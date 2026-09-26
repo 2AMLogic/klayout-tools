@@ -1584,13 +1584,15 @@ def test_declared_islands_rejects_non_positive_integer_values(tmp_path, bad):
 # bound unstated.
 
 
-#: The `nets[]` remainder keys (issue #2510) for an entry that declares no
+#: The `nets[]` remainder keys (issue #2510, plus issue #2524's
+#: `unlabelled_allowed_islands`) for an entry that declares no
 #: `nets[].roles`: echoed empty, and not measured (`None`, never `0`).
 _UNMEASURED = {
     "roles": [],
     "unlabelled_islands": None,
     "unlabelled_area_um2": None,
     "unlabelled_bbox": None,
+    "unlabelled_allowed_islands": None,
 }
 
 
@@ -1694,8 +1696,10 @@ def test_unlabelled_remainder_is_nonzero_on_the_severed_single_label_rail(
 ):
     """AC (issue #2510): the severed single-label rail that grades clean on
     `erc.unconnected_net` reports its orphan as the unlabelled remainder of
-    the role VDD owns -- one island, 1 um^2, located at the orphan itself --
-    while the verdict stays clean (reporting only)."""
+    the role VDD owns -- one island, 1 um^2, located at the orphan itself.
+    Since issue #2524 that remainder also *gates* (see
+    `erc.unlabelled_conductor` below); the measurement itself is unchanged,
+    which is what this test pins."""
     report = _run_severed(
         tmp_path,
         "remainder",
@@ -1719,6 +1723,7 @@ def test_unlabelled_remainder_is_nonzero_on_the_severed_single_label_rail(
                 "right": _um(9),
                 "top": _um(1),
             },
+            "unlabelled_allowed_islands": 0,
         }
     ]
 
@@ -1749,9 +1754,11 @@ def test_unlabelled_remainder_reports_every_unlabelled_shape_on_an_owned_role(
     """The scoping is the caller's ownership declaration, taken at its word:
     with the base fixture's unrelated, unlabelled li1 gate strap still drawn,
     `roles: ["li1"]` is not true of this stream, and the strap is reported
-    beside the orphan. This is why the measurement is reporting only -- a
-    stream with unlabelled fill on an owned role must not fail a correct
-    layout -- and why the key is opt-in rather than inferred."""
+    beside the orphan -- which is why the key is opt-in rather than inferred.
+    Issue #2524: that over-report is exactly what
+    `nets[].unlabelled_allowed_boxes` exists to declare away; undeclared, it
+    now gates (`erc.unlabelled_conductor`, tested below) rather than being
+    reported silently."""
     report = _run_severed(
         tmp_path,
         "remainder_strap",
@@ -1768,9 +1775,13 @@ def test_unlabelled_remainder_reports_every_unlabelled_shape_on_an_owned_role(
         "right": _um(9),
         "top": _um(1),
     }
+    assert entry["unlabelled_allowed_islands"] == 0
     assert [
         f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
     ] == []
+    assert [f["rule"] for f in report["erc_findings"] if f["net"] == "VDD"] == [
+        "erc.unlabelled_conductor"
+    ]
 
 
 def test_unlabelled_remainder_does_not_count_another_labelled_net(tmp_path):
@@ -1855,6 +1866,302 @@ def test_declared_net_roles_omitted_forms_are_unmeasured(tmp_path, empty):
     assert report["nets"] == [
         {"name": "VDD", "matched_islands": 1, "expected_islands": 1, **_UNMEASURED}
     ]
+
+
+# --- `erc.unlabelled_conductor`: the remainder gates (issue #2524) ------------
+#
+# Issue #2510 shipped the remainder as reporting only and left "should a
+# non-zero remainder be a finding" as an explicit open decision. #2524 takes
+# it: a non-zero remainder on a role a net declared it owns is
+# `erc.unlabelled_conductor`, with `nets[].unlabelled_allowed_boxes` as the
+# declared carve-out for legitimate unlabelled fill on an owned role. The
+# opt-in property is preserved -- no `roles`, no measurement, no finding.
+
+
+def _unlabelled_findings(report):
+    return [
+        f for f in report["erc_findings"] if f["rule"] == "erc.unlabelled_conductor"
+    ]
+
+
+def test_unlabelled_conductor_fires_on_the_severed_single_label_rail(tmp_path):
+    """AC (issue #2524): the severed single-label rail #2510 could only
+    *report* now fails. `erc.unconnected_net` still grades clean (the rule
+    genuinely sees one labelled island), so the new rule id is what carries
+    the verdict -- and `erc_status` reflects it."""
+    report = _run_severed(
+        tmp_path,
+        "gates",
+        [{"name": "VDD", "kind": "supply", "roles": ["li1"]}],
+    )
+
+    assert [
+        f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
+    ] == []
+    findings = _unlabelled_findings(report)
+    assert len(findings) == 1
+    assert findings[0]["net"] == "VDD"
+    assert findings[0]["layer"] == "li1"
+    assert findings[0]["bbox"] == {
+        "left": _um(8),
+        "bottom": _um(0),
+        "right": _um(9),
+        "top": _um(1),
+    }
+    assert "unlabelled conductor" in findings[0]["description"]
+    assert report["erc_status"] == "violations"
+    assert report["nets"][0]["unlabelled_islands"] == 1
+    assert report["nets"][0]["unlabelled_allowed_islands"] == 0
+
+
+def test_unlabelled_conductor_never_fires_without_a_roles_declaration(tmp_path):
+    """The opt-in property #2510 established is preserved exactly: a spec
+    that declares no `nets[].roles` has nothing measured (`None`, not `0`)
+    and can never acquire this finding, so no pre-#2524 spec changes
+    verdict."""
+    report = _run_severed(
+        tmp_path,
+        "gates_no_roles",
+        [{"name": "VDD", "kind": "supply"}],
+    )
+
+    assert _unlabelled_findings(report) == []
+    assert report["nets"] == [
+        {
+            "name": "VDD",
+            "matched_islands": 1,
+            "expected_islands": 1,
+            **_UNMEASURED,
+        }
+    ]
+
+
+def test_unlabelled_conductor_clears_once_the_orphan_is_labelled(tmp_path):
+    """The fix the finding asks for: label the orphan and this rule goes
+    silent (the remainder is zero) while `erc.unconnected_net` picks the
+    defect up as the two-island count it can now see."""
+    report = _run_severed(
+        tmp_path,
+        "gates_labelled",
+        [{"name": "VDD", "kind": "supply", "roles": ["li1"]}],
+        label_orphan=True,
+    )
+
+    assert _unlabelled_findings(report) == []
+    assert (
+        len([f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"])
+        == 1
+    )
+
+
+def test_unlabelled_conductor_fires_once_per_claimant_of_a_shared_role(tmp_path):
+    """Reporting granularity matches the report field it is derived from
+    (issue #2510): a shared unlabelled island is reported under *each* net
+    claiming the role, so the finding is too -- one per claimant, each
+    independently accurate, rather than a deduplicated single finding that
+    would disagree with `nets[].unlabelled_islands`."""
+    layout, top, poly, li1, label = _severed_rail_layout(gate_strap=False)
+    top.shapes(li1).insert(kdb.Box.new(_um(11), _um(0), _um(14), _um(1)))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(12), _um(0.5))))
+    gds = tmp_path / "claimants.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "claimants.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply", "roles": ["li1"]},
+                {"name": "VSS", "kind": "supply", "roles": ["li1"]},
+            ]
+        ),
+    )
+
+    findings = _unlabelled_findings(run_erc(str(gds), str(spec)))
+    assert sorted(f["net"] for f in findings) == ["VDD", "VSS"]
+
+
+def test_unlabelled_allowed_boxes_suppresses_declared_fill(tmp_path):
+    """The escape hatch (issue #2524, modelled on #2183's `devices[]`
+    carve-out): the base fixture's unrelated unlabelled li1 strap over the
+    gate is legitimate conductor on a role VDD claims. Declaring it excludes
+    it from the finding -- the orphan at 8-9um still fires, and the excluded
+    island is counted in `nets[].unlabelled_allowed_islands` rather than
+    silently vanishing from the raw measurement."""
+    report = _run_severed(
+        tmp_path,
+        "allowed_fill",
+        [
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                "unlabelled_allowed_boxes": [[-0.5, -0.5, 1.5, 1.5]],
+            }
+        ],
+        gate_strap=True,
+    )
+
+    entry = report["nets"][0]
+    # The raw measurement is unchanged -- the exclusion narrows what *gates*,
+    # never what was measured.
+    assert entry["unlabelled_islands"] == 2
+    assert entry["unlabelled_area_um2"] == 2.0
+    assert entry["unlabelled_allowed_islands"] == 1
+
+    findings = _unlabelled_findings(report)
+    assert len(findings) == 1
+    assert findings[0]["bbox"]["left"] == _um(8)
+    assert report["provenance"]["net_exclusions"] == [
+        {
+            "net": "VDD",
+            "boxes": [[-0.5, -0.5, 1.5, 1.5]],
+            "excluded_islands": 1,
+            "excluded_area_um2": 1.0,
+        }
+    ]
+
+
+def test_unlabelled_allowed_boxes_covering_everything_clears_the_finding(tmp_path):
+    """The full-suppression case: a declaration covering every unlabelled
+    island on the owned role leaves no finding at all, and the report says so
+    -- `unlabelled_islands` still `2`, every one of them excluded, and
+    `provenance.net_exclusions` naming what was carved out."""
+    report = _run_severed(
+        tmp_path,
+        "allowed_all",
+        [
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                "unlabelled_allowed_boxes": [[-1.0, -1.0, 10.0, 2.0]],
+            }
+        ],
+        gate_strap=True,
+    )
+
+    assert _unlabelled_findings(report) == []
+    # Nothing on VDD is left to report -- the only remaining finding is the
+    # base fixture's own unstrapped gate, which this rule says nothing about.
+    assert [f["rule"] for f in report["erc_findings"] if f["net"] == "VDD"] == []
+    entry = report["nets"][0]
+    assert (entry["unlabelled_islands"], entry["unlabelled_allowed_islands"]) == (2, 2)
+    assert report["provenance"]["net_exclusions"][0]["excluded_islands"] == 2
+
+
+def test_unlabelled_allowed_boxes_partial_cover_does_not_excuse_an_island(tmp_path):
+    """Exclusion is per *island*, not per area: a box covering only part of
+    an unlabelled island leaves that island counted, so a declared fill
+    region overlapping a real severed orphan cannot silence it. The echoed
+    `excluded_area_um2` still reports what the box actually removed, so the
+    partial bite is visible rather than implied."""
+    report = _run_severed(
+        tmp_path,
+        "allowed_partial",
+        [
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                "unlabelled_allowed_boxes": [[8.0, 0.0, 8.5, 1.0]],
+            }
+        ],
+    )
+
+    findings = _unlabelled_findings(report)
+    assert len(findings) == 1
+    assert report["nets"][0]["unlabelled_allowed_islands"] == 0
+    echo = report["provenance"]["net_exclusions"][0]
+    assert echo["excluded_islands"] == 0
+    assert echo["excluded_area_um2"] == 0.5
+
+
+def test_unlabelled_allowed_boxes_that_removed_nothing_is_still_echoed(tmp_path):
+    """Same falsifiability bar `provenance.devices[].body_area_um2` is held
+    to (issue #2226): a declaration that subtracted nothing at all -- a box
+    over empty space -- is echoed with zeroes rather than being
+    indistinguishable from one that bit."""
+    report = _run_severed(
+        tmp_path,
+        "allowed_miss",
+        [
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                "unlabelled_allowed_boxes": [[40.0, 40.0, 41.0, 41.0]],
+            }
+        ],
+    )
+
+    assert len(_unlabelled_findings(report)) == 1
+    assert report["provenance"]["net_exclusions"] == [
+        {
+            "net": "VDD",
+            "boxes": [[40.0, 40.0, 41.0, 41.0]],
+            "excluded_islands": 0,
+            "excluded_area_um2": 0.0,
+        }
+    ]
+
+
+def test_net_exclusions_is_empty_when_no_net_declares_one(tmp_path):
+    """`provenance.net_exclusions` is always present and `[]` when unused --
+    the same convention `provenance.devices` follows, so a reader never has
+    to distinguish "absent" from "declared nothing"."""
+    report = _run_severed(
+        tmp_path,
+        "no_exclusions",
+        [{"name": "VDD", "kind": "supply", "roles": ["li1"]}],
+    )
+    assert report["provenance"]["net_exclusions"] == []
+
+
+def test_unlabelled_allowed_boxes_requires_a_roles_declaration(tmp_path):
+    """An exclusion with nothing to exclude from is an assertion that reads
+    as honoured while doing nothing -- rejected loudly, the same way
+    `nets[].roles` rejects a typo'd role name."""
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "allowed_no_roles.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "allowed_no_roles.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[{"name": "VDD", "unlabelled_allowed_boxes": [[0.0, 0.0, 1.0, 1.0]]}]
+        ),
+    )
+    with pytest.raises(ErcError, match=r"nets\[0\]\.unlabelled_allowed_boxes"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize(
+    "bad, match",
+    [
+        ("0,0,1,1", r"must be an array"),
+        ([[0.0, 0.0, 1.0]], r"4-number"),
+        ([[1.0, 0.0, 0.0, 1.0]], r"left < right"),
+        ([[0.0, 0.0, 1.0, True]], r"4-number"),
+    ],
+)
+def test_unlabelled_allowed_boxes_rejects_malformed_values(tmp_path, bad, match):
+    """The same literal-geometry validation `ties[].tap_boxes`/`well_boxes`
+    get (`_parse_um_boxes`): a silently-dropped box would weaken an assertion
+    the caller believes they made."""
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "allowed_bad.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "allowed_bad.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[{"name": "VDD", "roles": ["li1"], "unlabelled_allowed_boxes": bad}]
+        ),
+    )
+    with pytest.raises(
+        ErcError, match=rf"nets\[0\]\.unlabelled_allowed_boxes.*{match}"
+    ):
+        run_erc(str(gds), str(spec))
 
 
 def test_declared_nets_report_zero_matches_and_a_declared_island_count(tmp_path):

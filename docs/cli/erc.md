@@ -315,14 +315,39 @@ draws that the spec never declared" below.
     reported as `nets[].unlabelled_islands` / `unlabelled_area_um2` /
     `unlabelled_bbox` — which is what catches a severed single-label rail
     that `erc.unconnected_net` cannot see (see "`erc.unconnected_net` counts
-    labelled islands, not conductor islands" below). Reporting only: no
-    verdict changes. Only `stackup` roles are accepted (a `vias` role, an
-    unknown name, or a repeated name is a spec error); `null` or `[]` is the
-    undeclared form, identical to omitting the key. **Declare a role only if
-    the ownership claim is true of your stream** — every unlabelled shape on
-    an owned role is counted, including unrelated nets and fill (see below).
+    labelled islands, not conductor islands" below). Since issue #2524 a
+    non-zero remainder is also a **finding**
+    (`erc.unlabelled_conductor`), so declaring this key is a graded
+    assertion, not merely a reporting switch. Only `stackup` roles are
+    accepted (a `vias` role, an unknown name, or a repeated name is a spec
+    error); `null` or `[]` is the undeclared form, identical to omitting the
+    key. **Declare a role only if the ownership claim is true of your
+    stream** — every unlabelled shape on an owned role is counted,
+    including unrelated nets and fill; where the role legitimately carries
+    some, declare it away with `unlabelled_allowed_boxes` below rather than
+    leaving the role unowned and unmeasured (see below).
+  - `unlabelled_allowed_boxes` (array of `[left, bottom, right, top]`
+    micrometre boxes, optional, default absent, issue #2524) — the regions
+    on this net's owned `roles` where unlabelled conductor is *expected*:
+    dummy/fill, a deliberately floating shield, a seal-ring fragment. The
+    declared carve-out that makes `erc.unlabelled_conductor` safe to gate
+    on — structurally the `devices[]` carve-out (see "Device bodies are not
+    wires" above) applied one level up, with what it actually removed
+    echoed in `provenance.net_exclusions` so a reviewer can audit it. Takes
+    the same literal-geometry shape as `ties[].tap_boxes`/`well_boxes`, and
+    the same validation (a malformed or inverted box is a spec error, never
+    a silent no-op). Exclusion is per **island**, not per area: an
+    unlabelled island survives unless *all* of its geometry on the owned
+    roles falls inside the declared boxes, so a fill declaration that
+    happens to overlap a real severed orphan cannot silence it. The three
+    `unlabelled_*` report values stay the **raw** measurement — a carve-out
+    narrows what gates, never what was measured. Requires a non-empty
+    `roles` on the same entry (there is otherwise no remainder for it to
+    narrow, and the declaration would read as honoured while doing
+    nothing); `null` or `[]` is the undeclared form.
   - Omitted entirely -> `erc.unconnected_net`/`erc.multiply_driven_net`/
-    `erc.supply_short`/`erc.expected_short_missing` are never computed.
+    `erc.supply_short`/`erc.expected_short_missing`/
+    `erc.unlabelled_conductor` are never computed.
 
   **A `"supply"` (or signal) connectivity spec must declare every metal
   layer the design's real PDN straps use.** The worked `stackup`/`vias`
@@ -543,7 +568,8 @@ string) and for the `devices[]` declaration that fixes it.
 
 `gates[]`, every antenna ratio derived from it, and the `nets[]`-driven
 findings (`erc.unconnected_net` / `erc.multiply_driven_net` /
-`erc.supply_short` / `erc.expected_short_missing`) all come from that one
+`erc.supply_short` / `erc.expected_short_missing` /
+`erc.unlabelled_conductor`) all come from that one
 graph. Since issue #2169 the
 `ties[]` declarations are **not** part of it — see "Well/tap connectivity"
 below.
@@ -1388,6 +1414,23 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   without it, declaring the tie would only remove a finding, leaving the
   tied conductor no better covered than not declaring the second name at
   all.
+- **`erc.unlabelled_conductor`** (issue #2524) — a declared `nets[]` entry
+  that owns `stackup` roles (`nets[].roles`, issue #2510) on which some
+  conductor is reachable from **no label at all**: the severed
+  single-label rail's orphan `erc.unconnected_net` structurally cannot see
+  (see "`erc.unconnected_net` counts labelled islands, not conductor
+  islands" below). Its own rule id rather than a reason on
+  `erc.unconnected_net`, because the condition is materially different — a
+  *partially* labelled net with an unreached remainder, versus no
+  connectivity to the label at all — and a caller filtering or suppressing
+  per rule must be able to tell them apart. Reported **once per claimant**
+  of the role, matching the granularity of the `nets[].unlabelled_islands`
+  field it is derived from. Entirely opt-in: the measurement exists only
+  where `roles` was declared, so no spec written before #2510 can acquire
+  this finding. Legitimate unlabelled conductor on an owned role is
+  declared away with `nets[].unlabelled_allowed_boxes` — see "Measuring the
+  unlabelled remainder" below for the escape hatch and the decision behind
+  gating it at all.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
   (one per merged polygon of a `ties[]` entry's `well_layer` — narrowed to
   the shapes its `well_requires`/`well_excludes` class selection keeps,
@@ -1458,7 +1501,7 @@ count the verdict was decided on, including when it passed:
   labelled island — and the field is what makes that bound visible rather
   than removing it.
 
-#### Measuring the unlabelled remainder (`nets[].roles`, issue #2510)
+#### Measuring the unlabelled remainder (`nets[].roles`, issues #2510/#2524)
 
 `matched_islands` makes the bound visible; it does not remove it. The
 quantity the rule actually wants to be zero is the net's conductor geometry
@@ -1477,18 +1520,21 @@ The attribution therefore comes from the spec. A net that declares
 "nets": [
   {"name": "VDD", "matched_islands": 1, "expected_islands": 1,
    "roles": ["met4"], "unlabelled_islands": 1, "unlabelled_area_um2": 812.5,
-   "unlabelled_bbox": {"left": 140000, "bottom": 0, "right": 145000, "top": 162500}},
+   "unlabelled_bbox": {"left": 140000, "bottom": 0, "right": 145000, "top": 162500},
+   "unlabelled_allowed_islands": 0},
   {"name": "VSS", "matched_islands": 1, "expected_islands": 1,
    "roles": [], "unlabelled_islands": null, "unlabelled_area_um2": null,
-   "unlabelled_bbox": null}
+   "unlabelled_bbox": null, "unlabelled_allowed_islands": null}
 ]
 ```
 
 Here `VDD` still grades clean on `erc.unconnected_net` (one labelled
-island), but the remainder shows the severed piece and where it is. Label
-the orphan too and the remainder drops to `0` while the finding fires — the
-third row of the table above. `VSS` declared no roles, so its remainder is
-`null` (not measured), never a guessed `0`.
+island), but the remainder shows the severed piece and where it is — and
+since issue #2524 it also fails, as `erc.unlabelled_conductor`. Label
+the orphan too and the remainder drops to `0` while `erc.unconnected_net`
+fires instead — the third row of the table above. `VSS` declared no roles,
+so its remainder is `null` (not measured), never a guessed `0`, and it can
+never acquire the finding.
 
 This **closes the bound for a net that declares truthful ownership, and only
 for it**. What the scoping decides, deliberately:
@@ -1502,10 +1548,9 @@ for it**. What the scoping decides, deliberately:
   assigning it to none would recreate the silent case.
 - **Every unlabelled shape on an owned role counts** — including unlabelled
   dummy/fill conductor, or an unrelated unlabelled net, if the ownership
-  claim is not actually true of the stream. This is why the measurement is
-  **reporting only**: a non-zero remainder changes no verdict, roll-up,
-  `status`/`erc_status`, or exit code. Promoting it to a finding is a
-  separate decision.
+  claim is not actually true of the stream. Where the role legitimately
+  carries some, declare it with `nets[].unlabelled_allowed_boxes` — see
+  "The remainder gates" below.
 - **A cross-layer cut** (a missing via severing one routing layer from the
   next) is caught only when the orphaned side lies on an owned role.
 - `unlabelled_area_um2` sums each owned role's merged remainder area (two
@@ -1513,6 +1558,85 @@ for it**. What the scoping decides, deliberately:
   area); `unlabelled_islands` counts distinct unlabelled electrical islands
   with geometry on any owned role (one spanning two owned roles through a via
   counts once).
+
+##### The remainder gates: `erc.unlabelled_conductor` and its escape hatch (issue #2524)
+
+Issue #2510 shipped the measurement above as **reporting only** and left
+"should a non-zero remainder be a finding" as an explicit open decision,
+because a stream drawing legitimate unlabelled fill on an owned role would
+otherwise fail on a correct layout. **Issue #2524 takes that decision: it
+gates.** A remainder that survives the entry's own declared carve-out is
+`erc.unlabelled_conductor`, and it counts toward `erc_finding_count` /
+`erc_status` / the exit code like any other finding. Four sub-decisions, each
+deliberate:
+
+- **A new rule id, not a new reason on `erc.unconnected_net`.** The two
+  conditions are materially different — a *partially* labelled net with an
+  unreached remainder, versus no connectivity to the declared label at all
+  (or the wrong number of labelled islands) — and folding them into one
+  rule's reasons would cost every caller who filters or suppresses per rule
+  the ability to tell them apart. Adding a rule id is an additive
+  value-set change under [`docs/json-contract.md`](../json-contract.md), not
+  a `schema_version` bump — the same latitude `erc.expected_short_missing`
+  (issue #2463) took.
+- **Opt-in by construction.** The finding is reachable only where
+  `nets[].roles` was declared, which is also the only condition under which
+  the measurement exists at all. A spec written before #2510 grades
+  byte-identically: its remainder is still `null`, and no verdict moves.
+- **The escape hatch is a declared carve-out**,
+  `nets[].unlabelled_allowed_boxes` — the same shape as `devices[]` (see
+  "Device bodies are not wires" above) one level up. The caller names the
+  regions on the owned roles where unlabelled conductor is expected, those
+  regions are subtracted before the rule is evaluated, and what the
+  declaration **actually** removed is echoed in
+  `provenance.net_exclusions`. There is deliberately **no** auto-detection
+  of fill today — the exclusion is only ever the caller's explicit,
+  auditable word — and should a future `--deck`-driven fill-marker
+  auto-detection be added, an explicit declaration takes precedence over it,
+  the same direction `devices[]`' `superseded_by` already records. This is
+  what makes gating safe:
+  the alternative for a role carrying real fill was an unownable role (no
+  measurement at all) or a permanent finding on a correct layout.
+- **One finding per claimant, not one per role.** A shared unlabelled island
+  is already reported under *each* net claiming the role (above), so the
+  finding matches that granularity rather than deduplicating: a finding
+  shaped differently from the field it is derived from would make the two
+  disagree for no reader's benefit, and each claimant's finding is
+  independently accurate.
+
+```json
+"nets": [
+  {"name": "VDD", "matched_islands": 1, "expected_islands": 1,
+   "roles": ["li1"], "unlabelled_islands": 2, "unlabelled_area_um2": 2.0,
+   "unlabelled_bbox": {"left": 0, "bottom": 0, "right": 9000, "top": 1000},
+   "unlabelled_allowed_islands": 1}
+],
+"provenance": {
+  "net_exclusions": [
+    {"net": "VDD", "boxes": [[-0.5, -0.5, 1.5, 1.5]],
+     "excluded_islands": 1, "excluded_area_um2": 1.0}
+  ]
+}
+```
+
+Two unlabelled islands were measured on the role `VDD` owns; the declared
+box covers one of them (a fill strap), so one finding fires for the other
+(the severed orphan). Note what the report does *not* do:
+
+- **The three `unlabelled_*` values stay the raw measurement.**
+  `unlabelled_islands: 0` goes on meaning exactly what #2510 documented —
+  every piece of conductor on the owned roles is reachable from a label —
+  rather than weakening to "…or was excluded". What the carve-out removed
+  is reported separately as `unlabelled_allowed_islands`.
+- **Exclusion is per island, not per area.** An island survives unless
+  *all* of its geometry on the owned roles falls inside the declared boxes,
+  so a fill declaration that happens to overlap a real severed orphan
+  cannot silence it. `provenance.net_exclusions[].excluded_area_um2` still
+  reports the partial bite, so the overlap is visible rather than implied.
+- **A declaration that removed nothing is still echoed**, with zeroes — the
+  same falsifiability bar `provenance.devices[].body_area_um2 == 0.0` is
+  held to (issue #2226). A mis-transcribed coordinate or a fill region that
+  moved is distinguishable from a box that bit.
 
 **What to do about it.** Where you cannot declare truthful role ownership,
 the coverage this rule gives you is still bounded by your own stream:
@@ -1528,7 +1652,11 @@ the coverage this rule gives you is still bounded by your own stream:
   in a sign-off narrative for a single-label block. Cite
   `nets[].matched_islands` alongside it so the reader can see the bound —
   or, where the net owns its roles, cite `nets[].unlabelled_islands: 0`,
-  which is the severed-rail negative.
+  which is the severed-rail negative. `klt signoff`'s T1 item 11 does this
+  for you since issue #2524: a met item's citation carries
+  `power_delivery.supply_unlabelled_islands` per declared supply that owns
+  its roles (`{}` when none did — the honest "not measured", never a
+  fabricated zero).
 
 ### Locating the islands of a multi-island `erc.unconnected_net` (issue #2194)
 
@@ -1763,7 +1891,7 @@ issue #2179 each carries its own roll-up:
 | Field | Question it answers | Needs a PDK antenna table? |
 | ----- | ------------------- | -------------------------- |
 | `status` | Both signals together: did every *graded* antenna level pass **and** are there no `erc_findings`? | Yes — it is `not_checked` when no level could be graded |
-| `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.expected_short_missing`, `erc.floating_gate`, `erc.missing_tie` | No |
+| `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.expected_short_missing`, `erc.unlabelled_conductor`, `erc.floating_gate`, `erc.missing_tie` | No |
 
 The distinction is not academic. `--pdk` resolves against a limit table
 **this command carries for sky130 only** (see "Sky130 antenna-ratio limits"
@@ -2098,22 +2226,23 @@ forward regardless (a `diode_insertion` remedy):
 | `remedy.layer`   | string          | The violating `levels[].layer` value — identical to the entry this remedy is attached to.        |
 | `remedy.target_layer` | string \| null | For `"layer_jumping"`, the adjacent `stackup` role name to route through instead; `null` for `"diode_insertion"`. |
 | `remedy.justification` | string    | Human-readable explanation citing the specific ratio/limit values and (for `"layer_jumping"`) the target layer's own margin.     |
-| `nets`           | array\<object\> | (issue #2497) One entry per declared `nets[]` spec entry, in spec order — the island count `erc.unconnected_net` actually graded that net on, retained **whether or not it produced a finding**. `[]` when the spec declares no `nets`. Reporting only: no value in an entry is an input to any finding, roll-up, or `status`/`erc_status`. See "`erc.unconnected_net` counts labelled islands, not conductor islands" above, and (issue #2510) its "Measuring the unlabelled remainder" subsection for the `roles`/`unlabelled_*` keys. |
+| `nets`           | array\<object\> | (issue #2497) One entry per declared `nets[]` spec entry, in spec order — the island count `erc.unconnected_net` actually graded that net on, retained **whether or not it produced a finding**. `[]` when the spec declares no `nets`. The `matched_islands`/`expected_islands` pair is reporting only (neither is an input to any finding, roll-up, or `status`/`erc_status`); the `unlabelled_*` keys are **not**, since issue #2524 — a surviving remainder is `erc.unlabelled_conductor`. See "`erc.unconnected_net` counts labelled islands, not conductor islands" above, and (issues #2510/#2524) its "Measuring the unlabelled remainder" subsection for the `roles`/`unlabelled_*` keys. |
 | `nets[].name`    | string          | The declared `nets[].name`, echoed verbatim.                                                     |
 | `nets[].matched_islands` | integer | How many disconnected electrical islands **carry this net's declared label** — `0` when nothing in the layout carries the name at all. This is the number the `erc.unconnected_net` verdict is decided on, and it equals the number of islands the net's conductor geometry forms **only when the stream labels every piece** (see the bound above). On a failing multi-island finding it equals `len(erc_findings[].islands)` for that net. |
 | `nets[].expected_islands` | integer | The entry's own `nets[].islands` declaration (issue #2400), default `1` — echoed so a committed report can be graded (`matched_islands == expected_islands` is clean) without the spec document in hand. |
 | `nets[].roles` | array\<string\> | (issue #2510) The entry's own `nets[].roles` declaration — the `stackup` roles this net owns outright — echoed so the remainder below is readable without the spec. `[]` when the entry declares none. |
-| `nets[].unlabelled_islands` | integer \| null | (issue #2510) How many distinct electrical islands carrying **no label at all** have conductor on any of `roles` — `0` means every piece of conductor on the owned roles is reachable from a label. `null` when `roles` is empty (not measured). Reporting only. See "Measuring the unlabelled remainder" above for the scoping. |
-| `nets[].unlabelled_area_um2` | number \| null | (issue #2510) The unlabelled remainder's area in µm², summed per owned role (each role's merged remainder). `null` when `roles` is empty. |
-| `nets[].unlabelled_bbox` | object \| null | (issue #2510) The remainder's extent across all owned roles (`{left, bottom, right, top}`, raw database units — the `erc_findings[].bbox` convention), so a non-zero remainder points at the orphan. `null` when the remainder is empty or not measured. |
+| `nets[].unlabelled_islands` | integer \| null | (issue #2510) How many distinct electrical islands carrying **no label at all** have conductor on any of `roles` — `0` means every piece of conductor on the owned roles is reachable from a label. `null` when `roles` is empty (not measured). Always the **raw** measurement: a declared `unlabelled_allowed_boxes` carve-out narrows what gates, never what was measured (issue #2524). See "Measuring the unlabelled remainder" above for the scoping. |
+| `nets[].unlabelled_area_um2` | number \| null | (issue #2510) The unlabelled remainder's area in µm², summed per owned role (each role's merged remainder). `null` when `roles` is empty. Raw, like the count above. |
+| `nets[].unlabelled_bbox` | object \| null | (issue #2510) The remainder's extent across all owned roles (`{left, bottom, right, top}`, raw database units — the `erc_findings[].bbox` convention), so a non-zero remainder points at the orphan. `null` when the remainder is empty or not measured. Raw, like the two above. |
+| `nets[].unlabelled_allowed_islands` | integer \| null | (issue #2524) How many of `unlabelled_islands` the entry's own `nets[].unlabelled_allowed_boxes` declaration excused — the islands that did **not** gate `erc.unlabelled_conductor` because all of their geometry on the owned roles falls inside a declared box. `0` for an entry that owns roles and declared no boxes; `null` alongside the three raw values when `roles` is empty. The gating count is `unlabelled_islands - unlabelled_allowed_islands`. |
 | `erc_findings`   | array\<object\> | One entry per ERC violation found by the checks in "ERC finding checks" above (issue #861) — empty when clean, or when no `nets`/`ties` spec sections were provided (the `erc.floating_gate` check still always runs). |
-| `erc_findings[].rule` | string     | One of `erc.floating_gate`, `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.missing_tie`, `erc.supply_short`, `erc.expected_short_missing` (issue #2463) — matching `klt drc`'s `violations[].rule` convention. A new rule id is an additive value-set change (`docs/json-contract.md`), not a `schema_version` bump. |
+| `erc_findings[].rule` | string     | One of `erc.floating_gate`, `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.missing_tie`, `erc.supply_short`, `erc.expected_short_missing` (issue #2463), `erc.unlabelled_conductor` (issue #2524) — matching `klt drc`'s `violations[].rule` convention. A new rule id is an additive value-set change (`docs/json-contract.md`), not a `schema_version` bump. |
 | `erc_findings[].description` | string | Human-readable explanation of this specific finding.                                       |
 | `erc_findings[].net` | string \| null | The primary net name implicated (a `nets[].name`/`ties[].net` value, or a gate's own `gates[].net`). |
 | `erc_findings[].other_net` | string \| null | The second net name implicated, for `erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing` only; `null` otherwise. The pair is always sorted, so `net` < `other_net` for those rules. |
 | `erc_findings[].gate_id` | string \| null | The `gates[].gate_id` implicated, for `erc.floating_gate` only; `null` otherwise.           |
-| `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
-| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`, and the *zero*-match `erc.unconnected_net`, which have no one place to point at). For a **multi-island** `erc.unconnected_net` (issue #2194) this is the box spanning every island — see `islands[]` below for the per-island boxes. |
+| `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, a tie's own `name`, or — for `erc.unlabelled_conductor`, issue #2524 — the owned role carrying the most surviving remainder area, ties broken by declared `roles` order, the same "one deterministic layer to open a viewer on" convention `islands[].layer` uses); `null` for the two net-connectivity rules. |
+| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`, and the *zero*-match `erc.unconnected_net`, which have no one place to point at). For a **multi-island** `erc.unconnected_net` (issue #2194) this is the box spanning every island — see `islands[]` below for the per-island boxes. For `erc.unlabelled_conductor` (issue #2524) it is the extent of the *surviving* remainder across every owned role, so it points at the orphan rather than at the excluded fill. |
 | `erc_findings[].islands` | array\<object\> \| null | (issue #2194) One entry per disconnected electrical island, populated **only** for a multi-island `erc.unconnected_net`; `null` for every other finding (including the zero-match one). Entries are in ascending KLayout cluster-id order — deterministic for a given layout+spec. See "Locating the islands of a multi-island `erc.unconnected_net`" above. |
 | `erc_findings[].islands[].bbox` | object \| null | That island's whole extent, unioned across every `stackup` role it has geometry on, in the same raw-database-unit convention as `erc_findings[].bbox`. Populated for every island of a net that resolved to geometry (a labelled net always has `stackup` geometry by construction). |
 | `erc_findings[].islands[].layer` | string \| null | The `stackup` role carrying the most of this island's area (ties broken by stackup order) — the most useful layer to open a viewer on, not an exhaustive list of the roles it touches. |
@@ -2125,6 +2254,7 @@ forward regardless (a `diode_insertion` remedy):
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
 | `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region — `area(marker ∩ on's own drawn region)`, **not** the marker layer's own area (issue #2226), since a device-body marker is conventionally drawn with enclosure past the conductor it marks. `0.0` therefore means this declaration changed nothing at all: its marker layer carries no geometry in this layout, is drawn on a different datatype, or does not touch the role it was declared `on` (that last case also warns on stderr). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
+| `provenance.net_exclusions` | array\<object\> | (issue #2524) One entry per `nets[]` entry that declared `unlabelled_allowed_boxes`, in spec order — `{"net", "boxes", "excluded_islands", "excluded_area_um2"}`, where `boxes` echoes the declaration verbatim (micrometre `[left, bottom, right, top]`) and the two `excluded_*` values are what it **actually** removed from the unlabelled remainder `erc.unlabelled_conductor` is graded on. `[]` when no declared net asked for one. The same auditability contract `provenance.devices` establishes one level down: a declaration that *suppresses a finding* has to be readable from the report, or two runs of the same layout disagree about `erc.unlabelled_conductor` with nothing in either payload to say why. `excluded_islands: 0` with a non-zero `excluded_area_um2` is the per-island rule working as intended (a box that bit into an island without covering it); both zero means the declaration changed nothing at all — a box over empty space, a mis-transcribed coordinate — distinguishable from one that bit, exactly as `provenance.devices[].body_area_um2 == 0.0` is. |
 
 ## Checked-work coverage
 
@@ -2143,7 +2273,8 @@ declined the accumulation, the same shape of caller-side skip as omitting
 which need no `--pdk` at all. One checked ID per subject actually checked:
 per discovered gate (`erc.floating_gate`), per declared `nets[]` entry
 (`erc.net_connectivity` — the `erc.unconnected_net`/
-`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`
+`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`/
+`erc.unlabelled_conductor`
 rules all key off the same declaration), and per declared `ties[]` entry (`erc.missing_tie`). A spec
 that declares no `nets`/`ties` asked for none of that work, so those rules
 are recorded as **inapplicable** (`no_nets_declared`/`no_ties_declared`,

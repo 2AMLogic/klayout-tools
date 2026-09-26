@@ -94,10 +94,16 @@ def _print_declared_nets(report: dict) -> None:
         # declares no roles -- and every stored pre-#2510 payload -- renders
         # exactly as before.
         if entry.get("unlabelled_islands") is not None:
+            # Issue #2524: the declared `unlabelled_allowed_boxes` carve-out's
+            # own effect, appended only when it excused something -- so a
+            # measured-but-undeclared entry (and every stored pre-#2524
+            # payload) renders exactly as #2510 left it.
+            allowed = entry.get("unlabelled_allowed_islands") or 0
+            suffix = f" allowed={allowed}" if allowed else ""
             print(
                 f"    unlabelled on {','.join(entry['roles'])}: "
                 f"islands={entry['unlabelled_islands']} "
-                f"area={entry['unlabelled_area_um2']}um^2"
+                f"area={entry['unlabelled_area_um2']}um^2{suffix}"
             )
 
 

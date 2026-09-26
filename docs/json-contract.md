@@ -368,6 +368,19 @@ bump, matching this block's own additive-envelope convention. See
 [`docs/cli/erc.md`](cli/erc.md)'s "Deck-driven device-marker
 auto-detection".
 
+Issue #2524 adds a third verb-local key on the same principle,
+`provenance.net_exclusions`: one entry per `nets[]` spec declaration that
+carried `unlabelled_allowed_boxes` (`{net, boxes, excluded_islands,
+excluded_area_um2}`), `[]` when none did. That key subtracts caller-declared
+regions — legitimate unlabelled fill on a role a net declared it owns — from
+the unlabelled remainder the `erc.unlabelled_conductor` finding is graded
+on, so a declaration *suppresses a finding*, and the two `excluded_*` values
+report what it actually removed. Same reasoning as `provenance.devices`'
+`body_area_um2`, one level up: without the echo, two runs of the same layout
+disagree about a finding with nothing in either payload to say why, and a
+box over empty space is indistinguishable from one that bit. See
+[`docs/cli/erc.md`](cli/erc.md)'s "The remainder gates".
+
 `klt power` (issue #2349) emits the block for the same two-input reason
 `klt erc` does — its IR/EM verdict is a joint function of the layout
 *and* the spec's `stackup`/`vias` sheet-resistance and EM declarations,
