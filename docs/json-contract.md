@@ -76,6 +76,18 @@ never silently mis-executed. Each such addition is recorded in
 `docs/cli/<verb>.md` — for the example above, `docs/cli/lvs.md`'s "Digital
 gate-level LVS" section and its `request` field table.
 
+The same holds for a **new optional request field** that widens what an
+already-shipped field can express, as long as a request valid before is still
+valid and still means what it meant. `klt sim`'s `measurements[].expr` (issue
+#2533) is the reference case: a `measurements[]` entry used to require
+`spice` (a verbatim `.meas` card) and now takes exactly one of `spice` or
+`expr` (an ngspice expression evaluated after the analysis). Every pre-#2533
+request is unchanged — byte-identical deck, byte-identical response — and the
+*response* shape is untouched, so there is no `schema_version` bump: an
+`expr` measurement is reported as an ordinary
+`corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
+"Measurements that are not `.meas` cards (`measurements[].expr`)".
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt

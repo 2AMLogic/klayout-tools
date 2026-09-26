@@ -611,6 +611,28 @@ def test_measurement_referencing_a_nonexistent_node_is_flagged(tmp_path, monkeyp
     assert "'vout'" in finding["message"]
 
 
+def test_expr_measurement_referencing_a_nonexistent_node_is_flagged(
+    tmp_path, monkeypatch
+):
+    """Issue #2533: `measurements[].expr` is how an *operating-point* quantity
+    is declared -- the very analysis this lint runs -- so its `v(...)`
+    references have to be scanned like a `.meas` card's, or the lint would be
+    blind to exactly the measurements most likely to reach it."""
+    request = _write_request(
+        tmp_path,
+        _GOOD_NETLIST,
+        measurements=[{"name": "vout", "expr": "v(vout_node) - v(in)"}],
+    )
+    _install_fake_ngspice(monkeypatch, {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS})
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    (finding,) = _findings(report, "missing_node")
+    assert finding["node"] == "vout_node"
+    assert finding["severity"] == "error"
+    assert "'vout'" in finding["message"]
+
+
 def test_declared_io_node_present_in_netlist_is_not_flagged(tmp_path, monkeypatch):
     request = _write_request(
         tmp_path,

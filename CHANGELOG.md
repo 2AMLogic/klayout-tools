@@ -210,6 +210,36 @@ not `klt --version`, if you need to detect this kind of drift. See
   caller. See [`docs/cli/yield.md`](docs/cli/yield.md)'s "Campaign
   orchestration → Dispatch" section.
 
+- **Added** (#2533, `klt sim`; additive — `schema_version` unchanged):
+  `measurements[].expr`, a second declarable measurement form alongside
+  today's `spice` (a verbatim `.meas` card). An entry now takes **exactly
+  one** of the two; `expr` is a single-line ngspice expression `klt sim`
+  evaluates after the analysis, inside the `.control` block it already owns,
+  as a `let <name> = <expr>` / `print <name>` pair. This makes two classes of
+  measurement expressible that previously had no request form at all:
+  **operating-point** quantities (ngspice implements no `.MEASURE OP`, so
+  there was no card to write) and **reductions/combinations of saved
+  vectors** (peak-to-peak swing, a ratio of two nodes, a derived figure of
+  merit). The result is harvested from the same `<name> = <value>` log shape
+  a `.meas` result uses and graded against `limits`/`plausible_range`,
+  counted in `coverage`, and pooled into `monte_carlo` statistics
+  identically — there is no new response field and no `schema_version` bump.
+  `let`/`print` are emitted in declared order (so a later expression may
+  reference an earlier one's name) and **after** the optional rawfile
+  `write`, so an `options.waveforms` artifact is unaffected. The expression
+  must reduce to a single real scalar; one that does not yields the
+  measurement's usual `status: "error"` with a diagnostic naming both
+  causes. Names are held to `[A-Za-z_][A-Za-z0-9_]*` and must be unique
+  across `measurements[]`, compared case-insensitively (an `expr` name is both
+  a deck vector name and the log key, and ngspice lower-cases the name it
+  prints — the response entry keeps the caller's own spelling); `engine:
+  "xyce"` refuses `expr` by name (no `.control` block).
+  A request declaring only `.meas` cards produces a byte-identical deck and
+  report to before. `--op-lint` now also scans `expr` for `v(<node>)`
+  references. Still one analysis per corner — a measurement defined across
+  several analyses or across corners/Monte Carlo draws remains out of scope
+  (#2482).
+
 - **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
   user-visible: a corner that previously reported `status: "error"` can now
   report a real grade): a `spice`-form `measurements[].name` was looked up

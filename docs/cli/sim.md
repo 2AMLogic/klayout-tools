@@ -145,10 +145,12 @@ naming what *is* supported:
 - **Backends**: `local` and `local-parallel` only; `remote`/`batch` pin
   the ngspice toolchain and are refused for this engine.
 - **Refused**: `monte_carlo` (no seed wiring),
-  `options.fail_fast_probe` (reads ngspice's rawfile stream), and
+  `options.fail_fast_probe` (reads ngspice's rawfile stream),
   `options.osdi_preload` (`pre_osdi` is an ngspice control command; Xyce
   loads Verilog-A as its own plugins — see "OSDI (Verilog-A) model
-  preload").
+  preload"), and `measurements[].expr` (`let`/`print` are ngspice control
+  commands with no Xyce `.control` block to carry them — see "Measurements
+  that are not `.meas` cards").
 
 Two syntax divergences the deck generator handles for you (both verified
 against Xyce 7.10.0; the full list with the measured ngspice-vs-Xyce
@@ -937,6 +939,11 @@ Verilog-A compact models does **not** need a `.control` block in the body
 either — declare the compiled `.osdi` files in `options.osdi_preload` instead
 (see "OSDI (Verilog-A) model preload" below).
 
+Because `klt sim` owns that single `.control` block, a measurement that has no
+top-level `.meas` form — most notably an operating-point quantity — is
+declared as a `measurements[].expr` expression rather than smuggled in through
+the netlist body; see "Measurements that are not `.meas` cards" below.
+
 ## Saved signal set (`save all`)
 
 ngspice's `.save` card **restricts** the batch run's saved node/branch set —
@@ -979,6 +986,161 @@ two apart, so `no_such_vector` names the *symptom* ("nothing resolved for
 this name"), not the cause; treat it as "check the signal name against the
 netlist body, including any `.save` card it carries" rather than a
 self-diagnosing error.
+
+## Measurements that are not `.meas` cards (`measurements[].expr`)
+
+A `measurements[]` entry declares **exactly one** of two forms:
+
+| Form    | What it is                                                          | Where it lands in the deck                    |
+| ------- | ------------------------------------------------------------------- | --------------------------------------------- |
+| `spice` | A verbatim top-level `.meas` card                                   | File scope, before the `.control` block       |
+| `expr`  | A single-line ngspice **expression**, evaluated after the analysis  | Inside `klt sim`'s own `.control` block       |
+
+Declaring both, or neither, is an application error (exit 1).
+
+### Why `expr` exists
+
+A top-level `.meas` card is the only measurement shape ngspice's batch mode
+accepts at file scope, and ngspice's `.MEASURE` implements no `op` analysis
+type at all (see `measurements[]` in the request table, and the `.meas op`
+rejection above). The "Netlist convention" section above also gives `klt sim`
+sole ownership of the deck's single `.control` block — the caller cannot
+inject one from either side. Together, those two facts meant that **a
+quantity which is not a single `.meas` card's search had no expression in a
+request whatsoever**
+([#2533](https://github.com/2AMLogic/klayout-tools/issues/2533)):
+
+- an **operating-point** quantity (`analysis.kind: "op"`) — no `.MEASURE OP`
+  exists, so there was no card to write;
+- a **reduction or combination** of saved vectors — peak-to-peak swing,
+  a ratio of two nodes, a derived figure of merit — which needs arithmetic
+  across a vector or across two `.meas`-shaped searches that no single card
+  performs.
+
+A block whose ratified spec rows are of either kind could not produce a `klt
+sim` envelope covering its spec at all — and design-signoff tier-1 item 5
+("full corner verification vs a ratified spec") accepts only a `sim` envelope
+for an analog partition, so citing the `.meas`-expressible subset would have
+graded the item `met` on evidence narrower than the spec it names. `expr`
+closes that for any spec row derivable from a single corner's single solve;
+see [`signoff.md`](signoff.md) and the "Still one analysis per corner" bullet
+below for what remains.
+
+### What `klt sim` generates
+
+For each `expr` entry, in **declared order**, inside the generated `.control`
+block:
+
+```
+let <name> = <expr>
+print <name>
+```
+
+Emitted **after** the analysis command (the expression reads the vectors the
+analysis produced) and **after** the optional rawfile `write` — deliberately:
+`let` adds its result to the current plot and `write` dumps every vector in
+that plot, so evaluating earlier would silently add derived vectors to the
+`options.waveforms` artifact. Declaring an `expr` never changes what the
+rawfile/waveform artifact contains.
+
+A `print`ed **scalar** lands in the log as `<name> = <value>` — the same shape
+a successful `.meas` result uses — so it is harvested, unit-stamped, and
+graded against `limits`/`plausible_range` exactly like a `.meas` measurement,
+and it participates in `monte_carlo` statistics and `coverage` identically.
+There is no separate response shape and no `schema_version` bump: an `expr`
+measurement is an ordinary `corners[].measurements[]` entry.
+
+Because the `let` lines are emitted in declaration order into one plot, a
+later expression may reference an earlier one's name:
+
+```json
+"measurements": [
+  { "name": "vmid",    "expr": "v(mid)",      "unit": "V"  },
+  { "name": "vmid_mv", "expr": "vmid * 1e3",  "unit": "mV" }
+]
+```
+
+### The expression must reduce to a single real scalar
+
+This is the one contract rule the tool cannot check up front. ngspice's
+`print` renders a **multi-point** vector (or a complex `ac`/`sp` result) as an
+indexed table rather than a `<name> = <value>` line, so nothing is harvested
+and the measurement grades `status: "error"` with a `code: "measurement"`
+diagnostic that names both causes. Reduce the expression yourself —
+`vecmax()`, `vecmin()`, `mean()`, `db()`, `mag()`, `<expr>[0]` — rather than
+relying on `print`:
+
+```json
+{ "name": "swing", "expr": "vecmax(v(out)) - vecmin(v(out))", "unit": "V" }
+```
+
+Worked `op` example — the case that had no expression at all before:
+
+```json
+{
+  "netlist": "divider.spice",
+  "analysis": { "kind": "op", "args": "" },
+  "measurements": [
+    {
+      "name": "vmid",
+      "expr": "v(mid)",
+      "unit": "V",
+      "limits": { "min": 1.9, "max": 2.1 }
+    }
+  ]
+}
+```
+
+### Constraints and interactions
+
+- **Name rules are stricter than for a `spice` card.** An `expr` name is
+  emitted as an ngspice vector name *and* read back out of the log, so it must
+  match `[A-Za-z_][A-Za-z0-9_]*` — no dots, no leading digit. A `.meas`
+  card's `name` is unaffected (it is never a `let` target), so an existing
+  request using e.g. `stage1.vout` keeps working.
+- **Case is preserved in the response, but folded for matching.** ngspice
+  lower-cases the vector name it prints (`print Vmid` → `vmid = 2.0e+00`), so
+  an `expr`'s value is harvested case-insensitively; the response entry still
+  carries the caller's own spelling (`"name": "Vmid"`). A `.meas` card's name
+  is folded the same way
+  ([#2546](https://github.com/2AMLogic/klayout-tools/issues/2546)) — ngspice
+  lower-cases that one in its report too, so an upper/mixed-case `spice` name
+  now harvests exactly as a matching-case one always has.
+- **An `expr` name must be unique** across the whole `measurements[]` list
+  (compared case-insensitively, per the previous bullet): a second `let
+  <name>` overwrites the first, so both response entries would report the same
+  value. Duplicate names among `spice`-only entries are left to ngspice
+  exactly as before.
+- **Single line only.** The expression is spliced verbatim into one `let`
+  line; an embedded newline would become a separate control command.
+- **`corners.*` / `monte_carlo`**: nothing special. The `let`/`print` pair is
+  regenerated in every corner's own deck, after that corner's `alter` cards
+  and analysis, so the expression is evaluated against that corner's solve.
+  Monte Carlo statistics (`monte_carlo.quantiles`, `k_sigma`, the `mean ±
+  k*stddev` window) apply to an `expr` measurement's per-sample values with no
+  extra declaration — the stats layer keys off `measurements[].name`, not the
+  form it was declared in.
+- **`engine: "xyce"` refuses `expr`** (application error, exit 1): `let` and
+  `print` are ngspice control commands and the Xyce deck has no `.control`
+  block (its analysis is a plain top-level dot card). Use `engine: "ngspice"`,
+  or express the quantity as a `.meas` card. Refused by name rather than
+  silently dropped — a corner that ran without its `expr` lines would report
+  every such measurement as "produced no value", which reads as a circuit
+  regression instead of an unsupported request field.
+- **`remote`/`batch` backends** need no special handling: `expr` is deck text,
+  not a host artifact, and the off-host worker generates the deck from the
+  same request document.
+- **Still one analysis per corner.** `expr` reaches everything derivable from
+  *one* corner's *one* solve. A measurement defined across several analyses in
+  one corner, or across corners/Monte Carlo draws (a differential between a
+  loaded and an unloaded run, a statistic rescaled by a separate calibration
+  run), is a different gap — tracked in
+  [#2482](https://github.com/2AMLogic/klayout-tools/issues/2482) — and is
+  **not** addressed by this field.
+- **`--op-lint`** scans a measurement's `v(...)` references from `expr` as
+  well as from `spice`, so an operating-point measurement naming a node the
+  netlist does not define is still a named finding rather than a silent 0 V
+  (see "Operating-point lint" below).
 
 ## Off-host backends stage the netlist's `.include` closure
 
@@ -1760,8 +1922,10 @@ has no `.MEASURE OP` — an operating point has no sweep variable for a
 measurement to search over the way DC/AC/TRAN/SP do — so a `.meas op` card
 (regardless of the request's own `analysis.kind`) is rejected up front with
 an actionable `SimError` instead of failing deep inside an ngspice parse
-error. Use `analysis.kind: "tran"` with a short single-step transient and
-`.meas tran ... at=<t>` to read back an operating-point-like value instead.
+error. Declare the quantity as a `measurements[].expr` expression instead (the
+first-class answer — see "Measurements that are not `.meas` cards" above), or
+use `analysis.kind: "tran"` with a short single-step transient and
+`.meas tran ... at=<t>` to read back an operating-point-like value.
 
 ### Grading a recovered diagnostic as inconclusive (`options.fail_on_diagnostic`)
 
@@ -2046,7 +2210,7 @@ klt sim <request.json> --op-lint [--op-lint-corner <corner_id>] [--format text|j
 | `drain_tied_to_rail` | `error` | An NMOS whose drain node is ground, or a PMOS whose drain node is the positive supply — the drain voltage can never move. |
 | `gate_shorted_to_source` | `error` | Gate and source are the same node: `Vgs` is 0 by construction. |
 | `bulk_not_tied` | `warning` | Bulk is tied to neither the device's own source nor the matching rail. A warning, not an error — a deep-nwell/isolated device may genuinely want this. |
-| `missing_node` | `error` | A declared I/O node (`op_lint.nodes`, or any `v(<node>)` reference inside the request's own `.meas` cards) that does not appear in the netlist at all — the usual cause of a measurement that silently reads 0 V. |
+| `missing_node` | `error` | A declared I/O node (`op_lint.nodes`, or any `v(<node>)` reference inside the request's own measurements — `spice` cards and `expr` expressions alike) that does not appear in the netlist at all — the usual cause of a measurement that silently reads 0 V. |
 | `floating_node` | `warning` | A node with exactly one element terminal on it and no DC path. This is the *structural* counterpart of the singular-matrix / gmin-stepping narration the sweep classifies from the log ([#205](https://github.com/2AMLogic/klayout-tools/issues/205)); that classification is reused here verbatim rather than re-implemented, so the two never disagree. |
 
 Every threshold comparison is on **magnitudes**: BSIM4 reports a PMOS's
@@ -2226,8 +2390,8 @@ the *response* echoes back.
 | `monte_carlo.vary`       | string            | `"mismatch"`, `"process"`, or `"both"` — which axis the sample sequence varies. Required when `monte_carlo` is present.                                                 |
 | `monte_carlo.quantiles`  | array\<number\>   | Percentiles in `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]`. See "Monte Carlo statistics" above.                                                      |
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
-| `analysis`               | object, required  | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per request. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) and `spice` (a verbatim `.meas` card), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. |
+| `analysis`               | object, required  | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per request. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card) or `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
