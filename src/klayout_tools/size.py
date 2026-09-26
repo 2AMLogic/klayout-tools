@@ -155,6 +155,15 @@ declared corner always makes the aggregate ``status`` ``"error"``, mirroring
 ``klt sim``'s own error > fail > pass precedence -- see
 ``docs/cli/size.md``'s "Corner sets" section for the full response shape.
 
+One deliberate narrowing versus ``klt sim``'s axis semantics: a bundle
+section may **not** name its own model library
+(``sections: [{"lib": ..., "section": ...}]``, issue #2522). ``klt sim``
+resolves those per-section refs and emits one ``.lib`` card per library;
+this command resolves exactly one ``models_lib`` per request and binds every
+section to it, so ``_parse_corner_set`` refuses the shape with a
+:class:`SizeError` rather than dropping the ref and emitting a deck that
+reads the named section out of the wrong file.
+
 Worst-corner margin objective (issue #769)
 --------------------------------------------
 The above ("sizing_corner", the default) optimizes for exactly one nominal
@@ -339,7 +348,7 @@ from ._paths import _load_request_json, validate_request_shape
 from ._provenance import build_provenance
 from ._text import line_containing as _line_containing
 from .pdk import PdkNotFoundError, find_pdk
-from .sim import SimError, _expand_corners, _resolve_models_lib
+from .sim import CornerPoint, SimError, _expand_corners, _resolve_models_lib
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -650,6 +659,12 @@ def _parse_corner_set(request: dict[str, Any]) -> tuple[list[dict[str, Any]], in
     Accepts either the original single-corner ``request.corner`` object
     (unchanged) or the new corner-*set* ``request.corners`` object -- never
     both. See this module's docstring's "Corner set input" section.
+
+    A bundle section declaring its own model library
+    (``{"lib": str, "section": str}``, issue #2522) is **refused** here: this
+    command binds every section to the single ``models_lib`` it resolved for
+    the request, so honouring the ref is not something it can do silently.
+    See "Corner set input" in this module's docstring.
     """
     legacy_corner = request.get("corner")
     corner_set = request.get("corners")
@@ -687,6 +702,8 @@ def _parse_corner_set(request: dict[str, Any]) -> tuple[list[dict[str, Any]], in
     if not points:
         raise SizeError("request.corners produced no corner points (check 'exclude')")
 
+    _reject_per_section_libs(points)
+
     parsed_points: list[dict[str, Any]] = []
     for point in points:
         process = point.process if point.process is not None else "tt"
@@ -702,6 +719,34 @@ def _parse_corner_set(request: dict[str, Any]) -> tuple[list[dict[str, Any]], in
 
     sizing_index = _resolve_sizing_index(parsed_points, corner_set.get("sizing"))
     return parsed_points, sizing_index
+
+
+def _reject_per_section_libs(points: list[CornerPoint]) -> None:
+    """Refuse a corner bundle whose sections name their own model libraries.
+
+    Issue #2522 widened ``corners.process[].sections[]`` to accept
+    ``{"lib": str, "section": str}`` -- a section read from its *own* model
+    library rather than the request's ``models.lib``. ``klt sim`` honours
+    those refs (resolving each and emitting one ``.lib`` card per library);
+    this command resolves exactly one ``models_lib`` per request and binds
+    every section to it, so accepting the shape here would emit
+    ``.lib <models_lib> <section>`` and read the named section out of the
+    wrong file -- failing loudly only in the lucky case where the section is
+    absent from ``models_lib``, and silently mis-modelling the sizing run
+    otherwise.
+
+    Because ``_expand_corners`` is shared with ``klt sim``, this refusal is
+    what preserves the property the shape had *before* #2522 taught the shared
+    parser to accept it at all: an unsupported request fails loudly.
+    """
+    for point in points:
+        if point.process_section_libs is not None:
+            raise SizeError(
+                "request.corners.process per-section 'lib' overrides are not "
+                "supported by klt size (issue #2522 added them for klt sim "
+                "only); every section of a klt size corner bundle is read "
+                "from the request's own models.lib"
+            )
 
 
 def _resolve_sizing_index(points: list[dict[str, Any]], sizing_spec: Any) -> int:

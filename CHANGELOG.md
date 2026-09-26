@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2522, `klt sim`; additive — `schema_version` unchanged): a
+  `corners.process` bundle's `sections[]` entries may now name their **own**
+  model library — `{"lib": str, "section": str}` alongside today's bare
+  section strings — so a PDK that ships one corner library *per device
+  family* (separate MOS / capacitor / bipolar corner files, each with its own
+  section names) can be expressed directly instead of through a hand-generated
+  aggregator `.lib`. Each `lib` resolves exactly as `models.lib` does (PDK
+  variant-relative with `models.pdk`, else `$VAR`/`~`-expanded and relative
+  to the request file) and is existence-checked before any corner is
+  dispatched (`corner section library not found: <path>`, exit 1).
+  `models.lib` itself becomes optional when every selected section names its
+  own library. The report gains `environment.corner_section_libs` (`{name,
+  path, scope, sha256}` per distinct library, first-appearance order, present
+  only when declared), and a resumable sweep's checkpoint fingerprint keys on
+  those hashes. The refs cross the `remote`/`batch` fleet wire **as declared**
+  so a shard resolves them against its own `$PDK_ROOT`, the same contract
+  `models.lib` already had; a bare-string bundle's deck, wire payload and
+  fingerprint are byte-identical to before. The sweep deck, the
+  `fail_fast_probe` deck, the `--op-lint` deck and the Xyce oracle deck now
+  emit a corner's `.lib` cards from one shared code path.
+
 - **Added** (#2513, `klt sim`; additive — `schema_version` unchanged):
   `options.osdi_preload`, a first-class hook for OSDI (Verilog-A) compact
   models. Each declared `.osdi` path (`$VAR`/`~` expanded, relative to the

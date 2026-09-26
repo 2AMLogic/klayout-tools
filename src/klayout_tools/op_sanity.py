@@ -126,8 +126,11 @@ from .sim import (
     CornerPoint,
     SimError,
     _classify_diagnostics,
+    _corner_lib_lines,
     _expand_corners,
     _extract_engine_version,
+    _needs_models_lib,
+    _resolve_corner_section_libs,
     _resolve_models_lib,
     _resolve_osdi_preload,
 )
@@ -634,11 +637,9 @@ def _write_op_deck(
     candidate op-point vector plus every probed node voltage, each device's
     block introduced by an ``echo`` marker."""
     lines = ["* klt sim --op-lint -- generated operating-point deck, do not edit"]
-    if point.process_sections is not None:
-        for section in point.process_sections:
-            lines.append(f".lib {models_lib} {section}")
-    elif point.process is not None:
-        lines.append(f".lib {models_lib} {point.process}")
+    # Same helper the sweep's deck uses, so the lint cannot drift from it on
+    # multi-section bundles or issue #2522's per-section corner libraries.
+    lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
     lines.append(f".temp {point.temperature_c}")
 
@@ -1096,11 +1097,16 @@ def run_op_sanity(
 
     models = request.get("models") or {}
     models_lib: str | None = None
-    if point.process is not None:
-        try:
+    try:
+        # Issue #2522: resolve (and existence-check) any per-section corner
+        # library this point's bundle names, then the request's own
+        # `models.lib` -- needed only when some selected section actually
+        # reads from it (`_needs_models_lib`).
+        _resolve_corner_section_libs([point], models, request_dir)
+        if _needs_models_lib(point):
             models_lib = _resolve_models_lib(models, request_dir)
-        except SimError as exc:
-            raise OpSanityError(str(exc)) from exc
+    except SimError as exc:
+        raise OpSanityError(str(exc)) from exc
 
     provenance_pdk: dict[str, Any] | None = None
     if models.get("pdk") or models.get("pdk_root"):
