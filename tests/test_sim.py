@@ -2186,7 +2186,7 @@ def _stub_subprocess_run(
     stdout: str = "** ngspice-99\n",
     side_effect=None,
 ):
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         log_path = cmd[cmd.index("-o") + 1]
         if side_effect is not None:
             raise side_effect
@@ -2272,7 +2272,7 @@ def _stub_ngspice_subprocess(monkeypatch, *, captured_cmds: list | None = None):
     """Like `_stub_subprocess_run` above, but also records every invoked
     `cmd` so a test can assert which binary was actually spawned."""
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         if captured_cmds is not None:
             captured_cmds.append(cmd)
         log_path = cmd[cmd.index("-o") + 1]
@@ -2530,7 +2530,7 @@ def test_run_calibration_probe_measures_wall_time(tmp_path, monkeypatch):
     point = sim.CornerPoint(None, {}, 27.0)
     probe_timeouts: list[float] = []
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         probe_timeouts.append(timeout)
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
@@ -2560,7 +2560,7 @@ def test_run_calibration_probe_timeout_reports_timed_out(tmp_path, monkeypatch):
     _write_body(tmp_path)
     point = sim.CornerPoint(None, {}, 27.0)
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
@@ -2587,7 +2587,7 @@ def test_run_calibration_probe_missing_binary_is_inconclusive(tmp_path, monkeypa
     _write_body(tmp_path)
     point = sim.CornerPoint(None, {}, 27.0)
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         raise FileNotFoundError("no ngspice")
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
@@ -2611,7 +2611,7 @@ def test_run_calibration_probe_aborted_analysis_is_inconclusive(tmp_path, monkey
     _write_body(tmp_path)
     point = sim.CornerPoint(None, {}, 27.0)
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write("Warning: singular matrix\nsimulation(s) aborted\n")
@@ -3741,7 +3741,7 @@ def _stub_subprocess_values(monkeypatch, name: str, values: list[float | None]) 
     """
     state = {"index": 0}
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         log_path = cmd[cmd.index("-o") + 1]
         value = values[state["index"]]
         state["index"] += 1
@@ -4178,7 +4178,7 @@ def test_run_sim_local_parallel_backend_is_order_identical_to_local(
         "options": {"max_workers": 4},
     }
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         deck_path = cmd[2]
         log_path = cmd[cmd.index("-o") + 1]
         deck_text = Path(deck_path).read_text()
@@ -4234,7 +4234,7 @@ def test_run_sim_local_parallel_failing_corner_does_not_abort_siblings(
         },
     )
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         deck_path = cmd[2]
         log_path = cmd[cmd.index("-o") + 1]
         deck_text = Path(deck_path).read_text()
@@ -4637,7 +4637,9 @@ def test_invalid_host_max_workers_cap_fails_before_dispatch(tmp_path, monkeypatc
 
     calls = []
 
-    def fake_run(cmd, capture_output, text, timeout):  # pragma: no cover - guard
+    def fake_run(  # pragma: no cover - guard
+        cmd, capture_output, text, timeout, cwd=None
+    ):
         calls.append(cmd)
         raise AssertionError("no corner should be dispatched with a malformed cap")
 
@@ -4677,7 +4679,7 @@ def _fake_run_sleeping(run_calls: list, sleep_s: float = 0.1):
     sleeps ``sleep_s`` before "completing" -- used to make budget/orphan
     checks between corners deterministic without a real ngspice binary."""
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         deck_path = cmd[2]
         log_path = cmd[cmd.index("-o") + 1]
         deck_text = Path(deck_path).read_text()
@@ -5433,7 +5435,7 @@ def test_run_sim_monte_carlo_statistics_over_sharded_run_equal_unsharded(
         "options": {"max_workers": 4},
     }
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         deck_path = cmd[2]
         log_path = cmd[cmd.index("-o") + 1]
         deck_text = Path(deck_path).read_text()
@@ -7579,7 +7581,7 @@ def _stub_subprocess_run_with_waveform(monkeypatch, *, points, log_text="clean r
     fakes that side effect so the plot-writing code under test has a real
     waveform artifact to read."""
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
@@ -8660,7 +8662,7 @@ def _stub_subprocess_values_with_logs(
     """
     state = {"index": 0}
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         log_path = cmd[cmd.index("-o") + 1]
         index = state["index"]
         state["index"] += 1
@@ -8816,3 +8818,301 @@ def test_rollup_measurements_errored_corner_still_outranks_inconclusive():
     (entry,) = sim._rollup_measurements([{"name": "vref"}], corners)
 
     assert entry["status"] == "error"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2520: `cwd=` + `options.ngspice_init` / `.spiceinit`
+# --------------------------------------------------------------------------- #
+
+
+def _stub_subprocess_run_capturing_cwd(
+    monkeypatch,
+    *,
+    log_text: str = "",
+    stdout: str = "** ngspice-99\n",
+    captured_cwds: list | None = None,
+):
+    """Like `_stub_subprocess_run`, but also records every `cwd=` kwarg the
+    real code passed, so a test can assert which directory ngspice was
+    actually launched from (issue #2520)."""
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        if captured_cwds is not None:
+            captured_cwds.append(cwd)
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(log_text)
+        return fake_completed(stdout)
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+
+def test_run_corner_cwd_is_the_keep_artifacts_corner_dir(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True},
+        },
+    )
+    captured_cwds: list = []
+    _stub_subprocess_run_capturing_cwd(monkeypatch, captured_cwds=captured_cwds)
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    (corner,) = report["corners"]
+    corner_dir = os.path.dirname(corner["artifacts"]["log"])
+    assert captured_cwds == [corner_dir]
+
+
+def test_run_corner_cwd_is_a_scratch_dir_when_not_keeping_artifacts(
+    tmp_path, monkeypatch
+):
+    """`keep_artifacts=False` corners run from a `_tmp_work_dir()` scratch
+    directory, not `artifacts_dir` -- the `cwd=` fix must anchor to *that*
+    directory too, not just the `keep_artifacts=True` branch (see the
+    issue's own implementation guidance)."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    captured_cwds: list = []
+    _stub_subprocess_run_capturing_cwd(monkeypatch, captured_cwds=captured_cwds)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["artifacts"]["log"] is None  # not kept
+    (cwd,) = captured_cwds
+    assert cwd is not None
+    assert cwd != os.getcwd()
+    assert os.path.basename(cwd).startswith("klt-sim-")
+
+
+def test_write_spiceinit_writes_requested_lines_in_order(tmp_path):
+    run_dir = tmp_path / "corner"
+    run_dir.mkdir()
+
+    sim._write_spiceinit(str(run_dir), ("set ngbehavior=hsa", "set numdgt=7"))
+
+    assert (run_dir / ".spiceinit").read_text() == "set ngbehavior=hsa\nset numdgt=7\n"
+
+
+def test_write_spiceinit_is_a_no_op_when_unset_and_none_existed(tmp_path):
+    run_dir = tmp_path / "corner"
+    run_dir.mkdir()
+
+    sim._write_spiceinit(str(run_dir), ())
+
+    assert not (run_dir / ".spiceinit").exists()
+
+
+def test_write_spiceinit_removes_a_stale_file_when_unset(tmp_path):
+    """A `keep_artifacts` corner directory can be reused across requests --
+    an earlier request that set `options.ngspice_init` must not leave a
+    `.spiceinit` behind for a later request that doesn't opt in."""
+    run_dir = tmp_path / "corner"
+    run_dir.mkdir()
+    (run_dir / ".spiceinit").write_text("set ngbehavior=hsa\n")
+
+    sim._write_spiceinit(str(run_dir), ())
+
+    assert not (run_dir / ".spiceinit").exists()
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, ()),
+        ([], ()),
+        (["set ngbehavior=hsa"], ("set ngbehavior=hsa",)),
+        (
+            ["set ngbehavior=hsa", "set numdgt=7"],
+            ("set ngbehavior=hsa", "set numdgt=7"),
+        ),
+        # Unlike `_validate_fail_on_diagnostic`, duplicates are preserved --
+        # a repeated line is the caller's call, not an obvious mistake.
+        (
+            ["set ngbehavior=hsa", "set ngbehavior=hsa"],
+            ("set ngbehavior=hsa", "set ngbehavior=hsa"),
+        ),
+    ],
+)
+def test_validate_ngspice_init_normalises_accepted_values(value, expected):
+    assert sim._validate_ngspice_init(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value,match",
+    [
+        ("set ngbehavior=hsa", "must be an array"),
+        ({"line": "set ngbehavior=hsa"}, "must be an array"),
+        ([1], "non-empty ngspice init-line strings"),
+        ([""], "non-empty ngspice init-line strings"),
+        (["   "], "non-empty ngspice init-line strings"),
+    ],
+)
+def test_validate_ngspice_init_rejects_bad_values(value, match):
+    with pytest.raises(sim.SimError, match=match):
+        sim._validate_ngspice_init(value)
+
+
+def test_run_sim_ngspice_init_writes_spiceinit_into_corner_dir(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {
+                "keep_artifacts": True,
+                "ngspice_init": ["set ngbehavior=hsa", "set numdgt=7"],
+            },
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    (corner,) = report["corners"]
+    corner_dir = os.path.dirname(corner["artifacts"]["log"])
+    spiceinit_path = os.path.join(corner_dir, ".spiceinit")
+    assert os.path.isfile(spiceinit_path)
+    assert Path(spiceinit_path).read_text() == "set ngbehavior=hsa\nset numdgt=7\n"
+
+
+def test_run_sim_without_ngspice_init_writes_no_spiceinit(tmp_path, monkeypatch):
+    """Regression check: a request that doesn't opt in gets byte-identical
+    behaviour to before issue #2520 -- no `.spiceinit` anywhere."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"keep_artifacts": True},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    (corner,) = report["corners"]
+    corner_dir = os.path.dirname(corner["artifacts"]["log"])
+    assert not os.path.isfile(os.path.join(corner_dir, ".spiceinit"))
+
+
+def test_run_sim_ngspice_init_honoured_by_the_local_parallel_backend(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "corners": {"temperature_c": [27, 125]},
+            "options": {
+                "keep_artifacts": True,
+                "ngspice_init": ["set ngbehavior=hsa"],
+            },
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(
+        str(request),
+        artifacts_dir=str(tmp_path / "artifacts"),
+        backend="local-parallel",
+    )
+
+    assert len(report["corners"]) == 2
+    for corner in report["corners"]:
+        corner_dir = os.path.dirname(corner["artifacts"]["log"])
+        assert os.path.isfile(os.path.join(corner_dir, ".spiceinit"))
+
+
+def test_run_sim_ngspice_init_not_forwarded_to_xyce(tmp_path, monkeypatch):
+    """`.spiceinit` is an ngspice-only lookup -- the `xyce` engine branch of
+    `_prepare_corner_run` never writes one, even when `options.ngspice_init`
+    is set (harmless, but also not silently doing something Xyce has no
+    concept of)."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {
+                "keep_artifacts": True,
+                "ngspice_init": ["set ngbehavior=hsa"],
+            },
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        log_path = cmd[cmd.index("-l") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("Xyce version 7.10.0\n")
+        return fake_completed("")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    (corner,) = report["corners"]
+    corner_dir = os.path.dirname(corner["artifacts"]["log"])
+    assert not os.path.isfile(os.path.join(corner_dir, ".spiceinit"))
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_ngspice_init_sets_compatibility_mode(tmp_path, monkeypatch):
+    """The reproducibility fix itself (issue #2520), against real ngspice.
+
+    Isolated from whatever `$HOME/.spiceinit` this host happens to have --
+    exactly the "unreproducible" symptom the issue reports -- by pointing
+    `$HOME` at an empty directory. Without `options.ngspice_init`, ngspice's
+    own log carries `Note: No compatibility mode selected!`; with it, that
+    note is replaced by a `Compatibility modes selected` note naming the
+    requested mode -- proving `.spiceinit` was actually written to, and read
+    from, `corner_dir` (via the `cwd=` fix), not the caller's ambient cwd or
+    `$HOME`.
+    """
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    _write_body(tmp_path)
+
+    def _run(*, with_init: bool) -> str:
+        options: dict[str, object] = {"keep_artifacts": True}
+        if with_init:
+            options["ngspice_init"] = ["set ngbehavior=hsa"]
+        request = _write_request(
+            tmp_path,
+            {
+                "netlist": "body.spice",
+                "analysis": {"kind": "tran", "args": "1n 1u"},
+                "options": options,
+            },
+            name=f"request_{with_init}.json",
+        )
+        report = sim.run_sim(
+            str(request),
+            artifacts_dir=str(tmp_path / f"artifacts_{with_init}"),
+        )
+        (corner,) = report["corners"]
+        return Path(corner["artifacts"]["log"]).read_text()
+
+    without_log = _run(with_init=False)
+    assert "Note: No compatibility mode selected!" in without_log
+
+    with_log = _run(with_init=True)
+    assert "Note: No compatibility mode selected!" not in with_log
+    assert "Compatibility modes selected" in with_log

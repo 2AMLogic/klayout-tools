@@ -78,7 +78,7 @@ def _base_spec(**overrides) -> dict:
 
 
 def _stub_subprocess_run(monkeypatch, *, log_text: str) -> None:
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         log_path = cmd[cmd.index("-o") + 1]
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
@@ -508,7 +508,7 @@ def _stub_subprocess_run_per_sample(monkeypatch, *, values: list[str]) -> None:
     implausible draws."""
     calls = {"n": 0}
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
         log_path = cmd[cmd.index("-o") + 1]
         value = values[calls["n"] % len(values)]
         calls["n"] += 1
