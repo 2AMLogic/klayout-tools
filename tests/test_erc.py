@@ -1573,6 +1573,120 @@ def test_declared_islands_rejects_non_positive_integer_values(tmp_path, bad):
         run_erc(str(gds), str(spec))
 
 
+# --- `nets[]`: the measured island count behind every verdict (issue #2497) --
+#
+# `erc.unconnected_net` counts the islands *carrying the declared label*, not
+# the electrical islands the net's conductor geometry forms. Those are the same
+# number only when the stream labels every piece, so a single-label net whose
+# rail is severed into a labelled piece and an unlabelled orphan still grades
+# clean. These tests pin the count into the report on the passing path too, so
+# a committed report says what was actually measured instead of leaving the
+# bound unstated.
+
+
+def _severed_rail_layout():
+    """The issue #2497 worked example: a ``VDD`` rail severed into a labelled
+    piece (li1 5-6 um, carrying the stream's one ``VDD`` text) and an
+    electrically disjoint, *unlabelled* orphan (li1 8-9 um)."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    return layout, top, poly, li1, label
+
+
+def test_declared_net_matched_island_count_is_reported_on_the_passing_path(
+    tmp_path,
+):
+    """AC (issue #2497): a severed single-label rail still grades clean --
+    the orphan carries no label, so the rule genuinely sees one island --
+    but `nets[].matched_islands` now records that the passing `1` was
+    measured over the declared *label*, beside the `expected_islands` it was
+    graded against. Before this the number existed only on the failing
+    path, so a committed clean report could not be audited without
+    re-deriving the connectivity graph."""
+    layout, *_ = _severed_rail_layout()
+
+    gds = tmp_path / "severed.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "severed.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    # The verdict is unchanged -- this is additive visibility, not a new
+    # failure mode.
+    assert [
+        f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
+    ] == []
+    assert report["nets"] == [
+        {"name": "VDD", "matched_islands": 1, "expected_islands": 1}
+    ]
+
+
+def test_declared_net_matched_island_count_rises_when_the_orphan_is_labelled(
+    tmp_path,
+):
+    """The control from the issue's own two-perturbation experiment: the
+    *same* severed rail with a second copy of the label dropped on the
+    orphan reports 2 matched islands and the finding. The pair is what makes
+    the bound visible -- identical conductor geometry, different
+    `matched_islands`, because the count is over labelled islands."""
+    layout, top, poly, li1, label = _severed_rail_layout()
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.5), _um(0.5))))
+
+    gds = tmp_path / "severed_labelled.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "severed_labelled.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+    assert len(findings) == 1
+    assert report["nets"] == [
+        {"name": "VDD", "matched_islands": 2, "expected_islands": 1}
+    ]
+    # The reported count is the same number the finding was graded on.
+    assert len(findings[0]["islands"]) == report["nets"][0]["matched_islands"]
+
+
+def test_declared_nets_report_zero_matches_and_a_declared_island_count(tmp_path):
+    """Both ends of the range are reported, in spec order: a name matching
+    no labelled geometry at all is `matched_islands: 0` (not omitted), and a
+    legitimately multi-domain declaration echoes its own
+    `nets[].islands` (issue #2400) as `expected_islands`, so a clean `3 == 3`
+    is readable without the spec in hand."""
+    gds, spec, spec_dict = _three_island_vdd_layout(tmp_path, "nets_report")
+    spec_dict["nets"] = [
+        {"name": "VDD", "kind": "supply", "islands": 3},
+        {"name": "NOWHERE", "kind": "supply"},
+    ]
+    _write_spec(spec, spec_dict)
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["nets"] == [
+        {"name": "VDD", "matched_islands": 3, "expected_islands": 3},
+        {"name": "NOWHERE", "matched_islands": 0, "expected_islands": 1},
+    ]
+
+
+def test_nets_report_is_empty_when_the_spec_declares_none(tmp_path):
+    """The key is always present -- `[]` when the spec declares no `nets`,
+    matching every other always-present report section, so a consumer never
+    has to distinguish "absent" from "nothing declared"."""
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "no_nets.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "no_nets.erc.json"
+    _write_spec(spec, _nets_spec())
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["nets"] == []
+
+
 def test_unconnected_net_finding_keys_are_uniform_across_rules(tmp_path):
     """Issue #2194 adds `islands` to the finding shape; it must be present
     (as `null`) on every other rule too, so the `erc_findings[]` key set
@@ -3977,6 +4091,7 @@ def test_cli_json_contract(tmp_path, capsys):
         "gate_role",
         "gate_count",
         "gates",
+        "nets",
         "erc_findings",
         "erc_finding_count",
         "erc_status",
@@ -4166,6 +4281,31 @@ def test_cli_text_output_prints_the_connectivity_verdict(tmp_path, capsys):
     assert main(["erc", str(gds), str(spec)]) == 3
     out = capsys.readouterr().out
     assert "erc_status: violations" in out
+    # `_basic_spec` declares no `nets`, so the issue #2497 block is skipped
+    # entirely -- text output is unchanged for every spec not using it.
+    assert "declared nets:" not in out
+
+
+def test_cli_text_output_prints_the_matched_island_count_per_declared_net(
+    tmp_path, capsys
+):
+    """Issue #2497: the courtesy view names the island count each declared
+    net was graded on -- including the passing one on the severed
+    single-label rail, where the clean `erc.unconnected_net` verdict is
+    precisely the thing a reader should not take as evidence the whole net
+    was measured."""
+    layout, *_ = _severed_rail_layout()
+    gds = tmp_path / "severed_cli.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "severed_cli.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    main(["erc", str(gds), str(spec)])
+    out = capsys.readouterr().out
+
+    assert "declared nets: 1" in out
+    assert "VDD: matched_islands=1 (expected 1" in out
+    assert "counted over islands carrying the label" in out
 
 
 def test_cli_unknown_pdk_exits_one_with_clean_message(tmp_path, capsys):

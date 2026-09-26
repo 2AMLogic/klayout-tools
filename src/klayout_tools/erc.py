@@ -81,6 +81,13 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   declared net names that resolve to the same electrical island are
   "multiply-driven" (shorted together) -- or, when both are declared
   ``"kind": "supply"``, a **supply short** (``erc.supply_short``) instead.
+  The islands counted are the ones *carrying the declared label*, not the
+  islands the net's conductor geometry forms, so a single-label net whose
+  rail is severed into a labelled piece and an unlabelled orphan still
+  grades clean. That bound is reported rather than left unstated: every
+  declared net gets a report ``nets[]`` entry carrying the count its
+  verdict was decided on, passing or not (issue #2497, see
+  :func:`_declared_net_entry` and ``docs/cli/erc.md``).
 - **Expected short missing** (``erc.expected_short_missing``, issue
   #2463): the same ``nets`` section, read the other way round. A layout
   that deliberately ties two labelled conductors together -- a sub-block's
@@ -2248,6 +2255,38 @@ def _match_net_clusters(circuit: Any, name: str) -> list[Any]:
     )
 
 
+def _declared_net_entry(decl: dict[str, Any], matched: int) -> dict[str, Any]:
+    """One report ``nets[]`` entry (issue #2497): the island count
+    ``erc.unconnected_net`` actually graded this declared net on, retained
+    whether or not it produced a finding.
+
+    ``matched_islands`` is ``len(_match_net_clusters(...))`` -- the number of
+    disconnected electrical islands **carrying this net's declared label**,
+    which is the number of islands its conductor geometry forms only when
+    the stream labels every piece. A stream that draws one text per net (the
+    ordinary hand-built or generated analog block, where the label names a
+    port rather than annotating every rail segment) whose rail is severed
+    therefore still reports ``1``: the orphaned piece is unlabelled, so it is
+    not a match and the rule cannot see it. Before this field the number
+    existed only on the *failing* path (as the finding's ``islands[]``
+    length), so a clean verdict carried no evidence of what it was measured
+    over -- "exactly one island per supply" silently rested on an undeclared,
+    unreported stream property. See ``docs/cli/erc.md``,
+    "`erc.unconnected_net` counts labelled islands, not conductor islands".
+
+    ``expected_islands`` echoes the entry's own ``nets[].islands``
+    declaration (issue #2400, default 1) beside it, so a committed report can
+    be graded -- ``3 == 3`` is clean, ``3 != 1`` is the finding -- without the
+    spec document in hand. Reporting only; neither value is an input to any
+    finding or roll-up, both are re-derived from the same ``matched`` the
+    rule already computed."""
+    return {
+        "name": decl["name"],
+        "matched_islands": matched,
+        "expected_islands": decl["islands"],
+    }
+
+
 def _island_entry(l2n: Any, layer_index: dict[str, int], net: Any) -> dict[str, Any]:
     """One ``erc.unconnected_net`` ``islands[]`` entry (issue #2194): where
     a single disconnected electrical island of a declared net actually is.
@@ -2447,10 +2486,13 @@ def _net_connectivity_findings(
     circuit: Any,
     layer_index: dict[str, int],
     nets_decl: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """``erc.unconnected_net`` / ``erc.multiply_driven_net`` /
     ``erc.supply_short`` findings (issue #861), driven by the optional
-    ``nets`` spec section.
+    ``nets`` spec section -- plus, since issue #2497, the per-declared-net
+    island counts those findings were graded from (the report's own
+    ``nets[]`` section, see :func:`_declared_net_entry`), returned beside
+    them because both come from the same single pass over ``nets_decl``.
 
     A declared net matching zero, or a number other than the count its
     entry declares (``nets[].islands``, issue #2400 -- default 1), of
@@ -2491,15 +2533,17 @@ def _net_connectivity_findings(
     falsifiable rather than silenceable.
     """
     if not nets_decl:
-        return []
+        return [], []
 
     findings: list[dict[str, Any]] = []
+    declared_nets: list[dict[str, Any]] = []
     matches: dict[str, list[Any]] = {}
     clusters_by_name: dict[str, set[int]] = {}
     for decl in nets_decl:
         matched = _match_net_clusters(circuit, decl["name"])
         matches[decl["name"]] = matched
         clusters_by_name[decl["name"]] = {net.cluster_id for net in matched}
+        declared_nets.append(_declared_net_entry(decl, len(matched)))
         # The expected island count is the declared one (issue #2400;
         # ``nets[].islands``, default 1 -- the pre-#2400 "one label string
         # == one electrical net" model). Grading the count against the
@@ -2552,7 +2596,7 @@ def _net_connectivity_findings(
         )
     )
     findings.extend(_expected_short_findings(pairs, clusters_by_name))
-    return findings
+    return findings, declared_nets
 
 
 def _tie_findings(
@@ -3475,9 +3519,13 @@ def run_erc(
             list(zip(gates, gate_regions, gate_floating, strict=True)), gate_role
         )
     )
-    erc_findings.extend(
-        _net_connectivity_findings(l2n, circuit, layer_index, nets_decl)
+    # (issue #2497) The same pass returns the per-declared-net island counts
+    # behind those findings -- the report's own `nets[]` section, populated
+    # on the passing path too. See `_declared_net_entry`.
+    connectivity_findings, declared_nets = _net_connectivity_findings(
+        l2n, circuit, layer_index, nets_decl
     )
+    erc_findings.extend(connectivity_findings)
 
     # The tie graph (issue #2169): a second extraction, built only when the
     # spec actually declares `ties[]`, that adds each tie's derived tap
@@ -3700,6 +3748,13 @@ def run_erc(
         "gate_role": gate_role,
         "gate_count": len(gates),
         "gates": gates,
+        # (issue #2497) One entry per declared `nets[]` entry, in spec
+        # order: the island count `erc.unconnected_net` graded it on, even
+        # when that count passed. `[]` when the spec declares no `nets`.
+        # The count is over islands *carrying the declared label*, which is
+        # why it is reported rather than left implicit -- see
+        # `_declared_net_entry` and docs/cli/erc.md.
+        "nets": declared_nets,
         "erc_findings": erc_findings,
         "erc_finding_count": erc_finding_count,
         "erc_status": erc_status,
