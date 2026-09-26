@@ -523,7 +523,7 @@ def load_ami_manifest(manifest_path: str | Path | None = None) -> dict[str, Any]
     return manifest
 
 
-def ami_pdk_key(pdk: str) -> str:
+def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
     """Map a request's ``models.pdk`` to the key the AMI manifest publishes
     under, accepting the *local variant* name the same request uses on the
     ``local`` backend.
@@ -548,6 +548,14 @@ def ami_pdk_key(pdk: str) -> str:
     than a prefix scan restated here -- and that family is accepted only if
     the remote backend covers it (:data:`_AMI_PDK_FAMILIES`) *and* the AMI
     pipeline publishes it (:data:`SUPPORTED_PDKS`).
+
+    ``backend`` names the off-host backend in the refusal message and is the
+    *only* thing it changes (issue #2523). Both off-host backends run on
+    images this same pipeline publishes, so both must accept exactly the same
+    PDK set: ``sim_batch._resolve_batch_config`` calls this function with
+    ``backend="batch"`` before its first S3 write rather than re-deriving
+    :data:`SUPPORTED_PDKS`/:data:`_AMI_PDK_FAMILIES` on its own, so the two
+    backends cannot silently disagree about which PDKs are supported.
     """
     if pdk in SUPPORTED_PDKS:
         return pdk
@@ -555,7 +563,7 @@ def ami_pdk_key(pdk: str) -> str:
     if family in _AMI_PDK_FAMILIES and family in SUPPORTED_PDKS:
         return family
     raise RemoteLaunchError(
-        f"unsupported PDK '{pdk}' for the remote backend "
+        f"unsupported PDK '{pdk}' for the {backend} backend "
         f"(supported: {', '.join(SUPPORTED_PDKS)}). `models.pdk` carries the "
         "local variant name and is reduced to its family to find the AMI "
         "(e.g. 'gf180mcuC' -> 'gf180mcu'), so a variant whose family has no "

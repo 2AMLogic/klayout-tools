@@ -88,7 +88,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from . import remote_transport, sim_staging
-from .remote_launcher import ASSUMED_THREADS_PER_CORNER
+from .remote_launcher import (
+    ASSUMED_THREADS_PER_CORNER,
+    RemoteLaunchError,
+    ami_pdk_key,
+)
 from .sim_remote import (
     _build_remote_request,
     _rewrite_remote_artifact_paths,
@@ -538,6 +542,39 @@ def _resolve_provision_script(batch_spec: dict[str, Any]) -> str:
     return resolved
 
 
+def _validate_batch_pdk(request: dict[str, Any]) -> None:
+    """Refuse a ``models.pdk`` the batch fleet has no image for, **before**
+    :func:`_resolve_batch_config`'s caller writes anything to S3 (issue
+    #2523).
+
+    The check is :func:`remote_launcher.ami_pdk_key` itself -- not a copy of
+    :data:`~klayout_tools.remote_launcher.SUPPORTED_PDKS` or its
+    family-reduction rule -- so the ``batch`` and ``remote`` backends can
+    never silently disagree about which PDKs are supported: a job instance
+    boots an image from the same published set ``remote`` provisions from,
+    which is why ``remote``'s pre-``run-instances`` refusal
+    (``RemoteLauncher.provision`` -> :func:`remote_launcher.resolve_ami`)
+    and this one must agree by construction. A variant reducible to a
+    published family is accepted on the same terms (``"gf180mcuC"`` ->
+    ``"gf180mcu"``); the *variant* keeps flowing into ``job.json``'s
+    ``pdk_variant`` (see :func:`_build_batch_job_spec`), because the job
+    instance resolves the PDK locally exactly as the ``local`` backend does.
+
+    A request that names **no** PDK at all is untouched: without a
+    ``corners.process`` axis there is no model library to resolve, so there
+    is nothing to validate and nothing to refuse.
+    """
+    from .sim import SimError
+
+    pdk = (request.get("models") or {}).get("pdk")
+    if not pdk:
+        return
+    try:
+        ami_pdk_key(str(pdk), backend="batch")
+    except RemoteLaunchError as exc:
+        raise SimError(str(exc)) from exc
+
+
 def _resolve_batch_config(
     request: dict[str, Any], *, corner_count: int, timeout_s: float
 ) -> BatchConfig:
@@ -550,9 +587,16 @@ def _resolve_batch_config(
     and jobs prefix only) a documented literal default. The **bucket has no
     literal default** -- an unresolvable bucket is an error naming all three
     sources, never a guess (see this module's docstring).
+
+    ``models.pdk`` is validated here too (:func:`_validate_batch_pdk`),
+    first: a PDK the fleet publishes no image for has no compliant execution
+    path on this backend at all, so it is a property of the *request* rather
+    than of this host's fleet configuration and should be reported even when
+    the provision script or bucket is also unresolvable.
     """
     from .sim import SimError
 
+    _validate_batch_pdk(request)
     batch_spec = request.get("batch") or {}
     provision_script = _resolve_provision_script(batch_spec)
     fleet = _read_fleet_config(provision_script)
