@@ -119,6 +119,47 @@ not `klt --version`, if you need to detect this kind of drift. See
   implant on those families needs a real PDK enclosure rule the curated
   decks do not carry (sg13g2's, for one, transcribes no implant rule of any
   kind) and is left as separately-filed follow-up work.
+- **Added** (#2524, `klt erc` + `klt signoff`; additive — **no**
+  `schema_version` bump): the unlabelled remainder #2510 shipped as
+  reporting-only now **gates**. A declared net's conductor on the `stackup`
+  roles it owns (`nets[].roles`) that is reachable from no label is the new
+  finding `erc.unlabelled_conductor` — the orphan of a severed single-label
+  rail that `erc.unconnected_net` structurally cannot see, since that rule
+  counts only labelled islands (#2497). This is the decision #2510
+  explicitly deferred; it is taken on a **separate rule id** rather than a
+  new reason on `erc.unconnected_net`, because a partially-labelled net with
+  an unreached remainder is a materially different condition from no
+  connectivity to the label at all, and per-rule filtering must be able to
+  tell them apart. A new `erc_findings[].rule` value is an **additive
+  value-set change** under [`docs/json-contract.md`](docs/json-contract.md)
+  (the same latitude #2463's `erc.expected_short_missing` took), not a
+  `schema_version` bump — and the verdict change is reachable only by a spec
+  that opted into `nets[].roles`, so every spec written before #2510 grades
+  byte-identically with its remainder still `null`. The escape hatch that
+  makes gating safe is a new optional spec key
+  `nets[].unlabelled_allowed_boxes` (micrometre `[left, bottom, right, top]`
+  boxes, the `ties[].tap_boxes`/`well_boxes` shape), modelled on #2183's
+  `devices[]` carve-out one level up: the caller declares where unlabelled
+  conductor is *expected* on an owned role — dummy/fill, a floating shield —
+  those regions are subtracted before the rule is evaluated, and what the
+  declaration **actually** removed is echoed in the new
+  `provenance.net_exclusions` (`{net, boxes, excluded_islands,
+  excluded_area_um2}` per declaring entry, `[]` otherwise) so a suppression
+  is auditable rather than inferred. Exclusion is per *island*, not per area,
+  so a fill declaration overlapping a real orphan cannot silence it; the
+  three #2510 remainder values stay the **raw** measurement (a carve-out
+  narrows what gates, never what was measured), with what it excused
+  reported separately as the new `nets[].unlabelled_allowed_islands`. The
+  finding fires **once per claimant** of a shared role, matching the
+  granularity of the report field it is derived from. `klt signoff`'s T1 item
+  11 consumes both halves: `erc.unlabelled_conductor` on a declared supply is
+  an `unmet`/`supply_not_continuous` blocker under the same declared-name
+  filter `erc.unconnected_net` uses, and a met citation now states the
+  severed-rail negative it rests on in
+  `power_delivery.supply_unlabelled_islands` (`{supply: unlabelled_islands}`,
+  all `0`; `{}` — the honest "not measured", never a fabricated zero — when
+  no cited supply declared `roles`, including every pre-#2510 envelope).
+
 - **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
   user-visible: a corner that previously reported `status: "error"` can now
   report a real grade): a `spice`-form `measurements[].name` was looked up

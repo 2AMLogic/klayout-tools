@@ -425,6 +425,33 @@ written to every block.
       `erc.expected_short_missing` naming a declared supply — blocks this
       item in the short's place, so declaring the tie converts a false
       blocking finding into a real check rather than into no evidence.
+      **The severed-rail half of "exactly one island" is gradeable too,
+      where the spec declares the roles a supply owns** (issue #2524).
+      `erc.unconnected_net` counts islands *carrying the declared label*,
+      so a single-label supply rail severed into a labelled piece and an
+      unlabelled orphan grades clean (`docs/cli/erc.md` →
+      "`erc.unconnected_net` counts labelled islands, not conductor
+      islands") — the ordinary shape for hand-built or generated analog,
+      where the label names a port rather than annotating every rail
+      segment. Before this rule existed, a met item 11 on such a block
+      rested on a negative the evidence could not actually state. A supply
+      that declares `nets[].roles` (issue #2510) turns the measurement on,
+      and conductor on those owned roles reachable from no label is
+      `erc.unlabelled_conductor`, which blocks this item under the same
+      declared-name filter `erc.unconnected_net` uses. The **negative** is
+      what a met item now carries: `power_delivery.supply_unlabelled_islands`
+      names each declared supply that owns its roles and that net's
+      `nets[].unlabelled_islands` — all `0` for a met item — so a grader can
+      see the clean verdict was measured over the whole conductor, not only
+      over what carried a label. It is `{}` for a cited run whose supplies
+      declared no `roles` (and for every pre-#2510 envelope): the honest
+      "not measured", never a fabricated zero, so "checked, and it is zero"
+      stays distinguishable from "nobody asked". **Declaring `nets[].roles`
+      is therefore optional but strictly better evidence** — and where an
+      owned role legitimately carries unlabelled fill or a floating shield,
+      `nets[].unlabelled_allowed_boxes` declares that away with the carve-out
+      echoed in `provenance.net_exclusions`, rather than forcing the role to
+      be left unowned and the severed-rail question unasked.
       The run must also report zero
       `erc.missing_tie`, from a tie the run actually *checked*: a `ties[]`
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
