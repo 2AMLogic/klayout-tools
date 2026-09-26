@@ -205,6 +205,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "missing_include",
         "netlist",
         "model_bin_range",
+        "no_such_vector",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
         "measurement",
@@ -668,6 +669,29 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"^\s*Error:\s*Could not find include file",
             re.IGNORECASE | re.MULTILINE,
         ),
+    ),
+    (
+        # ngspice's own text when a `.meas`/`.print` reference names a node
+        # or branch ngspice's current plot has no vector for, e.g.
+        # `Error: no such vector as v(mid).` (verified against ngspice 46,
+        # issue #2521). This fires for *both* of two causes ngspice's log
+        # gives no way to tell apart: the name is a genuine typo/dead node,
+        # or the vector exists but fell outside the saved set -- e.g. a
+        # restrictive `.save` card the netlist body carries, from before
+        # `_write_corner_deck`'s own `save all` (below) started restoring
+        # the full set by default, or (should a future caller opt into a
+        # narrower `options.save`) a node that override deliberately
+        # excluded. Verified empirically: a vector genuinely absent from the
+        # circuit and a vector merely unsaved both produce the identical
+        # `no such vector as ...` line -- there is no ngspice-side signal
+        # to distinguish them, so this code names the *symptom*
+        # ("nothing came back for this name") rather than inventing an
+        # unreliable heuristic about the cause. It is emitted *in addition
+        # to* the per-measurement generic `measurement` diagnostic (see
+        # `_run_corner`), not instead of it -- this is strictly more
+        # specific information layered on top.
+        "no_such_vector",
+        re.compile(r"^Error:\s*no such vector as", re.IGNORECASE | re.MULTILINE),
     ),
     (
         "netlist",
@@ -3621,7 +3645,8 @@ def _run_corner(
     # count as fatal on its own: downgrade its severity in place before
     # computing the corner's aggregate status. See
     # `_recovered_from_stepping` and issue #205;
-    # `timeout`/`netlist`/`measurement`/`unknown` are never downgraded.
+    # `timeout`/`netlist`/`measurement`/`no_such_vector`/`unknown` are never
+    # downgraded.
     # Xyce (issue #2016) gets the same rule against its own abort trailer:
     # its Amesos "numerically singular matrix, returning zero" warnings can
     # narrate intermediate solver trouble on a run that ultimately produced
@@ -3788,9 +3813,12 @@ def _write_corner_deck(
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
     seed card, ``.lib``/``.include``/``.temp``, the request's verbatim
     ``.meas`` cards, and a ``.control`` block that ``pre_osdi``-loads any
-    declared OSDI libraries (issue #2513, ``options.osdi_preload``),
-    ``alter``s the supply sources, optionally captures an ASCII rawfile, and
-    runs the declared analysis.
+    declared OSDI libraries (issue #2513, ``options.osdi_preload``), then
+    (when this corner has measurements or a rawfile to capture) restores
+    the full saved set, ``alter``s the supply sources, optionally captures
+    an ASCII rawfile, and runs the declared analysis. The ``.control``
+    block itself is built by :func:`_corner_deck_control_lines`, which owns
+    the ordering contract between those commands.
     """
     lines = ["* klt sim -- generated corner deck, do not edit"]
     if point.mc_seed is not None:
@@ -3822,15 +3850,72 @@ def _write_corner_deck(
     for spec in measurements_spec:
         lines.append(spec["spice"])
 
-    lines.append(".control")
-    # Issue #2513: `pre_osdi` is ngspice's only mechanism for loading a
-    # Verilog-A compact model, and it is a *control* command -- `pre_`-
-    # prefixed commands run before the circuit is parsed, wherever they sit
-    # in the block. Emitted first, in declared order, so the preload is
-    # visibly ahead of every `alter` and the analysis command. Empty (the
-    # default) emits nothing: the deck is byte-identical to before.
+    lines.extend(
+        _corner_deck_control_lines(
+            point=point,
+            analysis=analysis,
+            measurements_spec=measurements_spec,
+            raw_path=raw_path,
+            osdi_preload=osdi_preload,
+        )
+    )
+    lines.append(".end")
+
+    with open(deck_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
+def _corner_deck_control_lines(
+    *,
+    point: CornerPoint,
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    raw_path: str | None,
+    osdi_preload: tuple[str, ...],
+) -> list[str]:
+    """The ``.control``/``.endc`` block of :func:`_write_corner_deck`'s
+    generated deck, in emission order -- this function owns the ordering
+    contract between the commands inside it, which is where two otherwise
+    independent features (``options.osdi_preload``, issue #2513, and the
+    default ``save all``, issue #2521) both write.
+
+    Emission order, and why:
+
+    1. ``pre_osdi <lib>`` per ``options.osdi_preload`` entry, in declared
+       order. Order-free in practice -- a ``pre_``-prefixed command is
+       hoisted out of the block and executed before the circuit is even
+       parsed, wherever it sits -- but kept first so the preload reads as
+       visibly ahead of every ``alter`` and the analysis command.
+    2. ``save all``, when this corner has anything to save. A netlist
+       body's own ``.save`` card *restricts* ngspice's saved node/branch
+       set -- schematic netlisters emit one routinely (e.g. for a
+       supply-current probe), and until issue #2521 that restriction won
+       silently, starving every ``.meas`` card and any ``options.waveforms``
+       capture whose signal fell outside it (both surfaced identically as a
+       plain "produced no value" measurement error, indistinguishable from
+       a genuine measurement failure). ngspice applies ``save`` cards in
+       the order encountered, so this one only has to land *after* the
+       ``.include`` (already emitted at file scope, by the caller) to
+       supersede the body's, and *before* the ``alter``/analysis lines that
+       read the saved set -- which the ``pre_osdi`` lines above it cannot
+       affect either way. Emitted only when this corner actually has
+       something to save (``measurements_spec`` or ``raw_path``, mirroring
+       ``measurements[]``/``options.waveforms`` at the request level), so
+       the probe-deck caller and the historical
+       no-measurement/no-waveform request stay byte-identical to
+       pre-#2521 behavior. There is currently no request-level opt-out
+       (e.g. a narrower ``options.save`` for a caller who wants to trade
+       completeness for performance) -- see docs/cli/sim.md's "Saved signal
+       set" section for why that is deferred to a follow-up.
+    3. One ``alter`` per supply rail, then the analysis command, wrapped by
+       the ASCII-rawfile ``set filetype``/``write`` pair when a rawfile was
+       requested, then ``quit``.
+    """
+    lines = [".control"]
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
+    if measurements_spec or raw_path is not None:
+        lines.append("save all")
     for key, value in sorted(point.supply_v.items()):
         lines.append(f"alter {key}={value}")
     if raw_path is not None:
@@ -3840,10 +3925,7 @@ def _write_corner_deck(
         lines.append(f"write {raw_path}")
     lines.append("quit")
     lines.append(".endc")
-    lines.append(".end")
-
-    with open(deck_path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(lines) + "\n")
+    return lines
 
 
 def _write_xyce_deck(

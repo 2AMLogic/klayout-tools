@@ -897,7 +897,8 @@ subcircuit definitions plus sources — with **no `.control`/`.end` cards of
 its own**. `klt sim` generates a corner-specific wrapper deck that
 `.include`s the file and appends the corner's `.lib`/`.temp` cards, the
 request's verbatim `.meas` cards, and a `.control` block that `pre_osdi`-loads
-any declared OSDI libraries, `alter`s the supply sources, and runs the
+any declared OSDI libraries, restores the full saved set with `save all` (see
+"Saved signal set" below), `alter`s the supply sources, and runs the
 declared analysis. A netlist that already
 carries its own `.end` (a full deck exported as-is, e.g. straight off some
 schematic tools) is not supported in this version — strip the top-level
@@ -905,6 +906,49 @@ control/end cards before pointing a request at it. A PDK whose devices are
 Verilog-A compact models does **not** need a `.control` block in the body
 either — declare the compiled `.osdi` files in `options.osdi_preload` instead
 (see "OSDI (Verilog-A) model preload" below).
+
+## Saved signal set (`save all`)
+
+ngspice's `.save` card **restricts** the batch run's saved node/branch set —
+whatever the netlist's own last `.save` names, and nothing else, is what
+survives to be read by a `.meas` card or a rawfile capture. Schematic
+netlisters emit one routinely (e.g. narrowing the saved set to a supply-current
+probe), and a circuit body carrying one used to silently starve every other
+`.meas`/`options.waveforms` request this command generated for it — both a
+genuinely missing measurement and one merely excluded by the body's own
+`.save` card surfaced identically as `code: "measurement"`.
+
+`klt sim` now emits its own `save all` inside the generated `.control` block
+whenever the request declares any `measurements[]` or `options.waveforms` —
+after the `.include <netlist>` line so it wins over (ngspice applies `save`
+cards in the order encountered) any `.save` the netlist body itself carries,
+restoring the full saved set regardless, and before the `alter` cards and the
+analysis command that read it. Only `options.osdi_preload`'s `pre_osdi` lines
+(see "OSDI (Verilog-A) model preload" below) precede it in the block, and they
+cannot interact with it: a `pre_`-prefixed command is hoisted out and executed
+before the circuit is even parsed. A request declaring neither `measurements[]`
+nor `options.waveforms` omits `save all` entirely, leaving that path
+byte-identical to before (issue #2521).
+
+There is currently **no request-level opt-out** — no `options.save` to ask
+for a deliberately narrower saved set (e.g. for performance on a very large
+netlist). That is a documented follow-up, not a gap in this pass: every
+existing caller either wants the full set restored (the common case this
+fixes) or was not previously relying on the netlist body's own `.save`
+already winning, since that behavior was never contractual — it was only ever
+an accident of `_write_corner_deck` never emitting a `save` card of its own.
+
+**Diagnosing a still-missing measurement.** When a `.meas`/rawfile signal
+still comes back empty after this fix, ngspice's log gives the same `Error:
+no such vector as <name>.` line (classified as `code: "no_such_vector"`,
+alongside the generic `code: "measurement"`) whether the name is a genuine
+typo/dead node or — pre-#2521, or on a future `options.save`-narrowed corner
+— a vector that exists but was excluded from the saved set. Verified
+empirically against ngspice 46: there is no log-side signal that tells the
+two apart, so `no_such_vector` names the *symptom* ("nothing resolved for
+this name"), not the cause; treat it as "check the signal name against the
+netlist body, including any `.save` card it carries" rather than a
+self-diagnosing error.
 
 ## Off-host backends stage the netlist's `.include` closure
 
@@ -1523,6 +1567,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
+| `no_such_vector`   | ngspice's own `Error: no such vector as ...` — emitted *alongside* `measurement` when the missing signal's name never resolved to a vector at all (issue #2521). See "Saved signal set (`save all`)" below for what this can and cannot tell you. |
 | `unknown`          | Anything else that prevented a trustworthy result (e.g. ngspice not installed/spawnable). |
 | `budget_exceeded`  | The corner never started: the sweep's own `options.wall_clock_budget_s` was exceeded first. See "Wall-clock budget, orphan safety, and resume" above. |
 | `orphaned`         | The corner never started: the launching process exited before its turn. See "Wall-clock budget, orphan safety, and resume" above. |
@@ -1704,10 +1749,11 @@ ngspice's raw log line, same as every other `code`.
 ## Waveform artifact (optional, first-class)
 
 When `options.waveforms` is true, each corner's `.control` block adds
-`set filetype=ascii` and `write <rawfile>` before running the declared
-analysis; the resulting ngspice ASCII rawfile is parsed into a small,
-documented waveform JSON shape and referenced (not inlined) from the
-corner's `artifacts.waveform`:
+`save all` (issue #2521 — see "Saved signal set" above), `set
+filetype=ascii`, and `write <rawfile>` before running the declared analysis;
+the resulting ngspice ASCII rawfile is parsed into a small, documented
+waveform JSON shape and referenced (not inlined) from the corner's
+`artifacts.waveform`:
 
 ```json
 {
