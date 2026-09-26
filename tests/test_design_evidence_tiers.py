@@ -189,6 +189,22 @@ def test_real_doc_item_11_columns_name_their_own_evidence():
     assert "klt power" in note
 
 
+def test_real_doc_item_11_gives_one_answer_on_native_substrate_ties():
+    """Issue #2514: item 11 once documented #2255's `well_layer: null` +
+    `well_boxes` form as reaching `met` *and*, ~90 lines later, kept a stale
+    "Known gap" saying a native-substrate block cannot declare its substrate
+    tie at all. The form shipped, so the note must state only the first
+    answer -- a vendoring block reads this as its checklist of record."""
+    doc = parse_tier_doc()
+    item_11 = next(item for item in doc["t1_items"] if item["id"] == 11)
+    note = " ".join(item_11["notes"][0].split())
+
+    assert "`ties[].well_layer: null`" in note
+    assert "`ties[].well_boxes`" in note
+    assert "Known gap (issue #2255)" not in note
+    assert "cannot declare its substrate tie" not in note
+
+
 def test_default_doc_path_points_at_the_real_doc():
     assert DEFAULT_DOC_PATH.name == "design-evidence-tiers.md"
     assert DEFAULT_DOC_PATH.is_file()
