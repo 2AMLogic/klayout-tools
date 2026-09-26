@@ -91,6 +91,36 @@ as `environment.ngspice_binary` (alongside `engine_version`), `null` for
 `environment.netgen_binary` (issue #2373). `klt sim` has no `--check`/
 `--rerun` mode, so there is no drift-diff exclusion to add for this field.
 
+**ngspice's working directory, and `.spiceinit` compatibility mode (issue
+#2520).** Every `ngspice`/`Xyce` subprocess this command spawns — per
+corner, and for the two-pass fail-fast probe's own calibration slice — now
+runs with `cwd` set to that run's own artifact directory (`corner_dir` under
+`--outdir` when `options.keep_artifacts` is set, otherwise a private
+`klt-sim-*` scratch directory that is removed once the corner finishes),
+never the directory `klt sim` itself was invoked from. This matters because
+ngspice reads a `.spiceinit` init file from its **current working
+directory** (falling back to `$HOME`) before touching the corner's own deck
+— the file where a compatibility mode such as `set ngbehavior=hsa` (needed
+for vendor model decks written in HSPICE style) is set. Before this issue,
+whether that mode was active depended on which directory happened to invoke
+`klt`, and on whatever `$HOME/.spiceinit` (if any) existed on that host —
+unreproducible, and invisible in the request document itself.
+
+`options.ngspice_init` (array of strings, default unset) makes that mode a
+property of the *request*: each string is written as one line of a
+`.spiceinit` file inside the corner's own artifact directory before ngspice
+runs, so `cwd=` now guarantees it is actually read.
+
+```json
+{ "options": { "ngspice_init": ["set ngbehavior=hsa"] } }
+```
+
+Unset (the default) writes no `.spiceinit` at all — behaviour is unchanged
+from before this issue, modulo the `cwd=` fix itself (which only matters if
+the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
+own). ngspice-only: the `xyce` engine has no equivalent init-file lookup, so
+`options.ngspice_init` is accepted but has no effect when `engine: "xyce"`.
+
 ## Xyce engine
 
 `engine: "xyce"` runs the same corner matrix through Sandia's
@@ -1963,6 +1993,7 @@ the *response* echoes back.
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
 | `options.fail_on_diagnostic` | array\<string\> | Issue #2492. Diagnostic `code`s whose presence makes a corner `status: "inconclusive"` rather than `pass`/`fail` — matched on the code *before* the recovered-stepping severity downgrade, so it is how a caller says they do not trust a solve that needed gmin/source stepping to converge. Defaults to unset/`[]` (no behavior change: every count, status and statistic is exactly as before). An unrecognized code is an application error (exit 1); a valid code this run never emits is a no-op. Repeatable `--fail-on-diagnostic <code>` CLI flag overrides it. See "Grading a recovered diagnostic as inconclusive" above. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
+| `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
 

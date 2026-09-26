@@ -849,6 +849,47 @@ def _validate_fail_on_diagnostic(value: Any) -> tuple[str, ...]:
     return tuple(codes)
 
 
+def _validate_ngspice_init(value: Any) -> tuple[str, ...]:
+    """Validate and normalise ``options.ngspice_init`` (issue #2520).
+
+    Each entry becomes one line of a ``.spiceinit`` file ``ngspice`` reads
+    from its own current working directory before touching the corner's
+    deck -- the reproducible way to select a compatibility mode (most
+    notably ``"set ngbehavior=hsa"`` for vendor decks written in HSPICE
+    style) instead of depending on whichever ``$HOME/.spiceinit`` (or none)
+    happens to exist on the host that ran ``klt sim``. See
+    :func:`_write_spiceinit`, which turns the returned tuple into the file
+    itself, and :func:`_run_corner`'s ``cwd=`` fix (the other half of issue
+    #2520) that makes ``corner_dir`` -- not the caller's ambient cwd --
+    ``ngspice``'s lookup directory in the first place.
+
+    Returns the requested lines as a tuple, preserving the caller's order
+    and any duplicates -- unlike :func:`_validate_fail_on_diagnostic`'s
+    code-set dedupe, a repeated ``.spiceinit`` line is not obviously a
+    mistake (e.g. two unrelated ``set`` lines that happen to collide is the
+    caller's call, not this validator's). ``None``/absent (the house
+    convention for an undeclared optional field) and ``[]`` both normalise
+    to ``()`` -- "no ``.spiceinit`` is written", today's (pre-#2520)
+    behaviour exactly.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise SimError(
+            "options.ngspice_init must be an array of ngspice .spiceinit "
+            'line strings (e.g. ["set ngbehavior=hsa"])'
+        )
+    lines: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise SimError(
+                "options.ngspice_init entries must be non-empty ngspice "
+                "init-line strings"
+            )
+        lines.append(entry)
+    return tuple(lines)
+
+
 def run_sim(
     request_path: str,
     *,
@@ -1204,6 +1245,10 @@ def run_sim(
         if fail_on_diagnostic is not None
         else options.get("fail_on_diagnostic")
     )
+    # Issue #2520: no CLI-flag override (unlike `fail_on_diagnostic`) --
+    # this is a per-request compatibility-mode declaration, not a runtime
+    # dial an operator would reach for per invocation.
+    ngspice_init_lines = _validate_ngspice_init(options.get("ngspice_init"))
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
     # check -- never blocks the sweep, only surfaces an advisory string. See
@@ -1374,6 +1419,7 @@ def run_sim(
             artifacts_dir=artifacts_dir,
             keep_artifacts=keep_artifacts,
             ngspice_binary=ngspice_binary,
+            ngspice_init=ngspice_init_lines,
         )
 
     probe_abort: dict[str, Any] | None = None
@@ -1421,12 +1467,18 @@ def run_sim(
     # inconclusive there -- passing this process's resolved value too would
     # either be dead weight or, worse, double-grade. (A `--fail-on-diagnostic`
     # CLI override is therefore local-backend-only, exactly like
-    # `--fail-fast-probe`; see docs/cli/sim.md.)
+    # `--fail-fast-probe`; see docs/cli/sim.md.) `ngspice_init` (issue #2520)
+    # rides along on the same terms for the same reason: an off-host shard
+    # reads `options.ngspice_init` itself from the forwarded request
+    # document and writes its own `.spiceinit` on its own box -- this
+    # process's own resolved lines describe only this host's corner
+    # directories.
     local_engine_kwargs = (
         {
             "engine": engine,
             "ngspice_binary": ngspice_binary,
             "fail_on_diagnostic": fail_on_diagnostic_codes,
+            "ngspice_init": ngspice_init_lines,
         }
         if backend not in _OFFHOST_BACKENDS
         else {}
@@ -2712,6 +2764,7 @@ def _run_local(
     engine: str = "ngspice",
     ngspice_binary: str | None = None,
     fail_on_diagnostic: tuple[str, ...] = (),
+    ngspice_init: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -2790,6 +2843,7 @@ def _run_local(
             engine=engine,
             ngspice_binary=ngspice_binary,
             fail_on_diagnostic=fail_on_diagnostic,
+            ngspice_init=ngspice_init,
         )
         corners.append(result)
         if version is not None:
@@ -2930,6 +2984,7 @@ def _run_local_parallel(
     engine: str = "ngspice",
     ngspice_binary: str | None = None,
     fail_on_diagnostic: tuple[str, ...] = (),
+    ngspice_init: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -3037,6 +3092,7 @@ def _run_local_parallel(
                     engine=engine,
                     ngspice_binary=ngspice_binary,
                     fail_on_diagnostic=fail_on_diagnostic,
+                    ngspice_init=ngspice_init,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -3108,6 +3164,7 @@ def _prepare_corner_run(
     want_waveforms: bool,
     engine: str,
     ngspice_binary: str | None = None,
+    ngspice_init: tuple[str, ...] = (),
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
 
@@ -3122,6 +3179,14 @@ def _prepare_corner_run(
     branch, which never reads it) need not also stub binary resolution. A
     ``None`` reaching the ``ngspice`` branch falls back to the bare
     ``"ngspice"`` name, matching this function's pre-#2423 behaviour.
+
+    ``ngspice_init`` (issue #2520, the already-validated
+    ``options.ngspice_init`` lines -- see :func:`_validate_ngspice_init`)
+    is materialized as ``corner_dir/.spiceinit`` for the ``ngspice`` branch
+    only (:func:`_write_spiceinit`): Xyce has no equivalent init-file
+    lookup, so the ``xyce`` branch ignores it. The caller is responsible for
+    also running ``ngspice``/``Xyce`` with ``cwd=corner_dir`` -- writing the
+    file here without that ``cwd=`` would leave it unread.
     """
     is_xyce = engine == "xyce"
     deck_path = os.path.join(corner_dir, "corner.cir")
@@ -3152,6 +3217,7 @@ def _prepare_corner_run(
             measurements_spec=measurements_spec,
             raw_path=raw_path,
         )
+        _write_spiceinit(corner_dir, ngspice_init)
         command = [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path]
     return command, log_path, raw_path, deck_path
 
@@ -3251,6 +3317,7 @@ def _run_corner(
     engine: str = "ngspice",
     ngspice_binary: str | None = None,
     fail_on_diagnostic: tuple[str, ...] = (),
+    ngspice_init: tuple[str, ...] = (),
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
     classify the result.
@@ -3282,6 +3349,19 @@ def _run_corner(
     ``pass`` -- still counts. That is the whole point of the option: it is
     how a caller says "I do not trust a solve that needed stepping to
     converge". Empty (the default) leaves grading byte-identical to before.
+
+    ``ngspice_init`` (issue #2520, the already-validated
+    ``options.ngspice_init`` lines -- see :func:`_validate_ngspice_init`) is
+    forwarded to :func:`_prepare_corner_run`, which materializes it as
+    ``corner_dir/.spiceinit`` for the ``ngspice`` branch. This function's own
+    ``subprocess.run`` call passes ``cwd=corner_dir`` (the other half of
+    issue #2520) so that file -- and any relative ``.lib``/``.include`` path
+    the netlist itself declares -- is read from the per-corner directory
+    this run controls, never the caller's ambient working directory. That
+    holds for both the ``keep_artifacts=True`` directory under
+    ``artifacts_dir`` and the ``keep_artifacts=False`` :func:`_tmp_work_dir`
+    scratch directory -- ``corner_dir`` names whichever one this call is
+    using either way.
     """
     is_xyce = engine == "xyce"
     engine_name = XYCE_BINARY if is_xyce else "ngspice"
@@ -3301,6 +3381,7 @@ def _run_corner(
         want_waveforms=want_waveforms,
         engine=engine,
         ngspice_binary=ngspice_binary,
+        ngspice_init=ngspice_init,
     )
 
     diagnostics: list[dict[str, str]] = []
@@ -3314,6 +3395,7 @@ def _run_corner(
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            cwd=corner_dir,
         )
         stdout_text = completed.stdout or ""
     except subprocess.TimeoutExpired:
@@ -3519,6 +3601,39 @@ def _cleanup_dir(path: str) -> None:
     import shutil
 
     shutil.rmtree(path, ignore_errors=True)
+
+
+def _write_spiceinit(run_dir: str, ngspice_init: tuple[str, ...]) -> None:
+    """Materialize (or remove) ``run_dir/.spiceinit`` from ``options.ngspice_init``
+    (issue #2520), one requested line per line of the file.
+
+    ngspice reads ``.spiceinit`` from its own current working directory
+    (then ``$HOME``) before touching anything else -- the file this
+    function writes is how a caller reliably sets a compatibility mode
+    (``set ngbehavior=hsa`` for vendor decks written in HSPICE style, most
+    notably) from the *request* rather than from whatever ``$HOME`` happens
+    to hold on the box that ran ``klt sim``. Paired with ``cwd=run_dir`` on
+    the actual ``ngspice`` invocation (:func:`_run_corner`,
+    :func:`_run_calibration_probe`) -- writing the file without that
+    ``cwd=`` would leave it unread.
+
+    A no-op when ``ngspice_init`` is empty *except* that a stale
+    ``.spiceinit`` already sitting in ``run_dir`` is removed first: a
+    ``keep_artifacts`` corner directory can be reused across requests (same
+    ``point.slug`` under the same ``artifacts_dir``), so an earlier request
+    that *did* set ``options.ngspice_init`` must not leave a file behind
+    that silently keeps altering a later request's ngspice behaviour even
+    though that later request never opted in -- see this issue's
+    "unchanged without the field" acceptance criterion.
+    """
+    spiceinit_path = os.path.join(run_dir, ".spiceinit")
+    if not ngspice_init:
+        if os.path.isfile(spiceinit_path):
+            os.remove(spiceinit_path)
+        return
+    with open(spiceinit_path, "w", encoding="utf-8") as handle:
+        for line in ngspice_init:
+            handle.write(line + "\n")
 
 
 def _write_corner_deck(
@@ -4032,6 +4147,7 @@ def _run_calibration_probe(
     artifacts_dir: str,
     keep_artifacts: bool,
     ngspice_binary: str | None = None,
+    ngspice_init: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
     two-pass probe model -- and report how it went.
@@ -4062,6 +4178,17 @@ def _run_calibration_probe(
     the same binary the real corners will, so a ``None``/broken-override
     misconfiguration surfaces at the (cheap) probe stage rather than only
     after every real corner is dispatched.
+
+    ``ngspice_init`` (issue #2520, the already-validated
+    ``options.ngspice_init`` lines -- see :func:`_validate_ngspice_init`) is
+    materialized as ``probe_dir/.spiceinit`` the same way :func:`_run_corner`
+    does for a real corner, and the probe's own ``subprocess.run`` call
+    passes ``cwd=probe_dir`` so it is actually read. The probe otherwise
+    runs the same compatibility mode a real corner would, and this issue's
+    other half (the missing ``cwd=``) applied here too -- without it, the
+    probe's own convergence behaviour (and thus its rate estimate) would
+    silently diverge from the real corners it is meant to be representative
+    of whenever a caller sets ``options.ngspice_init``.
     """
     probe_dir = (
         os.path.join(artifacts_dir, f"{point.slug}__probe")
@@ -4082,6 +4209,7 @@ def _run_calibration_probe(
         measurements_spec=[],
         raw_path=None,
     )
+    _write_spiceinit(probe_dir, ngspice_init)
 
     started = time.monotonic()
     timed_out = False
@@ -4092,6 +4220,7 @@ def _run_calibration_probe(
             capture_output=True,
             text=True,
             timeout=probe_timeout_s,
+            cwd=probe_dir,
         )
     except subprocess.TimeoutExpired:
         timed_out = True
@@ -4124,6 +4253,7 @@ def _run_fail_fast_probe(
     artifacts_dir: str,
     keep_artifacts: bool,
     ngspice_binary: str | None = None,
+    ngspice_init: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
     run one short, bounded calibration ``tran`` slice on the grid's first
@@ -4166,6 +4296,7 @@ def _run_fail_fast_probe(
         artifacts_dir=artifacts_dir,
         keep_artifacts=keep_artifacts,
         ngspice_binary=ngspice_binary,
+        ngspice_init=ngspice_init,
     )
     if probe["error"] is not None:
         return None
