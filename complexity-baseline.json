@@ -810,13 +810,13 @@
     },
     {
       "file": "src/klayout_tools/synthesize.py",
-      "function": "_resolve_arithmetic",
-      "complexity": 15
-    },
-    {
-      "file": "src/klayout_tools/synthesize.py",
       "function": "run_synthesize",
       "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/synthesize_arithmetic.py",
+      "function": "_resolve_arithmetic",
+      "complexity": 15
     },
     {
       "file": "src/klayout_tools/trajectory.py",
