@@ -420,6 +420,16 @@ from .extract import (
 #: enum-like field is additive under ``docs/json-contract.md``'s own
 #: "growing value set" rule (the same latitude ``klt drc``'s new rule ids
 #: take), so, as with every prior additive change above, no bump.
+#: Issue #2510 adds one optional spec sub-key, ``nets[].roles`` (the
+#: ``stackup`` roles a declared net owns outright -- see
+#: :func:`_parse_net_roles`), and four new keys on every report ``nets[]``
+#: entry: ``roles`` (the echo, ``[]`` when omitted) and
+#: ``unlabelled_islands`` / ``unlabelled_area_um2`` / ``unlabelled_bbox``
+#: (the unlabelled remainder on those roles, all ``None`` when no role was
+#: declared -- see :func:`_unlabelled_remainder`). New keys on an existing
+#: object are additive under ``docs/json-contract.md``; no existing field's
+#: value changes for any input and none of the new values feeds a finding
+#: or roll-up (reporting only). No bump.
 SCHEMA_VERSION = 1
 
 
@@ -1162,7 +1172,9 @@ def _parse_same_net_as(
     return other
 
 
-def _validate_nets(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]:
+def _validate_nets(
+    spec: dict[str, Any], spec_path: str, stackup_names: list[str]
+) -> list[dict[str, Any]]:
     """Validate the optional ``nets`` array (issue #861): named nets to
     check for connectivity findings (``erc.unconnected_net``,
     ``erc.multiply_driven_net``, ``erc.supply_short``). Mirrors ``klt
@@ -1173,7 +1185,9 @@ def _validate_nets(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]
     implicit 1, and (issue #2463) a ``same_net_as`` naming another entry
     this one is intentionally one net with -- see
     :func:`_net_connectivity_findings` for why a declared count and a
-    declared tie are the falsifiable forms. Omitted or empty -> no
+    declared tie are the falsifiable forms -- and (issue #2510) the
+    ``roles`` this net owns outright, over which the unlabelled remainder is
+    measured (:func:`_parse_net_roles`). Omitted or empty -> no
     net-connectivity findings are computed
     (a caller who only wants the floating-gate check need not declare
     this)."""
@@ -1212,6 +1226,8 @@ def _validate_nets(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]
                 # Issue #2463: the declared intentional tie, cross-checked
                 # against the declared names below (once they are all known).
                 "same_net_as": _parse_same_net_as(entry, spec_path, i, name),
+                # Issue #2510: the stackup roles this net owns outright.
+                "roles": _parse_net_roles(entry, spec_path, i, stackup_names),
             }
         )
 
@@ -1236,6 +1252,54 @@ def _parse_net_islands(entry: dict[str, Any], spec_path: str, index: int) -> int
             f">= 1 (got {entry.get('islands')!r})"
         )
     return islands
+
+
+def _parse_net_roles(
+    entry: dict[str, Any], spec_path: str, index: int, stackup_names: list[str]
+) -> list[str]:
+    """``nets[].roles`` (optional, issue #2510): the ``stackup`` role names
+    this declared net **owns outright** -- the caller's assertion that every
+    conductor shape drawn on each named role is meant to be part of this net
+    (a dedicated supply-strap metal, a rail-only layer).
+
+    That assertion is what makes the unlabelled remainder
+    (:func:`_unlabelled_remainder`) measurable at all. A severed rail's
+    orphan does not touch the labelled piece -- that is what "severed"
+    means -- so nothing in the extracted graph associates it with this net;
+    and an ordinary routing role carries many unrelated nets, so "every
+    unlabelled shape on the layer" is only this net's orphan when the
+    caller says the layer is this net's. The key is therefore opt-in: an
+    entry that omits it reports the remainder as ``None`` (not measured),
+    never as a guessed ``0``.
+
+    Omitted/``null``/``[]`` -> ``[]``, the undeclared form. Anything else
+    must be a list of distinct names of declared ``stackup`` entries --
+    ``vias`` roles are rejected, since their graph index is not retained
+    (see :func:`_island_entry`) and a via sits inside the two stackup shapes
+    it joins anyway. A typo is a spec error rather than a silently
+    unmeasured role, for the same reason :func:`_parse_same_net_as` rejects
+    one."""
+    raw = entry.get("roles")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].roles must be an array of "
+            f"stackup role names (got {raw!r})"
+        )
+    roles: list[str] = []
+    for role in raw:
+        if not isinstance(role, str) or role not in stackup_names:
+            raise ErcError(
+                f"spec '{spec_path}': nets[{index}].roles entry {role!r} is "
+                f"not a declared stackup role (declared: {stackup_names})"
+            )
+        if role in roles:
+            raise ErcError(
+                f"spec '{spec_path}': nets[{index}].roles names {role!r} twice"
+            )
+        roles.append(role)
+    return roles
 
 
 def _validate_same_net_refs(
@@ -2255,7 +2319,9 @@ def _match_net_clusters(circuit: Any, name: str) -> list[Any]:
     )
 
 
-def _declared_net_entry(decl: dict[str, Any], matched: int) -> dict[str, Any]:
+def _declared_net_entry(
+    decl: dict[str, Any], matched: int, remainder: dict[str, Any]
+) -> dict[str, Any]:
     """One report ``nets[]`` entry (issue #2497): the island count
     ``erc.unconnected_net`` actually graded this declared net on, retained
     whether or not it produced a finding.
@@ -2279,11 +2345,137 @@ def _declared_net_entry(decl: dict[str, Any], matched: int) -> dict[str, Any]:
     be graded -- ``3 == 3`` is clean, ``3 != 1`` is the finding -- without the
     spec document in hand. Reporting only; neither value is an input to any
     finding or roll-up, both are re-derived from the same ``matched`` the
-    rule already computed."""
+    rule already computed.
+
+    ``roles`` / ``unlabelled_islands`` / ``unlabelled_area_um2`` /
+    ``unlabelled_bbox`` (issue #2510) are the measurement that closes the
+    bound above for a net that declares the roles it owns
+    (``nets[].roles``): the conductor on those roles reachable from **no**
+    label at all -- see :func:`_unlabelled_remainder`. ``roles`` echoes the
+    declaration (``[]`` when omitted); the other three are ``None`` when no
+    role was declared (not measured -- deliberately not ``0``, which would
+    read as "checked and clean"). Reporting only, like the two counts above:
+    a non-zero remainder changes no verdict (see
+    :func:`_unlabelled_remainder` for why it does not gate yet)."""
     return {
         "name": decl["name"],
         "matched_islands": matched,
         "expected_islands": decl["islands"],
+        "roles": list(decl["roles"]),
+        **remainder,
+    }
+
+
+def _unlabelled_by_role(
+    l2n: Any, circuit: Any, layer_index: dict[str, int], roles: set[str]
+) -> dict[str, tuple[Any, set[int]]]:
+    """Per ``stackup`` role in ``roles``: the merged conductor region of every
+    extracted net that carries **no label at all**, and those nets'
+    ``cluster_id`` set (issue #2510).
+
+    One pass over the circuit's nets serves every declared net, because the
+    quantity is a property of the role, not of the net asking: an unlabelled
+    net is by definition not attributable to any label, so which declared
+    net "owns" it can only come from the caller's ``nets[].roles``
+    declaration, applied afterwards in :func:`_unlabelled_remainder`.
+    A net is labelled iff KLayout named it from a registered label text
+    (``Net.name`` non-empty -- an unlabelled net's name is ``""``; its
+    ``expanded_name()`` is a synthetic ``$N``). ``cluster_id`` 0 is skipped,
+    the :func:`_match_net_clusters` convention. Not called at all -- zero
+    cost -- when no declared net declares ``roles``."""
+    import klayout.db as kdb
+
+    by_role: dict[str, tuple[Any, set[int]]] = {
+        role: (kdb.Region(), set()) for role in roles
+    }
+    for net in circuit.each_net():
+        if net.cluster_id == 0 or net.name:
+            continue
+        for role, (region, clusters) in by_role.items():
+            piece = l2n.polygons_of_net(net, layer_index[role])
+            if piece.is_empty():
+                continue
+            region += piece
+            clusters.add(net.cluster_id)
+    return {
+        role: (region.merged(), clusters)
+        for role, (region, clusters) in by_role.items()
+    }
+
+
+def _unlabelled_remainder(
+    l2n: Any,
+    roles: list[str],
+    by_role: dict[str, tuple[Any, set[int]]],
+) -> dict[str, Any]:
+    """One declared net's unlabelled remainder (issue #2510): the conductor
+    geometry on the roles it owns (``nets[].roles``) that is reachable from
+    **no** label -- the quantity ``erc.unconnected_net`` actually wants to be
+    zero, which ``matched_islands`` (issue #2497) can only bound.
+
+    **Scoping decision.** Three candidate scopes were weighed:
+
+    - *Same-layer connected component of the labelled piece*: measures
+      nothing. Each ``stackup`` role is self-connected in the graph, so the
+      raw component touching the labelled piece already *is* the labelled
+      net; a severed orphan is by definition not in it.
+    - *Every unlabelled shape on every role the net touches*: wrong on any
+      real routing layer, which carries many unrelated nets -- including
+      unlabelled internal signal nets -- so a correct layout would report a
+      large, meaningless remainder.
+    - *Caller-declared ownership* (chosen): the net names the roles it owns
+      outright, and the remainder is the unlabelled conductor on exactly
+      those roles. The attribution the graph cannot supply comes from the
+      only party who knows it.
+
+    Consequences of that choice, each deliberate:
+
+    - Geometry belonging to *another labelled* net on an owned role is not
+      remainder (it is reachable from a label -- that is a different defect,
+      ``erc.supply_short``'s territory if it touches), so two declared nets
+      sharing one physical layer never count each other's labelled
+      geometry.
+    - An unlabelled island on a role *several* declared nets claim is
+      reported under each claimant: having no label, it cannot be attributed
+      to one of them, and under-reporting it would recreate the silent case.
+    - Unlabelled dummy/fill conductor drawn on an owned role *is* reported
+      -- the ownership declaration says it should not be there -- which is
+      exactly why this stays **reporting only** rather than a finding: a
+      stream that draws such fill would otherwise fail on a correct layout.
+      Promoting a non-zero remainder to a finding is a separate decision.
+    - A cross-layer defect (a missing via severing met2 from met1) is caught
+      only when the orphaned side lies on an owned role.
+
+    ``unlabelled_area_um2`` sums each owned role's merged remainder area
+    (per role, not the plan-view union -- two roles stacked over one another
+    are two conductors); ``unlabelled_islands`` counts distinct unlabelled
+    electrical islands with geometry on any owned role (an island spanning
+    two owned roles through a via counts once); ``unlabelled_bbox`` is the
+    remainder's extent in raw database units (the ``_bbox_dict``
+    convention), ``None`` when the remainder is empty, so a non-zero value
+    points straight at the orphan. All three are ``None`` for a net that
+    declared no roles."""
+    if not roles:
+        return {
+            "unlabelled_islands": None,
+            "unlabelled_area_um2": None,
+            "unlabelled_bbox": None,
+        }
+    dbu = l2n.internal_layout().dbu
+    area = 0
+    clusters: set[int] = set()
+    bbox: Any = None
+    for role in roles:
+        region, role_clusters = by_role[role]
+        clusters |= role_clusters
+        if region.is_empty():
+            continue
+        area += region.area()
+        bbox = region.bbox() if bbox is None else bbox + region.bbox()
+    return {
+        "unlabelled_islands": len(clusters),
+        "unlabelled_area_um2": round(area * dbu * dbu, 9),
+        "unlabelled_bbox": _bbox_dict(bbox) if bbox is not None else None,
     }
 
 
@@ -2539,11 +2731,25 @@ def _net_connectivity_findings(
     declared_nets: list[dict[str, Any]] = []
     matches: dict[str, list[Any]] = {}
     clusters_by_name: dict[str, set[int]] = {}
+    # Issue #2510: the unlabelled conductor on every role some declared net
+    # owns (`nets[].roles`), computed once for all of them.
+    unlabelled = _unlabelled_by_role(
+        l2n,
+        circuit,
+        layer_index,
+        {role for decl in nets_decl for role in decl["roles"]},
+    )
     for decl in nets_decl:
         matched = _match_net_clusters(circuit, decl["name"])
         matches[decl["name"]] = matched
         clusters_by_name[decl["name"]] = {net.cluster_id for net in matched}
-        declared_nets.append(_declared_net_entry(decl, len(matched)))
+        declared_nets.append(
+            _declared_net_entry(
+                decl,
+                len(matched),
+                _unlabelled_remainder(l2n, decl["roles"], unlabelled),
+            )
+        )
         # The expected island count is the declared one (issue #2400;
         # ``nets[].islands``, default 1 -- the pre-#2400 "one label string
         # == one electrical net" model). Grading the count against the
@@ -3330,7 +3536,7 @@ def run_erc(
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
     vias = _validate_vias(spec, spec_path, stackup_names)
-    nets_decl = _validate_nets(spec, spec_path)
+    nets_decl = _validate_nets(spec, spec_path, stackup_names)
     ties = _validate_ties(spec, spec_path, stackup_names)
     ties_disclosure = _validate_ties_disclosure(spec, spec_path)
     # The `devices[]` fragment is shared verbatim with `klt power` (issue

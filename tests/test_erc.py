@@ -1584,11 +1584,28 @@ def test_declared_islands_rejects_non_positive_integer_values(tmp_path, bad):
 # bound unstated.
 
 
-def _severed_rail_layout():
+#: The `nets[]` remainder keys (issue #2510) for an entry that declares no
+#: `nets[].roles`: echoed empty, and not measured (`None`, never `0`).
+_UNMEASURED = {
+    "roles": [],
+    "unlabelled_islands": None,
+    "unlabelled_area_um2": None,
+    "unlabelled_bbox": None,
+}
+
+
+def _severed_rail_layout(gate_strap=True):
     """The issue #2497 worked example: a ``VDD`` rail severed into a labelled
     piece (li1 5-6 um, carrying the stream's one ``VDD`` text) and an
-    electrically disjoint, *unlabelled* orphan (li1 8-9 um)."""
+    electrically disjoint, *unlabelled* orphan (li1 8-9 um).
+
+    ``gate_strap=False`` (issue #2510) drops the base fixture's unlabelled
+    li1 strap box over the gate, making li1 a VDD-only role -- the stream
+    shape a ``nets[].roles: ["li1"]`` ownership declaration truthfully
+    describes. The strap is otherwise inert here (no via joins li1 to poly)."""
     layout, top, poly, li1, label = _nets_fixture_layout()
+    if not gate_strap:
+        top.shapes(li1).clear()
     top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
     top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
     top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
@@ -1620,7 +1637,7 @@ def test_declared_net_matched_island_count_is_reported_on_the_passing_path(
         f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
     ] == []
     assert report["nets"] == [
-        {"name": "VDD", "matched_islands": 1, "expected_islands": 1}
+        {"name": "VDD", "matched_islands": 1, "expected_islands": 1, **_UNMEASURED}
     ]
 
 
@@ -1645,10 +1662,199 @@ def test_declared_net_matched_island_count_rises_when_the_orphan_is_labelled(
     findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
     assert len(findings) == 1
     assert report["nets"] == [
-        {"name": "VDD", "matched_islands": 2, "expected_islands": 1}
+        {"name": "VDD", "matched_islands": 2, "expected_islands": 1, **_UNMEASURED}
     ]
     # The reported count is the same number the finding was graded on.
     assert len(findings[0]["islands"]) == report["nets"][0]["matched_islands"]
+
+
+# --- `nets[].roles`: the unlabelled remainder on owned roles (issue #2510) ---
+#
+# `matched_islands` makes the labelled-islands bound visible; the remainder
+# removes it for a net that declares the roles it owns outright. These pin
+# the issue's own acceptance pair on the #2497 fixture (non-zero on the
+# single-label severed rail, zero once the orphan is labelled), the scoping
+# consequences of the ownership declaration, and that the measurement is
+# reporting only.
+
+
+def _run_severed(tmp_path, stem, nets, *, label_orphan=False, gate_strap=False):
+    layout, top, poly, li1, label = _severed_rail_layout(gate_strap=gate_strap)
+    if label_orphan:
+        top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.5), _um(0.5))))
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, _nets_spec(nets=nets))
+    return run_erc(str(gds), str(spec))
+
+
+def test_unlabelled_remainder_is_nonzero_on_the_severed_single_label_rail(
+    tmp_path,
+):
+    """AC (issue #2510): the severed single-label rail that grades clean on
+    `erc.unconnected_net` reports its orphan as the unlabelled remainder of
+    the role VDD owns -- one island, 1 um^2, located at the orphan itself --
+    while the verdict stays clean (reporting only)."""
+    report = _run_severed(
+        tmp_path,
+        "remainder",
+        [{"name": "VDD", "kind": "supply", "roles": ["li1"]}],
+    )
+
+    assert [
+        f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
+    ] == []
+    assert report["nets"] == [
+        {
+            "name": "VDD",
+            "matched_islands": 1,
+            "expected_islands": 1,
+            "roles": ["li1"],
+            "unlabelled_islands": 1,
+            "unlabelled_area_um2": 1.0,
+            "unlabelled_bbox": {
+                "left": _um(8),
+                "bottom": _um(0),
+                "right": _um(9),
+                "top": _um(1),
+            },
+        }
+    ]
+
+
+def test_unlabelled_remainder_is_zero_once_the_orphan_is_labelled(tmp_path):
+    """The other half of the acceptance pair: the identical conductor with a
+    second `VDD` text on the orphan has no unlabelled remainder (the orphan
+    is now a matched island, and the existing finding fires on it)."""
+    report = _run_severed(
+        tmp_path,
+        "remainder_labelled",
+        [{"name": "VDD", "kind": "supply", "roles": ["li1"]}],
+        label_orphan=True,
+    )
+
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+    assert len(findings) == 1
+    entry = report["nets"][0]
+    assert entry["matched_islands"] == 2
+    assert entry["unlabelled_islands"] == 0
+    assert entry["unlabelled_area_um2"] == 0.0
+    assert entry["unlabelled_bbox"] is None
+
+
+def test_unlabelled_remainder_reports_every_unlabelled_shape_on_an_owned_role(
+    tmp_path,
+):
+    """The scoping is the caller's ownership declaration, taken at its word:
+    with the base fixture's unrelated, unlabelled li1 gate strap still drawn,
+    `roles: ["li1"]` is not true of this stream, and the strap is reported
+    beside the orphan. This is why the measurement is reporting only -- a
+    stream with unlabelled fill on an owned role must not fail a correct
+    layout -- and why the key is opt-in rather than inferred."""
+    report = _run_severed(
+        tmp_path,
+        "remainder_strap",
+        [{"name": "VDD", "kind": "supply", "roles": ["li1"]}],
+        gate_strap=True,
+    )
+
+    entry = report["nets"][0]
+    assert entry["unlabelled_islands"] == 2
+    assert entry["unlabelled_area_um2"] == 2.0
+    assert entry["unlabelled_bbox"] == {
+        "left": _um(0),
+        "bottom": _um(0),
+        "right": _um(9),
+        "top": _um(1),
+    }
+    assert [
+        f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
+    ] == []
+
+
+def test_unlabelled_remainder_does_not_count_another_labelled_net(tmp_path):
+    """Two declared nets on one physical layer: `VSS`'s labelled rail on the
+    li1 role `VDD` claims is reachable from a label, so it is never `VDD`'s
+    remainder -- only the unlabelled orphan is. A net declaring no `roles`
+    stays unmeasured (`None`), and when both nets claim the role the
+    unattributable orphan is reported under each claimant rather than
+    silently assigned to one."""
+    layout, top, poly, li1, label = _severed_rail_layout(gate_strap=False)
+    top.shapes(li1).insert(kdb.Box.new(_um(11), _um(0), _um(14), _um(1)))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(12), _um(0.5))))
+    gds = tmp_path / "two_nets.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "two_nets.erc.json"
+
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply", "roles": ["li1"]},
+                {"name": "VSS", "kind": "supply"},
+            ]
+        ),
+    )
+    vdd, vss = run_erc(str(gds), str(spec))["nets"]
+    assert (vdd["unlabelled_islands"], vdd["unlabelled_area_um2"]) == (1, 1.0)
+    assert vdd["unlabelled_bbox"]["left"] == _um(8)
+    assert vdd["unlabelled_bbox"]["right"] == _um(9)
+    assert vss == {
+        "name": "VSS",
+        "matched_islands": 1,
+        "expected_islands": 1,
+        **_UNMEASURED,
+    }
+
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply", "roles": ["li1"]},
+                {"name": "VSS", "kind": "supply", "roles": ["li1"]},
+            ]
+        ),
+    )
+    vdd, vss = run_erc(str(gds), str(spec))["nets"]
+    for entry in (vdd, vss):
+        assert (entry["unlabelled_islands"], entry["unlabelled_area_um2"]) == (1, 1.0)
+
+
+@pytest.mark.parametrize(
+    "bad, match",
+    [
+        ("li1", r"must be an array"),
+        (["met9"], r"not a declared stackup role"),
+        ([3], r"not a declared stackup role"),
+        (["li1", "li1"], r"names 'li1' twice"),
+    ],
+)
+def test_declared_net_roles_rejects_invalid_values(tmp_path, bad, match):
+    """`nets[].roles` must name distinct declared `stackup` roles -- a typo
+    would otherwise leave a role silently unmeasured while the declaration
+    reads as honoured."""
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "bad_roles.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "bad_roles.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "roles": bad}]))
+    with pytest.raises(ErcError, match=rf"nets\[0\]\.roles.*{match}"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("empty", [None, []])
+def test_declared_net_roles_omitted_forms_are_unmeasured(tmp_path, empty):
+    """`roles: null` and `roles: []` are the undeclared form: echoed as
+    `[]`, remainder `None` -- identical to omitting the key."""
+    report = _run_severed(
+        tmp_path,
+        "roles_empty",
+        [{"name": "VDD", "kind": "supply", "roles": empty}],
+    )
+    assert report["nets"] == [
+        {"name": "VDD", "matched_islands": 1, "expected_islands": 1, **_UNMEASURED}
+    ]
 
 
 def test_declared_nets_report_zero_matches_and_a_declared_island_count(tmp_path):
@@ -1667,8 +1873,8 @@ def test_declared_nets_report_zero_matches_and_a_declared_island_count(tmp_path)
     report = run_erc(str(gds), str(spec))
 
     assert report["nets"] == [
-        {"name": "VDD", "matched_islands": 3, "expected_islands": 3},
-        {"name": "NOWHERE", "matched_islands": 0, "expected_islands": 1},
+        {"name": "VDD", "matched_islands": 3, "expected_islands": 3, **_UNMEASURED},
+        {"name": "NOWHERE", "matched_islands": 0, "expected_islands": 1, **_UNMEASURED},
     ]
 
 
@@ -4306,6 +4512,32 @@ def test_cli_text_output_prints_the_matched_island_count_per_declared_net(
     assert "declared nets: 1" in out
     assert "VDD: matched_islands=1 (expected 1" in out
     assert "counted over islands carrying the label" in out
+
+
+def test_cli_text_output_prints_the_unlabelled_remainder_when_measured(
+    tmp_path, capsys
+):
+    """Issue #2510: a net declaring `nets[].roles` gets its unlabelled
+    remainder in the courtesy view; one that does not renders as before."""
+    layout, *_ = _severed_rail_layout(gate_strap=False)
+    gds = tmp_path / "remainder_cli.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "remainder_cli.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply", "roles": ["li1"]},
+                {"name": "VSS", "kind": "supply"},
+            ]
+        ),
+    )
+
+    main(["erc", str(gds), str(spec)])
+    out = capsys.readouterr().out
+
+    assert "    unlabelled on li1: islands=1 area=1.0um^2" in out
+    assert out.count("unlabelled on") == 1
 
 
 def test_cli_unknown_pdk_exits_one_with_clean_message(tmp_path, capsys):
