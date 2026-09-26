@@ -1,0 +1,14 @@
+* klt characterize worked example -- synthetic standard cells
+* (not a real PDK -- see this directory's generate.py docstring)
+
+.subckt inv_demo Y A VDD VSS
+MN Y A VSS VSS nfet_demo w=1u l=0.15u
+MP Y A VDD VDD pfet_demo w=2u l=0.15u
+.ends inv_demo
+
+.subckt nand2_demo Y A B VDD VSS
+MN0 Y A net1 VSS nfet_demo w=2u l=0.15u
+MN1 net1 B VSS VSS nfet_demo w=2u l=0.15u
+MP0 Y A VDD VDD pfet_demo w=2u l=0.15u
+MP1 Y B VDD VDD pfet_demo w=2u l=0.15u
+.ends nand2_demo
