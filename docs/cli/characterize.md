@@ -308,15 +308,17 @@ library, and several open PDKs ship their core devices that way — IHP's
 device in the cell's netlist fails with `Unable to find definition of model
 …` and the whole grid errors.
 
-`options.osdi_preload` is a list of `.osdi` paths the generated testbench
-emits as `pre_osdi` commands. They land in a `.control` block, because
-`pre_osdi` is a *control* command (`pre_`-prefixed commands run before the
-circuit is parsed, wherever the block sits) — which is the one place this
-command's generated netlist deviates from [`sim.md`](sim.md)'s "a circuit
-body, not a full deck" convention. That is a deliberate, documented
-deviation, not an accident: `klt sim` generates its own `.control` block and
-exposes no hook for adding lines to it. See issue #2513 for giving `klt sim`
-a first-class model-preload option so this deck stops needing one.
+`options.osdi_preload` is a list of `.osdi` paths, resolved against this
+request's directory and existence-checked before any testbench is written.
+They are forwarded as-is to the generated `klt sim` request's own
+[`options.osdi_preload`](sim.md#osdi-verilog-a-model-preload) (issue #2513),
+which emits them as `pre_osdi` commands inside the `.control` block `klt sim`
+generates for each corner. The generated testbench itself carries **no**
+`.control` block — it is a plain circuit body, per [`sim.md`](sim.md)'s "a
+circuit body, not a full deck" convention — and `klt sim`'s report records
+each preloaded library and its SHA-256 under `environment.osdi_preload`. The
+same `klt sim` rules apply: the option works on the `local`/`local-parallel`
+backends (the default here) and is refused by name for `remote`/`batch`.
 
 ## Request
 
@@ -468,7 +470,7 @@ says which input edge produces the *rising* output edge under this arc's own
 | `options.tran_step_ns` | number | Transient step, also used as `tmax`. Default `min(0.001, shortest ramp / 10)`. |
 | `options.timeout_s` | number | Per-corner ngspice timeout. Default `900`. |
 | `options.keep_artifacts` | boolean | Keep the ngspice log/deck. Default `false`; `--keep-artifacts` overrides. |
-| `options.osdi_preload` | array of string | `.osdi` shared libraries to `pre_osdi`. See "OSDI model preload". |
+| `options.osdi_preload` | array of string | `.osdi` shared libraries to `pre_osdi`, forwarded to `klt sim`'s `options.osdi_preload`. See "OSDI (Verilog-A) model preload". |
 | `netlist_source` | string | Forwarded to `klt sim` (`"schematic"` / `"extracted"`), for provenance on a post-extraction run. |
 
 ### Non-unate arcs

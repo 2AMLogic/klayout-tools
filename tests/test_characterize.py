@@ -800,19 +800,56 @@ def test_input_ramp_undoes_the_slew_threshold_span(tmp_path):
     assert resolved["options"]["ramps_ns"] == pytest.approx((0.02 / 0.6, 0.08 / 0.6))
 
 
-def test_osdi_preload_is_emitted_in_its_own_control_block(tmp_path):
-    """`pre_osdi` is a control command, not a netlist card -- sg13g2's PSP103
-    MOSFETs will not instantiate without it."""
+def test_osdi_preload_rides_the_sim_request_not_the_testbench(tmp_path):
+    """Issue #2513: the generated testbench is a plain circuit body -- no
+    `.control` block of its own, OSDI preload or not -- and the preload is
+    forwarded to `klt sim`'s first-class `options.osdi_preload`, which emits
+    the `pre_osdi` lines in the `.control` block `klt sim` generates."""
     osdi = tmp_path / "psp103.osdi"
     osdi.write_text("")
     request = _inverter_request(tmp_path)
-    request["options"] = {"osdi_preload": [str(osdi)]}
-    plan, _ = _plan_for(tmp_path, request)
+    request["options"] = {"osdi_preload": ["psp103.osdi"]}
+    plan, resolved = _plan_for(tmp_path, request)
 
     text = plan["netlist_text"]
-    assert ".control" in text and ".endc" in text
-    assert f"pre_osdi {osdi}" in text
-    assert text.index(".control") < text.index(".include")
+    assert ".control" not in text
+    assert ".endc" not in text
+    assert "pre_osdi" not in text
+
+    sim_request = characterize._build_sim_request(
+        request=request,
+        request_dir=str(tmp_path),
+        testbench_path=str(tmp_path / "testbench.spice"),
+        corner=characterize._resolve_corner(request),
+        plan=plan,
+        options=resolved["options"],
+        keep_artifacts=None,
+    )
+    # Resolved to an absolute path against the characterize request's own
+    # directory, so it means the same thing from the generated request's.
+    assert sim_request["options"]["osdi_preload"] == [str(osdi)]
+
+
+def test_no_osdi_preload_leaves_the_sim_request_options_unchanged(tmp_path):
+    request = _inverter_request(tmp_path)
+    plan, resolved = _plan_for(tmp_path, request)
+    sim_request = characterize._build_sim_request(
+        request=request,
+        request_dir=str(tmp_path),
+        testbench_path=str(tmp_path / "testbench.spice"),
+        corner=characterize._resolve_corner(request),
+        plan=plan,
+        options=resolved["options"],
+        keep_artifacts=None,
+    )
+    assert "osdi_preload" not in sim_request["options"]
+    assert ".control" not in plan["netlist_text"]
+
+
+def test_osdi_preload_must_be_an_array(tmp_path):
+    request = _inverter_request(tmp_path)
+    request["options"] = {"osdi_preload": "psp103.osdi"}
+    _expect_error(tmp_path, request, "osdi_preload must be an array")
 
 
 # --------------------------------------------------------------------------- #

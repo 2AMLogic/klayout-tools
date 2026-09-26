@@ -809,8 +809,8 @@ def _resolve_options(
 
 
 def _resolve_osdi_preload(spec: dict[str, Any], request_dir: str) -> tuple[str, ...]:
-    """Resolve ``options.osdi_preload``: OSDI shared libraries the generated
-    testbench must ``pre_osdi`` before the circuit is parsed.
+    """Resolve ``options.osdi_preload``: OSDI shared libraries the simulation
+    must ``pre_osdi`` before the circuit is parsed.
 
     ngspice can only instantiate a Verilog-A compact model through an OSDI
     shared library, and several open PDKs ship their core devices that way --
@@ -821,26 +821,19 @@ def _resolve_osdi_preload(spec: dict[str, Any], request_dir: str) -> tuple[str, 
     ``Unable to find definition of model ...`` and the whole grid errors, so
     this is not an exotic option on those PDKs -- it is the difference
     between a run and no run.
+
+    Delegates to ``klt sim``'s own ``options.osdi_preload`` resolver (issue
+    #2513) -- same shape, same resolution rule, same up-front existence
+    check -- and is called here, before any testbench is written, so a bad
+    path is named against *this* request rather than the generated one. The
+    resolved absolute paths are forwarded into the generated ``klt sim``
+    request's ``options.osdi_preload``; the testbench itself carries no
+    ``.control`` block.
     """
-    raw = spec.get("osdi_preload")
-    if raw is None:
-        return ()
-    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-        raise CharacterizeError(
-            "request.options.osdi_preload must be an array of paths to "
-            "compiled `.osdi` shared libraries"
-        )
-    resolved: list[str] = []
-    for index, entry in enumerate(raw):
-        if not isinstance(entry, str) or not entry.strip():
-            raise CharacterizeError(
-                f"request.options.osdi_preload[{index}] must be a non-empty path"
-            )
-        path = _resolve_relative(entry, request_dir)
-        if not os.path.isfile(path):
-            raise CharacterizeError(f"osdi_preload file not found: {path}")
-        resolved.append(path)
-    return tuple(resolved)
+    try:
+        return sim._resolve_osdi_preload(spec, request_dir)
+    except sim.SimError as exc:
+        raise CharacterizeError(str(exc)) from exc
 
 
 def _resolve_arcs(
@@ -1059,20 +1052,11 @@ def _build_stimulus_plan(
         "* so its per-edge supply charge can be integrated; lk* instances never",
         "* switch and measure the static (leakage) current of one input state.",
     ]
-    osdi = options["osdi_preload"]
-    if osdi:
-        # `pre_osdi` is ngspice's only mechanism for loading a Verilog-A
-        # compact model (sg13g2's PSP103 MOSFETs are OSDI-only, see
-        # `pdks/README.md`), and it is a *control* command -- `pre_`-prefixed
-        # commands run before the circuit is parsed regardless of where the
-        # block sits, so it must live in a `.control` block rather than as a
-        # netlist card. `klt sim` generates its own `.control` block and has
-        # no hook to add lines to it, so this deck carries a second,
-        # preload-only one. Verified against ngspice 46.
-        lines.append(".control")
-        for path in osdi:
-            lines.append(f"pre_osdi {path}")
-        lines.append(".endc")
+    # No `.control` block here, OSDI preload or not: the testbench is a
+    # circuit body per `klt sim`'s netlist convention, and any
+    # `options.osdi_preload` rides the generated sim request instead (see
+    # `_build_sim_request`), which `klt sim` emits as `pre_osdi` lines in the
+    # `.control` block it generates itself (issue #2513).
     lines.append(f".include {cell['netlist_path']}")
     lines.append(f"Vdd vdd 0 DC {_spice_number(vdd)}")
 
@@ -1457,6 +1441,11 @@ def _build_sim_request(
             ),
         },
     }
+    if options["osdi_preload"]:
+        # Issue #2513: already resolved to absolute paths against the
+        # characterize request's directory, so they mean the same thing
+        # from the generated request's own (work) directory.
+        sim_request["options"]["osdi_preload"] = list(options["osdi_preload"])
     models = request.get("models")
     if models is not None:
         if not isinstance(models, dict):

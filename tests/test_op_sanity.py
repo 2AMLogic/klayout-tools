@@ -761,6 +761,44 @@ def test_missing_netlist_is_a_request_error(tmp_path):
         op_sanity.run_op_sanity(str(request))
 
 
+def test_osdi_preload_reaches_the_op_lint_deck(tmp_path, monkeypatch):
+    """Issue #2513: the sweep and the lint read the same request, so an
+    OSDI-model PDK's `options.osdi_preload` must reach this deck too, as
+    `pre_osdi` lines inside its `.control` block ahead of `op`."""
+    osdi = tmp_path / "psp103.osdi"
+    osdi.write_bytes(b"fake osdi")
+    request = _write_request(
+        tmp_path, _GOOD_NETLIST, options={"osdi_preload": ["psp103.osdi"]}
+    )
+    decks: list[list[str]] = []
+    _install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        node_voltages={"vdd": 1.8, "in": 0.9, "bias": 0.6, "out": 1.2},
+    )
+    fake_run = op_sanity.subprocess.run
+
+    def recording_run(cmd, **kwargs):
+        decks.append(Path(cmd[cmd.index("-b") + 1]).read_text().splitlines())
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(op_sanity.subprocess, "run", recording_run)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    pre = deck.index(f"pre_osdi {osdi}")
+    assert deck.index(".control") < pre < deck.index("op")
+
+
+def test_missing_osdi_preload_is_an_op_lint_request_error(tmp_path):
+    request = _write_request(
+        tmp_path, _GOOD_NETLIST, options={"osdi_preload": ["absent.osdi"]}
+    )
+    with pytest.raises(op_sanity.OpSanityError, match="osdi_preload file not found"):
+        op_sanity.run_op_sanity(str(request))
+
+
 def test_named_corner_selects_that_point(tmp_path, monkeypatch):
     netlist_path = tmp_path / "body.spice"
     netlist_path.write_text(_GOOD_NETLIST)

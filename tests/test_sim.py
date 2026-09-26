@@ -9116,3 +9116,224 @@ def test_integration_ngspice_init_sets_compatibility_mode(tmp_path, monkeypatch)
     with_log = _run(with_init=True)
     assert "Note: No compatibility mode selected!" not in with_log
     assert "Compatibility modes selected" in with_log
+
+
+# --------------------------------------------------------------------------- #
+# OSDI (Verilog-A) model preload (issue #2513): options.osdi_preload
+# --------------------------------------------------------------------------- #
+
+
+def _write_osdi(
+    tmp_path: Path, name: str = "psp103.osdi", content: bytes = b""
+) -> Path:
+    path = tmp_path / name
+    path.write_bytes(content or f"fake osdi {name}".encode())
+    return path
+
+
+def _osdi_request(tmp_path: Path, osdi_preload, **extra) -> Path:
+    _write_body(tmp_path)
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements": [
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+        ],
+        "options": {"osdi_preload": osdi_preload},
+    }
+    request.update(extra)
+    return _write_request(tmp_path, request)
+
+
+def _capture_decks(monkeypatch) -> list[str]:
+    """Stub ngspice, recording the text of every deck it is handed."""
+    decks: list[str] = []
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        decks.append(Path(cmd[cmd.index("-b") + 1]).read_text())
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(_HOST_DEFAULT_LOG)
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    return decks
+
+
+def test_write_corner_deck_emits_pre_osdi_inside_control_before_the_analysis(
+    tmp_path,
+):
+    first = str(tmp_path / "psp103.osdi")
+    second = str(tmp_path / "r3_cmc.osdi")
+    point = sim.CornerPoint("tt", {"vdd": 1.2}, 27)
+    lines = _write_deck(tmp_path, point, osdi_preload=(first, second))
+
+    control = lines.index(".control")
+    endc = lines.index(".endc")
+    analysis = lines.index("tran 1n 1u")
+    alter = lines.index("alter vdd=1.2")
+    pre = [i for i, line in enumerate(lines) if line.startswith("pre_osdi")]
+    # Declared order, inside the generated control block, ahead of every
+    # `alter` and the analysis command.
+    assert [lines[i] for i in pre] == [f"pre_osdi {first}", f"pre_osdi {second}"]
+    assert all(control < i < endc for i in pre)
+    assert max(pre) < alter < analysis
+    # Exactly one control block: the preload does not grow a second one.
+    assert lines.count(".control") == 1
+
+
+def test_write_corner_deck_without_osdi_preload_is_unchanged(tmp_path):
+    point = sim.CornerPoint("tt", {"vdd": 1.2}, 27)
+    default = _write_deck(tmp_path, point)
+    explicit_empty = _write_deck(tmp_path, point, osdi_preload=())
+    assert default == explicit_empty
+    assert not any(line.startswith("pre_osdi") for line in default)
+
+
+def test_run_sim_osdi_preload_reaches_the_deck_and_the_environment(
+    tmp_path, monkeypatch
+):
+    osdi = _write_osdi(tmp_path)
+    decks = _capture_decks(monkeypatch)
+    # Relative to the request file's own directory, like `models.lib`.
+    request = _osdi_request(tmp_path, ["psp103.osdi"])
+
+    report = sim.run_sim(str(request))
+
+    (deck,) = decks
+    deck_lines = deck.splitlines()
+    assert f"pre_osdi {osdi}" in deck_lines
+    assert deck_lines.index(f"pre_osdi {osdi}") > deck_lines.index(".control")
+    assert deck_lines.index(f"pre_osdi {osdi}") < deck_lines.index("tran 1n 1u")
+
+    (entry,) = report["environment"]["osdi_preload"]
+    assert entry["name"] == "psp103.osdi"
+    assert entry["sha256"] == sim.sha256_file(str(osdi))
+    assert set(entry) == {"name", "path", "scope", "sha256"}
+
+
+def test_run_sim_without_osdi_preload_omits_the_environment_field(
+    tmp_path, monkeypatch
+):
+    decks = _capture_decks(monkeypatch)
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    report = sim.run_sim(str(request))
+    assert "osdi_preload" not in report["environment"]
+    assert "pre_osdi" not in decks[0]
+
+
+def test_run_sim_missing_osdi_preload_fails_before_any_corner_runs(
+    tmp_path, monkeypatch
+):
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("no corner may be dispatched")
+
+    monkeypatch.setattr(sim.subprocess, "run", must_not_run)
+    request = _osdi_request(tmp_path, ["absent.osdi"])
+    with pytest.raises(
+        sim.SimError, match="osdi_preload file not found: .*absent.osdi"
+    ):
+        sim.run_sim(str(request))
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ("psp103.osdi", "osdi_preload must be an array"),
+        ({"a": "b"}, "osdi_preload must be an array"),
+        ([""], r"osdi_preload\[0\] must be a non-empty path"),
+        ([42], r"osdi_preload\[0\] must be a non-empty path"),
+    ],
+)
+def test_run_sim_malformed_osdi_preload_is_a_named_error(tmp_path, value, match):
+    request = _osdi_request(tmp_path, value)
+    with pytest.raises(sim.SimError, match=match):
+        sim.run_sim(str(request))
+
+
+@pytest.mark.parametrize("backend", ["remote", "batch"])
+def test_run_sim_osdi_preload_is_refused_for_an_explicit_offhost_backend(
+    tmp_path, monkeypatch, backend
+):
+    """An `.osdi` is a host-architecture binary: the off-host backends refuse
+    the option by name, before any instance/job exists, rather than stage it."""
+
+    def must_not_dispatch(*args, **kwargs):
+        raise AssertionError(f"the {backend} backend must not be reached")
+
+    monkeypatch.setitem(sim._BACKENDS, backend, must_not_dispatch)
+    monkeypatch.setattr(sim, "_run_remote_fleet", must_not_dispatch)
+    monkeypatch.setattr(sim, "_run_batch_fleet", must_not_dispatch)
+    _write_osdi(tmp_path)
+    request = _osdi_request(
+        tmp_path,
+        ["psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+    with pytest.raises(
+        sim.SimError,
+        match=rf"options.osdi_preload is not supported for backend '{backend}'",
+    ):
+        sim.run_sim(str(request), backend=backend)
+
+
+@pytest.mark.parametrize("backend", ["remote", "batch"])
+def test_run_sim_osdi_preload_steps_a_host_default_offhost_backend_back_to_local(
+    tmp_path, monkeypatch, backend
+):
+    monkeypatch.setenv(sim.BACKEND_ENV, backend)
+
+    def must_not_dispatch(*args, **kwargs):
+        raise AssertionError(f"the {backend} backend must not be reached")
+
+    monkeypatch.setitem(sim._BACKENDS, backend, must_not_dispatch)
+    decks = _capture_decks(monkeypatch)
+    osdi = _write_osdi(tmp_path)
+    request = _osdi_request(
+        tmp_path,
+        ["psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert len(report["corners"]) == 3
+    assert all(f"pre_osdi {osdi}" in deck for deck in decks)
+
+
+def test_run_sim_osdi_preload_is_refused_for_the_xyce_engine(tmp_path, monkeypatch):
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("no corner may be dispatched")
+
+    monkeypatch.setattr(sim.subprocess, "run", must_not_run)
+    _write_osdi(tmp_path)
+    request = _osdi_request(tmp_path, ["psp103.osdi"], engine="xyce")
+    with pytest.raises(
+        sim.SimError, match="options.osdi_preload is not supported for engine 'xyce'"
+    ):
+        sim.run_sim(str(request))
+
+
+def test_checkpoint_fingerprint_keys_on_osdi_preload_content(tmp_path):
+    body = _write_body(tmp_path)
+    osdi = _write_osdi(tmp_path, content=b"build 1")
+    kwargs = {
+        "netlist_path": str(body),
+        "models_lib": None,
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements_spec": [],
+        "corner_points": [sim.CornerPoint(None, {}, 27)],
+        "timeout_s": 10.0,
+        "engine": "ngspice",
+    }
+    without = sim._checkpoint_fingerprint(**kwargs)
+    # No preload keeps the pre-#2513 fingerprint byte-identical.
+    assert sim._checkpoint_fingerprint(**kwargs, osdi_preload=()) == without
+    first = sim._checkpoint_fingerprint(**kwargs, osdi_preload=(str(osdi),))
+    assert first != without
+    osdi.write_bytes(b"build 2")
+    assert sim._checkpoint_fingerprint(**kwargs, osdi_preload=(str(osdi),)) != first
