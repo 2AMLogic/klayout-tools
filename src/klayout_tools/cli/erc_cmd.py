@@ -89,6 +89,16 @@ def _print_declared_nets(report: dict) -> None:
             f"(expected {entry['expected_islands']}, "
             "counted over islands carrying the label)"
         )
+        # Issue #2510: the unlabelled remainder on the roles this net owns
+        # (`nets[].roles`). Printed only when measured, so an entry that
+        # declares no roles -- and every stored pre-#2510 payload -- renders
+        # exactly as before.
+        if entry.get("unlabelled_islands") is not None:
+            print(
+                f"    unlabelled on {','.join(entry['roles'])}: "
+                f"islands={entry['unlabelled_islands']} "
+                f"area={entry['unlabelled_area_um2']}um^2"
+            )
 
 
 def _print_text(report: dict) -> None:

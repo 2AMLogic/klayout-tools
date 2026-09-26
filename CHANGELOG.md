@@ -78,6 +78,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   and is byte-identical to before. Denominator rationale and the two-level
   derivation are documented in `docs/cli/yield.md` ("Errored samples and
   conditional yield").
+- **Added** (#2510, `klt erc`; additive — **no** `schema_version` bump): an
+  optional `nets[].roles` spec key (the `stackup` roles a declared net owns
+  outright) and four new keys on every report `nets[]` entry — `roles` (the
+  echo, `[]` when omitted) plus `unlabelled_islands`, `unlabelled_area_um2`
+  and `unlabelled_bbox`: the conductor on the owned roles reachable from
+  **no** label, i.e. the orphan of a severed single-label rail that
+  `erc.unconnected_net` (which counts only labelled islands, #2497) grades
+  clean. The remainder is scoped to caller-declared ownership because a
+  severed orphan does not touch its labelled piece and a routing layer
+  carries unrelated unlabelled nets, so no graph-only scoping can attribute
+  it; another labelled net on an owned role is never counted, and an
+  unlabelled island on a role several nets claim is reported under each.
+  The three measurement keys are `null` (not measured) for an entry that
+  declares no `roles`. Reporting only: no verdict, roll-up,
+  `status`/`erc_status`, or exit code changes — unlabelled fill on an owned
+  role would otherwise fail a correct layout. The text output adds an
+  `unlabelled on <roles>:` line under a net only when it was measured.
+  Documented in `docs/cli/erc.md` ("Measuring the unlabelled remainder").
 - **Added** (#2497, `klt erc`; additive — **no** `schema_version` bump): a
   top-level `nets[]` report section, one entry per declared `nets[]` spec
   entry in spec order, carrying `{name, matched_islands,
