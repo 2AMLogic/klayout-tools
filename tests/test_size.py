@@ -1173,6 +1173,49 @@ def test_parse_corner_set_process_bundle():
     assert points[0]["corner_id"] == "typical/27C"
 
 
+def test_parse_corner_set_per_section_lib_override_raises():
+    """A bundle section naming its own model library (issue #2522, `klt sim`
+    only) must be *refused* by `klt size`, not silently flattened.
+
+    `_expand_corners` is shared with `klt sim`, which learned to parse
+    `{"lib", "section"}` in #2522. This command resolves exactly one
+    `models_lib` per request and binds every section to it, so accepting the
+    shape would emit `.lib <models_lib> cap_tt` -- reading the named section
+    out of the wrong file, and failing loudly only when the section happens to
+    be absent from `models_lib`. Refuse instead.
+    """
+    request = {
+        "corners": {
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": ["mos_tt", {"lib": "cap.lib", "section": "cap_tt"}],
+                }
+            ],
+            "temperature_c": [27],
+            "vdd_v": 1.8,
+        }
+    }
+    with pytest.raises(size.SizeError, match="not supported by klt size"):
+        size._parse_corner_set(request)
+
+
+def test_parse_corner_set_bundle_of_bare_sections_still_accepted():
+    """The refusal above is scoped to the per-section `lib` form only -- an
+    all-bare-string bundle (the pre-#2522 shape) keeps working unchanged."""
+    request = {
+        "corners": {
+            "process": [{"name": "tt", "sections": ["mos_tt", "cap_tt"]}],
+            "temperature_c": [27],
+            "vdd_v": 1.8,
+        }
+    }
+    points, _sizing_index = size._parse_corner_set(request)
+
+    assert points[0]["process_sections"] == ["mos_tt", "cap_tt"]
+    assert "process_section_libs" not in points[0]
+
+
 def test_parse_corner_set_missing_vdd_raises():
     request = {"corners": {"process": ["tt"], "temperature_c": [27]}}
     with pytest.raises(size.SizeError, match="vdd_v"):
