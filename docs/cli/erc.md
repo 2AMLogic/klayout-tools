@@ -478,10 +478,23 @@ draws that the spec never declared" below.
       any routed design, so the honest thing a release-pinned flow can do is
       declare no tie and say why. Cleared by a different *build*, not by a
       redrawn layout. Records `"ties_disclosed_tool_limitation"`.
+  - `undeclared_classes` (optional array of non-empty strings, issue #2541)
+    — the caller's own names for the tie classes this spec does *not*
+    declare (e.g. `["p_substrate"]`). Each one becomes a separate
+    `erc_coverage.inapplicable` entry, `erc.missing_tie:["<name>"]`,
+    carrying whichever reason token `kind` selects — **whether or not
+    `ties` is empty**. That is what makes the disclosure reachable for a
+    *partial* declaration: a spec that declares the one well class it can
+    express and honestly cannot express the other. Present-but-empty, a
+    non-string/blank entry, and a duplicate are all spec errors; so is a
+    name a `ties[]` entry already declares, since the same class cannot be
+    both checked work and a disclosed non-declaration. Omitted → no named
+    entries, and every pre-#2541 spec's report is byte-identical.
   - Changes no geometry and no finding. What it changes is the
     `erc_coverage.inapplicable` reason recorded for the undeclared
     `erc.missing_tie` work when `ties` is empty (one of the two tokens
-    above, instead of `"no_ties_declared"`) — so a consumer (`klt signoff`'s
+    above, instead of `"no_ties_declared"`), plus one entry per
+    `undeclared_classes` name — so a consumer (`klt signoff`'s
     T1 item 11, `docs/design-evidence-tiers.md`) can distinguish a
     considered, disclosed omission from "nobody declared ties at all", which
     previously rendered identically, *and* can tell the two disclosed
@@ -494,8 +507,10 @@ draws that the spec never declared" below.
     themselves whether a disclosed tool limitation applies to the run in
     front of them.
   - Echoed verbatim as the top-level `ties_disclosure` field, carrying
-    `kind` only when the spec itself declared it (so a pre-#2247 spec's
-    report is byte-identical); `null` when omitted.
+    `kind`/`undeclared_classes` only when the spec itself declared them (so
+    a pre-#2247 / pre-#2541 spec's report is byte-identical); `null` when
+    omitted. The echo is prose for a human reader — the machine-readable
+    channel is `erc_coverage`, which is why the classes are named there too.
 - `devices` (optional array, default `[]`, issue #2183) — where a drawn
   **device body** sits on an already-declared conductor role, so the
   connectivity model stops reading it as a wire (see "Device bodies are
@@ -905,6 +920,76 @@ naming the right remedy: re-run against a build whose tie extraction is
 isolated and declare the tie, rather than go looking for a tap that is
 already there.
 
+##### Disclosing one class while declaring another (`undeclared_classes`, issue #2541)
+
+Both forms above describe a spec that declares **zero** `ties[]`, and until
+issue #2541 that was the only shape a disclosure could describe: the reason
+token is recorded against the *undeclared* `erc.missing_tie` work, and that
+work only existed when `ties` was entirely empty. A spec that declared one
+well class and genuinely could not express another therefore had no
+machine-readable way to say so — its `erc_coverage` was byte-identical to
+that of a spec which declared the same one tie and never considered the
+second class at all. The top-level `ties_disclosure` echo carried the prose,
+but it names no work identity and no reason token, so a grader reading
+`erc_coverage` (which is what T1 item 11 reads) could not tell the two
+apart. That produced a perverse incentive worth naming: declaring the one
+tie you *can* check made the record less legible than declaring nothing.
+
+`undeclared_classes` names the classes the disclosure is about, giving that
+undeclared work the identity it lacked:
+
+```json
+{
+  "ties": [
+    {
+      "name": "nwell_tie",
+      "well_layer": "10/0",
+      "tap_layer": "11/0",
+      "tap_requires": ["12/0"],
+      "connect_to": "li1",
+      "net": "VDD"
+    }
+  ],
+  "ties_disclosure": {
+    "kind": "unexpressible",
+    "reason": "the p-substrate class is deliberately not declared: this PDK draws no pwell/tub layer for a native-substrate block, so there is no well geometry to name",
+    "undeclared_classes": ["p_substrate"]
+  }
+}
+```
+
+The run records the declared tie as `checked`
+(`erc.missing_tie:["nwell_tie"]`, real evaluated work) *and* the disclosed
+class as `inapplicable`:
+
+```json
+{"id": "erc.missing_tie:[\"p_substrate\"]", "reason": "ties_disclosed_unexpressible"}
+```
+
+Notes on the shape:
+
+- **Inapplicable, not skipped.** A class the caller says cannot be
+  expressed is work this run was never asked to do, not requested work that
+  failed to run — the same classification the empty-`ties` disclosure
+  already gets — so it leaves `erc_status` alone. A *declared* tie that
+  could not be graded is still the skip that makes the scope
+  `clean_partial`.
+- **One identity space.** The disclosed classes sit in the same
+  `erc.missing_tie:` identity space declared ties occupy, which is what
+  lets an existing grader read them without new parsing. A disclosed name
+  that collides with a `ties[].name` is rejected at the spec: the same
+  class cannot be both checked work and a disclosed non-declaration.
+- **Still unverified, still unmet.** Naming a class proves nothing about
+  it. As with `reason` and `kind`, nothing here checks that such a class
+  exists or that it is really inexpressible; what changes is only that a
+  reader of the report of record can see *which* class was disclosed and
+  *which* obstacle was claimed, instead of a sentence no grader can act on.
+- **Opt-in.** A disclosure that names no classes behaves exactly as it did
+  before #2541 — inert alongside a non-empty `ties`, and the bare
+  `erc.missing_tie:[]` entry when `ties` is empty. When `ties` is empty
+  *and* classes are named, both are recorded: the bare entry is still the
+  true "nothing was declared" fact pre-#2541 readers key on.
+
 #### A block with no drawn well at all (`well_boxes`, issue #2255)
 
 Everything above relaxes how the **tap** side is expressed. The well side
@@ -915,7 +1000,10 @@ stream to point at — could not declare its substrate tie in any form. Only
 the drawn-well (n-well) half of such a design was ever graded, and
 `ties_disclosure` could not cover the gap either: a disclosure describes
 *undeclared* work, so a spec that declares its n-well tie and can express
-nothing for its substrate had nothing to disclose.
+nothing for its substrate had nothing to disclose. (Issue #2541 since gave
+that spec a disclosure path — `undeclared_classes`, above — but it remains
+a disclosure, and an unmet item 11: a substrate tie a block really does
+draw is better *declared* with `well_boxes` than disclosed.)
 
 The declarable form is `well_layer: null` plus a `well_boxes` list naming
 the substrate region the tie covers, in the same `[left, bottom, right,
@@ -2121,7 +2209,7 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
 | `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration — a degenerate tap, issue #2199, or a degenerate well assertion, issue #2255), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. Additionally carries `layers_in_stream_without_declaration` (issue #2389), the drawn-but-undeclared layer disclosure, which grades nothing. |
-| `ties_disclosure` | object \| null | (issues #2234, #2247) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`, plus `"kind": "unexpressible"\|"tool_limitation"` when the spec declared one); `null` when the spec did not declare one. See "A tie with no distinguishing marker layer at all" and "When the obstacle is the build, not the stream" above. |
+| `ties_disclosure` | object \| null | (issues #2234, #2247, #2541) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`, plus `"kind": "unexpressible"\|"tool_limitation"` and `"undeclared_classes": [<string>, …]` when the spec declared them); `null` when the spec did not declare one. Prose for a human reader — the machine-readable channel is `erc_coverage`, which carries one `inapplicable` entry per disclosed class. See "A tie with no distinguishing marker layer at all", "When the obstacle is the build, not the stream", and "Disclosing one class while declaring another" above. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
 | `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region — `area(marker ∩ on's own drawn region)`, **not** the marker layer's own area (issue #2226), since a device-body marker is conventionally drawn with enclosure past the conductor it marks. `0.0` therefore means this declaration changed nothing at all: its marker layer carries no geometry in this layout, is drawn on a different datatype, or does not touch the role it was declared `on` (that last case also warns on stderr). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
@@ -2156,6 +2244,15 @@ what lets a consumer tell "no supply was declared, so `erc.supply_short`
 was never computed" from "the declared supplies came back clean" off the
 envelope alone. The gate scope is never empty: a run in which no net
 carries gate-role geometry is exit 1, not a zero-coverage report.
+
+A disclosure that names `undeclared_classes` (issue #2541) additionally
+records one `erc.missing_tie:["<class>"]` **inapplicable** entry per named
+class, carrying the same reason token, whether or not `ties` is empty —
+the only way a *partial* declaration (one well class declared and checked,
+another honestly inexpressible) can state that considered omission in the
+envelope rather than only in the prose `ties_disclosure` echo. Inapplicable
+rather than skipped for the same reason the empty-`ties` disclosure is, so
+it never moves `erc_status`.
 
 A declared `ties[]` entry is the one case this scope records as **skipped**:
 work that was requested and could not be performed. Four reasons today —

@@ -4059,6 +4059,302 @@ def test_cli_text_output_names_a_non_default_disclosure_kind(tmp_path, capsys):
     )
 
 
+# --- ties: a disclosed *partial* declaration (issue #2541) ---------------
+#
+# Every test above declares *zero* `ties[]`. The gap #2541 reports is the
+# other shape: a spec that declares the one well class it can express and
+# genuinely cannot express the other. Before `undeclared_classes`, the
+# disclosure's reason token only ever reached `erc_coverage` from the
+# `if not ties` branch, so such a spec's coverage block was byte-identical
+# to one that declared the same tie and never considered the second class --
+# declaring real, checkable work made the record *less* machine-readable
+# than declaring nothing at all.
+
+#: The native-substrate case the issue names: the n-well class is declared
+#: and checked; the p-substrate class has no drawn pwell/tub layer to name.
+_P_SUBSTRATE_DISCLOSURE = {
+    "reason": (
+        "the p-substrate class is deliberately not declared: this PDK draws "
+        "no pwell/tub layer for a native-substrate block, so there is no "
+        "well geometry to name"
+    ),
+    "undeclared_classes": ["p_substrate"],
+}
+
+
+def _run_partial_declaration(tmp_path, stem, *, disclosure=None, ties=None):
+    """The issue's own reproduction shape: the native-substrate fixture (no
+    pwell drawn anywhere in the stream), a spec declaring the one well class
+    it *can* express -- the n-well tie, narrowed by the real implant marker,
+    so it is genuinely checked work -- and optionally a top-level
+    `ties_disclosure` for the class it cannot."""
+    layout, _top = _routed_tie_layout(draw_pwell=False)
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec_body = _routed_tie_spec(
+        ties=ties
+        if ties is not None
+        else [_routed_tie_entries(tap_requires=["12/0"])[0]]
+    )
+    if disclosure is not None:
+        spec_body["ties_disclosure"] = disclosure
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, spec_body)
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def _inapplicable_reasons(report):
+    return {
+        record["id"]: record["reason"]
+        for record in report["erc_coverage"]["inapplicable"]
+    }
+
+
+def test_a_partial_declaration_reaches_the_disclosure_reason(tmp_path):
+    """The reported bug, verbatim: one declared `ties[]` entry, run twice --
+    once as-is, once with a disclosure for the class the spec cannot express
+    -- must not produce identical `erc_coverage`."""
+    plain = _run_partial_declaration(tmp_path, "partial_plain")
+    disclosed = _run_partial_declaration(
+        tmp_path, "partial_disclosed", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+
+    # The whole point: the two coverage blocks are no longer byte-identical.
+    assert plain["erc_coverage"] != disclosed["erc_coverage"]
+
+    # The declared class is unchanged, real, checked work in both runs.
+    declared = 'erc.missing_tie:["nwell_tie"]'
+    assert declared in plain["erc_coverage"]["checked"]
+    assert declared in disclosed["erc_coverage"]["checked"]
+
+    # The undeclared class now has an identity of its own, carrying the
+    # disclosed reason token -- readable without re-parsing the free-text
+    # `reason` and without re-opening the spec document.
+    assert not any(
+        record["id"].startswith("erc.missing_tie")
+        for record in plain["erc_coverage"]["inapplicable"]
+    )
+    assert (
+        _inapplicable_reasons(disclosed)['erc.missing_tie:["p_substrate"]']
+        == "ties_disclosed_unexpressible"
+    )
+
+
+def test_a_partial_declaration_discloses_a_tool_limitation_too(tmp_path):
+    """Both disclosed obstacles reach a partial declaration, exactly as they
+    do the empty-`ties[]` one (issue #2247): the two have different remedies
+    and must not collapse into one token here either."""
+    unexpressible = _run_partial_declaration(
+        tmp_path, "partial_unexpressible", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+    tool_limited = _run_partial_declaration(
+        tmp_path,
+        "partial_tool_limited",
+        disclosure={
+            "kind": "tool_limitation",
+            "reason": (
+                "klayout-tools#2169: a second declared tie on the pinned "
+                "release joins the well/tap regions into the primary graph"
+            ),
+            "undeclared_classes": ["p_substrate"],
+        },
+    )
+
+    identity = 'erc.missing_tie:["p_substrate"]'
+    assert (
+        _inapplicable_reasons(unexpressible)[identity] == "ties_disclosed_unexpressible"
+    )
+    assert (
+        _inapplicable_reasons(tool_limited)[identity]
+        == "ties_disclosed_tool_limitation"
+    )
+
+
+def test_a_disclosed_partial_declaration_moves_no_finding_and_no_status(tmp_path):
+    """Same principle every disclosure here rests on: it is the caller's
+    word, so it changes the coverage *reason* and nothing else -- not a
+    finding, not `erc_status`, not the declared tie's own grade."""
+    plain = _run_partial_declaration(tmp_path, "partial_status_plain")
+    disclosed = _run_partial_declaration(
+        tmp_path, "partial_status_disclosed", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+
+    assert plain["erc_findings"] == disclosed["erc_findings"] == []
+    assert plain["erc_status"] == disclosed["erc_status"] == "clean"
+    assert plain["erc_coverage"]["checked"] == disclosed["erc_coverage"]["checked"]
+    assert (
+        plain["erc_coverage"]["skipped"] == disclosed["erc_coverage"]["skipped"] == []
+    )
+
+
+def test_a_partial_disclosure_that_names_no_class_stays_inert(tmp_path):
+    """Naming the classes is the opt-in. A disclosure alongside a non-empty
+    `ties[]` that names none is accepted exactly as it always was (issue
+    #2234 rejected neither shape), and -- deliberately -- still records
+    nothing: there is no undeclared class for a reason to attach to, so
+    every already-committed spec's report stays byte-identical."""
+    plain = _run_partial_declaration(tmp_path, "partial_inert_plain")
+    unnamed = _run_partial_declaration(
+        tmp_path,
+        "partial_inert_unnamed",
+        disclosure={"reason": "no pwell is drawn on this stream"},
+    )
+
+    assert plain["erc_coverage"] == unnamed["erc_coverage"]
+    # The echo still carries the prose, so nothing is lost -- it is simply
+    # not machine-readable, which is the state #2541 exists to let a caller
+    # leave.
+    assert unnamed["ties_disclosure"] == {"reason": "no pwell is drawn on this stream"}
+
+
+def test_the_empty_ties_disclosure_path_is_unchanged(tmp_path):
+    """Regression for case (a): a spec with no `ties[]` at all and a
+    disclosure that names no classes must render exactly as it did before
+    #2541 -- the bare `erc.missing_tie:[]` entry, same reason token."""
+    report = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "empty_unchanged",
+        {"ties_disclosure": {"reason": "no implant layers are drawn on this stream"}},
+    )
+    assert (
+        _inapplicable_reasons(report)["erc.missing_tie:[]"]
+        == "ties_disclosed_unexpressible"
+    )
+    assert report["ties_disclosure"] == {
+        "reason": "no implant layers are drawn on this stream"
+    }
+
+
+def test_named_classes_add_to_the_bare_entry_when_ties_is_empty(tmp_path):
+    """A spec that declares no `ties[]` *and* names the classes it cannot
+    express keeps the bare "nothing was declared" entry -- that fact is
+    still true and pre-#2541 readers key on it -- and gains one named entry
+    per class."""
+    report = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "empty_named",
+        {
+            "ties_disclosure": {
+                "reason": "no implant layers are drawn on this stream",
+                "undeclared_classes": ["n_well", "p_substrate"],
+            }
+        },
+    )
+
+    reasons = _inapplicable_reasons(report)
+    assert reasons["erc.missing_tie:[]"] == "ties_disclosed_unexpressible"
+    assert reasons['erc.missing_tie:["n_well"]'] == "ties_disclosed_unexpressible"
+    assert reasons['erc.missing_tie:["p_substrate"]'] == "ties_disclosed_unexpressible"
+
+
+def test_a_disclosed_class_never_shares_an_identity_with_a_declared_tie(tmp_path):
+    """The disclosed classes live in the *same* `erc.missing_tie:` identity
+    space declared ties occupy, which is what makes them readable by a
+    grader that already walks that space -- so no identity may appear in two
+    coverage categories. A spec that declares and discloses the same class
+    contradicts itself and is a spec error, not an internal invariant
+    failure."""
+    disclosed = _run_partial_declaration(
+        tmp_path, "identity_space", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+    coverage = disclosed["erc_coverage"]
+    identities = [
+        *coverage["checked"],
+        *(record["id"] for record in coverage["skipped"]),
+        *(record["id"] for record in coverage["inapplicable"]),
+    ]
+    assert len(identities) == len(set(identities))
+
+    with pytest.raises(ErcError, match="which ties\\[\\] already declares"):
+        _run_partial_declaration(
+            tmp_path,
+            "identity_collision",
+            disclosure={
+                "reason": "cannot express it",
+                "undeclared_classes": ["nwell_tie"],
+            },
+        )
+
+
+@pytest.mark.parametrize("value", [[], "p_substrate", {}, 3, True])
+def test_undeclared_classes_rejects_a_non_array_or_empty_array(tmp_path, value):
+    """An empty array is the unfalsifiable "disclosed nothing" shape the
+    disclosure keys exist to rule out -- rejected for the same reason an
+    empty `reason` is."""
+    with pytest.raises(
+        ErcError, match="ties_disclosure.undeclared_classes must be a non-empty array"
+    ):
+        _run_partial_declaration(
+            tmp_path,
+            f"bad_classes_{abs(hash(str(value)))}",
+            disclosure={"reason": "because", "undeclared_classes": value},
+        )
+
+
+@pytest.mark.parametrize("value", ["", "   ", 7, None, ["nested"]])
+def test_undeclared_classes_rejects_a_non_string_entry(tmp_path, value):
+    with pytest.raises(
+        ErcError, match=r"ties_disclosure.undeclared_classes\[0\] must be a non-empty"
+    ):
+        _run_partial_declaration(
+            tmp_path,
+            f"bad_entry_{abs(hash(str(value)))}",
+            disclosure={"reason": "because", "undeclared_classes": [value]},
+        )
+
+
+def test_undeclared_classes_rejects_a_duplicate(tmp_path):
+    """Two entries for one class would emit one coverage identity twice --
+    rejected at the spec, the same way a duplicate `ties[].name` is."""
+    with pytest.raises(
+        ErcError, match="duplicate ties_disclosure.undeclared_classes entry"
+    ):
+        _run_partial_declaration(
+            tmp_path,
+            "dup_classes",
+            disclosure={
+                "reason": "because",
+                "undeclared_classes": ["p_substrate", "p_substrate"],
+            },
+        )
+
+
+def test_undeclared_classes_null_is_omitted(tmp_path):
+    """An explicit JSON `null` is "not declared", matching every other
+    optional key in this spec -- not a rejected value."""
+    report = _run_partial_declaration(
+        tmp_path,
+        "null_classes",
+        disclosure={"reason": "no pwell is drawn", "undeclared_classes": None},
+    )
+    assert report["ties_disclosure"] == {"reason": "no pwell is drawn"}
+
+
+def test_undeclared_classes_is_echoed_verbatim(tmp_path):
+    """The echo carries the names back, `kind` included, so a reader of the
+    report of record sees the same vocabulary the coverage identities use."""
+    report = _run_partial_declaration(
+        tmp_path, "echo_classes", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+    assert report["ties_disclosure"] == _P_SUBSTRATE_DISCLOSURE
+
+
+def test_cli_text_output_names_the_undeclared_classes(tmp_path, capsys):
+    """The courtesy view must not render a partial declaration's disclosure
+    as "some tie you cannot see was not declared" either."""
+    gds = tmp_path / "partial_cli.gds"
+    layout, _top = _routed_tie_layout(draw_pwell=False)
+    layout.write(str(gds))
+    spec = tmp_path / "partial_cli.erc.json"
+    spec_body = _routed_tie_spec(ties=[_routed_tie_entries(tap_requires=["12/0"])[0]])
+    spec_body["ties_disclosure"] = _P_SUBSTRATE_DISCLOSURE
+    _write_spec(spec, spec_body)
+
+    main(["erc", str(gds), str(spec), "--pdk", "sky130"])
+    out = capsys.readouterr().out
+    assert "undeclared classes: p_substrate" in out
+
+
 def test_ties_rejects_a_non_boolean_tap_is_dedicated(tmp_path):
     gds = tmp_path / "basic.gds"
     _basic_fixture(gds)
