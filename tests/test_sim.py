@@ -990,6 +990,112 @@ def test_write_corner_deck_no_process_emits_no_lib_line(tmp_path):
     assert not any(line.startswith(".lib") for line in lines)
 
 
+# --------------------------------------------------------------------------- #
+# _write_corner_deck: "save all" (issue #2521)
+# --------------------------------------------------------------------------- #
+
+
+def test_write_corner_deck_no_measurements_or_waveforms_omits_save_all(tmp_path):
+    """Regression: a corner with neither `measurements[]` nor
+    `options.waveforms` (the probe-deck caller, and the historical
+    no-measurement/no-waveform request) stays byte-identical to
+    pre-#2521 behavior -- no `save all` card at all."""
+    point = sim.CornerPoint("tt", {}, 27)
+    lines = _write_deck(tmp_path, point, measurements_spec=[], raw_path=None)
+
+    assert "save all" not in lines
+
+
+def test_write_corner_deck_with_measurements_emits_save_all(tmp_path):
+    point = sim.CornerPoint("tt", {}, 27)
+    lines = _write_deck(
+        tmp_path,
+        point,
+        measurements_spec=[
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+        ],
+        raw_path=None,
+    )
+
+    assert "save all" in lines
+
+
+def test_write_corner_deck_with_waveforms_only_emits_save_all(tmp_path):
+    """`options.waveforms` alone (no `measurements[]`) is also enough --
+    the acceptance criteria's other declared-signal-set trigger."""
+    point = sim.CornerPoint("tt", {}, 27)
+    raw_path = str(tmp_path / "waveform.raw")
+    lines = _write_deck(tmp_path, point, measurements_spec=[], raw_path=raw_path)
+
+    assert "save all" in lines
+
+
+def test_write_corner_deck_save_all_comes_after_include_and_before_alter(tmp_path):
+    """Ordering matters: `save all` must appear after `.include` (so it
+    supersedes any `.save` the included netlist body carries -- ngspice
+    applies `save` cards in the order encountered) and before the `alter`
+    cards / analysis line."""
+    point = sim.CornerPoint("tt", {"vdd": 1.8}, 27)
+    lines = _write_deck(
+        tmp_path,
+        point,
+        measurements_spec=[
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+        ],
+        raw_path=None,
+    )
+
+    include_idx = next(i for i, line in enumerate(lines) if line.startswith(".include"))
+    save_idx = lines.index("save all")
+    alter_idx = next(i for i, line in enumerate(lines) if line.startswith("alter"))
+    analysis_idx = next(i for i, line in enumerate(lines) if line.startswith("tran "))
+
+    assert include_idx < save_idx < alter_idx < analysis_idx
+    # With no `options.osdi_preload` declared, `save all` is the first
+    # command inside the `.control` block.
+    control_idx = lines.index(".control")
+    assert save_idx == control_idx + 1
+
+
+def test_write_corner_deck_save_all_follows_pre_osdi_and_still_precedes_alter(
+    tmp_path,
+):
+    """`options.osdi_preload` (issue #2513) also writes into the top of the
+    `.control` block. The two are order-independent -- a `pre_`-prefixed
+    command is hoisted out and run before the circuit is parsed, so it
+    neither reads nor writes the saved set -- so #2513 keeps its position
+    and `save all` follows it, still after `.include` (superseding any
+    `.save` the netlist body carries) and still before the `alter` cards
+    and the analysis line, which is all this issue's ordering requires."""
+    osdi = tmp_path / "psp103.osdi"
+    osdi.write_bytes(b"\x7fELF-ish")
+    point = sim.CornerPoint("tt", {"vdd": 1.8}, 27)
+    lines = _write_deck(
+        tmp_path,
+        point,
+        measurements_spec=[
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+        ],
+        raw_path=None,
+        osdi_preload=(str(osdi),),
+    )
+
+    control_idx = lines.index(".control")
+    include_idx = next(i for i, line in enumerate(lines) if line.startswith(".include"))
+    pre_osdi_idx = lines.index(f"pre_osdi {osdi}")
+    save_idx = lines.index("save all")
+    alter_idx = next(i for i, line in enumerate(lines) if line.startswith("alter"))
+    analysis_idx = next(i for i, line in enumerate(lines) if line.startswith("tran "))
+
+    # This issue's invariant is unchanged: after `.include`, before analysis.
+    assert include_idx < save_idx < alter_idx < analysis_idx
+    # #2513's `pre_osdi` block stays at the top of `.control`, with
+    # `save all` immediately after it.
+    assert control_idx < pre_osdi_idx < save_idx
+    assert pre_osdi_idx == control_idx + 1
+    assert save_idx == pre_osdi_idx + 1
+
+
 def test_corner_id_multi_rail_format():
     point = sim.CornerPoint("tt", {"vdd": 1.8, "vdda": 1.7}, 27)
     assert point.corner_id == "tt/vdd=1.800_vdda=1.700V/27C"
@@ -1214,6 +1320,25 @@ def test_classify_diagnostics_missing_include():
     (diag,) = [d for d in diagnostics if d["code"] == "missing_include"]
     assert diag["severity"] == "error"
     assert "07-reference.spice" in diag["message"]
+
+
+def test_classify_diagnostics_no_such_vector():
+    """Issue #2521: ngspice's `Error: no such vector as ...` line (emitted
+    when a `.meas`/rawfile signal never resolved -- whether because the name
+    is a genuine typo/dead node, or the vector was excluded from the saved
+    set) gets its own code, additive to the generic per-measurement
+    `measurement` diagnostic `_run_corner` already attaches."""
+    log = (
+        "  Measurements for DC Analysis\n\n"
+        "Error: no such vector as v(mid).\n"
+        " .meas dc mout_val find v(mid) at=0 failed!\n"
+    )
+    diagnostics = sim._classify_diagnostics(log)
+    codes = [d["code"] for d in diagnostics]
+    assert "no_such_vector" in codes
+    (diag,) = [d for d in diagnostics if d["code"] == "no_such_vector"]
+    assert diag["severity"] == "error"
+    assert "v(mid)" in diag["message"]
 
 
 def test_classify_diagnostics_clean_log_is_empty():
@@ -2240,6 +2365,47 @@ def test_run_sim_stubbed_timeout_is_corner_error(tmp_path, monkeypatch):
     assert corner["status"] == "error"
     codes = [d["code"] for d in corner["diagnostics"]]
     assert codes == ["timeout"]
+
+
+def test_run_sim_stubbed_no_such_vector_augments_generic_measurement_code(
+    tmp_path, monkeypatch
+):
+    """Issue #2521: a `.meas` that never resolves to a vector gets both the
+    generic `measurement` code (the per-measurement "produced no value"
+    diagnostic `_run_corner` always attaches) *and* the more specific
+    `no_such_vector` code from the log classifier -- additive, not a
+    replacement, since `no_such_vector` alone cannot tell a genuine typo
+    apart from a signal that was excluded from the saved set."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vmissing",
+                    "spice": ".meas tran vmissing FIND v(missing) AT=1u",
+                }
+            ],
+        },
+    )
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "Error: no such vector as v(missing).\n"
+            " .meas tran vmissing find v(missing) at=1u failed!\n"
+        ),
+    )
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "measurement" in codes
+    assert "no_such_vector" in codes
 
 
 # --------------------------------------------------------------------------- #
@@ -7302,6 +7468,49 @@ def test_cli_outdir_flag_overrides_default(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Integration: real ngspice (skipped when not installed)
 # --------------------------------------------------------------------------- #
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_save_all_overrides_netlist_bodys_restrictive_save_card(tmp_path):
+    """Issue #2521's manual verification step, automated: a netlist body
+    that carries its own restrictive `.save` card (a schematic netlister's
+    supply-current probe convention) used to make every measurement outside
+    that card's list silently return no value. `_write_corner_deck`'s own
+    `save all` -- emitted after `.include`, so it supersedes the body's
+    `.save` -- restores the full saved set, and the measurement on the
+    excluded node now resolves."""
+    body = tmp_path / "body.spice"
+    body.write_text(
+        "Vin in 0 DC 1\n"
+        "R1 in mid 1k\n"
+        "R2 mid out 1k\n"
+        "R3 out 0 1k\n"
+        "* Restrictive: only `v(in)` survives without this fix's `save all`.\n"
+        ".save v(in)\n"
+    )
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "dc", "args": "Vin 0 1 0.1"},
+            "measurements": [
+                {
+                    "name": "vmid",
+                    "spice": ".meas dc vmid FIND v(mid) AT=0.5",
+                    "unit": "V",
+                }
+            ],
+        },
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    (corner,) = report["corners"]
+    assert corner["diagnostics"] == []
+    (measurement,) = corner["measurements"]
+    assert measurement["status"] == "pass"
+    assert measurement["value"] == pytest.approx(1.0 / 3.0, abs=1e-3)
 
 
 @_SKIP_NO_NGSPICE
