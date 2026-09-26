@@ -606,7 +606,7 @@
     {
       "file": "src/klayout_tools/op_sanity.py",
       "function": "run_op_sanity",
-      "complexity": 22
+      "complexity": 23
     },
     {
       "file": "src/klayout_tools/pdk_models.py",
@@ -761,7 +761,7 @@
     {
       "file": "src/klayout_tools/sim.py",
       "function": "run_sim",
-      "complexity": 52
+      "complexity": 54
     },
     {
       "file": "src/klayout_tools/sim_plot.py",
