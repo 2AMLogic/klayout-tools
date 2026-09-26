@@ -50,6 +50,15 @@ DEFAULT_CONFIDENCE = 0.95
 DEFAULT_TARGET_CI_HALFWIDTH = 0.01
 ABSOLUTE_MIN_SAMPLES = 2
 
+#: Mirrors ``sim._INCONCLUSIVE_STATUS`` -- the single status `klt sim` grades
+#: a draw it does not trust with, whichever of the two reasons produced it
+#: (``options.fail_on_diagnostic``, issue #2492, or a plausibility-bound
+#: violation, issue #2493; see that constant's own note on why they are one
+#: token rather than two). Repeated here rather than imported so reading a
+#: sim report never drags `klt sim`'s whole module in; a rename on either side
+#: is caught by ``tests/test_yield.py``'s cross-module assertion (issue #2507).
+_SIM_INCONCLUSIVE_STATUS = "inconclusive"
+
 
 class YieldError(Exception):
     """Raised when ``klt yield`` cannot run: a bad/missing input document, a
@@ -153,6 +162,30 @@ def _censored_from(raw: Any, name: str, where: str) -> int:
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
         raise YieldError(
             f"{where}: measurement '{name}' censored must be a non-negative integer"
+        )
+    return raw
+
+
+def _inconclusive_from(raw: Any, name: str, where: str) -> int:
+    """Normalise an ``inconclusive`` count -- draws whose value exists but is
+    not trustworthy, so it must not be graded against ``limits`` as if it
+    were a result (issue #2507).
+
+    This is the sample-set path's counterpart of what
+    ``_measurements_from_sim_report`` derives from a `klt sim` report's own
+    ``status`` grading: a plain sample-set document has no per-sample status
+    channel, so the count is caller-supplied, exactly like
+    ``errored``/``failed_unmeasurable``/``censored``. Gets ``errored``'s
+    denominator treatment -- excluded from both the numerator and denominator
+    of the empirical yield (see ``native/yield/src/estimate.rs``) as well as
+    from the distribution fit and Cp/Cpk, because a distrusted number carries
+    no verdict in either direction.
+    """
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise YieldError(
+            f"{where}: measurement '{name}' inconclusive must be a non-negative integer"
         )
     return raw
 
@@ -326,6 +359,72 @@ def _sampling_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
     return {"strategy": strategy}
 
 
+def _draw_from_mc_corners(
+    mc_corners: list[dict[str, Any]], name: str
+) -> tuple[list[float], int, int, list[str]]:
+    """Pool one measurement's Monte Carlo draw out of a sim report's sampled
+    corners, as ``(samples, errored, inconclusive, source_corners)``.
+
+    Split out of :func:`_measurements_from_sim_report` so the per-sample
+    screening below is a single readable unit rather than a third nesting
+    level inside the rollup loop.
+    """
+    samples: list[float] = []
+    errored = 0
+    inconclusive = 0
+    source_corners: list[str] = []
+    for corner in mc_corners:
+        # Strip the `/mc<sample_index>` suffix `klt sim` appends to a sampled
+        # corner's id, so `source_corners` names the originating
+        # (pre-sampling) corners the draw was pooled from.
+        corner_id = corner.get("corner_id")
+        if isinstance(corner_id, str):
+            origin = corner_id.rsplit("/mc", 1)[0]
+            if origin not in source_corners:
+                source_corners.append(origin)
+        for m in corner.get("measurements") or []:
+            if not isinstance(m, dict) or m.get("name") != name:
+                continue
+            if _is_distrusted(corner, m):
+                inconclusive += 1
+                continue
+            value = m.get("value")
+            if value is None:
+                errored += 1
+            elif isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise YieldError(
+                    f"sim report: measurement '{name}' has a non-numeric value "
+                    f"in corner {corner.get('corner_id')!r}"
+                )
+            else:
+                samples.append(float(value))
+    return samples, errored, inconclusive, source_corners
+
+
+def _is_distrusted(corner: dict[str, Any], measurement: dict[str, Any]) -> bool:
+    """Whether `klt sim` declined to vouch for this sample's value (issue
+    #2507) -- in which case it is set aside *before* it reaches this module's
+    population, mirroring what `klt sim`'s own Monte Carlo rollup already does
+    to the same draw (``sim._monte_carlo_rollup._stats``). An untrusted number
+    must not be allowed to move the mean/sigma, the Cpk, or the yield fraction
+    a spec verdict rests on.
+
+    Two levels need screening, because `klt sim` grades the two reasons at
+    different levels: ``options.fail_on_diagnostic`` (issue #2492)
+    disqualifies the sample's whole *corner* -- its measurement can still read
+    ``pass``/``fail``, having been graded against ``limits`` before the corner
+    was disqualified -- while a plausibility-bound violation (issue #2493) is
+    graded onto the *measurement* itself. Neither is caught by a
+    ``value is None`` filter, because a distrusted sample has a real,
+    non-null value; that is exactly what makes it dangerous to the statistics.
+    A draw disqualified at both levels is one excluded sample, not two.
+    """
+    return (
+        corner.get("status") == _SIM_INCONCLUSIVE_STATUS
+        or measurement.get("status") == _SIM_INCONCLUSIVE_STATUS
+    )
+
+
 def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Read a `klt sim` Monte Carlo report into this module's request shape.
 
@@ -358,37 +457,21 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
             raise YieldError("sim report has a malformed 'measurements' entry")
         name = entry["name"]
-        samples: list[float] = []
-        errored = 0
-        source_corners: list[str] = []
-        for corner in mc_corners:
-            # Strip the `/mc<sample_index>` suffix `klt sim` appends to a
-            # sampled corner's id, so `source_corners` names the originating
-            # (pre-sampling) corners the draw was pooled from.
-            corner_id = corner.get("corner_id")
-            if isinstance(corner_id, str):
-                origin = corner_id.rsplit("/mc", 1)[0]
-                if origin not in source_corners:
-                    source_corners.append(origin)
-            for m in corner.get("measurements") or []:
-                if not isinstance(m, dict) or m.get("name") != name:
-                    continue
-                value = m.get("value")
-                if value is None:
-                    errored += 1
-                elif isinstance(value, bool) or not isinstance(value, (int, float)):
-                    raise YieldError(
-                        f"sim report: measurement '{name}' has a non-numeric value "
-                        f"in corner {corner.get('corner_id')!r}"
-                    )
-                else:
-                    samples.append(float(value))
+        samples, errored, inconclusive, source_corners = _draw_from_mc_corners(
+            mc_corners, name
+        )
         out.append(
             {
                 "name": name,
                 "unit": entry.get("unit"),
                 "samples": samples,
                 "errored": errored,
+                # Issue #2507: unlike `failed_unmeasurable`/`censored` below,
+                # this one *is* derivable from the report -- `klt sim` states
+                # the distrust verdict itself, on the corner and on the
+                # measurement -- so it is counted here rather than taken from
+                # the rollup entry, exactly like `errored` above.
+                "inconclusive": inconclusive,
                 # Issue #1095: like `negative_control`/`analytic_cross_check`/
                 # `sampling` below, `failed_unmeasurable` is metadata about
                 # the measurement rather than something derivable from a
@@ -465,6 +548,15 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                 "unit": entry.get("unit"),
                 "samples": samples,
                 "errored": errored,
+                # Issue #2507: a draw whose value exists but is not
+                # trustworthy. A plain sample-set document has no per-sample
+                # status channel (the sim-report path derives this from `klt
+                # sim`'s own corner/measurement `status` grading), so the
+                # count is supplied directly -- the same shape the three
+                # other no-usable-value categories already use.
+                "inconclusive": _inconclusive_from(
+                    entry.get("inconclusive"), name, "sample set"
+                ),
                 # Issue #1095: a draw that failed the limit without producing
                 # a value -- a design failure, not a measurement failure.
                 "failed_unmeasurable": _failed_unmeasurable_from(

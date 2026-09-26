@@ -495,6 +495,81 @@ def test_run_campaign_end_to_end_same_spec_rerun_reproduces_sample_set(
 
 
 # --------------------------------------------------------------------------- #
+# Plausibility-aware yield (issue #2507). `run_campaign` hands `run_sim`'s own
+# live report straight to `run_yield`, so it is the path that proves the two
+# verbs agree about which samples are in the population -- not just that
+# `klt sim`'s verdict is plausibility-aware.
+# --------------------------------------------------------------------------- #
+
+
+def _stub_subprocess_run_per_sample(monkeypatch, *, values: list[str]) -> None:
+    """Like `_stub_subprocess_run`, but emits a different measured value per
+    ngspice invocation, so a single campaign can mix trustworthy and
+    implausible draws."""
+    calls = {"n": 0}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        log_path = cmd[cmd.index("-o") + 1]
+        value = values[calls["n"] % len(values)]
+        calls["n"] += 1
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "  Measurements for Transient Analysis\n\n"
+                f"vout                =  {value}\n"
+            )
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+
+@requires_native
+def test_run_campaign_yield_population_excludes_implausible_draws(
+    tmp_path, monkeypatch
+):
+    """A campaign declaring `options.node_voltage_bounds` must produce a
+    plausibility-aware *yield number*, not merely a plausibility-aware sim
+    verdict: the two draws `klt sim` graded `"inconclusive"` are excluded
+    from `klt yield`'s population and reported as `inconclusive`."""
+    _write_body(tmp_path)
+    spec = _base_spec(options={"node_voltage_bounds": {"min": -0.5, "max": 2.0}})
+    spec["measurements"][0]["unit"] = "V"
+    spec_path = _write_spec(tmp_path, spec)
+    # Two of the six draws converge to 500 V -- a real, non-null number, far
+    # outside the declared node-voltage bound.
+    _stub_subprocess_run_per_sample(
+        monkeypatch,
+        values=["5.00000e+02", "5.00000e+02"] + ["5.00000e-01"] * 4,
+    )
+
+    report = run_campaign(str(spec_path))
+
+    measurement = report["measurements"][0]
+    assert measurement["n"] == 4
+    assert measurement["inconclusive"] == 2
+    assert measurement["errored"] == 0
+    # `n + errored + inconclusive` accounts for the full draw.
+    assert (
+        measurement["n"] + measurement["errored"] + measurement["inconclusive"]
+        == report["campaign"]["requested_samples"]
+        == 6
+    )
+    # `inconclusive` gets `errored`'s denominator treatment, not
+    # `failed_unmeasurable`'s: the empirical yield's own `n` is the 4
+    # trustworthy draws, and the 500 V outliers never moved the mean.
+    assert measurement["yield"]["empirical"]["n"] == 4
+    assert measurement["distribution"]["mean"] == pytest.approx(0.5)
+    assert any("inconclusive" in w for w in report["warnings"])
+
+    # …and it is the *same* exclusion `klt sim`'s own Monte Carlo rollup
+    # made over the identical report -- the agreement this issue exists for.
+    with open(report["campaign"]["sim_report_path"], encoding="utf-8") as handle:
+        sim_report = json.load(handle)
+    sim_rollup = sim_report["measurements"][0]["monte_carlo"]
+    assert sim_rollup["n"] == measurement["n"]
+    assert sim_rollup["inconclusive"] == measurement["inconclusive"]
+
+
+# --------------------------------------------------------------------------- #
 # `klt sim`'s `{path, scope}` netlist field must not leak into `klt yield`'s
 # own contract (issue #1261). `run_campaign` is the path that makes this
 # reachable by default: it hands `run_sim`'s live report straight to

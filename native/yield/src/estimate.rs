@@ -143,6 +143,22 @@ pub fn analyze(request: &YieldRequest) -> Result<YieldResponse, String> {
                 .to_string(),
         );
     }
+    // Issue #2507: `inconclusive` also gets `errored`'s denominator
+    // treatment, but is the one category where a value *did* exist -- it was
+    // set aside because it could not be trusted, not because it was missing.
+    // Flag it separately so a reader is never left inferring a distrusted
+    // solve from a count that reads like a tooling failure.
+    if reports.iter().any(|r| r.inconclusive > 0) {
+        warnings.push(
+            "at least one measurement excluded inconclusive draws from its denominator -- their \
+             value existed but was not trustworthy (a `klt sim` plausibility-bound violation or a \
+             fail_on_diagnostic corner disqualification), so it was never graded against the \
+             limits; its empirical yield is conditional on the draws that produced a trustworthy \
+             value -- see that measurement's own warnings, and \
+             docs/cli/yield.md#errored-samples-and-conditional-yield"
+                .to_string(),
+        );
+    }
 
     Ok(YieldResponse {
         schema_version: SCHEMA_VERSION,
@@ -209,51 +225,60 @@ fn analyze_measurement(
 
     let n = m.samples.len();
     if n < min_samples {
-        // Issue #1082 / #1095 / #2468: at the 100%-no-value end (every draw
-        // is `errored`, `failed_unmeasurable`, or `censored`) there is no
-        // report to carry the conditional-yield / failed_unmeasurable /
-        // censored warnings below, so this error has to name all three
-        // counts itself -- otherwise a draw of 100 samples that all failed
-        // to produce a value is indistinguishable from a draw of nothing.
+        // Issue #1082 / #1095 / #2468 / #2507: at the 100%-excluded end
+        // (every draw is `errored`, `failed_unmeasurable`, `censored`, or
+        // `inconclusive`) there is no report to carry the conditional-yield /
+        // failed_unmeasurable / censored / inconclusive warnings below, so
+        // this error has to name all four counts itself -- otherwise a draw
+        // of 100 samples that all failed to produce a *usable* value is
+        // indistinguishable from a draw of nothing.
         // Note that neither `failed_unmeasurable` nor `censored` can
         // substitute for the shortfall here even though `failed_unmeasurable`
         // *does* enter the yield below once the floor is met:
         // `distribution`/`capability` still need a numeric sample to fit,
         // and there is none to give them.
-        let no_value_note = if m.errored > 0 || m.failed_unmeasurable > 0 || m.censored > 0 {
-            // Errored-only keeps the exact pre-#1095 wording (a bare count,
-            // no qualifier) for backward compatibility with existing
-            // callers scraping this message; the qualifiers only appear
-            // once `failed_unmeasurable` and/or `censored` are part of the
-            // shortfall.
-            let breakdown = if m.errored > 0 && m.failed_unmeasurable == 0 && m.censored == 0 {
-                format!("{}", m.errored)
-            } else {
-                let mut parts = Vec::new();
-                if m.errored > 0 {
-                    parts.push(format!("{} tooling-errored", m.errored));
-                }
-                if m.failed_unmeasurable > 0 {
-                    parts.push(format!("{} failed_unmeasurable", m.failed_unmeasurable));
-                }
-                if m.censored > 0 {
-                    parts.push(format!("{} censored", m.censored));
-                }
-                parts.join(" and ")
-            };
-            format!(
-                " -- {breakdown} of the {} sample(s) drawn produced no usable value and were \
+        let no_value_note =
+            if m.errored > 0 || m.failed_unmeasurable > 0 || m.censored > 0 || m.inconclusive > 0 {
+                // Errored-only keeps the exact pre-#1095 wording (a bare count,
+                // no qualifier) for backward compatibility with existing
+                // callers scraping this message; the qualifiers only appear
+                // once `failed_unmeasurable`, `censored`, and/or `inconclusive`
+                // are part of the shortfall.
+                let breakdown = if m.errored > 0
+                    && m.failed_unmeasurable == 0
+                    && m.censored == 0
+                    && m.inconclusive == 0
+                {
+                    format!("{}", m.errored)
+                } else {
+                    let mut parts = Vec::new();
+                    if m.errored > 0 {
+                        parts.push(format!("{} tooling-errored", m.errored));
+                    }
+                    if m.failed_unmeasurable > 0 {
+                        parts.push(format!("{} failed_unmeasurable", m.failed_unmeasurable));
+                    }
+                    if m.censored > 0 {
+                        parts.push(format!("{} censored", m.censored));
+                    }
+                    if m.inconclusive > 0 {
+                        parts.push(format!("{} inconclusive", m.inconclusive));
+                    }
+                    parts.join(" and ")
+                };
+                format!(
+                    " -- {breakdown} of the {} sample(s) drawn produced no usable value and were \
                  excluded, so this is a draw that mostly failed to *measure*, not a small draw; \
                  if a missing value is itself a failure for this measurement, use \
                  failed_unmeasurable to count it as one directly; if it instead means the \
                  measurement's own precondition was never satisfied, use censored instead; or \
                  map it onto a sentinel outside the limits before analysis (see \
                  docs/cli/yield.md#errored-samples-and-conditional-yield)",
-                n as u64 + m.errored + m.failed_unmeasurable + m.censored
-            )
-        } else {
-            String::new()
-        };
+                    n as u64 + m.errored + m.failed_unmeasurable + m.censored + m.inconclusive
+                )
+            } else {
+                String::new()
+            };
         return Err(format!(
             "measurement '{name}' has {n} usable sample(s), below the minimum of {min_samples}: \
              refusing to report a yield number that cannot carry a confidence interval \
@@ -492,7 +517,7 @@ fn analyze_measurement(
     // a campaign's conditioning rate is visible even though there is no
     // dedicated rate field on the payload.
     if m.censored > 0 {
-        let total_drawn = n_u + m.errored + m.failed_unmeasurable + m.censored;
+        let total_drawn = n_u + m.errored + m.failed_unmeasurable + m.censored + m.inconclusive;
         warnings.push(format!(
             "measurement '{name}': {} of the {total_drawn} sample(s) drawn ({:.1}%) are \
              censored -- their measurement precondition was never satisfied inside the analysis \
@@ -503,6 +528,32 @@ fn analyze_measurement(
              value to fit; see docs/cli/yield.md#errored-samples-and-conditional-yield",
             m.censored,
             m.censored as f64 / total_drawn as f64 * 100.0
+        ));
+    }
+    // Issue #2507: `inconclusive` draws are the fourth and only category
+    // where the draw *did* produce a value. `klt sim` graded that value
+    // untrustworthy -- either its whole corner was disqualified by
+    // `options.fail_on_diagnostic` (issue #2492) or the value itself fell
+    // outside a declared plausibility bound (issue #2493) -- so it was never
+    // compared against the limits, and must not be either here: a converged-
+    // somewhere-impossible number would move the mean, the sigma, and the
+    // Cpk exactly as far as a real one. They get `errored`'s denominator
+    // treatment (`yield_drawn` above is unaffected by `m.inconclusive`),
+    // because a distrusted number is evidence of neither a pass nor a fail.
+    // The rate is reported against the full draw, like `censored`'s.
+    if m.inconclusive > 0 {
+        let total_drawn = n_u + m.errored + m.failed_unmeasurable + m.censored + m.inconclusive;
+        warnings.push(format!(
+            "measurement '{name}': {} of the {total_drawn} sample(s) drawn ({:.1}%) are \
+             inconclusive -- a value existed but `klt sim` did not trust it (a plausibility-bound \
+             violation, or a corner disqualified by options.fail_on_diagnostic), so it was never \
+             graded against the limits; they are excluded from both the numerator and denominator \
+             of the empirical yield below (the `errored` treatment, not `failed_unmeasurable`'s), \
+             and from `distribution`/`capability` -- a number nobody trusts must not move the \
+             mean, sigma, or Cpk a verdict rests on; see \
+             docs/cli/yield.md#errored-samples-and-conditional-yield",
+            m.inconclusive,
+            m.inconclusive as f64 / total_drawn as f64 * 100.0
         ));
     }
     if m.source_corners.len() > 1 {
@@ -566,6 +617,7 @@ fn analyze_measurement(
         errored: m.errored,
         failed_unmeasurable: m.failed_unmeasurable,
         censored: m.censored,
+        inconclusive: m.inconclusive,
         limits: m.limits,
         source_corners: m.source_corners.clone(),
         distribution,
@@ -1454,6 +1506,7 @@ mod tests {
                 errored: 0,
                 failed_unmeasurable: 0,
                 censored: 0,
+                inconclusive: 0,
                 limits,
                 source_corners: vec![],
                 negative_control: None,
@@ -1481,6 +1534,7 @@ mod tests {
                 errored: 0,
                 failed_unmeasurable: 0,
                 censored: 0,
+                inconclusive: 0,
                 limits,
                 source_corners: vec![],
                 negative_control: None,
@@ -2420,6 +2474,207 @@ mod tests {
     }
 
     // ----------------------------------------------------------------- //
+    // `inconclusive` -- a draw whose value existed but was not trustworthy
+    // (issue #2507)
+    // ----------------------------------------------------------------- //
+
+    /// Same shape as [`request`], but with a non-zero `inconclusive` count --
+    /// draws `klt sim` graded `"inconclusive"` (a plausibility-bound
+    /// violation, or a corner disqualified by `options.fail_on_diagnostic`).
+    fn request_with_inconclusive(
+        samples: Vec<f64>,
+        limits: Limits,
+        inconclusive: u64,
+    ) -> YieldRequest {
+        let mut req = request(samples, limits);
+        req.measurements[0].inconclusive = inconclusive;
+        req
+    }
+
+    #[test]
+    fn inconclusive_draws_are_excluded_from_both_the_numerator_and_denominator_of_the_yield() {
+        // 20 in-spec numeric samples, 5 inconclusive draws: like `censored`
+        // and `errored` (and unlike `failed_unmeasurable`), a distrusted
+        // value is evidence of neither a pass nor a fail, so it must not
+        // enter the empirical yield at either end.
+        let req = request_with_inconclusive(
+            vec![1.0; 20],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            5,
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.inconclusive, 5);
+        assert_eq!(m.n, 20);
+        assert_eq!(m.yield_.empirical.n, 20);
+        close(m.yield_.empirical.estimate, 1.0, 1e-12);
+    }
+
+    #[test]
+    fn inconclusive_draws_are_excluded_from_distribution_fit_and_capability() {
+        let samples = normal_grid(300, 1.0, 0.01);
+        let limits = Limits {
+            min: Some(0.9),
+            max: Some(1.1),
+            target_yield: None,
+            ..Default::default()
+        };
+        let with_resp = analyze(&request_with_inconclusive(samples.clone(), limits, 50)).unwrap();
+        let without_resp = analyze(&request(samples, limits)).unwrap();
+        let with_m = &with_resp.measurements[0];
+        let without_m = &without_resp.measurements[0];
+        // A number nobody trusts must not move the mean, sigma, or Cpk --
+        // the whole point of the field (issue #2507). The Python layer has
+        // already dropped the value, so the statistics are byte-identical.
+        close(with_m.distribution.mean, without_m.distribution.mean, 1e-15);
+        close(
+            with_m.distribution.stddev,
+            without_m.distribution.stddev,
+            1e-15,
+        );
+        close(
+            with_m.capability.cpk.unwrap(),
+            without_m.capability.cpk.unwrap(),
+            1e-15,
+        );
+        close(
+            with_m.yield_.empirical.estimate,
+            without_m.yield_.empirical.estimate,
+            1e-15,
+        );
+        assert_eq!(with_m.yield_.empirical.n, without_m.yield_.empirical.n);
+    }
+
+    #[test]
+    fn inconclusive_draws_are_surfaced_in_the_payload_with_their_own_distinct_warning() {
+        let mut req = request_with_inconclusive(
+            vec![1.0; 20],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            5,
+        );
+        req.measurements[0].errored = 3;
+        req.measurements[0].failed_unmeasurable = 2;
+        req.measurements[0].censored = 4;
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.errored, 3);
+        assert_eq!(m.failed_unmeasurable, 2);
+        assert_eq!(m.censored, 4);
+        assert_eq!(m.inconclusive, 5);
+        // The inconclusive warning says a value *existed* and was distrusted
+        // -- never "produced no value", which is the other three categories'
+        // whole premise.
+        assert!(
+            m.warnings.iter().any(|w| w.contains("inconclusive")
+                && w.contains("a value existed but `klt sim` did not trust it")),
+            "{:?}",
+            m.warnings
+        );
+        assert!(
+            resp.warnings.iter().any(|w| w
+                .contains("excluded inconclusive draws")
+                && w.contains("not trustworthy")),
+            "{:?}",
+            resp.warnings
+        );
+        // Every category's rate is quoted against the same full draw:
+        // 20 numeric + 3 errored + 2 failed_unmeasurable + 4 censored + 5
+        // inconclusive = 34.
+        assert!(
+            m.warnings
+                .iter()
+                .filter(|w| w.contains("inconclusive") || w.contains("censored"))
+                .all(|w| w.contains("of the 34 sample(s) drawn")),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    #[test]
+    fn an_entirely_inconclusive_measurement_does_not_crash_and_names_the_count() {
+        // 100% inconclusive, no trustworthy sample at all -- a clean error
+        // naming the count, not a panic and not a 100%-yield report.
+        let req = request_with_inconclusive(
+            vec![],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            100,
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("0 usable sample(s)"), "{err}");
+        assert!(err.contains("100 inconclusive"), "{err}");
+        assert!(
+            err.contains("#errored-samples-and-conditional-yield"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_measurement_mixing_all_four_excluded_categories_analyzes_cleanly() {
+        let mut req = request_with_inconclusive(
+            normal_grid(50, 1.0, 0.01),
+            Limits {
+                min: Some(0.9),
+                max: Some(1.1),
+                target_yield: None,
+                ..Default::default()
+            },
+            6,
+        );
+        req.measurements[0].errored = 7;
+        req.measurements[0].failed_unmeasurable = 10;
+        req.measurements[0].censored = 8;
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.n, 50);
+        assert_eq!(m.errored, 7);
+        assert_eq!(m.failed_unmeasurable, 10);
+        assert_eq!(m.censored, 8);
+        assert_eq!(m.inconclusive, 6);
+        // Only `failed_unmeasurable` enters the denominator: 50 + 10 = 60.
+        assert_eq!(m.yield_.empirical.n, 60);
+    }
+
+    #[test]
+    fn a_zero_inconclusive_count_adds_no_warning_and_changes_nothing() {
+        // The field is additive: an existing caller that never sets it must
+        // see byte-identical output (no new warning, no changed number).
+        let limits = Limits {
+            min: Some(0.9),
+            max: Some(1.1),
+            target_yield: None,
+            ..Default::default()
+        };
+        let resp = analyze(&request(normal_grid(50, 1.0, 0.01), limits)).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.inconclusive, 0);
+        assert!(
+            !m.warnings.iter().any(|w| w.contains("inconclusive")),
+            "{:?}",
+            m.warnings
+        );
+        assert!(
+            !resp.warnings.iter().any(|w| w.contains("inconclusive")),
+            "{:?}",
+            resp.warnings
+        );
+    }
+
+    // ----------------------------------------------------------------- //
     // Negative control (issue #817)
     // ----------------------------------------------------------------- //
 
@@ -2444,6 +2699,7 @@ mod tests {
                 errored: 0,
                 failed_unmeasurable: 0,
                 censored: 0,
+                inconclusive: 0,
                 limits,
                 source_corners: vec![],
                 negative_control,
