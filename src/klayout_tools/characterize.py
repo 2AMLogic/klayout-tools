@@ -1611,8 +1611,27 @@ def _build_power_tables(
     ``C_load * V**2`` on the rise", sums to the same cycle total but piles all
     the internal-node energy onto the rise edge; measured against IHP's
     ``sg13g2_stdcell`` it is the worse fit by several femtojoules per point.
-    The vendor's split does differ on arcs through a series stack -- see
-    ``docs/cli/characterize.md``'s "Accuracy against a vendor library".)
+
+    The vendor's own split *does* differ from both conventions on arcs that
+    switch a series-stack internal node -- ``sg13g2_nand2_1``'s ``B->Y`` and
+    ``sg13g2_nor2_1``'s ``A->Y`` (issue #2527) -- and it is not a rail-choice
+    artifact: node-voltage tracing on a standalone instance of each cell
+    shows the internal node *discharging* through the just-switched
+    transistor in well under a nanosecond (driven hard on) but *recharging*
+    through the other, permanently-on transistor over a many-tens-of-ns
+    subthreshold tail (it settles near ``Vdd - Vth``, not the rail, because
+    that transistor never turns fully off). Any window short enough to be
+    practical -- ours included, ``settle_ns`` below is a few input ramps'
+    worth, not the ~100 ns the tail needs -- captures the fast discharge in
+    full but only the leading edge of the slow recharge, so whichever output
+    edge is the *recharge* edge reads low relative to its true,
+    infinite-settle energy. That is a window-*length* effect: it shows up on
+    ``Q_vdd`` and ``Q_gnd`` alike, so no per-edge rail-attribution convention
+    -- symmetric or otherwise -- corrects it, and matching the vendor's own
+    split would mean guessing their (undocumented, and almost certainly
+    different) window length rather than adopting a principled convention.
+    See ``docs/cli/characterize.md``'s "Accuracy against a vendor library"
+    for the measured deltas this leaves in place.)
 
     Supply leakage integrated over the (settle-dominated) window is left in:
     at the static currents a standard cell draws (tens to ~100 pW on IHP
