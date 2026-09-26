@@ -25,12 +25,13 @@ The following verbs are implemented across more than one source file. Each entry
 
 ### characterize
 
-The `characterize` verb turns one standard cell's SPICE netlist, at one PVT corner, into an NLDM Liberty (`.lib`) timing model — the write side of the Liberty path `sta`/`synthesize`/`place_and_route` already read.
+The `characterize` verb turns one standard cell's SPICE netlist — or a batch of cells' — at one PVT corner, into one NLDM Liberty (`.lib`) timing and power model — the write side of the Liberty path `sta`/`synthesize`/`place_and_route` already read.
 
 - **characterize_cmd** (`cli/characterize_cmd.py`): CLI interface, JSON envelope output, request document handling
 - **characterize** (`characterize.py`): Core extraction engine — request resolution, single-deck grid stimulus generation, `klt sim` driving, `.meas` reshape into NLDM tables, and the `native/statime` round-trip check
 - **characterize_arcs** (`characterize_arcs.py`): Liberty boolean-`function` parsing and combinational timing-arc derivation — which arcs exist, each arc's `timing_sense`, and the side-input state it must be measured under. Pure logic, no simulation
-- **liberty_writer** (`liberty_writer.py`): Liberty **write** path — the NLDM data model (`Library`/`Cell`/`Pin`/`TimingArc`/`Table2D`) and its renderer. The counterpart to `native/statime/src/liberty.rs`'s reader; deliberately Python rather than Rust (see that module's docstring for the rationale)
+- **liberty_writer** (`liberty_writer.py`): Liberty **write** path — the NLDM data model (`Library`/`Cell`/`Pin`/`TimingArc`/`InternalPower`/`LeakagePower`/`Table2D`) and its renderer. The counterpart to `native/statime/src/liberty.rs`'s reader; deliberately Python rather than Rust (see that module's docstring for the rationale)
+- **liberty_compare** (`liberty_compare.py`): arc-by-arc comparison of two Liberty files (delay, transition, internal power, leakage) under per-field `max(rel * |ref|, abs)` tolerances — the `--compare-to` accuracy harness. Pure: two paths in, a JSON-serialisable report out
 
 ### deck
 

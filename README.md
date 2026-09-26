@@ -126,7 +126,7 @@ klt synthesize request.json              # RTL -> gate-level netlist (Yosys), JS
 klt arith-gen --width 16 --arch kogge-stone  # parallel-prefix adder RTL from a cell map (+ testbench, techmap rules, equiv request)
 klt place-and-route request.json         # netlist -> placed+routed DEF/GDS (OpenROAD), JSON out
 klt sta request.json                     # standalone timing/power analysis of an already-routed DEF (OpenSTA), no re-implementation
-klt characterize request.json            # one standard cell + one PVT corner + a slew x load grid -> NLDM Liberty (.lib) delay/transition model (ngspice)
+klt characterize request.json            # standard cell(s) + one PVT corner + a slew x load grid -> NLDM Liberty (.lib) delay/transition/power/leakage model (ngspice)
 klt power routed.gds power.json          # routed power/ground nets -> resistive network + static IR-drop map
 klt erc routed.gds erc.json --pdk sky130 # per-gate connectivity model + antenna-ratio verdict + core ERC findings (floating gate, unconnected/shorted net, missing tie)
 klt functional-verification verify.json  # cocotb regression (Icarus/Verilator) -> pass/fail + coverage

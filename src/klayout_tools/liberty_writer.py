@@ -25,17 +25,20 @@ here means the emission path has no Rust toolchain dependency at all, so
 ``klt characterize`` degrades to "emitted, round-trip not verified" rather
 than "cannot emit" on a machine with no built extension.
 
-Scope: exactly the NLDM subset ``klt characterize``'s first increment emits
--- library-level units/thresholds/operating conditions, one
-``lu_table_template``, and per-cell pins carrying ``direction``,
-``capacitance``, ``function``, and combinational ``timing()`` groups with
-``cell_rise``/``cell_fall``/``rise_transition``/``fall_transition``. No
-power tables (``rise_power``/``fall_power``/``leakage_power``), no
-sequential-cell constraint arcs (``setup_*``/``hold_*``), no ``bus``/
-``bundle`` pins, no ``when``-qualified arc splitting. Those are deliberate
-omissions of this increment (power/multi-cell: issue #2503), not of the
-format -- a consumer of this module should not read the absence of a group
-as an assertion about the cell.
+Scope: exactly the NLDM subset ``klt characterize`` emits -- library-level
+units/thresholds/operating conditions, one ``lu_table_template`` (plus one
+``power_lut_template`` when any cell carries power tables), per-cell
+``cell_leakage_power`` and per-state ``leakage_power()`` groups, and
+per-cell pins carrying ``direction``, ``capacitance``, ``function``,
+combinational ``timing()`` groups with
+``cell_rise``/``cell_fall``/``rise_transition``/``fall_transition``, and
+``internal_power()`` groups with ``rise_power``/``fall_power`` (issue #2503
+added the power groups and multi-cell libraries). No sequential-cell
+constraint arcs (``setup_*``/``hold_*``), no ``bus``/``bundle`` pins, no
+``when``-qualified arc splitting, no input-pin (hidden) internal power.
+Those are deliberate omissions, not of the format -- a consumer of this
+module should not read the absence of a group as an assertion about the
+cell.
 
 Every number is rendered through :func:`format_number` (``%.<n>g``, default
 6 significant digits) rather than ``repr``/``str``: a fixed-precision
@@ -152,6 +155,28 @@ class TimingArc:
 
 
 @dataclass(frozen=True)
+class InternalPower:
+    """One ``internal_power()`` group on an output pin: the internal
+    (non-load) switching energy per output edge, in the library's energy
+    unit (``voltage_unit**2 * capacitive_load_unit`` -- pJ for 1 V / 1 pF),
+    over the same ``input_net_transition`` x ``total_output_net_capacitance``
+    axes as the timing tables."""
+
+    related_pin: str
+    rise_power: Table2D
+    fall_power: Table2D
+
+
+@dataclass(frozen=True)
+class LeakagePower:
+    """One ``leakage_power()`` group: the static power of one input state,
+    in the library's ``leakage_power_unit``."""
+
+    when: str
+    value: float
+
+
+@dataclass(frozen=True)
 class Pin:
     """One ``pin()`` group."""
 
@@ -161,6 +186,7 @@ class Pin:
     function: str | None = None
     max_capacitance_pf: float | None = None
     arcs: tuple[TimingArc, ...] = ()
+    internal_power: tuple[InternalPower, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -170,6 +196,10 @@ class Cell:
     name: str
     pins: tuple[Pin, ...]
     area: float | None = None
+    #: ``cell_leakage_power`` in the library's ``leakage_power_unit``;
+    #: omitted from the file when ``None`` (never fabricated as ``0``).
+    cell_leakage_power: float | None = None
+    leakage_power: tuple[LeakagePower, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -230,6 +260,10 @@ class Library:
     #: ``index_1``/``index_2`` (which this writer always does, so a reader
     #: that ignores templates -- ``statime``'s does -- is unaffected).
     template_name: str = "klt_char_template"
+    #: Name of the ``power_lut_template`` every ``rise_power``/``fall_power``
+    #: table references. Emitted only when some pin carries an
+    #: ``internal_power`` group.
+    power_template_name: str = "klt_char_power_template"
 
 
 def render_library(library: Library, *, precision: int = DEFAULT_PRECISION) -> str:
@@ -313,6 +347,15 @@ def _render_header(library: Library, precision: int) -> list[str]:
     lines.append(f'    index_2 ("{_index_text(template.index_2, number)}");')
     lines.append("  }")
     lines.append(f"  default_max_transition : {number(max(template.index_1))};")
+    power_template = _first_power_table(library)
+    if power_template is not None:
+        power_template.validate(f"library '{library.name}' power_lut_template source")
+        lines.append(f"  power_lut_template ({library.power_template_name}) {{")
+        lines.append("    variable_1 : input_transition_time;")
+        lines.append("    variable_2 : total_output_net_capacitance;")
+        lines.append(f'    index_1 ("{_index_text(power_template.index_1, number)}");')
+        lines.append(f'    index_2 ("{_index_text(power_template.index_2, number)}");')
+        lines.append("  }")
     return lines
 
 
@@ -321,6 +364,13 @@ def _render_cell(cell: Cell, library: Library, precision: int) -> list[str]:
     lines = [f"  cell ({cell.name}) {{"]
     if cell.area is not None:
         lines.append(f"    area : {number(cell.area)};")
+    if cell.cell_leakage_power is not None:
+        lines.append(f"    cell_leakage_power : {number(cell.cell_leakage_power)};")
+    for leakage in cell.leakage_power:
+        lines.append("    leakage_power () {")
+        lines.append(f"      value : {number(leakage.value)};")
+        lines.append(f'      when : "{_escape(leakage.when)}";')
+        lines.append("    }")
     for pin in cell.pins:
         if pin.direction not in DIRECTIONS:
             raise LibertyWriteError(
@@ -337,6 +387,8 @@ def _render_cell(cell: Cell, library: Library, precision: int) -> list[str]:
             lines.append(f"      max_capacitance : {number(pin.max_capacitance_pf)};")
         for arc in pin.arcs:
             lines.extend(_render_arc(arc, cell, pin, library, number))
+        for power in pin.internal_power:
+            lines.extend(_render_internal_power(power, cell, pin, library, number))
         lines.append("    }")
     lines.append("  }")
     return lines
@@ -370,6 +422,29 @@ def _render_arc(
         )
         table.validate(where)
         lines.extend(_render_table(group, table, library.template_name, number))
+    lines.append("      }")
+    return lines
+
+
+def _render_internal_power(
+    power: InternalPower,
+    cell: Cell,
+    pin: Pin,
+    library: Library,
+    number,
+) -> list[str]:
+    lines = ["      internal_power () {"]
+    lines.append(f'        related_pin : "{power.related_pin}";')
+    for group, table in (
+        ("rise_power", power.rise_power),
+        ("fall_power", power.fall_power),
+    ):
+        where = (
+            f"cell '{cell.name}' pin '{pin.name}' internal_power from "
+            f"'{power.related_pin}' {group}"
+        )
+        table.validate(where)
+        lines.extend(_render_table(group, table, library.power_template_name, number))
     lines.append("      }")
     return lines
 
@@ -416,6 +491,14 @@ def _first_table(library: Library) -> Table2D:
         "a Liberty NLDM library needs at least one timing arc to derive its "
         "lu_table_template axes from"
     )
+
+
+def _first_power_table(library: Library) -> Table2D | None:
+    for cell in library.cells:
+        for pin in cell.pins:
+            for power in pin.internal_power:
+                return power.rise_power
+    return None
 
 
 def _escape(text: str) -> str:

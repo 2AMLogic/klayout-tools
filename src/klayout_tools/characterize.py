@@ -97,6 +97,12 @@ _TABLES = (
     ("fall_transition", "tf"),
 )
 
+#: The two NLDM internal-energy tables every arc also carries (issue #2503).
+POWER_TABLES = ("rise_power", "fall_power")
+
+#: Every per-arc table in the response, in report order.
+TABLE_NAMES = tuple(name for name, _ in _TABLES) + POWER_TABLES
+
 
 class CharacterizeError(Exception):
     """Raised for any failure to produce a characterization: a malformed
@@ -118,37 +124,180 @@ def run_characterize(
     lib_path: str | None = None,
     backend: str | None = None,
     keep_artifacts: bool | None = None,
+    cells: list[str] | tuple[str, ...] | None = None,
+    compare_to: str | None = None,
 ) -> dict[str, Any]:
-    """Characterize one cell at one corner and emit its NLDM ``.lib``.
+    """Characterize one cell -- or a batch of cells -- at one corner and emit
+    one NLDM ``.lib`` covering all of them.
 
     ``request_path`` is a ``klt characterize`` request document (see
     ``docs/cli/characterize.md``). Paths inside it resolve against the
-    request file's own directory, as in every other request-taking verb.
+    request file's own directory, as in every other request-taking verb. It
+    carries either ``cell`` (one cell, issue #2502's form) or ``cells`` (an
+    array of the same objects, issue #2503's batch mode); every cell shares
+    the request's one ``corner``/``grid``/``thresholds``/``models``/
+    ``options``, which is what lets their tables live in one library.
+
+    ``cells`` restricts a batch request to the named subset (the CLI's
+    repeatable ``--cell``). ``compare_to`` names a reference Liberty file
+    (typically the vendor library for the same corner) to compare the
+    emitted one against arc by arc -- see
+    :mod:`klayout_tools.liberty_compare`; the result lands in the response's
+    ``comparison`` block (``null`` when not asked for).
 
     ``outdir`` overrides where the generated testbench / sim request / sim
     report / ``.lib`` are written (default: a ``.klt/characterize/``
-    directory next to the request file). ``lib_path`` overrides the emitted
-    Liberty path (default: ``<outdir>/<library name>.lib``, or the request's
-    own ``output.lib``). ``backend``/``keep_artifacts`` are forwarded to
-    ``klt sim`` -- the grid is a single corner, so the default ``local``
-    backend is the right one and there is normally no reason to change it.
+    directory next to the request file; batch mode writes each cell's
+    simulation artifacts under ``<outdir>/cells/<cell>/``). ``lib_path``
+    overrides the emitted Liberty path (default: ``<outdir>/<library
+    name>.lib``, or the request's own ``output.lib``). ``backend``/
+    ``keep_artifacts`` are forwarded to ``klt sim``.
 
     Raises :class:`CharacterizeError` for every failure mode; never returns
-    a partially-populated table.
+    a partially-populated table, and a batch run in which any one cell fails
+    emits nothing (the error names the cell).
     """
     request = _load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path)) or os.getcwd()
+    batch = "cells" in request
+    if cells and not batch:
+        raise CharacterizeError(
+            "--cell selects cells out of a batch request's `cells` array; this "
+            "request uses the single-cell `cell` form"
+        )
 
-    cell = _resolve_cell(request, request_dir)
     corner = _resolve_corner(request)
     grid = _resolve_grid(request)
     thresholds = _resolve_thresholds(request)
     options = _resolve_options(request, grid, thresholds, request_dir)
-    arcs = _resolve_arcs(request, cell)
+
+    # Resolve *every* cell before simulating *any*: a typo in the fifth
+    # cell's pin list must not cost the first four cells' simulation time.
+    resolved: list[tuple[dict[str, Any], tuple[DerivedArc, ...]]] = []
+    for where, spec in _cell_entries(request, tuple(cells) if cells else None):
+        cell = _resolve_cell_spec(spec, request_dir, where)
+        if batch:
+            arcs = _resolve_arcs_for(spec.get("arcs"), cell, f"{where}.arcs")
+        else:
+            arcs = _resolve_arcs(request, cell)
+        resolved.append((cell, arcs))
 
     work_dir = _resolve_outdir(outdir, request, request_dir)
     os.makedirs(work_dir, exist_ok=True)
 
+    results: list[dict[str, Any]] = []
+    for cell, arcs in resolved:
+        cell_dir = (
+            os.path.join(work_dir, "cells", _slug(cell["name"])) if batch else work_dir
+        )
+        try:
+            results.append(
+                _characterize_cell(
+                    cell=cell,
+                    arcs=arcs,
+                    corner=corner,
+                    grid=grid,
+                    thresholds=thresholds,
+                    options=options,
+                    request=request,
+                    request_dir=request_dir,
+                    work_dir=cell_dir,
+                    backend=backend,
+                    keep_artifacts=keep_artifacts,
+                )
+            )
+        except CharacterizeError as exc:
+            if not batch:
+                raise
+            raise CharacterizeError(f"cell '{cell['name']}': {exc}") from exc
+
+    library = _build_library(
+        request=request,
+        results=results,
+        corner=corner,
+        grid=grid,
+        thresholds=thresholds,
+        request_path=request_path,
+        batch=batch,
+    )
+    emitted_path = _resolve_lib_path(lib_path, request, request_dir, work_dir, library)
+    try:
+        lib_text = liberty_writer.render_library(library)
+    except liberty_writer.LibertyWriteError as exc:
+        raise CharacterizeError(f"could not emit Liberty: {exc}") from exc
+    with open(emitted_path, "w", encoding="utf-8") as handle:
+        handle.write(lib_text)
+
+    roundtrip = roundtrip_check_cells(
+        lib_path=emitted_path,
+        cells=[
+            (
+                result["cell"]["name"],
+                result["cell"]["input_pins"],
+                result["cell"]["output_pins"],
+            )
+            for result in results
+        ],
+        work_dir=work_dir,
+    )
+    if roundtrip["status"] == "fail":
+        raise CharacterizeError(
+            f"the emitted Liberty at '{emitted_path}' does not parse through "
+            f"{ROUNDTRIP_ENGINE}'s reader: {roundtrip['message']}"
+        )
+
+    comparison = None
+    if compare_to is not None:
+        from . import liberty_compare  # local: only needed when asked for
+
+        try:
+            comparison = liberty_compare.compare_libraries(
+                emitted_path,
+                os.path.abspath(compare_to),
+                cells=[result["cell"]["name"] for result in results],
+            )
+        except liberty_compare.LibertyCompareError as exc:
+            raise CharacterizeError(
+                f"could not compare against '{compare_to}': {exc}"
+            ) from exc
+
+    return _build_response(
+        request_path=request_path,
+        grid=grid,
+        corner=corner,
+        thresholds=thresholds,
+        options=options,
+        results=results,
+        library=library,
+        emitted_path=emitted_path,
+        roundtrip=roundtrip,
+        comparison=comparison,
+        request=request,
+        batch=batch,
+    )
+
+
+def _characterize_cell(
+    *,
+    cell: dict[str, Any],
+    arcs: tuple[DerivedArc, ...],
+    corner: dict[str, Any],
+    grid: dict[str, tuple[float, ...]],
+    thresholds: liberty_writer.Thresholds,
+    options: dict[str, Any],
+    request: dict[str, Any],
+    request_dir: str,
+    work_dir: str,
+    backend: str | None,
+    keep_artifacts: bool | None,
+) -> dict[str, Any]:
+    """Run one cell's whole grid (timing, power, and leakage) as a single
+    ``klt sim`` request and reshape the results into tables.
+
+    This is #2502's single-cell mechanism unchanged in structure; batch mode
+    is this function in a loop, each cell in its own ``work_dir``.
+    """
+    os.makedirs(work_dir, exist_ok=True)
     plan = _build_stimulus_plan(
         cell=cell,
         corner=corner,
@@ -192,56 +341,21 @@ def run_characterize(
     values = _extract_measurements(sim_report, sim_report_path)
     tables = _build_tables(plan, grid, values, thresholds)
     _check_settle_margin(plan, grid, tables, options)
+    power_tables = _build_power_tables(plan, grid, values, corner)
+    leakage = _build_leakage(plan, values, corner)
 
-    library = _build_library(
-        request=request,
-        cell=cell,
-        corner=corner,
-        grid=grid,
-        thresholds=thresholds,
-        tables=tables,
-        arcs=arcs,
-        request_path=request_path,
-    )
-    emitted_path = _resolve_lib_path(lib_path, request, request_dir, work_dir, library)
-    try:
-        lib_text = liberty_writer.render_library(library)
-    except liberty_writer.LibertyWriteError as exc:
-        raise CharacterizeError(f"could not emit Liberty: {exc}") from exc
-    with open(emitted_path, "w", encoding="utf-8") as handle:
-        handle.write(lib_text)
-
-    roundtrip = roundtrip_check(
-        lib_path=emitted_path,
-        cell_name=cell["name"],
-        input_pins=cell["input_pins"],
-        output_pins=cell["output_pins"],
-        work_dir=work_dir,
-    )
-    if roundtrip["status"] == "fail":
-        raise CharacterizeError(
-            f"the emitted Liberty at '{emitted_path}' does not parse through "
-            f"{ROUNDTRIP_ENGINE}'s reader: {roundtrip['message']}"
-        )
-
-    return _build_response(
-        request_path=request_path,
-        cell=cell,
-        corner=corner,
-        grid=grid,
-        thresholds=thresholds,
-        options=options,
-        arcs=arcs,
-        tables=tables,
-        library=library,
-        emitted_path=emitted_path,
-        testbench_path=testbench_path,
-        sim_request_path=sim_request_path,
-        sim_report_path=sim_report_path,
-        sim_report=sim_report,
-        roundtrip=roundtrip,
-        request=request,
-    )
+    return {
+        "cell": cell,
+        "arcs": arcs,
+        "plan": plan,
+        "tables": tables,
+        "power_tables": power_tables,
+        "leakage": leakage,
+        "testbench_path": testbench_path,
+        "sim_request_path": sim_request_path,
+        "sim_report_path": sim_report_path,
+        "sim_report": sim_report,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -255,7 +369,37 @@ def _load_request(request_path: str) -> dict[str, Any]:
         raise CharacterizeError(
             f"request '{request_path}' must be a JSON object, not {type(data).__name__}"
         )
-    for field in ("cell", "corner", "grid"):
+    # Exactly one of `cell` (the single-cell form, issue #2502) and `cells`
+    # (batch mode, issue #2503) -- both, or neither, is ambiguous.
+    has_cell = "cell" in data
+    has_cells = "cells" in data
+    if has_cell and has_cells:
+        raise CharacterizeError(
+            "request.cell and request.cells are mutually exclusive: use `cell` "
+            "for one cell or `cells` (an array of the same objects) for a batch"
+        )
+    if not has_cell and not has_cells:
+        raise CharacterizeError(
+            "request.cell is required (or request.cells, an array of cell "
+            "objects, to characterize several cells into one `.lib`)"
+        )
+    if has_cell and not isinstance(data["cell"], dict):
+        raise CharacterizeError("request.cell must be an object")
+    if has_cells:
+        cells = data["cells"]
+        if not isinstance(cells, list) or not cells:
+            raise CharacterizeError(
+                "request.cells must be a non-empty array of cell objects"
+            )
+        for index, entry in enumerate(cells):
+            if not isinstance(entry, dict):
+                raise CharacterizeError(f"request.cells[{index}] must be an object")
+        if "arcs" in data:
+            raise CharacterizeError(
+                "request.arcs is the single-cell override; in batch mode put "
+                "an `arcs` array on the request.cells[] entry it applies to"
+            )
+    for field in ("corner", "grid"):
         if field not in data:
             raise CharacterizeError(f"request.{field} is required")
         if not isinstance(data[field], dict):
@@ -263,15 +407,63 @@ def _load_request(request_path: str) -> dict[str, Any]:
     return data
 
 
+def _cell_entries(
+    request: dict[str, Any], selected: tuple[str, ...] | None
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return ``(field_prefix, cell_spec)`` for every cell this run covers.
+
+    The single-cell form yields one entry whose error-message prefix is
+    ``request.cell`` (unchanged from #2502); batch mode yields one per
+    ``request.cells[i]``, filtered to ``selected`` names when given (the
+    CLI's repeatable ``--cell``). A selected name the request does not
+    declare is an error, never a silent no-op -- "characterize these
+    cells" that quietly characterizes fewer is exactly the kind of
+    under-delivery a caller cannot see.
+    """
+    if "cell" in request:
+        entries = [("request.cell", request["cell"])]
+    else:
+        entries = [
+            (f"request.cells[{index}]", spec)
+            for index, spec in enumerate(request["cells"])
+        ]
+    names = [spec.get("name") for _, spec in entries]
+    duplicates = sorted(
+        {name for name in names if isinstance(name, str) and names.count(name) > 1}
+    )
+    if duplicates:
+        raise CharacterizeError(
+            f"request.cells declares {', '.join(duplicates)} more than once -- "
+            "a Liberty library holds one cell() group per name"
+        )
+    if selected:
+        unknown = [name for name in selected if name not in names]
+        if unknown:
+            raise CharacterizeError(
+                f"--cell names {', '.join(unknown)}, which the request does not "
+                f"declare (declared: {', '.join(str(name) for name in names)})"
+            )
+        wanted = set(selected)
+        entries = [entry for entry in entries if entry[1].get("name") in wanted]
+    return entries
+
+
 def _resolve_cell(request: dict[str, Any], request_dir: str) -> dict[str, Any]:
-    spec = request["cell"]
+    """Resolve the single-cell form's ``request.cell`` (kept for callers of
+    the #2502 shape; batch mode goes through :func:`_resolve_cell_spec`)."""
+    return _resolve_cell_spec(request["cell"], request_dir, "request.cell")
+
+
+def _resolve_cell_spec(
+    spec: dict[str, Any], request_dir: str, where: str
+) -> dict[str, Any]:
     name = spec.get("name")
     if not isinstance(name, str) or not name.strip():
-        raise CharacterizeError("request.cell.name is required (the cell's name)")
+        raise CharacterizeError(f"{where}.name is required (the cell's name)")
     netlist = spec.get("netlist")
     if not isinstance(netlist, str) or not netlist.strip():
         raise CharacterizeError(
-            "request.cell.netlist is required (a SPICE file defining the "
+            f"{where}.netlist is required (a SPICE file defining the "
             "cell's .subckt -- post-extraction where available)"
         )
     netlist_path = _resolve_relative(netlist, request_dir)
@@ -281,23 +473,23 @@ def _resolve_cell(request: dict[str, Any], request_dir: str) -> dict[str, Any]:
     subckt = spec.get("subckt") or name
     terminals = _read_subckt_terminals(netlist_path, subckt)
 
-    pins = _resolve_pins(spec, subckt)
-    power = _resolve_power_pins(spec, terminals, pins)
+    pins = _resolve_pins(spec, subckt, where)
+    power = _resolve_power_pins(spec, terminals, pins, where)
 
     declared = {pin["name"] for pin in pins} | set(power.values())
     missing = [terminal for terminal in terminals if terminal not in declared]
     if missing:
         raise CharacterizeError(
             f"subcircuit '{subckt}' declares terminal(s) "
-            f"{', '.join(missing)} that request.cell.pins / "
-            "request.cell.power_pins do not account for -- every terminal "
+            f"{', '.join(missing)} that {where}.pins / "
+            f"{where}.power_pins do not account for -- every terminal "
             "must be either a signal pin or a named supply, so the generated "
             "testbench cannot leave one floating"
         )
     unknown = [pin["name"] for pin in pins if pin["name"] not in terminals]
     if unknown:
         raise CharacterizeError(
-            f"request.cell.pins names {', '.join(unknown)}, which "
+            f"{where}.pins names {', '.join(unknown)}, which "
             f"subcircuit '{subckt}' does not declare as a terminal"
         )
 
@@ -313,14 +505,17 @@ def _resolve_cell(request: dict[str, Any], request_dir: str) -> dict[str, Any]:
             pin["name"] for pin in pins if pin["direction"] == "output"
         ),
         "area": spec.get("area"),
+        "where": where,
     }
 
 
-def _resolve_pins(spec: dict[str, Any], subckt: str) -> tuple[dict[str, Any], ...]:
+def _resolve_pins(
+    spec: dict[str, Any], subckt: str, where: str = "request.cell"
+) -> tuple[dict[str, Any], ...]:
     raw = spec.get("pins")
     if not isinstance(raw, list) or not raw:
         raise CharacterizeError(
-            "request.cell.pins is required: an array of "
+            f"{where}.pins is required: an array of "
             '{"name", "direction"} objects (output pins additionally need '
             '"function", the cell\'s Liberty boolean expression)'
         )
@@ -328,19 +523,19 @@ def _resolve_pins(spec: dict[str, Any], subckt: str) -> tuple[dict[str, Any], ..
     seen: set[str] = set()
     for index, entry in enumerate(raw):
         if not isinstance(entry, dict):
-            raise CharacterizeError(f"request.cell.pins[{index}] must be an object")
+            raise CharacterizeError(f"{where}.pins[{index}] must be an object")
         pin_name = entry.get("name")
         if not isinstance(pin_name, str) or not pin_name.strip():
-            raise CharacterizeError(f"request.cell.pins[{index}].name is required")
+            raise CharacterizeError(f"{where}.pins[{index}].name is required")
         if pin_name in seen:
             raise CharacterizeError(
-                f"request.cell.pins declares '{pin_name}' more than once"
+                f"{where}.pins declares '{pin_name}' more than once"
             )
         seen.add(pin_name)
         direction = entry.get("direction")
         if direction not in ("input", "output"):
             raise CharacterizeError(
-                f'request.cell.pins[{index}].direction must be "input" or '
+                f'{where}.pins[{index}].direction must be "input" or '
                 f'"output" (got {direction!r}); `inout` pins are out of scope '
                 "for this command"
             )
@@ -349,7 +544,7 @@ def _resolve_pins(spec: dict[str, Any], subckt: str) -> tuple[dict[str, Any], ..
             not isinstance(function, str) or not function.strip()
         ):
             raise CharacterizeError(
-                f"request.cell.pins[{index}] ('{pin_name}') is an output pin "
+                f"{where}.pins[{index}] ('{pin_name}') is an output pin "
                 "and needs a Liberty `function` expression -- that is what "
                 "the timing arcs and their side-input states are derived from"
             )
@@ -360,19 +555,19 @@ def _resolve_pins(spec: dict[str, Any], subckt: str) -> tuple[dict[str, Any], ..
                 "function": function if direction == "output" else None,
                 "capacitance_pf": _optional_positive(
                     entry.get("capacitance_pf"),
-                    f"request.cell.pins[{index}].capacitance_pf",
+                    f"{where}.pins[{index}].capacitance_pf",
                 ),
             }
         )
     if not any(pin["direction"] == "input" for pin in pins):
         raise CharacterizeError(
             f"subcircuit '{subckt}' has no input pin declared in "
-            "request.cell.pins -- there is nothing to drive"
+            f"{where}.pins -- there is nothing to drive"
         )
     if not any(pin["direction"] == "output" for pin in pins):
         raise CharacterizeError(
             f"subcircuit '{subckt}' has no output pin declared in "
-            "request.cell.pins -- there is nothing to measure"
+            f"{where}.pins -- there is nothing to measure"
         )
     return tuple(pins)
 
@@ -381,13 +576,15 @@ def _resolve_power_pins(
     spec: dict[str, Any],
     terminals: tuple[str, ...],
     pins: tuple[dict[str, Any], ...],
+    where: str = "request.cell",
 ) -> dict[str, str]:
     raw = spec.get("power_pins")
     if raw is None:
         signal = {pin["name"] for pin in pins}
         remaining = [terminal for terminal in terminals if terminal not in signal]
         raise CharacterizeError(
-            'request.cell.power_pins is required: {"vdd": "<terminal>", '
+            f"{where}.power_pins is required: "
+            '{"vdd": "<terminal>", '
             '"gnd": "<terminal>"} naming which subcircuit terminals are the '
             "supply rails"
             + (
@@ -397,15 +594,15 @@ def _resolve_power_pins(
             )
         )
     if not isinstance(raw, dict):
-        raise CharacterizeError("request.cell.power_pins must be an object")
+        raise CharacterizeError(f"{where}.power_pins must be an object")
     resolved: dict[str, str] = {}
     for key in ("vdd", "gnd"):
         value = raw.get(key)
         if not isinstance(value, str) or not value.strip():
-            raise CharacterizeError(f"request.cell.power_pins.{key} is required")
+            raise CharacterizeError(f"{where}.power_pins.{key} is required")
         if value not in terminals:
             raise CharacterizeError(
-                f"request.cell.power_pins.{key} names '{value}', which is not "
+                f"{where}.power_pins.{key} names '{value}', which is not "
                 "a terminal of the cell's subcircuit"
             )
         resolved[key] = value
@@ -414,7 +611,7 @@ def _resolve_power_pins(
             continue
         if not isinstance(extra_value, str) or extra_value not in terminals:
             raise CharacterizeError(
-                f"request.cell.power_pins.{extra_key} must name a terminal of "
+                f"{where}.power_pins.{extra_key} must name a terminal of "
                 "the cell's subcircuit"
             )
         resolved[extra_key] = extra_value
@@ -460,8 +657,8 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
         return terminals
     raise CharacterizeError(
         f"no `.subckt {subckt}` found in '{netlist_path}' -- set "
-        "request.cell.subckt if the subcircuit name differs from "
-        "request.cell.name"
+        "the cell's `subckt` field if the subcircuit name differs from "
+        "its `name`"
     )
 
 
@@ -657,9 +854,14 @@ def _resolve_arcs(
     it is not a shortcut around the pin metadata, which still has to declare
     the pins the arc names.
     """
-    override = request.get("arcs")
+    return _resolve_arcs_for(request.get("arcs"), cell, "request.arcs")
+
+
+def _resolve_arcs_for(
+    override: Any, cell: dict[str, Any], where: str
+) -> tuple[DerivedArc, ...]:
     if override is not None:
-        return _arcs_from_request(override, cell)
+        return _arcs_from_request(override, cell, where)
 
     arcs: list[DerivedArc] = []
     for pin in cell["pins"]:
@@ -686,36 +888,38 @@ def _resolve_arcs(
     return tuple(arcs)
 
 
-def _arcs_from_request(override: Any, cell: dict[str, Any]) -> tuple[DerivedArc, ...]:
+def _arcs_from_request(
+    override: Any, cell: dict[str, Any], where: str = "request.arcs"
+) -> tuple[DerivedArc, ...]:
     if not isinstance(override, list) or not override:
-        raise CharacterizeError("request.arcs must be a non-empty array when given")
+        raise CharacterizeError(f"{where} must be a non-empty array when given")
     arcs: list[DerivedArc] = []
     for index, entry in enumerate(override):
         if not isinstance(entry, dict):
-            raise CharacterizeError(f"request.arcs[{index}] must be an object")
+            raise CharacterizeError(f"{where}[{index}] must be an object")
         output_pin = entry.get("output_pin")
         related_pin = entry.get("related_pin")
         if output_pin not in cell["output_pins"]:
             raise CharacterizeError(
-                f"request.arcs[{index}].output_pin must name a declared "
+                f"{where}[{index}].output_pin must name a declared "
                 f"output pin (got {output_pin!r})"
             )
         if related_pin not in cell["input_pins"]:
             raise CharacterizeError(
-                f"request.arcs[{index}].related_pin must name a declared "
+                f"{where}[{index}].related_pin must name a declared "
                 f"input pin (got {related_pin!r})"
             )
         timing_sense = entry.get("timing_sense")
         if timing_sense not in liberty_writer.TIMING_SENSES:
             raise CharacterizeError(
-                f"request.arcs[{index}].timing_sense must be one of "
+                f"{where}[{index}].timing_sense must be one of "
                 f"{', '.join(liberty_writer.TIMING_SENSES)} (got "
                 f"{timing_sense!r})"
             )
         measured_sense = entry.get("measured_sense", timing_sense)
         if measured_sense not in ("positive_unate", "negative_unate"):
             raise CharacterizeError(
-                f"request.arcs[{index}].measured_sense must be "
+                f"{where}[{index}].measured_sense must be "
                 '"positive_unate" or "negative_unate" -- it says which input '
                 "edge produces the rising output edge under this arc's own "
                 "side-input state, so it cannot itself be non-unate"
@@ -731,6 +935,7 @@ def _arcs_from_request(override: Any, cell: dict[str, Any]) -> tuple[DerivedArc,
                     cell=cell,
                     related_pin=related_pin,
                     index=index,
+                    where=where,
                 ),
             )
         )
@@ -743,24 +948,25 @@ def _side_inputs_from_request(
     cell: dict[str, Any],
     related_pin: str,
     index: int,
+    where: str = "request.arcs",
 ) -> tuple[tuple[str, bool], ...]:
     """Validate one explicit ``request.arcs[i].side_inputs`` object."""
     if not isinstance(side_inputs, dict):
         raise CharacterizeError(
-            f"request.arcs[{index}].side_inputs must be an object mapping "
+            f"{where}[{index}].side_inputs must be an object mapping "
             "pin name -> boolean"
         )
     resolved: list[tuple[str, bool]] = []
     for pin_name in sorted(side_inputs):
         if pin_name not in cell["input_pins"] or pin_name == related_pin:
             raise CharacterizeError(
-                f"request.arcs[{index}].side_inputs names {pin_name!r}, "
+                f"{where}[{index}].side_inputs names {pin_name!r}, "
                 "which is not another declared input pin of this cell"
             )
         value = side_inputs[pin_name]
         if not isinstance(value, bool):
             raise CharacterizeError(
-                f"request.arcs[{index}].side_inputs.{pin_name} must be a boolean"
+                f"{where}[{index}].side_inputs.{pin_name} must be a boolean"
             )
         resolved.append((pin_name, value))
     return tuple(resolved)
@@ -817,9 +1023,22 @@ def _build_stimulus_plan(
 
     One cell instance per (arc, input transition, output load) triple, each
     with a private ramp source and load capacitor on a private input/output
-    node pair, all sharing one supply. The window drives every input low ->
+    node pair, all fed from one supply. The window drives every input low ->
     high -> low once, so one instance yields both output edges and therefore
-    all four NLDM quantities for its grid point.
+    all four NLDM timing quantities for its grid point.
+
+    **Power instrumentation (issue #2503)** rides on the same instances:
+    each one reaches the shared ``vdd``/``0`` rails through its own
+    zero-volt ammeter pair (``Vpd<tag>``/``Vpg<tag>``), so the charge each
+    rail delivers to *that* instance over *that* edge is one ``INTEG`` card
+    away -- no second simulation campaign, and no cross-talk between the
+    instances sharing the deck. See :func:`_build_power_tables` for how the
+    four charges per point become ``rise_power``/``fall_power``.
+
+    **Leakage** is measured on ``2**n`` extra, never-switching instances --
+    one per input state, supply (and every input held high) through its own
+    ammeter, low inputs tied to ground -- whose average supply current over
+    the whole run is the static current of that state. Same deck, same run.
     """
     vdd = corner["supply_v"]
     ramps = options["ramps_ns"]
@@ -835,7 +1054,10 @@ def _build_stimulus_plan(
         f"* corner: {corner['name']}",
         "*",
         "* One instance per (arc, input transition, output load) grid point;",
-        "* a single tran run drives every input low->high->low once.",
+        "* a single tran run drives every input low->high->low once. Every",
+        "* instance reaches the rails through its own 0 V ammeter pair (Vpd*/Vpg*)",
+        "* so its per-edge supply charge can be integrated; lk* instances never",
+        "* switch and measure the static (leakage) current of one input state.",
     ]
     osdi = options["osdi_preload"]
     if osdi:
@@ -860,6 +1082,16 @@ def _build_stimulus_plan(
     for key, terminal in cell["power_pins"].items():
         if key not in ("vdd", "gnd"):
             rail_nodes.setdefault(terminal, "vdd" if "v" in key.lower() else "0")
+
+    # Integration windows: the first input edge (rising) owns
+    # [rise_start, fall_start], the second (falling) owns [fall_start, stop].
+    # Each window starts before its own edge and ends after the output has
+    # settled (the settle check below enforces that), so the whole switching
+    # event -- short-circuit current included -- lands inside it.
+    windows = {
+        "RISE": (rise_start, fall_start),
+        "FALL": (fall_start, stop_ns),
+    }
 
     measurements: list[dict[str, Any]] = []
     points: list[dict[str, Any]] = []
@@ -889,6 +1121,7 @@ def _build_stimulus_plan(
                     vdd=vdd,
                     thresholds=thresholds,
                 )
+                cards.extend(_power_cards(tag=tag, arc=arc, windows=windows))
                 measurements.extend(cards)
                 points.append(
                     {
@@ -902,11 +1135,31 @@ def _build_stimulus_plan(
                     }
                 )
 
+    leakage_states = _leakage_states(cell)
+    for state_index, state in enumerate(leakage_states):
+        tag = f"lk{state_index}"
+        lines.extend(
+            _leakage_instance_lines(
+                tag=tag, cell=cell, state=state, rail_nodes=rail_nodes
+            )
+        )
+        measurements.append(
+            {
+                "name": f"{tag}_i",
+                "spice": (
+                    f".meas tran {tag}_i AVG i(Vpl{tag}) "
+                    f"FROM=0 TO={_spice_number(stop_ns)}n"
+                ),
+                "unit": "A",
+            }
+        )
+
     return {
         "netlist_text": "\n".join(lines) + "\n",
         "measurements": measurements,
         "points": points,
         "arc_count": len(arcs),
+        "leakage_states": leakage_states,
         "window": {
             "rise_start_ns": rise_start,
             "fall_start_ns": fall_start,
@@ -935,6 +1188,17 @@ def _full_side_state(
     )
 
 
+def _metered_rail_nodes(
+    tag: str, cell: dict[str, Any], rail_nodes: dict[str, str]
+) -> dict[str, str]:
+    """``rail_nodes`` with the cell's primary ``vdd``/``gnd`` terminals moved
+    onto this instance's private ammeter nodes."""
+    nodes = dict(rail_nodes)
+    nodes[cell["power_pins"]["vdd"]] = f"pd_{tag}"
+    nodes[cell["power_pins"]["gnd"]] = f"pg_{tag}"
+    return nodes
+
+
 def _instance_lines(
     *,
     tag: str,
@@ -959,8 +1223,9 @@ def _instance_lines(
         else:
             node_of[name] = "vdd" if side_map[name] else "0"
 
+    metered = _metered_rail_nodes(tag, cell, rail_nodes)
     nodes = [
-        node_of.get(terminal) or rail_nodes[terminal] for terminal in cell["terminals"]
+        node_of.get(terminal) or metered[terminal] for terminal in cell["terminals"]
     ]
     lines = [
         f"V{tag} i_{tag} 0 PWL(0 0 "
@@ -968,6 +1233,10 @@ def _instance_lines(
         f"{_spice_number(rise_start + ramp_ns)}n {_spice_number(vdd)} "
         f"{_spice_number(fall_start)}n {_spice_number(vdd)} "
         f"{_spice_number(fall_start + ramp_ns)}n 0)",
+        # 0 V ammeters: i(Vpd) is the current the supply delivers INTO the
+        # cell's vdd pin, i(Vpg) the current flowing OUT of its gnd pin.
+        f"Vpd{tag} vdd pd_{tag} DC 0",
+        f"Vpg{tag} pg_{tag} 0 DC 0",
         f"X{tag} {' '.join(nodes)} {cell['subckt']}",
     ]
     for output in cell["output_pins"]:
@@ -975,6 +1244,61 @@ def _instance_lines(
             f"C{tag}_{_slug(output)} {node_of[output]} 0 {_spice_number(load_pf)}p"
         )
     return lines
+
+
+def _leakage_states(cell: dict[str, Any]) -> tuple[tuple[tuple[str, bool], ...], ...]:
+    """Every assignment of the cell's input pins, in a fixed order (the first
+    input is the most significant bit), each as ``((pin, value), ...)``.
+
+    Exhaustive over ``2**n`` for the same reason arc derivation is: a
+    standard cell has a handful of inputs, and a vendor ``.lib`` reports one
+    ``leakage_power`` group per state.
+    """
+    inputs = cell["input_pins"]
+    states = []
+    for code in range(2 ** len(inputs)):
+        states.append(
+            tuple(
+                (pin, bool((code >> (len(inputs) - 1 - position)) & 1))
+                for position, pin in enumerate(inputs)
+            )
+        )
+    return tuple(states)
+
+
+def _leakage_instance_lines(
+    *,
+    tag: str,
+    cell: dict[str, Any],
+    state: tuple[tuple[str, bool], ...],
+    rail_nodes: dict[str, str],
+) -> list[str]:
+    values = dict(state)
+    node_of: dict[str, str] = {}
+    for pin in cell["pins"]:
+        name = pin["name"]
+        if pin["direction"] == "output":
+            node_of[name] = f"o_{tag}_{_slug(name)}"
+        else:
+            # A high input is tied to the *metered* supply node, not the
+            # shared rail: its gate leakage is drawn from the supply too, and
+            # static power is every source's V * I -- a low input's source
+            # sits at 0 V and delivers none. Measured on IHP sg13g2_inv_1
+            # with A high, routing the input around the ammeter under-reports
+            # the state's leakage by roughly a third (the NMOS gate current).
+            node_of[name] = f"pl_{tag}" if values[name] else "0"
+    nodes = []
+    for terminal in cell["terminals"]:
+        if terminal in node_of:
+            nodes.append(node_of[terminal])
+        elif terminal == cell["power_pins"]["vdd"]:
+            nodes.append(f"pl_{tag}")
+        else:
+            nodes.append(rail_nodes[terminal])
+    return [
+        f"Vpl{tag} vdd pl_{tag} DC 0",
+        f"X{tag} {' '.join(nodes)} {cell['subckt']}",
+    ]
 
 
 def _measurement_cards(
@@ -1032,6 +1356,54 @@ def _measurement_cards(
         {"name": name, "spice": f".meas tran {name} {body}", "unit": "s"}
         for name, body in cards
     ]
+
+
+#: The four supply-charge integrals per grid point, and what each measures:
+#: ``(suffix, ammeter prefix, output edge)``. ``qv*`` is charge drawn from
+#: the vdd rail, ``qg*`` charge returned to the gnd rail, over the window
+#: of the input edge that produces the named *output* edge.
+_POWER_CARDS = (
+    ("qvr", "Vpd", "rise"),
+    ("qgr", "Vpg", "rise"),
+    ("qvf", "Vpd", "fall"),
+    ("qgf", "Vpg", "fall"),
+)
+
+
+def _power_cards(
+    *,
+    tag: str,
+    arc: DerivedArc,
+    windows: dict[str, tuple[float, float]],
+) -> list[dict[str, Any]]:
+    """``INTEG`` cards for the four per-edge rail charges of one grid point.
+
+    The output-rise window is the *input* edge's window that produces it --
+    the rising input's for a positive-unate measured polarity, the falling
+    input's otherwise -- mirroring :func:`_measurement_cards`'s trigger
+    choice so a table can never pair one edge's delay with the other edge's
+    energy.
+    """
+    rise_input_edge = "RISE" if arc.measured_sense == "positive_unate" else "FALL"
+    fall_input_edge = "FALL" if arc.measured_sense == "positive_unate" else "RISE"
+    window_of = {
+        "rise": windows[rise_input_edge],
+        "fall": windows[fall_input_edge],
+    }
+    cards = []
+    for suffix, ammeter, edge in _POWER_CARDS:
+        start, stop = window_of[edge]
+        cards.append(
+            {
+                "name": f"{tag}_{suffix}",
+                "spice": (
+                    f".meas tran {tag}_{suffix} INTEG i({ammeter}{tag}) "
+                    f"FROM={_spice_number(start)}n TO={_spice_number(stop)}n"
+                ),
+                "unit": "C",
+            }
+        )
+    return cards
 
 
 def _spice_number(value: float) -> str:
@@ -1220,6 +1592,117 @@ def _build_tables(
     return tables
 
 
+def _build_power_tables(
+    plan: dict[str, Any],
+    grid: dict[str, tuple[float, ...]],
+    values: dict[str, float],
+    corner: dict[str, Any],
+) -> dict[int, dict[str, liberty_writer.Table2D]]:
+    """Reshape the per-edge rail charges into ``rise_power``/``fall_power``
+    tables, one pair per arc, in the library's energy unit (pJ -- Liberty's
+    internal-energy unit is ``voltage_unit**2 * capacitive_load_unit``, i.e.
+    1 V * 1 V * 1 pF here).
+
+    **The convention (Liberty *internal* energy, not total energy).** A
+    consumer (``klt power``, OpenSTA's power engine, any Liberty power
+    reader) adds the load's own switching energy -- ``C_load * V**2 / 2`` per
+    output transition -- on top of the table, so the table must exclude it
+    or the load would be counted twice. Per output edge this computes::
+
+        E_edge = V * (Q_vdd + Q_gnd) / 2  -  C_load * V**2 / 2
+
+    where ``Q_vdd`` is the charge drawn from the vdd rail and ``Q_gnd`` the
+    charge returned to the gnd rail over that edge's window. Averaging the
+    two rails is what makes the split *symmetric*: on an output rise
+    ``Q_vdd`` carries the load *and* internal-node charge while ``Q_gnd``
+    carries only the short-circuit current, and on a fall it is the other way
+    round -- so each edge ends up owning half the internal-node charging
+    energy plus its own short-circuit energy, and the two edges sum to the
+    whole-cycle internal energy exactly. (The alternative, "vdd only, subtract
+    ``C_load * V**2`` on the rise", sums to the same cycle total but piles all
+    the internal-node energy onto the rise edge; measured against IHP's
+    ``sg13g2_stdcell`` it is the worse fit by several femtojoules per point.
+    The vendor's split does differ on arcs through a series stack -- see
+    ``docs/cli/characterize.md``'s "Accuracy against a vendor library".)
+
+    Supply leakage integrated over the (settle-dominated) window is left in:
+    at the static currents a standard cell draws (tens to ~100 pW on IHP
+    ``sg13g2_stdcell`` at typ) over a 7x7 grid's ~17 ns window it is a few
+    attojoules, three orders of magnitude below the femtojoule internal
+    energy, and subtracting an estimate would add more noise than it removes.
+    """
+    slews = grid["input_transition_ns"]
+    loads = grid["output_load_pf"]
+    vdd = corner["supply_v"]
+    tables: dict[int, dict[str, liberty_writer.Table2D]] = {}
+    for arc_index in range(plan["arc_count"]):
+        per_table: dict[str, liberty_writer.Table2D] = {}
+        for table_name, edge in (("rise_power", "r"), ("fall_power", "f")):
+            rows: list[tuple[float, ...]] = []
+            for slew_index in range(len(slews)):
+                row: list[float] = []
+                for load_index, load_pf in enumerate(loads):
+                    tag = f"a{arc_index}s{slew_index}l{load_index}"
+                    charges = []
+                    for rail in ("qv", "qg"):
+                        key = f"{tag}_{rail}{edge}"
+                        if key not in values:
+                            raise CharacterizeError(
+                                f"no measured value for '{key}' -- the "
+                                "simulation report does not cover the whole "
+                                "requested grid"
+                            )
+                        charges.append(values[key])
+                    # Coulombs * volts = joules; * 1e12 = pJ.
+                    rail_energy_pj = vdd * (charges[0] + charges[1]) / 2.0 * 1e12
+                    load_energy_pj = 0.5 * load_pf * vdd * vdd
+                    row.append(rail_energy_pj - load_energy_pj)
+                rows.append(tuple(row))
+            per_table[table_name] = liberty_writer.Table2D(
+                index_1=slews,
+                index_2=loads,
+                values=tuple(rows),
+            )
+        tables[arc_index] = per_table
+    return tables
+
+
+def _build_leakage(
+    plan: dict[str, Any],
+    values: dict[str, float],
+    corner: dict[str, Any],
+) -> dict[str, Any]:
+    """Per-input-state static power (pW) and their mean, the
+    ``cell_leakage_power`` a vendor library reports alongside the states.
+
+    Each state's ``when`` is the conjunction of its input literals
+    (``"A&!B"``), which is the form a Liberty reader matches against; the
+    mean over all ``2**n`` states is the unweighted average IHP's own
+    ``sg13g2_stdcell`` uses for ``cell_leakage_power`` (its ``sg13g2_inv_1``
+    reports 63.0032 = the mean of its two states, 82.469 and 43.5374).
+    """
+    vdd = corner["supply_v"]
+    states: list[dict[str, Any]] = []
+    for state_index, state in enumerate(plan["leakage_states"]):
+        key = f"lk{state_index}_i"
+        if key not in values:
+            raise CharacterizeError(
+                f"no measured value for '{key}' -- the simulation report does "
+                "not cover every leakage state"
+            )
+        states.append(
+            {
+                "when": "&".join(pin if value else f"!{pin}" for pin, value in state),
+                "inputs": {pin: value for pin, value in state},
+                # Amps * volts = watts; * 1e12 = pW (the library's
+                # leakage_power_unit).
+                "value_pw": values[key] * vdd * 1e12,
+            }
+        )
+    mean = sum(entry["value_pw"] for entry in states) / len(states)
+    return {"cell_leakage_power_pw": mean, "states": states}
+
+
 def _check_settle_margin(
     plan: dict[str, Any],
     grid: dict[str, tuple[float, ...]],
@@ -1275,23 +1758,55 @@ def _check_settle_margin(
 def _build_library(
     *,
     request: dict[str, Any],
-    cell: dict[str, Any],
+    results: list[dict[str, Any]],
     corner: dict[str, Any],
     grid: dict[str, tuple[float, ...]],
     thresholds: liberty_writer.Thresholds,
-    tables: dict[int, dict[str, liberty_writer.Table2D]],
-    arcs: tuple[DerivedArc, ...],
     request_path: str,
+    batch: bool,
 ) -> liberty_writer.Library:
     spec = request.get("library") or {}
     if not isinstance(spec, dict):
         raise CharacterizeError("request.library must be an object")
-    library_name = spec.get("name") or f"{cell['name']}_{corner['name']}"
+    if batch:
+        default_name = f"klt_characterize_{corner['name']}"
+    else:
+        default_name = f"{results[0]['cell']['name']}_{corner['name']}"
+    library_name = spec.get("name") or default_name
     if not isinstance(library_name, str) or not library_name.strip():
         raise CharacterizeError("request.library.name must be a non-empty string")
 
+    cells = tuple(_build_liberty_cell(result=result, grid=grid) for result in results)
+    cell_names = ", ".join(result["cell"]["name"] for result in results)
+    comment = (
+        f"Generated by `klt characterize` from {os.path.basename(request_path)}. "
+        f"Delay, transition, internal power, and leakage. Single corner "
+        f"({corner['name']}); {len(results)} cell(s): {cell_names}."
+    )
+    return liberty_writer.Library(
+        name=library_name,
+        operating_conditions=liberty_writer.OperatingConditions(
+            name=corner["name"],
+            process=corner["nom_process"],
+            temperature_c=corner["temperature_c"],
+            voltage_v=corner["supply_v"],
+        ),
+        cells=cells,
+        thresholds=thresholds,
+        comment=comment,
+    )
+
+
+def _build_liberty_cell(
+    *, result: dict[str, Any], grid: dict[str, tuple[float, ...]]
+) -> liberty_writer.Cell:
+    cell = result["cell"]
+    tables = result["tables"]
+    power_tables = result["power_tables"]
+
     arcs_by_output: dict[str, list[liberty_writer.TimingArc]] = {}
-    for arc_index, arc in enumerate(arcs):
+    power_by_output: dict[str, list[liberty_writer.InternalPower]] = {}
+    for arc_index, arc in enumerate(result["arcs"]):
         per_table = tables[arc_index]
         arcs_by_output.setdefault(arc.output_pin, []).append(
             liberty_writer.TimingArc(
@@ -1301,6 +1816,13 @@ def _build_library(
                 cell_fall=per_table["cell_fall"],
                 rise_transition=per_table["rise_transition"],
                 fall_transition=per_table["fall_transition"],
+            )
+        )
+        power_by_output.setdefault(arc.output_pin, []).append(
+            liberty_writer.InternalPower(
+                related_pin=arc.related_pin,
+                rise_power=power_tables[arc_index]["rise_power"],
+                fall_power=power_tables[arc_index]["fall_power"],
             )
         )
 
@@ -1314,32 +1836,20 @@ def _build_library(
                 max(grid["output_load_pf"]) if pin["direction"] == "output" else None
             ),
             arcs=tuple(arcs_by_output.get(pin["name"], ())),
+            internal_power=tuple(power_by_output.get(pin["name"], ())),
         )
         for pin in cell["pins"]
     )
-
-    comment = (
-        f"Generated by `klt characterize` from {os.path.basename(request_path)}. "
-        f"Delay/transition only -- no power tables. Single corner "
-        f"({corner['name']}), single cell ({cell['name']})."
-    )
-    return liberty_writer.Library(
-        name=library_name,
-        operating_conditions=liberty_writer.OperatingConditions(
-            name=corner["name"],
-            process=corner["nom_process"],
-            temperature_c=corner["temperature_c"],
-            voltage_v=corner["supply_v"],
+    leakage = result["leakage"]
+    return liberty_writer.Cell(
+        name=cell["name"],
+        pins=pins,
+        area=cell["area"],
+        cell_leakage_power=leakage["cell_leakage_power_pw"],
+        leakage_power=tuple(
+            liberty_writer.LeakagePower(when=state["when"], value=state["value_pw"])
+            for state in leakage["states"]
         ),
-        cells=(
-            liberty_writer.Cell(
-                name=cell["name"],
-                pins=pins,
-                area=cell["area"],
-            ),
-        ),
-        thresholds=thresholds,
-        comment=comment,
     )
 
 
@@ -1391,23 +1901,40 @@ def roundtrip_check(
     output_pins: tuple[str, ...],
     work_dir: str,
 ) -> dict[str, Any]:
+    """Parse ``lib_path`` back through ``native/statime``'s Liberty reader,
+    probing one cell. See :func:`roundtrip_check_cells`."""
+    return roundtrip_check_cells(
+        lib_path=lib_path,
+        cells=[(cell_name, input_pins, output_pins)],
+        work_dir=work_dir,
+    )
+
+
+def roundtrip_check_cells(
+    *,
+    lib_path: str,
+    cells: list[tuple[str, tuple[str, ...], tuple[str, ...]]],
+    work_dir: str,
+) -> dict[str, Any]:
     """Parse ``lib_path`` back through ``native/statime``'s Liberty reader.
 
     The reader is not exposed on its own across the pyo3 boundary -- the
     extension's single entry point is ``critical_path_json(netlist, liberty,
-    top, ...)`` -- so this writes a one-instance structural Verilog wrapper
-    around the characterized cell and asks the engine to analyse it. That
-    exercises strictly more than a bare parse: ``liberty.rs`` has to parse
-    the file, ``sta.rs`` has to find the cell and its pins, and ``nldm.rs``
-    has to interpolate each emitted table to produce the reported delay. A
-    file that parses structurally but carries a malformed table therefore
-    still fails here.
+    top, ...)`` -- so this writes a structural Verilog wrapper instantiating
+    **every** characterized cell once and asks the engine to analyse it.
+    That exercises strictly more than a bare parse: ``liberty.rs`` has to
+    parse the file, ``sta.rs`` has to find each cell and its pins, and
+    ``nldm.rs`` has to interpolate the emitted tables to produce the reported
+    delay. A file that parses structurally but carries a malformed table
+    therefore still fails here -- and in batch mode a combined library whose
+    second cell the reader cannot find fails too, rather than passing on the
+    strength of its first.
 
     Returns ``{"engine", "status", "message", "probe_netlist"}`` with
     ``status`` one of:
 
     - ``"pass"`` -- the reader accepted the file and the engine reported a
-      path delay through the cell.
+      path delay through the probe.
     - ``"skipped"`` -- the ``klt_statime_native`` extension is not installed,
       so nothing was verified. Never a fabricated pass; ``message`` says so.
     - ``"fail"`` -- the reader (or the engine behind it) rejected the file.
@@ -1416,13 +1943,7 @@ def roundtrip_check(
 
     probe_path = os.path.join(work_dir, "roundtrip-probe.v")
     with open(probe_path, "w", encoding="utf-8") as handle:
-        handle.write(
-            _probe_netlist(
-                cell_name=cell_name,
-                input_pins=input_pins,
-                output_pins=output_pins,
-            )
-        )
+        handle.write(_probe_netlist_cells(cells))
     try:
         result = compute_critical_path(probe_path, lib_path, "klt_characterize_probe")
     except StaError as exc:
@@ -1444,12 +1965,24 @@ def roundtrip_check(
             "probe_netlist": probe_path,
         }
     worst = result.get("worst_path") or {}
+    num_cells = result.get("num_cells")
+    if isinstance(num_cells, int) and num_cells < len(cells):
+        return {
+            "engine": ROUNDTRIP_ENGINE,
+            "status": "fail",
+            "message": (
+                f"the reader resolved {num_cells} of the {len(cells)} probe "
+                "instance(s) -- the emitted library does not define every "
+                "characterized cell"
+            ),
+            "probe_netlist": probe_path,
+        }
     return {
         "engine": ROUNDTRIP_ENGINE,
         "status": "pass",
         "message": (
             f"parsed and interpolated: worst probe-path delay "
-            f"{worst.get('delay_ns')} ns through {result.get('num_cells')} cell(s)"
+            f"{worst.get('delay_ns')} ns through {num_cells} cell(s)"
         ),
         "probe_netlist": probe_path,
     }
@@ -1458,23 +1991,45 @@ def roundtrip_check(
 def _probe_netlist(
     *, cell_name: str, input_pins: tuple[str, ...], output_pins: tuple[str, ...]
 ) -> str:
-    ports = ", ".join(input_pins + output_pins)
-    lines = [
-        "/* Generated by `klt characterize` -- a one-instance wrapper whose",
-        " * only purpose is to make native/statime's Liberty reader parse and",
-        " * interpolate the emitted .lib. Not a design. */",
-        f"module klt_characterize_probe({ports});",
+    return _probe_netlist_cells([(cell_name, input_pins, output_pins)])
+
+
+def _probe_netlist_cells(
+    cells: list[tuple[str, tuple[str, ...], tuple[str, ...]]],
+) -> str:
+    """A structural wrapper instantiating each cell once (``u0``, ``u1``,
+    ...). A single cell keeps its own pin names as the module's ports (the
+    #2502 shape); several cells get per-instance ``u<i>_<pin>`` ports so no
+    two instances share a net."""
+    single = len(cells) == 1
+
+    def port(index: int, pin: str) -> str:
+        return pin if single else f"u{index}_{pin}"
+
+    inputs = [
+        port(index, pin) for index, (_, ins, _) in enumerate(cells) for pin in ins
     ]
-    for pin in input_pins:
-        lines.append(f"  input {pin};")
-        lines.append(f"  wire {pin};")
-    for pin in output_pins:
-        lines.append(f"  output {pin};")
-        lines.append(f"  wire {pin};")
-    lines.append(f"  {cell_name} u0 (")
-    connections = [f"    .{pin}({pin})" for pin in input_pins + output_pins]
-    lines.append(",\n".join(connections))
-    lines.append("  );")
+    outputs = [
+        port(index, pin) for index, (_, _, outs) in enumerate(cells) for pin in outs
+    ]
+    lines = [
+        "/* Generated by `klt characterize` -- a wrapper instantiating each",
+        " * characterized cell once, whose only purpose is to make",
+        " * native/statime's Liberty reader parse and interpolate the emitted",
+        " * .lib. Not a design. */",
+        f"module klt_characterize_probe({', '.join(inputs + outputs)});",
+    ]
+    for name in inputs:
+        lines.append(f"  input {name};")
+        lines.append(f"  wire {name};")
+    for name in outputs:
+        lines.append(f"  output {name};")
+        lines.append(f"  wire {name};")
+    for index, (cell_name, ins, outs) in enumerate(cells):
+        lines.append(f"  {cell_name} u{index} (")
+        connections = [f"    .{pin}({port(index, pin)})" for pin in ins + outs]
+        lines.append(",\n".join(connections))
+        lines.append("  );")
     lines.append("endmodule")
     return "\n".join(lines) + "\n"
 
@@ -1484,31 +2039,26 @@ def _probe_netlist(
 # --------------------------------------------------------------------------- #
 
 
-def _build_response(
-    *,
-    request_path: str,
-    cell: dict[str, Any],
-    corner: dict[str, Any],
-    grid: dict[str, tuple[float, ...]],
-    thresholds: liberty_writer.Thresholds,
-    options: dict[str, Any],
-    arcs: tuple[DerivedArc, ...],
-    tables: dict[int, dict[str, liberty_writer.Table2D]],
-    library: liberty_writer.Library,
-    emitted_path: str,
-    testbench_path: str,
-    sim_request_path: str,
-    sim_report_path: str,
-    sim_report: dict[str, Any],
-    roundtrip: dict[str, Any],
-    request: dict[str, Any],
-) -> dict[str, Any]:
+def _table_json(table: liberty_writer.Table2D) -> dict[str, Any]:
+    return {
+        "index_1": list(table.index_1),
+        "index_2": list(table.index_2),
+        "values": [list(row) for row in table.values],
+    }
+
+
+def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
+    """One characterized cell's response entry: the echo of the resolved
+    cell, its arcs with all six tables, its leakage states, and its own
+    simulation run."""
+    cell = result["cell"]
+    tables = result["tables"]
+    power_tables = result["power_tables"]
+    sim_report = result["sim_report"]
     corner_entry = sim_report["corners"][0]
     environment = sim_report.get("environment") or {}
-    grid_points = len(grid["input_transition_ns"]) * len(grid["output_load_pf"])
-
+    window = result["plan"]["window"]
     return {
-        "schema_version": SCHEMA_VERSION,
         "cell": {
             "name": cell["name"],
             "subckt": cell["subckt"],
@@ -1523,6 +2073,72 @@ def _build_response(
                 for pin in cell["pins"]
             ],
         },
+        "arcs": [
+            {
+                "output_pin": arc.output_pin,
+                "related_pin": arc.related_pin,
+                "timing_sense": arc.timing_sense,
+                "measured_sense": arc.measured_sense,
+                "side_inputs": {
+                    pin: value for pin, value in _full_side_state(arc, cell)
+                },
+                **{name: _table_json(tables[index][name]) for name, _ in _TABLES},
+                **{
+                    name: _table_json(power_tables[index][name])
+                    for name in POWER_TABLES
+                },
+            }
+            for index, arc in enumerate(result["arcs"])
+        ],
+        "leakage": result["leakage"],
+        "simulation": {
+            "testbench": result["testbench_path"],
+            "request": result["sim_request_path"],
+            "report": result["sim_report_path"],
+            "corner_id": corner_entry["corner_id"],
+            "status": corner_entry["status"],
+            "runtime_s": corner_entry["runtime_s"],
+            "engine": environment.get("engine"),
+            "engine_version": environment.get("engine_version"),
+            "window": {
+                "settle_ns": window["rise_start_ns"],
+                "tran_step_ns": window["step_ns"],
+            },
+        },
+    }
+
+
+def _build_response(
+    *,
+    request_path: str,
+    grid: dict[str, tuple[float, ...]],
+    corner: dict[str, Any],
+    thresholds: liberty_writer.Thresholds,
+    options: dict[str, Any],
+    results: list[dict[str, Any]],
+    library: liberty_writer.Library,
+    emitted_path: str,
+    roundtrip: dict[str, Any],
+    comparison: dict[str, Any] | None,
+    request: dict[str, Any],
+    batch: bool,
+) -> dict[str, Any]:
+    grid_points = len(grid["input_transition_ns"]) * len(grid["output_load_pf"])
+    arc_count = sum(len(result["arcs"]) for result in results)
+    leakage_count = sum(len(result["plan"]["leakage_states"]) for result in results)
+    timing_count = grid_points * arc_count * len(_TABLES)
+    power_count = grid_points * arc_count * len(_POWER_CARDS)
+    entries = [_cell_entry(result) for result in results]
+    # Single-cell form: the top-level `cell`/`arcs`/`leakage`/`simulation`
+    # mirror `cells[0]`, exactly as #2502 shipped them. Batch form: they are
+    # `null` -- there is no one cell to describe -- and `cells[]` is the
+    # data. A batch request is a request shape that did not exist before
+    # #2503, so no schema-1 consumer can meet the nulls unawares.
+    single = None if batch else entries[0]
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "cell": single["cell"] if single else None,
         "corner": {
             "name": corner["name"],
             "process": corner["process"],
@@ -1533,32 +2149,28 @@ def _build_response(
             "input_transition_ns": list(grid["input_transition_ns"]),
             "output_load_pf": list(grid["output_load_pf"]),
             "points": grid_points,
-            "arc_count": len(arcs),
-            "measurement_count": grid_points * len(arcs) * len(_TABLES),
+            "arc_count": arc_count,
+            "measurement_count": timing_count,
+            "power_measurement_count": power_count,
+            "leakage_measurement_count": leakage_count,
+            "total_measurement_count": timing_count + power_count + leakage_count,
         },
         "thresholds": {
             name: getattr(thresholds, name) for name in thresholds.__dataclass_fields__
         },
-        "arcs": [
-            {
-                "output_pin": arc.output_pin,
-                "related_pin": arc.related_pin,
-                "timing_sense": arc.timing_sense,
-                "measured_sense": arc.measured_sense,
-                "side_inputs": {
-                    pin: value for pin, value in _full_side_state(arc, cell)
-                },
-                **{
-                    name: {
-                        "index_1": list(tables[index][name].index_1),
-                        "index_2": list(tables[index][name].index_2),
-                        "values": [list(row) for row in tables[index][name].values],
-                    }
-                    for name, _ in _TABLES
-                },
-            }
-            for index, arc in enumerate(arcs)
-        ],
+        # The units every table/value in this response (and the emitted
+        # `.lib`) is expressed in. Fixed by `liberty_writer.Library`'s
+        # defaults (1ns / 1pF / 1V / 1pW); internal energy is Liberty's
+        # voltage_unit**2 * capacitive_load_unit = pJ.
+        "units": {
+            "time": "ns",
+            "capacitance": "pF",
+            "internal_energy": "pJ",
+            "leakage_power": "pW",
+        },
+        "arcs": single["arcs"] if single else None,
+        "leakage": single["leakage"] if single else None,
+        "cells": entries,
         "liberty": {
             # Plain absolute string, not the `{path, scope}` envelope: this is
             # a *generated artifact a caller chains onward* (into `klt sta`'s
@@ -1580,23 +2192,14 @@ def _build_response(
                 "probe_netlist": roundtrip["probe_netlist"],
             },
         },
-        "simulation": {
-            "testbench": testbench_path,
-            "request": sim_request_path,
-            "report": sim_report_path,
-            "corner_id": corner_entry["corner_id"],
-            "status": corner_entry["status"],
-            "runtime_s": corner_entry["runtime_s"],
-            "engine": environment.get("engine"),
-            "engine_version": environment.get("engine_version"),
-            "window": {
-                "settle_ns": options["settle_ns"],
-                "tran_step_ns": options["tran_step_ns"],
-            },
-        },
+        "simulation": single["simulation"] if single else None,
+        "comparison": comparison,
         "provenance": build_provenance(
             pdk=_best_effort_pdk(request),
-            input_path=cell["netlist_path"],
+            # Batch mode pins the first cell's netlist -- the whole batch in
+            # the common case of one library-wide SPICE file; every
+            # `cells[].cell.netlist` names its own file regardless.
+            input_path=results[0]["cell"]["netlist_path"],
             input_role=INPUT_ROLE_NETLIST,
         ),
     }

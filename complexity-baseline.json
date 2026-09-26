@@ -49,6 +49,16 @@
       "complexity": 12
     },
     {
+      "file": "src/klayout_tools/characterize.py",
+      "function": "_load_request",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/characterize.py",
+      "function": "run_characterize",
+      "complexity": 11
+    },
+    {
       "file": "src/klayout_tools/cli/economy_cmd.py",
       "function": "_print_text",
       "complexity": 11
@@ -467,6 +477,26 @@
       "file": "src/klayout_tools/layout_plan_execute.py",
       "function": "_resolve_placement",
       "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/liberty_compare.py",
+      "function": "_cell_data",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/liberty_compare.py",
+      "function": "_compare_leakage",
+      "complexity": 18
+    },
+    {
+      "file": "src/klayout_tools/liberty_compare.py",
+      "function": "group_body",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/liberty_writer.py",
+      "function": "_render_cell",
+      "complexity": 11
     },
     {
       "file": "src/klayout_tools/lvs.py",
