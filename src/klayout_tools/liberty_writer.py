@@ -300,6 +300,12 @@ def _render_header(library: Library, precision: int) -> list[str]:
     lines.append(f'  default_operating_conditions : "{conditions.name}";')
 
     template = _first_table(library)
+    # The header's `lu_table_template` and `default_max_transition` are
+    # derived from this table's axes, *before* `_render_arc` gets to validate
+    # anything -- so validate it here too. Without this an empty `index_1`
+    # reaches `max()` as a bare `ValueError` instead of the named
+    # `LibertyWriteError` every other malformed-table path raises.
+    template.validate(f"library '{library.name}' lu_table_template source")
     lines.append(f"  lu_table_template ({library.template_name}) {{")
     lines.append("    variable_1 : input_net_transition;")
     lines.append("    variable_2 : total_output_net_capacitance;")
