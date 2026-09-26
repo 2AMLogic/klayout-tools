@@ -1060,23 +1060,33 @@ fails with `Unable to find definition of model …` and every corner errors.
 ## Corner axes
 
 - **`corners.process`** (`array<string | {"name": string, "sections":
-  string[]}>`, optional) — process-corner axis. Each entry is either:
+  (string | {"lib": string, "section": string})[]}>`, optional) —
+  process-corner axis. Each entry is either:
   - a **bare string** — opaque `.lib` section name passed through to
     `models.lib` (e.g. sky130's `tt`/`ss`/`ff`/`sf`/`fs`, or a mismatch
     variant like `tt_mm` — no schema change needed for those). Emits a
     single `.lib <models.lib> <name>` card.
-  - a **bundle object** `{"name": str, "sections": list[str]}` — a named
-    corner backed by *multiple* `.lib` sections, emitted as one `.lib
-    <models.lib> <section>` card per entry in `sections`, **in declaration
+  - a **bundle object** `{"name": str, "sections": [...]}` — a named
+    corner backed by *multiple* `.lib` sections, emitted as one `.lib`
+    card per entry in `sections`, **in declaration
     order** (ordering matters when the section set has interdependent
     global switch params — see gf180mcu below). `name` is what shows up as
     `corner_id`/the response's `process` field and what `corners.exclude[].process`
     matches against; it need not equal any of the section strings.
 
+    Each `sections[]` entry is itself either a **bare string** (that section
+    is read from `models.lib`, emitting `.lib <models.lib> <section>`) or an
+    object **`{"lib": str, "section": str}`** naming its *own* model library
+    for that section, emitting `.lib <lib> <section>` — see "Per-section
+    corner libraries" below.
+
   Selecting a process corner needs a model library; `models.lib` is only
-  required when this axis is present. Omit `corners.process` entirely for a
-  request that doesn't care about process (single point, no `.lib` card
-  emitted).
+  required when this axis is present — and, since
+  [#2522](https://github.com/2AMLogic/klayout-tools/issues/2522), only when
+  at least one selected section actually reads from it (a bundle whose
+  *every* section names its own `lib` needs no `models.lib` at all). Omit
+  `corners.process` entirely for a request that doesn't care about process
+  (single point, no `.lib` card emitted).
 
   The bundle form exists because not every PDK's vendor model deck ships a
   single all-device section per named corner. **sky130**'s
@@ -1173,6 +1183,77 @@ fails with `Unable to find definition of model …` and every corner errors.
 Expansion is deterministic and odometer-style: process outermost, supply
 next, temperature innermost — the same corner list, same order, every run
 against the same request.
+
+### Per-section corner libraries
+
+gf180mcu's bundle above still reads every section from **one** file. Some
+PDKs instead ship one corner library *per device family* — separate
+MOS / capacitor / bipolar corner files, each with its own section names — so
+a single named corner needs `.lib` cards against several different paths. A
+`sections[]` entry may therefore name its own library
+(issue [#2522](https://github.com/2AMLogic/klayout-tools/issues/2522)):
+
+```json
+"models": { "pdk": "somepdk", "lib": "libs.tech/ngspice/mos.lib" },
+"corners": {
+  "process": [
+    {
+      "name": "ss",
+      "sections": [
+        "ss",
+        { "lib": "libs.tech/ngspice/moscap.lib", "section": "moscap_ss" },
+        { "lib": "libs.tech/ngspice/bjt.lib", "section": "bjt_ss" }
+      ]
+    }
+  ]
+}
+```
+
+emits, in declaration order:
+
+```
+.lib <resolved models.lib> ss
+.lib <resolved moscap.lib> moscap_ss
+.lib <resolved bjt.lib> bjt_ss
+```
+
+- **Same resolution rule as `models.lib`.** A `lib` ref is joined against
+  the resolved PDK variant directory when the request names a PDK
+  (`models.pdk`/`models.pdk_root`), otherwise `$VAR`/`~` are expanded and a
+  relative path is joined against the request file's own directory — see
+  "Model library resolution" below.
+- **Existence-checked before any corner is dispatched**, with a named error
+  (`corner section library not found: <path>`, exit `1`), the same posture as
+  `models.lib`'s own `model library not found`. It never surfaces as a
+  per-corner ngspice parse failure deep inside a sweep.
+- **Mixed forms are fine**, as above: a bare-string section and a
+  per-section-lib object may appear in the same `sections` array. Bare
+  strings keep binding to `models.lib`, byte-for-byte as before.
+- **`models.lib` becomes optional** when every section of every selected
+  corner names its own library — the case for a PDK with no all-device
+  library to point it at. `environment.models_lib` then reports
+  `{"path": null, "scope": "absent"}` with a null `models_lib_sha256`.
+- **Provenance.** `environment.corner_section_libs` lists each distinct
+  per-section library, in first-appearance order, as
+  `{name, path, scope, sha256}` — normalised exactly like
+  `environment.models_lib` (an out-of-repo PDK file reports
+  `{"path": null, "scope": "external"}`), because `models_lib_sha256` alone
+  no longer answers "which models produced this result". Present only when a
+  request declares per-section libraries. A resumable sweep's checkpoint
+  fingerprint keys on these hashes too, so editing one of those files
+  invalidates the checkpoint exactly like editing `models.lib` does.
+- **The same cards reach every deck** — the `fail_fast_probe` deck, the
+  `--op-lint` deck, and the Xyce cross-validation deck all emit a corner's
+  `.lib` cards from one shared code path, so a lint or an oracle run can
+  never read different models than the sweep it accompanies.
+- **Off-host backends resolve the refs on their own box.** `remote`/`batch`
+  forward the refs **as declared** (this host's absolute paths would be
+  meaningless there) and the remote host resolves them against its own
+  `$PDK_ROOT`/request directory, exactly as it already resolves
+  `models.lib`. Per-section libraries are *not* staged — same as
+  `models.lib`, and unlike the netlist's `.include` closure — so express
+  them PDK-relative (`models.pdk` + a relative `lib`) rather than as an
+  operator-local absolute path if the request may run off-host.
 
 ## Monte Carlo sampling
 
@@ -1405,6 +1486,11 @@ pins the search the same way `klt pdk find --pdk-root` does.
 The spike's literal shape, for callers that already resolved `$PDK_ROOT`
 themselves (e.g. via `eval "$(klt pdk env)"`). Env vars and `~` are expanded;
 a relative path is joined against the request file's directory.
+
+Both shapes apply verbatim to a `corners.process` bundle's per-section
+`{"lib": ..., "section": ...}` refs (see "Per-section corner libraries"
+above) — a per-section library resolves exactly as the `models.lib` it
+stands in for would, and is reported in `environment.corner_section_libs`.
 
 Either way, the resolved library is reported in the response's
 `environment.models_lib` as the `{path, scope}` shape (`schema_version` `3`,
@@ -2087,9 +2173,9 @@ the *response* echoes back.
 | `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`launcher_cidrs`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`, `ami_manifest`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
 | `batch.*`                | object            | Request fields for the `batch` backend (`provision_script_path`, `bucket`, `jobs_prefix`, `region`, `profile`, `poll_interval_s`, `poll_timeout_s`) — see "Batch backend" above. Only read/validated when `backend: "batch"` is selected. |
 | `remote.hosts`           | integer           | Shard the expanded unit list across this many hosts and merge the per-shard reports. Defaults to `1` (today's single-host behaviour, byte-identical). Must be a positive integer, and (for `backend: "remote"`) no greater than the unit count. `local`/`local-parallel` shard in-process; `backend: "remote"` provisions a real `hosts`-instance EC2 fleet ([#906](https://github.com/2AMLogic/klayout-tools/issues/906)). Overridable with the `--hosts` CLI flag, same precedence rule as `backend`/`--backend`. See "Fleet sharding" above. |
-| `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set. See "Model library resolution" above.                        |
-| `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` through `klt pdk find` instead of a literal path.                                                                                                 |
-| `corners.process`        | array\<string \| {name, sections}\> | Process-corner axis. Each entry is either a bare `.lib` section name (single `.lib` card) or a bundle object `{"name": str, "sections": list[str]}` (one `.lib` card per section, in order) — see "Corner axes" above. |
+| `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set **and** at least one selected section reads from it (a bundle whose every section names its own `lib` needs none — issue #2522). See "Model library resolution" above. |
+| `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` — and any per-section `lib` — through `klt pdk find` instead of a literal path.                                                                    |
+| `corners.process`        | array\<string \| {name, sections}\> | Process-corner axis. Each entry is either a bare `.lib` section name (single `.lib` card) or a bundle object `{"name": str, "sections": [...]}` (one `.lib` card per section, in order). Each `sections[]` entry is a bare section name (read from `models.lib`) or `{"lib": str, "section": str}` naming its own model library for that section (issue #2522 — `$VAR`/`~` expand, relative refs resolve like `models.lib`; each must exist, checked before any corner runs, exit 1 otherwise). See "Corner axes" above. |
 | `corners.supply_v`       | object            | Supply axis, keyed by source/`.param` name; arrays sweep together by index.                                                                                            |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
 | `exclude`                | array\<object\>   | Partial corner specs dropped from the expansion.                                                                                                                       |
@@ -2229,7 +2315,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `diagnostic_counts` | object      | Rollup of every `corners[].diagnostics[]` entry across the whole grid (issue #2491), counted regardless of each corner's final `status` — a `pass`ed corner with a recovered `severity: "warning"` diagnostic is still counted, as are the `inconclusive`/`implausible_solution` grading markers (issues #2492/#2493), which is how the two reasons for an `inconclusive` corner stay distinguishable. `{by_code: {<code>: N, ...}, by_severity: {<severity>: N, ...}, corners_with_diagnostics: N}`. Always present; `by_code`/`by_severity` are `{}` and `corners_with_diagnostics` is `0` for a diagnostic-free grid, never omitted. See "Failure classification" below for the `code`/`severity` vocabulary. |
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored`/`inconclusive` (issues #1849, #2492). See below. |
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
-| `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
+| `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `corner_section_libs` (issue #2522 — one `{name, path, scope, sha256}` per distinct per-section corner library a `corners.process` bundle named, in first-appearance order; see "Per-section corner libraries" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |

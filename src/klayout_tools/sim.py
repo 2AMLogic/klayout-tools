@@ -1381,12 +1381,22 @@ def run_sim(
         if k_sigma is not None:
             monte_carlo_info["k_sigma"] = k_sigma
 
+    # Issue #2522: a `corners.process` bundle may name its own model library
+    # per section. Resolved (and existence-checked) per host, from the refs
+    # as declared -- a fleet shard resolves the same refs against its own box,
+    # exactly as it resolves `models.lib` from the forwarded `models` block.
+    corner_section_libs = _resolve_corner_section_libs(
+        corner_points, models, request_dir
+    )
+
     # Gated on the *actually dispatched* `corner_points`, not `corners_spec`,
     # so a fleet shard reconstructed from `_explicit_points` (which pops
     # `corners` entirely -- see `_build_remote_request`) still resolves a
     # model library when its own points carry a `process` value, even though
-    # the pushed request's `corners_spec` is empty on the remote box.
-    if any(point.process for point in corner_points):
+    # the pushed request's `corners_spec` is empty on the remote box. A bundle
+    # whose every section names its own library needs no `models.lib` at all
+    # (see `_needs_models_lib`).
+    if any(_needs_models_lib(point) for point in corner_points):
         # Only the process axis needs a model library -- supply/temperature
         # are plain netlist/control-block mutations (see this module's
         # docstring and the spike's "Native PVT sweeping" survey row).
@@ -1432,6 +1442,7 @@ def run_sim(
             timeout_s=timeout_s,
             engine=engine,
             osdi_preload=osdi_preload,
+            corner_section_libs=corner_section_libs,
         )
         pre_completed, loaded_engine_version = _load_checkpoint(
             checkpoint_path, fingerprint
@@ -1840,14 +1851,19 @@ def run_sim(
         # existing consumers of a request that omits netlist_source see an
         # unchanged environment block (see docs/cli/sim.md).
         environment["netlist_source"] = netlist_source
-    if osdi_preload:
-        # Issue #2513, additive/optional: only present when the request
-        # declares `options.osdi_preload`, so a request without it sees an
-        # unchanged environment block. One `{name, path, scope, sha256}` per
-        # preloaded library, in load order -- see `_osdi_preload_environment`.
-        environment["osdi_preload"] = _osdi_preload_environment(
-            osdi_preload, repo_root=repo_root
+    # Additive/optional, one key each and only when the request declared that
+    # kind of input: `osdi_preload` (issue #2513) and `corner_section_libs`
+    # (issue #2522 -- `models_lib_sha256` alone no longer pins "which models
+    # produced this result" once a corner reads sections from other files, and
+    # may pin none of it: a bundle whose every section names its own library
+    # needs no `models.lib`). See `_model_inputs_environment`.
+    environment.update(
+        _model_inputs_environment(
+            osdi_preload=osdi_preload,
+            corner_section_libs=corner_section_libs,
+            repo_root=repo_root,
         )
+    )
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
@@ -1994,6 +2010,21 @@ def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
     if lib is None:
         raise SimError("request.models.lib is required")
 
+    resolved = _resolve_lib_ref(lib, models, request_dir)
+    if not os.path.isfile(resolved):
+        raise SimError(f"model library not found: {resolved}")
+    return resolved
+
+
+def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
+    """Apply ``models.lib``'s own resolution rule (see
+    :func:`_resolve_models_lib`) to one library reference, without the
+    existence check -- shared with issue #2522's per-section corner libraries
+    so a ``corners.process`` bundle's ``{"lib": ...}`` entry resolves
+    *identically* to the ``models.lib`` it stands in for: joined against the
+    resolved PDK variant directory when the request names a PDK, otherwise
+    ``$VAR``/``~``-expanded and joined against the request file's directory.
+    """
     pdk_variant = models.get("pdk")
     pdk_root = models.get("pdk_root")
     if pdk_variant is not None or pdk_root is not None:
@@ -2002,13 +2033,71 @@ def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
         except PdkNotFoundError as exc:
             raise SimError(str(exc)) from exc
         variant_dir = os.path.join(resolution["root"], resolution["variant"])
-        resolved = lib if os.path.isabs(lib) else os.path.join(variant_dir, lib)
-    else:
-        resolved = _resolve_relative(lib, request_dir)
+        return lib if os.path.isabs(lib) else os.path.join(variant_dir, lib)
+    return _resolve_relative(lib, request_dir)
 
-    if not os.path.isfile(resolved):
-        raise SimError(f"model library not found: {resolved}")
-    return resolved
+
+def _resolve_corner_section_libs(
+    points: list[CornerPoint], models: dict[str, Any], request_dir: str
+) -> tuple[str, ...]:
+    """Resolve every per-section corner library declared by a
+    ``corners.process`` bundle (issue #2522) and record the absolute paths on
+    the points themselves, returning the distinct resolved libraries in
+    first-appearance order (for ``environment.corner_section_libs`` and the
+    resume checkpoint's fingerprint).
+
+    Resolution is the same rule as ``models.lib``'s
+    (:func:`_resolve_lib_ref`), and every ref is existence-checked **here**,
+    before any corner is dispatched -- the same posture as
+    :func:`_resolve_models_lib`'s ``model library not found`` and
+    :func:`_resolve_osdi_preload`, rather than left to surface as a
+    per-corner ngspice parse error deep inside the run.
+
+    Fills each point's ``process_section_libs_resolved`` in place rather than
+    rebuilding the point: a copy would have to enumerate every
+    ``CornerPoint`` field, so a field added later (an already-derived Monte
+    Carlo seed, say) would be silently dropped here. Points that declared no
+    per-section library are left exactly as they were, so a pre-#2522 corner
+    list is untouched and this returns ``()``.
+    """
+    resolved_by_ref: dict[str, str] = {}
+    for point in points:
+        declared = point.process_section_libs
+        if declared is None:
+            continue
+        resolved: list[str | None] = []
+        for ref in declared:
+            if ref is None:
+                resolved.append(None)
+                continue
+            if ref not in resolved_by_ref:
+                path = _resolve_lib_ref(ref, models, request_dir)
+                if not os.path.isfile(path):
+                    raise SimError(f"corner section library not found: {path}")
+                resolved_by_ref[ref] = path
+            resolved.append(resolved_by_ref[ref])
+        point.process_section_libs_resolved = resolved
+    return tuple(resolved_by_ref.values())
+
+
+def _needs_models_lib(point: CornerPoint) -> bool:
+    """Whether this corner still needs the request's own ``models.lib``.
+
+    ``False`` for a process-less point (nothing selects a model section), and
+    also -- since issue #2522 -- for a bundle whose *every* section names its
+    own library: a PDK that ships nothing but per-device-family corner files
+    has no single all-device library to point ``models.lib`` at, so requiring
+    one would force the caller to nominate an arbitrary family file just to
+    satisfy the check.
+    """
+    if point.process is None:
+        return False
+    if point.process_sections is None:
+        return True
+    declared = point.process_section_libs
+    if declared is None:
+        return True
+    return any(lib is None for lib in declared)
 
 
 def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[str, ...]:
@@ -2059,27 +2148,54 @@ def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[st
     return tuple(resolved)
 
 
-def _osdi_preload_environment(
-    osdi_preload: tuple[str, ...], *, repo_root: str | None
-) -> list[dict[str, Any]]:
-    """``environment.osdi_preload`` (issue #2513): one entry per preloaded
-    OSDI library, in load order -- its basename, its ``{path, scope}``
-    normalised exactly like ``environment.models_lib`` (so an out-of-repo
-    PDK file reports ``{"path": null, "scope": "external"}`` rather than an
-    absolute host path), and the SHA-256 of its content. An ``.osdi`` binary
-    is as much a part of "which models produced this result" as the ``.lib``
-    is, and the hash is what pins it when the path itself is not reported.
+def _model_inputs_environment(
+    *,
+    osdi_preload: tuple[str, ...],
+    corner_section_libs: tuple[str, ...],
+    repo_root: str | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """The optional ``environment`` keys pinning the model input files a run
+    read *besides* ``models.lib`` -- ``osdi_preload`` (issue #2513, in load
+    order) and ``corner_section_libs`` (issue #2522, in first-appearance
+    order). An ``.osdi`` binary and a per-device-family corner library are
+    each as much a part of "which models produced this result" as
+    ``models.lib`` is, and their hashes are what pin them when their paths
+    are not reported.
+
+    Each key is present **only** when the request declared that kind of
+    input, so a request declaring neither leaves the ``environment`` block
+    exactly as it was before either issue.
     """
-    entries: list[dict[str, Any]] = []
-    for path in osdi_preload:
-        entries.append(
-            {
-                "name": os.path.basename(path),
-                **_report_path(path, repo_root=repo_root),
-                "sha256": sha256_file(path),
-            }
-        )
+    entries: dict[str, list[dict[str, Any]]] = {}
+    for key, paths in (
+        ("osdi_preload", osdi_preload),
+        ("corner_section_libs", corner_section_libs),
+    ):
+        if paths:
+            entries[key] = _model_file_entries(paths, repo_root=repo_root)
     return entries
+
+
+def _model_file_entries(
+    paths: tuple[str, ...], *, repo_root: str | None
+) -> list[dict[str, Any]]:
+    """One ``{name, path, scope, sha256}`` entry per model input file, in the
+    order given -- the shared shape behind ``environment.osdi_preload``
+    (issue #2513) and ``environment.corner_section_libs`` (issue #2522).
+    ``path``/``scope`` are normalised exactly like
+    ``environment.models_lib``, so a file inside a PDK under the user's home
+    directory reports ``{"path": null, "scope": "external"}`` rather than an
+    absolute host path, and ``sha256`` is what pins it when the path itself
+    is not reported.
+    """
+    return [
+        {
+            "name": os.path.basename(path),
+            **_report_path(path, repo_root=repo_root),
+            "sha256": sha256_file(path),
+        }
+        for path in paths
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -2101,18 +2217,37 @@ class CornerPoint:
 
     ``process_sections`` is populated only when the request's
     ``corners.process[]`` entry for this point was the multi-section bundle
-    object form (``{"name": str, "sections": list[str]}``, see
+    object form (``{"name": str, "sections": [...]}``, see
     :func:`_parse_process_entry`) rather than a bare string -- ``None`` for
     an ordinary single-section (or process-less) corner. ``process`` always
     holds the corner's display name either way (the bundle's ``name``, or
     the bare string itself), so `corner_id`/`slug` labeling, the response's
     ``process`` field, and `_matches_exclude` need no bundle-awareness of
     their own.
+
+    ``process_section_libs``/``process_section_libs_resolved`` (issue #2522)
+    are the per-section model-library overrides of that bundle -- both
+    ``None`` unless at least one ``sections[]`` entry used the
+    ``{"lib": str, "section": str}`` object form, in which case both are
+    lists **parallel to** ``process_sections`` whose entry is ``None``
+    wherever that section takes the request's own ``models.lib``:
+
+    - ``process_section_libs`` holds the refs exactly **as declared**
+      (relative / ``$VAR`` / ``~``). This is what crosses the fleet wire
+      (:func:`_corner_points_to_wire`): a remote shard resolves them against
+      its *own* box, the same way it resolves ``models.lib`` itself, so
+      this host's absolute paths must never be baked in here.
+    - ``process_section_libs_resolved`` holds the absolute paths
+      :func:`_resolve_corner_section_libs` settled on for *this* host. It is
+      deliberately **not** serialised -- it is a local execution detail, not
+      part of the point's identity.
     """
 
     __slots__ = (
         "process",
         "process_sections",
+        "process_section_libs",
+        "process_section_libs_resolved",
         "supply_v",
         "temperature_c",
         "sample_index",
@@ -2126,15 +2261,36 @@ class CornerPoint:
         temperature_c: float,
         *,
         process_sections: list[str] | None = None,
+        process_section_libs: list[str | None] | None = None,
+        process_section_libs_resolved: list[str | None] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, int] | None = None,
     ) -> None:
         self.process = process
         self.process_sections = process_sections
+        self.process_section_libs = process_section_libs
+        self.process_section_libs_resolved = process_section_libs_resolved
         self.supply_v = supply_v
         self.temperature_c = temperature_c
         self.sample_index = sample_index
         self.mc_seed = mc_seed
+
+    def section_lib(self, index: int, models_lib: str | None) -> str | None:
+        """The library path the ``.lib`` card for ``process_sections[index]``
+        must name: this bundle's per-section override when it declared one
+        for that section (issue #2522 -- the absolute path resolved by
+        :func:`_resolve_corner_section_libs` when this run resolved it,
+        otherwise the ref exactly as declared, so a direct caller that never
+        resolved still names what it asked for rather than silently binding
+        ``models.lib``), else the request's own ``models.lib``.
+        """
+        resolved = self.process_section_libs_resolved
+        if resolved is not None and resolved[index] is not None:
+            return resolved[index]
+        declared = self.process_section_libs
+        if declared is not None and declared[index] is not None:
+            return declared[index]
+        return models_lib
 
     @property
     def corner_id(self) -> str:
@@ -2180,25 +2336,41 @@ def _format_number(value: float) -> str:
     return str(value)
 
 
-def _parse_process_entry(entry: Any) -> tuple[str | None, list[str] | None]:
-    """Normalize one ``corners.process[]`` entry into ``(name, sections)``.
+def _parse_process_entry(
+    entry: Any,
+) -> tuple[str | None, list[str] | None, list[str | None] | None]:
+    """Normalize one ``corners.process[]`` entry into ``(name, sections,
+    section_libs)``.
 
     A bare string is today's single-``.lib``-section corner (e.g. sky130's
-    ``"tt"``): returns ``(entry, None)`` -- ``process_sections=None`` signals
-    :func:`_write_corner_deck` to emit its historical single ``.lib`` line,
-    byte-for-byte unchanged from before this function existed.
+    ``"tt"``): returns ``(entry, None, None)`` -- ``process_sections=None``
+    signals :func:`_write_corner_deck` to emit its historical single ``.lib``
+    line, byte-for-byte unchanged from before this function existed.
 
-    An object ``{"name": str, "sections": list[str]}`` is a multi-section
-    corner *bundle* -- e.g. gf180mcu's ``sm141064.ngspice``, which has no
-    all-device corner sections and instead needs one ``.lib`` card per
-    device family (MOS + ``bjt_*`` + ``diode_*`` + ``res_*`` + ``moscap_*`` +
-    ``mimcap_*``) to fully select a named corner: returns ``(name,
-    list(sections))``, and :func:`_write_corner_deck` emits one ``.lib`` line
-    per section, in declaration order (ordering matters -- the gf180 section
-    set has interdependent global switch params).
+    An object ``{"name": str, "sections": [...]}`` is a multi-section corner
+    *bundle* -- e.g. gf180mcu's ``sm141064.ngspice``, which has no all-device
+    corner sections and instead needs one ``.lib`` card per device family
+    (MOS + ``bjt_*`` + ``diode_*`` + ``res_*`` + ``moscap_*`` + ``mimcap_*``)
+    to fully select a named corner. :func:`_write_corner_deck` emits one
+    ``.lib`` line per section, in declaration order (ordering matters -- the
+    gf180 section set has interdependent global switch params).
+
+    Each ``sections[]`` entry is either:
+
+    - a **bare string** -- that section is read from the request's own
+      ``models.lib``, exactly as before issue #2522; or
+    - an object ``{"lib": str, "section": str}`` -- that section is read
+      from ``lib`` instead, for a PDK that ships one corner library *per
+      device family* rather than one file carrying every section. Returned
+      as the third element, a list parallel to ``sections`` holding the
+      declared ref (or ``None`` for a bare-string section).
+
+    ``section_libs`` is ``None`` -- not a list of ``None``s -- when no entry
+    used the object form, so an all-bare-string bundle produces exactly the
+    ``CornerPoint`` (and fleet wire payload) it produced before #2522.
     """
     if isinstance(entry, str):
-        return entry, None
+        return entry, None, None
     if isinstance(entry, dict):
         name = entry.get("name")
         sections = entry.get("sections")
@@ -2206,20 +2378,77 @@ def _parse_process_entry(entry: Any) -> tuple[str | None, list[str] | None]:
             raise SimError(
                 "corners.process bundle entry requires a non-empty string 'name'"
             )
-        if (
-            not isinstance(sections, list)
-            or not sections
-            or not all(isinstance(s, str) and s for s in sections)
-        ):
+        if not isinstance(sections, list) or not sections:
             raise SimError(
-                "corners.process bundle entry requires a non-empty list of "
-                "non-empty strings 'sections'"
+                "corners.process bundle entry requires a non-empty list "
+                '\'sections\' of section names or {"lib", "section"} objects'
             )
-        return name, list(sections)
+        parsed = [_parse_process_section(section) for section in sections]
+        section_names = [section for section, _ in parsed]
+        section_libs = [lib for _, lib in parsed]
+        if all(lib is None for lib in section_libs):
+            return name, section_names, None
+        return name, section_names, section_libs
     raise SimError(
         "corners.process entries must be a string or an object "
-        '{"name": str, "sections": list[str]}'
+        '{"name": str, "sections": list[str | {"lib": str, "section": str}]}'
     )
+
+
+def _parse_process_section(section: Any) -> tuple[str, str | None]:
+    """One ``corners.process[].sections[]`` entry -> ``(section name, library
+    ref or None)``.
+
+    A bare string names a section of the request's own ``models.lib``
+    (``None`` library ref -- today's behaviour); an object
+    ``{"lib": str, "section": str}`` names the model library that section is
+    read from instead (issue #2522). The ref is returned exactly as declared;
+    :func:`_resolve_corner_section_libs` is what resolves and
+    existence-checks it.
+    """
+    if isinstance(section, str) and section:
+        return section, None
+    if not isinstance(section, dict):
+        raise SimError(
+            "corners.process bundle 'sections' entries must be a "
+            'non-empty string or an object {"lib": str, "section": str}'
+        )
+    lib = section.get("lib")
+    name = section.get("section")
+    if not isinstance(lib, str) or not lib:
+        raise SimError(
+            "corners.process bundle per-section entry requires a non-empty "
+            "string 'lib' (the model library this section is read from)"
+        )
+    if not isinstance(name, str) or not name:
+        raise SimError(
+            "corners.process bundle per-section entry requires a non-empty "
+            "string 'section'"
+        )
+    return name, lib
+
+
+def _corner_lib_lines(point: CornerPoint, models_lib: str | None) -> list[str]:
+    """The ``.lib`` cards selecting this corner's model sections, in
+    declaration order -- the one place every generated deck
+    (:func:`_write_corner_deck`, :func:`_write_xyce_deck`, and
+    ``op_sanity._write_op_deck``) derives them from, so a sweep, its
+    cross-validation oracle, and ``--op-lint`` can never disagree about which
+    model cards a corner selects.
+
+    Three shapes, in order: a multi-section bundle (one line per section,
+    each against its own per-section library when it declared one --
+    :meth:`CornerPoint.section_lib`), a bare-string process corner (one line
+    against ``models_lib``), or no process axis at all (no lines).
+    """
+    if point.process_sections is not None:
+        return [
+            f".lib {point.section_lib(index, models_lib)} {section}"
+            for index, section in enumerate(point.process_sections)
+        ]
+    if point.process is not None:
+        return [f".lib {models_lib} {point.process}"]
+    return []
 
 
 # --------------------------------------------------------------------------- #
@@ -2233,11 +2462,20 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
     wire shape a remote fleet shard's pushed request carries -- see
     ``_build_remote_request``'s ``explicit_points`` parameter and this
     module's ``_corner_points_from_wire`` counterpart.
+
+    ``process_section_libs`` (issue #2522) carries each per-section model
+    library **as the request declared it**, never
+    ``process_section_libs_resolved``'s absolute paths: the shard resolves
+    them against its own box, exactly as it resolves ``models.lib`` from the
+    forwarded ``models`` block (see ``_build_remote_request``'s decision 4).
+    ``None`` for every pre-#2522 corner list, so those shards' payloads are
+    unchanged apart from one added null field.
     """
     return [
         {
             "process": point.process,
             "process_sections": point.process_sections,
+            "process_section_libs": point.process_section_libs,
             "supply_v": point.supply_v,
             "temperature_c": point.temperature_c,
             "sample_index": point.sample_index,
@@ -2259,12 +2497,28 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
     for entry in data:
         if not isinstance(entry, dict):
             raise SimError("request._explicit_points entries must be objects")
+        sections = entry.get("process_sections")
+        section_libs = entry.get("process_section_libs")
+        if section_libs is not None and (
+            not isinstance(sections, list)
+            or not isinstance(section_libs, list)
+            or len(section_libs) != len(sections)
+        ):
+            # Issue #2522: the two lists are parallel by construction
+            # (`_parse_process_entry`), so a payload where they disagree is a
+            # corrupted shard dispatch -- refuse it rather than emit a deck
+            # binding some section to the wrong library.
+            raise SimError(
+                "request._explicit_points[].process_section_libs must be the "
+                "same length as process_sections"
+            )
         points.append(
             CornerPoint(
                 entry.get("process"),
                 entry.get("supply_v") or {},
                 entry.get("temperature_c"),
-                process_sections=entry.get("process_sections"),
+                process_sections=sections,
+                process_section_libs=section_libs,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
             )
@@ -2284,16 +2538,17 @@ def _expand_corners(
     populate the others.
 
     Each ``corners.process[]`` entry is either a bare string (one ``.lib``
-    section, unchanged) or a ``{"name": str, "sections": list[str]}`` bundle
-    object (multiple ``.lib`` sections under one named corner) -- see
+    section, unchanged) or a ``{"name": str, "sections": [...]}`` bundle
+    object (multiple ``.lib`` sections under one named corner, each
+    optionally naming its own model library) -- see
     :func:`_parse_process_entry`.
 
     ``corners.supply_v``'s keys sweep together by index (same-length arrays;
     rails move as a set), matching the spike's documented semantics.
     """
     raw_processes: list[Any] = corners_spec.get("process") or [None]
-    processes: list[tuple[str | None, list[str] | None]] = [
-        (None, None) if raw is None else _parse_process_entry(raw)
+    processes: list[tuple[str | None, list[str] | None, list[str | None] | None]] = [
+        (None, None, None) if raw is None else _parse_process_entry(raw)
         for raw in raw_processes
     ]
 
@@ -2313,7 +2568,7 @@ def _expand_corners(
     temperatures: list[float] = corners_spec.get("temperature_c") or [27]
 
     points: list[CornerPoint] = []
-    for process, process_sections in processes:
+    for process, process_sections, process_section_libs in processes:
         for supply_v in supply_points:
             for temperature_c in temperatures:
                 point = CornerPoint(
@@ -2321,6 +2576,7 @@ def _expand_corners(
                     supply_v,
                     temperature_c,
                     process_sections=process_sections,
+                    process_section_libs=process_section_libs,
                 )
                 if not _is_excluded(point, exclude_spec):
                     points.append(point)
@@ -2676,6 +2932,7 @@ def _expand_monte_carlo(
                     base.supply_v,
                     base.temperature_c,
                     process_sections=base.process_sections,
+                    process_section_libs=base.process_section_libs,
                     sample_index=sample_index,
                     mc_seed={
                         "process_seed": process_seed,
@@ -2712,6 +2969,7 @@ def _checkpoint_fingerprint(
     timeout_s: float,
     engine: str,
     osdi_preload: tuple[str, ...] = (),
+    corner_section_libs: tuple[str, ...] = (),
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
     corners actually run -- the basis for deciding whether an on-disk
@@ -2744,6 +3002,15 @@ def _checkpoint_fingerprint(
         # Only keyed in when declared, so a request without the option keeps
         # its pre-#2513 fingerprint (and its existing checkpoint) unchanged.
         payload["osdi_preload_sha256"] = [sha256_file(p) for p in osdi_preload]
+    if corner_section_libs:
+        # Issue #2522: a corner's per-section libraries determine its device
+        # models exactly as `models.lib` does, so editing one must invalidate
+        # the checkpoint too. Only keyed in when the request declares them, so
+        # a bundle without per-section libraries keeps its pre-#2522
+        # fingerprint (and its existing checkpoint) unchanged.
+        payload["corner_section_libs_sha256"] = [
+            sha256_file(p) for p in corner_section_libs
+        ]
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
 
@@ -3836,14 +4103,11 @@ def _write_corner_deck(
         lines.append(f".param mc_sample_index={point.sample_index}")
         lines.append(f".param mc_process_seed={point.mc_seed['process_seed']}")
         lines.append(f".param mc_mismatch_seed={point.mc_seed['mismatch_seed']}")
-    if point.process_sections is not None:
-        # Multi-section corner bundle (e.g. gf180mcu's per-device-family
-        # `.lib` cards) -- one line per declared section, in order (see
-        # `_parse_process_entry`).
-        for section in point.process_sections:
-            lines.append(f".lib {models_lib} {section}")
-    elif point.process is not None:
-        lines.append(f".lib {models_lib} {point.process}")
+    # The corner's `.lib` cards: one per section for a multi-section bundle
+    # (e.g. gf180mcu's per-device-family cards, each optionally against its
+    # own library file -- issue #2522), a single card for a bare-string
+    # process corner, none without a process axis. See `_corner_lib_lines`.
+    lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
     lines.append(f".temp {point.temperature_c}")
 
@@ -3965,13 +4229,10 @@ def _write_xyce_deck(
     ``monte_carlo`` for this engine before any deck exists.
     """
     lines = ["* klt sim -- generated Xyce corner deck, do not edit"]
-    if point.process_sections is not None:
-        # Multi-section corner bundle -- one line per declared section, in
-        # order (see `_parse_process_entry`), same as the ngspice deck.
-        for section in point.process_sections:
-            lines.append(f".lib {models_lib} {section}")
-    elif point.process is not None:
-        lines.append(f".lib {models_lib} {point.process}")
+    # Same `.lib` cards as the ngspice deck, from the same helper (multi-
+    # section bundles and issue #2522's per-section libraries included) --
+    # the oracle must read the same models as the run it cross-validates.
+    lines.extend(_corner_lib_lines(point, models_lib))
     lines.append(f".include {netlist_path}")
     # Xyce's documented circuit-wide device-temperature control; `.temp`
     # would be a silent no-op (see this docstring's list).

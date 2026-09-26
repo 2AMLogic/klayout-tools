@@ -9546,3 +9546,500 @@ def test_checkpoint_fingerprint_keys_on_osdi_preload_content(tmp_path):
     assert first != without
     osdi.write_bytes(b"build 2")
     assert sim._checkpoint_fingerprint(**kwargs, osdi_preload=(str(osdi),)) != first
+
+
+# --------------------------------------------------------------------------- #
+# Per-section corner libraries (issue #2522): a `corners.process` bundle whose
+# `sections[]` entries name their own `.lib` file, for a PDK that ships one
+# corner library per device family instead of one file with every section.
+# --------------------------------------------------------------------------- #
+
+
+def _write_family_lib(tmp_path: Path, name: str, section: str = "tt") -> Path:
+    path = tmp_path / name
+    path.write_text(f".lib {section}\n.param {section}_scale=1.0\n.endl {section}\n")
+    return path
+
+
+def test_expand_corners_bundle_per_section_libs():
+    (point,) = sim._expand_corners(
+        {
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": [
+                        {"lib": "mos.lib", "section": "mos_tt"},
+                        {"lib": "cap.lib", "section": "cap_tt"},
+                    ],
+                }
+            ]
+        },
+        [],
+    )
+
+    assert point.process == "tt"
+    assert point.process_sections == ["mos_tt", "cap_tt"]
+    assert point.process_section_libs == ["mos.lib", "cap.lib"]
+    # Nothing is resolved at expansion time -- the declared refs are what a
+    # fleet shard is handed (see `_resolve_corner_section_libs`).
+    assert point.process_section_libs_resolved is None
+    assert point.corner_id == "tt/novdd/27C"
+
+
+def test_expand_corners_bundle_mixes_bare_and_per_section_lib_entries():
+    """The issue's edge case: a bare-string section (models.lib) and a
+    per-section-lib object in the same `sections` array."""
+    (point,) = sim._expand_corners(
+        {
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": ["tt", {"lib": "cap.lib", "section": "cap_tt"}],
+                }
+            ]
+        },
+        [],
+    )
+
+    assert point.process_sections == ["tt", "cap_tt"]
+    assert point.process_section_libs == [None, "cap.lib"]
+
+
+def test_expand_corners_bundle_of_bare_strings_declares_no_section_libs():
+    """Regression: today's all-bare-string bundle keeps
+    `process_section_libs=None` -- the shape every pre-#2522 caller produced,
+    which `_write_corner_deck` renders against `models.lib` alone."""
+    (point,) = sim._expand_corners(
+        {"process": [{"name": "ss", "sections": ["ss", "bjt_ss"]}]}, []
+    )
+
+    assert point.process_sections == ["ss", "bjt_ss"]
+    assert point.process_section_libs is None
+
+
+@pytest.mark.parametrize(
+    "section,match",
+    [
+        ({"section": "cap_tt"}, "lib"),
+        ({"lib": "", "section": "cap_tt"}, "lib"),
+        ({"lib": 5, "section": "cap_tt"}, "lib"),
+        ({"lib": "cap.lib"}, "section"),
+        ({"lib": "cap.lib", "section": ""}, "section"),
+        ({"lib": "cap.lib", "section": 5}, "section"),
+        (["cap.lib", "cap_tt"], "sections"),
+    ],
+)
+def test_expand_corners_bundle_per_section_lib_validation(section, match):
+    with pytest.raises(sim.SimError, match=match):
+        sim._expand_corners(
+            {"process": [{"name": "tt", "sections": [section]}]},
+            [],
+        )
+
+
+def test_corner_points_wire_round_trip_preserves_per_section_libs():
+    points = sim._expand_corners(
+        {
+            "process": [
+                "ff",
+                {
+                    "name": "tt",
+                    "sections": ["tt", {"lib": "cap.lib", "section": "cap_tt"}],
+                },
+            ],
+            "temperature_c": [-40, 125],
+        },
+        [],
+    )
+    wire = sim._corner_points_to_wire(points)
+
+    # The wire carries the refs *as declared* -- never this host's resolved
+    # absolute paths, which a fleet shard's own box could not honour.
+    assert wire[2]["process_sections"] == ["tt", "cap_tt"]
+    assert wire[2]["process_section_libs"] == [None, "cap.lib"]
+    assert json.loads(json.dumps(wire)) == wire
+
+    restored = sim._corner_points_from_wire(json.loads(json.dumps(wire)))
+    assert [p.corner_id for p in restored] == [p.corner_id for p in points]
+    assert [p.process_sections for p in restored] == [
+        p.process_sections for p in points
+    ]
+    assert [p.process_section_libs for p in restored] == [
+        p.process_section_libs for p in points
+    ]
+
+
+def test_corner_points_wire_round_trip_without_per_section_libs():
+    """A pre-#2522 corner list round-trips with `process_section_libs` null,
+    and reconstructs the exact shape `_write_corner_deck` used before."""
+    points = sim._expand_corners(
+        {"process": ["tt", {"name": "ss", "sections": ["ss", "bjt_ss"]}]}, []
+    )
+    wire = sim._corner_points_to_wire(points)
+
+    assert [entry["process_section_libs"] for entry in wire] == [None, None]
+    restored = sim._corner_points_from_wire(wire)
+    assert [p.process_section_libs for p in restored] == [None, None]
+
+
+def test_corner_points_from_wire_rejects_mismatched_section_lib_length():
+    wire = [
+        {
+            "process": "tt",
+            "process_sections": ["tt", "cap_tt"],
+            "process_section_libs": ["cap.lib"],
+            "supply_v": {},
+            "temperature_c": 27,
+        }
+    ]
+    with pytest.raises(sim.SimError, match="process_section_libs"):
+        sim._corner_points_from_wire(wire)
+
+
+def test_write_corner_deck_per_section_libs_emit_their_own_lib_file(tmp_path):
+    point = sim.CornerPoint(
+        "tt",
+        {},
+        27,
+        process_sections=["tt", "cap_tt", "bjt_tt"],
+        process_section_libs=[None, "cap.lib", "bjt.lib"],
+        process_section_libs_resolved=[
+            None,
+            str(tmp_path / "cap.lib"),
+            str(tmp_path / "bjt.lib"),
+        ],
+    )
+    lines = _write_deck(tmp_path, point)
+
+    models_lib = tmp_path / "corner.lib"
+    assert [line for line in lines if line.startswith(".lib")] == [
+        f".lib {models_lib} tt",
+        f".lib {tmp_path / 'cap.lib'} cap_tt",
+        f".lib {tmp_path / 'bjt.lib'} bjt_tt",
+    ]
+
+
+def test_write_corner_deck_unresolved_per_section_libs_use_the_declared_ref(
+    tmp_path,
+):
+    """A point that never went through `_resolve_corner_section_libs` (a
+    direct caller, not `run_sim`) still names the declared ref rather than
+    silently falling back to `models.lib`."""
+    point = sim.CornerPoint(
+        "tt",
+        {},
+        27,
+        process_sections=["cap_tt"],
+        process_section_libs=["cap.lib"],
+    )
+    lines = _write_deck(tmp_path, point)
+
+    assert [line for line in lines if line.startswith(".lib")] == [
+        ".lib cap.lib cap_tt"
+    ]
+
+
+def test_write_xyce_deck_per_section_libs_emit_their_own_lib_file(tmp_path):
+    deck = tmp_path / "corner.cir"
+    sim._write_xyce_deck(
+        deck_path=str(deck),
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib=str(tmp_path / "corner.lib"),
+        point=sim.CornerPoint(
+            "tt",
+            {},
+            85,
+            process_sections=["tt", "cap_tt"],
+            process_section_libs=[None, "cap.lib"],
+            process_section_libs_resolved=[None, str(tmp_path / "cap.lib")],
+        ),
+        analysis={"kind": "tran", "args": "1n 10u"},
+        measurements_spec=[],
+    )
+
+    lines = deck.read_text().splitlines()
+    assert [line for line in lines if line.startswith(".lib")] == [
+        f".lib {tmp_path / 'corner.lib'} tt",
+        f".lib {tmp_path / 'cap.lib'} cap_tt",
+    ]
+
+
+def test_resolve_corner_section_libs_resolves_relative_to_the_request_dir(tmp_path):
+    cap = _write_family_lib(tmp_path, "cap.lib", section="cap_tt")
+    (point,) = sim._expand_corners(
+        {
+            "process": [
+                {"name": "tt", "sections": [{"lib": "cap.lib", "section": "cap_tt"}]}
+            ]
+        },
+        [],
+    )
+
+    libs = sim._resolve_corner_section_libs([point], {}, str(tmp_path))
+
+    assert libs == (str(cap),)
+    assert point.process_section_libs_resolved == [str(cap)]
+    # The declared ref is left intact for the fleet wire.
+    assert point.process_section_libs == ["cap.lib"]
+
+
+def test_resolve_corner_section_libs_expands_env_vars(tmp_path, monkeypatch):
+    cap = _write_family_lib(tmp_path, "cap.lib", section="cap_tt")
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path))
+    (point,) = sim._expand_corners(
+        {
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": [
+                        {"lib": "$PDK_ROOT/cap.lib", "section": "cap_tt"},
+                    ],
+                }
+            ]
+        },
+        [],
+    )
+
+    assert sim._resolve_corner_section_libs([point], {}, str(tmp_path)) == (str(cap),)
+
+
+def test_resolve_corner_section_libs_joins_relative_refs_against_the_pdk_variant(
+    tmp_path,
+):
+    """Same rule as `models.lib`: with `models.pdk` set, a relative ref
+    resolves against the PDK variant directory -- the shape that also
+    survives a remote/batch shard, whose own `$PDK_ROOT` differs."""
+    install_root = tmp_path / "install"
+    variant_dir = install_root / "sky130A" / "libs.tech" / "ngspice"
+    variant_dir.mkdir(parents=True)
+    (install_root / "sky130A" / "libs.tech" / "klayout").mkdir()
+    cap = variant_dir / "cap.lib"
+    cap.write_text(".lib cap_tt\n.endl cap_tt\n")
+
+    (point,) = sim._expand_corners(
+        {
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": [
+                        {
+                            "lib": "libs.tech/ngspice/cap.lib",
+                            "section": "cap_tt",
+                        }
+                    ],
+                }
+            ]
+        },
+        [],
+    )
+    libs = sim._resolve_corner_section_libs(
+        [point],
+        {"pdk": "sky130A", "pdk_root": str(install_root)},
+        str(tmp_path),
+    )
+
+    assert libs == (str(cap),)
+
+
+def test_resolve_corner_section_libs_missing_file_raises(tmp_path):
+    (point,) = sim._expand_corners(
+        {
+            "process": [
+                {"name": "tt", "sections": [{"lib": "nope.lib", "section": "cap_tt"}]}
+            ]
+        },
+        [],
+    )
+
+    with pytest.raises(sim.SimError, match="corner section library not found"):
+        sim._resolve_corner_section_libs([point], {}, str(tmp_path))
+
+
+def test_resolve_corner_section_libs_deduplicates_in_first_appearance_order(tmp_path):
+    cap = _write_family_lib(tmp_path, "cap.lib", section="cap_tt")
+    bjt = _write_family_lib(tmp_path, "bjt.lib", section="bjt_tt")
+    points = sim._expand_corners(
+        {
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": [
+                        {"lib": "cap.lib", "section": "cap_tt"},
+                        {"lib": "bjt.lib", "section": "bjt_tt"},
+                    ],
+                },
+                {
+                    "name": "ss",
+                    "sections": [{"lib": "cap.lib", "section": "cap_tt"}],
+                },
+            ]
+        },
+        [],
+    )
+
+    assert sim._resolve_corner_section_libs(points, {}, str(tmp_path)) == (
+        str(cap),
+        str(bjt),
+    )
+
+
+def test_resolve_corner_section_libs_leaves_ordinary_points_alone(tmp_path):
+    points = sim._expand_corners(
+        {"process": ["tt", {"name": "ss", "sections": ["ss", "bjt_ss"]}]}, []
+    )
+
+    assert sim._resolve_corner_section_libs(points, {}, str(tmp_path)) == ()
+    assert [p.process_section_libs_resolved for p in points] == [None, None]
+
+
+def _per_section_lib_request(tmp_path: Path, **models) -> tuple[Path, Path, Path]:
+    _write_body(tmp_path)
+    mos = _write_corner_lib(tmp_path, "mos.lib")
+    cap = _write_family_lib(tmp_path, "cap.lib", section="cap_tt")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": models,
+            "corners": {
+                "process": [
+                    {
+                        "name": "tt",
+                        "sections": [
+                            {"lib": "mos.lib", "section": "tt"},
+                            {"lib": "cap.lib", "section": "cap_tt"},
+                        ],
+                    }
+                ]
+            },
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+    return request, mos, cap
+
+
+def test_run_sim_per_section_libs_reach_the_deck_and_the_environment(
+    tmp_path, monkeypatch
+):
+    decks = _capture_decks(monkeypatch)
+    request, mos, cap = _per_section_lib_request(tmp_path)
+
+    report = sim.run_sim(str(request))
+
+    (deck,) = decks
+    assert [line for line in deck.splitlines() if line.startswith(".lib")] == [
+        f".lib {mos} tt",
+        f".lib {cap} cap_tt",
+    ]
+    entries = report["environment"]["corner_section_libs"]
+    assert [entry["name"] for entry in entries] == ["mos.lib", "cap.lib"]
+    assert [entry["sha256"] for entry in entries] == [
+        sim.sha256_file(str(mos)),
+        sim.sha256_file(str(cap)),
+    ]
+    assert set(entries[0]) == {"name", "path", "scope", "sha256"}
+    # Every section named its own library, so `models.lib` was never needed.
+    assert report["environment"]["models_lib"]["path"] is None
+    assert report["environment"]["models_lib_sha256"] is None
+
+
+def test_run_sim_per_section_libs_alongside_a_models_lib_section(tmp_path, monkeypatch):
+    decks = _capture_decks(monkeypatch)
+    _write_body(tmp_path)
+    models_lib = _write_corner_lib(tmp_path)
+    cap = _write_family_lib(tmp_path, "cap.lib", section="cap_tt")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "corner.lib"},
+            "corners": {
+                "process": [
+                    {
+                        "name": "tt",
+                        "sections": ["tt", {"lib": "cap.lib", "section": "cap_tt"}],
+                    }
+                ]
+            },
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+
+    report = sim.run_sim(str(request))
+
+    (deck,) = decks
+    assert [line for line in deck.splitlines() if line.startswith(".lib")] == [
+        f".lib {models_lib} tt",
+        f".lib {cap} cap_tt",
+    ]
+    assert report["environment"]["models_lib_sha256"] == sim.sha256_file(
+        str(models_lib)
+    )
+
+
+def test_run_sim_without_per_section_libs_omits_the_environment_field(
+    tmp_path, monkeypatch
+):
+    _capture_decks(monkeypatch)
+    request = _host_default_request(
+        tmp_path, {"process": [{"name": "tt", "sections": ["tt"]}]}
+    )
+    report = sim.run_sim(str(request))
+    assert "corner_section_libs" not in report["environment"]
+
+
+def test_run_sim_missing_per_section_lib_fails_before_any_corner_runs(
+    tmp_path, monkeypatch
+):
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("no corner may be dispatched")
+
+    monkeypatch.setattr(sim.subprocess, "run", must_not_run)
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "corners": {
+                "process": [
+                    {
+                        "name": "tt",
+                        "sections": [{"lib": "nope.lib", "section": "cap_tt"}],
+                    }
+                ]
+            },
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+
+    with pytest.raises(sim.SimError, match="corner section library not found"):
+        sim.run_sim(str(request))
+
+
+def test_checkpoint_fingerprint_keys_on_per_section_lib_content(tmp_path):
+    body = _write_body(tmp_path)
+    cap = _write_family_lib(tmp_path, "cap.lib", section="cap_tt")
+    kwargs = {
+        "netlist_path": str(body),
+        "models_lib": None,
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "measurements_spec": [],
+        "corner_points": [sim.CornerPoint(None, {}, 27)],
+        "timeout_s": 10.0,
+        "engine": "ngspice",
+    }
+    without = sim._checkpoint_fingerprint(**kwargs)
+    # No per-section libraries keeps the pre-#2522 fingerprint identical.
+    assert sim._checkpoint_fingerprint(**kwargs, corner_section_libs=()) == without
+    first = sim._checkpoint_fingerprint(**kwargs, corner_section_libs=(str(cap),))
+    assert first != without
+    cap.write_text(".lib cap_tt\n.param cap_tt_scale=1.1\n.endl cap_tt\n")
+    assert (
+        sim._checkpoint_fingerprint(**kwargs, corner_section_libs=(str(cap),)) != first
+    )

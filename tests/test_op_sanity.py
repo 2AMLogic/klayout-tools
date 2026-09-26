@@ -791,6 +791,71 @@ def test_osdi_preload_reaches_the_op_lint_deck(tmp_path, monkeypatch):
     assert deck.index(".control") < pre < deck.index("op")
 
 
+def test_per_section_corner_libs_reach_the_op_lint_deck(tmp_path, monkeypatch):
+    """Issue #2522: a `corners.process` bundle whose sections name their own
+    `.lib` files must produce the same `.lib` cards here as the sweep deck --
+    a lint and a sweep of the same request see the same circuit."""
+    mos = tmp_path / "mos.lib"
+    mos.write_text(".lib tt\n.endl tt\n")
+    cap = tmp_path / "cap.lib"
+    cap.write_text(".lib cap_tt\n.endl cap_tt\n")
+    request = _write_request(
+        tmp_path,
+        _GOOD_NETLIST,
+        corners={
+            "supply_v": {"vdd": [1.8]},
+            "temperature_c": [27],
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": [
+                        {"lib": "mos.lib", "section": "tt"},
+                        {"lib": "cap.lib", "section": "cap_tt"},
+                    ],
+                }
+            ],
+        },
+    )
+    decks: list[list[str]] = []
+    _install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        node_voltages={"vdd": 1.8, "in": 0.9, "bias": 0.6, "out": 1.2},
+    )
+    fake_run = op_sanity.subprocess.run
+
+    def recording_run(cmd, **kwargs):
+        decks.append(Path(cmd[cmd.index("-b") + 1]).read_text().splitlines())
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(op_sanity.subprocess, "run", recording_run)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    assert [line for line in deck if line.startswith(".lib")] == [
+        f".lib {mos} tt",
+        f".lib {cap} cap_tt",
+    ]
+
+
+def test_missing_per_section_corner_lib_is_an_op_lint_request_error(tmp_path):
+    request = _write_request(
+        tmp_path,
+        _GOOD_NETLIST,
+        corners={
+            "temperature_c": [27],
+            "process": [
+                {"name": "tt", "sections": [{"lib": "absent.lib", "section": "tt"}]}
+            ],
+        },
+    )
+    with pytest.raises(
+        op_sanity.OpSanityError, match="corner section library not found"
+    ):
+        op_sanity.run_op_sanity(str(request))
+
+
 def test_missing_osdi_preload_is_an_op_lint_request_error(tmp_path):
     request = _write_request(
         tmp_path, _GOOD_NETLIST, options={"osdi_preload": ["absent.osdi"]}
