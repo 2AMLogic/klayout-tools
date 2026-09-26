@@ -129,6 +129,7 @@ from .sim import (
     _expand_corners,
     _extract_engine_version,
     _resolve_models_lib,
+    _resolve_osdi_preload,
 )
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -622,13 +623,16 @@ def _write_op_deck(
     point: CornerPoint,
     devices: list[MosInstance],
     probe_nodes: list[str],
+    osdi_preload: tuple[str, ...] = (),
 ) -> None:
     """Generate the ``.op`` deck: the corner's ``.lib``/``.include``/
     ``.temp`` cards (identical to ``sim.py``'s ``_write_corner_deck``, so a
     lint and a sweep of the same request see the same circuit), then a
-    ``.control`` block that ``alter``s the supply sources, runs ``op``, and
-    ``print``s every candidate op-point vector plus every probed node
-    voltage, each device's block introduced by an ``echo`` marker."""
+    ``.control`` block that ``pre_osdi``-loads the request's
+    ``options.osdi_preload`` libraries (issue #2513, same as the sweep's
+    deck), ``alter``s the supply sources, runs ``op``, and ``print``s every
+    candidate op-point vector plus every probed node voltage, each device's
+    block introduced by an ``echo`` marker."""
     lines = ["* klt sim --op-lint -- generated operating-point deck, do not edit"]
     if point.process_sections is not None:
         for section in point.process_sections:
@@ -639,6 +643,8 @@ def _write_op_deck(
     lines.append(f".temp {point.temperature_c}")
 
     lines.append(".control")
+    for path in osdi_preload:
+        lines.append(f"pre_osdi {path}")
     for key, value in sorted(point.supply_v.items()):
         lines.append(f"alter {key}={value}")
     lines.append("op")
@@ -1107,6 +1113,13 @@ def run_op_sanity(
 
     options = request.get("options") or {}
     timeout_s = op_lint.get("timeout_s", options.get("timeout_s", DEFAULT_TIMEOUT_S))
+    # Issue #2513: the same request document drives the sweep and this lint,
+    # so an OSDI-model PDK's preload must reach this deck too -- otherwise
+    # every device would be an undefined model here and only here.
+    try:
+        osdi_preload = _resolve_osdi_preload(options, request_dir)
+    except SimError as exc:
+        raise OpSanityError(str(exc)) from exc
 
     ground, supply = _classify_rails(
         parsed, sorted(point.supply_v), op_lint.get("rails") or {}
@@ -1120,6 +1133,7 @@ def run_op_sanity(
         devices=parsed.devices,
         probe_nodes=probe_nodes,
         timeout_s=timeout_s,
+        osdi_preload=osdi_preload,
     )
 
     resolved, node_voltages = _parse_op_log(log_text, parsed.devices)
@@ -1265,6 +1279,7 @@ def _run_op(
     devices: list[MosInstance],
     probe_nodes: list[str],
     timeout_s: float,
+    osdi_preload: tuple[str, ...] = (),
 ) -> tuple[str, str | None, float, list[dict[str, str]]]:
     """Run the generated ``.op`` deck through ``ngspice -b``.
 
@@ -1293,6 +1308,7 @@ def _run_op(
             point=point,
             devices=devices,
             probe_nodes=probe_nodes,
+            osdi_preload=osdi_preload,
         )
         started = time.monotonic()
         try:

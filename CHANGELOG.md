@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2513, `klt sim`; additive — `schema_version` unchanged):
+  `options.osdi_preload`, a first-class hook for OSDI (Verilog-A) compact
+  models. Each declared `.osdi` path (`$VAR`/`~` expanded, relative to the
+  request file) is existence-checked before any corner runs and emitted as a
+  `pre_osdi <path>` line at the top of the `.control` block `klt sim`
+  generates, so a PDK like IHP `sg13g2` (PSP103 MOSFETs) no longer needs a
+  second `.control` block smuggled into the netlist body or a host-level
+  `~/.spiceinit`. The report gains `environment.osdi_preload` (`{name, path,
+  scope, sha256}` per library, present only when declared), and a resumable
+  sweep's checkpoint fingerprint keys on those hashes. `remote`/`batch`
+  refuse the option by name (an `.osdi` is a host-architecture binary, so it
+  is not staged; a host-default off-host backend steps back to `local`),
+  and `engine: "xyce"` refuses it by name. The same preload reaches the
+  `fail_fast_probe` and `--op-lint` decks. `klt characterize` now forwards
+  its `options.osdi_preload` to this option and its generated testbench no
+  longer carries a `.control` block of its own.
+
 - **Added** (#2502, new verb `klt characterize`; `schema_version: 1` — a new
   command, so nothing existing changed shape): `klt` can now *emit* a Liberty
   model, not only consume one. `klt sta`, `klt synthesize` and

@@ -1190,6 +1190,32 @@ def run_sim(
     ngspice_binary = (
         _resolve_ngspice_binary(options, request_dir) if engine == "ngspice" else None
     )
+    # Issue #2513: OSDI (Verilog-A) model preload. Resolved and
+    # existence-checked here, before any corner is dispatched, like
+    # `models.lib` -- see `_resolve_osdi_preload`. Validated for every engine
+    # so a typo'd path is always named; `engine: "xyce"` then refuses the
+    # option outright in `_enforce_xyce_support_boundary` below rather than
+    # silently dropping it.
+    osdi_preload = _resolve_osdi_preload(options, request_dir)
+    # An `.osdi` is a host-architecture shared library compiled against one
+    # ngspice's OSDI ABI, so the off-host backends refuse the option rather
+    # than stage it (see docs/cli/sim.md's "OSDI (Verilog-A) model preload"
+    # for why staging -- #2485's answer for the `.include` closure -- is the
+    # wrong answer for a binary). A host-default off-host backend steps
+    # aside to `local` instead of refusing, like every other "this run
+    # cannot leave this host" case; an explicit choice is never
+    # second-guessed, so it is refused by name.
+    backend = _yield_host_default_backend(
+        backend, backend_from_host_default, reason_ok=not osdi_preload
+    )
+    if osdi_preload and backend in _OFFHOST_BACKENDS:
+        raise SimError(
+            f"options.osdi_preload is not supported for backend {backend!r}: "
+            "an `.osdi` file is a host-architecture shared library compiled "
+            "against this host's ngspice, so it is neither staged to nor "
+            "resolved on the off-host instance -- run OSDI-model sweeps with "
+            "backend 'local' or 'local-parallel'"
+        )
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     keep_artifacts = bool(options.get("keep_artifacts", False))
     want_waveforms = bool(options.get("waveforms", False))
@@ -1287,6 +1313,7 @@ def run_sim(
         corners_spec=corners_spec,
         monte_carlo_declared=monte_carlo_spec is not None,
         fail_fast_probe=fail_fast_probe,
+        osdi_preload_declared=bool(osdi_preload),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -1380,6 +1407,7 @@ def run_sim(
             corner_points=corner_points,
             timeout_s=timeout_s,
             engine=engine,
+            osdi_preload=osdi_preload,
         )
         pre_completed, loaded_engine_version = _load_checkpoint(
             checkpoint_path, fingerprint
@@ -1420,6 +1448,7 @@ def run_sim(
             keep_artifacts=keep_artifacts,
             ngspice_binary=ngspice_binary,
             ngspice_init=ngspice_init_lines,
+            osdi_preload=osdi_preload,
         )
 
     probe_abort: dict[str, Any] | None = None
@@ -1479,6 +1508,7 @@ def run_sim(
             "ngspice_binary": ngspice_binary,
             "fail_on_diagnostic": fail_on_diagnostic_codes,
             "ngspice_init": ngspice_init_lines,
+            "osdi_preload": osdi_preload,
         }
         if backend not in _OFFHOST_BACKENDS
         else {}
@@ -1786,6 +1816,14 @@ def run_sim(
         # existing consumers of a request that omits netlist_source see an
         # unchanged environment block (see docs/cli/sim.md).
         environment["netlist_source"] = netlist_source
+    if osdi_preload:
+        # Issue #2513, additive/optional: only present when the request
+        # declares `options.osdi_preload`, so a request without it sees an
+        # unchanged environment block. One `{name, path, scope, sha256}` per
+        # preloaded library, in load order -- see `_osdi_preload_environment`.
+        environment["osdi_preload"] = _osdi_preload_environment(
+            osdi_preload, repo_root=repo_root
+        )
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
@@ -1947,6 +1985,77 @@ def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
     if not os.path.isfile(resolved):
         raise SimError(f"model library not found: {resolved}")
     return resolved
+
+
+def _resolve_osdi_preload(options: dict[str, Any], request_dir: str) -> tuple[str, ...]:
+    """Resolve ``options.osdi_preload`` (issue #2513) to absolute paths of
+    compiled OSDI shared libraries the generated deck must ``pre_osdi``.
+
+    ngspice can only instantiate a Verilog-A compact model through an OSDI
+    shared library, loaded with the *control* command ``pre_osdi <file>``
+    (``pre_``-prefixed commands run before the circuit is parsed). Several
+    open PDKs ship their core devices that way -- IHP's ``sg13g2`` MOSFETs
+    are PSP103 Verilog-A, compiled to ``libs.tech/ngspice/osdi/*.osdi`` by
+    ``scripts/fetch-sg13g2-sim-toolchain.sh`` (see ``pdks/README.md``) --
+    and without the preload every device fails with ``Unable to find
+    definition of model ...``. :func:`_write_corner_deck` emits one
+    ``pre_osdi`` line per entry, in declared order, at the top of the
+    ``.control`` block it already generates, so a caller's netlist body
+    never needs a ``.control`` block of its own (docs/cli/sim.md's "Netlist
+    convention").
+
+    Same resolution rule as ``models.lib``'s literal-path shape: env vars
+    and ``~`` are expanded, a relative path is joined against the request
+    file's own directory. Every entry is existence-checked **here**, before
+    any corner is dispatched -- the same posture as
+    :func:`_resolve_models_lib`'s ``model library not found`` -- rather than
+    left to surface as a per-corner ngspice error deep inside the run.
+
+    Returns ``()`` when the option is absent or an empty list, which leaves
+    every generated deck byte-identical to before this issue.
+    """
+    raw = options.get("osdi_preload")
+    if raw is None:
+        return ()
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise SimError(
+            "request.options.osdi_preload must be an array of paths to "
+            "compiled `.osdi` shared libraries"
+        )
+    resolved: list[str] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, str) or not entry.strip():
+            raise SimError(
+                f"request.options.osdi_preload[{index}] must be a non-empty path"
+            )
+        path = _resolve_relative(entry, request_dir)
+        if not os.path.isfile(path):
+            raise SimError(f"osdi_preload file not found: {path}")
+        resolved.append(path)
+    return tuple(resolved)
+
+
+def _osdi_preload_environment(
+    osdi_preload: tuple[str, ...], *, repo_root: str | None
+) -> list[dict[str, Any]]:
+    """``environment.osdi_preload`` (issue #2513): one entry per preloaded
+    OSDI library, in load order -- its basename, its ``{path, scope}``
+    normalised exactly like ``environment.models_lib`` (so an out-of-repo
+    PDK file reports ``{"path": null, "scope": "external"}`` rather than an
+    absolute host path), and the SHA-256 of its content. An ``.osdi`` binary
+    is as much a part of "which models produced this result" as the ``.lib``
+    is, and the hash is what pins it when the path itself is not reported.
+    """
+    entries: list[dict[str, Any]] = []
+    for path in osdi_preload:
+        entries.append(
+            {
+                "name": os.path.basename(path),
+                **_report_path(path, repo_root=repo_root),
+                "sha256": sha256_file(path),
+            }
+        )
+    return entries
 
 
 # --------------------------------------------------------------------------- #
@@ -2578,6 +2687,7 @@ def _checkpoint_fingerprint(
     corner_points: list[CornerPoint],
     timeout_s: float,
     engine: str,
+    osdi_preload: tuple[str, ...] = (),
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
     corners actually run -- the basis for deciding whether an on-disk
@@ -2604,6 +2714,12 @@ def _checkpoint_fingerprint(
         "engine": engine,
         "corner_ids": [point.corner_id for point in corner_points],
     }
+    if osdi_preload:
+        # Issue #2513: a rebuilt `.osdi` changes every device it defines, so
+        # it invalidates a checkpoint exactly like an edited model library.
+        # Only keyed in when declared, so a request without the option keeps
+        # its pre-#2513 fingerprint (and its existing checkpoint) unchanged.
+        payload["osdi_preload_sha256"] = [sha256_file(p) for p in osdi_preload]
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
 
@@ -2704,6 +2820,7 @@ def _enforce_xyce_support_boundary(
     corners_spec: dict[str, Any],
     monte_carlo_declared: bool,
     fail_fast_probe: bool,
+    osdi_preload_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -2742,6 +2859,19 @@ def _enforce_xyce_support_boundary(
             "'xyce': the calibration probe reads ngspice's own rawfile "
             "stream; use engine 'ngspice' or drop the option"
         )
+    if osdi_preload_declared:
+        # Issue #2513: `pre_osdi` is an ngspice control command and Xyce has
+        # no `.control` block to carry it; Xyce compiles Verilog-A into a
+        # plugin through its own `buildxyceplugin` flow and loads it with
+        # `-plugin`, which a `.osdi` file is not. Refused by name rather
+        # than silently dropped -- a deck that ran without its preload would
+        # report every OSDI device as an undefined model.
+        raise SimError(
+            "options.osdi_preload is not supported for engine 'xyce': "
+            "`pre_osdi` is an ngspice control command, and Xyce loads "
+            "Verilog-A models as its own compiled plugins (`-plugin`), not "
+            "OSDI shared libraries; use engine 'ngspice' or drop the option"
+        )
 
 
 def _run_local(
@@ -2765,6 +2895,7 @@ def _run_local(
     ngspice_binary: str | None = None,
     fail_on_diagnostic: tuple[str, ...] = (),
     ngspice_init: tuple[str, ...] = (),
+    osdi_preload: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -2844,6 +2975,7 @@ def _run_local(
             ngspice_binary=ngspice_binary,
             fail_on_diagnostic=fail_on_diagnostic,
             ngspice_init=ngspice_init,
+            osdi_preload=osdi_preload,
         )
         corners.append(result)
         if version is not None:
@@ -2985,6 +3117,7 @@ def _run_local_parallel(
     ngspice_binary: str | None = None,
     fail_on_diagnostic: tuple[str, ...] = (),
     ngspice_init: tuple[str, ...] = (),
+    osdi_preload: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -3093,6 +3226,7 @@ def _run_local_parallel(
                     ngspice_binary=ngspice_binary,
                     fail_on_diagnostic=fail_on_diagnostic,
                     ngspice_init=ngspice_init,
+                    osdi_preload=osdi_preload,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -3165,6 +3299,7 @@ def _prepare_corner_run(
     engine: str,
     ngspice_binary: str | None = None,
     ngspice_init: tuple[str, ...] = (),
+    osdi_preload: tuple[str, ...] = (),
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
 
@@ -3216,6 +3351,7 @@ def _prepare_corner_run(
             analysis=analysis,
             measurements_spec=measurements_spec,
             raw_path=raw_path,
+            osdi_preload=osdi_preload,
         )
         _write_spiceinit(corner_dir, ngspice_init)
         command = [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path]
@@ -3318,6 +3454,7 @@ def _run_corner(
     ngspice_binary: str | None = None,
     fail_on_diagnostic: tuple[str, ...] = (),
     ngspice_init: tuple[str, ...] = (),
+    osdi_preload: tuple[str, ...] = (),
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
     classify the result.
@@ -3382,6 +3519,7 @@ def _run_corner(
         engine=engine,
         ngspice_binary=ngspice_binary,
         ngspice_init=ngspice_init,
+        osdi_preload=osdi_preload,
     )
 
     diagnostics: list[dict[str, str]] = []
@@ -3645,12 +3783,14 @@ def _write_corner_deck(
     analysis: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
     raw_path: str | None,
+    osdi_preload: tuple[str, ...] = (),
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
     seed card, ``.lib``/``.include``/``.temp``, the request's verbatim
-    ``.meas`` cards, and a ``.control`` block that ``alter``s the supply
-    sources, optionally captures an ASCII rawfile, and runs the declared
-    analysis.
+    ``.meas`` cards, and a ``.control`` block that ``pre_osdi``-loads any
+    declared OSDI libraries (issue #2513, ``options.osdi_preload``),
+    ``alter``s the supply sources, optionally captures an ASCII rawfile, and
+    runs the declared analysis.
     """
     lines = ["* klt sim -- generated corner deck, do not edit"]
     if point.mc_seed is not None:
@@ -3683,6 +3823,14 @@ def _write_corner_deck(
         lines.append(spec["spice"])
 
     lines.append(".control")
+    # Issue #2513: `pre_osdi` is ngspice's only mechanism for loading a
+    # Verilog-A compact model, and it is a *control* command -- `pre_`-
+    # prefixed commands run before the circuit is parsed, wherever they sit
+    # in the block. Emitted first, in declared order, so the preload is
+    # visibly ahead of every `alter` and the analysis command. Empty (the
+    # default) emits nothing: the deck is byte-identical to before.
+    for path in osdi_preload:
+        lines.append(f"pre_osdi {path}")
     for key, value in sorted(point.supply_v.items()):
         lines.append(f"alter {key}={value}")
     if raw_path is not None:
@@ -4148,6 +4296,7 @@ def _run_calibration_probe(
     keep_artifacts: bool,
     ngspice_binary: str | None = None,
     ngspice_init: tuple[str, ...] = (),
+    osdi_preload: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
     two-pass probe model -- and report how it went.
@@ -4208,6 +4357,7 @@ def _run_calibration_probe(
         analysis={"kind": "tran", "args": f"{step_token} {probe_window_s:.9g}"},
         measurements_spec=[],
         raw_path=None,
+        osdi_preload=osdi_preload,
     )
     _write_spiceinit(probe_dir, ngspice_init)
 
@@ -4254,6 +4404,7 @@ def _run_fail_fast_probe(
     keep_artifacts: bool,
     ngspice_binary: str | None = None,
     ngspice_init: tuple[str, ...] = (),
+    osdi_preload: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
     run one short, bounded calibration ``tran`` slice on the grid's first
@@ -4297,6 +4448,7 @@ def _run_fail_fast_probe(
         keep_artifacts=keep_artifacts,
         ngspice_binary=ngspice_binary,
         ngspice_init=ngspice_init,
+        osdi_preload=osdi_preload,
     )
     if probe["error"] is not None:
         return None
