@@ -24,6 +24,7 @@ import jsonschema
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from klayout_tools import remote_launcher as rl
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 
@@ -750,6 +751,154 @@ def test_unresolvable_bucket_names_all_three_sources(tmp_path, monkeypatch):
     assert "request.batch.bucket" in message
     assert sb.BUCKET_ENV in message
     assert sb.FLEET_CONFIG_FILENAME in message
+
+
+# --------------------------------------------------------------------------- #
+# PDK validation -- both off-host backends, one supported set (issue #2523)
+# --------------------------------------------------------------------------- #
+
+
+def test_unsupported_pdk_raises_before_any_s3_write(tmp_path, monkeypatch):
+    """A PDK the fleet publishes no image for has no compliant execution path
+    on this backend at all, so it must be refused at request-validation time
+    -- not discovered after a job contract is already sitting in S3."""
+    runner = _FakeRunner()
+    monkeypatch.setattr(sb, "_run_subprocess", runner)
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    request["models"] = {"pdk": "sky130B"}
+    path = _write_request(tmp_path, request)
+
+    with pytest.raises(sim.SimError) as excinfo:
+        sim.run_sim(str(path))
+    message = str(excinfo.value)
+    assert "unsupported PDK 'sky130B'" in message
+    assert "batch backend" in message
+    for supported in rl.SUPPORTED_PDKS:  # names the whole supported set
+        assert supported in message
+    assert runner.calls == []  # not one byte uploaded, nothing launched
+
+
+def test_unsupported_pdk_is_refused_even_when_the_fleet_is_unconfigured(tmp_path):
+    """The PDK is a property of the *request*, not of this host's fleet
+    configuration, so it is reported first -- an operator with no provision
+    script yet still learns the request could never have run."""
+    with pytest.raises(sim.SimError, match="unsupported PDK 'ihp-sg13g2'"):
+        sb._resolve_batch_config(
+            {"models": {"pdk": "ihp-sg13g2"}}, corner_count=1, timeout_s=30.0
+        )
+
+
+@pytest.mark.parametrize("variant", ["gf180mcuA", "gf180mcuC", "gf180mcu", "sky130A"])
+def test_a_variant_reducible_to_a_published_family_is_accepted(
+    tmp_path, monkeypatch, variant
+):
+    """`ami_pdk_key`'s family reduction applies here verbatim: `gf180mcuC` ->
+    `gf180mcu` is supported, so the submit proceeds (and `job.json` keeps the
+    *variant*, which the job instance resolves locally)."""
+    monkeypatch.delenv(sb.BUCKET_ENV, raising=False)
+    script = _provision_script(tmp_path)
+    config = sb._resolve_batch_config(
+        {
+            "models": {"pdk": variant},
+            "batch": {"provision_script_path": str(script), "bucket": FAKE_BUCKET},
+        },
+        corner_count=1,
+        timeout_s=30.0,
+    )
+    assert config.bucket == FAKE_BUCKET
+
+
+def test_a_request_naming_no_pdk_at_all_is_not_refused(tmp_path, monkeypatch):
+    """Edge case that must not regress: a process-less request has no model
+    library to resolve, so there is no PDK to validate and nothing to refuse."""
+    monkeypatch.delenv(sb.BUCKET_ENV, raising=False)
+    script = _provision_script(tmp_path)
+    spec = {"batch": {"provision_script_path": str(script), "bucket": FAKE_BUCKET}}
+    assert sb._resolve_batch_config(spec, corner_count=1, timeout_s=30.0).bucket
+    spec_empty_models = {**spec, "models": {}}
+    assert sb._resolve_batch_config(
+        spec_empty_models, corner_count=1, timeout_s=30.0
+    ).bucket
+
+
+@pytest.mark.parametrize("unsupported", ["sky130B", "ihp-sg13g2", "not-a-pdk"])
+def test_remote_and_batch_reject_the_same_unsupported_pdk_identically(
+    tmp_path, unsupported
+):
+    """Issue #2523: the two off-host backends must agree by construction.
+
+    `remote` refuses in `resolve_ami` before its `run-instances` call; `batch`
+    refuses in `_resolve_batch_config` before its first S3 write. Both go
+    through the *same* `remote_launcher.ami_pdk_key`, so the messages differ
+    only in the backend name -- this test fails if either side ever grows its
+    own copy of the supported-PDK rule.
+    """
+    with pytest.raises(rl.RemoteLaunchError) as remote_exc:
+        rl.resolve_ami(unsupported, "us-east-1")
+    with pytest.raises(sim.SimError) as batch_exc:
+        sb._resolve_batch_config(
+            {
+                "models": {"pdk": unsupported},
+                "batch": {
+                    "provision_script_path": str(_provision_script(tmp_path)),
+                    "bucket": FAKE_BUCKET,
+                },
+            },
+            corner_count=1,
+            timeout_s=30.0,
+        )
+    remote_message = str(remote_exc.value)
+    assert "unsupported PDK" in remote_message
+    assert remote_message.replace("the remote backend", "the batch backend") == str(
+        batch_exc.value
+    )
+
+
+def test_narrowing_supported_pdks_narrows_both_backends_together(tmp_path, monkeypatch):
+    """The anti-divergence guarantee, exercised directly: drop `sky130A` from
+    the single supported-PDK declaration and *both* backends must start
+    refusing it. A `batch`-side copy of the list would leave this test's
+    `batch` half passing `sky130A` while `remote` refuses it."""
+    monkeypatch.setattr(rl, "SUPPORTED_PDKS", ("gf180mcu",))
+    with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK 'sky130A'"):
+        rl.resolve_ami("sky130A", "us-east-1")
+    with pytest.raises(sim.SimError, match="unsupported PDK 'sky130A'"):
+        sb._resolve_batch_config(
+            {
+                "models": {"pdk": "sky130A"},
+                "batch": {
+                    "provision_script_path": str(_provision_script(tmp_path)),
+                    "bucket": FAKE_BUCKET,
+                },
+            },
+            corner_count=1,
+            timeout_s=30.0,
+        )
+
+
+def test_batch_pdk_validation_delegates_to_ami_pdk_key(tmp_path, monkeypatch):
+    """Named-callsite guard: the batch path must call `ami_pdk_key` itself
+    (with its own backend label), never re-implement the mapping."""
+    seen: list[tuple[str, str]] = []
+
+    def _spy(pdk: str, *, backend: str = "remote") -> str:
+        seen.append((pdk, backend))
+        return pdk
+
+    monkeypatch.setattr(sb, "ami_pdk_key", _spy)
+    sb._resolve_batch_config(
+        {
+            "models": {"pdk": "gf180mcuC"},
+            "batch": {
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "bucket": FAKE_BUCKET,
+            },
+        },
+        corner_count=1,
+        timeout_s=30.0,
+    )
+    assert seen == [("gf180mcuC", "batch")]
 
 
 def test_no_credential_key_path_or_bucket_name_is_baked_into_source():

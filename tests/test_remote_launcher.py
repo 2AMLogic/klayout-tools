@@ -196,6 +196,24 @@ def test_ami_pdk_key_rejects_a_family_the_remote_backend_does_not_cover(requeste
         rl.ami_pdk_key(requested)
 
 
+def test_ami_pdk_key_names_the_calling_backend_in_its_refusal():
+    """Issue #2523: `batch` reuses this exact function (it runs on images this
+    same pipeline publishes), so the backend name is a parameter of the
+    *message* only -- the accepted set is shared, never re-derived per
+    backend. Anything else lets the two off-host backends drift apart."""
+    with pytest.raises(rl.RemoteLaunchError) as remote_exc:
+        rl.ami_pdk_key("sky130B")
+    with pytest.raises(rl.RemoteLaunchError) as batch_exc:
+        rl.ami_pdk_key("sky130B", backend="batch")
+    assert "for the remote backend" in str(remote_exc.value)
+    assert "for the batch backend" in str(batch_exc.value)
+    assert str(remote_exc.value).replace("remote backend", "batch backend") == str(
+        batch_exc.value
+    )
+    # The label changes nothing about what is accepted.
+    assert rl.ami_pdk_key("gf180mcuC", backend="batch") == "gf180mcu"
+
+
 def test_ami_pdk_families_is_a_declared_subset_of_the_authoritative_set():
     """The narrowing is intentional (the AMI pipeline maintains fewer families
     than the toolkit supports locally) and must stay expressible as a subset --

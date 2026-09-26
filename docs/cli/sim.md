@@ -310,7 +310,7 @@ implements against.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. |
+| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. Validated up front by `remote_launcher.ami_pdk_key` — the *same* check the `batch` backend applies, see "Both off-host backends validate `models.pdk` up front" below. |
 | `remote.region` | string, required | AWS region to provision in. No default — an unset region is a usage error, not an inferred one (`RemoteLaunchError` from `remote_launcher.require_cost_config`, mirroring `repo:remote`'s "no silent defaults for cost-relevant fields" discipline). |
 | `remote.key_name` | string, required | AWS EC2 keypair name attached to the provisioned instance, so `remote.ssh_key_path`'s private key can authenticate. |
 | `remote.ssh_key_path` | string, required | Local path to the private key matching `remote.key_name`, used for every SSH/SCP call the transport makes. |
@@ -472,6 +472,36 @@ What differs from `remote` is *who acquires the machine*:
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
+
+### Both off-host backends validate `models.pdk` up front
+
+`remote` and `batch` (`sim._OFFHOST_BACKENDS`) both run on images the same
+AMI pipeline publishes, so both accept exactly the same PDK set
+(`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`) and both refuse an
+unsupported one **before spending anything** — `remote` before its
+`run-instances` call, `batch` before its first S3 write
+([#2523](https://github.com/2AMLogic/klayout-tools/issues/2523)):
+
+```
+unsupported PDK 'sky130B' for the batch backend (supported: sky130A, gf180mcu). ...
+```
+
+The check is one function, `remote_launcher.ami_pdk_key`, called by both
+paths rather than restated per backend, so the two can never disagree about
+what is supported. Consequences worth knowing:
+
+- **A variant reducible to a published family is accepted** on both, on the
+  same terms: `models.pdk: "gf180mcuC"` → family `gf180mcu`. The *variant*
+  name is what keeps flowing off-host (`job.json`'s `pdk_variant`), because
+  the executing box resolves the PDK locally exactly as the `local` backend
+  does.
+- **A variant whose family has no published image is refused even though it
+  resolves locally** — `sky130B` reduces to `sky130`, which is not a
+  published key (only `sky130A` is), so it is named rather than silently
+  served a different model deck.
+- **A request naming no `models.pdk` at all is untouched.** Without a
+  `corners.process` axis there is no model library to resolve, so there is
+  nothing to validate; such a request still submits.
 
 **The seam is 2am's, verbatim** (`infra/aws/batch-fleet.md` §"The seam: what
 a consumer-repo wrapper does"), and `klt` implements exactly its four steps:
