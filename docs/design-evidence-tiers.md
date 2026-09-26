@@ -372,6 +372,25 @@ written to every block.
       reference satisfies this by construction; a signal-only
       `gate-level-verilog` reference does not, which is why the Digital
       column asks for `power_connectivity` instead.
+      **That pairing check is not independent of the compare's own verdict**
+      (issue #2495), and a claimant should read it as a participation test,
+      not as a second opinion. `net_correspondence` lists only the nets the
+      comparer *matched*, so for a SPICE reference — which declares its
+      supplies by construction — "every declared supply appears paired" is
+      implied by any `match` and destroyed by any `mismatch`, including one
+      with no bearing on a rail: a restated device parameter or a moved
+      signal-net connection collapses the pairing along with everything
+      else. This item's LVS half is therefore **gated on item 4 passing**:
+      an analog block cannot reach `met` here while its compare is
+      mismatched, however complete its `klt erc` supply evidence is, because
+      no reading of a mismatched compare can say the supplies took part in
+      it. What the report does distinguish is *which half* is missing —
+      `klt signoff` renders `lvs_did_not_pass` (not the plain
+      `check_failed`) when the ERC supply evidence is complete and
+      continuous and only the LVS half is unavailable, naming in
+      `detail.power_delivery` the supplies the ERC run did prove. Produce
+      the ERC supply spec anyway — it is the half that survives an unrelated
+      LVS defect, and it is what makes the distinction visible.
     - *Digital* — the `klt erc` supply evidence below, plus the routed
       artifact having actually been produced with a power grid, plus item
       4's power/ground verdict having actually run. Concretely: the `klt
