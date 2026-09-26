@@ -510,6 +510,23 @@ written to every block.
       the question), `supply_spec_disclosed_unexpressible` (no tap to
       name), and `supply_spec_disclosed_tool_limitation` (a tap, and a
       build that cannot be trusted to grade it).
+      **A disclosure now reaches a partial declaration too** (issue #2541).
+      All three states above describe a spec declaring *zero* ties, because
+      the disclosure's reason token was recorded only against the
+      entirely-undeclared `erc.missing_tie` work — so a spec that declared
+      the one well class it could express and honestly could not express
+      the other produced an `erc_coverage` byte-identical to one that
+      declared the same tie and never considered the second class, and
+      declaring real, checkable work made the record *less* machine-readable
+      than declaring nothing. `ties_disclosure.undeclared_classes` names
+      those classes, and `klt erc` records one
+      `erc.missing_tie:["<class>"]` **inapplicable** entry per name carrying
+      the same disclosed reason token. The declared class is graded
+      exactly as before — a partial declaration is not downgraded, and its
+      checked tie still carries this item on its own terms — and the
+      disclosed class is still the caller's word, so it establishes
+      nothing; what it establishes is *legibility*, which is the whole
+      point of the disclosure vocabulary.
       **The spec's own coverage of the layout must be disclosed, not
       assumed** (issue #2389), on the same principle item 3 applies to a
       DRC deck's rule-free layers: `klt erc` scopes its connectivity model

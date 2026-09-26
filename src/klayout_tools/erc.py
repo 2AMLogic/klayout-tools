@@ -209,6 +209,19 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   ``provenance.klt_version`` pins the build, so a reader can check whether a
   disclosed tool limitation applies to the run in front of them.
 
+  ``ties_disclosure.undeclared_classes`` (issue #2541) is what makes that
+  disclosure reachable for a **partial** declaration. The reason token above
+  is recorded against the undeclared ``erc.missing_tie`` work, and until
+  #2541 that work only existed when ``ties`` was *entirely* empty -- so a
+  spec that declares the one well class it can express and genuinely cannot
+  express the other (the native-substrate block on a PDK that draws no
+  pwell/tub layer) produced an ``erc_coverage`` byte-identical to one that
+  declared the same tie and never considered the second class at all. Naming
+  the undeclared classes gives that work an identity
+  (``erc.missing_tie:["<class>"]`` in ``inapplicable``, carrying the same
+  disclosed reason token), so declaring real, checkable work never makes the
+  record *less* machine-readable than declaring nothing.
+
 Device bodies (``devices``, issue #2183): a conductor role carries
 *geometry*, and nothing in the model above distinguishes a wire from a
 drawn device body sitting on the same layer -- a poly resistor, a poly
@@ -623,7 +636,7 @@ _TIES_DISCLOSURE_COVERAGE_REASON: dict[str, str] = {
 }
 
 
-def _ties_disclosure_reason(ties_disclosure: dict[str, str] | None) -> str:
+def _ties_disclosure_reason(ties_disclosure: dict[str, Any] | None) -> str:
     """The ``erc_coverage.inapplicable`` reason for undeclared
     ``erc.missing_tie`` work, given the spec's ``ties_disclosure`` (or its
     absence) -- see :func:`_connectivity_coverage`."""
@@ -632,6 +645,23 @@ def _ties_disclosure_reason(ties_disclosure: dict[str, str] | None) -> str:
     return _TIES_DISCLOSURE_COVERAGE_REASON[
         ties_disclosure.get("kind", DISCLOSURE_KIND_UNEXPRESSIBLE)
     ]
+
+
+def _disclosed_undeclared_classes(
+    ties_disclosure: dict[str, Any] | None,
+) -> list[str]:
+    """The tie classes a top-level ``ties_disclosure`` names as undeclared
+    (``undeclared_classes``, issue #2541) -- ``[]`` when the spec declared
+    no disclosure, or a disclosure that names none.
+
+    Already validated by :func:`_validate_ties_disclosure` (non-empty
+    strings, no duplicates, none of them a declared ``ties[]`` name), so
+    this is a plain read: the list exists precisely so the undeclared work
+    has an identity :func:`_connectivity_coverage` can record a reason
+    against."""
+    if not ties_disclosure:
+        return []
+    return list(ties_disclosure.get("undeclared_classes") or [])
 
 
 def _spec_declared_layers(
@@ -756,7 +786,7 @@ def _connectivity_coverage(
     ties: list[dict[str, Any]],
     degenerate_ties: dict[str, str] | None = None,
     asserted_ties: set[str] | None = None,
-    ties_disclosure: dict[str, str] | None = None,
+    ties_disclosure: dict[str, Any] | None = None,
     well_asserted_ties: set[str] | None = None,
     undeclared_stream_layers: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -842,6 +872,28 @@ def _connectivity_coverage(
     build that must produce this evidence cannot grade a declared tie
     safely". See :func:`_ties_disclosure_reason`.
 
+    A disclosure that names ``undeclared_classes`` (issue #2541) records
+    that same reason token against **one ``inapplicable`` entry per named
+    class** -- ``erc.missing_tie:["<class>"]``, the same identity shape a
+    *declared* tie of that name would occupy in ``checked`` -- and does so
+    whether or not ``ties`` is empty. Without it, the reason token was
+    reachable only from the ``if not ties`` branch below, so a spec that
+    declared the one well class it can express and honestly could not
+    express the other had **no** machine-readable way to say so: its
+    ``erc_coverage`` was byte-identical to that of a spec which declared the
+    same one tie and never considered the second class. That is the exact
+    "considered, disclosed omission versus nobody declared ties"
+    distinction the disclosure exists to draw, and a partial declaration --
+    a native-substrate block on a PDK that draws no pwell layer being the
+    common case -- is the shape that most needs it. The undeclared classes
+    are recorded as *inapplicable*, not skipped, for the same reason the
+    empty-``ties`` disclosure is: a class the caller says cannot be
+    expressed is work this run was never asked to do, not requested work
+    that failed to run, so it leaves ``erc_status`` alone. Spec validation
+    (:func:`_validate_ties_disclosure`) rejects a disclosed class that
+    collides with a declared ``ties[]`` name, so no identity can ever land
+    in two coverage categories at once.
+
     ``layers_in_stream_without_declaration`` (``undeclared_stream_layers``,
     issue #2389) is the one key in this block that is not about *work
     items* at all: it names the drawn layers this spec declares nowhere --
@@ -878,6 +930,20 @@ def _connectivity_coverage(
                 checked_by_assertion.append(identity)
             if tie["name"] in well_asserted:
                 checked_by_well_assertion.append(identity)
+    # (issue #2541) One named entry per disclosed undeclared class, before
+    # the bare "zero ties declared" entry below, so a *partial* declaration
+    # reaches the disclosure's reason token too. Both are emitted when a
+    # spec declares no `ties` at all and still names classes: the bare entry
+    # is the pre-#2541 "nothing was declared" fact, byte-identical to what
+    # such a run always reported, and the named ones say which classes the
+    # disclosure is about.
+    for undeclared_class in _disclosed_undeclared_classes(ties_disclosure):
+        inapplicable.append(
+            {
+                "id": work_id("erc.missing_tie", undeclared_class),
+                "reason": _ties_disclosure_reason(ties_disclosure),
+            }
+        )
     if not ties:
         inapplicable.append(
             {
@@ -1712,9 +1778,57 @@ def _validate_ties(
     return entries
 
 
+def _validate_undeclared_classes(
+    raw: Any, spec_path: str, tie_names: list[str]
+) -> list[str]:
+    """Validate ``ties_disclosure.undeclared_classes`` (issue #2541): the
+    names of the tie classes this spec discloses it does *not* declare.
+
+    Held to the same "present but malformed is a spec error" bar as every
+    other optional key in this module, plus one check the others have no
+    analogue for: a name that a ``ties[]`` entry already declares is
+    **rejected**, because the same class cannot be both real checked work
+    and disclosed-as-undeclarable. That contradiction would otherwise land
+    the same ``erc.missing_tie:["<class>"]`` identity in two coverage
+    categories at once, which the common coverage contract forbids
+    outright -- so catching it here turns an internal invariant failure into
+    the spec error it actually is.
+
+    An empty array is rejected for the same reason an empty ``reason`` is:
+    it is the unfalsifiable "disclosed nothing" shape the disclosure keys
+    exist to rule out. Omitted/``null`` -> ``[]`` (every pre-#2541 spec's
+    report stays byte-identical)."""
+    if not isinstance(raw, list) or not raw:
+        raise ErcError(
+            f"spec '{spec_path}': ties_disclosure.undeclared_classes must be "
+            "a non-empty array of class names"
+        )
+    names: list[str] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, str) or not item.strip():
+            raise ErcError(
+                f"spec '{spec_path}': ties_disclosure.undeclared_classes[{i}] "
+                "must be a non-empty string"
+            )
+        name = item.strip()
+        if name in names:
+            raise ErcError(
+                f"spec '{spec_path}': duplicate ties_disclosure."
+                f"undeclared_classes entry {name!r}"
+            )
+        if name in tie_names:
+            raise ErcError(
+                f"spec '{spec_path}': ties_disclosure.undeclared_classes "
+                f"names {name!r}, which ties[] already declares -- a class "
+                "cannot be both declared work and a disclosed non-declaration"
+            )
+        names.append(name)
+    return names
+
+
 def _validate_ties_disclosure(
-    spec: dict[str, Any], spec_path: str
-) -> dict[str, str] | None:
+    spec: dict[str, Any], spec_path: str, tie_names: list[str] | None = None
+) -> dict[str, Any] | None:
     """The optional top-level ``ties_disclosure`` spec key (issue #2234): a
     caller's explicit statement that this run declares no tap, and why --
     ``{"reason": "<non-empty string>", "kind": "<kind>"}``. Omitted/``null``
@@ -1733,6 +1847,22 @@ def _validate_ties_disclosure(
     disclosure is not rejected (a spec may express some taps and disclose
     the rest), but the disclosure only ever affects the *undeclared* work's
     reason.
+
+    ``undeclared_classes`` (optional array of names, issue #2541) is what
+    gives that undeclared work an identity when ``ties`` is **not** empty.
+    Before it, the promise in the paragraph above held only for spec
+    *acceptance*: a partial declaration was accepted, but "the undeclared
+    work" existed nowhere in the report, so the disclosure's reason token
+    never reached ``erc_coverage`` and a considered partial declaration
+    rendered byte-identically to one that never considered the second class
+    at all. Each name becomes one ``erc_coverage.inapplicable`` entry --
+    ``erc.missing_tie:["<name>"]``, carrying the same disclosed reason token
+    the kind selects (:func:`_connectivity_coverage`). The names are the
+    caller's own vocabulary for the classes they could not declare (e.g.
+    ``"p_substrate"``); nothing verifies that such a class exists, for the
+    same reason nothing verifies ``reason`` -- but a name that collides with
+    a declared ``ties[]`` entry *is* rejected, since that spec contradicts
+    itself (:func:`_validate_undeclared_classes`).
 
     ``kind`` (optional, issue #2247) says which obstacle is being disclosed,
     because the two have different remedies and a reader of the report of
@@ -1775,7 +1905,7 @@ def _validate_ties_disclosure(
         raise ErcError(
             f"spec '{spec_path}': ties_disclosure.reason must be a non-empty string"
         )
-    disclosure = {"reason": reason.strip()}
+    disclosure: dict[str, Any] = {"reason": reason.strip()}
     if "kind" in raw and raw["kind"] is not None:
         kind = raw["kind"]
         if not isinstance(kind, str) or kind not in _TIES_DISCLOSURE_COVERAGE_REASON:
@@ -1785,6 +1915,10 @@ def _validate_ties_disclosure(
                 f"{allowed} (got {kind!r})"
             )
         disclosure["kind"] = kind
+    if raw.get("undeclared_classes") is not None:
+        disclosure["undeclared_classes"] = _validate_undeclared_classes(
+            raw["undeclared_classes"], spec_path, tie_names or []
+        )
     return disclosure
 
 
@@ -3538,7 +3672,12 @@ def run_erc(
     vias = _validate_vias(spec, spec_path, stackup_names)
     nets_decl = _validate_nets(spec, spec_path, stackup_names)
     ties = _validate_ties(spec, spec_path, stackup_names)
-    ties_disclosure = _validate_ties_disclosure(spec, spec_path)
+    # `ties` first, deliberately: #2541's `undeclared_classes` is validated
+    # against the declared tie names, so a spec that declares and discloses
+    # the same class is rejected as the self-contradiction it is.
+    ties_disclosure = _validate_ties_disclosure(
+        spec, spec_path, [tie["name"] for tie in ties]
+    )
     # The `devices[]` fragment is shared verbatim with `klt power` (issue
     # #2260), so it lives in `_devices.py` and takes the flat list of
     # conductor role names -- `stackup` first, then `vias` -- this module
@@ -3967,12 +4106,15 @@ def run_erc(
         "status": status,
         "coverage": coverage,
         "erc_coverage": erc_coverage,
-        # (issues #2234, #2247) The spec's top-level `ties_disclosure`,
-        # echoed verbatim -- `None` when the spec did not declare one,
-        # matching every other optional-spec-key echo's conditional
-        # population, and carrying `kind` only when the spec itself did. See
-        # `_validate_ties_disclosure` and this module's docstring, "Missing
-        # substrate/well tie".
+        # (issues #2234, #2247, #2541) The spec's top-level
+        # `ties_disclosure`, echoed verbatim -- `None` when the spec did not
+        # declare one, matching every other optional-spec-key echo's
+        # conditional population, and carrying `kind`/`undeclared_classes`
+        # only when the spec itself did. The echo is prose for a human
+        # reader; the machine-readable channel is `erc_coverage` (#2541),
+        # which now carries one `inapplicable` entry per disclosed
+        # undeclared class. See `_validate_ties_disclosure` and this
+        # module's docstring, "Missing substrate/well tie".
         "ties_disclosure": ties_disclosure,
         "provenance": provenance,
     }

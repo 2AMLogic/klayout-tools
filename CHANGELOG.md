@@ -235,6 +235,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   caller. See [`docs/cli/yield.md`](docs/cli/yield.md)'s "Campaign
   orchestration → Dispatch" section.
 
+- **Added** (#2541, `klt erc`; additive — `schema_version` unchanged):
+  `ties_disclosure.undeclared_classes`, an array naming the tie classes a
+  spec discloses it does *not* declare. `klt erc` records one
+  `erc_coverage.inapplicable` entry per name —
+  `erc.missing_tie:["<class>"]`, carrying the same
+  `ties_disclosed_unexpressible` / `ties_disclosed_tool_limitation` reason
+  token `ties_disclosure.kind` already selects — **whether or not `ties[]`
+  is empty**. Until now that reason token was reachable only when `ties[]` was
+  entirely empty, so a spec that declared the one well class it could
+  express and honestly could not express the other (a native-substrate block
+  on a PDK that draws no pwell/tub layer) had no machine-readable way to say
+  so: its `erc_coverage` was byte-identical to that of a spec which declared
+  the same one tie and never considered the second class, and the only
+  remaining channel was the top-level `ties_disclosure` prose echo, which
+  carries no work id and no reason token. Declaring real, checkable work no
+  longer makes the record less legible than declaring nothing. The disclosed
+  classes are **inapplicable**, never skipped, so `erc_status` is unmoved;
+  a name that collides with a declared `ties[].name` is a spec error (the
+  same class cannot be both checked work and a disclosed non-declaration),
+  as are an empty array, a blank/non-string entry, and a duplicate. Omitted
+  → every existing report is byte-identical, including the empty-`ties[]`
+  disclosure path and a disclosure that names no classes. `klt signoff`'s
+  T1 item 11 reads the new entries through the same
+  `erc_coverage.inapplicable` walk it already performed.
+
 - **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
   user-visible: a corner that previously reported `status: "error"` can now
   report a real grade): a `spice`-form `measurements[].name` was looked up

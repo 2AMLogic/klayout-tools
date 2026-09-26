@@ -169,6 +169,15 @@ def _print_text(report: dict) -> None:
             else f"ties_disclosure ({kind})"
         )
         print(f"{label}: {disclosure['reason']}")
+        # (issue #2541) Which classes the disclosure is about, when the
+        # spec named them -- a partial declaration's disclosure says
+        # nothing useful in the courtesy view without them ("some tie you
+        # cannot see was not declared"). Printed as a trailing line rather
+        # than folded into the label above so the existing single-line
+        # rendering of every pre-#2541 disclosure is unchanged.
+        undeclared = disclosure.get("undeclared_classes") or []
+        if undeclared:
+            print(f"  undeclared classes: {', '.join(undeclared)}")
     _print_declared_nets(report)
     print(f"erc_findings: {report['erc_finding_count']}")
     for finding in report["erc_findings"]:
