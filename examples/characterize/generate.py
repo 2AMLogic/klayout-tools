@@ -101,14 +101,20 @@ def write_request() -> None:
     A 4x4 grid rather than a vendor-sized 7x7 keeps the example's single
     ngspice run fast (it is one transient over ``4 x 4 x 2 arcs = 32``
     instances); nothing about the shape changes with the grid's size.
+
+    Neither input declares ``capacitance_pf``: pin capacitance is *measured*
+    (issue #2512), and the point of characterizing a cell you drew yourself
+    is not to copy that number out of somebody else's library. The batch
+    request below keeps one declared value, so the override path stays
+    visible too.
     """
     request = {
         "cell": {
             "name": "nand2_demo",
             "netlist": "cells.spice",
             "pins": [
-                {"name": "A", "direction": "input", "capacitance_pf": 0.002},
-                {"name": "B", "direction": "input", "capacitance_pf": 0.002},
+                {"name": "A", "direction": "input"},
+                {"name": "B", "direction": "input"},
                 {"name": "Y", "direction": "output", "function": "!(A*B)"},
             ],
             "power_pins": {"vdd": "VDD", "gnd": "VSS"},
@@ -142,6 +148,12 @@ def write_batch_request() -> None:
     difference is ``cells`` (an array of the same cell objects) in place of
     ``cell``. A 3x3 grid keeps the two sequential ngspice runs (one per cell)
     fast.
+
+    ``inv_demo``'s ``A`` keeps a declared ``capacitance_pf`` and
+    ``nand2_demo``'s pins do not, so one combined ``.lib`` shows both halves
+    of the #2512 precedence rule: a declared value overrides the measurement
+    (and is emitted alone, with no rise/fall split), a measured one is
+    emitted with its split.
     """
     request = {
         "cells": [
@@ -159,8 +171,8 @@ def write_batch_request() -> None:
                 "name": "nand2_demo",
                 "netlist": "cells.spice",
                 "pins": [
-                    {"name": "A", "direction": "input", "capacitance_pf": 0.002},
-                    {"name": "B", "direction": "input", "capacitance_pf": 0.002},
+                    {"name": "A", "direction": "input"},
+                    {"name": "B", "direction": "input"},
                     {"name": "Y", "direction": "output", "function": "!(A*B)"},
                 ],
                 "power_pins": {"vdd": "VDD", "gnd": "VSS"},

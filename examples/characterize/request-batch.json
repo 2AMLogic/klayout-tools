@@ -27,13 +27,11 @@
       "pins": [
         {
           "name": "A",
-          "direction": "input",
-          "capacitance_pf": 0.002
+          "direction": "input"
         },
         {
           "name": "B",
-          "direction": "input",
-          "capacitance_pf": 0.002
+          "direction": "input"
         },
         {
           "name": "Y",
