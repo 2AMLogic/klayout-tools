@@ -6149,6 +6149,82 @@ def test_run_sim_stubbed_missing_measurement_is_error(tmp_path, monkeypatch):
     assert any(d["code"] == "measurement" for d in corner["diagnostics"])
 
 
+def test_run_sim_stubbed_uppercase_measurement_name_harvests_against_lowercase_log(
+    tmp_path, monkeypatch
+):
+    """Issue #2546: ngspice lower-cases a `.meas` card's own name in its
+    report output (verified against ngspice 46) regardless of how the
+    request spelled it -- `Vout` prints back as `vout = ...`. Before the
+    fix, the case-sensitive lookup in `_run_corner` never matched an
+    upper/mixed-case `measurements[].name`, so a perfectly good measurement
+    reported `status: "error"` / `measurement 'Vout' produced no value`
+    purely on casing. The lookup must fold case; the response must still
+    echo the caller's own original spelling ("Vout", not "vout")."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "Vout", "spice": ".meas tran Vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\nvout            =  1.00000e+00\n"
+        ),
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] != "error"
+    (corner,) = report["corners"]
+    (measurement,) = corner["measurements"]
+    # Response echoes the caller's own spelling, not the log's folded form.
+    assert measurement["name"] == "Vout"
+    assert measurement["value"] == pytest.approx(1.0)
+    assert measurement["status"] != "error"
+    assert not any(d["code"] == "measurement" for d in corner["diagnostics"])
+
+
+def test_run_sim_stubbed_exact_case_measurement_name_still_harvests(
+    tmp_path, monkeypatch
+):
+    """Regression guard for issue #2546's fix: the pre-existing common case
+    (a `measurements[].name` whose case already matches ngspice's own
+    lower-cased report) must keep harvesting identically once the lookup is
+    case-folded, not just the mismatched-case case above."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\nvout            =  1.00000e+00\n"
+        ),
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] != "error"
+    (corner,) = report["corners"]
+    (measurement,) = corner["measurements"]
+    assert measurement["name"] == "vout"
+    assert measurement["value"] == pytest.approx(1.0)
+    assert measurement["status"] != "error"
+
+
 #: A real ngspice-46 log (captured against the sky130 5T OTA composed by
 #: `klt gen-compose`, per this issue's own repro) where gmin/source stepping
 #: recovers from a singular DC operating-point matrix and the transient

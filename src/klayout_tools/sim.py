@@ -3861,15 +3861,22 @@ def _run_corner(
     else:
         diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
 
-    # Xyce upper-cases measurement names in its own output (`Vout` ->
-    # `VOUT`), so the lookup below is case-insensitive for that engine
-    # (`_parse_engine_measurements` lower-cases its keys; ngspice preserves
-    # the request's case, so its keys are used verbatim).
+    # Both engines fold a `.meas`/`.measure` card's name to lower-case in
+    # their own report output (Xyce actually upper-cases, but
+    # `_parse_xyce_measurements` lower-cases its keys to normalize that);
+    # `_parse_engine_measurements` -> `_parse_measurements` for ngspice does
+    # the same, storing keys exactly as the (already lower-cased) log
+    # printed them. So the lookup here is always case-insensitive: fold the
+    # requested `name` to lower-case for both engines rather than only for
+    # Xyce -- an upper/mixed-case `spice`-form name (e.g. `Vout`) still
+    # harvests even though ngspice's own report prints `vout = ...` (#2546).
+    # The *response* below still echoes the caller's original `name`
+    # spelling -- only this internal lookup is case-folded.
     measurement_values = _parse_engine_measurements(log_text, engine)
     measurement_results: list[dict[str, Any]] = []
     for spec in measurements_spec:
         name = spec["name"]
-        value = measurement_values.get(name.lower() if is_xyce else name)
+        value = measurement_values.get(name.lower())
         unit = spec.get("unit")
         if value is None:
             measurement_results.append(
