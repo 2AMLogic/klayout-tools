@@ -74,23 +74,30 @@ commands/loom/doctor.md
 # resynced normally.
 commands/loom/hermit-patterns.md
 
-# #1316: scripts/lib/forge-helpers.sh's forge_merge_pr()/forge_auto_merge()
-# and scripts/merge-pr.sh's native `loom-daemon forge auto-merge` fallback
-# carry a local-only App-installation permission-scope 403 retry (originally
-# #1308, closing #1293): forge_merge_pr()/forge_auto_merge() route their `gh
-# api` calls through forge_gh_perm_safe (fresh installation-token retry on a
-# 403 "not accessible by integration"), and merge-pr.sh's native path detects
-# that same 403 via is_app_permission_error() and falls through to the
-# (fixed) shell forge_auto_merge path instead of just retrying the native
-# binary call again. This fix was never upstreamed into rjwalters/loom's own
-# templates, so an unpinned resync silently reverted it once already (commit
-# 1edbd2b, "chore: resync installed Loom surfaces") even though #1308 had
-# already merged to main — the same reversion pattern as #606/#662/#1292.
-# These pins are what prevent a recurrence. If the upstream Loom project ever
-# adopts an equivalent retry, these pins can be dropped and the files
-# resynced normally.
-scripts/lib/forge-helpers.sh
-scripts/merge-pr.sh
+# #1316 (RETIRED 2026-09-26 by #2543): scripts/lib/forge-helpers.sh and
+# scripts/merge-pr.sh used to be pinned here to preserve a local-only
+# App-installation permission-scope 403 retry (originally #1308, closing
+# #1293). That pin's own stated removal condition — "if the upstream Loom
+# project ever adopts an equivalent retry, these pins can be dropped" — is now
+# satisfied, verified against rjwalters/loom @ 7259b24cb:
+#   * `is_app_permission_error()` is byte-identical upstream (same
+#     "not accessible by integration" match).
+#   * Upstream's `forge_gh_perm_safe` is `forge_cmd_perm_safe gh "$@"`, and
+#     `forge_cmd_perm_safe` runs the identical 3-rung ladder the local fix
+#     shipped (ambient -> freshly minted installation token -> personal
+#     token / personal-ambient), plus an extra owner-config rung (2am#446).
+#   * `forge_merge_pr()`'s GitHub PUT still routes through
+#     `forge_gh_perm_safe` upstream (both the with- and without-`sha` arms).
+#   * The pin's second half is moot: upstream #8410/#8427 retired the native
+#     `loom-daemon forge auto-merge` dispatch and `forge_auto_merge()`
+#     entirely, so the 403-on-the-native-path case the local fallback
+#     handled no longer exists — `merge-pr.sh --auto` now settles checks and
+#     merges in-process through the same ladder-routed `forge_merge_pr`.
+# Dropping the pin is what lets #7754/#8845's repo-aware merge-method
+# detection (`forge_detect_merge_method`, `REPO_MERGE_METHOD`,
+# `--merge-method`) reach this repo, which only allows merge commits —
+# hardcoded squash 405'd every merge here. Do NOT re-add these paths without
+# re-checking the ladder above.
 
 # #1356: verdict-staleness-guard.sh (and its test) carry a local-only fix
 # dropping the nonexistent `merged` field from its `gh pr view --json` request
