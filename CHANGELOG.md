@@ -138,6 +138,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   case-folded). See [`docs/cli/sim.md`](docs/cli/sim.md)'s "Failure
   classification" section.
 
+- **Changed** (#2526, `klt signoff --manifest/--fleet --check`; additive
+  payload change — `schema_version` unchanged): `--check` no longer reports
+  `status: "drifted"` when the only difference between the committed and the
+  freshly-graded report is the checklist doc's own **wording** — each
+  `items[]` entry's `title`/`text`/`notes` (which a tier report inlines
+  verbatim from `design-evidence-tiers.md`), `source_doc_content_hash`, and,
+  in `--fleet` mode, the per-block copies of the same. A `klt` version pin
+  does not pin the doc, so an upstream rewording alone used to turn a
+  consumer's committed verdict of record red, indistinguishable from a real
+  grading change. **The exclusion is from the verdict, not from the
+  report**: the response gains `doc_drift` (bool) and `doc_drift_fields`
+  (the excluded `{field, committed, fresh}` entries that moved), so a gate
+  can warn on "the yardstick was reworded" while still failing only on "the
+  evidence moved". Any change to an item's `id`/`status`/`reason`/
+  `citation`/`tier`, to `t1_item_count`/`build_t1_item_count`/
+  `t1_met_count`, or to `source_doc` still reports `"drifted"` and exits
+  `3` — including when it co-occurs with a prose change on the same item.
+  `--describe-grader` and `grading_ruleset_id` are unaffected.
 - **Added** (#2522, `klt sim`; additive — `schema_version` unchanged): a
   `corners.process` bundle's `sections[]` entries may now name their **own**
   model library — `{"lib": str, "section": str}` alongside today's bare
