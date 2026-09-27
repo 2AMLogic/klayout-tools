@@ -246,6 +246,23 @@ files — kilobytes to low megabytes of plain SPICE text — per job.**
   report which baked snapshot it used so a caller can tell whether it
   matches what their own `--pdk-root` would have resolved locally.
 
+**Addendum (#2573): SG13G2's snapshot pin is not the open_pdks/volare
+commit shape this decision was originally written around.** `sky130A` and
+`gf180mcu` both pin a single `open_pdks` commit consumed via `volare enable`
+(`scripts/aws/build-remote-sim-ami.sh`'s `PDK_VERSION`). IHP-Open-PDK is not
+on volare's feed, and SG13G2 additionally needs a compiled OSDI toolchain
+that has no `open_pdks` equivalent at all (decision 4 assumed "bake ngspice
++ PDK decks"; SG13G2 needs "bake ngspice + PDK decks + a compiled
+Verilog-A-to-OSDI toolchain output" — a PDK-only install cannot simulate a
+single SG13G2 device). So SG13G2's recipe branch in
+`build-remote-sim-ami.sh` carries **two** independent pins instead of one
+`PDK_VERSION`: an IHP-Open-PDK release tag (mirroring
+`scripts/fetch-ihp-sg13g2.sh`'s own `IHP_OPEN_PDK_VERSION`) and the
+OpenVAF-Reloaded compiler tag `scripts/fetch-sg13g2-sim-toolchain.sh` pins
+(`OPENVAF_R_TAG`) — both documented as script constants near that recipe
+branch, neither resolved to a real published manifest entry yet (that is
+the operator-only follow-up, #2574).
+
 ## 5. Result fidelity: same contract, explicit provenance, no new byte-identity promise
 
 **`remote` guarantees the same request/report JSON contract and the same
