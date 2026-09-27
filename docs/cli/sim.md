@@ -1698,6 +1698,15 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
 
+**The `measurement` code's lookup is case-insensitive** (issue #2546): a
+`.meas`/`.measure` card's own name is folded to lower-case by both engines
+in their report output (ngspice already prints it lower-case; Xyce's own
+upper-cased form is normalized by this command's parser), so `measurements[]`
+matches a declared `name` (e.g. `"Vout"`) against the log's folded name
+(`vout`) case-insensitively rather than requiring a byte-identical spelling.
+The response still echoes the caller's own original `name` spelling — only
+the internal lookup is case-folded.
+
 The last two rows are the only ones produced by the **grading** step itself
 rather than by a log classifier or a never-ran-corner path. Both are emitted
 on a corner that is already being graded `inconclusive`, downstream of

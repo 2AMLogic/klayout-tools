@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
+  user-visible: a corner that previously reported `status: "error"` can now
+  report a real grade): a `spice`-form `measurements[].name` was looked up
+  in ngspice's own log report **verbatim**, but ngspice lower-cases a
+  `.meas`/`.measure` card's name in its report output regardless of how the
+  request spelled it (`.meas tran Vout FIND v(out) AT=1u` prints back as
+  `vout = ...`, verified against ngspice 46). An upper/mixed-case
+  `measurements[].name` (e.g. `"Vout"`) therefore never matched, and a
+  perfectly good measurement was reported `status: "error"` /
+  `measurement 'Vout' produced no value` purely on casing — the Xyce engine
+  path already folded case the other direction (Xyce upper-cases; the
+  parser lower-cases both its keys and the lookup), so only ngspice's
+  `spice`-form lookup had this gap. `_run_corner` now folds the requested
+  `name` to lower-case for both engines before looking it up in the parsed
+  measurement map; the response's `measurements[].name` field still echoes
+  the caller's own original spelling (only the internal lookup is
+  case-folded). See [`docs/cli/sim.md`](docs/cli/sim.md)'s "Failure
+  classification" section.
+
 - **Added** (#2522, `klt sim`; additive — `schema_version` unchanged): a
   `corners.process` bundle's `sections[]` entries may now name their **own**
   model library — `{"lib": str, "section": str}` alongside today's bare
