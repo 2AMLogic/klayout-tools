@@ -32,6 +32,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   implant on those families needs a real PDK enclosure rule the curated
   decks do not carry (sg13g2's, for one, transcribes no implant rule of any
   kind) and is left as separately-filed follow-up work.
+- **Fixed** (#2517, `klt yield-campaign`; no schema change — **no**
+  `schema_version` bump): every campaign run reported
+  `campaign.sim_status: "pass_partial"`, even a completely clean one. A
+  campaign spec declares each measurement's limits once, in the shape both
+  verbs read (`{"min": …, "max": …, "target_yield": …}`), and the spec was
+  handed straight to `klt sim` — whose recognised limit keys are `min`/`max`
+  only, so `target_yield` was filed into the measurement-coverage **skip**
+  list as `unrecognized_limit_key`, and a non-empty skip list downgrades an
+  otherwise-passing check to `"pass_partial"` (#2109's rollup rule). The
+  campaign path now holds a measurement's `limits.target_yield` out of the
+  dispatched request — exactly as it already held out the run-level
+  `confidence`/`target_ci_halfwidth`/`min_samples` fields — and restores it
+  on the collected report before that report becomes the sample set `klt
+  yield` reads. The restore matters: with no separate `--limits` file in
+  this flow, the sim report *is* where `klt yield` gets its limits, so a bare
+  strip would have deleted the campaign's own yield claim and left every
+  measurement ungraded (`status: "reported"`) instead of pass/fail. The
+  strip is a closed list of known yield-only keys, not "anything besides
+  `min`/`max`" — any *other* unrecognised limit key still reaches `klt sim`
+  and still shows up in its coverage report, which is where a real spec bug
+  belongs. `klt sim`'s own coverage contract is untouched for every other
+  caller. See [`docs/cli/yield.md`](docs/cli/yield.md)'s "Campaign
+  orchestration → Dispatch" section.
+
 - **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
   user-visible: a corner that previously reported `status: "error"` can now
   report a real grade): a `spice`-form `measurements[].name` was looked up
