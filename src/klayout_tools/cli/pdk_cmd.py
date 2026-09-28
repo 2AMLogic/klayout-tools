@@ -437,8 +437,10 @@ def _print_stackup_text(report: dict) -> None:
     print()
     print(
         f"substrate: {substrate['name']} ({substrate['material']}), top at"
-        f" z = {substrate['z1_um']:g} um, epsilon_r ="
-        f" {_num(substrate['permittivity'])}"
+        f" z = {substrate['z1_um']:g} um, bottom at"
+        f" z = {_num(substrate['z0_um'])} um, epsilon_r ="
+        f" {_num(substrate['permittivity'])}, resistivity ="
+        f" {_num(substrate['resistivity_ohm_cm'])} ohm*cm"
     )
 
     print()

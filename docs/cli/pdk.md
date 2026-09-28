@@ -1220,7 +1220,7 @@ ild6         silicon dioxide                   4.0211  5.3711  1.3500        3.9
 …
 pmd          borophosphosilicate glass (BPSG)  0.0000  0.9361  0.9361        3.9
 
-substrate: substrate (silicon), top at z = 0 um, epsilon_r = 11.9
+substrate: substrate (silicon), top at z = 0 um, bottom at z = -725 um, epsilon_r = 11.9, resistivity = 10 ohm*cm
 ```
 
 The stack is emitted top-down in text (the way a cross-section is drawn) and
@@ -1337,10 +1337,12 @@ emitting a null-thickness slab.
   "substrate": {
     "name": "substrate",
     "material": "silicon",
+    "z0_um": -725.0,
     "z1_um": 0.0,
+    "resistivity_ohm_cm": 10.0,
     "permittivity": 11.9,
     "loss_tangent": null,
-    "source": "relative permittivity of crystalline silicon at 300 K …"
+    "source": "permittivity: relative permittivity of crystalline silicon at 300 K …"
   },
   "conductors": [
     {
@@ -1391,7 +1393,8 @@ emitting a null-thickness slab.
 | `available_corners` | array of string | Every corner suffix found across the install's tech LEFs, sorted. |
 | `curated_source` | object | `{description, references}` — the published, open sources the curated fields were transcribed from. |
 | `sources` | array of object | `{cell_library, corner, tech_lef}` per tech LEF actually parsed (same shape as `em-limits`). Empty when the install ships none. |
-| `substrate` | object | `{name, material, z1_um, permittivity, loss_tangent, source}`. `z1_um` is the elevation origin (`0.0`); the substrate is modelled as semi-infinite below it, so it has no `z0_um`. |
+| `substrate` | object | `{name, material, z0_um, z1_um, resistivity_ohm_cm, permittivity, loss_tangent, source}`. `z1_um` is the elevation origin (`0.0`). `z0_um` is the nominal *physical* wafer thickness (negative, below the origin; SEMI M1 200 mm, -725 um). It is **not** an effective depth for spreading-resistance calculations: treat it as an upper bound and choose an effective depth yourself — an open modeling question the `source` string documents explicitly rather than resolving (issue #2560). |
+| `substrate.resistivity_ohm_cm` | float | Bulk resistivity in Ω·cm. No open sky130/gf180mcu source publishes a doping/resistivity figure, so this is a labeled textbook-typical value for a lightly-doped p-type CMOS substrate (for sky130, the lightly-doped p-epi layer, not the heavily-doped P+ handle wafer that makes up most of the `z0_um` depth), not a process-specific measurement — see `source` for the full caveat (issue #2560). |
 | `conductors` | array of object | Every conductor/via level, **ascending z**. |
 | `conductors[].kind` | string | `"conductor"` (routing metal) or `"via"` (cut layer). |
 | `conductors[].gds_layer` | string \| null | `"<layer>/<datatype>"` — the GDS layer this level's shapes live on, so the entry can be turned straight into a [`klt mom`](mom.md#spec-file) `stackup[]` entry. |
