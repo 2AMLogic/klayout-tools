@@ -506,18 +506,28 @@ DECK: list[DrcRule] = [
     # local copy (see the module docstring's own note on why) --------------
     DrcRule(
         id="via1.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via1 width -- "
-            "approximated as a minimum-width floor only, since this "
-            "engine's width check has no maximum-width counterpart"
-        ),
+        description="min/max Via1 size (fixed 0.19 x 0.19 um square)",
         layer=(19, 0),  # Via1.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_19_via1.drc rule "V1.a": via1_nseal.without_bbox_min/max(0.19um)
         # -> "5.19. V1.a : Min. and max. Via1 width: 0.19 um"
         # (cmos5l's own sg13cmos5l_tech_default.json: drc_rules['V1_a']
-        # == 0.19)
+        # == 0.19). Both halves are enforced (issue #2370/#2388):
+        # `threshold_dbu` is the minimum-width lower bound
+        # (`Region.width_check`), and the equal `threshold_max_dbu` is the
+        # fixed-size upper bound, measured as a bounding-box size
+        # (`Region.with_bbox_max`, see `_run_width_max_check` in `drc.py`)
+        # -- exactly the `without_bbox_min/max` semantics the upstream
+        # rule itself uses. Threshold value unmodified.
+        #
+        # Note sg13g2's *identically shaped* cont/via1-4 rules could not
+        # take their max half in the same change: `klt gen`'s sg13g2
+        # generators draw those cuts oversized, at the PDK-generic
+        # `gen.CONTACT_SIZE_UM` (issue #2585). No sg13cmos5l generator
+        # draws a Via1-Via3/TopVia1 cut at all, so this deck had no such
+        # blocker -- see docs/cli/drc.md's "Fixed-size rules".
         scope="5.19 Via1",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_19_via1.drc", "V1.a"),
     ),
@@ -577,18 +587,16 @@ DECK: list[DrcRule] = [
     # non-symlinked local copy, scoped "Via2-Via3 only (no Via4)" ----------
     DrcRule(
         id="via2.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via2 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "min-size-only approximation via1.width.1 above makes"
-        ),
+        description="min/max Via2 size (fixed 0.19 x 0.19 um square)",
         layer=(29, 0),  # Via2.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_20_vian.drc rule "V2.a" (via_no=2 instance of the templated
         # "Vn.a" rule): via2_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V2.a : Min. and max. Via2 width: 0.19 um"
-        # (drc_rules['Vn_a'] == 0.19, shared by Via2-Via3)
+        # (drc_rules['Vn_a'] == 0.19, shared by Via2-Via3). Both halves
+        # enforced (issue #2370/#2388): see via1.width.1's note above.
         scope="5.20 Vian",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_20_vian.drc", "V2.a"),
     ),
@@ -646,19 +654,16 @@ DECK: list[DrcRule] = [
     # --- 5.20 Vian, Via3 instance (beol/5_20_vian.drc) ---------------------
     DrcRule(
         id="via3.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via3 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "min-size-only approximation via1.width.1/via2.width.1 above "
-            "make"
-        ),
+        description="min/max Via3 size (fixed 0.19 x 0.19 um square)",
         layer=(49, 0),  # Via3.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_20_vian.drc rule "V3.a" (via_no=3 instance of "Vn.a"):
         # via3_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V3.a : Min. and max. Via3 width: 0.19 um"
-        # (drc_rules['Vn_a'] == 0.19)
+        # (drc_rules['Vn_a'] == 0.19). Both halves enforced (issue
+        # #2370/#2388): see via1.width.1's note above.
         scope="5.20 Vian",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_20_vian.drc", "V3.a"),
     ),
@@ -724,18 +729,16 @@ DECK: list[DrcRule] = [
     # (TopMetal1) -- both transcribed here. --------------------------------
     DrcRule(
         id="topvia1.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) TopVia1 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "min-size-only approximation via1.width.1 above makes"
-        ),
+        description="min/max TopVia1 size (fixed 0.42 x 0.42 um square)",
         layer=(125, 0),  # TopVia1.drawing
         check="width",
         threshold_dbu=420,  # 0.42 um
+        threshold_max_dbu=420,  # 0.42 um -- same value: a *fixed*-size rule
         # 5_21_topvia1.drc rule "TV1.a":
         # topvia1_nseal.without_bbox_min/max(0.42um)
         # -> "5.21. TV1.a : Min. and max. TopVia1 width: 0.42 um"
-        # (drc_rules['TV1_a'] == 0.42)
+        # (drc_rules['TV1_a'] == 0.42). Both halves enforced (issue
+        # #2370/#2388): see via1.width.1's note above.
         scope="5.21 TopVia1",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_21_topvia1.drc", "TV1.a"),
     ),
