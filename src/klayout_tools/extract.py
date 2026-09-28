@@ -142,6 +142,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import env_provenance
 from ._annotation import is_reserved_annotation_layer
+from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import load_layout, resolve_top_cell
 from ._layout import region as _region
 from ._layout import texts as _texts
@@ -7194,8 +7195,19 @@ def _extract_netlist(
     # code path. `tap_declared` records whether *some* tap mechanism (drawn
     # or derived) exists for this deck -- gating the connectivity block
     # below the same way `deck.tap is not None` alone used to.
+    #
+    # `tap_nplus_complement` (issue #2591) adds a second well-tie form for a
+    # family whose own LVS deck derives n+ from the *absence* of its p+
+    # implant (IHP SG13G2's `nactiv = activ.not(psd_drw...)`): unimplanted
+    # Activ inside the well, minus any piece touching a gate (see
+    # `_complement_well_tie`). Unioned with the positive `tap_nplus` form so
+    # a layout drawn either way extracts the same tie.
     tap_declared = deck.tap is not None
-    if deck.tap is None and (deck.tap_nplus is not None or deck.tap_pplus is not None):
+    if deck.tap is None and (
+        deck.tap_nplus is not None
+        or deck.tap_pplus is not None
+        or deck.tap_nplus_complement is not None
+    ):
         tap_nplus_region = _region(layout, top_cell, deck.tap_nplus)
         tap_pplus_region = _region(layout, top_cell, deck.tap_pplus)
         # `nwell_body_cover`, not `nwell` (issue #1911): this is a
@@ -7207,6 +7219,13 @@ def _extract_netlist(
             (tap_nplus_region & active & nwell_body_cover)
             | (tap_pplus_region & (active - nwell_body_cover))
         ) - poly
+        if deck.tap_nplus_complement is not None:
+            tap = tap | _complement_well_tie(
+                active,
+                poly,
+                nwell_body_cover,
+                _region(layout, top_cell, deck.tap_nplus_complement),
+            )
         # Exclude the derived tie geometry from `active` before the NMOS/
         # PMOS source/drain split just below, so a tie strip is never also
         # registered as ordinary device-terminal diffusion (`nfet_sd`/
