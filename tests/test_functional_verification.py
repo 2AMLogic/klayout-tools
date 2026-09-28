@@ -2542,10 +2542,16 @@ def test_integration_real_icarus_testcase_filter_passes(tmp_path):
     assert report["status"] == "pass"
     assert report["failed_count"] == 0
     assert report["passed_count"] == 2
-    # cocotb still lists the filtered-out test, as a skip -- the exact
-    # `get_results()` undercount the contract's own counts avoid.
-    assert report["skipped_count"] == 1
-    assert report["test_count"] == 3
+    # cocotb >= 2.1 (the 2.1.0 pin, issue #2583) no longer lists the
+    # filtered-out test at all: the runner turns `testcase` names into a
+    # `COCOTB_TEST_FILTER` regex and deselected tests are absent from
+    # `results.xml` (`tests="2" skipped="0"`, verified live), where the
+    # 2.0.x regression manager recorded them as skips. A `<skipped>`
+    # entry for a test that *ran* and skipped itself (the count the
+    # contract's own three-way breakdown exists for) is still parsed and
+    # counted -- see the stubbed `_RESULTS_XML_WITH_SKIP` tests above.
+    assert report["skipped_count"] == 0
+    assert report["test_count"] == 2
 
 
 @pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
