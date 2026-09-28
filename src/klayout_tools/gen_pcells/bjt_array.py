@@ -31,6 +31,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 
     from klayout_tools.gen import (
         _bjt_array_layout,
+        _clamp_cut_boxes,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
@@ -203,6 +204,18 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "deck declares (see ExtractionDeck.dummy)",
                 default=False,
             )
+            # Fixed drawn side of every cut on contact_layer (issue #2585) --
+            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
+            # family and layer. `0.0` (no upper size bound) leaves the cuts
+            # exactly as laid out; see `gen._clamp_cut_boxes`.
+            self.param(
+                "contact_fixed_size_um",
+                self.TypeDouble,
+                "Fixed drawn side (um) every cut on contact_layer is clamped "
+                "down to on the resolved PDK family -- 0.0 leaves the "
+                "generator's own cut size unchanged",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"bjt_array({self.rows}x{self.cols},e={self.emitter_um})"
@@ -339,5 +352,9 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                             c["x0_um"],
                             c["y0_um"],
                         )
+
+            # Issue #2585: clamp every cut on a fixed-size cut/via layer down
+            # to that size, inside the unchanged generic-budget layout.
+            _clamp_cut_boxes(self.cell, li_contact, dbu, self.contact_fixed_size_um)
 
     return {"bjt_array": _BjtArrayPCell}

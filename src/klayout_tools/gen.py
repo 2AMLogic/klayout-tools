@@ -154,6 +154,9 @@ from .gen_layer_params import (
     _PDK_CONTACT_GATE_EXTRA_OFFSET_UM as _PDK_CONTACT_GATE_EXTRA_OFFSET_UM,
 )
 from .gen_layer_params import (
+    _PDK_CUT_FIXED_SIZE_UM as _PDK_CUT_FIXED_SIZE_UM,
+)
+from .gen_layer_params import (
     _PDK_GATE_BOTTOM_ENDCAP_UM as _PDK_GATE_BOTTOM_ENDCAP_UM,
 )
 from .gen_layer_params import (
@@ -224,6 +227,9 @@ from .gen_layer_params import (
 )
 from .gen_layer_params import (
     _contact_gate_extra_offset_um as _contact_gate_extra_offset_um,
+)
+from .gen_layer_params import (
+    _cut_fixed_size_um as _cut_fixed_size_um,
 )
 from .gen_layer_params import (
     _device_layer_params as _device_layer_params,
@@ -398,6 +404,13 @@ _HIDDEN_PARAMS = {
     "metal_res_via_min_w_um",
     "metal_res_via_enclosure_min_um",
     "metal_res_via_space_min_um",
+    # Fixed drawn side of every cut on a fixed-size cut/via layer (issue
+    # #2585) -- harness-computed from the resolved PDK family and the
+    # resolved cut layer by :func:`_cut_fixed_size_um`, exactly like the
+    # per-family floors above, never part of the request schema. `0.0` (every
+    # layer with no upper size bound) leaves the drawn cut unchanged.
+    "contact_fixed_size_um",
+    "cap_top_via_fixed_size_um",
 }
 
 #: ``res_array``'s flavour mask slots are generated from
@@ -424,9 +437,23 @@ _HIDDEN_PARAMS |= {
     for suffix in ("layer", "present")
 }
 
-#: Minimum contact/via drawn size (um) used by every phase-2 generator --
-#: exceeds both curated decks' contact-size rule (sky130's ``licon1`` has no
-#: size rule at all; gf180mcu's ``contact.width.1`` is 0.22um).
+#: PDK-generic contact/via cut **budget** (um) used by every phase-2
+#: generator: the side every contact region, landing pad, ring band and port
+#: width is laid out around (``CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM``),
+#: and the drawn cut size on any layer whose cut rule is only a *minimum* --
+#: it meets or exceeds sky130's ``licon1`` (no curated size rule) and
+#: gf180mcu's ``contact.width.1`` (0.22um), and is widened per family where a
+#: coarser minimum binds (``via_min_w_um``/``cap_top_via_min_w_um``).
+#:
+#: It is **not** the drawn size on a *fixed*-size cut layer (issue #2585),
+#: where the foundry rule is a minimum and a maximum: sky130's ``via``
+#: (0.15um) and sg13g2's ``Cont`` (0.16um)/``Via1``-``Via4`` (0.19um) would
+#: all be over their maximum at 0.22um. There the drawn cut is clamped down
+#: to the layer's fixed size (:func:`_cut_fixed_size_um`,
+#: :func:`_clamp_cut_boxes`, :func:`_fixed_cut_side_um`) *inside* the
+#: unchanged 0.22um-derived contact region -- so every pad, ring, port and
+#: ``klt gen describe`` coordinate stays exactly where it was and each cut's
+#: enclosure only grows.
 CONTACT_SIZE_UM = 0.22
 
 #: The coarsest grid (um) any generator's geometry is placed on -- the
@@ -2450,6 +2477,68 @@ def _insert_boxes(
                 int(round((y1 + oy_um) / dbu)),
             )
         )
+
+
+def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:
+    """The cut side (um) actually drawn for a generator-sized ``side_um`` cut
+    on a layer whose fixed size is ``fixed_size_um`` (issue #2585, see
+    :func:`_cut_fixed_size_um`): ``min(side_um, fixed_size_um)`` when a fixed
+    size is declared, else ``side_um`` unchanged.
+
+    Clamp *down* only. A fixed size above what the generator already draws is
+    a minimum-side shortfall, which the per-family floors
+    (``via_min_w_um``/``cap_top_via_min_w_um``/`gen compose`'s deck-derived
+    via-drop floor) exist to fix; growing a cut here instead would eat into
+    the enclosure of a landing pad laid out around the smaller cut."""
+    if fixed_size_um > 0.0:
+        return min(side_um, fixed_size_um)
+    return side_um
+
+
+def _clamp_cut_boxes(
+    cell: Any, layer_index: int, dbu: float, fixed_size_um: float
+) -> None:
+    """Clamp every box already drawn on ``layer_index`` in ``cell`` down to
+    ``fixed_size_um`` per side, about its own centre (issue #2585).
+
+    Every generator lays its cuts out around the PDK-generic
+    :data:`CONTACT_SIZE_UM` budget (and its per-family *minimum* floors); on a
+    *fixed*-size cut layer (sky130's ``via``, sg13g2's ``Cont``/``Via1``-
+    ``Via4``) that budget is over the foundry maximum. Clamping the drawn
+    boxes as a last step of ``produce_impl`` -- rather than re-deriving
+    ``contact_region_um`` from the smaller cut -- keeps every landing pad,
+    diffusion segment, ring band and reported port exactly where the
+    generic-budget layout put it, so the only geometry that moves is the cut
+    itself, and its enclosure only grows.
+
+    Works in integer dbu so the clamped side is *exactly*
+    ``round(fixed_size_um / dbu)`` -- never a dbu short or long from
+    per-edge rounding (the #685/#2442 failure mode, which on a fixed-size
+    rule trips the maximum as readily as the minimum). The one odd-dbu
+    remainder, when there is one, goes on the high side. A no-op for
+    ``fixed_size_um <= 0`` and for any box already at or under the fixed size
+    on that axis."""
+    if fixed_size_um <= 0.0:
+        return
+    import klayout.db as kdb
+
+    fixed_dbu = int(round(fixed_size_um / dbu))
+    shapes = cell.shapes(layer_index)
+    oversized = [s for s in shapes.each() if s.is_box()]
+    for shape in oversized:
+        box = shape.box
+        w = box.width()
+        h = box.height()
+        if w <= fixed_dbu and h <= fixed_dbu:
+            continue
+        left, bottom, right, top = box.left, box.bottom, box.right, box.top
+        if w > fixed_dbu:
+            left += (w - fixed_dbu) // 2
+            right = left + fixed_dbu
+        if h > fixed_dbu:
+            bottom += (h - fixed_dbu) // 2
+            top = bottom + fixed_dbu
+        shape.box = kdb.Box(left, bottom, right, top)
 
 
 def _insert_ring(

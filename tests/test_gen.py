@@ -5976,6 +5976,257 @@ def test_sg13g2_res_array_metal_level_draws_expected_device_class(
     assert device["params"]["r_ohm"] == pytest.approx(length_um / width_um * sheet_rho)
 
 
+# --------------------------------------------------------------------------- #
+# Fixed-size cut/via layers (issue #2585)
+# --------------------------------------------------------------------------- #
+
+
+def _drawn_box_sides_um(path, layer_pair):
+    """Every distinct ``(width_um, height_um)`` drawn on ``layer_pair`` in the
+    flattened top cell of the GDS at ``path``."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(path))
+    top = layout.top_cell()
+    top.flatten(True)
+    shapes = top.shapes(layout.layer(*layer_pair))
+    return {
+        (round(s.box.width() * layout.dbu, 6), round(s.box.height() * layout.dbu, 6))
+        for s in shapes.each()
+        if s.is_box()
+    }, len(list(shapes.each()))
+
+
+def test_cut_fixed_size_table_agrees_with_every_curated_deck():
+    """Every `_PDK_CUT_FIXED_SIZE_UM` entry is a genuine *fixed*-size rule
+    already present (as its minimum half) in that family's curated deck:
+    the table value equals the deck's own `"width"` threshold on that layer,
+    and -- once a deck carries the upper bound itself as `threshold_max_dbu`
+    (#2370/#2388) -- equals that too, so the two sources can never disagree
+    about how big a generator draws the cut."""
+    from klayout_tools.decks import get_deck, get_nominal_dbu
+    from klayout_tools.gen_layer_params import _deck_cut_max_size_um
+
+    for family, layers in gen._PDK_CUT_FIXED_SIZE_UM.items():
+        rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+        for layer, size_um in layers.items():
+            minima = [
+                round(rule.threshold_dbu * nominal_dbu_um, 6)
+                for rule in rules
+                if rule.check == "width"
+                and rule.layer == layer
+                and rule.other_layer is None
+                and rule.derived_layer is None
+            ]
+            assert minima, (family, layer)
+            assert max(minima) == size_um, (family, layer, minima)
+            deck_max = _deck_cut_max_size_um(family, layer)
+            assert deck_max is None or deck_max == size_um, (family, layer)
+
+
+@pytest.mark.parametrize(
+    ("family", "layer", "expected_um"),
+    [
+        ("sky130", (68, 44), 0.15),  # via -- table (via.1a_b)
+        ("sky130", (66, 44), 0.0),  # licon1 -- no curated size bound
+        ("sky130", (67, 44), 0.0),  # mcon -- minimum-only here
+        ("sg13g2", (6, 0), 0.16),  # Cont -- Cnt.a
+        ("sg13g2", (19, 0), 0.19),  # Via1 -- V1.a
+        ("sg13g2", (66, 0), 0.19),  # Via4 -- V4.a
+        ("gf180mcu", (33, 0), 0.22),  # contact -- deck threshold_max_dbu
+    ],
+)
+def test_cut_fixed_size_um_resolves_deck_and_table(family, layer, expected_um):
+    import klayout.db as kdb
+
+    assert gen._cut_fixed_size_um(family, layer) == expected_um
+    assert gen._cut_fixed_size_um(family, kdb.LayerInfo(*layer)) == expected_um
+
+
+def test_cut_fixed_size_um_absent_layer_is_zero():
+    assert gen._cut_fixed_size_um("sg13g2", None) == 0.0
+
+
+def test_fixed_cut_side_um_only_ever_clamps_down():
+    assert gen._fixed_cut_side_um(0.22, 0.0) == 0.22
+    assert gen._fixed_cut_side_um(0.22, 0.16) == 0.16
+    # A fixed size above the generator's own side is a minimum-side concern
+    # for the per-family floors -- never grown here.
+    assert gen._fixed_cut_side_um(0.22, 0.42) == 0.22
+
+
+def test_clamp_cut_boxes_shrinks_about_centre_to_exact_size():
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell("T")
+    li = layout.layer(6, 0)
+    cell.shapes(li).insert(kdb.Box(0, 0, 220, 220))  # generic 0.22um cut
+    cell.shapes(li).insert(kdb.Box(1000, 0, 1221, 221))  # odd remainder
+    cell.shapes(li).insert(kdb.Box(2000, 0, 2150, 2150))  # oversized one axis
+    cell.shapes(li).insert(kdb.Box(3000, 0, 3100, 3100))  # already small
+
+    gen._clamp_cut_boxes(cell, li, layout.dbu, 0.16)
+
+    boxes = sorted(
+        (s.box.left, s.box.bottom, s.box.right, s.box.top)
+        for s in cell.shapes(li).each()
+    )
+    assert boxes == [
+        (30, 30, 190, 190),
+        (1030, 30, 1190, 190),
+        (2000, 995, 2150, 1155),
+        (3000, 1470, 3100, 1630),
+    ]
+
+
+def test_clamp_cut_boxes_zero_fixed_size_is_a_no_op():
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    cell = layout.create_cell("T")
+    li = layout.layer(66, 44)
+    cell.shapes(li).insert(kdb.Box(0, 0, 220, 220))
+    gen._clamp_cut_boxes(cell, li, layout.dbu, 0.0)
+    assert [s.box for s in cell.shapes(li).each()] == [kdb.Box(0, 0, 220, 220)]
+
+
+@pytest.mark.parametrize(
+    ("generator_name", "params"),
+    [
+        ("mos_array", {}),
+        ("mos_array", {"gate_contact": True, "add_guard_ring": True}),
+        ("diff_pair", {}),
+        ("guard_ring", {}),
+        ("res_array", {}),
+    ],
+)
+def test_sg13g2_generators_draw_cont_at_its_fixed_size(
+    generator_name, params, tmp_path, sg13g2_pdk_root, monkeypatch
+):
+    """sg13g2's `Cont` is a fixed-size cut (`Cnt.a`, min *and* max 0.16um):
+    every contact a generator draws there is exactly 0.16um square -- not the
+    PDK-generic 0.22um budget.
+
+    The design choice issue #2585 made: the cut shrinks *inside* its
+    unchanged 0.22um-derived contact region. So compared with the same
+    request drawn with the clamp disabled, every other layer is identical,
+    every cut keeps its centre, and the reported ports do not move."""
+    import klayout.db as kdb
+
+    from klayout_tools import gen_describe, gen_layer_params
+
+    def _generate(name):
+        output = tmp_path / f"{generator_name}_sg13g2_{name}.gds"
+        report = generate(
+            {
+                "generator": generator_name,
+                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+                "params": params,
+                "options": {"output": str(output)},
+            }
+        )
+        return output, report
+
+    fixed_output, fixed_report = _generate("fixed")
+    sides, count = _drawn_box_sides_um(fixed_output, (6, 0))
+    assert count > 0
+    assert sides == {(0.16, 0.16)}
+
+    monkeypatch.setattr(gen_layer_params, "_cut_fixed_size_um", lambda *a: 0.0)
+    monkeypatch.setattr(gen_describe, "_cut_fixed_size_um", lambda *a: 0.0)
+    generic_output, generic_report = _generate("generic")
+    assert _drawn_box_sides_um(generic_output, (6, 0))[0] == {(0.22, 0.22)}
+
+    assert fixed_report["ports"] == generic_report["ports"]
+    assert fixed_report["bbox_um"] == generic_report["bbox_um"]
+
+    def _flat_regions(path):
+        layout = kdb.Layout()
+        layout.read(str(path))
+        top = layout.top_cell()
+        top.flatten(True)
+        return {
+            (info.layer, info.datatype): kdb.Region(top.begin_shapes_rec(li))
+            for li, info in zip(
+                layout.layer_indexes(), layout.layer_infos(), strict=True
+            )
+        }
+
+    fixed_regions = _flat_regions(fixed_output)
+    generic_regions = _flat_regions(generic_output)
+    assert fixed_regions.keys() == generic_regions.keys()
+    for layer, region in fixed_regions.items():
+        if layer == (6, 0):
+            continue
+        assert (region ^ generic_regions[layer]).is_empty(), layer
+
+    def _centres(region):
+        return sorted((p.bbox().center().x, p.bbox().center().y) for p in region.each())
+
+    assert _centres(fixed_regions[(6, 0)]) == _centres(generic_regions[(6, 0)])
+    # Enclosure only grows: every 0.16um cut sits inside the 0.22um one.
+    assert (fixed_regions[(6, 0)] - generic_regions[(6, 0)]).is_empty()
+
+
+@pytest.mark.parametrize("level", [1, 2])
+def test_sg13g2_res_array_metal_level_draws_via_at_its_fixed_size(
+    tmp_path, sg13g2_pdk_root, level
+):
+    """sg13g2's `Via1`/`Via2` are fixed-size cuts (`V1.a`/`V2.a`, 0.19um):
+    `metal_level`'s end vias are drawn at exactly that side."""
+    output = tmp_path / f"res_array_sg13g2_via_m{level}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"num": 1, "dummy": 0, "width_um": 1.0, "metal_level": level},
+            "options": {"output": str(output)},
+        }
+    )
+    via_layer = {1: (19, 0), 2: (29, 0)}[level]
+    sides, count = _drawn_box_sides_um(output, via_layer)
+    assert count == 2
+    assert sides == {(0.19, 0.19)}
+
+
+def test_sky130_res_array_metal_level_2_draws_via_at_its_fixed_size(tmp_path, pdk_root):
+    """sky130's met2 resistor's end via drops to met1 on `via` (68/44), a
+    fixed-size cut (`via.1a_a`/`via.1a_b`, 0.15um)."""
+    output = tmp_path / "res_array_sky130_via_m2.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 1, "dummy": 0, "metal_level": 2},
+            "options": {"output": str(output)},
+        }
+    )
+    sides, count = _drawn_box_sides_um(output, (68, 44))
+    assert count == 2
+    assert sides == {(0.15, 0.15)}
+
+
+def test_sky130_minimum_only_contact_keeps_the_generic_size(tmp_path, pdk_root):
+    """sky130's `licon1` carries no curated upper size bound, so its cuts
+    stay at the generic 0.22um budget -- issue #2585 only moves fixed-size
+    layers."""
+    output = tmp_path / "mos_array_sky130_licon.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    sides, count = _drawn_box_sides_um(output, (66, 44))
+    assert count > 0
+    assert sides == {(0.22, 0.22)}
+
+
 def test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged(
     tmp_path, sg13g2_pdk_root
 ):

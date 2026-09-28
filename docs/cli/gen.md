@@ -456,6 +456,35 @@ This is a scope statement for what a contribution needs to satisfy, not a
 commitment that a fourth family or full `sg13g2` generator coverage is
 currently planned or in progress.
 
+#### Fixed-size cut/via layers (issue #2585)
+
+Every generator lays its contacts and vias out around one PDK-generic cut
+budget, `CONTACT_SIZE_UM` (0.22 µm): contact regions, landing pads, ring
+bands and reported port widths are all `CONTACT_SIZE_UM + 2 *
+ENCLOSURE_MARGIN_UM` wide. Widening that cut to a family's *minimum* (e.g.
+gf180mcu's 0.26 µm vias) is always safe. Some foundry cut rules are
+*fixed-size*, though — a minimum **and** a maximum — and 0.22 µm is over the
+maximum on:
+
+| Family | Cut layer | Fixed size | Upstream rule |
+|---|---|---|---|
+| `sky130` | `via` (68/44) | 0.15 µm | `via.1a_a` + `via.1a_b` |
+| `sg13g2` | `Cont` (6/0) | 0.16 µm | `Cnt.a` |
+| `sg13g2` | `Via1`–`Via4` (19/0, 29/0, 49/0, 66/0) | 0.19 µm | `V1.a`, `Vn.a` |
+
+On those layers every drawn cut is clamped **down** to the fixed size, about
+its own centre, *inside* the unchanged 0.22 µm-derived contact region —
+`produce_impl` draws the generic layout and then clamps the cut layer
+(`gen._clamp_cut_boxes`), and `klt gen compose` clamps its via-drop squares
+the same way. The only geometry that changes is the cut itself: every other
+layer, every port coordinate and every `bbox_um` is exactly what the generic
+layout produced, and each cut's enclosure only grows. The per-layer size is
+resolved by `gen_layer_params._cut_fixed_size_um` from the curated deck's own
+`DrcRule.threshold_max_dbu` where the deck declares one (gf180mcu's
+`contact`/`via1`–`via4`, already equal to what the generators draw) and
+from `_PDK_CUT_FIXED_SIZE_UM` for the rules above, which the curated decks do
+not yet bound from above.
+
 ### `mos_array` (family 1: matched transistor array)
 
 > **gf180mcu note (issues #1575/#1577):** this generator's documented default
