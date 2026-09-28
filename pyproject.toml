@@ -56,7 +56,7 @@ dev = [
 # own clear "functional-verification requires Python < 3.14" error before
 # calling into it (the verb issue's concern, not this pin's).
 functional-verification = [
-    "cocotb>=2.0.1,<2.1; python_version < \"3.14\"",
+    "cocotb>=2.1,<2.2; python_version < \"3.14\"",
 ]
 # Backs `tests/test_mom_cross_validation.py` (issue #895, Phase 2c of the
 # Method-of-Moments epic #701): the external MoM oracle used to cross-check
