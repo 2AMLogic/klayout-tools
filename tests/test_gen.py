@@ -1052,7 +1052,14 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
         for i in layout.layer_indexes()
     }
     assert well_pair in present
-    assert report["drc_hints"]["notes"] == []
+    # sky130 declares no S/D implant role (issue #2580), so its row now
+    # carries the reporting-only absence note; gf180mcu (issue #1577) keeps
+    # an empty list -- the note is the only difference.
+    family = gen._pdk_family(variant)
+    expected_notes = (
+        [] if family == "gf180mcu" else [_sd_implant_absence_note(family, "pfet")]
+    )
+    assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -1150,7 +1157,13 @@ def test_mos_array_guard_ring_flavor_pfet_draws_well_and_is_drc_clean(
         for i in layout.layer_indexes()
     }
     assert well_pair in present
-    assert report["drc_hints"]["notes"] == []
+    # Same sky130-vs-gf180mcu split as the no-ring pfet test above (issue
+    # #2580's reporting-only absence note).
+    family = gen._pdk_family(variant)
+    expected_notes = (
+        [] if family == "gf180mcu" else [_sd_implant_absence_note(family, "pfet")]
+    )
+    assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -1409,7 +1422,11 @@ def test_mos_array_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert report["drc_hints"]["voltage_flavor"] is None
     assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    assert report["drc_hints"]["notes"] == []
+    # sky130's S/D-implant absence note (issue #2580) is the one entry this
+    # default sky130 request now carries -- identical for the implicit and
+    # explicit requests compared above, so the default-unchanged contract
+    # holds.
+    assert report["drc_hints"]["notes"] == [_sd_implant_absence_note("sky130", "nfet")]
 
 
 def test_mos_array_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
@@ -1548,7 +1565,9 @@ def test_mos_array_voltage_flavor_hvi_draws_marker_and_is_drc_clean(tmp_path, pd
     assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in present
     assert report["drc_hints"]["voltage_flavor"] == "hvi"
     assert report["drc_hints"]["voltage_flavor_mark_present"] is True
-    assert report["drc_hints"]["notes"] == []
+    # sky130's S/D-implant absence note (issue #2580) is the one entry this
+    # pfet request now carries.
+    assert report["drc_hints"]["notes"] == [_sd_implant_absence_note("sky130", "pfet")]
 
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -2060,7 +2079,12 @@ def test_mos_array_parallel_is_the_default_finger_topology(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert implicit_report["ports"] == explicit_report["ports"]
     assert implicit_report["warnings"] == []
-    assert implicit_report["drc_hints"]["notes"] == []
+    # sky130's S/D-implant absence note (issue #2580) is the one entry this
+    # default-flavour sky130 unit now carries -- identical on both sides, so
+    # the implicit-vs-explicit contract holds.
+    assert implicit_report["drc_hints"]["notes"] == [
+        _sd_implant_absence_note("sky130", "nfet")
+    ]
 
 
 @pytest.mark.parametrize("gate_contact", [False, True])
@@ -8462,6 +8486,137 @@ def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
 
     drc_report = run_drc(str(output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def _sd_implant_absence_note(family: str, flavor: str) -> str:
+    """The exact ``drc_hints.notes`` entry ``mos_array`` emits on a family
+    whose role-layer table declares no S/D implant role for ``flavor``
+    (issue #2580) -- the reporting-only mirror of ``voltage_flavor``'s own
+    "unresolved role -> note it, never silently drop it" contract."""
+    role = "nplus" if flavor == "nfet" else "pplus"
+    return (
+        f"family '{family}' declares no S/D implant role ('{role}') for "
+        f"flavor '{flavor}' -- no implant mask was drawn"
+    )
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_mos_array_sd_implant_absence_noted_on_sg13g2(
+    tmp_path, sg13g2_pdk_root, flavor
+):
+    """Issue #2580's own repro: ``mos_array`` on ``ihp-sg13g2`` draws no
+    source/drain implant (``nSD`` 7/0 for an nfet, ``pSD`` 14/0 for a pfet)
+    and nothing DRC-side flags the missing mask -- the family's curated deck
+    recognises a MOS from ``Activ``/``GatPoly``/well alone. The omission must
+    be *reported* via ``drc_hints.notes`` (mirroring the ``voltage_flavor``
+    contract) while the drawn geometry stays byte-for-byte unchanged: the
+    issue's own observed layer set, implant layers absent. The repro's
+    sub-default gate length additionally keeps its own pre-existing note
+    (``l_um`` 0.13), so the implant note is asserted by membership."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"mos_array_sg13g2_sd_implant_{flavor}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {
+                "w_um": 1.6,
+                "l_um": 0.13,
+                "rows": 1,
+                "cols": 4,
+                "topology": "common_centroid",
+                "dummy": 1,
+                "flavor": flavor,
+                "gate_contact": True,
+                "add_guard_ring": True,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["sd_implant_present"] is False
+    assert _sd_implant_absence_note("sg13g2", flavor) in report["drc_hints"]["notes"]
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    # The issue's own observed stream: Activ (1/0), GatPoly (5/0), Cont
+    # (6/0), Metal1 (8/0) -- plus NWell (31/0) for the pfet well -- and no
+    # implant shape on either `nSD` (7/0) or `pSD` (14/0).
+    expected = {(1, 0), (5, 0), (6, 0), (8, 0)}
+    if flavor == "pfet":
+        expected.add((31, 0))
+    assert present == expected
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_mos_array_sd_implant_absence_noted_on_sky130(tmp_path, pdk_root, flavor):
+    """sky130 declares no ``"nplus"``/``"pplus"`` role either -- the same gap
+    as sg13g2, never filed only because sky130's curated deck has no implant
+    rule to make it visible (issue #2580's scope correction). The note must
+    fire there too, naming the flavor-selected role."""
+    output = tmp_path / f"mos_array_sky130_sd_implant_{flavor}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["sd_implant_present"] is False
+    assert _sd_implant_absence_note("sky130", flavor) in report["drc_hints"]["notes"]
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_mos_array_sd_implant_absence_noted_on_sg13cmos5l(
+    tmp_path, sg13cmos5l_pdk_root, flavor
+):
+    """sg13cmos5l -- the third family with no ``"nplus"``/``"pplus"`` role
+    (its curated deck recognises a MOS from ``Activ``/well alone, like
+    sg13g2's). ``flavor="pfet"`` still fires the ``pplus``-flavoured note
+    even though that flavor's well-tie tap pad (#1473) draws its own
+    ``nSD`` implant via the separate ``well_tap_implant`` role -- the note
+    is about the *unit devices'* source/drain implant."""
+    output = tmp_path / f"mos_array_sg13cmos5l_sd_implant_{flavor}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["sd_implant_present"] is False
+    assert (
+        _sd_implant_absence_note("sg13cmos5l", flavor) in report["drc_hints"]["notes"]
+    )
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_gf180mcu_mos_array_sd_implant_present_no_absence_note(
+    tmp_path, both_pdk_root, flavor
+):
+    """gf180mcu -- the one family that *does* declare ``"nplus"``/``"pplus"``
+    (issue #1577) -- keeps drawing its real S/D implant with no absence
+    note: ``sd_implant_present`` is ``True`` for both flavors and the
+    reporting-only change leaves it untouched."""
+    output = tmp_path / f"mos_array_gf180mcu_sd_implant_{flavor}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"flavor": flavor, "rows": 1, "cols": 1, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["sd_implant_present"] is True
+    assert not any(
+        "no implant mask was drawn" in n for n in report["drc_hints"]["notes"]
+    )
 
 
 def test_gf180mcu_mos_array_voltage_flavor_marker_grows_past_well_margin(
