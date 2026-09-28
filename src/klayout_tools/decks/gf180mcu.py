@@ -2172,6 +2172,57 @@ EXTRACTION_DECK = ExtractionDeck(
     # derivation. Geometry outside every DNWELL island is unaffected.
     substrate_isolation=(12, 0),  # DNWELL
     poly_label=(30, 10),  # Poly2 pin/label purpose -- names a bare-poly gate (#210)
+    # Dummy-device marker (issue #2599, the gf180mcu counterpart of sky130's
+    # own issue #491 declaration -- see `decks/sky130.py`'s `dummy=(83, 20)`
+    # comment and `ExtractionDeck.dummy`'s docstring in `decks/extraction.py`
+    # for the extractor-side machinery this field drives, which shipped in
+    # #295/#462 and needs no change here). Without it, `klt gen mos_array`/
+    # `res_array`/`bjt_array`'s own `"dummy": N` param drew edge-fill devices
+    # on this family that `klt lvs` could then only report as
+    # `device.unmatched`, with knock-on `topology` conflicts on whichever
+    # supply rail the dummy units tie to.
+    #
+    # gf180mcu has no *native* per-device dummy-recognition mark either. The
+    # only dummy-adjacent purposes in its own layer table are (a) the
+    # per-conductor density-fill purposes `<Layer>_Dummy` (datatype 4 on
+    # `COMP`/`Poly2`/`Metal1`..`MetalTop`), which is where generated *fill
+    # shapes themselves* are drawn rather than a marker laid over a real
+    # device, and (b) the fill-*exclusion* region markers `NDMY` (111/5) /
+    # `PMNDMY` (152/5), whose DRM section 10.8 `DE.*` rules ("design rules
+    # for dummy exclude layers") make them a density/DRC concept, not a
+    # device-recognition mark the way `DRC_BJT` (127/5) or `RES_MK` (110/5)
+    # are. That is the identical "no native mark, curated substitute"
+    # situation sky130's own `(83, 20)` comment documents.
+    #
+    # `(100, 50)` therefore reuses gf180mcu's own *LVS-only annotation*
+    # layer number -- 100, the `LVS_*` family (`LVS_RF` 100/5, `LVS_Drain`
+    # 100/7, `LVS_Source` 100/8): layers that exist purely to annotate
+    # extraction/LVS and that no per-layer design rule keys off, the
+    # structural analogue of the `marker.*` layer number sky130's `(83, 20)`
+    # reuses. Datatype 50 is assigned no purpose at all. Verified against
+    # the same real fetched install this deck's MiM/resistor/diode
+    # provenance already cites (`volare enable gf180mcu
+    # c6d73a35f524070e85faff4a6a9eef49553ebc2b`): across
+    # `libs.tech/klayout/tech/gf180mcu.lyp`,
+    # `libs.tech/klayout/drc/rule_decks/layers_def.drc` and
+    # `libs.tech/klayout/lvs/rule_decks/layers_definitions.lvs`, layer 100
+    # carries exactly three assigned datatypes -- 5, 7 and 8 -- and all four
+    # shipped variants (`gf180mcuA`/`B`/`C`/`D`) agree on that set. Datatype
+    # 50 leaves generous headroom above upstream's low, contiguous 5..8
+    # block, so an upstream purpose extension does not immediately collide.
+    # This deck reserves it as an extraction-only, deck-local marker: no
+    # official gf180mcu purpose string, and no rule in this module's own
+    # `DECK` references layer 100 at all, so `klt drc --deck gf180mcu` never
+    # checks it.
+    #
+    # Verified non-colliding against every layer this `EXTRACTION_DECK`
+    # otherwise reads (`ExtractionDeck.connectivity_layers` -- the
+    # `active`/`poly`/`nwell`/`contact` core, the `metals`/`vias`/
+    # `metal_labels` stacks, `tap_nplus`/`tap_pplus`/`substrate_isolation`/
+    # `poly_label`, and every `bipolars`/`capacitors`/`resistors`/`diodes`/
+    # `mos_flavours` recognition layer): none of them is on layer 100 at
+    # all. `tests/test_extract.py` asserts that non-collision directly.
+    dummy=(100, 50),
     # Full Metal1-Metal5 routing stack (#220). Before this, `metals` stopped
     # at Metal1, so anything drawn above it was invisible to the connectivity
     # graph and a normally-routed block extracted as a pile of disconnected
