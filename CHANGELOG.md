@@ -56,6 +56,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   still declare no `dummy` layer and are unaffected (tracked separately).
   A `dummy: 0` request on `gf180mcu` draws no marker shape and extracts
   exactly as before.
+- **Fixed** (#2585, `klt gen`/`klt gen compose`; additive — **no**
+  `schema_version` bump, but user-visible: drawn cut/via geometry on the
+  layers below shrinks): every generator drew its contacts and vias at one
+  PDK-generic 0.22µm cut, widened per family only to a *minimum*. Several
+  real foundry cut/via rules are fixed-size — a minimum **and** a maximum —
+  so the generic 0.22µm cut was an actual DRC violation on sky130's `via`
+  (68/44, max 0.15µm) and sg13g2's `Cont` (6/0, 0.16µm) / `Via1`–`Via4`
+  (19/0, 29/0, 49/0, 66/0, 0.19µm). Every cut-drawing generator (`mos_array`,
+  `diff_pair`, `guard_ring`, `well_island`, `res_array`, `bjt_array`,
+  `esd_device`, `cap_array`) and `klt gen compose`'s via-drop ladder now
+  clamp a drawn cut on one of those layers down to its exact fixed size,
+  about the cut's own centre — the contact region, landing pads, ports and
+  `bbox_um` stay exactly where the generic 0.22µm layout put them, so a cut's
+  enclosure only grows. gf180mcu's `contact`/`via1`–`via4` and sg13g2's
+  `TopVia1`/`TopVia2` are unaffected (their per-family minimum already
+  equals the fixed size). See `docs/cli/gen.md`'s "Fixed-size cut/via layers
+  (issue #2585)" section.
 - **Fixed** (#2580, `klt gen`; additive — **no** `schema_version` bump, but
   user-visible: a `mos_array` request that previously returned an empty
   `drc_hints.notes` can now carry an entry): `klt gen mos_array` draws a
