@@ -2304,6 +2304,62 @@ def _version_drift_advisories(committed: dict[str, Any]) -> list[dict[str, Any]]
     return advisories
 
 
+def _input_hash_check(
+    field: str, expected: str | None, echoed: Any, report_path: str
+) -> dict[str, Any]:
+    """One :func:`~klayout_tools._report_verify.hash_check` entry for an
+    input path the committed report echoes back (``layout``/``reference``),
+    with issue #2595's ``input_not_found`` diagnostic attached when that
+    path does not name an existing file.
+
+    :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
+    "the file is not there" and (vacuously) for "no path was recorded", so a
+    plain ``hash_check`` renders an unresolvable input as ``actual: null`` --
+    indistinguishable, to a reader, from a recorded hash that no longer
+    matches. That is exactly the confusing shape issue #2595 reported when a
+    committed request/report pair with *request-file-relative*
+    ``layout``/``reference`` paths is ``--check``ed from a different
+    directory.
+
+    This does **not** change where the path is resolved: ``--check`` still
+    anchors a relative echoed path to the current working directory, the
+    same convention ``klt drc --check``'s ``file`` field uses (re-anchoring
+    one verb and not the other would make the two silently disagree). It
+    only makes the failure legible, as an *additional*, optional key on the
+    entry -- ``expected``/``actual``/``match`` and the resulting ``status``
+    are byte-identical to before:
+
+    - ``path`` -- the echoed path verbatim, as the report recorded it.
+    - ``resolved`` -- the absolute path that was actually looked for.
+    - ``found_relative_to_report`` -- the absolute path the input *does*
+      occupy relative to the committed report's own directory, when it is
+      there; ``null`` otherwise (including for an echoed absolute path,
+      which has no report-relative candidate to try).
+
+    Kept local to this module rather than folded into the shared
+    ``hash_check`` on purpose: ``klt drc --check`` resolves its own
+    ``provenance.input`` path the identical way and would need the identical
+    diagnostic to stay consistent, which is a deliberate follow-up, not a
+    side effect of this one. Promote this helper to ``_report_verify`` if
+    and when that happens.
+    """
+    path = echoed if isinstance(echoed, str) and echoed else None
+    check = hash_check(field, expected, sha256_file(path))
+    if path is None or os.path.isfile(path):
+        return check
+    found_relative_to_report: str | None = None
+    if not os.path.isabs(path):
+        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
+        if os.path.isfile(candidate):
+            found_relative_to_report = os.path.abspath(candidate)
+    check["input_not_found"] = {
+        "path": path,
+        "resolved": os.path.abspath(path),
+        "found_relative_to_report": found_relative_to_report,
+    }
+    return check
+
+
 def check_lvs_report(report_path: str) -> dict[str, Any]:
     """``klt lvs --check`` (cheap mode, issue #1106): verify a previously
     committed ``klt lvs --format json`` report at ``report_path`` still
@@ -2330,7 +2386,12 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     drc --check``'s ``file`` field uses); if the original request used
     request-file-relative paths, invoke ``--check`` from that same
     directory, or commit reports whose ``layout``/``reference`` are already
-    absolute paths.
+    absolute paths. Issue #2595: that anchoring is unchanged, but hitting it
+    no longer renders as a bare ``actual: null`` -- an echoed path that
+    names no existing file gets an ``input_not_found`` block on its
+    ``checks[]`` entry saying where it was looked for, and where it *was*
+    found relative to the report's own directory when it is there. See
+    :func:`_input_hash_check`.
 
     Raises :class:`LvsError` for a missing/unparseable committed report --
     never a traceback.
@@ -2346,15 +2407,17 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     """
     committed = _load_committed_report(report_path, LvsError)
     checks = [
-        hash_check(
+        _input_hash_check(
             "environment.layout_sha256",
             get_path(committed, ("environment", "layout_sha256")),
-            sha256_file(committed.get("layout")),
+            committed.get("layout"),
+            report_path,
         ),
-        hash_check(
+        _input_hash_check(
             "environment.reference_sha256",
             get_path(committed, ("environment", "reference_sha256")),
-            sha256_file(committed.get("reference")),
+            committed.get("reference"),
+            report_path,
         ),
     ]
     deck = get_path(committed, ("provenance", "deck"))
