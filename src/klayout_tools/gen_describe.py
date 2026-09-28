@@ -75,6 +75,7 @@ from .gen_layer_params import (
     _res_flavor_min_width_um_floor,
     _ring_implant_margin_um,
     _role_layer_info,
+    _sd_implant_margin_um,
     _voltage_flavor_mark_layer,
 )
 
@@ -252,6 +253,37 @@ def _voltage_flavor_hints(
     return {
         "voltage_flavor": voltage_flavor or None,
         "voltage_flavor_mark_present": mark_present,
+    }
+
+
+def _sd_implant_hints(
+    family: str, params: dict[str, Any], notes: list[str]
+) -> dict[str, Any]:
+    """``drc_hints`` fields for the unit devices' source/drain implant
+    (issue #2580), reporting-only: echoes whether the family's
+    flavor-selected ``"nplus"``/``"pplus"`` role resolved to a real layer
+    (the same selection :func:`_device_layer_params` threads to the PCell),
+    appending an explanatory entry to ``notes`` (in place) when it did not
+    -- gf180mcu (issue #1577) is today the only family that declares the
+    roles, so every other family's S/D diffusion lands un-implanted with no
+    DRC rule in its curated deck to flag it. Mirrors
+    :func:`_voltage_flavor_hints`'s own "notes it, never silently drops it"
+    contract; draws nothing and changes no geometry -- actually drawing a
+    correctly-enclosed implant on the remaining families needs a real PDK
+    enclosure rule this repo's curated decks do not carry."""
+    flavor = params.get("flavor", "nfet")
+    sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
+    sd_implant = _role_layer_info(family, sd_implant_role)
+    if sd_implant is None:
+        notes.append(
+            f"family '{family}' declares no S/D implant role "
+            f"('{sd_implant_role}') for flavor '{flavor}' -- no implant "
+            "mask was drawn"
+        )
+    return {
+        "sd_implant_present": (
+            sd_implant is not None and _sd_implant_margin_um(family) > 0
+        ),
     }
 
 
@@ -470,6 +502,7 @@ def _mos_array_describe(
         )
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
+    sd_implant_hints = _sd_implant_hints(family, params, notes)
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     grid = f"{params['rows']}x{params['cols']}"
@@ -507,6 +540,7 @@ def _mos_array_describe(
             "snapped_to_grid": snapped,
             "notes": notes,
             **voltage_flavor_hints,
+            **sd_implant_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]

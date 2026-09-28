@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2580, `klt gen`; additive — **no** `schema_version` bump, but
+  user-visible: a `mos_array` request that previously returned an empty
+  `drc_hints.notes` can now carry an entry): `klt gen mos_array` draws a
+  real source/drain implant on `gf180mcu` only (issue #1577) — every other
+  supported family (`sky130`, `sg13g2`, `sg13cmos5l`) has no `"nplus"`/
+  `"pplus"` entry in its role-layer table, so the S/D diffusion landed
+  un-implanted with **no signal at all**: the curated DRC decks recognise a
+  MOS device from `Activ`/`GatPoly`/well alone and report such a stream
+  clean, and `drc_hints.notes` said nothing about the missing mask. A
+  request on one of those families now reports the omission — a
+  `drc_hints.notes` entry naming the family, the flavor-selected role and
+  the absent mask, plus a machine-readable `drc_hints.sd_implant_present`
+  (`false` there, `true` on `gf180mcu`), mirroring the contract an
+  unrecognised `voltage_flavor` already follows — while drawn geometry
+  stays byte-for-byte unchanged. Actually drawing a correctly-enclosed
+  implant on those families needs a real PDK enclosure rule the curated
+  decks do not carry (sg13g2's, for one, transcribes no implant rule of any
+  kind) and is left as separately-filed follow-up work.
 - **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
   user-visible: a corner that previously reported `status: "error"` can now
   report a real grade): a `spice`-form `measurements[].name` was looked up

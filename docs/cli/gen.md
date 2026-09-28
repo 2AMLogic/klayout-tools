@@ -642,6 +642,25 @@ silently dropped. `voltage_flavor` is independent of `flavor`: requesting
 both `flavor="pfet"` and `voltage_flavor="medium_voltage"`/`"hv"`/`"hvi"`
 draws both the well and the marker with no conflict.
 
+**Source/drain implant (issue #2580).** Only `gf180mcu`'s role-layer table
+declares the S/D implant roles (`"nplus"` 32/0 / `"pplus"` 31/0, issue
+#1577), so `gf180mcu` is the one family whose unit devices are drawn with a
+real, margin-enclosing implant mask (and the tap/guard ring likewise).
+Every other supported family — `sky130`, `sg13g2`, `sg13cmos5l` — draws
+**no** source/drain implant: their curated decks recognise a MOS device
+from `Activ`/`GatPoly`/well alone, so `klt drc` reports such a stream clean
+and, before this issue, nothing else flagged the missing mask either. A
+request on one of those families now reports the omission instead of
+dropping it silently — a `drc_hints.notes` entry naming the family, the
+flavor-selected role and the absent mask, plus the machine-readable
+`drc_hints.sd_implant_present: false` (see below), the same "notes it,
+never silently drops it" contract an unrecognised `voltage_flavor` already
+follows — while the drawn geometry stays byte-for-byte unchanged. Drawing a
+correctly-enclosed implant on those families is deliberately *not* done
+here: it needs a real PDK enclosure rule this repo's curated decks do not
+carry (sg13g2's, for one, transcribes no implant rule of any kind), and a
+wrong margin would be caught by no existing check.
+
 **`add_guard_ring` (issue #1493).** Encloses the array in an
 automatically-sized tap/guard ring, composed the same way `diff_pair`'s own
 `add_guard_ring` composes `guard_ring`'s ring-drawing (`ring_gap_side`/
@@ -1777,6 +1796,7 @@ family/variant split the resolver doesn't have. The response's
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
 | `voltage_flavor` | string \| null | `mos_array`/`diff_pair` only (issue #1054): echo of the request's `params.voltage_flavor`, or `null` when omitted/empty — lets a downstream tool (`klt gen-compose`, `klt extract`, `klt lvs`) see the requested device-class marker without re-deriving it from raw geometry. |
 | `voltage_flavor_mark_present` | boolean | `mos_array`/`diff_pair` only (issue #1054): whether a real marker layer was drawn for `voltage_flavor` on the resolved PDK family. `false` both when `voltage_flavor` is omitted/empty and when it was requested but not recognised (see `notes` for the latter case). |
+| `sd_implant_present` | boolean | `mos_array` only (issue #2580): whether a real source/drain implant mask was drawn for the request's `flavor` on the resolved PDK family — `true` only on `gf180mcu` today (issue #1577); `false` on every family whose role-layer table declares no `"nplus"`/`"pplus"` (`sky130`/`sg13g2`/`sg13cmos5l`), whose request additionally carries a `notes` entry naming the omission. |
 | `well_net` | string \| null | `well_island` only (issue #1421): the net its tie carries (echo of `params.net`), or `null` when unnamed. |
 | `well_box_um` | object \| null | `well_island` only: `{x0, y0, x1, y1}` of the well rectangle actually drawn, at the resolved (possibly trimmed) enclosure. `null` on a PDK family with no well layer. |
 | `well_separation_um` | number \| null | `well_island` only: the well-to-well clearance actually enforced against `params.isolate_from` — the resolved family's own different-potential rule unless `params.separation_um` raised it. |
