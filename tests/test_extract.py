@@ -3409,6 +3409,62 @@ def test_mos_array_series_finger_topology_round_trips_as_a_chain(tmp_path):
     assert len(sd_nets) == fingers + 1
 
 
+def test_mos_array_sg13g2_dummy_gates_suppressed(tmp_path):
+    """Issue #2590: `klt gen mos_array` (ihp-sg13g2, `dummy > 0`) piped into
+    `klt extract --deck sg13g2` suppresses the dummy gates instead of
+    extracting them as spurious real `nfet` devices -- the sg13g2
+    counterpart of `test_mos_array_sky130_dummy_gates_suppressed` (#491).
+    `dummy_devices_dropped` matches `2 * rows * dummy` and the extracted
+    `device_count` matches `klt gen`'s own real-cell-only count."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "ihp-sg13g2")
+    params = {"rows": 2, "cols": 2, "dummy": 1}
+    gen_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "ihp-sg13g2", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_sg.gds")},
+        }
+    )
+    real = params["rows"] * params["cols"]
+    assert gen_report["device_count"] == real
+
+    report = run_extract(
+        str(tmp_path / "mos_sg.gds"), "sg13g2", output=str(tmp_path / "mos_sg.spice")
+    )
+
+    assert report["device_count"] == real
+    assert report["device_counts"] == {"nfet": real}
+    assert report["dummy_devices_dropped"] == 2 * params["rows"] * params["dummy"]
+
+
+def test_mos_array_sg13g2_without_dummies_drops_nothing(tmp_path):
+    """Issue #2590's edge case: a `dummy: 0` request on the same family
+    draws no marker shape at all, so the additive suppression is a no-op --
+    `dummy_devices_dropped` stays 0 and every drawn unit still extracts."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "ihp-sg13g2")
+    params = {"rows": 2, "cols": 2, "dummy": 0}
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "ihp-sg13g2", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_sg0.gds")},
+        }
+    )
+
+    report = run_extract(
+        str(tmp_path / "mos_sg0.gds"), "sg13g2", output=str(tmp_path / "mos_sg0.spice")
+    )
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_count"] == params["rows"] * params["cols"]
+
+
 def test_res_array_sky130_dummy_resistors_suppressed(tmp_path):
     """Issue #491: `klt gen res_array` (sky130, `dummy > 0`) piped into `klt
     extract --deck sky130` suppresses the dummy resistor bodies instead of
@@ -16472,15 +16528,17 @@ def _add_dummy_nfet(layout: kdb.Layout, x0: int, *, marker: str = "full") -> Non
 
 def test_dummy_field_defaults_none_on_shipped_decks():
     """The `dummy` field is opt-in per deck (issue #295). sky130's curated
-    deck declares a curated marker layer as of issue #491 (`(83, 20)`) and
-    gf180mcu's as of issue #2599 (`(100, 50)`) -- see each
-    `EXTRACTION_DECK`'s own comment for why that layer was chosen. Both are
-    the deck-side half of a fix whose extractor-side half (this field
-    itself) shipped in #295/#462. `sg13cmos5l` still declares none (deferred
-    by #2599 to its own follow-up, #2602), so its extraction is unaffected
-    and the field's opt-in default is still exercised here."""
+    deck declares a curated marker layer as of issue #491 (`(83, 20)`),
+    gf180mcu's as of issue #2599 (`(100, 50)`), and sg13g2's as of issue
+    #2590 (`(99, 50)`) -- see each `EXTRACTION_DECK`'s own comment for why
+    that layer was chosen. All three are the deck-side half of a fix whose
+    extractor-side half (this field itself) shipped in #295/#462.
+    `sg13cmos5l` still declares none (deferred by #2599 to its own
+    follow-up, #2602), so its extraction is unaffected and the field's
+    opt-in default is still exercised here."""
     assert get_extraction_deck("sky130").dummy == (83, 20)
     assert get_extraction_deck("gf180mcu").dummy == (100, 50)
+    assert get_extraction_deck("sg13g2").dummy == (99, 50)
     assert get_extraction_deck("sg13cmos5l").dummy is None
 
 
@@ -16518,6 +16576,33 @@ def test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer():
     from klayout_tools.decks.gf180mcu import DECK as GF180MCU_DRC_DECK
 
     assert not [rule for rule in GF180MCU_DRC_DECK if rule.layer[0] == 100]
+
+
+def test_sg13g2_dummy_marker_does_not_collide_with_any_read_layer():
+    """Issue #2590: sg13g2's curated dummy marker is a deck-local
+    convention layer, so it must not coincide with any other layer this
+    deck reads -- otherwise real geometry would be silently suppressed as
+    "dummy". It reuses the `Recog.*` device-recognition layer *number* (99,
+    the structural analogue of the `marker.*` number sky130's `(83, 20)`
+    reuses) on a datatype IHP-Open-PDK assigns no purpose to; the deck's own
+    layer-99 entries (`Recog.diode` 99/31, `Recog.mom` 99/39,
+    `Recog.momf` 99/40) are all on other datatypes."""
+    deck = get_extraction_deck("sg13g2")
+    assert deck.dummy == (99, 50)
+    assert deck.dummy not in (deck.connectivity_layers - {deck.dummy})
+    assert deck.dummy not in deck.device_recognition_layers
+    assert deck.dummy not in deck.merge_layers
+    assert sorted(layer for layer in deck.connectivity_layers if layer[0] == 99) == [
+        (99, 31),
+        (99, 39),
+        (99, 40),
+        (99, 50),
+    ]
+    # No DRC rule in this family's curated deck references layer 99 at all,
+    # so `klt drc --deck sg13g2` never checks the convention layer.
+    from klayout_tools.decks.sg13g2 import DECK as SG13G2_DRC_DECK
+
+    assert not [rule for rule in SG13G2_DRC_DECK if rule.layer[0] == 99]
 
 
 def test_dummy_devices_dropped_is_zero_without_dummy_layer(tmp_path):

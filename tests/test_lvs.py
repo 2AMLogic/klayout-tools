@@ -9475,6 +9475,88 @@ def test_lvs_mos_array_gf180mcu_dummy_suppression_no_unmatched_device(
     )
 
 
+def test_lvs_mos_array_sg13g2_dummy_suppression_no_unmatched_device(
+    tmp_path, monkeypatch
+):
+    """Issue #2590's own reproduction: `klt gen mos_array` on `ihp-sg13g2`
+    with `"dummy": 1` used to extract each dummy as a real `nfet`, so a
+    reference netlist declaring only the real devices saw N
+    `device.unmatched` errors (plus the supply nets those dummies hang off
+    dropping out of `net_correspondence`). sg13g2's curated deck now
+    declares a `dummy` marker layer and `mos_array` draws it, so the compare
+    is clean -- the sg13g2 counterpart of sky130's own #491 fix.
+
+    `dummy: 0` output (the pre-#2590 workaround) stands in for the reference
+    schematic's own real-cells-only topology; `dummy: 1` output is the
+    physical layout with edge fill."""
+    from klayout_tools import pdk
+    from klayout_tools.extract import run_extract
+    from klayout_tools.gen import generate
+
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(pdk, "STORE_DIRS", [])
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
+
+    pdk_root = tmp_path / "pdk_install"
+    (pdk_root / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
+
+    # The issue's own `klt gen` params, minus `dummy` (varied below).
+    base_params = {
+        "w_um": 1.6,
+        "l_um": 0.13,
+        "rows": 1,
+        "cols": 4,
+        "topology": "common_centroid",
+        "flavor": "nfet",
+        "gate_contact": True,
+        "add_guard_ring": True,
+    }
+
+    def _extract(dummy: int, name: str):
+        gds = tmp_path / f"{name}.gds"
+        generate(
+            {
+                "generator": "mos_array",
+                "pdk": {"variant": "ihp-sg13g2", "root": str(pdk_root)},
+                "params": {**base_params, "dummy": dummy},
+                "options": {"output": str(gds)},
+            }
+        )
+        spice = tmp_path / f"{name}.spice"
+        return spice, run_extract(str(gds), "sg13g2", output=str(spice))
+
+    reference_path, ref_extracted = _extract(0, "mos_array_sg13g2_ref")
+    layout_extracted_path, layout_extracted = _extract(1, "mos_array_sg13g2_dummy")
+
+    # The two dummy columns are suppressed at extraction, so both sides
+    # carry only the four real devices.
+    assert layout_extracted["dummy_devices_dropped"] == 2
+    assert ref_extracted["dummy_devices_dropped"] == 0
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "netlist": str(layout_extracted_path),
+                "top": layout_extracted["top"],
+            },
+            "reference": {"netlist": str(reference_path), "top": ref_extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 4, "reference": 4, "matched": 4}
+    assert not any(m["category"] == "device.unmatched" for m in report["mismatches"])
+    # The array's body rail is paired, not dropped -- the knock-on symptom
+    # the issue reports alongside `device.unmatched`.
+    assert any(
+        entry["layout"] == "VSUBS" and entry["reference"] == "VSUBS"
+        for entry in report["net_correspondence"]
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Issue #504: bulk-terminal device class vs. plain-element reference (arity)
 # --------------------------------------------------------------------------- #

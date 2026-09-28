@@ -470,14 +470,15 @@ currently planned or in progress.
 A `rows` x `cols` grid of identical unit MOS-like devices (active/diffusion
 strip + poly gate(s) + contact + local-metal source/drain pads), with
 `dummy` extra unit-device columns flanking each side for etch/gradient
-matching. On sky130 (issue #491) and gf180mcu (issue #2599), each dummy
-column's gate footprint is also covered by the curated `dummy` marker layer
-`klayout_tools.decks.sky130`/`klayout_tools.decks.gf180mcu` declares, so
+matching. On sky130 (issue #491), gf180mcu (issue #2599) and sg13g2 (issue
+#2590), each dummy column's gate footprint is also covered by the curated
+`dummy` marker layer `klayout_tools.decks.sky130`/
+`klayout_tools.decks.gf180mcu`/`klayout_tools.decks.sg13g2` declares, so
 `klt extract`'s dummy-device suppression (see "Dummy devices:
 the `dummy` marker layer" in `docs/cli/extract.md`) drops it from the
 extracted netlist instead of reporting it as a spurious unmatched device
-under `klt lvs` — sg13g2, the only other family `mos_array` runs on, draws no
-equivalent marker (its curated deck declares no `dummy` layer).
+under `klt lvs` — sg13cmos5l, the only other family `mos_array` runs on,
+draws no equivalent marker (its curated deck declares no `dummy` layer).
 For a single-finger unit device the (one) gate
 finger carries a **poly landing pad** that extends one
 `CONTACT_SIZE_UM + 2*ENCLOSURE_MARGIN_UM` (0.42 µm) square past the
@@ -776,13 +777,13 @@ below), so `klt gen res_array`'s output is directly recognised as a resistor
 device by `klt extract --deck <pdk>` rather than being absorbed into ordinary
 poly interconnect as a short (issue #369). Neither curated *DRC* deck checks
 any of these layers, so drawing them never affects `klt drc` status. On
-sky130 (issue #491) and gf180mcu (issue #2599), each *dummy* unit's body
-segment is additionally
-covered by the curated `dummy` marker layer, so `klt extract`'s dummy-device
+sky130 (issue #491), gf180mcu (issue #2599) and sg13g2 (issue #2590), each
+*dummy* unit's body segment is additionally covered by the curated `dummy`
+marker layer, so `klt extract`'s dummy-device
 suppression (see "Dummy devices: the `dummy` marker layer" in
 `docs/cli/extract.md`) drops it from the extracted netlist instead of
-reporting it as a spurious unmatched device under `klt lvs` — sg13g2/sg13cmos5l
-draw no equivalent marker.
+reporting it as a spurious unmatched device under `klt lvs` — sg13cmos5l
+draws no equivalent marker.
 
 `flavor` selects which recognised poly-resistor *device class* the array
 draws, by covering each body segment with the implant/precision-resistor

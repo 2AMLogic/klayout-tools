@@ -654,6 +654,12 @@ _SKY130_DUMMY_LAYER = (83, 20)
 #: own comment for the `LVS_*`-family provenance of (100, 50).
 _GF180_DUMMY_LAYER = (100, 50)
 
+#: sg13g2's curated dummy-device marker layer (issue #2590) -- matches
+#: `klayout_tools.decks.sg13g2.EXTRACTION_DECK.dummy` and
+#: `klayout_tools.gen_layer_params._PDK_ROLE_LAYERS["sg13g2"]["dummy"]`. See
+#: that deck's own comment for the `Recog.*`-family provenance of (99, 50).
+_SG13G2_DUMMY_LAYER = (99, 50)
+
 
 def test_list_generators_includes_all_four_phase2_families():
     """`klt gen --list` must show all four analog primitive families the
@@ -8735,11 +8741,80 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
     }
     # The issue's own observed stream: Activ (1/0), GatPoly (5/0), Cont
     # (6/0), Metal1 (8/0) -- plus NWell (31/0) for the pfet well -- and no
-    # implant shape on either `nSD` (7/0) or `pSD` (14/0).
-    expected = {(1, 0), (5, 0), (6, 0), (8, 0)}
+    # implant shape on either `nSD` (7/0) or `pSD` (14/0). The curated
+    # dummy marker (99/50, issue #2590) joins it because this repro requests
+    # `dummy: 1`; it is a deck-local extraction marker, not an implant.
+    expected = {(1, 0), (5, 0), (6, 0), (8, 0), _SG13G2_DUMMY_LAYER}
     if flavor == "pfet":
         expected.add((31, 0))
     assert present == expected
+
+
+def test_mos_array_sg13g2_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, sg13g2_pdk_root
+):
+    """Issue #2590 (the sg13g2 counterpart of sky130's own #491): on
+    ``ihp-sg13g2``, ``mos_array`` draws the deck's curated ``dummy`` marker
+    layer (``99, 50``) over each dummy unit's gate footprint -- and *only*
+    the dummy units, never a real cell -- so ``klt extract``'s existing
+    dummy-suppression guards (#295/#462) fire on this family too. A
+    ``dummy: 0`` request draws no shapes on that layer at all (the pre-#2590
+    regression case)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_sg13g2_dummy_marker.gds"
+    rows, cols, dummy = 1, 2, 2
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"rows": rows, "cols": cols, "dummy": dummy},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SG13G2_DUMMY_LAYER in present
+
+    dummy_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_SG13G2_DUMMY_LAYER))
+    )
+    poly_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(5, 0))  # GatPoly.drawing
+    )
+    # A strict subset of the drawn poly: it covers only the dummy gates'
+    # footprint, never a real cell's.
+    assert not dummy_region.is_empty()
+    assert (dummy_region - poly_region).is_empty()
+    assert dummy_region.area() < poly_region.area()
+
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(1, 0))  # Activ.drawing
+    )
+    # The channel component `klt extract` recognises as a gate is
+    # poly & active -- one connected component per dummy unit device, the
+    # same count `dummy_devices_dropped` reports for this request.
+    assert (dummy_region & active_region).merged().count() == 2 * dummy * rows
+
+    output_no_dummy = tmp_path / "mos_array_sg13g2_no_dummy_marker.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"rows": rows, "cols": cols, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    assert _SG13G2_DUMMY_LAYER not in {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
 
 
 @pytest.mark.parametrize("flavor", ["nfet", "pfet"])
