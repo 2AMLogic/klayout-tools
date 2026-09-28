@@ -247,7 +247,7 @@ name = "cocotb"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "exceptiongroup", marker = "python_full_version < '3.11' or python_full_version >= '3.14'" },
+    { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
     { name = "find-libpython" },
     { name = "pytest" },
 ]
@@ -924,7 +924,7 @@ dev = [
     { name = "ruff" },
 ]
 functional-verification = [
-    { name = "cocotb", marker = "python_full_version < '3.14'" },
+    { name = "cocotb" },
 ]
 mom-cross-validation = [
     { name = "pynec", marker = "python_full_version >= '3.11'" },
@@ -954,7 +954,7 @@ yield = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cocotb", marker = "python_full_version < '3.14' and extra == 'functional-verification'", specifier = ">=2.1,<2.2" },
+    { name = "cocotb", marker = "extra == 'functional-verification'", specifier = ">=2.1.0,<2.2" },
     { name = "jsonschema", specifier = ">=4.0" },
     { name = "klayout", specifier = ">=0.30" },
     { name = "pynec", marker = "python_full_version >= '3.11' and extra == 'mom-cross-validation'", specifier = ">=2.3,<3" },

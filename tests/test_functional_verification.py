@@ -21,11 +21,13 @@ Three tiers, mirroring `tests/test_synthesize.py`'s structure:
   live-captured `TESTS=3 PASS=2 FAIL=1 SKIP=0` outcome and (Verilator only)
   its line/toggle/branch/expr coverage numbers.
 
-  These are **skipped, not failed, in CI**: cocotb caps at Python <= 3.13 and
-  neither `iverilog` nor `verilator` is installed on the CI runners today
-  (the same posture `test_synthesize.py` takes toward `yosys` + a real
-  sky130 install). They run — and pass — on any machine with cocotb plus the
-  simulator.
+  These are **skipped, not failed, in CI**: neither `iverilog` nor
+  `verilator` is installed on the CI runners today (the same posture
+  `test_synthesize.py` takes toward `yosys` + a real sky130 install). cocotb
+  itself now installs on every leg of the matrix, 3.10 through 3.14 — the
+  extra's `python_version < "3.14"` marker was dropped in issue #2593 once
+  cocotb 2.1.0 added 3.14 support. They run — and pass — on any machine with
+  cocotb plus the simulator.
 """
 
 from __future__ import annotations

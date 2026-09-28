@@ -897,9 +897,61 @@ Icarus Verilog 13.0):
   `docs/cli/functional-verification.md` → `testbench.testcase`.
 - cocotb 2.1.0's own metadata now declares `Requires-Python: >=3.9` (still
   no upper bound) and ships cp314 wheels, so the extra's
-  `python_version < "3.14"` marker is conservative rather than
-  load-bearing — see `pyproject.toml`'s comment for the lift-it-in-
-  lockstep-with-the-verb caveat.
+  `python_version < "3.14"` marker became conservative rather than
+  load-bearing. **That marker has since been removed** — see the next
+  addendum for the measurement that justified lifting it.
+
+## Addendum: the `python_version < "3.14"` marker removed (2026-09, issue #2593)
+
+The `functional-verification` extra now reads `cocotb>=2.1.0,<2.2` with no
+environment marker, and `.github/workflows/ci.yml`'s `test` matrix carries a
+`3.14` leg alongside `3.10`–`3.13`. Everything above stays as captured; this
+entry records only the drift.
+
+Issue #2593 offered two coherent options — verify the 3.14 claim and then
+make it, or keep the marker and restate the hold as a CI-coverage decision.
+The **first** was taken, because the deciding measurement supported it.
+Measured 2026-09-28 against `origin/main` @ `d848778f` (CPython 3.14.7, uv
+0.12.18, macOS arm64):
+
+| Check | Result |
+|---|---|
+| marker **in place** (`origin/main`) | `uv.lock` records `functional-verification = [{ name = "cocotb", marker = "python_full_version < '3.14'" }]` — cocotb is excluded from the resolved set on 3.14 outright, which is the marker doing its job |
+| `uv lock` with the marker **removed** | re-resolves to the same 82 packages, no conflict introduced anywhere in `dev` + `functional-verification`; `uv lock --check` clean |
+| `uv sync --locked --python 3.14 --extra dev --extra functional-verification` | resolves 82, installs 15, including `cocotb==2.1.0` from a genuine **cp314 wheel** (`Tag: cp314-cp314-macosx_11_0_arm64`), not an sdist build |
+| `import cocotb` / `cocotb-config --version` on 3.14 | both report `2.1.0` |
+| `klayout==0.30.12` on 3.14 | `Tag: cp314-cp314-macosx_11_0_arm64`; `klayout.db.Layout()` constructs and names a cell |
+| cp314 **Linux** wheels on PyPI (what the CI leg actually needs) | present for both: `klayout-0.30.12-cp314-cp314-manylinux_2_27_x86_64…whl` and `cocotb-2.1.0-cp314-cp314-manylinux2014_x86_64…whl` |
+| `pytest tests/test_functional_verification*.py` on 3.14 | 426 collected, 425 pass; the single failure is a local-machine Verilator pin mismatch (installed 5.052 vs `scripts/install-verilator.sh`'s pinned 5.050), not interpreter-related |
+| `pytest tests --collect-only` on 3.14 | 10006 tests collected, **0 collection errors** — every test module, and so the whole `klayout_tools` import graph, imports cleanly |
+
+The full 10006-test suite was *not* run to completion on 3.14 locally (it is a
+multi-hour run on one developer machine, and most of its cost is ngspice /
+Yosys / simulator work that is interpreter-agnostic). Clean collection plus a
+green `functional-verification` tier is the local evidence; the authoritative
+check is the new CI leg itself, which runs the identical suite the other four
+legs run.
+
+The cost is one more matrix leg of CI compute, budgeted explicitly rather
+than absorbed: `.github/ci-wall-clock-budget.json` gains
+`"Tests (Python 3.14)": 420` and raises `total_job_budget_seconds` 2100 →
+2520 for exactly that leg. `run_wall_clock_budget_seconds` is unchanged —
+matrix legs run in parallel, so a fifth leg adds compute, not wall clock.
+
+Why that cost is worth paying rather than taking the option-2 fallback:
+`pyproject.toml`'s `requires-python = ">=3.10"` declares **no upper bound**,
+so 3.14 users could already `pip install klayout-tools` today. The leg tests
+a claim this package's metadata was making either way; the marker only ever
+hid it for one optional extra.
+
+The historical justification for the marker — cocotb 2.0.1's unbounded
+`Requires-Python` plus its own internal `RuntimeError: cocotb 2.0.1 only
+supports a maximum Python version of 3.13` — is preserved in full in
+`pyproject.toml`'s comment on the extra. Two other captured records
+([docs/design/sdf-annotate-feasibility-spike.md](sdf-annotate-feasibility-spike.md)
+and `scripts/research/sdf_annotate_spike.py`) still describe the marker as
+current; like §1–§9 above they are live-capture records and are deliberately
+not re-edited.
 
 ## Related
 

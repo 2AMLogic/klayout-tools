@@ -168,6 +168,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   `pSD` (14/0) and keeps `tap_nplus = (7, 0)`, so either convention extracts
   the same tie. The deck's comment no longer claims full `ntap` parity with
   upstream. Substrate-tie behaviour and every other deck are unchanged.
+- **Changed** (#2593, packaging + CI coverage; no `schema_version` bump —
+  no command payload changes): the `functional-verification` extra's
+  `cocotb` requirement no longer carries a `python_version < "3.14"`
+  environment marker, so `pip install 'klayout-tools[functional-verification]'`
+  / `uv sync --extra functional-verification` now resolves cocotb on Python
+  3.14 instead of silently omitting it. The marker dated from cocotb 2.0.1,
+  which refused to run on 3.14+; cocotb 2.1.0 (this repo's pin since #2583)
+  added 3.14 support and ships cp314 wheels. `.github/workflows/ci.yml`'s
+  `test` matrix gains a **Python 3.14 leg** so the claim is tested rather
+  than asserted — this package's `requires-python = ">=3.10"` has no upper
+  bound, so 3.14 installs were already possible but unverified. The
+  measurement behind the decision is recorded in
+  [`docs/design/cocotb-verification-spike.md`](docs/design/cocotb-verification-spike.md)
+  → "the `python_version < \"3.14\"` marker removed". Also user-visible: the
+  `cocotb is not installed` error from `klt functional-verification` no
+  longer appends the now-false "(cocotb 2.0 supports Python <= 3.13)" and
+  points at `uv sync --extra functional-verification` instead.
 - **Fixed** (#2580, `klt gen`; additive — **no** `schema_version` bump, but
   user-visible: a `mos_array` request that previously returned an empty
   `drc_hints.notes` can now carry an entry): `klt gen mos_array` draws a
