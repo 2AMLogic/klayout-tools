@@ -16589,9 +16589,22 @@ def test_sg13g2_dummy_marker_does_not_collide_with_any_read_layer():
     `Recog.momf` 99/40) are all on other datatypes."""
     deck = get_extraction_deck("sg13g2")
     assert deck.dummy == (99, 50)
-    assert deck.dummy not in (deck.connectivity_layers - {deck.dummy})
     assert deck.dummy not in deck.device_recognition_layers
     assert deck.dummy not in deck.merge_layers
+    # The marker is necessarily *in* `connectivity_layers` (the extractor has
+    # to read it to suppress on it), so `deck.dummy not in
+    # deck.connectivity_layers` cannot be asserted directly -- and
+    # `deck.dummy not in (deck.connectivity_layers - {deck.dummy})` would be
+    # a tautology. Recompute the set from a copy of this same deck with the
+    # `dummy` field cleared: that is every layer this deck reads for *some
+    # other* role, built by the deck's own machinery rather than restated
+    # here, so the marker's absence from it is a real invariant.
+    layers_read_for_other_roles = dataclasses.replace(
+        deck, dummy=None
+    ).connectivity_layers
+    assert deck.dummy not in layers_read_for_other_roles
+    # ...and its only other layer-99 members are the three `Recog.*`
+    # entries, all on other datatypes.
     assert sorted(layer for layer in deck.connectivity_layers if layer[0] == 99) == [
         (99, 31),
         (99, 39),

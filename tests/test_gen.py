@@ -2671,11 +2671,11 @@ def test_gf180mcu_res_array_metal_level_default_zero_is_poly_body_unchanged(
 
     extract_report = run_extract(str(output_default), "gf180mcu")
     # `>= 3` (not `== 3`): gf180mcu's `_PDK_ROLE_LAYERS` entry declares no
-    # `"dummy"` role layer at all (the same pre-existing gap
-    # `test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged`
-    # documents for sg13g2, out of this issue's scope), so this family's
-    # dummy units are not suppressed by `klt extract` and count as ordinary
-    # `"ppolyf_u"` devices alongside the `num` real ones.
+    # `"dummy"` role layer at all -- the last family with that gap, now that
+    # sky130 (#491) and sg13g2 (#2590) both declare one; wiring gf180mcu up is
+    # tracked separately in #2599. So this family's dummy units are not
+    # suppressed by `klt extract` and count as ordinary `"ppolyf_u"` devices
+    # alongside the `num` real ones.
     assert extract_report["device_counts"].get("ppolyf_u", 0) >= 3
 
 
@@ -5765,7 +5765,7 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
     `EXTRACTION_DECK.resistors[0]`'s `marker`/`requires`) -- issue #369's
     precedent, mirrored for the third family."""
     output = tmp_path / "res_array_sg13g2.gds"
-    generate(
+    gen_report = generate(
         {
             "generator": "res_array",
             "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
@@ -5775,7 +5775,13 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
 
     report = run_extract(str(output), "sg13g2")
 
-    assert report["device_counts"].get("rsil", 0) > 0
+    # Exactly the generator's own real-device count, no longer a loose
+    # `> 0`: issue #2590 gave this family a curated `dummy` marker layer, so
+    # the default `dummy: 1`'s two edge-fill units are suppressed rather than
+    # padding the `"rsil"` count. Comparing against `gen_report` rather than a
+    # literal keeps this tied to `res_array`'s documented default `num`.
+    assert report["device_counts"] == {"rsil": gen_report["device_count"]}
+    assert report["dummy_devices_dropped"] == 2
 
 
 def test_sg13g2_res_array_explicit_generic_matches_default(tmp_path, sg13g2_pdk_root):
@@ -6010,14 +6016,19 @@ def test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged(
     assert report_default["ports"] == report_explicit["ports"]
 
     extract_report = run_extract(str(output_default), "sg13g2")
-    # `>= 3` (not `== 3`, unlike sky130's own version of this test above):
-    # sg13g2's `_PDK_ROLE_LAYERS` entry declares no `"dummy"` role layer at
-    # all (a pre-existing gap, out of this issue's scope -- see
-    # `test_sg13g2_res_array_default_params_recognised_as_rsil`'s own
-    # `> 0`, not `== num`, assertion above for the same reason), so this
-    # family's dummy units are not suppressed by `klt extract` and count as
-    # ordinary `"rsil"` devices alongside the `num` real ones.
-    assert extract_report["device_counts"].get("rsil", 0) >= 3
+    # `== 3`, matching sky130's own version of this test above: as of issue
+    # #2590 sg13g2's curated extraction deck declares a `dummy` marker layer
+    # and `_PDK_ROLE_LAYERS["sg13g2"]` a matching `"dummy"` role, so
+    # `res_array`'s edge-fill units -- two of them, one per end at
+    # `dummy: 1` -- are suppressed by `klt extract` and only the `num` real
+    # units survive. A loose `>= 3` bound (this test's pre-#2590 shape, from
+    # when those dummies extracted as ordinary `"rsil"` devices) could no
+    # longer tell working suppression (`3`) from a regression back to none
+    # (`5`), so assert both halves exactly. `klt lvs` coverage of the same
+    # behaviour lives in
+    # `test_lvs_res_array_sg13g2_dummy_suppression_no_unmatched_device`.
+    assert extract_report["dummy_devices_dropped"] == 2
+    assert extract_report["device_counts"] == {"rsil": 3}
 
 
 def test_sg13g2_res_array_metal_level_3_rejected(tmp_path, sg13g2_pdk_root):

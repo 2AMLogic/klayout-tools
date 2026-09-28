@@ -9324,8 +9324,8 @@ def test_lvs_unused_device_class_mismatch_is_warning_not_error(tmp_path, monkeyp
 
 
 # --------------------------------------------------------------------------- #
-# Array dummy-device suppression reaches `klt lvs`: sky130 (issue #491) and
-# gf180mcu (issue #2599)
+# Array dummy-device suppression reaches `klt lvs`: sky130 (issue #491),
+# gf180mcu (issue #2599) and sg13g2 (issue #2590)
 # --------------------------------------------------------------------------- #
 
 
@@ -9555,6 +9555,87 @@ def test_lvs_mos_array_sg13g2_dummy_suppression_no_unmatched_device(
         entry["layout"] == "VSUBS" and entry["reference"] == "VSUBS"
         for entry in report["net_correspondence"]
     )
+
+
+def test_lvs_res_array_sg13g2_dummy_suppression_no_unmatched_device(
+    tmp_path, monkeypatch
+):
+    """The `res_array` half of issue #2590, on its own terms: `klt gen
+    res_array` on `ihp-sg13g2` with `"dummy": N` used to extract each
+    edge-fill unit as a real `rsil` resistor, so a reference netlist
+    declaring only the real units saw `2 * N` `device.unmatched` errors.
+    sg13g2's curated deck now declares a `dummy` marker layer and
+    `res_array` draws it over each dummy unit's body segment, so the compare
+    is clean -- the sg13g2 counterpart of
+    `test_lvs_res_array_dummy_suppression_no_unmatched_device`'s own sky130
+    (#491) coverage, and the `res_array` counterpart of
+    `test_lvs_mos_array_sg13g2_dummy_suppression_no_unmatched_device` above.
+
+    `dummy: 0` output (the pre-#2590 workaround) stands in for the reference
+    schematic's own real-units-only topology; `dummy: 2` output is the
+    physical layout with edge fill at both ends."""
+    from klayout_tools import pdk
+    from klayout_tools.extract import run_extract
+    from klayout_tools.gen import generate
+
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(pdk, "STORE_DIRS", [])
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
+
+    pdk_root = tmp_path / "pdk_install"
+    (pdk_root / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
+
+    def _extract(dummy: int, name: str):
+        gds = tmp_path / f"{name}.gds"
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": "ihp-sg13g2", "root": str(pdk_root)},
+                "params": {"num": 4, "dummy": dummy},
+                "options": {"output": str(gds)},
+            }
+        )
+        spice = tmp_path / f"{name}.spice"
+        return spice, run_extract(str(gds), "sg13g2", output=str(spice))
+
+    reference_path, ref_extracted = _extract(0, "res_array_sg13g2_ref")
+    layout_extracted_path, layout_extracted = _extract(2, "res_array_sg13g2_dummy")
+
+    # Two dummy units per end at `dummy: 2`, so four are suppressed at
+    # extraction and both sides carry only the four real `rsil` units.
+    assert layout_extracted["dummy_devices_dropped"] == 4
+    assert ref_extracted["dummy_devices_dropped"] == 0
+    assert layout_extracted["device_counts"] == {"rsil": 4}
+    assert ref_extracted["device_counts"] == {"rsil": 4}
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "netlist": str(layout_extracted_path),
+                "top": layout_extracted["top"],
+            },
+            "reference": {"netlist": str(reference_path), "top": ref_extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    # A fully clean compare: no `device.unmatched` (the issue's headline
+    # symptom), and no `net.unmatched`/`topology` errors from the dummies'
+    # floating end nets either.
+    assert report["mismatches"] == []
+    # sg13g2's `rsil` is a *three*-terminal resistor (both ends plus the
+    # substrate rail), which `klt extract` writes as a subcircuit call
+    # (`X$n a b vsubs rsil ...`) rather than a SPICE `R` card -- so
+    # `counts.devices` is legitimately `0` on both sides here, unlike
+    # sky130's two-terminal `res_generic_po` in the test above, and the
+    # dropped-vs-kept distinction shows up in the *net* counts instead.
+    # Verified by clearing the deck's `dummy` field: the layout side then
+    # carries the four dummy units' eight extra nets (17 vs. the reference's
+    # 9) and the compare fails with `net.unmatched` + `topology` errors.
+    assert report["counts"]["nets"]["layout"] == report["counts"]["nets"]["reference"]
 
 
 # --------------------------------------------------------------------------- #
