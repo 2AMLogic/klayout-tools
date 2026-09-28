@@ -6292,6 +6292,90 @@ def test_sg13g2_cap_array_draws_mim_stack_layers(tmp_path, sg13g2_pdk_root):
     assert _SG13G2_CAP_TOP_VIA_METAL_LAYER in present
 
 
+#: IHP-Open-PDK's own `MIM.c` ("Min. Metal5 enclosure of MIM is 0.60 um" --
+#: `drc_rules['Mim_c']` = 0.6 in `sg13g2_tech_default.json`, applied by
+#: `rule_decks/beol/6_11_mim.drc`), the rule that governs how far this
+#: family's drawn `Metal5` bottom plate must extend past its `MIM` top plate
+#: (issue #2576). The curated `klayout_tools.decks.sg13g2` deck carries no
+#: `MIM` rule group at all, so `klt drc --deck sg13g2` cannot catch a
+#: shortfall here -- these tests measure the drawn geometry directly instead.
+_SG13G2_MIM_C_ENCLOSURE_UM = 0.6
+
+
+@pytest.mark.parametrize(
+    ("plate_w_um", "plate_h_um"),
+    ((5.0, 5.0), (25.7, 25.7), (2.0, 11.3)),
+)
+def test_sg13g2_cap_array_bottom_plate_clears_mim_c_enclosure(
+    plate_w_um, plate_h_um, tmp_path, sg13g2_pdk_root
+):
+    """The drawn `Metal5` bottom plate must enclose the `MIM` top plate by at
+    least `MIM.c`'s 0.60um on all four sides, at any plate size -- issue
+    #2576, where the generic `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) drew every
+    sg13g2 `cap_array` stream 0.1um short of the family's own foundry rule.
+
+    This is deliberately a *geometry* assertion, not a `klt drc --deck
+    sg13g2` clean-status one: that deck transcribes no `MIM` rule group, so
+    it reported `clean` on the pre-fix, rule-violating output too."""
+    output = tmp_path / "cap_array_sg13g2_mim_c.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {
+                "plate_w_um": plate_w_um,
+                "plate_h_um": plate_h_um,
+                "num": 1,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    top = _layer_bbox(output, *_SG13G2_CAP_TOP_PLATE_LAYER)
+    bottom = _layer_bbox(output, *_SG13G2_CAP_BOTTOM_PLATE_LAYER)
+    enclosures = {
+        "left": top["left"] - bottom["left"],
+        "bottom": top["bottom"] - bottom["bottom"],
+        "right": bottom["right"] - top["right"],
+        "top": bottom["top"] - top["top"],
+    }
+    for side, enclosure in enclosures.items():
+        assert enclosure >= _SG13G2_MIM_C_ENCLOSURE_UM - 1e-9, (side, enclosures)
+
+
+def test_sg13g2_cap_bottom_plate_margin_floor_is_the_mim_c_minimum():
+    """The floor itself: sg13g2 declares `MIM.c`'s own 0.60um as its
+    `cap_bottom_plate_margin_min_um`, and every other family is left on the
+    generic `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) -- so sky130's and
+    sg13cmos5l's drawn geometry is unchanged by issue #2576 and gf180mcu
+    keeps its own, larger virtual-bottom-plate oversize (1.06um)."""
+    assert (
+        gen._cap_geometry_min_um("sg13g2")["cap_bottom_plate_margin_min_um"]
+        == _SG13G2_MIM_C_ENCLOSURE_UM
+    )
+    assert gen._cap_geometry_min_um("sky130")["cap_bottom_plate_margin_min_um"] == 0.0
+    assert (
+        gen._cap_geometry_min_um("sg13cmos5l")["cap_bottom_plate_margin_min_um"] == 0.0
+    )
+    assert (
+        gen._cap_geometry_min_um("gf180mcu")["cap_bottom_plate_margin_min_um"] == 1.06
+    )
+
+    # The default-sized unit cell grows by exactly the 0.1um shortfall on
+    # each side: 5.0 + 2*0.6, not the pre-fix 5.0 + 2*0.5.
+    sg13g2_unit = gen._cap_unit_layout(
+        5.0,
+        5.0,
+        bottom_plate_margin_min_um=_SG13G2_MIM_C_ENCLOSURE_UM,
+    )
+    assert sg13g2_unit["total_w_um"] == pytest.approx(
+        5.0 + 2 * _SG13G2_MIM_C_ENCLOSURE_UM
+    )
+    assert gen._cap_unit_layout(5.0, 5.0)["total_w_um"] == pytest.approx(
+        5.0 + 2 * gen.CAP_BOTTOM_PLATE_MARGIN_UM
+    )
+
+
 def test_sg13g2_cap_array_extracts_as_cap_cmim_device(tmp_path, sg13g2_pdk_root):
     """The end-to-end acceptance bar from issue #1455: `cap_array`'s own
     sg13g2 output, run through (unmodified) `klt extract`, must be

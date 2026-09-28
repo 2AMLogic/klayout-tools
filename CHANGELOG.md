@@ -210,6 +210,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   caller. See [`docs/cli/yield.md`](docs/cli/yield.md)'s "Campaign
   orchestration → Dispatch" section.
 
+- **Fixed** (#2576, `klt gen cap_array` on the `sg13g2` PDK family; additive
+  — **no** `schema_version` bump, but the **drawn geometry changes**): the
+  `Metal5` bottom plate was drawn `0.5µm` past the `MIM` top plate on all
+  four sides (the generic `CAP_BOTTOM_PLATE_MARGIN_UM` default), while
+  IHP-Open-PDK's own signoff deck requires `0.6µm` — rule `MIM.c` ("Min.
+  Metal5 enclosure of MIM is 0.60 um", `drc_rules['Mim_c']` = 0.6 in
+  `rule_decks/sg13g2_tech_default.json`). Every `cap_array` stream on this
+  family therefore carried a foundry-rule violation by construction, at any
+  `plate_w_um`/`plate_h_um`. This was invisible to `klt drc --deck sg13g2`,
+  which reported `status: "clean"` throughout, because the curated `sg13g2`
+  deck transcribes no `MIM` rule group at all — the only signal was the bare
+  `MIM` layer pair under `coverage.layers_in_stream_without_rules`. The
+  family now declares its own `cap_bottom_plate_margin_min_um` floor of
+  `0.6µm` (`gen.py`'s `_PDK_CAP_GEOMETRY_MIN_UM`, the same per-family
+  mechanism gf180mcu's `1.06µm` MiM floor already used), applied as
+  `max(generic, floor)`, so `sky130`/`gf180mcu`/`sg13cmos5l` output is
+  byte-for-byte unchanged. **Callers pinning sg13g2 `cap_array` geometry
+  should note the unit cell grew**: a default-sized bottom plate is now
+  `5.0 + 2 × 0.6 = 6.2µm` on a side (was `6.0µm`), and reported port
+  positions shift with it. Verified against the PDK's own runset
+  (`ihp-sg13g2.drc`, `tables=main`): 4 `MIM.c` violations before, 0
+  violations of any rule after. Transcribing the `MIM` rule group into the
+  curated deck so `klt drc` can check this dimension is tracked by #2581.
 - **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
   user-visible: a corner that previously reported `status: "error"` can now
   report a real grade): a `spice`-form `measurements[].name` was looked up

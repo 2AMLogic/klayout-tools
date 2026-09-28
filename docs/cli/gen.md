@@ -117,7 +117,11 @@ narrower claim than "verified against the target PDK's own signoff tooling"
 own official deck end to end, and the gap is not always benign: see the
 `gf180mcu`/`mos_array` note immediately after the table for a documented,
 concrete instance where curated-deck-clean output has real, reproducible
-violations under gf180mcu's own signoff deck.
+violations under gf180mcu's own signoff deck, and the
+`sg13g2`/`cap_array` note after it (issue #2576) for a second instance of
+the same shape — a drawn dimension 0.1µm short of a foundry rule the
+curated `sg13g2` deck transcribes no counterpart of, so `klt drc --deck
+sg13g2` reported `clean` throughout.
 
 | Generator | `sky130` | `gf180mcu` | `sg13g2` | `sg13cmos5l` |
 | --------- | :------: | :--------: | :------: | :----------: |
@@ -242,6 +246,45 @@ than its width; `ring_padding_um` is documented only as `>= 0` and is not
 required to land on the grid, so off-grid values are a supported input, not an
 edge case.
 
+**sg13g2 — `cap_array`'s MiM bottom-plate enclosure was 0.1µm short of the
+PDK's own `MIM.c` (issue #2576).** Every pre-#2576 `sg13g2` `cap_array`
+stream drew its `Metal5` bottom plate exactly `0.5µm` past the `MIM` top
+plate on all four sides — the generic `CAP_BOTTOM_PLATE_MARGIN_UM` default —
+while IHP-Open-PDK's own signoff deck
+(`libs.tech/klayout/tech/drc/rule_decks/beol/6_11_mim.drc`, rule `MIM.c`
+"Min. Metal5 enclosure of MIM is 0.60 um", value `drc_rules['Mim_c']` = 0.6)
+requires `0.6µm`. Because this repo's curated `sg13g2` deck transcribes **no
+`MIM` rule group at all** — no plate-enclosure rule, no plate width/space
+rule — `klt drc --deck sg13g2` reported `status: "clean"` on that
+rule-violating output at every `plate_w_um`/`plate_h_um`; the only signal
+anything was unchecked was the bare `MIM` layer pair appearing under
+`coverage.layers_in_stream_without_rules`. #2576 fixes the *geometry*: the
+family now carries its own `cap_bottom_plate_margin_min_um` floor of `0.6µm`
+(`gen.py`'s `_PDK_CAP_GEOMETRY_MIN_UM`, the same per-family mechanism
+`gf180mcu`'s own `1.06µm` MiM floor uses), applied as `max(generic, floor)`
+so `sky130`/`gf180mcu`/`sg13cmos5l` geometry is byte-for-byte unchanged. A
+default-sized unit cell's bottom plate is therefore `5.0 + 2 × 0.6 = 6.2µm`
+on a side, not the pre-fix `6.0µm`. Unlike #1575/#1577/#1580 — whose
+gf180mcu margins had no reachable signoff deck to check them against — this
+one **was** verified end to end against the PDK's own runset (IHP-Open-PDK
+`libs.tech/klayout/tech/drc/ihp-sg13g2.drc`, `tables=main`, run under a
+local KLayout batch binary against the `ihp-open-pdk` tree
+`scripts/fetch-ihp-sg13g2.sh` fetches): the pre-fix stream reports **4
+`MIM.c` violations** (one per plate edge) and the post-fix stream reports
+**0 violations of any rule**, as does `cap_array`'s own documented default
+output (`num: 3`). That run is not reproducible in CI — it needs both a
+fetched multi-hundred-MB PDK tree and the KLayout *application* binary — so
+the committed regression guard is a direct bbox measurement of the two drawn
+plates (`tests/test_gen.py`'s
+`test_sg13g2_cap_array_bottom_plate_clears_mim_c_enclosure`), not a
+clean-status assertion: `klt drc --deck sg13g2` can neither confirm nor deny
+this dimension, since the curated deck still carries no `MIM` rule to check. Transcribing sg13g2's full `MIM` rule group into the
+curated deck — which would also clear that layer pair out of
+`coverage.layers_in_stream_without_rules` — is deliberately *not* part of
+this fix: it is a separate, larger change (the whole `MIM.a`–`MIM.f` group,
+not just `MIM.c`), tracked by issue #2581, and the floor above makes the
+drawn geometry foundry-legal regardless of what the curated deck can check.
+
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
 up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;
@@ -307,7 +350,11 @@ sg13g2` (no currently-supported family's `guard_ring` output is). `cap_array`'s
 default output round-trips through `klt extract --deck sg13g2` to the
 `"cap_cmim"` device class (issue #1455); `TopMetal1`'s own coarse 1.64µm
 minimum-width DRC rule widens the drawn top-plate landing pad past the
-generic default for this family only (see the `cap_array` section above).
+generic default for this family only (see the `cap_array` section above),
+and `MIM.c`'s 0.60µm `Metal5`-enclosure-of-`MIM` minimum widens the drawn
+bottom plate past the generic 0.5µm margin the same way (issue #2576 — see
+the note above the start of this section for why `klt drc --deck sg13g2`
+never caught the original shortfall and cannot verify the fix either).
 
 **sg13cmos5l (IHP-Open-PDK's SG13G2_CMOS5L sibling, issue #1462).** Only
 `mos_array`/`res_array` are wired up against this family's curated deck

@@ -1161,13 +1161,39 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
 #:
 #: Per-family provenance:
 #:
-#: - ``sg13g2`` (issue #1455): ``cap_top_via_metal_min_w_um`` 1.64um --
-#:   `topmetal1.width.1` (`klayout_tools.decks.sg13g2`'s `5_22_topmetal1.drc`
-#:   rule "TM1.a", "Min. TopMetal1 width"), far coarser than sky130's
-#:   `met4.width.1` (0.3um) or gf180mcu's own metal-width rules the generic
-#:   pad size was originally sized against. Without this floor, `cap_array`'s
-#:   default-sized landing pad would violate `klt drc --deck sg13g2` on every
-#:   request.
+#: - ``sg13g2`` (issues #1455/#2576): two floors --
+#:
+#:   - ``cap_top_via_metal_min_w_um`` 1.64um (issue #1455) --
+#:     `topmetal1.width.1` (`klayout_tools.decks.sg13g2`'s
+#:     `5_22_topmetal1.drc` rule "TM1.a", "Min. TopMetal1 width"), far
+#:     coarser than sky130's `met4.width.1` (0.3um) or gf180mcu's own
+#:     metal-width rules the generic pad size was originally sized against.
+#:     Without this floor, `cap_array`'s default-sized landing pad would
+#:     violate `klt drc --deck sg13g2` on every request.
+#:   - ``cap_bottom_plate_margin_min_um`` 0.6um (issue #2576) -- "MIM.c"
+#:     ("Min. Metal5 enclosure of MIM is 0.60 um", IHP-Open-PDK's own
+#:     `libs.tech/klayout/tech/drc/rule_decks/beol/6_11_mim.drc`, value
+#:     `drc_rules['Mim_c']` = 0.6 in that deck's `sg13g2_tech_default.json`).
+#:     This family's plate pair is `MIM` over `Metal5` (see
+#:     :data:`_PDK_ROLE_LAYERS`'s own sg13g2 `cap_top_plate`/
+#:     `cap_bottom_plate` entries), so MIM.c governs exactly this margin, and
+#:     the generic `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) misses it by 0.1um --
+#:     every pre-#2576 sg13g2 `cap_array` stream carried that shortfall at
+#:     any `plate_w_um`/`plate_h_um`. Unlike every other floor in this table,
+#:     it is transcribed from the **PDK's own signoff deck** rather than from
+#:     this repo's curated `klayout_tools.decks.sg13g2` `DECK`, because that
+#:     curated deck carries no `MIM` rule group at all: `klt drc --deck
+#:     sg13g2` could not see the violation (it reported `clean`), and cannot
+#:     see the fix either -- the sg13g2 `MIM` layer pair simply stops being
+#:     an unruled layer nobody margined against. Transcribing that rule group
+#:     into the curated deck is tracked separately (issue #2581); it is not
+#:     what makes the drawn geometry legal, this floor is. The floor *was*
+#:     verified end to end against the PDK's own runset
+#:     (`libs.tech/klayout/tech/drc/ihp-sg13g2.drc`, `tables=main`): 4
+#:     `MIM.c` violations before, 0 violations of any rule after. Unlike
+#:     gf180mcu's 1.06um below,
+#:     no "virtual bottom plate" oversize applies here (sg13g2's bottom plate
+#:     is an ordinary conductor), so the floor is the rule's own minimum.
 #: - ``gf180mcu`` (issue #1555): three floors its MiM stack's own DRM rules
 #:   impose, all transcribed from `klayout_tools.decks.gf180mcu`'s curated
 #:   `DECK` (never re-derived here):
@@ -1197,6 +1223,10 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
 #:     `klt drc --deck gf180mcu`.
 _PDK_CAP_GEOMETRY_MIN_UM: dict[str, dict[str, float]] = {
     "sg13g2": {
+        # MIM.c ("Min. Metal5 enclosure of MIM is 0.60 um") -- the drawn
+        # `Metal5` bottom plate's own enclosure of the `MIM` top plate, which
+        # the generic `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) misses by 0.1um:
+        "cap_bottom_plate_margin_min_um": 0.6,
         "cap_top_via_metal_min_w_um": 1.64,  # topmetal1.width.1 (TM1.a)
     },
     "gf180mcu": {
