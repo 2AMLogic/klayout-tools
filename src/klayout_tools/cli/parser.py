@@ -1430,13 +1430,14 @@ def _add_gen_parser(subparsers: argparse._SubParsersAction) -> None:
             "report -- see docs/design/layout-generator-spike.md section 2 "
             "for the request/response contract. Runs fully headless via "
             "KLayout's native pya.PCellDeclarationHelper -- no GUI, no Qt. "
-            "PDK resolution reuses `klt pdk find`'s resolver. Note: every "
-            "generator except resistor_strip only supports the sky130/"
-            "gf180mcu PDK families today (any other resolved family is an "
-            "application error) -- see docs/cli/gen.md's 'PDK-family "
-            "support' section. --list-pdk-pcells/--pdk-pcell reach the "
-            "resolved PDK's *own* shipped PCell library instead of a klt "
-            "built-in generator."
+            "PDK resolution reuses `klt pdk find`'s resolver. Note: not "
+            "every generator supports every PDK family -- resolving a "
+            "family a given generator has not been wired up for is an "
+            "application error -- see docs/cli/gen.md's 'PDK-family "
+            "support' section for the current per-generator table, and "
+            "`klt gen --list` for the full set of available generators. "
+            "--list-pdk-pcells/--pdk-pcell reach the resolved PDK's *own* "
+            "shipped PCell library instead of a klt built-in generator."
         ),
     )
     gen_parser.add_argument(
