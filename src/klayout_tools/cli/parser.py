@@ -1720,6 +1720,28 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--substrate-spreading",
+        dest="substrate_spreading",
+        default=None,
+        metavar="NET",
+        help=(
+            "estimate the resistance *through silicon* between this net's "
+            "substrate-tap contacts, using the Kelvin two-disc "
+            "spreading-resistance closed form and the curated PDK stackup's "
+            "substrate resistivity (issue #2561, Phase 2 of issue #2515); "
+            "requires --parasitics. Reported in an additive "
+            "`parasitics.substrate_spreading` JSON block -- one entry per "
+            "tap pair, each tagged with the accuracy regime it falls in and "
+            "with the resistivity's own provenance echoed alongside. This is "
+            "a two-terminal *estimate*, NOT an N-terminal substrate network "
+            "solve: on a net with more than two taps every pair is reported "
+            "and flagged `pairwise_approximation`. A name matching no net, "
+            "or a net with no drawn substrate tie, is an error. Off by "
+            "default -- byte-identical to today's behavior. See "
+            "docs/cli/extract.md's '--substrate-spreading' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--spef",
         dest="spef",
         default=None,

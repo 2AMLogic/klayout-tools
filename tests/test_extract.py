@@ -1765,6 +1765,7 @@ def test_gf180mcu_nmos_body_isolation_scoping_is_opt_in(tmp_path):
         _net_label_positions,
         _device_instance_paths,
         _def_pin_promotion,
+        _substrate_spreading,
     ) = _extract_netlist(layout, layout.top_cell(), disabled_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -4756,6 +4757,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _net_label_positions,
         _device_instance_paths,
         _def_pin_promotion,
+        _substrate_spreading,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -7536,6 +7538,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _net_label_positions,
         _device_instance_paths,
         _def_pin_promotion,
+        _substrate_spreading,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -12124,7 +12127,13 @@ def test_parasitics_summary_block_shape(tmp_path):
         "mom_crosscheck",
         "mom_rlc_override",
         "substrate_dc_tie",
+        "substrate_spreading",
     }
+    # `substrate_spreading` (issue #2561): `None` unless
+    # `--substrate-spreading <net>` was given -- present in every
+    # `--parasitics` run for schema stability, exactly like
+    # `mom_crosscheck`/`mom_rlc_override` above.
+    assert para["substrate_spreading"] is None
     # `substrate_dc_tie` (issue #1263): every synthesized substrate identity
     # this extraction produced, plus the shunt resistance used to give it a
     # DC path to SPICE's global ground node `0`. `node_scope` (issue #1503):

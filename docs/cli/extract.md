@@ -4815,6 +4815,14 @@ the same posture as the duplicate-net-name limitation noted above.
   distributed, per-segment RC ladder (the standard PEX-style network) is a
   strictly more accurate but substantially larger undertaking, deliberately
   deferred as issue #592's own "Option 2".
+- **Resistance *through silicon* between substrate taps is not in the
+  netlist.** Every synthesized substrate net gets one DC-tie shunt to ground
+  (see "Substrate DC reference"), so two taps 20 µm apart on the same bulk
+  net are perfectly shorted in the written SPICE. `--substrate-spreading
+  <net>` (issue #2561) *reports* a two-terminal closed-form estimate of that
+  missing impedance — see "Substrate spreading resistance between taps" —
+  but it injects nothing, and it is an estimate between one contact pair,
+  not the N-terminal substrate network solve issue #2515 tracks.
 
 ### Known gap: an anonymous PMOS body net has no DC bias path (issue #555)
 
@@ -5118,6 +5126,144 @@ Design notes, and what this does *not* change:
   the additive, machine-readable surface for this design decision — see the
   field table below.
 
+### Substrate spreading resistance between taps (`--substrate-spreading`, issue #2561)
+
+The DC tie above is one shunt to ground per *synthesized substrate net*.
+Nothing in that model carries a distance-dependent impedance **between two
+tap locations on the same net**: draw two substrate taps 20 µm apart, strap
+them on metal, and the extracted netlist says they are perfectly shorted —
+through silicon as well as through the strap. That is wrong, and for
+substrate-coupling questions (a noisy digital tap injecting into an analog
+tap's local bulk potential) it is wrong in the direction that hides the
+problem.
+
+`klt extract --parasitics --substrate-spreading <net>` puts a number on it:
+
+```bash
+klt extract block.gds --deck sky130 --parasitics \
+    --substrate-spreading VSUBRING --format json
+```
+
+```
+substrate_spreading: net=VSUBRING  taps=2  pairs=1  R=254240.1275557032..254240.1275557032 ohm  (rho=10.0 ohm-cm, two-terminal estimate, not a network solve)
+```
+
+#### Scope: a two-terminal *estimate*, not an N-terminal network solve
+
+**This does not close issue #2515**, which asks for the general case: a
+resistive network between arbitrary tap sets, solved with the finite
+substrate shared between every terminal. Read the caveats before using a
+number from this block:
+
+- **Two contacts is the whole model.** The closed form below is derived for
+  exactly two circular contacts on a semi-infinite half-space. On a net with
+  more than two taps, *every pair* is reported and the block sets
+  `pairwise_approximation: true`. Each pair is individually a valid
+  two-terminal estimate; the **set** of them is not a network. They are not
+  simultaneously realisable, because each is computed as though the other
+  taps were absent, so the current sharing between three or more taps in the
+  same bulk is unmodelled. (Issue #2561 allowed either rejecting an
+  over-two request or reporting every pair; every pair is reported, because
+  rejecting would make the capability useless on real geometry — a
+  substrate tie is normally a ring or a row of taps, never exactly two.)
+- **No solver is involved and none could be reused.** `klt mom`'s PEEC
+  resistance path restricts every conductor to a bar-shaped box whose
+  current flows along one axis (see `docs/cli/mom.md` → "The
+  bar-shaped-conductor MVP restriction"); current spreading radially out of
+  a contact into bulk has no such axis, so it is out of that solver's scope
+  by construction, not merely untested. A true volumetric N-terminal solve
+  belongs to the open FEM epic #708.
+- **Nothing is injected into the netlist.** This is a *reported* number
+  only: no `R` card is written, `parasitics.r_count` /
+  `total_resistance_ohm` are unchanged, and `parasitics.substrate_dc_tie`
+  is untouched. The block quantifies the impedance the written model omits;
+  it does not silently change what you simulate.
+
+#### The closed form
+
+For two circular contacts of radii `a1`/`a2`, centre-to-centre separation
+`d`, on a semi-infinite half-space of resistivity `rho`:
+
+```
+R = rho/(4*a1) + rho/(4*a2) - rho/(pi*d)
+```
+
+The two self terms are Holm's classic constriction (spreading) resistance —
+the `d → ∞` limit, where the pair is just two independent contacts in
+series. The third is the mutual term: far from a contact its current
+distribution is indistinguishable from a point source, whose half-space
+potential is `rho*I/(2*pi*r)`, so each contact depresses the other's
+potential by `rho*I/(2*pi*d)`. Full derivation:
+`src/klayout_tools/substrate_resistance.py`'s module docstring.
+
+Drawn taps are rectangles, not discs. Each connected tap cluster (merged
+first, so two abutting drawn boxes are one contact) is reduced to the
+**equal-area disc**: `a = sqrt(area/pi)` from the cluster's true polygon
+area, positioned at its bounding-box centre.
+
+#### Accuracy regimes, reported per pair
+
+Each pair carries a `regime` and an `exceeds_half_space_depth` flag rather
+than a bare number:
+
+| `regime` | When | What you get |
+|---|---|---|
+| `far_field` | `d >= 5 * (a1 + a2)` | The validated regime. `tests/test_substrate_resistance.py::test_point_source_mutual_term_is_within_one_percent_in_far_field` integrates the exact half-space Green's function over the real disc current density at exactly this threshold and measures the point-source truncation error at **under 1 %** of the mutual term (which is itself a small correction to the total). |
+| `near_field` | `a1 + a2 <= d < 5 * (a1 + a2)` | Still reported — it remains far better than the shorted-to-zero value the model has otherwise — but the mutual term is no longer 1 %-accurate, so treat it as order-of-magnitude. A note saying so is attached to the pair. |
+| `overlapping` | `d < a1 + a2` | `resistance_ohm: null`. The two-disc derivation assumes two disjoint equipotential contacts. **Zero separation** is likewise refused, not clamped: the mutual term diverges there, while two coincident contacts are physically one contact whose resistance to itself is zero — returning either would be an artefact the caller could not tell from a physical answer. |
+
+`exceeds_half_space_depth: true` is an independent flag, set when
+`d > 0.5 * substrate_thickness_um`: beyond that the wafer's back surface —
+which the semi-infinite half-space assumption ignores entirely — starts to
+matter. The value is still reported, with a note.
+
+#### Provenance: the resistivity is cited, never invented
+
+`rho` comes from the curated PDK stackup's substrate entry (issue #2560),
+and the block echoes `resistivity_ohm_cm`, `substrate_thickness_um`,
+`pdk_family` **and that entry's full `source` string** — which, for both
+curated families today, states in as many words that 10 ohm-cm is a textbook
+typical value for a lightly-doped p-epi layer rather than a figure the open
+PDK itself publishes. The reported ohms are therefore traceable back to a
+judgeable input instead of an opaque constant. Read that `source` before
+quoting a number from this block in a design decision.
+
+A deck whose PDK family has no curated stackup (`sg13g2` today) reports
+`resistivity_ohm_cm: null` and every `resistance_ohm: null`, with the tap
+geometry still reported and a warning naming the gap. **No default
+resistivity is substituted** — that would produce exactly the opaque
+constant this feature exists to replace.
+
+#### Order of magnitude: why the numbers look large
+
+A single sky130 tap contact is a fraction of a micrometre across. In
+10 ohm-cm silicon, `rho/(4*a)` for `a ≈ 0.2 µm` is over 100 kΩ *per
+contact*, and two such contacts in series dominate the pair regardless of
+how far apart they are. That is real physics, not a unit slip: it is
+precisely why production layouts tie the substrate with tap **arrays** and
+continuous guard rings rather than isolated contacts. A pair of large,
+many-contact tap rings reduces to a much smaller equal-area-disc resistance.
+
+#### Other behaviour worth knowing
+
+- **Requires `--parasitics`.** Given without it, that is an error, not a
+  silent no-op — the block is reported inside `parasitics`.
+- **A name matching no net, or a net with no drawn substrate tie, is an
+  error.** An empty block would read as "the resistance is negligible"; an
+  error reads as "nothing was measured", which is what actually happened.
+- **The tap layer is the one extraction already uses.** Contacts are read
+  off the `tap_substrate` region — the deck's `tap` layer outside every
+  `nwell`, or the `tap_nplus`/`tap_pplus`-derived equivalent for a family
+  that draws no dedicated tap mask (see "Deriving a tap region with no
+  dedicated tap layer") — the same geometry that resolves the NMOS body
+  terminal. No separate detection path.
+- **One label, several islands.** As with `--mom-net`, a name shared by
+  several electrically distinct nets measures the lowest-`net_id` one and
+  says so in `warnings`.
+- **Tap count is capped at 32** (496 pairs). Above that the 32
+  largest-area taps are paired and `truncated: true` plus a warning is set —
+  pairwise reporting is quadratic, and it is an approximation regardless.
+
 ### JSON `parasitics` block
 
 `--parasitics` adds a top-level `parasitics` field (an additive, independently
@@ -5267,6 +5413,7 @@ also gains the additive `node_scope` field (always `"global"`). See
     "nets": [{ "net": "vsubs", "device": "Rvsubs_dctie" }],
     "node_scope": "global"
   },
+  "substrate_spreading": null,
   "model": {
     "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
     "coupling": "vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled",
@@ -5296,6 +5443,7 @@ also gains the additive `node_scope` field (always `"global"`). See
 | `mom_crosscheck`       | object \| null  | Additive field (issue #798). `null` unless `--mom-net <net>` was given, in which case it is the swap-and-measure report for that one net — see "`klt mom` cross-check for one net" above and the field list below. |
 | `mom_rlc_override`     | object \| null  | Additive field (issue #988). `null` unless `--mom-rlc-net <net>` was given, in which case it is the substitution report for that one net — see "Substitute a caller-supplied `klt mom` R/L/C for a critical net" above and the field list below. |
 | `substrate_dc_tie`     | object          | Additive field (issue #1263, extended by issue #1503). The DC reference written for every synthesized substrate net — see "Substrate DC reference" above and the field list below. Always present (never `null`); `nets` is `[]` when this extraction synthesized no substrate identity at all. |
+| `substrate_spreading`  | object \| null  | Additive field (issue #2561). `null` unless `--substrate-spreading <net>` was given, in which case it is the **two-terminal closed-form** bulk-resistance estimate between that net's substrate taps — see "Substrate spreading resistance between taps" above and the field list below. Reported only; nothing is injected into the netlist, and this is **not** the N-terminal network solve issue #2515 tracks. |
 
 `substrate_dc_tie`:
 
@@ -5304,6 +5452,27 @@ also gains the additive `node_scope` field (always `"global"`). See
 | `resistance_ohm` | number | The shunt resistance used for every tie card (`1e12`). Fixed, not deck- or net-dependent. |
 | `nets` | array\<object\> | One entry per tied net, sorted by net name: `{"net", "device"}` — `net` is the substrate net's node name exactly as the written netlist spells it (the deck's `substrate_net`, or a `<substrate_net>_iso<n>` variant), and `device` is the emitted card's full instance name (e.g. `"Rvsubs_dctie"`), so a consumer cross-checking written `R` cards against `r_count` can exclude them by name. |
 | `node_scope` | string | Additive field (issue #1503). Always `"global"`: every `nets[].net` identity above is also declared SPICE-global (a `.GLOBAL` card written once, before the first `.SUBCKT`) — see "Substrate DC reference" above. Lets a caller detect the node-scoping guarantee programmatically instead of reading the generated SPICE for a `.GLOBAL` card. |
+
+`substrate_spreading` (non-`null` only when `--substrate-spreading` was given):
+
+| Field | Type | Description |
+|---|---|---|
+| `model` | string | Always `"two_contact_half_space"` — names the closed form, so a consumer can tell this estimate apart from any later N-terminal network solve (issue #2515), which will carry a different discriminator rather than silently redefining this one. |
+| `net` | string | The `--substrate-spreading` value, echoed back. |
+| `net_id` | integer | The `cluster_id` of the net island actually measured — the lowest, when one layout label is shared by several electrically distinct nets (same tie-break `--mom-net` uses, issue #811). |
+| `pdk_family` | string \| null | The curated stackup family the resistivity came from (`"sky130"`, `"gf180mcu"`). `null` for a deck whose family has no curated stackup. |
+| `resistivity_ohm_cm` | number \| null | The substrate resistivity used (issue #2560). `null` for an uncurated family — **no default is substituted**, and every `pairs[].resistance_ohm` is then `null` too. |
+| `substrate_thickness_um` | number \| null | The curated substrate's own thickness (`z1_um - z0_um`), used only to flag pairs whose separation leaves the semi-infinite half-space assumption (`exceeds_half_space_depth`). Not consumed by the formula itself. |
+| `source` | string \| null | The curated stackup substrate entry's full `source` prose, verbatim — what makes the reported ohms traceable rather than opaque. For both curated families it states that the resistivity is a textbook typical value rather than a figure the open PDK publishes. **Read it before quoting a number from this block.** |
+| `taps` | array\<object\> | One entry per substrate-tap contact cluster on this net, sorted by `(x_um, y_um)` for deterministic indices: `{"x_um", "y_um", "area_um2", "radius_um"}`. `radius_um` is the equal-area disc radius `sqrt(area_um2/pi)`; position is the cluster's bounding-box centre. |
+| `tap_count` | integer | `len(taps)` — the number of contacts actually paired up (after any truncation). |
+| `taps_total` | integer | The number of contacts found before truncation. Equals `tap_count` unless `truncated`. |
+| `truncated` | boolean | `true` when the net had more than 32 tap contacts and only the 32 largest-area ones were paired. A `warnings` entry always accompanies it. |
+| `pairs` | array\<object\> | One entry per contact pair: `{"a", "b", "separation_um", "resistance_ohm", "regime", "exceeds_half_space_depth", "notes"}`. `a`/`b` index into `taps`. `resistance_ohm` is `null` for an `overlapping` pair or an uncurated family. See the regime table above. |
+| `pair_count` | integer | `len(pairs)` — `tap_count * (tap_count - 1) / 2`. |
+| `pairwise_approximation` | boolean | `true` whenever more than two taps were found. Each pair is a valid two-terminal estimate; the set of them is **not** a network solve, because each pair is computed as though the other taps were absent. `false` is the genuinely two-terminal answer. |
+| `min_resistance_ohm` / `max_resistance_ohm` | number \| null | The extremes across the pairs that produced a value. Both `null` when none did. |
+| `warnings` | array\<string\> | Non-fatal notes: an uncurated family, truncation, a single-tap net, a shared net label. `[]` in the clean two-tap case. |
 
 `mom_crosscheck` (present only when `--mom-net` was given):
 

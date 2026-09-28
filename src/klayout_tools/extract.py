@@ -261,6 +261,17 @@ from .pdk_models import (
     resolve_device_bindings,
 )
 
+# Two-terminal closed-form substrate spreading resistance (issue #2561,
+# Phase 2 of issue #2515). Kept in its own module because the closed form
+# itself is pure geometry + resistivity with no layout dependency at all --
+# only `tap_contacts_from_region` touches KLayout, and only to reduce this
+# module's already-computed `tap_substrate` geometry to plain dicts.
+from .substrate_resistance import (
+    SubstrateSpreadingError,
+    substrate_spreading_report,
+    tap_contacts_from_region,
+)
+
 if TYPE_CHECKING:
     import klayout.db as kdb
 
@@ -776,6 +787,123 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
+def _read_substrate_taps(
+    l2n: kdb.LayoutToNetlist,
+    circuit: kdb.Circuit | None,
+    layer_index: dict[str, int],
+    dbu: float,
+    substrate_spreading_net: str | None,
+) -> dict[str, Any] | None:
+    """One net's substrate-tie contacts, for ``--substrate-spreading``
+    (issue #2561) -- ``None`` when the flag was not given or its name
+    matches no net.
+
+    Read off the ``tap_substrate`` layer: the exact region issue #490's
+    ``tap - nwell_body_cover`` split already built for the NMOS body
+    terminal, reused rather than re-derived, reduced to the plain position/
+    area/effective-radius dicts
+    :func:`~klayout_tools.substrate_resistance.tap_contacts_from_region`
+    produces. Must run while ``l2n`` is still alive (``polygons_of_net`` is
+    a live ``LayoutToNetlist`` API); the closed-form estimate built on top
+    of it is assembled later, in :func:`extract_netlist_from_layout`, which
+    has the deck *name* needed to resolve the curated substrate resistivity.
+
+    A ``--substrate-spreading`` *name* can match several genuinely distinct,
+    electrically unconnected net objects sharing one layout label. Same
+    lowest-``cluster_id`` tie-break ``--mom-net`` documents (issue #811),
+    for the same reason; the match count rides along so the caller can
+    report the ambiguity.
+    """
+    if substrate_spreading_net is None or circuit is None:
+        return None
+    matched = [
+        candidate
+        for candidate in circuit.each_net()
+        if candidate.cluster_id != 0
+        and spice_safe_net_name(candidate.expanded_name()) == substrate_spreading_net
+    ]
+    if not matched:
+        return None
+    tap_net = min(matched, key=lambda net: net.cluster_id)
+    return {
+        "net": substrate_spreading_net,
+        "net_id": tap_net.cluster_id,
+        "matched_net_count": len(matched),
+        "taps": tap_contacts_from_region(
+            l2n.polygons_of_net(tap_net, layer_index["tap_substrate"]), dbu
+        ),
+    }
+
+
+def _substrate_spreading_block(
+    substrate_spreading_net: str | None,
+    substrate_taps: dict[str, Any] | None,
+    deck_name: str,
+) -> dict[str, Any] | None:
+    """The ``parasitics.substrate_spreading`` report block (issue #2561),
+    or ``None`` when ``--substrate-spreading`` was not given.
+
+    Assembled here, not inside :func:`_extract_netlist`, because it needs
+    ``deck_name`` -- ``klt extract``'s deck names are PDK family names,
+    which is exactly what the curated stackup's substrate resistivity is
+    keyed on (issue #2560) -- and ``_extract_netlist`` only ever sees the
+    resolved :class:`ExtractionDeck` object, which carries no family name.
+    Its input was read while ``l2n`` was still alive; from here on it is
+    plain data.
+
+    A name that matched no net, or a net with no drawn substrate tie, is an
+    :class:`ExtractError` rather than an empty block: an empty block would
+    read as "the resistance is negligible" rather than "nothing was
+    measured".
+    """
+    if substrate_spreading_net is None:
+        return None
+    if substrate_taps is None:
+        raise ExtractError(
+            f"--substrate-spreading '{substrate_spreading_net}' matches no "
+            "extracted net: the substrate spreading estimate is reported for "
+            "the tap contacts on one named net, so the name must resolve to "
+            "a net this layout actually extracts"
+        )
+    try:
+        block = substrate_spreading_report(
+            substrate_taps["net"],
+            substrate_taps["taps"],
+            deck_name,
+            net_id=substrate_taps["net_id"],
+        )
+    except SubstrateSpreadingError as exc:
+        raise ExtractError(str(exc)) from exc
+    if substrate_taps["matched_net_count"] > 1:
+        # Same ambiguity `--mom-net` reports (issue #811): several
+        # electrically distinct islands share one layout label, and the
+        # estimate only describes the island actually measured.
+        block["warnings"].append(
+            f"--substrate-spreading '{substrate_spreading_net}' matches "
+            f"{substrate_taps['matched_net_count']} distinct, electrically "
+            "unconnected nets sharing that layout label -- measured the one "
+            f"with net_id {substrate_taps['net_id']} (the lowest); the taps "
+            "on every other same-named net are not in this estimate"
+        )
+    return block
+
+
+def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
+    """Reject ``flag`` when it was given without ``--parasitics``.
+
+    Several flags piggyback on the lumped-RC pass and are meaningless
+    without it (``--mom-net``, ``--spef``, ``--critical-net``, …, and
+    ``--substrate-spreading`` as of issue #2561), and all raise the same
+    ``"<flag> requires --parasitics"`` :class:`ExtractError`. The older ones
+    still test for it inline in :func:`run_extract` — deliberately left
+    alone, since rewriting them is not this issue's business — but a *new*
+    one routes through here instead, so it adds no further branch to a
+    function that already carries many.
+    """
+    if value is not None and not parasitics:
+        raise ExtractError(f"{flag} requires --parasitics")
+
+
 def run_extract(
     path: str,
     deck_name: str,
@@ -808,6 +936,7 @@ def run_extract(
     pin_source_cells: frozenset[str] | None = None,
     subcircuit_cell: str | None = None,
     subcircuit_output: str | None = None,
+    substrate_spreading_net: str | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -1055,6 +1184,32 @@ def run_extract(
     ``None`` (the default) skips this entirely -- byte-identical to before
     this feature existed. The resolved path is echoed back as the response's
     ``spef_path`` field (``null`` when omitted).
+
+    ``substrate_spreading_net`` (``klt extract --substrate-spreading <net>``,
+    issue #2561, Phase 2 of issue #2515, requires ``parasitics=True``)
+    reports a **two-terminal closed-form estimate** of the resistance
+    *through silicon* between the substrate-tap contacts on the named net,
+    in an additive ``parasitics.substrate_spreading`` block -- the magnitude
+    of the impedance today's model leaves out, since
+    ``parasitics.substrate_dc_tie`` gives each synthesized substrate net one
+    shunt to ground and nothing distance-dependent between separate taps on
+    it. The estimate is the Kelvin two-disc spreading-resistance formula
+    evaluated on each pair of the net's own tap contacts, against the
+    curated PDK stackup's substrate resistivity (issue #2560), with that
+    entry's ``source`` string echoed into the report so the number is
+    traceable rather than opaque -- see
+    :mod:`klayout_tools.substrate_resistance` for the derivation, accuracy
+    regimes and boundary behaviour, and ``docs/cli/extract.md``'s
+    "``--substrate-spreading``" section for the CLI/JSON contract.
+    **This is not an N-terminal substrate network solve** (issue #2515): on
+    a net with more than two taps every *pair* is reported, flagged
+    ``pairwise_approximation: true``, because the pairs are individually
+    valid two-terminal estimates but ignore the current sharing a real
+    network solve would capture. A name matching no net, or a net with no
+    drawn substrate tie, is an :class:`ExtractError`, the same convention
+    ``mom_net`` above follows. ``None`` (the default) skips this entirely --
+    byte-identical to before this feature existed, and the block is then
+    ``null``.
 
     ``def_net_names`` (``klt extract --def-net-names``, issue #951, Epic #700
     Phase 3) names each routed net from the **DEF net name** KLayout's LEF/DEF
@@ -1930,6 +2085,16 @@ def run_extract(
     if spef_output is not None and not parasitics:
         raise ExtractError("--spef requires --parasitics")
 
+    # `--substrate-spreading` (issue #2561) requires `--parasitics`: its
+    # estimate is reported inside the `parasitics` block, alongside the
+    # `substrate_dc_tie` shunt whose "two taps on one bulk net are shorted"
+    # simplification it exists to quantify -- without the lumped-RC pass
+    # there is no such block to report into. Same "a flag naming something
+    # invalid is an error, not a silent no-op" convention as `--mom-net`
+    # above. Raised from a helper rather than inline so this validation adds
+    # no branch to an already heavily-branching function.
+    _require_parasitics("--substrate-spreading", substrate_spreading_net, parasitics)
+
     # `--critical-net` (issue #976) requires `--parasitics`: it scopes the
     # lateral-coupling pass onto the same lumped-RC extraction this flag
     # piggybacks on, same reasoning as `--mom-net`/`--spef` above.
@@ -2041,6 +2206,7 @@ def run_extract(
         net_label_positions,
         device_instance_paths,
         def_pin_promotion,
+        substrate_spreading,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -2062,6 +2228,7 @@ def run_extract(
         pin_source_cells=pin_source_cells,
         subcircuit_cell=subcircuit_cell,
         subcircuit_info=subcircuit_info,
+        substrate_spreading_net=substrate_spreading_net,
     )
 
     # `--subcircuit` (issue #2245), layout-dependent half: both rejections
@@ -2660,6 +2827,14 @@ def run_extract(
         # `run_extract`'s `mom_net` docstring paragraph and
         # `docs/cli/extract.md`'s `--mom-net` section.
         parasitics_report["mom_crosscheck"] = mom_crosscheck_report
+        # Additive field (issue #2561): `None` unless `--substrate-spreading`
+        # was given, in which case it is the two-terminal closed-form
+        # estimate between that net's substrate-tap contacts. Deliberately a
+        # sibling of `substrate_dc_tie` rather than a replacement for it --
+        # the DC tie is still what the written SPICE carries; this block is
+        # the reported *magnitude* of the impedance that model leaves out.
+        # See `docs/cli/extract.md`'s `--substrate-spreading` section.
+        parasitics_report["substrate_spreading"] = substrate_spreading
         # Additive field (issue #988, Epic #709 Phase 3a): `None` unless
         # `--mom-rlc-net` was given, in which case it is the substitution
         # report built above -- see `run_extract`'s `mom_rlc_net` docstring
@@ -3472,6 +3647,7 @@ def extract_netlist_from_layout(
     pin_source_cells: frozenset[str] | None = None,
     subcircuit_cell: str | None = None,
     subcircuit_info: dict[str, Any] | None = None,
+    substrate_spreading_net: str | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -3488,17 +3664,30 @@ def extract_netlist_from_layout(
     dict[int, list[dict[str, Any]]],
     dict[int, list[dict[str, Any]]],
     dict[str, Any] | None,
+    dict[str, Any] | None,
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
     voltage_domain_warnings, abstracted_cells, dead_metal, mom_crosscheck,
-    net_label_positions, device_instance_paths, def_pin_promotion)`` -- see
+    net_label_positions, device_instance_paths, def_pin_promotion,
+    substrate_spreading)`` -- see
     :func:`_extract_netlist`'s own docstring for ``net_label_positions``
     (issue #1540), ``device_instance_paths`` (issue #1666) and
     ``def_pin_promotion`` (issue #2473, ``None`` unless ``def_pins`` was
     given).
+
+    ``substrate_spreading`` (``--substrate-spreading <net>``, issue #2561) is
+    ``None`` unless ``substrate_spreading_net`` is given, in which case it is
+    :func:`~klayout_tools.substrate_resistance.substrate_spreading_report`'s
+    two-terminal closed-form estimate between that net's substrate-tap
+    contacts -- an estimate, explicitly **not** the N-terminal substrate
+    network solve issue #2515 tracks. A ``substrate_spreading_net`` naming no
+    net, or naming one with no drawn substrate tie, raises
+    :class:`ExtractError` rather than returning an empty block, matching
+    ``--mom-net``'s "the caller asked for something that does not exist"
+    validation.
 
     ``abstract_cell_patterns``/``abstract_cell_lef_paths`` (the
     ``--abstract-cells``/``--abstract-cell-lef`` flags, issue #620): when
@@ -3779,6 +3968,7 @@ def extract_netlist_from_layout(
         net_label_positions,
         device_instance_paths,
         def_pin_promotion,
+        substrate_taps,
     ) = _extract_netlist(
         layout,
         top_cell,
@@ -3803,6 +3993,14 @@ def extract_netlist_from_layout(
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
+        substrate_spreading_net=substrate_spreading_net,
+    )
+
+    # `klt extract --substrate-spreading <net>` (issue #2561): the closed-form
+    # estimate, assembled here rather than inside `_extract_netlist` because
+    # it needs `deck_name` -- see `_substrate_spreading_block`'s docstring.
+    substrate_spreading = _substrate_spreading_block(
+        substrate_spreading_net, substrate_taps, deck_name
     )
 
     # Voltage-domain marker overlap (issue #552): computed after the main
@@ -3833,6 +4031,7 @@ def extract_netlist_from_layout(
         net_label_positions,
         device_instance_paths,
         def_pin_promotion,
+        substrate_spreading,
     )
 
 
@@ -6839,6 +7038,7 @@ def _extract_netlist(
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
+    substrate_spreading_net: str | None = None,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -6851,6 +7051,7 @@ def _extract_netlist(
     dict[str, Any] | None,
     dict[int, list[dict[str, Any]]],
     dict[int, list[dict[str, Any]]],
+    dict[str, Any] | None,
     dict[str, Any] | None,
 ]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
@@ -6948,6 +7149,20 @@ def _extract_netlist(
     ``layout``'s already-static instance tree, so it is computed once, right
     before this function returns. :func:`run_extract` folds it into
     ``devices[].instance_path`` (see :func:`_describe_devices`).
+
+    ``substrate_taps`` (issue #2561, ``klt extract --substrate-spreading
+    <net>``) is ``None`` unless ``substrate_spreading_net`` is given and
+    matches a net, in which case it is ``{"net", "net_id",
+    "matched_net_count", "taps"}`` -- that net's own substrate-tie contacts
+    on the ``tap_substrate`` layer (issue #490's ``tap - nwell_body_cover``
+    split, reused rather than re-derived), reduced to the plain position/
+    area/effective-radius dicts
+    :func:`~klayout_tools.substrate_resistance.tap_contacts_from_region`
+    produces. Read here, alongside ``parasitic_nets``/``mom_crosscheck``,
+    for the same "``polygons_of_net`` needs a live ``l2n``" reason; the
+    closed-form spreading estimate built on top of it is assembled by
+    :func:`extract_netlist_from_layout`, which has the deck *name* needed to
+    resolve the curated substrate resistivity.
 
     ``def_net_names`` (issue #951): when ``True``, each routed net is renamed
     to the DEF net name its geometry carries as GDS shape property
@@ -7516,7 +7731,13 @@ def _extract_netlist(
     # can leak, because the answer feeds `connect_global` -- see
     # `nwell_body_cover`'s own comment above for the full derivation.
     tap_substrate = tap - nwell_body_cover
-    l2n.register(tap_substrate, "tap_substrate")
+    # Captured into `layer_index` (issue #2561), unlike the other
+    # `connect_global`-only registrations around it: `klt extract
+    # --substrate-spreading <net>` reads this net's own substrate-tie
+    # geometry back through `polygons_of_net`, which needs the register
+    # handle. Registration itself is unchanged -- only the return value,
+    # previously discarded, is now kept.
+    layer_index["tap_substrate"] = l2n.register(tap_substrate, "tap_substrate")
 
     # Per-isolated-region body placeholders (issue #1128): one additional,
     # equally-empty placeholder `Region` per `isolation_islands` entry,
@@ -8837,6 +9058,7 @@ def _extract_netlist(
     # already captured the schematic-equivalent `devices[]`/`nets[]` view.
     parasitic_nets: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None
     mom_crosscheck: dict[str, Any] | None = None
+    substrate_taps: dict[str, Any] | None = None
     if parasitics_deck is not None:
         circuit = netlist.circuit_by_name(top_cell.name)
         parasitic_nets = _compute_parasitics(
@@ -8917,6 +9139,14 @@ def _extract_netlist(
                         "other same-named net keeps its lumped-RC capacitance"
                     )
 
+        # `klt extract --substrate-spreading <net>` (issue #2561): read the
+        # named net's own substrate-tie geometry back while `l2n` still owns
+        # the shape database `polygons_of_net` reads -- see
+        # `_read_substrate_taps`'s own docstring.
+        substrate_taps = _read_substrate_taps(
+            l2n, circuit, layer_index, layout.dbu, substrate_spreading_net
+        )
+
     # Issue #1540: per-net drawn-label geometry, keyed by `net.cluster_id` --
     # read back from `l2n` here, alongside `parasitic_nets`/`mom_crosscheck`
     # above, for the identical reason: `texts_of_net` is a live
@@ -8969,6 +9199,7 @@ def _extract_netlist(
         net_label_positions,
         device_instance_paths,
         def_pin_promotion,
+        substrate_taps,
     )
 
 
