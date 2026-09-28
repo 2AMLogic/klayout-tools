@@ -6814,6 +6814,30 @@ def _detect_diode_substrate_label_divergence(
     return warnings
 
 
+def _deck_complement_well_tie(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    active: kdb.Region,
+    poly: kdb.Region,
+    well: kdb.Region,
+) -> kdb.Region:
+    """The deck's ``tap_nplus_complement`` well-tie geometry (issue #2591),
+    or an empty ``Region`` when the deck does not declare that layer.
+
+    Kept out of ``_extract_netlist`` so the optional complement form does
+    not add a branch to that (already baselined) function's complexity.
+    """
+    if deck.tap_nplus_complement is None:
+        return _region(layout, top_cell, None)
+    return _complement_well_tie(
+        active,
+        poly,
+        well,
+        _region(layout, top_cell, deck.tap_nplus_complement),
+    )
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -7219,13 +7243,9 @@ def _extract_netlist(
             (tap_nplus_region & active & nwell_body_cover)
             | (tap_pplus_region & (active - nwell_body_cover))
         ) - poly
-        if deck.tap_nplus_complement is not None:
-            tap = tap | _complement_well_tie(
-                active,
-                poly,
-                nwell_body_cover,
-                _region(layout, top_cell, deck.tap_nplus_complement),
-            )
+        tap = tap | _deck_complement_well_tie(
+            layout, top_cell, deck, active, poly, nwell_body_cover
+        )
         # Exclude the derived tie geometry from `active` before the NMOS/
         # PMOS source/drain split just below, so a tie strip is never also
         # registered as ordinary device-terminal diffusion (`nfet_sd`/
