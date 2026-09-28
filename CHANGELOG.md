@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2592, `klt functional-verification`; additive — **no**
+  `schema_version` bump, but user-visible: a per-test `sim_time_ns` that
+  reported `null` on every run now carries a real number again): cocotb 2.1.0
+  restructured its JUnit XML writer and moved the per-test timing facts off
+  the `<testcase>` element's own `sim_time_ns` attribute into a child
+  `<properties>` block (`sim_time_duration` plus a separately-reported
+  `sim_time_unit`). `_parse_results_xml` only ever read the attribute, so
+  with the repo's own `cocotb>=2.1.0` pin every `tests[].sim_time_ns` in the
+  response silently degraded to `null` — contract-legal (the field is
+  documented as `null` when the simulator did not report it) and therefore
+  invisible to CI, whose only non-null assertions ran against synthetic
+  2.0.x-shaped fixtures. The attribute is still read **first** and used
+  unchanged, so stored historical `results.xml` evidence parses exactly as
+  before; only when it is absent is `sim_time_duration` read and scaled by
+  the reported unit (never assumed to be `ns`). A `<testcase>` carrying
+  neither shape — a test that never ran — still resolves to `null` rather
+  than raising. The real-toolchain Icarus integration test now asserts every
+  executed test reports a non-null `sim_time_ns`, so the next upstream JUnit
+  reshuffle fails loudly instead of silently nulling the field again.
 - **Fixed** (#2580, `klt gen`; additive — **no** `schema_version` bump, but
   user-visible: a `mos_array` request that previously returned an empty
   `drc_hints.notes` can now carry an entry): `klt gen mos_array` draws a

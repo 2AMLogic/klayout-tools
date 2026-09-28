@@ -1382,6 +1382,10 @@ def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
     verbatim from the ``<failure>`` element's own attributes and are present
     only on failing entries.
 
+    Simulated time comes from :func:`_testcase_sim_time_ns`, which reads
+    *both* JUnit shapes cocotb has emitted (the 2.0.x ``sim_time_ns``
+    attribute and the 2.1.0 ``<properties>`` block) -- see that function.
+
     Raises :class:`FunctionalVerificationError` if the file is missing or
     unparseable -- either means the run produced no trustworthy evidence.
     """
@@ -1407,7 +1411,7 @@ def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
             entry: dict[str, Any] = {
                 "name": testcase.get("name"),
                 "status": "passed",
-                "sim_time_ns": _maybe_float(testcase.get("sim_time_ns")),
+                "sim_time_ns": _testcase_sim_time_ns(testcase),
                 "real_time_s": _maybe_float(testcase.get("time")),
             }
             failure = testcase.find("failure")
@@ -1458,6 +1462,94 @@ def _maybe_float(value: str | None) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+# cocotb's own simulator-time unit tokens, as they appear in the
+# `<property name="sim_time_unit" value="..."/>` element of a cocotb >= 2.1.0
+# `results.xml`, mapped to the power of ten that converts that unit to
+# nanoseconds. `sec` is cocotb's own spelling for seconds; `s` is accepted
+# too so a future/alternate spelling still resolves rather than nulling out.
+_SIM_TIME_UNIT_NS_EXPONENT: dict[str, int] = {
+    "fs": -6,
+    "ps": -3,
+    "ns": 0,
+    "us": 3,
+    "ms": 6,
+    "s": 9,
+    "sec": 9,
+}
+
+
+def _testcase_properties(testcase: ElementTree.Element) -> dict[str, str]:
+    """``{name: value}`` for the ``<properties>`` block cocotb >= 2.1.0 hangs
+    off each ``<testcase>``.
+
+    Only the testcase's *own* direct ``<properties>/<property>`` children are
+    read -- never a ``<testsuite>``-level property (where cocotb 2.0.x put
+    ``random_seed``, see :func:`_extract_random_seed_property`) -- so a
+    per-suite property can never be mistaken for a per-test one. A property
+    missing either attribute is skipped rather than raising.
+    """
+    properties: dict[str, str] = {}
+    for prop in testcase.iterfind("properties/property"):
+        name = prop.get("name")
+        value = prop.get("value")
+        if name is not None and value is not None:
+            properties[name] = value
+    return properties
+
+
+def _testcase_sim_time_ns(testcase: ElementTree.Element) -> float | None:
+    """Simulated time for one ``<testcase>``, in nanoseconds, across both
+    JUnit XML shapes cocotb has emitted (issue #2592).
+
+    cocotb 2.0.x put the value on the element itself::
+
+        <testcase name="test_gcd_known_pairs" time="0.0056" sim_time_ns="520.0" />
+
+    cocotb 2.1.0 restructured its JUnit writer and moved the timing facts into
+    a child ``<properties>`` block instead, with the unit reported separately::
+
+        <testcase name="test_gcd_known_pairs" time="0.014">
+          <properties>
+            <property name="sim_time_unit" value="ns" />
+            <property name="sim_time_duration" value="520.0" />
+          </properties>
+        </testcase>
+
+    The 2.0.x attribute is tried **first** and used unchanged when present, so
+    nothing that parses today -- including stored historical ``results.xml``
+    evidence -- changes behaviour. Only when the attribute is absent is
+    ``sim_time_duration`` read and scaled by the sibling ``sim_time_unit``;
+    the unit is never assumed to be ``ns``, since cocotb reports whatever
+    unit the run actually used.
+
+    Never raises. A ``<testcase>`` carrying neither the attribute nor a
+    usable ``<properties>`` block (a test that never ran, or a unit token
+    this mapping does not recognise -- guessing a scale would be worse than
+    reporting nothing) degrades to ``None``, exactly as before: a purely
+    informational timing field must never sink a run whose pass/fail verdict
+    is otherwise perfectly well defined.
+    """
+    attribute = _maybe_float(testcase.get("sim_time_ns"))
+    if attribute is not None:
+        return attribute
+
+    properties = _testcase_properties(testcase)
+    duration = _maybe_float(properties.get("sim_time_duration"))
+    if duration is None:
+        return None
+    unit = (properties.get("sim_time_unit") or "").strip().lower()
+    exponent = _SIM_TIME_UNIT_NS_EXPONENT.get(unit)
+    if exponent is None:
+        return None
+    if exponent == 0:
+        return duration
+    if exponent > 0:
+        return duration * float(10**exponent)
+    # Divide rather than multiply by a fractional scale: `520000 / 1000` is
+    # exact where `520000 * 1e-3` is not.
+    return duration / float(10**-exponent)
 
 
 def _extract_random_seed_property(results_xml: str) -> int | None:
