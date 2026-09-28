@@ -49,14 +49,18 @@ dev = [
 # that failure to dependency-*resolution* time -- the standard, idiomatic
 # way pip/uv already handle a package with no distributable release for a
 # given interpreter -- rather than a confusing traceback surfacing from deep
-# inside cocotb's own build backend. Lift this cap once a cocotb release
-# adds Python 3.14 support (track https://github.com/cocotb/cocotb); until
-# then a `functional-verification` install attempt on 3.14 simply omits
-# cocotb from the resolved set, and any code that needs it must raise its
-# own clear "functional-verification requires Python < 3.14" error before
-# calling into it (the verb issue's concern, not this pin's).
+# inside cocotb's own build backend. cocotb 2.1.0 (the pin this extra
+# carried at the 2026-09 bump, issue #2583) still declares no upper bound
+# (`Requires-Python: >=3.9`) but now ships cp314 wheels, so the marker is
+# conservative rather than load-bearing until it is deliberately lifted --
+# lifting it is the verb issue's call (the `klt functional-verification`
+# Python-version guard must move in lockstep), not a dependency-bump PR's.
+# Until then a `functional-verification` install attempt on 3.14 simply
+# omits cocotb from the resolved set, and any code that needs it must raise
+# its own clear "functional-verification requires Python < 3.14" error
+# before calling into it (the verb issue's concern, not this pin's).
 functional-verification = [
-    "cocotb>=2.1,<2.2; python_version < \"3.14\"",
+    "cocotb>=2.1.0,<2.2; python_version < \"3.14\"",
 ]
 # Backs `tests/test_mom_cross_validation.py` (issue #895, Phase 2c of the
 # Method-of-Moments epic #701): the external MoM oracle used to cross-check

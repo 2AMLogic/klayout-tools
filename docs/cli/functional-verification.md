@@ -152,8 +152,10 @@ Related consequences:
   tests alone does not verify a design.
 
 A mixed passing/skipped regression still passes when at least one test
-executed and none failed. Test filters may intentionally leave skipped
-entries in the report; this command does not infer which named tests a
+executed and none failed. Test filters narrow the run (under cocotb ≥ 2.1,
+deselected tests are absent from the report entirely — see
+`testbench.testcase`); skipped entries come from tests that ran and skipped
+themselves, and this command does not infer which named tests a
 design must run. Detecting zero executed tests uses the testcase outcomes,
 not optional Verilator code-coverage collection. Signoff also validates
 these counts against the individual outcomes when reading saved evidence,
@@ -1020,7 +1022,7 @@ exactly.
 | `hdl_toplevel` | string | The DUT module name. Required. |
 | `testbench.module` | string | The Python test module **name** (`"test_gcd"`, not `"test_gcd.py"`), resolved as `<search dir>/<module>.py` where `<search dir>` is `testbench.search_path` if given, else the request's own directory. Required — this verb does not synthesize testbenches; the module is human- or generator-authored. |
 | `testbench.search_path` | string | Optional. Directory to resolve `testbench.module` against, instead of the request's own directory — absolute, or relative to the request (the same convention `sources` entries already use). Lets one unmodified testbench module be shared by several requests (e.g. RTL, gate-level netlist, and layout-extracted views of the same design) that live in different directories. Omitted: unchanged default behavior — the module is resolved next to the request. |
-| `testbench.testcase` | string \| array\<string\> \| null | Optional testcase-name filter; `null`/omitted runs every `@cocotb.test()` in the module. Filtered-out tests still appear in the report as `skipped`. |
+| `testbench.testcase` | string \| array\<string\> \| null | Optional testcase-name filter; `null`/omitted runs every `@cocotb.test()` in the module. Under cocotb ≥ 2.1 (the pinned line, issue #2583) filtered-out tests are **deselected, not skipped** — the runner compiles the names into a `COCOTB_TEST_FILTER` regex, and a deselected test does not appear in the report at all (`test_count` counts only selected tests). Cocotb 2.0.x instead recorded each filtered-out test as a `skipped` entry; `skipped_count` remains live for tests that *ran* and skipped themselves. |
 | `options.coverage` | boolean | Defaults to `false`. `true` requires `engine: "verilator"` (see "Coverage"). |
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
 | `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
