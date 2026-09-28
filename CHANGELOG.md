@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2595, `klt lvs --check`; additive — **no** `schema_version`
+  bump, and no change to where an input path is resolved): `--check` resolves
+  the `layout`/`reference` paths a committed report echoes back relative to
+  the **current working directory**, so a committed request/report pair whose
+  paths are relative to the request *file's own* directory only verified when
+  `--check` ran from that directory. Hitting it rendered as `status:
+  drifted` with `actual: null` — indistinguishable from "the recorded hash no
+  longer matches", so a reader who knew the inputs were untouched was told
+  the report had lost its hash rather than that the file was not found. The
+  CWD anchoring is deliberate and unchanged (`klt drc --check` resolves its
+  own `provenance.input` path the same way; re-anchoring one verb and not the
+  other would leave the two silently disagreeing about what a committed
+  relative path means) — but an echoed path that names no existing file now
+  gets an additional, optional `input_not_found` block on its `checks[]`
+  entry: `path` (the echoed path verbatim), `resolved` (the absolute path
+  actually looked for), and `found_relative_to_report` (the absolute path the
+  input *does* occupy relative to the committed report's own directory when
+  it is there, else `null` — the tell that the pair is intact and `--check`
+  was merely invoked from elsewhere). `expected`/`actual`/`match`/`status`
+  and the exit code are unchanged, the key is absent on a genuine content
+  mismatch, and text output prints `actual: None (input not found: …)` plus
+  the report-relative hint in place of the bare `None`. `klt drc --check` is
+  untouched.
 - **Fixed** (#2592, `klt functional-verification`; additive — **no**
   `schema_version` bump, but user-visible: a per-test `sim_time_ns` that
   reported `null` on every run now carries a real number again): cocotb 2.1.0

@@ -13740,6 +13740,129 @@ def test_check_lvs_report_detects_moved_layout_hash(tmp_path):
     assert by_field["environment.layout_sha256"]["match"] is False
 
 
+def _portable_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """Issue #2595's repro shape: a self-contained directory holding a
+    request whose `layout`/`reference` are relative to the request *file's
+    own* directory, its two netlists, and the report that run produced.
+    Returns ``(pair_dir, report_path)``."""
+    pair = tmp_path / "pair"
+    pair.mkdir()
+    _write(pair / "layout.spice", _INVERTER_SPICE)
+    _write(pair / "ref.spice", _INVERTER_SPICE)
+    request_path = _write_request(
+        pair / "request.json",
+        {
+            "layout": {"netlist": "layout.spice", "top": "inv"},
+            "reference": {"netlist": "ref.spice", "top": "inv"},
+        },
+    )
+    report_path = pair / "lvs.json"
+    _write_report(report_path, run_lvs(request_path))
+    return pair, report_path
+
+
+def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
+    """Issue #2595: `--check`ing a committed request/report pair from a
+    *different* directory than the one its relative `layout`/`reference`
+    were written against must say the inputs could not be found -- and
+    where it looked -- instead of a bare `actual: None` that reads as "the
+    recorded hash no longer matches".
+
+    Path anchoring itself is unchanged (still the current working
+    directory, the same convention `klt drc --check` uses): the entry is
+    still `match: False` / `status: "drifted"`, it just carries an
+    additional `input_not_found` block naming the resolved path, plus the
+    report-relative path that *does* exist when one does.
+    """
+    pair, report_path = _portable_pair(tmp_path)
+
+    monkeypatch.chdir(tmp_path)
+    result = check_lvs_report(os.path.join("pair", "lvs.json"))
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    for field, name in (
+        ("environment.layout_sha256", "layout.spice"),
+        ("environment.reference_sha256", "ref.spice"),
+    ):
+        check = by_field[field]
+        assert check["match"] is False
+        assert check["expected"] is not None
+        assert check["actual"] is None
+        missing = check["input_not_found"]
+        assert missing["path"] == name
+        assert os.path.realpath(missing["resolved"]) == os.path.realpath(
+            tmp_path / name
+        )
+        assert os.path.realpath(
+            missing["found_relative_to_report"]
+        ) == os.path.realpath(pair / name)
+
+
+def test_check_lvs_report_portable_pair_matches_from_its_own_directory(
+    tmp_path, monkeypatch
+):
+    """The already-covered half of issue #2595: the identical committed
+    pair `--check`ed from its own directory still passes cleanly, with no
+    `input_not_found` block on any entry."""
+    _pair, report_path = _portable_pair(tmp_path)
+
+    monkeypatch.chdir(report_path.parent)
+    result = check_lvs_report("lvs.json")
+
+    assert result["status"] == "match"
+    assert all(check["match"] for check in result["checks"])
+    assert not any("input_not_found" in check for check in result["checks"])
+
+
+def test_check_lvs_report_moved_input_is_not_reported_as_not_found(tmp_path):
+    """A genuine hash mismatch -- the input still resolves, its content
+    changed -- must stay distinguishable from issue #2595's unresolvable
+    path: no `input_not_found` block, and a real `actual` digest."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    _write(Path(layout_path), _INVERTER_SPICE + "* mutated\n")
+
+    result = check_lvs_report(str(report_path))
+
+    by_field = {check["field"]: check for check in result["checks"]}
+    moved = by_field["environment.layout_sha256"]
+    assert moved["match"] is False
+    assert moved["actual"] is not None
+    assert "input_not_found" not in moved
+
+
+def test_check_lvs_report_deleted_input_has_no_report_relative_fallback(tmp_path):
+    """An absolute `layout` path whose file is gone is still reported as
+    not-found (issue #2595), but with `found_relative_to_report: None` --
+    there is no report-relative candidate for an absolute path, so the
+    diagnostic must not invent one."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, run_lvs(json.dumps(request)))
+
+    os.remove(layout_path)
+
+    result = check_lvs_report(str(report_path))
+
+    by_field = {check["field"]: check for check in result["checks"]}
+    missing = by_field["environment.layout_sha256"]["input_not_found"]
+    assert missing["path"] == layout_path
+    assert missing["resolved"] == layout_path
+    assert missing["found_relative_to_report"] is None
+    assert "input_not_found" not in by_field["environment.reference_sha256"]
+
+
 def test_check_lvs_report_with_deck_checks_deck_hash(tmp_path):
     """Inline extraction (`layout.file` + `layout.deck`) also reconciles
     `provenance.deck.content_hash` -- the third hash issue #1106's design
@@ -14276,6 +14399,24 @@ def test_cli_lvs_check_drifted_exits_three(tmp_path, capsys):
     assert main(["lvs", "--check", str(report_path), "--format", "json"]) == 3
     data = json.loads(capsys.readouterr().out)
     assert data["status"] == "drifted"
+
+
+def test_cli_lvs_check_text_names_unresolvable_input(tmp_path, capsys, monkeypatch):
+    """Issue #2595's reproduction, end to end through the CLI: `--check`ing
+    a committed pair from its parent directory still exits 3, but the text
+    rendering says the input was not found (and where it really is) instead
+    of the bare `actual: None` the report reads as a lost hash."""
+    pair, _report_path = _portable_pair(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    capsys.readouterr()
+
+    assert main(["lvs", "--check", os.path.join("pair", "lvs.json")]) == 3
+    out = capsys.readouterr().out
+    assert "status: drifted" in out
+    assert "[DRIFTED] environment.layout_sha256" in out
+    assert f"actual:   None (input not found: {tmp_path / 'layout.spice'})" in out
+    assert str(pair / "layout.spice") in out
+    assert "re-run from there" in out
 
 
 def test_cli_lvs_check_rerun_exits_three_on_drift(tmp_path, capsys):
