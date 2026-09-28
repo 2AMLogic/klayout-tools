@@ -3439,6 +3439,94 @@ def test_res_array_sky130_dummy_resistors_suppressed(tmp_path):
     assert report["dummy_devices_dropped"] == dropped
 
 
+def test_mos_array_gf180mcu_dummy_gates_suppressed(tmp_path):
+    """Issue #2599: `klt gen mos_array` (gf180mcuC, `dummy > 0`) piped into
+    `klt extract --deck gf180mcu` suppresses the dummy gates instead of
+    extracting them as spurious real `nfet` devices -- the gf180mcu
+    counterpart of `test_mos_array_sky130_dummy_gates_suppressed` (#491).
+    `dummy_devices_dropped` matches `2 * rows * dummy` and the extracted
+    `device_count` matches `klt gen`'s own real-cell-only count."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "gf180mcuC")
+    params = {"rows": 2, "cols": 2, "dummy": 1}
+    gen_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuC", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_gf.gds")},
+        }
+    )
+    real = params["rows"] * params["cols"]
+    assert gen_report["device_count"] == real
+
+    report = run_extract(
+        str(tmp_path / "mos_gf.gds"), "gf180mcu", output=str(tmp_path / "mos_gf.spice")
+    )
+
+    assert report["device_count"] == real
+    assert report["device_counts"] == {"nfet": real}
+    assert report["dummy_devices_dropped"] == 2 * params["rows"] * params["dummy"]
+
+
+def test_mos_array_gf180mcu_without_dummies_drops_nothing(tmp_path):
+    """Issue #2599's edge case: a `dummy: 0` request on the same family
+    draws no marker shape at all, so the additive suppression is a no-op --
+    `dummy_devices_dropped` stays 0 and every drawn unit still extracts."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "gf180mcuC")
+    params = {"rows": 2, "cols": 2, "dummy": 0}
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuC", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_gf0.gds")},
+        }
+    )
+
+    report = run_extract(
+        str(tmp_path / "mos_gf0.gds"),
+        "gf180mcu",
+        output=str(tmp_path / "mos_gf0.spice"),
+    )
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_count"] == params["rows"] * params["cols"]
+    assert report["device_counts"] == {"nfet": params["rows"] * params["cols"]}
+
+
+def test_res_array_gf180mcu_dummy_resistors_suppressed(tmp_path):
+    """Issue #2599: `klt gen res_array` (gf180mcuC, `dummy > 0`) piped into
+    `klt extract --deck gf180mcu` suppresses the dummy resistor bodies
+    instead of extracting them as spurious real `ppolyf_u` devices -- the
+    gf180mcu counterpart of `test_res_array_sky130_dummy_resistors_suppressed`
+    (#491)."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "gf180mcuC")
+    params = {"num": 4, "dummy": 2, "rows": 1}
+    gen_report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuC", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "res_gf.gds")},
+        }
+    )
+    assert gen_report["device_count"] == params["num"]
+
+    report = run_extract(
+        str(tmp_path / "res_gf.gds"), "gf180mcu", output=str(tmp_path / "res_gf.spice")
+    )
+
+    assert report["device_count"] == params["num"]
+    assert report["device_counts"] == {"ppolyf_u": params["num"]}
+    assert report["dummy_devices_dropped"] == 2 * params["rows"] * params["dummy"]
+
+
 def test_sky130_bjt_coincident_marker_is_clean_error_not_traceback(tmp_path):
     """Issue #432: a bipolar device-mark drawn exactly coincident with (not
     strictly enclosing) its emitter pad used to abort `klt extract` with an
@@ -16383,15 +16471,53 @@ def _add_dummy_nfet(layout: kdb.Layout, x0: int, *, marker: str = "full") -> Non
 
 
 def test_dummy_field_defaults_none_on_shipped_decks():
-    """The `dummy` field is opt-in per deck (issue #295). gf180mcu still
-    declares none -- out of scope for issue #491, which only wires sky130 up
-    -- so its extraction is unaffected. sky130's curated deck now declares a
-    curated marker layer (issue #491, `(83, 20)` -- see
-    `klayout_tools.decks.sky130.EXTRACTION_DECK`'s own comment for why that
-    layer was chosen), the deck-side half of a fix whose extractor-side half
-    (this field itself) shipped in #295/#462."""
+    """The `dummy` field is opt-in per deck (issue #295). sky130's curated
+    deck declares a curated marker layer as of issue #491 (`(83, 20)`) and
+    gf180mcu's as of issue #2599 (`(100, 50)`) -- see each
+    `EXTRACTION_DECK`'s own comment for why that layer was chosen. Both are
+    the deck-side half of a fix whose extractor-side half (this field
+    itself) shipped in #295/#462. `sg13cmos5l` still declares none (deferred
+    by #2599 to its own follow-up, #2602), so its extraction is unaffected
+    and the field's opt-in default is still exercised here."""
     assert get_extraction_deck("sky130").dummy == (83, 20)
-    assert get_extraction_deck("gf180mcu").dummy is None
+    assert get_extraction_deck("gf180mcu").dummy == (100, 50)
+    assert get_extraction_deck("sg13cmos5l").dummy is None
+
+
+def test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer():
+    """Issue #2599: gf180mcu's curated dummy marker is a deck-local
+    convention layer, so it must not coincide with any other layer this deck
+    reads -- otherwise real geometry would be silently suppressed as
+    "dummy". It reuses gf180mcu's own `LVS_*` annotation layer *number*
+    (100, the structural analogue of the `marker.*` number sky130's
+    `(83, 20)` reuses) on a datatype the PDK assigns no purpose to (upstream
+    uses only 100/5, 100/7 and 100/8 -- `LVS_RF`/`LVS_Drain`/`LVS_Source`),
+    and this curated deck reads no layer-100 shape for any other role."""
+    deck = get_extraction_deck("gf180mcu")
+    assert deck.dummy == (100, 50)
+    assert deck.dummy not in deck.device_recognition_layers
+    assert deck.dummy not in deck.merge_layers
+    # The marker is necessarily *in* `connectivity_layers` (the extractor has
+    # to read it to suppress on it), so `deck.dummy not in
+    # deck.connectivity_layers` cannot be asserted directly. Recompute the
+    # set from a copy of this same deck with the `dummy` field cleared: that
+    # is every layer this deck reads for *some other* role, built by the
+    # deck's own machinery rather than restated here, so the marker's
+    # absence from it is a real invariant.
+    layers_read_for_other_roles = dataclasses.replace(
+        deck, dummy=None
+    ).connectivity_layers
+    assert deck.dummy not in layers_read_for_other_roles
+    # ...and the marker is the *only* layer-100 member of the full set: this
+    # deck reads nothing else on that number at all.
+    assert [layer for layer in deck.connectivity_layers if layer[0] == 100] == [
+        (100, 50)
+    ]
+    # No DRC rule in this family's curated deck references layer 100 either,
+    # so `klt drc --deck gf180mcu` never checks the convention layer.
+    from klayout_tools.decks.gf180mcu import DECK as GF180MCU_DRC_DECK
+
+    assert not [rule for rule in GF180MCU_DRC_DECK if rule.layer[0] == 100]
 
 
 def test_dummy_devices_dropped_is_zero_without_dummy_layer(tmp_path):

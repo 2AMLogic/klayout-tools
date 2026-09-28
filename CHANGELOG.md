@@ -33,6 +33,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   than raising. The real-toolchain Icarus integration test now asserts every
   executed test reports a non-null `sim_time_ns`, so the next upstream JUnit
   reshuffle fails loudly instead of silently nulling the field again.
+- **Fixed** (#2599, `klt gen` / `klt extract` / `klt lvs` on `gf180mcu`;
+  additive — **no** `schema_version` bump, but user-visible: the `gf180mcu`
+  deck's `provenance.deck` sha256 changes, a `dummy > 0` generated stream
+  carries one new layer, and an array that previously extracted
+  `2 * rows * dummy` extra devices now does not): `klt gen mos_array`/
+  `res_array`/`bjt_array` accept a `"dummy": N` param on `gf180mcu`, but
+  that family's curated extraction deck declared no `dummy` marker layer —
+  so the tool's own generator drew edge-fill devices the tool's own
+  `klt lvs` could only report as `device.unmatched`, with knock-on
+  `topology` conflicts on whichever supply rail the dummies tie to, and no
+  option, hint or deck field to say "these are dummies."
+  `decks/gf180mcu.py`'s `EXTRACTION_DECK` now declares `dummy=(100, 50)` —
+  a deck-local convention layer reusing gf180mcu's own `LVS_*`
+  extraction-annotation layer number on a datatype the PDK assigns no
+  purpose to (gf180mcu has no native per-device dummy mark; see that deck's
+  own comment for the provenance and the non-collision verification) — and
+  the generators draw it over each dummy unit's gate/body/device-mark
+  footprint, so the extractor-side dummy-suppression machinery that shipped
+  in #295/#462 fires on this family too. This is the `gf180mcu` counterpart
+  of sky130's own `(83, 20)` declaration (#491). `sg13g2` and `sg13cmos5l`
+  still declare no `dummy` layer and are unaffected (tracked separately).
+  A `dummy: 0` request on `gf180mcu` draws no marker shape and extracts
+  exactly as before.
 - **Fixed** (#2580, `klt gen`; additive — **no** `schema_version` bump, but
   user-visible: a `mos_array` request that previously returned an empty
   `drc_hints.notes` can now carry an entry): `klt gen mos_array` draws a
