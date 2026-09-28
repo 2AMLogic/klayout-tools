@@ -93,6 +93,29 @@ def test_cli_kb_validate_reports_broken_jsonschema_as_structured_error():
     assert "jsonschema" in payload["error"]["message"]
 
 
+def test_gen_help_does_not_claim_stale_pdk_family_restriction():
+    # Regression test for #2577: `gen_parser`'s description used to claim
+    # "every generator except resistor_strip only supports the sky130/
+    # gf180mcu PDK families" -- stale as of sg13g2 support landing for
+    # mos_array/cap_array (among others). The description must not hard-code
+    # a family list that can silently go stale again; instead it should
+    # point at docs/cli/gen.md's per-generator "PDK-family support" table
+    # (the single source of truth) and `klt gen --list`.
+    parser = create_parser()
+    subparsers_action = next(
+        action
+        for action in parser._actions
+        if getattr(action, "choices", None) and "gen" in action.choices
+    )
+    description = subparsers_action.choices["gen"].description
+    assert description is not None
+    assert "sky130/gf180mcu" not in description, (
+        f"gen --help description hard-codes a stale PDK-family claim: {description!r}"
+    )
+    assert "docs/cli/gen.md" in description
+    assert "--list" in description
+
+
 def test_gen_compose_help_lists_every_supported_placement_strategy():
     # Regression test for #683: `gen_compose_parser`'s description drifted
     # from `gen_compose.SUPPORTED_PLACEMENT_STRATEGIES` (it once claimed
