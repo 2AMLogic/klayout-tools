@@ -1583,6 +1583,26 @@ jobs:
           gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             > /tmp/ci-run.json
 
+      - name: Fetch the rolling comparison window
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Issue #2615: the gate compares against recent `main` runs and
+        # against runs that were on the pool at the same time, not against
+        # hand-committed ceilings. That history is read LIVE here rather than
+        # committed or cached -- the concurrency evidence is minutes old and
+        # cannot exist in any artifact a previous run wrote. The rationale and
+        # the alternatives considered are in the script's own docstring.
+        #
+        # This step cannot fail the job: the script writes an empty history
+        # and exits 0 on any API error, and the check then falls back to the
+        # committed ceilings (its pre-#2615 behaviour).
+        run: |
+          python3 scripts/fetch_ci_wall_clock_history.py \
+            --repo "${{ github.repository }}" \
+            --run-id "${{ github.run_id }}" \
+            --budget .github/ci-wall-clock-budget.json \
+            --out /tmp/ci-history.json
+
       - name: Check wall-clock budget
         # --report-only for fork PRs: ci.yml's runner conditional routes those
         # to ubuntu-latest, whose per-job timings the budgets -- measured on
@@ -1596,6 +1616,7 @@ jobs:
           python3 scripts/check_ci_wall_clock.py \
             --jobs-json /tmp/ci-jobs.json \
             --run-json /tmp/ci-run.json \
+            --history-json /tmp/ci-history.json \
             --budget .github/ci-wall-clock-budget.json \
             --annotate \
             ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '--report-only' || '' }}
