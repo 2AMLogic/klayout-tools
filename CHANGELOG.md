@@ -36,6 +36,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   exactly as issue #2496 made it. A spec found at neither candidate still
   renders `supply_spec_incomplete` — unprovable, never assumed. No `klt erc`
   output changed, and no manifest needs editing.
+- **Fixed** (#2602, `klt gen` / `klt extract` / `klt lvs` on `sg13cmos5l`;
+  additive — **no** `schema_version` bump, but user-visible: the
+  `sg13cmos5l` deck's `provenance.deck` sha256 changes, a `dummy > 0`
+  generated stream carries one new layer, and a `res_array` that previously
+  extracted `2 * rows * dummy` extra devices now does not): `klt gen
+  res_array` (the only dummy-drawing generator this family's
+  `_GENERATOR_FAMILY_DEFERRED` table lets run on `sg13cmos5l`) accepts a
+  `"dummy": N` param on `sg13cmos5l`, but that family's curated extraction
+  deck declared no `dummy` marker layer — so the tool's own generator drew
+  edge-fill resistor units the tool's own `klt lvs` could only report as
+  `device.unmatched`. `decks/sg13cmos5l.py`'s `EXTRACTION_DECK` now
+  declares `dummy=(100, 50)` — a deck-local convention layer on a layer
+  number this family's own transcribed `.lyp`/DRC/LVS layer tables assign
+  no purpose to at all (sg13cmos5l has no native per-device dummy mark; see
+  that deck's own comment for the provenance and the non-collision
+  verification), and `res_array` draws it over each dummy unit's
+  recognised body-segment footprint, so the extractor-side
+  dummy-suppression machinery that shipped in #295/#462 fires on this
+  family too. This is the `sg13cmos5l` counterpart of sky130's own
+  `(83, 20)` declaration (#491) and gf180mcu's own `(100, 50)` declaration
+  (#2599). `sg13g2` still declares no `dummy` layer and is unaffected
+  (tracked separately, #2590). A `dummy: 0` request on `sg13cmos5l` draws
+  no marker shape and extracts exactly as before.
 - **Fixed** (#2595, `klt lvs --check`; additive — **no** `schema_version`
   bump, and no change to where an input path is resolved): `--check` resolves
   the `layout`/`reference` paths a committed report echoes back relative to
