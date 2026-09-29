@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2608, `klt signoff` T1 item 11; additive — **no**
+  `schema_version` bump, and no new reason string: a citation that previously
+  rendered `supply_spec_incomplete` for a spec document that could not be
+  found now grades on that document's real declarations): the `klt erc`
+  envelope item 11 cites echoes its spec document's *path*, and `klt signoff`
+  re-reads that document to recover the declarations the envelope does not
+  carry (declared supplies, stackup, ties). That path was resolved from one
+  directory only — `spec["cwd"]` for a command-backed manifest entry, the
+  grading process's own cwd otherwise — so an ERC run made from the layout
+  directory, which records a bare `"spec": "erc_supply_spec.json"`, was
+  unreadable from a repo-root `klt signoff --manifest`. It is now resolved
+  the same two-candidate way issue #2197 resolves `klt yield`'s samples
+  document: **relative to the ERC report's own directory first**, then
+  relative to the producing run's directory as the previous, compatibility
+  fallback. Where both candidates hold a same-named document the envelope's
+  own `provenance.spec.content_hash` (issue #2049) decides which is the cited
+  spec, so a coincidentally-named neighbour beside the evidence can never
+  turn a fresh citation into a reported `stale_evidence`; a genuinely edited
+  or unpinned spec still renders `stale_evidence`/`unverifiable_provenance`
+  exactly as issue #2496 made it. A spec found at neither candidate still
+  renders `supply_spec_incomplete` — unprovable, never assumed. No `klt erc`
+  output changed, and no manifest needs editing.
 - **Fixed** (#2595, `klt lvs --check`; additive — **no** `schema_version`
   bump, and no change to where an input path is resolved): `--check` resolves
   the `layout`/`reference` paths a committed report echoes back relative to
