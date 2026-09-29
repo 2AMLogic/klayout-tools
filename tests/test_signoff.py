@@ -10217,6 +10217,171 @@ def test_item_11_unmet_when_the_erc_envelope_predates_content_hash_provenance(
     assert item["citation"] is None
 
 
+# --------------------------------------------------------------------------- #
+# Spec path resolution (issue #2608): `klt erc`'s envelope echoes the spec
+# document's *path*, and that path is not portable -- it was written relative
+# to whatever directory the producing run used. A `klt erc` run made from the
+# layout directory (the natural place for a per-block check) records a bare
+# filename, so grading its committed envelope from the repo root has to look
+# beside the evidence file too, exactly as issue #2197 taught the `klt yield`
+# samples document. Before that fallback existed the read simply failed, and
+# the failure was reported as `supply_spec_incomplete` -- "go widen the spec"
+# for a spec that is complete and two directories away.
+# --------------------------------------------------------------------------- #
+
+
+def _item_11_evidence_naming_a_relative_spec(
+    evidence_dir: Path,
+    spec_path: Path,
+    *,
+    spec: dict = ERC_SUPPLY_SPEC,
+    prefix: str = "erc",
+) -> list[str]:
+    """A complete analog item-11 citation whose `klt erc` envelope names its
+    spec document by *bare filename* -- the shape `klt erc
+    supply.gds erc_supply_spec.json` records -- with the document itself
+    written at `spec_path` (wherever that is) and the envelope's
+    `provenance.spec.content_hash` pinned to it (issue #2496)."""
+    spec_path.write_text(json.dumps(spec))
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "spec": spec_path.name,
+        "provenance": {
+            **ERC_CLEAN_ENVELOPE["provenance"],
+            "spec": {"content_hash": _hash_of(spec_path)},
+        },
+    }
+    erc_path = evidence_dir / f"{prefix}.json"
+    erc_path.write_text(json.dumps(envelope))
+    lvs_path = evidence_dir / f"{prefix}-lvs.json"
+    lvs_path.write_text(json.dumps(LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE))
+    return [str(erc_path), str(lvs_path)]
+
+
+def test_item_11_resolves_an_erc_spec_that_sits_beside_the_evidence(tmp_path):
+    """Issue #2608 repro: `klt erc` run from the layout directory records
+    `"spec": "erc_supply_spec.json"`, a path that resolves only from there.
+    Grading the manifest from a *different* process cwd (the repro's repo
+    root, stood in for by pytest's own invocation directory) must resolve it
+    relative to the ERC report's own directory -- never report
+    `supply_spec_incomplete` for a spec that is complete and readable."""
+    evidence_dir = tmp_path / "blocks" / "supply" / "signoff"
+    evidence_dir.mkdir(parents=True)
+    parts = _item_11_evidence_naming_a_relative_spec(
+        evidence_dir, evidence_dir / "erc_supply_spec.json"
+    )
+
+    assert os.getcwd() != str(evidence_dir)
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    assert item["citation"]["power_delivery"]["supply_nets"] == ["VPWR", "VGND"]
+
+
+def test_item_11_still_resolves_an_erc_spec_found_only_from_the_process_cwd(
+    tmp_path, monkeypatch
+):
+    """Compatibility fallback: a spec document that does *not* sit beside
+    the ERC report -- the pre-#2608 convention, where the grading process's
+    own cwd is the one the relative path was written against -- is still
+    found and graded exactly as before."""
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    parts = _item_11_evidence_naming_a_relative_spec(
+        evidence_dir, cwd_dir / "erc_supply_spec.json"
+    )
+    monkeypatch.chdir(cwd_dir)
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["supply_nets"] == ["VPWR", "VGND"]
+
+
+def test_item_11_prefers_the_erc_spec_candidate_whose_hash_matches(
+    tmp_path, monkeypatch
+):
+    """Two directories can hold a same-named spec. The envelope's own
+    `provenance.spec.content_hash` decides which one is the cited document,
+    for the same reason `_verify_input_artifact` prefers a match over a
+    mismatch: a coincidentally-named neighbour must never turn a fresh
+    citation into a reported `stale_evidence` (issue #2608)."""
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    # The cited document -- pinned by the envelope -- is the cwd-relative one.
+    parts = _item_11_evidence_naming_a_relative_spec(
+        evidence_dir, cwd_dir / "erc_supply_spec.json"
+    )
+    # An unrelated same-named spec beside the evidence, tried first.
+    (evidence_dir / "erc_supply_spec.json").write_text(
+        json.dumps({**ERC_SUPPLY_SPEC, "nets": [{"name": "A", "kind": "signal"}]})
+    )
+    monkeypatch.chdir(cwd_dir)
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["supply_nets"] == ["VPWR", "VGND"]
+
+
+def test_item_11_unmet_when_the_erc_spec_is_at_neither_candidate(tmp_path, monkeypatch):
+    """A spec that has moved or been deleted is found at neither candidate,
+    and stays `unmet` -- unprovable, never assumed. (The rendered reason is
+    still `supply_spec_incomplete`; issue #2608 narrows *when* that fires,
+    not what an unfindable spec grades as.)"""
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    parts = _item_11_evidence_naming_a_relative_spec(
+        evidence_dir, tmp_path / "elsewhere.json"
+    )
+    # The envelope names `elsewhere.json`, which exists at neither the
+    # evidence directory nor the process cwd.
+    monkeypatch.chdir(cwd_dir)
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
+    assert item["citation"] is None
+
+
+def test_item_11_edited_spec_beside_the_evidence_is_still_stale(tmp_path):
+    """The new evidence-dir candidate must not weaken issue #2496: an
+    evidence-relative spec edited after the cited run is the only candidate
+    that reads, so its hash mismatch is reported as `stale_evidence` rather
+    than falling through to some other document."""
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    spec_path = evidence_dir / "erc_supply_spec.json"
+    parts = _item_11_evidence_naming_a_relative_spec(evidence_dir, spec_path)
+    spec_path.write_text(
+        json.dumps(
+            {
+                **ERC_SUPPLY_SPEC,
+                "nets": [*ERC_SUPPLY_SPEC["nets"], {"name": "VPWR2", "kind": "supply"}],
+            }
+        )
+    )
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+    assert item["citation"] is None
+
+
 def test_item_11_requires_both_an_erc_and_an_lvs_citation(tmp_path):
     """An ERC run alone proves supply continuity but says nothing about
     whether the supplies were part of the LVS compare -- "cite a different
