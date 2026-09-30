@@ -149,7 +149,8 @@ def test_input_changes_in_late_analysis_also_refuse_attribution(prepared, monkey
 
     def changing(*args):
         (root / "gcd.v").write_text("module gcd(); endmodule\n")
-        return None
+        # `(sta, sta_unavailable_reason)` since issue #2628.
+        return None, None
 
     monkeypatch.setattr(synthesize, "_read_sta_timing", changing)
     with pytest.raises(SynthesizeError, match="input.*changed"):

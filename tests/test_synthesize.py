@@ -803,6 +803,15 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
     assert "sta" in report
     assert report["sta"] is None
 
+    # Issue #2628: a bare `sta: null` does not say whether STA was
+    # *unavailable* (extension not installed -- install it and retry) or
+    # *not applicable* (the engine ran and could not analyze this
+    # netlist/liberty pair). `sta_unavailable_reason` is always present and
+    # is non-`None` exactly when `sta` is `None`.
+    assert "sta_unavailable_reason" in report
+    assert isinstance(report["sta_unavailable_reason"], str)
+    assert "klt_statime_native" in report["sta_unavailable_reason"]
+
     # `structural` (issue #1588) is always present, even with no `Warning: `
     # lines in the captured log and no latch-shaped cell type in
     # `_GCD_MODULE_STATS`.

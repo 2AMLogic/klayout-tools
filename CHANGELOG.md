@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2628, `klt synthesize`; additive — `schema_version`
+  unchanged): a `sta_unavailable_reason` field (string | null) says **why**
+  the native gate-level `sta` stage produced no number. `null` exactly when
+  `sta` is non-`null`; otherwise a human-readable string distinguishing the
+  two cases a bare `sta: null` used to collapse into one — the optional
+  `klt_statime_native` extension is not installed (the reason names the
+  install path; a caller can act on this one and retry) versus the engine
+  ran and raised `StaError` on this particular netlist/liberty pair (the
+  reason carries the engine's own message, e.g. a mapped cell type with no
+  liberty entry). Free text for a human reader, following the
+  `unavailable_reason` precedent in `klt place-and-route`'s `power.placed`
+  block — branch on `sta === null`, not on the reason's wording.
+  `--format text` echoes it too, where a `null` `sta` previously printed
+  nothing at all. `sta` and `timing` themselves are unchanged.
+- **Changed** (docs/CLI help only, #2628): `klt sta --help` now documents
+  the DEF-free `verilog` geometry source (liberty + netlist + clock, ideal
+  wire loads, `geometry_source: "netlist_estimate"`) that has shipped since
+  #1825 — its description previously described only the `def` path, so a
+  caller reading it alone would conclude a routed DEF was mandatory.
+  `docs/cli/synthesize.md` additionally now states, in one place, whether
+  each of `timing.critical_path_ps` and `sta.worst_reg_to_reg_path.delay_ns`
+  includes clk-to-Q and setup/hold (neither includes setup/hold; only the
+  latter includes clk-to-Q). No behavior change.
 - **Added** (#2623, `klt signoff` T1 item 11; additive — `schema_version`
   unchanged): a `met` item 11 citation now names any `ties_disclosure.
   undeclared_classes` the cited `klt erc` run disclosed (#2541) even when

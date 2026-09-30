@@ -762,10 +762,18 @@ def _measure_candidate(
     except SynthesizeError:
         return None
 
+    # `_read_sta_timing` returns `(sta, sta_unavailable_reason)` since issue
+    # #2628; a candidate's `measured` block reports only the number. The
+    # reason is identical for every trial in this run (same extension, same
+    # liberty) and is reported once, at the response's own top level.
+    sta, _sta_unavailable_reason = _read_sta_timing(
+        netlist_path, engine_options.liberty_path, hdl_toplevel
+    )
+
     measurement = _candidate_measurement(
         instance_count=module_stats["num_cells"],
         area_um2=module_stats["area"],
-        sta=_read_sta_timing(netlist_path, engine_options.liberty_path, hdl_toplevel),
+        sta=sta,
         abc_timing=abc_timing,
         target_period_ns=engine_options.target_period_ns,
     )

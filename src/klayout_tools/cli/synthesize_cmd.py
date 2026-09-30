@@ -143,6 +143,39 @@ def _print_check_text(result: dict) -> None:
             print(f"      actual:   {check['actual']}")
 
 
+def _print_sta(report: dict) -> None:
+    """`--format text` rendering of the native gate-level `sta` stage.
+
+    Extracted from :func:`_print_text` (issue #2628) so the "why is there no
+    number?" branch below can exist without pushing that already-long
+    renderer further up the C901 ratchet -- same shape as the existing
+    :func:`_print_cell_exclusions` helper.
+    """
+    sta = report["sta"]
+    if not sta:
+        # A text reader previously saw *nothing* here, with no way to tell
+        # "the optional extension is missing -- install it and re-run" from
+        # "the engine ran and could not analyze this netlist". The JSON
+        # contract's `sta_unavailable_reason` says which; echo it.
+        reason = report.get("sta_unavailable_reason")
+        if reason:
+            print(f"sta: none ({reason})")
+        return
+
+    worst = sta["worst_path"]
+    print(
+        f"sta.worst_path: {worst['delay_ns']:.4f} ns "
+        f"({worst['startpoint']} -> {worst['endpoint']}, source: "
+        f"{sta['source']})"
+    )
+    r2r = sta.get("worst_reg_to_reg_path")
+    if r2r:
+        print(
+            f"sta.worst_reg_to_reg_path: {r2r['delay_ns']:.4f} ns "
+            f"({r2r['startpoint']} -> {r2r['endpoint']})"
+        )
+
+
 def _print_text(report: dict) -> None:
     print(f"engine: {report['engine']} {report['engine_version'] or ''}".rstrip())
     print(f"hdl_toplevel: {report['hdl_toplevel']}")
@@ -162,20 +195,7 @@ def _print_text(report: dict) -> None:
             f"wire_load: {timing['wire_load'] or 'none'} -- pre-layout estimate)"
         )
 
-    sta = report["sta"]
-    if sta:
-        worst = sta["worst_path"]
-        print(
-            f"sta.worst_path: {worst['delay_ns']:.4f} ns "
-            f"({worst['startpoint']} -> {worst['endpoint']}, source: "
-            f"{sta['source']})"
-        )
-        r2r = sta.get("worst_reg_to_reg_path")
-        if r2r:
-            print(
-                f"sta.worst_reg_to_reg_path: {r2r['delay_ns']:.4f} ns "
-                f"({r2r['startpoint']} -> {r2r['endpoint']})"
-            )
+    _print_sta(report)
 
     instance_counts_by_type = report["instance_counts_by_type"]
     if instance_counts_by_type:
