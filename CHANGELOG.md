@@ -311,7 +311,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   generic "unsupported PDK" one. See
   [`docs/cli/sim.md`](docs/cli/sim.md)'s "Both off-host backends validate
   `models.pdk` up front" section.
-
+- **Added** (#2447, `klt place-and-route`, additive — **no**
+  `schema_version` bump: no new request or response field, only one more
+  accepted value for the existing `request.power.preset`): a
+  **`"sg13g2"`** PDN preset for IHP's `sg13g2_stdcell`. `request.power` has
+  been supported on that library since #2441, but it was the only supported
+  library with no preset, so every IHP caller had to hand-transcribe the
+  strap geometry that presets exist to remove. The recipe is IHP's own
+  LibreLane platform config (`libs.tech/librelane/config.tcl` plus
+  `libs.tech/librelane/sg13g2_stdcell/config.tcl`'s `PDN_RAIL_WIDTH 0.44`,
+  IHP-Open-PDK v0.3.0): a `Metal1` followpins rail at width 0.44 / pitch
+  7.56, and `TopMetal1`/`TopMetal2` straps at width 2.2 / spacing 4.0 /
+  pitch 75.6 / offset 13.6, with no via-stack tuning (that config names
+  none). Unlike the three ORFS-derived presets, whose `source` strings are
+  line-for-line citations, this entry's rail **pitch is this repo's own
+  derivation** — 2× the 3.78 µm `CoreSite` row height, i.e. one VDD/VSS
+  rail pair, since `-followpins` takes its placement from the rows
+  themselves and LibreLane states no rail pitch — and its `source` string
+  and docs row both say so explicitly. Geometry unchanged from the
+  live-verified block in #2441 (`route_drc_violation_count: 0` against
+  `openroad 26Q3-1278-g4421880472` + a real IHP-Open-PDK v0.3.0 install);
+  the tests now read that block *out of* the preset table, so the explicit
+  and preset paths cannot drift apart. An unknown preset name's existing
+  `"supported: …"` validation error now lists `sg13g2` too. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s "Platform
+  PDN presets" section.
 - **Fixed** (#2517, `klt yield-campaign`; no schema change — **no**
   `schema_version` bump): every campaign run reported
   `campaign.sim_status: "pass_partial"`, even a completely clean one. A

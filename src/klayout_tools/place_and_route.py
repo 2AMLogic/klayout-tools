@@ -1401,6 +1401,32 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
 #:   still echoes one ``power.connects[]`` entry per consecutive pair
 #:   regardless (:func:`_pdn_connects_applied`).
 #:
+#: ``"sg13g2"`` (issue #2447) is the one entry that is **not** from ORFS:
+#: IHP-Open-PDK ships no ORFS platform at all, so its recipe comes from
+#: IHP's own LibreLane platform config instead --
+#: ``libs.tech/librelane/config.tcl`` @ IHP-Open-PDK v0.3.0, plus that
+#: file's per-library sibling ``libs.tech/librelane/sg13g2_stdcell/
+#: config.tcl`` for the rail width::
+#:
+#:       set ::env(PDN_RAIL_LAYER) Metal1         ;# PDN_RAIL_OFFSET 0
+#:       set ::env(PDN_VERTICAL_LAYER) TopMetal1
+#:       set ::env(PDN_HORIZONTAL_LAYER) TopMetal2
+#:       set ::env(PDN_VWIDTH) 2.2   ;# VSPACING 4.0 VPITCH 75.6 VOFFSET 13.6
+#:       set ::env(PDN_HWIDTH) 2.2   ;# HSPACING 4.0 HPITCH 75.6 HOFFSET 13.6
+#:       set ::env(PDN_RAIL_WIDTH) 0.44           ;# sg13g2_stdcell/config.tcl
+#:
+#: Exactly one number in that entry is **not** a transcription, and its
+#: ``source`` string says so rather than reading like the line-for-line
+#: citations the other three carry: the ``Metal1`` rail's ``pitch_um``
+#: (7.56). LibreLane states no rail pitch -- ``-followpins`` takes its
+#: placement from the rows themselves -- so 7.56 is this repo's own
+#: derivation, 2x the 3.78 um ``CoreSite`` row height (one VDD/VSS rail
+#: pair). LibreLane names no via-stack tuning for this platform either, so
+#: this entry's ``connects`` is empty for the same reason ``"sky130hd"``'s
+#: is. The whole block was driven through a real ``openroad`` + real
+#: IHP-Open-PDK v0.3.0 run under issue #2441 (as an explicit
+#: ``power.straps`` request) before being shipped here as a preset.
+#:
 #: Deliberately **not** carried over from those configs, because this
 #: module's PDN path does not emit the corresponding Tcl for *any* request,
 #: preset or explicit:
@@ -1498,6 +1524,41 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
                 "split_cuts": {"layer": "Metal3", "width_um": 0.128},
             },
         ),
+    },
+    "sg13g2": {
+        "cell_library": "sg13g2_stdcell",
+        "source": (
+            "IHP-Open-PDK@v0.3.0:libs.tech/librelane/config.tcl (+ "
+            "libs.tech/librelane/sg13g2_stdcell/config.tcl for "
+            "PDN_RAIL_WIDTH); the Metal1 rail's pitch of 7.56 is NOT from "
+            "that config -- it is this repo's own derivation, 2x the 3.78 "
+            "um CoreSite row height (one VDD/VSS rail pair), since "
+            "-followpins takes its placement from the rows themselves"
+        ),
+        "straps": (
+            {
+                "layer": "Metal1",
+                "width_um": 0.44,
+                "pitch_um": 7.56,
+                "offset_um": 0.0,
+                "followpins": True,
+            },
+            {
+                "layer": "TopMetal1",
+                "width_um": 2.2,
+                "pitch_um": 75.6,
+                "offset_um": 13.6,
+                "spacing_um": 4.0,
+            },
+            {
+                "layer": "TopMetal2",
+                "width_um": 2.2,
+                "pitch_um": 75.6,
+                "offset_um": 13.6,
+                "spacing_um": 4.0,
+            },
+        ),
+        "connects": (),
     },
     "sky130hd": {
         "cell_library": "sky130_fd_sc_hd",
