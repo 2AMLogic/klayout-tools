@@ -336,6 +336,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   `"supported: …"` validation error now lists `sg13g2` too. See
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s "Platform
   PDN presets" section.
+- **Added** (#2561, `klt extract`; additive — `schema_version` unchanged): a
+  new `--substrate-spreading <net>` flag (requires `--parasitics`) reports a
+  **two-terminal closed-form estimate** of the resistance *through silicon*
+  between the substrate-tap contacts on one net, in a new
+  `parasitics.substrate_spreading` block (`null` when the flag is omitted).
+  Until now `--parasitics` gave every synthesized substrate net a single
+  1 Tohm DC-tie shunt to ground and nothing distance-dependent between
+  separate taps on it, so two taps 20 µm apart on the same bulk net were
+  perfectly shorted — including through the silicon. The estimate is the
+  Kelvin two-disc spreading-resistance formula
+  (`rho/(4*a1) + rho/(4*a2) - rho/(pi*d)`) evaluated on each pair of the
+  net's own tap contacts (read off the `tap_substrate` region extraction
+  already builds for the NMOS body terminal), against the curated PDK
+  stackup's substrate resistivity (#2560) — whose full `source` prose is
+  echoed into the block, so the reported ohms are traceable to a judgeable
+  input rather than an opaque constant, and an uncurated PDK family reports
+  `null` instead of a substituted default. Each pair carries its own
+  accuracy regime (`far_field`/`near_field`/`overlapping`, plus an
+  `exceeds_half_space_depth` flag); the far-field threshold's "better than
+  1 %" claim is *measured* by quadrature against the exact half-space
+  Green's function in `tests/test_substrate_resistance.py`, not asserted.
+  **This is an estimate, not a solve, and it does not close #2515**: nothing
+  is injected into the netlist (`r_count`/`total_resistance_ohm` and
+  `substrate_dc_tie` are unchanged), and a net with more than two taps
+  reports every *pair* with `pairwise_approximation: true` rather than an
+  N-terminal network solve. See `docs/cli/extract.md`'s "Substrate spreading
+  resistance between taps" section.
 - **Fixed** (#2517, `klt yield-campaign`; no schema change — **no**
   `schema_version` bump): every campaign run reported
   `campaign.sim_status: "pass_partial"`, even a completely clean one. A
