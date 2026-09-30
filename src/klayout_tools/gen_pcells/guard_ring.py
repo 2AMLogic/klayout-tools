@@ -31,6 +31,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 
     from klayout_tools.gen import (
         WELL_ENCLOSURE_MARGIN_UM,
+        _clamp_cut_boxes,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
@@ -167,6 +168,18 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ring_implant_present)",
                 default=0.0,
             )
+            # Fixed drawn side of every cut on contact_layer (issue #2585) --
+            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
+            # family and layer. `0.0` (no upper size bound) leaves the cuts
+            # exactly as laid out; see `gen._clamp_cut_boxes`.
+            self.param(
+                "contact_fixed_size_um",
+                self.TypeDouble,
+                "Fixed drawn side (um) every cut on contact_layer is clamped "
+                "down to on the resolved PDK family -- 0.0 leaves the "
+                "generator's own cut size unchanged",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"guard_ring({self.inner_width_um}x{self.inner_height_um})"
@@ -227,5 +240,9 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     info["gap"]["side"] if info["gap"] is not None else None,
                     self.ring_implant_margin_um,
                 )
+
+            # Issue #2585: clamp every cut on a fixed-size cut/via layer down
+            # to that size, inside the unchanged generic-budget layout.
+            _clamp_cut_boxes(self.cell, li_contact, dbu, self.contact_fixed_size_um)
 
     return {"guard_ring": _GuardRingPCell}

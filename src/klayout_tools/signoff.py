@@ -1846,7 +1846,10 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #:   tie, not a redrawn layout.
 #: - :data:`_REASON_SUPPLY_NOT_CONTINUOUS` -- the ERC run *did* ask, and the
 #:   answer is no: a declared supply resolved to zero or several islands
-#:   (``erc.unconnected_net``), two declared supplies resolved to the same
+#:   (``erc.unconnected_net``), a declared supply's owned roles carry
+#:   conductor reachable from no label at all (``erc.unlabelled_conductor``,
+#:   issue #2524 -- the severed single-label rail the island count
+#:   structurally cannot see), two declared supplies resolved to the same
 #:   island (``erc.supply_short``), or a well/tub has no connected tap
 #:   (``erc.missing_tie``). Fix: the layout.
 #: - :data:`_REASON_LVS_SUPPLY_UNPROVEN` -- the LVS half of the item is not
@@ -5879,7 +5882,7 @@ def _erc_supply_findings(
     """Every ``erc_findings[]`` entry that contradicts T1 item 11's own
     supply-continuity rule -- ``[]`` when the run reports none.
 
-    Exactly four of `klt erc`'s six rules are graded here
+    Exactly five of `klt erc`'s seven rules are graded here
     (``docs/cli/erc.md`` → "ERC finding checks"), and only for the *declared
     supply* nets:
 
@@ -5887,6 +5890,19 @@ def _erc_supply_findings(
       zero islands (nothing carries its label) or more than one (the rail is
       split into pieces that never touch). Either way it is not the "exactly
       one island per declared supply" the item requires.
+    - ``erc.unlabelled_conductor`` naming a declared supply (issue #2524) --
+      the case ``erc.unconnected_net`` structurally cannot see. That rule
+      counts islands *carrying the declared label*, so a single-label supply
+      rail severed into a labelled piece and an unlabelled orphan grades
+      clean (``docs/cli/erc.md`` → "`erc.unconnected_net` counts labelled
+      islands, not conductor islands"): before this rule existed, item 11
+      could not cite a severed-rail negative for such a block at all. A
+      supply whose declared owned roles (``nets[].roles``) carry conductor
+      reachable from no label is not delivered to everything the spec says
+      it owns, which is this item's own question. Graded under the same
+      declared-name filter ``erc.unconnected_net`` uses, and reachable only
+      for a spec that opted into ``nets[].roles`` -- a spec that declares
+      none never acquires this blocker.
     - ``erc.supply_short`` -- two declared supplies resolved to the *same*
       island, which is likewise not one island per supply.
     - ``erc.expected_short_missing`` naming a declared supply (issue #2463)
@@ -5916,7 +5932,11 @@ def _erc_supply_findings(
         if rule == "erc.missing_tie" or rule == "erc.supply_short":
             offending.append(finding)
             continue
-        if rule not in ("erc.unconnected_net", "erc.expected_short_missing"):
+        if rule not in (
+            "erc.unconnected_net",
+            "erc.expected_short_missing",
+            "erc.unlabelled_conductor",
+        ):
             continue
         for field in ("net", "other_net"):
             value = finding.get(field)
@@ -6217,29 +6237,39 @@ def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
 
 def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
     """The cited `klt erc` run's ``erc_coverage.checked_by_well_assertion``
-    (issue #2255): the ``erc.missing_tie`` work identities whose **well
-    region itself** came from a caller assertion (``ties[].well_layer:
-    null`` + ``ties[].well_boxes``) because the block sits in a native
-    substrate that draws no well/tub layer at all -- ``[]`` for every run
-    that used none, and for every report produced before the field existed.
+    (issues #2255 and #2540): the ``erc.missing_tie`` work identities whose
+    **well side** rested on caller-named coordinates rather than purely on
+    drawn geometry -- ``[]`` for every run that named none, and for every
+    report produced before the field existed. Two spec forms land there:
+
+    - ``ties[].well_layer: null`` + ``ties[].well_boxes`` (issue #2255) -- the
+      **well region itself** asserted, because the block sits in a native
+      substrate that draws no well/tub layer at all;
+    - ``ties[].well_requires_boxes`` / ``ties[].well_excludes_boxes`` (issue
+      #2540) -- a *drawn* well whose **class selection** was named in boxes,
+      because no drawn layer separates the tub's two bias classes.
 
     Carried into a ``"met"`` item 11 citation beside
     :func:`_erc_ties_checked_by_assertion`'s tap-side list, and deliberately
     **not** merged into it, because the two state different things about the
     same verdict. A ``tap_boxes`` assertion says which of the drawn tap
     geometry counts as the tap; the well is still drawn, and still measured.
-    A ``well_boxes`` assertion says where the substrate *is*, for a stream
-    that draws nothing to corroborate it -- the weaker of the two claims,
-    and the one a grader is most likely to want to see stated explicitly.
+    This list says the *well* side was the caller's word -- the weaker of the
+    two claims, and the one a grader is most likely to want to see stated
+    explicitly. A purely marker-layer selection
+    (``well_requires``/``well_excludes``) is not in it: the stream draws its
+    own partition, so that is an ordinary geometrically-derived pass.
 
-    It does not change the verdict: item 11 is ``"met"`` on an asserted
-    substrate tie exactly as on a drawn-well one. It can be, because the
-    assertion is falsifiable and `klt erc` falsifies it where it can -- each
-    asserted polygon must independently contain a tap that reaches the
-    declared net, and an assertion indistinguishable from the whole top-cell
-    extent is rejected as degenerate (``docs/cli/erc.md`` → "A block with no
-    drawn well at all"), landing in ``erc_coverage.skipped`` where
-    :func:`_erc_missing_tie_skipped` already renders it ``unmet``.
+    It does not change the verdict: item 11 is ``"met"`` on either asserted
+    form exactly as on a drawn-well one. It can be, because both are
+    falsifiable and `klt erc` falsifies them where it can -- each asserted
+    polygon must independently contain a tap that reaches the declared net, an
+    assertion indistinguishable from the whole top-cell extent is rejected as
+    degenerate (``docs/cli/erc.md`` → "A block with no drawn well at all"),
+    and a box selection keeping every shape of the drawn layer or none of them
+    is rejected the same way (same doc → "A two-class tub with no marker layer
+    to separate them"). Both land in ``erc_coverage.skipped`` where
+    :func:`_erc_missing_tie_skipped` already renders them ``unmet``.
     """
     block = envelope.get("erc_coverage")
     if not isinstance(block, dict):
@@ -6249,6 +6279,52 @@ def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
         for identity in block.get("checked_by_well_assertion") or []
         if isinstance(identity, str)
     ]
+
+
+def _erc_supply_unlabelled_islands(
+    envelope: dict[str, Any], supply_nets: list[str]
+) -> dict[str, int]:
+    """The severed-rail **negative** a met item 11 can now cite (issue
+    #2524): per declared supply that asserted the ``stackup`` roles it owns
+    (``nets[].roles``, issue #2510), that net's ``nets[].unlabelled_islands``
+    -- ``0`` meaning every piece of conductor on its owned roles is reachable
+    from a label.
+
+    ``{}`` for a cited run whose supplies declared no ``roles`` (and for
+    every pre-#2510 envelope, whose ``nets[]`` entries carry no such key) --
+    the honest empty, never a fabricated zero: an undeclared role was not
+    measured, and this item must never read "not measured" as "checked
+    clean".
+
+    Why the item reports it at all. ``erc.unconnected_net`` counts islands
+    *carrying the declared label*, so on a single-label block -- the ordinary
+    shape for hand-built or generated analog, where the label names a port
+    rather than annotating every rail segment -- a severed rail still grades
+    clean, and a met item 11 rested on a negative it could not actually
+    state (``docs/cli/erc.md`` → "`erc.unconnected_net` counts labelled
+    islands, not conductor islands"). ``unlabelled_islands: 0`` **is** that
+    negative. Its non-zero counterpart is already a blocker via
+    :func:`_erc_supply_findings`'s ``erc.unlabelled_conductor`` clause, so
+    this key is strictly the positive-side evidence: what a reader needs to
+    see that the clean verdict was measured over the whole conductor, not
+    only over what carried a label.
+
+    Name comparison is case-insensitive, matching the declared-supply filter
+    every other item-11 predicate applies.
+    """
+    declared = {name.upper() for name in supply_nets}
+    islands: dict[str, int] = {}
+    for entry in envelope.get("nets") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        count = entry.get("unlabelled_islands")
+        if not isinstance(name, str) or name.upper() not in declared:
+            continue
+        if isinstance(count, bool) or not isinstance(count, int):
+            continue
+        islands[name] = count
+    return islands
 
 
 def _resolve_erc_supply_spec(
@@ -6380,9 +6456,20 @@ def _grade_power_delivery(
       (:func:`_erc_supply_findings`). A **native-substrate** block, whose
       ties assert their substrate region because no well/tub layer is drawn
       (``ties[].well_boxes``), reaches ``"met"`` on the same terms as a
-      drawn-well one; which of its ties rested on that assertion is stated
-      in the citation's ``power_delivery.ties_checked_by_well_assertion``
-      (:func:`_erc_ties_checked_by_well_assertion`);
+      drawn-well one -- as does a block whose one drawn tub layer carries two
+      bias classes that no drawn layer separates, scoped by caller-named
+      boxes (``ties[].well_requires_boxes``/``well_excludes_boxes``, issue
+      #2540). Which of its ties rested on the caller's word about the well
+      side is stated in the citation's
+      ``power_delivery.ties_checked_by_well_assertion``
+      (:func:`_erc_ties_checked_by_well_assertion`). Issue #2524 adds the
+      severed-rail half of the same question: a supply whose declared owned
+      roles (``nets[].roles``) carry conductor reachable from no label is
+      ``erc.unlabelled_conductor`` and blocks the item, and a met citation
+      states the negative it now rests on in
+      ``power_delivery.supply_unlabelled_islands``
+      (:func:`_erc_supply_unlabelled_islands`) rather than leaving it
+      implicit in a clean island count that could not have seen it;
     - an ``"lvs"`` citation -- the same report item 4 grades, which must
       itself pass (:func:`_check_passed`);
     - and, for an RTL-flow digital block, a ``"place-and-route"`` citation
@@ -6527,6 +6614,15 @@ def _grade_power_delivery(
         # `_erc_ties_checked_by_well_assertion`.
         "ties_checked_by_well_assertion": _erc_ties_checked_by_well_assertion(
             erc["envelope"]
+        ),
+        # Issue #2524: the severed-rail negative, per declared supply that
+        # owns its roles -- `{name: unlabelled_islands}`, all zero for a met
+        # item (a non-zero one is `erc.unlabelled_conductor`, which
+        # `_erc_supply_findings` already blocks on). `{}` when no supply
+        # declared `nets[].roles`, which is the honest "not measured" rather
+        # than a fabricated clean. See `_erc_supply_unlabelled_islands`.
+        "supply_unlabelled_islands": _erc_supply_unlabelled_islands(
+            erc["envelope"], supply_spec["supply_nets"]
         ),
     }
     return "met", None, citation, {}

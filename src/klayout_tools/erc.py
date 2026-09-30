@@ -88,6 +88,26 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   declared net gets a report ``nets[]`` entry carrying the count its
   verdict was decided on, passing or not (issue #2497, see
   :func:`_declared_net_entry` and ``docs/cli/erc.md``).
+- **Unlabelled conductor** (``erc.unlabelled_conductor``, issue #2524): the
+  bound above, removed rather than merely reported, for a net that declares
+  the ``stackup`` roles it **owns outright** (``nets[].roles``, issue
+  #2510). The conductor on those roles reachable from no label at all is
+  that net's unlabelled remainder -- the severed single-label rail's orphan
+  ``erc.unconnected_net`` structurally cannot see -- and a non-zero
+  remainder is this finding. Issue #2510 shipped the measurement as
+  reporting only and left promoting it to a finding as an explicit open
+  decision; #2524 takes it, on a **separate rule id** rather than a new
+  reason on ``erc.unconnected_net`` (a partially-labelled net with an
+  unreached remainder is a materially different condition from no
+  connectivity to the label at all, and per-rule filtering must be able to
+  tell them apart). Legitimate unlabelled conductor on an owned role --
+  dummy/fill, a floating shield -- is declared away with
+  ``nets[].unlabelled_allowed_boxes`` (the escape hatch that makes gating
+  safe, structurally #2183's ``devices[]`` carve-out one level up: the
+  caller names regions to subtract, and what was actually subtracted is
+  echoed in ``provenance.net_exclusions``). Entirely opt-in: the
+  measurement exists only where ``roles`` was declared, so no spec written
+  before #2510 can acquire this finding. See :func:`_unlabelled_state`.
 - **Expected short missing** (``erc.expected_short_missing``, issue
   #2463): the same ``nets`` section, read the other way round. A layout
   that deliberately ties two labelled conductors together -- a sub-block's
@@ -186,6 +206,38 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   (:data:`REASON_DEGENERATE_WELL_SELECTION`, see
   :func:`_degenerate_tie_reasons`) rather than as a pass.
 
+  **Caller-asserted well-side class selection**
+  (``ties[].well_requires_boxes`` / ``ties[].well_excludes_boxes``, issue
+  #2540): the selectors above narrow by *marker layer*, so they are only
+  reachable for a stream that happens to draw a layer separating the well
+  classes. A single drawn tub carrying two deliberately differently-biased
+  classes with **no** layer that distinguishes them could therefore declare
+  neither entry: every marker-driven selection over it keeps every shape or
+  none (:data:`REASON_DEGENERATE_WELL_SELECTION`), a single unselected entry
+  reports a false ``erc.missing_tie`` on every well of the class it did not
+  name, and ``well_boxes`` -- the one key naming well geometry outright --
+  is rejected beside a drawn ``well_layer``. These two keys close that hole
+  with the same literal-geometry escape hatch ``tap_boxes`` (issue #2234)
+  gives the tap side: the caller names the coordinates of the shapes their
+  class owns, as the same ``[left, bottom, right, top]`` micrometre box
+  list, and selection proceeds exactly as for a marker layer -- whole merged
+  shapes of the drawn ``well_layer``, kept when they interact with the
+  ``well_requires_boxes`` union and dropped when they interact with the
+  ``well_excludes_boxes`` one. They compose with ``well_requires`` /
+  ``well_excludes`` (all four narrow the same selection, as ``tap_boxes``
+  composes with ``tap_requires``) and, like them, ride on the *drawn* form
+  only.
+
+  Unlike a marker-layer selection, this rests on the caller's word about
+  *which* drawn shapes are theirs, so a tie graded through it is named in
+  ``erc_coverage.checked_by_well_assertion`` beside the ``well_boxes`` form
+  -- the same "the well side of this verdict rested on caller-named
+  coordinates" disclosure, one step weaker than drawn-marker selection and
+  one step stronger than substituting for the layer entirely. The
+  falsifiability bar is unchanged and shared with the marker form: a
+  declared selection that keeps every drawn shape, or none of them, is
+  graded as *skipped* work (:data:`REASON_DEGENERATE_WELL_SELECTION`).
+
   **Disclosed non-declaration** (top-level ``ties_disclosure``, issues
   #2234 and #2247): a run that deliberately declares no tap can say so
   explicitly, and say *why*, instead of simply omitting ``ties`` -- via a
@@ -208,6 +260,19 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   and why item 11 stays unmet on both -- but the report's own
   ``provenance.klt_version`` pins the build, so a reader can check whether a
   disclosed tool limitation applies to the run in front of them.
+
+  ``ties_disclosure.undeclared_classes`` (issue #2541) is what makes that
+  disclosure reachable for a **partial** declaration. The reason token above
+  is recorded against the undeclared ``erc.missing_tie`` work, and until
+  #2541 that work only existed when ``ties`` was *entirely* empty -- so a
+  spec that declares the one well class it can express and genuinely cannot
+  express the other (the native-substrate block on a PDK that draws no
+  pwell/tub layer) produced an ``erc_coverage`` byte-identical to one that
+  declared the same tie and never considered the second class at all. Naming
+  the undeclared classes gives that work an identity
+  (``erc.missing_tie:["<class>"]`` in ``inapplicable``, carrying the same
+  disclosed reason token), so declaring real, checkable work never makes the
+  record *less* machine-readable than declaring nothing.
 
 Device bodies (``devices``, issue #2183): a conductor role carries
 *geometry*, and nothing in the model above distinguishes a wire from a
@@ -426,10 +491,40 @@ from .extract import (
 #: entry: ``roles`` (the echo, ``[]`` when omitted) and
 #: ``unlabelled_islands`` / ``unlabelled_area_um2`` / ``unlabelled_bbox``
 #: (the unlabelled remainder on those roles, all ``None`` when no role was
-#: declared -- see :func:`_unlabelled_remainder`). New keys on an existing
+#: declared -- see :func:`_unlabelled_state`). New keys on an existing
 #: object are additive under ``docs/json-contract.md``; no existing field's
 #: value changes for any input and none of the new values feeds a finding
 #: or roll-up (reporting only). No bump.
+#: Issue #2524 promotes that remainder from reporting-only to a verdict:
+#: one new ``erc_findings[].rule`` value (``erc.unlabelled_conductor``), one
+#: optional spec sub-key (``nets[].unlabelled_allowed_boxes``, the declared
+#: carve-out -- see :func:`_parse_unlabelled_allowed_boxes`), one new
+#: ``nets[]`` key (``unlabelled_allowed_islands``), and one new
+#: ``provenance`` key (``net_exclusions``, the measured effect of every
+#: declared carve-out). Still additive, and still no bump: a new value in an
+#: already-shipped enum-like field is additive under
+#: ``docs/json-contract.md``'s "growing value set" rule (the same latitude
+#: #2463's ``erc.expected_short_missing`` took), new keys on existing
+#: objects are additive, and the *verdict* change is reachable only by a
+#: spec that opted into #2510's ``nets[].roles`` -- every spec written
+#: before it grades byte-identically, its remainder still ``None``. The
+#: three #2510 remainder values are deliberately left as the **raw**
+#: measurement: a declared carve-out narrows what gates, never what was
+#: measured, so ``unlabelled_islands: 0`` still means exactly what #2510
+#: documented.
+#: Issue #2540 adds two more optional spec keys (``ties[].well_requires_boxes``
+#: and ``ties[].well_excludes_boxes`` -- the literal-geometry form of #2339's
+#: well-side class selectors, for a two-class tub with no marker layer
+#: separating the classes; see :func:`_select_well_class`) and no new output
+#: field or coverage list at all. A tie graded through one is named in the
+#: already-shipped ``erc_coverage.checked_by_well_assertion`` list, whose
+#: documented meaning widens from "the well region was itself asserted" to
+#: "the well side of this verdict rested on caller-named coordinates" -- a
+#: superset no previously-possible run can land in, since neither key can be
+#: populated by a spec written before this issue. A spec that declares
+#: neither selects nothing and produces byte-identical output, and the
+#: existing :data:`REASON_DEGENERATE_WELL_SELECTION` token is reused rather
+#: than joined by a new one. No bump.
 SCHEMA_VERSION = 1
 
 
@@ -498,7 +593,10 @@ REASON_DEGENERATE_WELL_ASSERTION = "degenerate_well_assertion"
 
 #: The stable ``erc_coverage`` skip reason for a ``ties[]`` entry whose
 #: declared well-side selection (``well_requires``/``well_excludes``, issue
-#: #2339) did not actually select a *proper, non-empty* subset of the drawn
+#: #2339, or their literal-geometry counterparts
+#: ``well_requires_boxes``/``well_excludes_boxes``, issue #2540 -- the same
+#: test, applied to whichever of the four the spec declared) did not
+#: actually select a *proper, non-empty* subset of the drawn
 #: ``well_layer``: it either kept every merged shape on that layer (the
 #: selection distinguishes nothing, so the entry silently grades the other
 #: bias class against its own ``net`` exactly as an unselected tie would) or
@@ -509,7 +607,8 @@ REASON_DEGENERATE_WELL_ASSERTION = "degenerate_well_assertion"
 #: Kept distinct from :data:`REASON_DEGENERATE_WELL_ASSERTION` because the
 #: two say different things to go fix -- that one says "name the substrate
 #: region you are actually claiming, not the die"; this one says "the marker
-#: layer you named does not partition this well layer" -- and from
+#: layer (or box list) you named does not partition this well layer" -- and
+#: from
 #: :data:`REASON_DEGENERATE_TAP_DECLARATION`, which is about the tap. Unlike
 #: the tap test, this one fires only when a selection was *declared*: a tie
 #: with no well-side selector claims every shape on the layer, which is the
@@ -623,7 +722,7 @@ _TIES_DISCLOSURE_COVERAGE_REASON: dict[str, str] = {
 }
 
 
-def _ties_disclosure_reason(ties_disclosure: dict[str, str] | None) -> str:
+def _ties_disclosure_reason(ties_disclosure: dict[str, Any] | None) -> str:
     """The ``erc_coverage.inapplicable`` reason for undeclared
     ``erc.missing_tie`` work, given the spec's ``ties_disclosure`` (or its
     absence) -- see :func:`_connectivity_coverage`."""
@@ -632,6 +731,23 @@ def _ties_disclosure_reason(ties_disclosure: dict[str, str] | None) -> str:
     return _TIES_DISCLOSURE_COVERAGE_REASON[
         ties_disclosure.get("kind", DISCLOSURE_KIND_UNEXPRESSIBLE)
     ]
+
+
+def _disclosed_undeclared_classes(
+    ties_disclosure: dict[str, Any] | None,
+) -> list[str]:
+    """The tie classes a top-level ``ties_disclosure`` names as undeclared
+    (``undeclared_classes``, issue #2541) -- ``[]`` when the spec declared
+    no disclosure, or a disclosure that names none.
+
+    Already validated by :func:`_validate_ties_disclosure` (non-empty
+    strings, no duplicates, none of them a declared ``ties[]`` name), so
+    this is a plain read: the list exists precisely so the undeclared work
+    has an identity :func:`_connectivity_coverage` can record a reason
+    against."""
+    if not ties_disclosure:
+        return []
+    return list(ties_disclosure.get("undeclared_classes") or [])
 
 
 def _spec_declared_layers(
@@ -756,7 +872,7 @@ def _connectivity_coverage(
     ties: list[dict[str, Any]],
     degenerate_ties: dict[str, str] | None = None,
     asserted_ties: set[str] | None = None,
-    ties_disclosure: dict[str, str] | None = None,
+    ties_disclosure: dict[str, Any] | None = None,
     well_asserted_ties: set[str] | None = None,
     undeclared_stream_layers: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -786,10 +902,11 @@ def _connectivity_coverage(
       for each one.
     - ``erc.net_connectivity`` -- one per declared ``nets[]`` entry (the
       ``erc.unconnected_net``/``erc.multiply_driven_net``/
-      ``erc.supply_short`` rules all key off the same declaration, as does
-      issue #2463's ``erc.expected_short_missing`` -- a declared
-      ``same_net_as`` tie is graded as part of the work its own two
-      ``nets[]`` entries already name, not as a separate identity).
+      ``erc.supply_short`` rules all key off the same declaration, as do
+      issue #2463's ``erc.expected_short_missing`` and issue #2524's
+      ``erc.unlabelled_conductor`` -- a declared ``same_net_as`` tie, like a
+      declared ``roles`` ownership claim, is graded as part of the work its
+      own ``nets[]`` entry already names, not as a separate identity).
     - ``erc.missing_tie`` -- one per declared ``ties[]`` entry, *except*
       the degenerate ones (``degenerate_ties``, issue #2199): a tie whose
       declared tap region cannot be told apart from an ordinary
@@ -816,13 +933,33 @@ def _connectivity_coverage(
     the same idea applied one level down, and deliberately a **separate**
     list rather than more entries in ``checked_by_assertion``: there, the
     caller asserted which of the drawn ``tap_layer`` geometry counts as the
-    tap, inside a well the layout actually draws; here, the caller asserted
-    the **well region itself**, because the block sits in a native substrate
-    that draws no well/tub layer at all. Those are different claims with
-    different evidence value, and a reader grading the report of record must
-    be able to tell which one was made. A tie can appear in both lists (an
-    asserted substrate region whose tap is also named by ``tap_boxes``) or
-    in either alone.
+    tap; here, the caller named the **well side** of the tie in coordinates
+    rather than in drawn geometry. Those are different claims with different
+    evidence value, and a reader grading the report of record must be able to
+    tell which one was made. A tie can appear in both lists (an asserted
+    well side whose tap is also named by ``tap_boxes``) or in either alone.
+
+    Two spec forms land a tie in this list, and they are different strengths
+    of the same kind of claim:
+
+    - ``well_layer: null`` + ``well_boxes`` (issue #2255) -- the caller
+      asserted the **well region itself**, because the block sits in a native
+      substrate that draws no well/tub layer at all. Nothing in the stream
+      corroborates the region.
+    - ``well_requires_boxes``/``well_excludes_boxes`` (issue #2540) -- the
+      well *is* drawn and is still what gets measured; what the caller named
+      in coordinates is **which of its merged shapes** this entry's bias
+      class owns, for a two-class tub with no marker layer separating the
+      classes. Stronger than the first form (the shapes are real, drawn
+      geometry, and each is still independently graded) and weaker than
+      ``well_requires``/``well_excludes``, whose partition the stream itself
+      draws -- which is exactly why a marker-layer selection stays out of
+      this list and a box-driven one does not.
+
+    The list does not distinguish the two forms, deliberately: it answers one
+    question -- "did the well side of this verdict rest on the caller's
+    word?" -- and a consumer needing the finer distinction has the spec
+    document, which is the artifact that actually records the claim.
 
     A spec that declares no ``nets``/``ties`` asked for none of that work,
     so those rules are recorded as **inapplicable**, never skipped: a skip
@@ -841,6 +978,28 @@ def _connectivity_coverage(
     "this stream has no tap to name" from "this stream has a tap, but the
     build that must produce this evidence cannot grade a declared tie
     safely". See :func:`_ties_disclosure_reason`.
+
+    A disclosure that names ``undeclared_classes`` (issue #2541) records
+    that same reason token against **one ``inapplicable`` entry per named
+    class** -- ``erc.missing_tie:["<class>"]``, the same identity shape a
+    *declared* tie of that name would occupy in ``checked`` -- and does so
+    whether or not ``ties`` is empty. Without it, the reason token was
+    reachable only from the ``if not ties`` branch below, so a spec that
+    declared the one well class it can express and honestly could not
+    express the other had **no** machine-readable way to say so: its
+    ``erc_coverage`` was byte-identical to that of a spec which declared the
+    same one tie and never considered the second class. That is the exact
+    "considered, disclosed omission versus nobody declared ties"
+    distinction the disclosure exists to draw, and a partial declaration --
+    a native-substrate block on a PDK that draws no pwell layer being the
+    common case -- is the shape that most needs it. The undeclared classes
+    are recorded as *inapplicable*, not skipped, for the same reason the
+    empty-``ties`` disclosure is: a class the caller says cannot be
+    expressed is work this run was never asked to do, not requested work
+    that failed to run, so it leaves ``erc_status`` alone. Spec validation
+    (:func:`_validate_ties_disclosure`) rejects a disclosed class that
+    collides with a declared ``ties[]`` name, so no identity can ever land
+    in two coverage categories at once.
 
     ``layers_in_stream_without_declaration`` (``undeclared_stream_layers``,
     issue #2389) is the one key in this block that is not about *work
@@ -878,6 +1037,20 @@ def _connectivity_coverage(
                 checked_by_assertion.append(identity)
             if tie["name"] in well_asserted:
                 checked_by_well_assertion.append(identity)
+    # (issue #2541) One named entry per disclosed undeclared class, before
+    # the bare "zero ties declared" entry below, so a *partial* declaration
+    # reaches the disclosure's reason token too. Both are emitted when a
+    # spec declares no `ties` at all and still names classes: the bare entry
+    # is the pre-#2541 "nothing was declared" fact, byte-identical to what
+    # such a run always reported, and the named ones say which classes the
+    # disclosure is about.
+    for undeclared_class in _disclosed_undeclared_classes(ties_disclosure):
+        inapplicable.append(
+            {
+                "id": work_id("erc.missing_tie", undeclared_class),
+                "reason": _ties_disclosure_reason(ties_disclosure),
+            }
+        )
     if not ties:
         inapplicable.append(
             {
@@ -1218,6 +1391,7 @@ def _validate_nets(
                 f"'supply' (got {kind!r})"
             )
 
+        roles = _parse_net_roles(entry, spec_path, i, stackup_names)
         entries.append(
             {
                 "name": name,
@@ -1227,7 +1401,12 @@ def _validate_nets(
                 # against the declared names below (once they are all known).
                 "same_net_as": _parse_same_net_as(entry, spec_path, i, name),
                 # Issue #2510: the stackup roles this net owns outright.
-                "roles": _parse_net_roles(entry, spec_path, i, stackup_names),
+                "roles": roles,
+                # Issue #2524: the declared carve-out for legitimate
+                # unlabelled conductor on those owned roles.
+                "unlabelled_allowed_boxes": _parse_unlabelled_allowed_boxes(
+                    entry, spec_path, i, roles
+                ),
             }
         )
 
@@ -1263,7 +1442,7 @@ def _parse_net_roles(
     (a dedicated supply-strap metal, a rail-only layer).
 
     That assertion is what makes the unlabelled remainder
-    (:func:`_unlabelled_remainder`) measurable at all. A severed rail's
+    (:func:`_unlabelled_state`) measurable at all. A severed rail's
     orphan does not touch the labelled piece -- that is what "severed"
     means -- so nothing in the extracted graph associates it with this net;
     and an ordinary routing role carries many unrelated nets, so "every
@@ -1271,6 +1450,15 @@ def _parse_net_roles(
     caller says the layer is this net's. The key is therefore opt-in: an
     entry that omits it reports the remainder as ``None`` (not measured),
     never as a guessed ``0``.
+
+    Since issue #2524 that remainder also *gates*
+    (``erc.unlabelled_conductor``), which makes this key the single switch
+    controlling whether the new rule can fire for a net at all. Declaring it
+    is therefore a real assertion with a real consequence -- and where the
+    role legitimately carries unlabelled fill, the companion
+    ``nets[].unlabelled_allowed_boxes``
+    (:func:`_parse_unlabelled_allowed_boxes`) declares that away rather than
+    forcing the role to be left unowned and unmeasured.
 
     Omitted/``null``/``[]`` -> ``[]``, the undeclared form. Anything else
     must be a list of distinct names of declared ``stackup`` entries --
@@ -1300,6 +1488,50 @@ def _parse_net_roles(
             )
         roles.append(role)
     return roles
+
+
+def _parse_unlabelled_allowed_boxes(
+    entry: dict[str, Any], spec_path: str, index: int, roles: list[str]
+) -> list[tuple[float, float, float, float]]:
+    """``nets[].unlabelled_allowed_boxes`` (optional, issue #2524): the
+    regions on this net's owned ``roles`` where unlabelled conductor is
+    *expected* -- dummy/fill, a deliberately floating shield, a seal-ring
+    fragment -- as the same ``[left, bottom, right, top]`` micrometre box
+    list ``ties[].tap_boxes``/``well_boxes`` take.
+
+    This is the escape hatch that makes gating the unlabelled remainder
+    (:func:`_unlabelled_state`, ``erc.unlabelled_conductor``) safe. ``roles``
+    asserts the caller owns a layer outright; a layer that also carries
+    legitimate fill makes that assertion *almost* true, and before this key
+    the only two options were an unownable role (no measurement at all) or a
+    permanent finding on a correct layout. Structurally it is #2183's
+    ``devices[]`` carve-out applied one level up: the caller declares regions
+    to subtract before the check runs, and what the declaration actually
+    removed is echoed back under ``provenance.net_exclusions`` so a reviewer
+    can audit it rather than infer it.
+
+    Exclusion is per *island*, not per area: an unlabelled island survives
+    the carve-out unless **all** of its geometry on the owned roles falls
+    inside the declared boxes. A fill declaration that happens to overlap a
+    real severed orphan therefore cannot silence it -- the deliberate
+    conservative direction, since the whole point of the rule is to catch the
+    orphan the connectivity graph cannot attribute.
+
+    Omitted/``null``/``[]`` -> ``[]``. Declaring boxes on an entry with no
+    ``roles`` is a spec error, not a no-op: there is no measurement for them
+    to narrow, so such a declaration would read as honoured while doing
+    nothing -- the same unfalsifiable shape :func:`_parse_net_roles` rejects
+    a typo'd role name for."""
+    boxes = _parse_um_boxes(
+        entry, "unlabelled_allowed_boxes", spec_path, index, section="nets"
+    )
+    if boxes and not roles:
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].unlabelled_allowed_boxes needs "
+            "a non-empty nets[].roles to narrow -- without a declared owned "
+            "role there is no unlabelled remainder to exclude anything from"
+        )
+    return boxes
 
 
 def _validate_same_net_refs(
@@ -1389,13 +1621,20 @@ def _parse_tap_is_dedicated(entry: dict[str, Any], spec_path: str, index: int) -
 
 
 def _parse_um_boxes(
-    entry: dict[str, Any], key: str, spec_path: str, index: int
+    entry: dict[str, Any],
+    key: str,
+    spec_path: str,
+    index: int,
+    section: str = "ties",
 ) -> list[tuple[float, float, float, float]]:
-    """One ``ties[]`` entry's ``[left, bottom, right, top]`` micrometre box
-    list under ``key`` -- the shared parser behind ``tap_boxes`` (issue
-    #2234, :func:`_parse_tap_boxes`) and ``well_boxes`` (issue #2255,
-    :func:`_parse_well_boxes`), which take the identical literal-geometry
-    shape and differ only in what the boxes *mean*.
+    """One spec entry's ``[left, bottom, right, top]`` micrometre box list
+    under ``key`` -- the shared parser behind ``ties[].tap_boxes`` (issue
+    #2234, :func:`_parse_tap_boxes`), ``ties[].well_boxes`` (issue #2255,
+    :func:`_parse_well_boxes`), ``ties[].well_requires_boxes`` /
+    ``ties[].well_excludes_boxes`` (issue #2540, :func:`_parse_well_selection`)
+    and ``nets[].unlabelled_allowed_boxes`` (issue #2524,
+    :func:`_parse_unlabelled_allowed_boxes`), which take the identical
+    literal-geometry shape and differ only in what the boxes *mean*.
 
     ``[left, bottom, right, top]`` is the same tuple
     :func:`~klayout_tools._layout.clip_box` already converts for ``klt
@@ -1404,18 +1643,23 @@ def _parse_um_boxes(
     (JSON ``true`` is not a coordinate), or an inverted/degenerate extent is
     a spec error, since a silently-dropped box would weaken an assertion the
     caller believes they made.
+
+    ``section`` names the spec array the entry came from, so the error
+    message points at the caller's own key path (``ties[2].tap_boxes[0]`` vs.
+    ``nets[1].unlabelled_allowed_boxes[0]``) rather than at whichever array
+    happened to be the first user of this parser.
     """
     raw = entry.get(key, [])
     if raw is None:
         raw = []
     if not isinstance(raw, list):
         raise ErcError(
-            f"spec '{spec_path}': ties[{index}].{key} must be an array of "
+            f"spec '{spec_path}': {section}[{index}].{key} must be an array of "
             "[left, bottom, right, top] micrometre boxes"
         )
     boxes: list[tuple[float, float, float, float]] = []
     for j, value in enumerate(raw):
-        field = f"ties[{index}].{key}[{j}]"
+        field = f"{section}[{index}].{key}[{j}]"
         if (
             not isinstance(value, list)
             or len(value) != 4
@@ -1476,72 +1720,112 @@ def _parse_well_boxes(
 
 def _parse_well_selection(
     entry: dict[str, Any], spec_path: str, index: int, drawn_well: bool
-) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
-    """``ties[].well_requires`` / ``ties[].well_excludes`` (optional, issue
-    #2339): the marker layers that pick out *which* merged shapes of a drawn
-    ``well_layer`` this tie is about -- kept when the shape interacts with
-    geometry on every ``well_requires`` layer and with none of the
-    ``well_excludes`` layers.
+) -> dict[str, Any]:
+    """The four **well-side class selectors** on one ``ties[]`` entry: which
+    merged shapes of a drawn ``well_layer`` this tie is about.
 
-    The well-side counterpart of ``tap_requires``, for the one thing the tap
-    side cannot express: a single drawn tub layer carrying two
-    differently-biased well classes (device-body wells on one rail, a
-    vertical bipolar's base tub on the other). Each class is declared as its
-    own ``ties[]`` entry with its own ``net``, selected by a PDK device
-    marker -- one entry naming it under ``well_requires``, the complementary
-    entry naming the same marker under ``well_excludes``.
+    Two spellings of the same operation, and they compose:
 
-    Both require a **drawn** ``well_layer``: there is nothing to select from
-    on a tie whose well region is a caller assertion (``well_layer: null`` +
-    ``well_boxes``, issue #2255) -- the asserted boxes already *are* exactly
-    the region the caller means, box by box, so a second layer-driven
-    narrowing on top of them would be an unstated claim about geometry that
-    corroborates nothing. Rejected rather than silently ignored, for the
-    same reason :func:`_parse_um_boxes` rejects a malformed box.
+    - ``well_requires`` / ``well_excludes`` (optional, issue #2339) -- marker
+      *layers*. A shape is kept when it interacts with geometry on every
+      ``well_requires`` layer and with none of the ``well_excludes`` layers.
+    - ``well_requires_boxes`` / ``well_excludes_boxes`` (optional, issue
+      #2540) -- literal ``[left, bottom, right, top]`` micrometre *boxes*, the
+      same shape ``tap_boxes``/``well_boxes`` take. A shape is kept when it
+      interacts with the union of ``well_requires_boxes`` and with none of the
+      ``well_excludes_boxes`` union.
 
-    Split out of :func:`_parse_well_declaration` to keep that function
-    under the repo's C901 complexity ratchet, as
-    :func:`_parse_tap_requires` is split out of :func:`_validate_ties`.
+    All four exist for the one thing the tap side cannot express: a single
+    drawn tub layer carrying two differently-biased well classes (device-body
+    wells on one rail, a vertical bipolar's base tub on the other). Each class
+    is declared as its own ``ties[]`` entry with its own ``net``.
+
+    The **layer** pair needs a PDK layer that separates the classes, which is
+    the ordinary case (a device marker over the special tub) but not the only
+    one: a PDK with a single n-tub layer and no per-class marker draws nothing
+    that distinguishes them, and on such a stream every marker-driven
+    selection keeps every shape or none -- degenerate either way (see
+    :data:`REASON_DEGENERATE_WELL_SELECTION`). The **box** pair is the
+    literal-geometry escape hatch for exactly that stream, and the well-side
+    counterpart of ``tap_boxes`` (issue #2234), which is the same escape hatch
+    for a tap with no distinguishing implant. It needs no PDK marker layer to
+    exist at all: the caller points at the coordinates of the shapes their
+    class owns.
+
+    All four require a **drawn** ``well_layer``: there is nothing to select
+    from on a tie whose well region is itself a caller assertion
+    (``well_layer: null`` + ``well_boxes``, issue #2255) -- the asserted boxes
+    already *are* exactly the region the caller means, box by box, so a second
+    narrowing on top of them, layer- or box-driven, would be an unstated claim
+    about geometry that corroborates nothing. Rejected rather than silently
+    ignored, for the same reason :func:`_parse_um_boxes` rejects a malformed
+    box.
+
+    Returns the four parsed values as a dict, merged into the tie entry by
+    :func:`_parse_well_declaration`. Split out of that function to keep it
+    under the repo's C901 complexity ratchet, as :func:`_parse_tap_requires`
+    is split out of :func:`_validate_ties`.
     """
-    requires = _parse_tie_layer_list(entry, "well_requires", spec_path, index)
-    excludes = _parse_tie_layer_list(entry, "well_excludes", spec_path, index)
-    if not drawn_well and (requires or excludes):
-        named = "well_requires" if requires else "well_excludes"
+    selection: dict[str, Any] = {
+        "well_requires": _parse_tie_layer_list(
+            entry, "well_requires", spec_path, index
+        ),
+        "well_excludes": _parse_tie_layer_list(
+            entry, "well_excludes", spec_path, index
+        ),
+        "well_requires_boxes": _parse_um_boxes(
+            entry, "well_requires_boxes", spec_path, index
+        ),
+        "well_excludes_boxes": _parse_um_boxes(
+            entry, "well_excludes_boxes", spec_path, index
+        ),
+    }
+    named = next((key for key, value in selection.items() if value), None)
+    if not drawn_well and named is not None:
         raise ErcError(
             f"spec '{spec_path}': ties[{index}].{named} selects among the "
             f"drawn shapes of a well layer, so ties[{index}].well_layer must "
             "name one (got null); an asserted substrate region already names "
             "exactly the region it claims, box by box, in 'well_boxes'"
         )
-    return requires, excludes
+    return selection
 
 
 def _parse_well_declaration(
     entry: dict[str, Any], spec_path: str, index: int
 ) -> dict[str, Any]:
     """One ``ties[]`` entry's well declaration -- the ``well_layer`` /
-    ``well_boxes`` / ``well_requires`` / ``well_excludes`` keys, of which
-    exactly one of the first two is populated (issue #2255).
+    ``well_boxes`` keys, of which exactly one is populated (issue #2255), plus
+    the four well-side class selectors that ride on the first
+    (:func:`_parse_well_selection`).
 
-    Two mutually exclusive forms, because they are different evidence and
-    conflating them would let an assertion hide behind drawn geometry:
+    Two mutually exclusive forms for *where the well is*, because they are
+    different evidence and conflating them would let an assertion hide behind
+    drawn geometry:
 
     - ``"well_layer": "<layer>/<datatype>"`` (every spec before #2255) --
       the drawn well/tub layer, each of whose merged shapes is checked
       independently. ``well_boxes`` alongside it is rejected rather than
-      silently applied: there is nothing this module could do with a box
-      list over a drawn well that is not either a narrowing ``tap_boxes``
-      already expresses better, or a second, unstated claim.
+      silently applied: a box list over a drawn well is never a statement
+      about where the well *is* -- it is either a tap narrowing (``tap_boxes``
+      expresses that, better) or a statement about *which of the layer's
+      shapes* this entry is about, which since issue #2540 has its own keys
+      (``well_requires_boxes``/``well_excludes_boxes``) whose grading says so.
+      The error message names both, so the rejection points at a reachable
+      state rather than only at the marker-layer selectors a stream with no
+      separating marker cannot use.
     - ``"well_layer": null`` + a non-empty ``well_boxes`` -- the
       native-substrate form: nothing is drawn, so the caller names the
       region they are claiming.
 
-    ``well_requires``/``well_excludes`` (issue #2339,
-    :func:`_parse_well_selection`) ride on the *drawn* form only: they pick
-    which of that layer's merged shapes this tie is about, so a single tub
-    layer holding two differently-biased well classes can be declared as
-    two complementary entries instead of one entry that reports every well
-    of the other class as untied.
+    The selectors (``well_requires``/``well_excludes``, issue #2339;
+    ``well_requires_boxes``/``well_excludes_boxes``, issue #2540) ride on the
+    *drawn* form only: they pick which of that layer's merged shapes this tie
+    is about, so a single tub layer holding two differently-biased well
+    classes can be declared as two complementary entries instead of one entry
+    that reports every well of the other class as untied. They are a
+    narrowing, never a substitution, so unlike ``well_boxes`` they compose
+    with a drawn ``well_layer`` -- they *require* one.
 
     ``well_layer: null`` with no ``well_boxes`` is an error, not a tie that
     quietly checks nothing: "there is no well to name and I am not asserting
@@ -1557,13 +1841,9 @@ def _parse_well_declaration(
     """
     well_boxes = _parse_well_boxes(entry, spec_path, index)
     raw = entry["well_layer"]
-    well_requires, well_excludes = _parse_well_selection(
-        entry, spec_path, index, raw is not None
-    )
     declaration: dict[str, Any] = {
         "well_boxes": well_boxes,
-        "well_requires": well_requires,
-        "well_excludes": well_excludes,
+        **_parse_well_selection(entry, spec_path, index, raw is not None),
     }
     if raw is None:
         if not well_boxes:
@@ -1581,7 +1861,9 @@ def _parse_well_declaration(
             f"region for a tie with no drawn well, so ties[{index}].well_layer "
             f"must be null (got {str(raw)!r}); to narrow a drawn well's taps, "
             "use 'tap_boxes', and to select which of its shapes this tie is "
-            "about, 'well_requires'/'well_excludes'"
+            "about, 'well_requires_boxes'/'well_excludes_boxes' (literal "
+            "geometry, for a tub whose classes no drawn layer separates) or "
+            "'well_requires'/'well_excludes' (a marker layer that does)"
         )
     return {
         "well_layer": _parse_layer_datatype(
@@ -1656,7 +1938,22 @@ def _validate_ties(
     :func:`_parse_well_selection`), and held to the same falsifiability bar
     as every other narrowing here: a selection keeping every drawn shape, or
     none of them, is graded as skipped work (see
-    :func:`_degenerate_tie_reasons`)."""
+    :func:`_degenerate_tie_reasons`).
+
+    ``well_requires_boxes``/``well_excludes_boxes`` (optional arrays of the
+    same ``[left, bottom, right, top]`` micrometre boxes, issue #2540) select
+    the same way from literal geometry instead of from a marker layer -- the
+    well-side counterpart of ``tap_boxes``, and for the same reason it exists
+    on the tap side: the marker-layer form above needs the PDK to draw a layer
+    that separates the classes, and a single-tub PDK with no per-class marker
+    draws none, leaving a deliberately two-class tub undeclarable in any
+    non-degenerate form. They compose with the marker form (all four narrow
+    the same selection), ride on the same drawn-``well_layer`` requirement,
+    and are graded by the same degeneracy test. Because the *which shapes*
+    half of such a tie rests on the caller's word, a tie graded through one is
+    additionally named in ``erc_coverage.checked_by_well_assertion`` (see
+    :func:`_connectivity_coverage`), which a purely marker-driven selection
+    stays out of."""
     raw = spec.get("ties", [])
     if raw is None:
         raw = []
@@ -1712,9 +2009,57 @@ def _validate_ties(
     return entries
 
 
+def _validate_undeclared_classes(
+    raw: Any, spec_path: str, tie_names: list[str]
+) -> list[str]:
+    """Validate ``ties_disclosure.undeclared_classes`` (issue #2541): the
+    names of the tie classes this spec discloses it does *not* declare.
+
+    Held to the same "present but malformed is a spec error" bar as every
+    other optional key in this module, plus one check the others have no
+    analogue for: a name that a ``ties[]`` entry already declares is
+    **rejected**, because the same class cannot be both real checked work
+    and disclosed-as-undeclarable. That contradiction would otherwise land
+    the same ``erc.missing_tie:["<class>"]`` identity in two coverage
+    categories at once, which the common coverage contract forbids
+    outright -- so catching it here turns an internal invariant failure into
+    the spec error it actually is.
+
+    An empty array is rejected for the same reason an empty ``reason`` is:
+    it is the unfalsifiable "disclosed nothing" shape the disclosure keys
+    exist to rule out. Omitted/``null`` -> ``[]`` (every pre-#2541 spec's
+    report stays byte-identical)."""
+    if not isinstance(raw, list) or not raw:
+        raise ErcError(
+            f"spec '{spec_path}': ties_disclosure.undeclared_classes must be "
+            "a non-empty array of class names"
+        )
+    names: list[str] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, str) or not item.strip():
+            raise ErcError(
+                f"spec '{spec_path}': ties_disclosure.undeclared_classes[{i}] "
+                "must be a non-empty string"
+            )
+        name = item.strip()
+        if name in names:
+            raise ErcError(
+                f"spec '{spec_path}': duplicate ties_disclosure."
+                f"undeclared_classes entry {name!r}"
+            )
+        if name in tie_names:
+            raise ErcError(
+                f"spec '{spec_path}': ties_disclosure.undeclared_classes "
+                f"names {name!r}, which ties[] already declares -- a class "
+                "cannot be both declared work and a disclosed non-declaration"
+            )
+        names.append(name)
+    return names
+
+
 def _validate_ties_disclosure(
-    spec: dict[str, Any], spec_path: str
-) -> dict[str, str] | None:
+    spec: dict[str, Any], spec_path: str, tie_names: list[str] | None = None
+) -> dict[str, Any] | None:
     """The optional top-level ``ties_disclosure`` spec key (issue #2234): a
     caller's explicit statement that this run declares no tap, and why --
     ``{"reason": "<non-empty string>", "kind": "<kind>"}``. Omitted/``null``
@@ -1733,6 +2078,22 @@ def _validate_ties_disclosure(
     disclosure is not rejected (a spec may express some taps and disclose
     the rest), but the disclosure only ever affects the *undeclared* work's
     reason.
+
+    ``undeclared_classes`` (optional array of names, issue #2541) is what
+    gives that undeclared work an identity when ``ties`` is **not** empty.
+    Before it, the promise in the paragraph above held only for spec
+    *acceptance*: a partial declaration was accepted, but "the undeclared
+    work" existed nowhere in the report, so the disclosure's reason token
+    never reached ``erc_coverage`` and a considered partial declaration
+    rendered byte-identically to one that never considered the second class
+    at all. Each name becomes one ``erc_coverage.inapplicable`` entry --
+    ``erc.missing_tie:["<name>"]``, carrying the same disclosed reason token
+    the kind selects (:func:`_connectivity_coverage`). The names are the
+    caller's own vocabulary for the classes they could not declare (e.g.
+    ``"p_substrate"``); nothing verifies that such a class exists, for the
+    same reason nothing verifies ``reason`` -- but a name that collides with
+    a declared ``ties[]`` entry *is* rejected, since that spec contradicts
+    itself (:func:`_validate_undeclared_classes`).
 
     ``kind`` (optional, issue #2247) says which obstacle is being disclosed,
     because the two have different remedies and a reader of the report of
@@ -1775,7 +2136,7 @@ def _validate_ties_disclosure(
         raise ErcError(
             f"spec '{spec_path}': ties_disclosure.reason must be a non-empty string"
         )
-    disclosure = {"reason": reason.strip()}
+    disclosure: dict[str, Any] = {"reason": reason.strip()}
     if "kind" in raw and raw["kind"] is not None:
         kind = raw["kind"]
         if not isinstance(kind, str) or kind not in _TIES_DISCLOSURE_COVERAGE_REASON:
@@ -1785,6 +2146,10 @@ def _validate_ties_disclosure(
                 f"{allowed} (got {kind!r})"
             )
         disclosure["kind"] = kind
+    if raw.get("undeclared_classes") is not None:
+        disclosure["undeclared_classes"] = _validate_undeclared_classes(
+            raw["undeclared_classes"], spec_path, tie_names or []
+        )
     return disclosure
 
 
@@ -1962,8 +2327,9 @@ def _finding(
     module's docstring "ERC finding checks"): the 8-key dict shared
     verbatim by every rule id (``erc.floating_gate``,
     ``erc.unconnected_net``, ``erc.multiply_driven_net``,
-    ``erc.supply_short``, ``erc.missing_tie``, and issue #2463's
-    ``erc.expected_short_missing``) -- only which of
+    ``erc.supply_short``, ``erc.missing_tie``, issue #2463's
+    ``erc.expected_short_missing``, and issue #2524's
+    ``erc.unlabelled_conductor``) -- only which of
     ``net``/``other_net``/``gate_id``/``layer``/``bbox``/``islands`` are
     populated vs. left ``None`` varies per call site. Mirrors
     ``ring_check.py``'s own keyword-only ``_violation()`` helper for the
@@ -2351,12 +2717,23 @@ def _declared_net_entry(
     ``unlabelled_bbox`` (issue #2510) are the measurement that closes the
     bound above for a net that declares the roles it owns
     (``nets[].roles``): the conductor on those roles reachable from **no**
-    label at all -- see :func:`_unlabelled_remainder`. ``roles`` echoes the
-    declaration (``[]`` when omitted); the other three are ``None`` when no
+    label at all -- see :func:`_unlabelled_state`. ``roles`` echoes the
+    declaration (``[]`` when omitted); the others are ``None`` when no
     role was declared (not measured -- deliberately not ``0``, which would
-    read as "checked and clean"). Reporting only, like the two counts above:
-    a non-zero remainder changes no verdict (see
-    :func:`_unlabelled_remainder` for why it does not gate yet)."""
+    read as "checked and clean").
+
+    Unlike the two island counts above, these are **not** reporting only
+    since issue #2524: a remainder that survives the entry's declared
+    ``unlabelled_allowed_boxes`` carve-out is ``erc.unlabelled_conductor``.
+    The three ``unlabelled_*`` values here stay the **raw** measurement
+    regardless -- ``unlabelled_islands: 0`` goes on meaning "every piece of
+    conductor on the owned roles is reachable from a label", exactly as
+    #2510 documented it, rather than quietly weakening to "...or was
+    excluded". What the carve-out removed is reported separately, as
+    ``unlabelled_allowed_islands`` (issue #2524): how many of those raw
+    islands fell entirely inside the declared boxes and so did not gate.
+    ``0`` for a net that declared ``roles`` and no boxes; ``None`` alongside
+    the rest when no role was declared."""
     return {
         "name": decl["name"],
         "matched_islands": matched,
@@ -2368,52 +2745,69 @@ def _declared_net_entry(
 
 def _unlabelled_by_role(
     l2n: Any, circuit: Any, layer_index: dict[str, int], roles: set[str]
-) -> dict[str, tuple[Any, set[int]]]:
+) -> dict[str, dict[int, Any]]:
     """Per ``stackup`` role in ``roles``: the merged conductor region of every
-    extracted net that carries **no label at all**, and those nets'
-    ``cluster_id`` set (issue #2510).
+    extracted net that carries **no label at all**, keyed by that net's
+    ``cluster_id`` (issue #2510; per-cluster since issue #2524).
 
     One pass over the circuit's nets serves every declared net, because the
     quantity is a property of the role, not of the net asking: an unlabelled
     net is by definition not attributable to any label, so which declared
     net "owns" it can only come from the caller's ``nets[].roles``
-    declaration, applied afterwards in :func:`_unlabelled_remainder`.
+    declaration, applied afterwards in :func:`_unlabelled_state`.
     A net is labelled iff KLayout named it from a registered label text
     (``Net.name`` non-empty -- an unlabelled net's name is ``""``; its
     ``expanded_name()`` is a synthetic ``$N``). ``cluster_id`` 0 is skipped,
     the :func:`_match_net_clusters` convention. Not called at all -- zero
-    cost -- when no declared net declares ``roles``."""
-    import klayout.db as kdb
+    cost -- when no declared net declares ``roles``.
 
-    by_role: dict[str, tuple[Any, set[int]]] = {
-        role: (kdb.Region(), set()) for role in roles
-    }
+    Kept **per cluster** rather than pre-merged into one region per role
+    (issue #2524) because the ``unlabelled_allowed_boxes`` carve-out excludes
+    whole *islands*, not area: deciding whether an island survived needs that
+    island's own geometry, which a single merged region has already thrown
+    away. Distinct clusters are disjoint by construction, so the pre-#2524
+    per-role totals are recovered by summing them."""
+    by_role: dict[str, dict[int, Any]] = {role: {} for role in roles}
     for net in circuit.each_net():
         if net.cluster_id == 0 or net.name:
             continue
-        for role, (region, clusters) in by_role.items():
+        for role, per_cluster in by_role.items():
             piece = l2n.polygons_of_net(net, layer_index[role])
             if piece.is_empty():
                 continue
-            region += piece
-            clusters.add(net.cluster_id)
-    return {
-        role: (region.merged(), clusters)
-        for role, (region, clusters) in by_role.items()
-    }
+            per_cluster[net.cluster_id] = piece.merged()
+    return by_role
 
 
-def _unlabelled_remainder(
+def _unlabelled_state(
     l2n: Any,
-    roles: list[str],
-    by_role: dict[str, tuple[Any, set[int]]],
+    decl: dict[str, Any],
+    by_role: dict[str, dict[int, Any]],
 ) -> dict[str, Any]:
-    """One declared net's unlabelled remainder (issue #2510): the conductor
-    geometry on the roles it owns (``nets[].roles``) that is reachable from
-    **no** label -- the quantity ``erc.unconnected_net`` actually wants to be
-    zero, which ``matched_islands`` (issue #2497) can only bound.
+    """One declared net's unlabelled remainder (issue #2510) and the verdict
+    it now carries (issue #2524): the conductor geometry on the roles it owns
+    (``nets[].roles``) that is reachable from **no** label -- the quantity
+    ``erc.unconnected_net`` actually wants to be zero, which
+    ``matched_islands`` (issue #2497) can only bound.
 
-    **Scoping decision.** Three candidate scopes were weighed:
+    Returns ``{"report", "gating", "exclusion"}``, all three derived from the
+    same single pass so the finding can never disagree with the report field
+    it comes from:
+
+    - ``report`` -- the four ``nets[]`` keys (:func:`_declared_net_entry`):
+      the **raw** ``unlabelled_islands`` / ``unlabelled_area_um2`` /
+      ``unlabelled_bbox``, plus ``unlabelled_allowed_islands`` (how many of
+      those islands the declared carve-out excused). All ``None`` when no
+      role was declared.
+    - ``gating`` -- ``None`` when nothing gates, else
+      ``{"islands", "area_um2", "bbox", "layer"}`` describing the remainder
+      that survived the carve-out, which ``_net_connectivity_findings`` turns
+      into one ``erc.unlabelled_conductor`` finding.
+    - ``exclusion`` -- ``None`` unless the entry declared
+      ``unlabelled_allowed_boxes``, else the ``provenance.net_exclusions``
+      echo of what those boxes actually removed.
+
+    **Scoping decision** (issue #2510). Three candidate scopes were weighed:
 
     - *Same-layer connected component of the labelled piece*: measures
       nothing. Each ``stackup`` role is self-connected in the graph, so the
@@ -2438,11 +2832,18 @@ def _unlabelled_remainder(
     - An unlabelled island on a role *several* declared nets claim is
       reported under each claimant: having no label, it cannot be attributed
       to one of them, and under-reporting it would recreate the silent case.
-    - Unlabelled dummy/fill conductor drawn on an owned role *is* reported
-      -- the ownership declaration says it should not be there -- which is
-      exactly why this stays **reporting only** rather than a finding: a
-      stream that draws such fill would otherwise fail on a correct layout.
-      Promoting a non-zero remainder to a finding is a separate decision.
+      Issue #2524 keeps that granularity for the **finding** too -- one per
+      claimant, not one deduplicated per role -- because a finding shaped
+      differently from the field it is derived from would make the two
+      disagree for no reader's benefit.
+    - Unlabelled dummy/fill conductor drawn on an owned role *is* reported,
+      and since issue #2524 it also gates -- unless the entry declares it
+      (``unlabelled_allowed_boxes``, :func:`_parse_unlabelled_allowed_boxes`).
+      That key is what makes gating safe: #2510 left the finding unshipped
+      precisely because a stream with legitimate fill on an owned role would
+      otherwise fail on a correct layout, and a declared carve-out turns that
+      into an auditable assertion (echoed in ``provenance.net_exclusions``)
+      instead of an unownable role.
     - A cross-layer defect (a missing via severing met2 from met1) is caught
       only when the orphaned side lies on an owned role.
 
@@ -2453,30 +2854,110 @@ def _unlabelled_remainder(
     two owned roles through a via counts once); ``unlabelled_bbox`` is the
     remainder's extent in raw database units (the ``_bbox_dict``
     convention), ``None`` when the remainder is empty, so a non-zero value
-    points straight at the orphan. All three are ``None`` for a net that
-    declared no roles."""
+    points straight at the orphan.
+
+    The carve-out is applied per island and only to the *gating* half: an
+    island survives unless **all** of its geometry on the owned roles falls
+    inside the declared boxes, and the three raw values above never change
+    because of a declaration -- so ``unlabelled_islands: 0`` goes on meaning
+    what #2510 documented, and a partially-covered orphan still fires."""
+    roles = decl["roles"]
     if not roles:
         return {
-            "unlabelled_islands": None,
-            "unlabelled_area_um2": None,
-            "unlabelled_bbox": None,
+            "report": {
+                "unlabelled_islands": None,
+                "unlabelled_area_um2": None,
+                "unlabelled_bbox": None,
+                "unlabelled_allowed_islands": None,
+            },
+            "gating": None,
+            "exclusion": None,
         }
+
+    import klayout.db as kdb
+
+    from ._layout import clip_box as _clip_box
+
     dbu = l2n.internal_layout().dbu
-    area = 0
-    clusters: set[int] = set()
-    bbox: Any = None
+    boxes = decl["unlabelled_allowed_boxes"]
+    allowed = kdb.Region()
+    for box_um in boxes:
+        allowed += kdb.Region(_clip_box(kdb, box_um, dbu))
+    allowed = allowed.merged()
+
+    raw_clusters: set[int] = set()
+    kept_clusters: set[int] = set()
+    raw_area = 0
+    kept_area = 0
+    raw_bbox: Any = None
+    kept_bbox: Any = None
+    kept_area_by_role: list[tuple[str, int]] = []
     for role in roles:
-        region, role_clusters = by_role[role]
-        clusters |= role_clusters
-        if region.is_empty():
+        per_cluster = by_role[role]
+        role_region = kdb.Region()
+        kept_role_region = kdb.Region()
+        for cluster_id, region in per_cluster.items():
+            raw_clusters.add(cluster_id)
+            role_region += region
+            kept = (region - allowed).merged() if not allowed.is_empty() else region
+            if kept.is_empty():
+                continue
+            kept_clusters.add(cluster_id)
+            kept_role_region += kept
+        role_region = role_region.merged()
+        if not role_region.is_empty():
+            raw_area += role_region.area()
+            raw_bbox = (
+                role_region.bbox()
+                if raw_bbox is None
+                else raw_bbox + role_region.bbox()
+            )
+        kept_role_region = kept_role_region.merged()
+        if kept_role_region.is_empty():
             continue
-        area += region.area()
-        bbox = region.bbox() if bbox is None else bbox + region.bbox()
-    return {
-        "unlabelled_islands": len(clusters),
-        "unlabelled_area_um2": round(area * dbu * dbu, 9),
-        "unlabelled_bbox": _bbox_dict(bbox) if bbox is not None else None,
+        role_kept_area = kept_role_region.area()
+        kept_area += role_kept_area
+        kept_area_by_role.append((role, role_kept_area))
+        kept_bbox = (
+            kept_role_region.bbox()
+            if kept_bbox is None
+            else kept_bbox + kept_role_region.bbox()
+        )
+
+    dbu2 = dbu * dbu
+    report = {
+        "unlabelled_islands": len(raw_clusters),
+        "unlabelled_area_um2": round(raw_area * dbu2, 9),
+        "unlabelled_bbox": _bbox_dict(raw_bbox) if raw_bbox is not None else None,
+        "unlabelled_allowed_islands": len(raw_clusters) - len(kept_clusters),
     }
+    gating = (
+        {
+            "islands": len(kept_clusters),
+            "area_um2": round(kept_area * dbu2, 9),
+            "bbox": _bbox_dict(kept_bbox) if kept_bbox is not None else None,
+            # The owned role carrying the most surviving remainder area, ties
+            # broken by declared `roles` order -- the `_island_entry`
+            # convention, so a reader gets one deterministic layer to open a
+            # viewer on rather than the whole ownership list.
+            "layer": max(kept_area_by_role, key=lambda item: item[1])[0]
+            if kept_area_by_role
+            else None,
+        }
+        if kept_clusters
+        else None
+    )
+    exclusion = (
+        {
+            "net": decl["name"],
+            "boxes": [list(box) for box in boxes],
+            "excluded_islands": report["unlabelled_allowed_islands"],
+            "excluded_area_um2": round((raw_area - kept_area) * dbu2, 9),
+        }
+        if boxes
+        else None
+    )
+    return {"report": report, "gating": gating, "exclusion": exclusion}
 
 
 def _island_entry(l2n: Any, layer_index: dict[str, int], net: Any) -> dict[str, Any]:
@@ -2678,13 +3159,25 @@ def _net_connectivity_findings(
     circuit: Any,
     layer_index: dict[str, int],
     nets_decl: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """``erc.unconnected_net`` / ``erc.multiply_driven_net`` /
     ``erc.supply_short`` findings (issue #861), driven by the optional
     ``nets`` spec section -- plus, since issue #2497, the per-declared-net
     island counts those findings were graded from (the report's own
-    ``nets[]`` section, see :func:`_declared_net_entry`), returned beside
-    them because both come from the same single pass over ``nets_decl``.
+    ``nets[]`` section, see :func:`_declared_net_entry`), and since issue
+    #2524 the ``provenance.net_exclusions`` echo of every declared
+    ``unlabelled_allowed_boxes`` carve-out. All three are returned together
+    because all three come from the same single pass over ``nets_decl``.
+
+    ``erc.unlabelled_conductor`` (issue #2524) is emitted here too: the
+    unlabelled remainder on a net's owned ``roles`` (issue #2510) that
+    survives that net's declared carve-out. #2510 shipped the remainder as
+    reporting only and left promoting it to a finding as an explicit open
+    decision; #2524 takes it, with the carve-out as the escape hatch that
+    makes gating safe. It stays opt-in by construction -- the measurement
+    exists only for an entry that declares ``roles``, so no spec written
+    before either issue can acquire the finding. See
+    :func:`_unlabelled_state`.
 
     A declared net matching zero, or a number other than the count its
     entry declares (``nets[].islands``, issue #2400 -- default 1), of
@@ -2725,10 +3218,11 @@ def _net_connectivity_findings(
     falsifiable rather than silenceable.
     """
     if not nets_decl:
-        return [], []
+        return [], [], []
 
     findings: list[dict[str, Any]] = []
     declared_nets: list[dict[str, Any]] = []
+    net_exclusions: list[dict[str, Any]] = []
     matches: dict[str, list[Any]] = {}
     clusters_by_name: dict[str, set[int]] = {}
     # Issue #2510: the unlabelled conductor on every role some declared net
@@ -2743,13 +3237,38 @@ def _net_connectivity_findings(
         matched = _match_net_clusters(circuit, decl["name"])
         matches[decl["name"]] = matched
         clusters_by_name[decl["name"]] = {net.cluster_id for net in matched}
-        declared_nets.append(
-            _declared_net_entry(
-                decl,
-                len(matched),
-                _unlabelled_remainder(l2n, decl["roles"], unlabelled),
+        state = _unlabelled_state(l2n, decl, unlabelled)
+        declared_nets.append(_declared_net_entry(decl, len(matched), state["report"]))
+        if state["exclusion"] is not None:
+            net_exclusions.append(state["exclusion"])
+        # Issue #2524: `erc.unlabelled_conductor` -- the unlabelled remainder
+        # that survived this entry's own declared carve-out. A separate rule
+        # id from `erc.unconnected_net` on purpose: that rule's subject is a
+        # net with no connectivity to its label at all (or the wrong number
+        # of labelled islands), this one's is a *partially* labelled net with
+        # an unreached remainder. Conflating them into one rule's reasons
+        # would cost every caller who filters or suppresses per rule the
+        # ability to tell the two conditions apart. Emitted per claimant of
+        # the role, matching `nets[].unlabelled_islands`' own granularity.
+        if state["gating"] is not None:
+            gating = state["gating"]
+            plural = "" if gating["islands"] == 1 else "s"
+            role_plural = "" if len(decl["roles"]) == 1 else "s"
+            findings.append(
+                _finding(
+                    "erc.unlabelled_conductor",
+                    (
+                        f"declared net {decl['name']!r} owns "
+                        f"role{role_plural} {', '.join(decl['roles'])}, "
+                        f"carrying {gating['islands']} unlabelled conductor "
+                        f"island{plural} ({gating['area_um2']} um^2) "
+                        "reachable from no label"
+                    ),
+                    net=decl["name"],
+                    layer=gating["layer"],
+                    bbox=gating["bbox"],
+                )
             )
-        )
         # The expected island count is the declared one (issue #2400;
         # ``nets[].islands``, default 1 -- the pre-#2400 "one label string
         # == one electrical net" model). Grading the count against the
@@ -2802,7 +3321,7 @@ def _net_connectivity_findings(
         )
     )
     findings.extend(_expected_short_findings(pairs, clusters_by_name))
-    return findings, declared_nets
+    return findings, declared_nets, net_exclusions
 
 
 def _tie_findings(
@@ -2938,8 +3457,10 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
 
     A tie is **selection-degenerate**
     (:data:`REASON_DEGENERATE_WELL_SELECTION`, issue #2339) when it
-    *declared* a well-side class selection (``well_requires`` /
-    ``well_excludes``) that did not actually partition the drawn
+    *declared* a well-side class selection -- ``well_requires`` /
+    ``well_excludes`` (marker layers) or ``well_requires_boxes`` /
+    ``well_excludes_boxes`` (literal geometry, issue #2540), one test for all
+    four -- that did not actually partition the drawn
     ``well_layer``: it kept every merged shape on it (the selection
     distinguishes nothing, so the entry grades the other bias class against
     its own ``net`` exactly as an unselected tie would -- the false
@@ -2953,7 +3474,8 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     before this key existed. The measurement itself is geometric, in
     :func:`_select_well_class`, so a selector that happens to keep
     everything in *this* stream is as degenerate as one that names the well
-    layer itself.
+    layer itself -- and a box list that matches no shape of the drawn layer
+    at all lands on the "kept none" endpoint, not on a silent pass.
 
     A tie's well region is **empty** (:data:`REASON_EMPTY_WELL_REGION`,
     issue #2377) when it names a *drawn* ``well_layer`` (never ``well_boxes``
@@ -2999,6 +3521,58 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     return reasons
 
 
+#: The four ``ties[]`` keys that *select* which merged shapes of a drawn
+#: ``well_layer`` an entry is about -- the marker-layer pair (issue #2339) and
+#: its literal-geometry counterpart (issue #2540). Named once, because two
+#: separate places must agree on the same answer to "did this spec declare a
+#: well-side selection at all?": :func:`_select_well_class` (which returns the
+#: region untouched and never degenerate when none was declared) and
+#: :func:`_has_well_selection`'s callers.
+_WELL_SELECTION_KEYS = (
+    "well_requires",
+    "well_excludes",
+    "well_requires_boxes",
+    "well_excludes_boxes",
+)
+
+
+def _has_well_selection(tie: dict[str, Any]) -> bool:
+    """Whether this tie *declared* a well-side class selection in any of its
+    four spellings (:data:`_WELL_SELECTION_KEYS`).
+
+    The degeneracy test for a selection is presence-gated, unlike the tap
+    one: a tie with no well-side selector claims every shape on its layer,
+    which is the strongest claim available and exactly what every spec
+    written before issue #2339 means -- see
+    :data:`REASON_DEGENERATE_WELL_SELECTION`.
+    """
+    return any(tie[key] for key in _WELL_SELECTION_KEYS)
+
+
+def _boxes_region(
+    kdb: Any, layout: Any, boxes: list[tuple[float, float, float, float]]
+) -> Any:
+    """The merged region a ``ties[]`` micrometre-box list names -- the one
+    conversion behind every literal-geometry key on that entry
+    (``tap_boxes``, ``well_boxes``, ``well_requires_boxes`` /
+    ``well_excludes_boxes``), so the three callers cannot drift on how a
+    caller's coordinates become geometry.
+
+    ``[left, bottom, right, top]`` micrometres go through the same
+    :func:`~klayout_tools._layout.clip_box` conversion ``klt clip`` uses, and
+    the boxes are merged, so adjacent or overlapping boxes become one polygon
+    -- which is load-bearing for ``well_boxes`` (each merged polygon must
+    independently hold a tap) and harmless for the selection keys, which only
+    ever ask whether a well shape interacts with the union.
+    """
+    from ._layout import clip_box as _clip_box
+
+    region = kdb.Region()
+    for box_um in boxes:
+        region += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
+    return region.merged()
+
+
 def _tie_well_region(
     kdb: Any,
     layout: Any,
@@ -3032,13 +3606,7 @@ def _tie_well_region(
     if not tie["well_boxes"]:
         return _region(layout, top_cell, tie["well_layer"]).merged(), False
 
-    from ._layout import clip_box as _clip_box
-
-    asserted = kdb.Region()
-    for box_um in tie["well_boxes"]:
-        asserted += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
-    asserted = asserted.merged()
-
+    asserted = _boxes_region(kdb, layout, tie["well_boxes"])
     extent = kdb.Region(top_cell.bbox())
     extent_area = extent.area()
     if extent_area <= 0:
@@ -3051,20 +3619,45 @@ def _tie_well_region(
 
 
 def _select_well_class(
+    kdb: Any,
     layout: Any,
     top_cell: Any,
     tie: dict[str, Any],
     well_region: Any,
 ) -> tuple[Any, bool]:
     """This tie's well region narrowed to the *class* of well shapes it
-    declares -- ``(selected_region, selection_degenerate)``, issue #2339.
+    declares -- ``(selected_region, selection_degenerate)``, issues #2339 and
+    #2540.
 
     A shape of the drawn ``well_layer`` is kept when it interacts with
-    geometry on every ``well_requires`` layer and with none of the
-    ``well_excludes`` layers. With neither key declared (every spec before
-    this issue) the region is returned untouched and never degenerate: a tie
-    with no well-side selector claims every shape on the layer, which is the
-    strongest claim available, not the weakest.
+    geometry on every ``well_requires`` layer, with none of the
+    ``well_excludes`` layers, with the union of ``well_requires_boxes`` (when
+    that key is non-empty) and with none of the ``well_excludes_boxes`` union.
+    With none of the four declared (every spec before issue #2339) the region
+    is returned untouched and never degenerate: a tie with no well-side
+    selector claims every shape on the layer, which is the strongest claim
+    available, not the weakest.
+
+    **Boxes are a union, layers are a conjunction**, and both follow from what
+    a caller is saying. Each ``well_requires`` *layer* is a separate condition
+    a shape must satisfy (``Comp ∩ Nplus``-style reasoning, one layer at a
+    time), whereas a box *list* is one region named in pieces -- the same
+    union every other literal-geometry key on this entry forms
+    (:func:`_boxes_region`). So three ``well_requires_boxes`` boxes select the
+    shapes touching *any* of them (three wells of this class), not the shapes
+    touching all three (which for disjoint boxes is none).
+
+    ``well_requires_boxes``/``well_excludes_boxes`` (issue #2540) exist because
+    the marker form is only reachable for a stream that draws a layer
+    separating the classes. A single drawn tub carrying two deliberately
+    differently-biased classes with no such layer has nothing to name: every
+    marker-driven selection over it keeps every shape or none, i.e. is
+    degenerate by the test below, and the alternatives are a false
+    ``erc.missing_tie`` on every well of the undeclared class or a
+    ``well_boxes`` substitution the parser rejects beside a drawn
+    ``well_layer``. The box form is the same escape hatch ``tap_boxes`` (issue
+    #2234) is on the tap side, and composes with the marker form exactly as
+    ``tap_boxes`` composes with ``tap_requires``.
 
     **Selection, not intersection** -- and that is the whole design, not an
     implementation detail. ``tap_requires`` narrows the tap by ``&``-ing
@@ -3088,9 +3681,11 @@ def _select_well_class(
     ``tap_narrowed`` and ``well_degenerate`` are): a *declared* selection
     that keeps every drawn shape, or keeps none of them, did not partition
     anything -- see :data:`REASON_DEGENERATE_WELL_SELECTION` and
-    :func:`_degenerate_tie_reasons`.
+    :func:`_degenerate_tie_reasons`. One test for all four keys, so a box list
+    matching no shape of the drawn layer lands on the "kept none" endpoint
+    rather than reading as a clean run over an empty set.
     """
-    if not tie["well_requires"] and not tie["well_excludes"]:
+    if not _has_well_selection(tie):
         return well_region, False
 
     selected = well_region
@@ -3098,6 +3693,14 @@ def _select_well_class(
         selected = selected.interacting(_region(layout, top_cell, required))
     for excluded in tie["well_excludes"]:
         selected = selected.not_interacting(_region(layout, top_cell, excluded))
+    if tie["well_requires_boxes"]:
+        selected = selected.interacting(
+            _boxes_region(kdb, layout, tie["well_requires_boxes"])
+        )
+    if tie["well_excludes_boxes"]:
+        selected = selected.not_interacting(
+            _boxes_region(kdb, layout, tie["well_excludes_boxes"])
+        )
     selected = selected.merged()
     degenerate = selected.is_empty() or (well_region - selected).is_empty()
     return selected, degenerate
@@ -3226,20 +3829,23 @@ def _extract_connectivity(
     assertion additionally carries is its own degeneracy verdict
     (``well_degenerate``), measured here against the top cell's own extent.
 
-    **A drawn well may hold more than one bias class (issue #2339).** When
-    the tie declares ``well_requires``/``well_excludes``, only the merged
-    well shapes of that class survive into everything above
+    **A drawn well may hold more than one bias class (issues #2339, #2540).**
+    When the tie declares any well-side selector --
+    ``well_requires``/``well_excludes`` (marker layers) or
+    ``well_requires_boxes``/``well_excludes_boxes`` (literal micrometre boxes,
+    for a tub whose classes the PDK draws no layer to separate) -- only the
+    merged well shapes of that class survive into everything above
     (:func:`_select_well_class`) -- so the taps clipped to the well, the
     ``tap_narrowed`` measurement taken inside it, and the per-well loop in
     :func:`_tie_findings` all see one bias class rather than every shape the
     tub layer draws. A second, complementary entry declares the other class
     against its own ``net``, and the two are graded independently, keyed on
-    the tie ``name`` rather than on the shared ``well_layer``.
+    the tie ``name`` rather than on the shared ``well_layer``. The selection
+    *narrows* the drawn layer in both spellings -- it never substitutes for it,
+    which is what separates all four keys from ``well_boxes``.
     """
     # Imported lazily, matching `load_layout`'s lazy `klayout.db` import.
     import klayout.db as kdb
-
-    from ._layout import clip_box as _clip_box
 
     l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
 
@@ -3278,12 +3884,15 @@ def _extract_connectivity(
         # distinct from `well_selection_degenerate` below -- see
         # `_degenerate_tie_reasons`.
         well_region_empty = not tie["well_boxes"] and well_region.is_empty()
-        # `well_requires`/`well_excludes` (issue #2339): keep only the merged
-        # well shapes of the class this tie declares, so one tub layer
-        # carrying two differently-biased classes can be declared as two
-        # complementary entries. A no-op unless the spec asked for it.
+        # `well_requires`/`well_excludes` (issue #2339) and their
+        # literal-geometry counterparts `well_requires_boxes`/
+        # `well_excludes_boxes` (issue #2540): keep only the merged well
+        # shapes of the class this tie declares, so one tub layer carrying
+        # two differently-biased classes can be declared as two
+        # complementary entries -- whether or not the PDK draws a layer that
+        # separates them. A no-op unless the spec asked for it.
         well_region, well_selection_degenerate = _select_well_class(
-            layout, top_cell, tie, well_region
+            kdb, layout, top_cell, tie, well_region
         )
         drawn_tap = _region(layout, top_cell, tie["tap_layer"])
         tap_region = drawn_tap
@@ -3294,10 +3903,7 @@ def _extract_connectivity(
         # `tap_requires` (both narrow the same region) but needs no drawn
         # PDK marker layer to exist at all.
         if tie["tap_boxes"]:
-            asserted_region = kdb.Region()
-            for box_um in tie["tap_boxes"]:
-                asserted_region += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
-            tap_region = tap_region & asserted_region.merged()
+            tap_region = tap_region & _boxes_region(kdb, layout, tie["tap_boxes"])
         tap_sites = (tap_region & well_region).merged()
         tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
         l2n.connect(tap_sites)
@@ -3323,13 +3929,24 @@ def _extract_connectivity(
                 # non-degenerate asserted tie as `checked_by_assertion`
                 # (issue #2234).
                 "tap_asserted": bool(tie["tap_boxes"]),
-                # Issue #2255: whether this tie's *well* region was asserted
-                # by the caller (`well_layer: null` + `well_boxes`) rather
-                # than read off a drawn layer, and whether that assertion is
-                # indistinguishable from the whole top-cell extent. Read by
-                # `_degenerate_tie_reasons` and by `_connectivity_coverage`'s
-                # `checked_by_well_assertion`.
-                "well_asserted": bool(tie["well_boxes"]),
+                # Whether the *well* side of this tie rested on caller-named
+                # coordinates rather than purely on drawn geometry -- read by
+                # `_connectivity_coverage`'s `checked_by_well_assertion`. Two
+                # forms: the whole region asserted (`well_layer: null` +
+                # `well_boxes`, issue #2255), or the drawn layer's shapes
+                # *selected* by literal boxes (`well_requires_boxes`/
+                # `well_excludes_boxes`, issue #2540). A marker-layer
+                # selection is not one of them: the stream draws its own
+                # partition, so it is an ordinary geometrically-derived pass.
+                "well_asserted": bool(
+                    tie["well_boxes"]
+                    or tie["well_requires_boxes"]
+                    or tie["well_excludes_boxes"]
+                ),
+                # Issue #2255: whether the caller's *asserted* well region
+                # (`well_boxes`) is indistinguishable from the whole top-cell
+                # extent -- always `False` for a drawn `well_layer`. Read by
+                # `_degenerate_tie_reasons`.
                 "well_degenerate": well_degenerate,
                 # Issue #2377: whether this tie names a *drawn* `well_layer`
                 # that draws no geometry at all in this stream -- always
@@ -3338,10 +3955,11 @@ def _extract_connectivity(
                 # `_degenerate_tie_reasons`, before `well_selection_degenerate`
                 # below is even considered.
                 "well_region_empty": well_region_empty,
-                # Issue #2339: whether this tie's declared well-side class
-                # selection kept a proper, non-empty subset of the drawn
-                # `well_layer` -- `False` for every tie that declared none.
-                # Read by `_degenerate_tie_reasons`.
+                # Issues #2339/#2540: whether this tie's declared well-side
+                # class selection -- marker layers or literal boxes, one test
+                # for both -- failed to keep a proper, non-empty subset of the
+                # drawn `well_layer`. `False` for every tie that declared no
+                # selection at all. Read by `_degenerate_tie_reasons`.
                 "well_selection_degenerate": well_selection_degenerate,
             }
         )
@@ -3399,6 +4017,9 @@ def run_erc(
       bottom, right, top], ...] (optional, issue #2255), "well_requires":
       ["<layer>/<datatype>", ...] (optional, issue #2339),
       "well_excludes": ["<layer>/<datatype>", ...] (optional, issue #2339),
+      "well_requires_boxes": [[left, bottom, right, top], ...] (optional,
+      issue #2540), "well_excludes_boxes": [[left, bottom, right, top], ...]
+      (optional, issue #2540),
       "tap_layer":
       "<layer>/<datatype>", "tap_requires": ["<layer>/<datatype>", ...]
       (optional, issue #2169), "tap_is_dedicated": <bool> (optional, issue
@@ -3423,8 +4044,15 @@ def run_erc(
       it interacts with geometry on every ``well_requires`` layer and with
       none of the ``well_excludes`` layers, so each class is declarable as
       its own entry against its own ``net`` instead of one entry reporting
-      every well of the other class as untied. A declared selection that
-      keeps every drawn shape, or none of them, is skipped as degenerate.
+      every well of the other class as untied.
+      ``well_requires_boxes``/``well_excludes_boxes`` (issue #2540) select the
+      same way from literal micrometre boxes instead of a marker layer, for a
+      two-class tub the PDK draws no layer to separate -- composing with the
+      marker form, requiring the same drawn ``well_layer``, and additionally
+      naming the tie in ``erc_coverage.checked_by_well_assertion`` because the
+      *which shapes* half then rests on the caller's word. A declared
+      selection that keeps every drawn shape, or none of them, is skipped as
+      degenerate, in either spelling.
       Ties are extracted
       in their own connectivity graph (:func:`_extract_connectivity`), so
       they affect ``erc.missing_tie`` and nothing else.
@@ -3538,7 +4166,12 @@ def run_erc(
     vias = _validate_vias(spec, spec_path, stackup_names)
     nets_decl = _validate_nets(spec, spec_path, stackup_names)
     ties = _validate_ties(spec, spec_path, stackup_names)
-    ties_disclosure = _validate_ties_disclosure(spec, spec_path)
+    # `ties` first, deliberately: #2541's `undeclared_classes` is validated
+    # against the declared tie names, so a spec that declares and discloses
+    # the same class is rejected as the self-contradiction it is.
+    ties_disclosure = _validate_ties_disclosure(
+        spec, spec_path, [tie["name"] for tie in ties]
+    )
     # The `devices[]` fragment is shared verbatim with `klt power` (issue
     # #2260), so it lives in `_devices.py` and takes the flat list of
     # conductor role names -- `stackup` first, then `vias` -- this module
@@ -3727,8 +4360,11 @@ def run_erc(
     )
     # (issue #2497) The same pass returns the per-declared-net island counts
     # behind those findings -- the report's own `nets[]` section, populated
-    # on the passing path too. See `_declared_net_entry`.
-    connectivity_findings, declared_nets = _net_connectivity_findings(
+    # on the passing path too. See `_declared_net_entry`. (issue #2524) It
+    # also returns the `provenance.net_exclusions` echo of every declared
+    # `nets[].unlabelled_allowed_boxes` carve-out, for the same reason: it is
+    # measured in the same pass.
+    connectivity_findings, declared_nets, net_exclusions = _net_connectivity_findings(
         l2n, circuit, layer_index, nets_decl
     )
     erc_findings.extend(connectivity_findings)
@@ -3759,12 +4395,16 @@ def run_erc(
             for tie in tie_layers
             if tie["tap_asserted"] and tie["name"] not in degenerate_ties
         }
-        # Issue #2255: the same distinction one level up -- a non-degenerate
-        # tie whose *well* region was asserted (`well_layer: null` +
-        # `well_boxes`) because the block draws no well/tub layer at all.
-        # Its own `checked_by_well_assertion` list, never folded into the
-        # tap-side one: asserting which drawn geometry is the tap and
-        # asserting the region itself are different claims.
+        # Issues #2255/#2540: the same distinction one level up -- a
+        # non-degenerate tie whose *well* side rested on caller-named
+        # coordinates, either because the region itself was asserted
+        # (`well_layer: null` + `well_boxes`, for a block that draws no
+        # well/tub layer at all) or because the drawn layer's shapes were
+        # selected by literal boxes (`well_requires_boxes`/
+        # `well_excludes_boxes`, for a two-class tub no drawn layer
+        # separates). Its own `checked_by_well_assertion` list, never folded
+        # into the tap-side one: asserting which drawn geometry is the tap
+        # and naming the well side in coordinates are different claims.
         well_asserted_ties = {
             tie["name"]
             for tie in tie_layers
@@ -3941,6 +4581,20 @@ def run_erc(
     # entries to before this issue.
     provenance["devices"] = devices_applied
 
+    # `provenance.net_exclusions` (issue #2524): what each declared
+    # `nets[].unlabelled_allowed_boxes` carve-out actually removed from the
+    # unlabelled remainder `erc.unlabelled_conductor` is graded on. The same
+    # auditability contract `provenance.devices` establishes one level down:
+    # a declaration that *suppresses a finding* has to be readable from the
+    # report, otherwise two runs of the same layout disagree about
+    # `erc.unlabelled_conductor` with nothing in either payload to say why.
+    # Each entry carries the *measured* effect (`excluded_islands` /
+    # `excluded_area_um2`), so a box over empty space -- a mis-transcribed
+    # coordinate, a fill region that moved -- is distinguishable from one
+    # that bit, exactly as `provenance.devices[].body_area_um2 == 0.0` is.
+    # Always present; `[]` when no declared net asked for one.
+    provenance["net_exclusions"] = net_exclusions
+
     return {
         "schema_version": SCHEMA_VERSION,
         "file": file,
@@ -3967,12 +4621,15 @@ def run_erc(
         "status": status,
         "coverage": coverage,
         "erc_coverage": erc_coverage,
-        # (issues #2234, #2247) The spec's top-level `ties_disclosure`,
-        # echoed verbatim -- `None` when the spec did not declare one,
-        # matching every other optional-spec-key echo's conditional
-        # population, and carrying `kind` only when the spec itself did. See
-        # `_validate_ties_disclosure` and this module's docstring, "Missing
-        # substrate/well tie".
+        # (issues #2234, #2247, #2541) The spec's top-level
+        # `ties_disclosure`, echoed verbatim -- `None` when the spec did not
+        # declare one, matching every other optional-spec-key echo's
+        # conditional population, and carrying `kind`/`undeclared_classes`
+        # only when the spec itself did. The echo is prose for a human
+        # reader; the machine-readable channel is `erc_coverage` (#2541),
+        # which now carries one `inapplicable` entry per disclosed
+        # undeclared class. See `_validate_ties_disclosure` and this
+        # module's docstring, "Missing substrate/well tie".
         "ties_disclosure": ties_disclosure,
         "provenance": provenance,
     }

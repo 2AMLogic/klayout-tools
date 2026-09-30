@@ -195,6 +195,8 @@ from .gen import (
     CONTACT_SIZE_UM,
     ENCLOSURE_MARGIN_UM,
     GenError,
+    _cut_fixed_size_um,
+    _fixed_cut_side_um,
     _pdk_family,
 )
 
@@ -335,10 +337,28 @@ def _apply_orientation_um(x: float, y: float, orientation: str) -> tuple[float, 
     return x, y
 
 
-#: Via-drop square side (um, issue #454) -- the same drawn contact/via size
-#: every `klt gen` generator's own unit devices already use (`gen.CONTACT_SIZE_UM`),
-#: so a via-drop's via is never a second, unvalidated size.
+#: Via-drop square side (um, issue #454) -- the same generic contact/via
+#: budget every `klt gen` generator's own unit devices already use
+#: (`gen.CONTACT_SIZE_UM`), so a via-drop's via is never a second, unvalidated
+#: size. `compose()` widens it per via layer to the deck's own minimum (#1501)
+#: and clamps it down to the layer's fixed size where the foundry rule is a
+#: maximum too (#2585, :func:`_via_fixed_size_um`).
 _VIA_DROP_SIZE_UM = CONTACT_SIZE_UM
+
+
+def _via_fixed_size_um(variant: str, via_layer: tuple[int, int]) -> float:
+    """The fixed drawn side (um) of a via-drop cut on ``via_layer`` for the
+    resolved PDK ``variant`` (issue #2585, see
+    :func:`klayout_tools.gen_layer_params._cut_fixed_size_um`), or ``0.0``
+    when the layer has no upper size bound or the family cannot be resolved
+    at all -- an unresolvable family degrades to the unclamped via size,
+    exactly like :func:`_min_width_um_for_layer`'s own floor lookup."""
+    try:
+        family = _pdk_family(variant)
+    except GenError:
+        return 0.0
+    return _cut_fixed_size_um(family, via_layer)
+
 
 #: Landing-pad square side (um, issue #454) drawn on *both* sides of a
 #: via-drop (the backbone's own ``route_layer`` and the target pin's own
@@ -3680,8 +3700,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             via_pair = drop["via_layer"]
             if via_pair not in via_drop_size_um:
                 floor = _min_width_um_for_layer(pdk_info["variant"], via_pair)
-                via_drop_size_um[via_pair] = max(
-                    _VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0
+                # Issue #2585: then clamp *down* to the layer's fixed size
+                # where the foundry rule is a maximum too (sky130's `via`,
+                # 0.15um; sg13g2's `Via1`-`Via4`, 0.19um) -- the generic
+                # 0.22um square is over that maximum. The landing pads
+                # below keep their own baseline/area/enclosure sizing, so
+                # the smaller via only gains enclosure.
+                via_drop_size_um[via_pair] = _fixed_cut_side_um(
+                    max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
+                    _via_fixed_size_um(pdk_info["variant"], via_pair),
                 )
     # Issue #2072: `_VIA_LANDING_SIZE_UM` is a guaranteed `met3.area.1`/
     # `met4.area.1`/`met5.area.1`-class violation whenever a via-drop
