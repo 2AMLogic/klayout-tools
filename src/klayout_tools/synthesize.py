@@ -2734,11 +2734,18 @@ def _statime_native_is_importable() -> bool:
 
     Deliberately :func:`importlib.import_module` rather than
     :func:`importlib.util.find_spec`: the latter raises :class:`ValueError`
-    for a ``sys.modules`` entry of ``None`` (CPython's own "this import must
-    fail" sentinel) and for a module object carrying no ``__spec__``, both
-    of which are ordinary states in the hermetic tests. The import itself is
-    free here -- by the time this is called the real load has already been
-    attempted, so a successful import is a ``sys.modules`` cache hit.
+    for a module object carrying no ``__spec__`` (exactly what the hermetic
+    tests' stub injects), and that exception would escape the ``except
+    StaError`` handler in :func:`_read_sta_timing` -- a hard failure of
+    ``run_synthesize`` instead of the "extension not installed" reason this
+    function exists to produce. ``find_spec`` does handle the other ordinary
+    hermetic-test state, a ``sys.modules`` entry of ``None`` (CPython's own
+    "this import must fail" sentinel), correctly -- it returns ``None``
+    rather than raising -- but so does :func:`importlib.import_module`, via
+    :class:`ModuleNotFoundError` (an :class:`ImportError` subclass), so that
+    state does not favor either function. The import itself is free here --
+    by the time this is called the real load has already been attempted, so
+    a successful import is a ``sys.modules`` cache hit.
     """
     try:
         importlib.import_module("klt_statime_native")

@@ -300,9 +300,12 @@ def test_text_renderer_echoes_the_reason_when_sta_is_null(capsys):
 def test_reason_classification_survives_a_stub_without_a_module_spec(monkeypatch):
     """Regression guard for the classifier itself: `_statime_native_is_importable`
     must use `import_module`, not `importlib.util.find_spec` -- the latter
-    raises `ValueError` both for the `None` sentinel above and for a module
-    object with no `__spec__` (exactly what `_install_stub` injects), which
-    would misreport an engine failure as a missing extension."""
+    raises `ValueError` for a module object with no `__spec__` (exactly what
+    `_install_stub` injects below), and that exception would escape the
+    `except StaError` handler in `_read_sta_timing` as a hard failure rather
+    than the "extension not installed" classification under test here. (The
+    `None` sentinel used below is handled correctly by both `find_spec` and
+    `import_module`, so it does not distinguish between them.)"""
     from klayout_tools.synthesize import _statime_native_is_importable
 
     module = _install_stub(monkeypatch, lambda *args: json.dumps(_FAKE_RESULT))
