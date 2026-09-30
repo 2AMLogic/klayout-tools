@@ -465,6 +465,20 @@ stability statement, concrete precedents, and drift-detection guidance, and
   SPICE-vs-SPICE compare is topological and resolves no PDK, so `pdk` stays
   `null` there. See `docs/cli/drc.md`/`docs/cli/lvs.md` for each verb's exact
   condition.
+  - `ambiguous_sources` (issue #2564) — present **only** when more than one
+    candidate install on the resolving host held the resolved variant; the
+    `source`-style search-order labels of the ones the first-match-wins
+    resolution skipped, e.g. `["search root: ~/.volare"]`. Deliberately the
+    path-free labels and not the absolute roots: this block is committed
+    evidence, and a raw store path carries the resolving machine's home
+    directory (the same reasoning behind the `{path, scope}` shape used for
+    paths elsewhere). The absolute roots are named in the accompanying
+    stderr warning instead. Absent in the ordinary single-install case, so
+    an unambiguous run's `provenance` is byte-identical to what it was
+    before this field existed and a stored-report diff cannot drift on it.
+    Populated by `klt sim` today; the underlying detection lives in
+    `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
+    every verb that resolves a PDK — see `docs/cli/pdk.md`.
 - `deck` — the rule (or model) deck the run used, as
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
   hex digest of the deck file actually used, so "clean against *this exact*

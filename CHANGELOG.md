@@ -380,6 +380,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   reports every *pair* with `pairwise_approximation: true` rather than an
   N-terminal network solve. See `docs/cli/extract.md`'s "Substrate spreading
   resistance between taps" section.
+- **Fixed** (#2564, `klt sim` + `klt pdk`; additive — **no** `schema_version`
+  bump): PDK-root resolution is first-match-wins, and on a host carrying more
+  than one install of the same variant — both a `volare`-managed `~/.volare`
+  and a `ciel`-managed `~/.ciel` `sky130A`, the ordinary state of a machine
+  that has followed the tooling's own migration — it **silently** picked one.
+  A campaign that verified `~/.volare` against a pinned `open_pdks` commit
+  and then ran `klt sim` with a relative `models.lib` could therefore produce
+  a record naming that pin behind a simulation that read a different build
+  (whose `models_fet.spice` mismatch cards need not be byte-identical). The
+  only trace was `provenance.pdk.source`, which is correct but purely
+  after-the-fact, and absent entirely from `--format text`. Resolution itself
+  is unchanged; the ambiguity is now reported instead of discarded:
+  `pdk.find_pdk()` returns `ambiguous_roots` (the later candidate roots that
+  also hold the resolved variant — `[]` in the common case, and always `[]`
+  when `--pdk-root`/`models.pdk_root` pinned the root); `klt sim` prints a
+  one-line stderr warning naming the root read, the roots skipped, and the
+  remedy; `provenance.pdk` gains `ambiguous_sources` (the path-free
+  search-order labels, present only when ambiguous, so an unambiguous run's
+  provenance is unchanged); and `klt sim --format text` now echoes
+  `pdk: <variant> <version> (via <source>)` beside `models_lib`, with a
+  `WARNING` line for the ambiguous case. `docs/cli/sim.md`'s "Model library
+  resolution" section now documents the resolution order explicitly.
+  Request-level pinning is available today as `models.pdk_root`; a
+  `models.root`-style alias was **not** added.
+
 - **Fixed** (#2517, `klt yield-campaign`; no schema change — **no**
   `schema_version` bump): every campaign run reported
   `campaign.sim_status: "pass_partial"`, even a completely clean one. A
