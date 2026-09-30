@@ -9609,32 +9609,42 @@ def test_lvs_res_array_sg13g2_dummy_suppression_no_unmatched_device(
     assert layout_extracted["device_counts"] == {"rsil": 4}
     assert ref_extracted["device_counts"] == {"rsil": 4}
 
+    # Both request sides carry an explicit `"deck": "sg13g2"`. sg13g2's `rsil`
+    # is a *three*-terminal bulk resistor (both ends plus the substrate rail),
+    # which `klt extract` writes as a subcircuit call (`X$n a b vsubs rsil
+    # ...`) rather than a SPICE `R` card. Without a deck on each side to bind
+    # that call to a device class, the SPICE reader treats both circuits as
+    # device-less, and the compare degenerates to a 0-vs-0 `match` that never
+    # compares a device -- see the sg13cmos5l counterpart's docstring below.
     path = _write_request(
         tmp_path / "request.json",
         {
             "layout": {
                 "netlist": str(layout_extracted_path),
                 "top": layout_extracted["top"],
+                "deck": "sg13g2",
             },
-            "reference": {"netlist": str(reference_path), "top": ref_extracted["top"]},
+            "reference": {
+                "netlist": str(reference_path),
+                "top": ref_extracted["top"],
+                "deck": "sg13g2",
+            },
         },
     )
     report = run_lvs(path)
 
     assert report["status"] == "match"
-    # A fully clean compare: no `device.unmatched` (the issue's headline
-    # symptom), and no `net.unmatched`/`topology` errors from the dummies'
-    # floating end nets either.
-    assert report["mismatches"] == []
-    # sg13g2's `rsil` is a *three*-terminal resistor (both ends plus the
-    # substrate rail), which `klt extract` writes as a subcircuit call
-    # (`X$n a b vsubs rsil ...`) rather than a SPICE `R` card -- so
-    # `counts.devices` is legitimately `0` on both sides here, unlike
-    # sky130's two-terminal `res_generic_po` in the test above, and the
-    # dropped-vs-kept distinction shows up in the *net* counts instead.
-    # Verified by clearing the deck's `dummy` field: the layout side then
-    # carries the four dummy units' eight extra nets (17 vs. the reference's
-    # 9) and the compare fails with `net.unmatched` + `topology` errors.
+    # A real device compare: four `rsil` on each side, all matched, and no
+    # `device.unmatched` (the issue's headline symptom). Verified by clearing
+    # the deck's `dummy` field: the layout side then carries 8 devices against
+    # the reference's 4 and the compare fails with `device.unmatched` errors.
+    assert report["counts"]["devices"] == {"layout": 4, "reference": 4, "matched": 4}
+    assert not any(m["category"] == "device.unmatched" for m in report["mismatches"])
+    # With the deck bound, warning-only categories (e.g.
+    # `device.geometry_not_compared`) legitimately appear; what must be absent
+    # is any error-severity mismatch -- no `net.unmatched`/`topology` errors
+    # from the dummies' floating end nets either.
+    assert not [m for m in report["mismatches"] if m["severity"] == "error"]
     assert report["counts"]["nets"]["layout"] == report["counts"]["nets"]["reference"]
 
 
