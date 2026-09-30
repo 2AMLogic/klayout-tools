@@ -831,7 +831,13 @@ from typing import (
 )
 
 from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
-from ._report_verify import build_rerun_result, load_committed_report
+from ._report_verify import (
+    LIST_ITEM,
+    build_rerun_result,
+    diff_verdict_fields,
+    load_committed_report,
+    strip_path_patterns,
+)
 from .build_identity import version_report
 from .coverage import (
     coverage_nothing_checked,
@@ -1790,7 +1796,11 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #:   ``request.power`` block.
 #: - :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- the cited `klt erc` run's own
 #:   spec document does not ask the question item 11 grades: it could not be
-#:   read, declares no ``"kind": "supply"`` net, declares no ``ties[]``
+#:   read at *any* path it could mean from here (issue #2608 --
+#:   :func:`_erc_supply_spec_candidates` tries the evidence file's own
+#:   directory as well as the producing run's, so this no longer fires for a
+#:   spec committed beside its evidence), declares no ``"kind": "supply"``
+#:   net, declares no ``ties[]``
 #:   with no disclosure of why (see :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`
 #:   below for the disclosed case, issue #2234) -- an uncomputed check is
 #:   not a clean one -- declares a ``ties[]`` entry the ERC run itself
@@ -4949,6 +4959,13 @@ def _resolve_relative_to_report(path: str, spec: dict[str, Any]) -> str | None:
     silently failing to find it. Resolving it against the report file's own
     directory first -- see :func:`_yield_samples_content_hash` -- fixes that
     without requiring the manifest or the `klt yield` invocation to change.
+
+    Issue #2608: `klt erc`'s spec document (``envelope["spec"]``) is the
+    same shape of reference and is resolved the same way -- see
+    :func:`_erc_supply_spec_candidates`. A `klt erc` run made from the
+    layout directory records ``"spec": "erc_supply_spec.json"``, which a
+    repo-root ``klt signoff --manifest`` could not open before that
+    fallback existed.
     """
     if os.path.isabs(path):
         return path
@@ -5600,11 +5617,11 @@ def _resolve_relative_to_spec(path: str, spec: dict[str, Any]) -> str:
     a command-backed entry, this process's own cwd otherwise.
 
     Shared by :func:`_yield_samples_content_hash` (the `klt yield` samples
-    document -- as the compatibility fallback tried *after*
-    :func:`_resolve_relative_to_report`, per issue #2197) and
-    :func:`_erc_supply_spec` (the `klt erc` spec document) -- both are "the
-    envelope points at a second document this module has to read, because
-    the envelope itself does not carry what we need".
+    document) and :func:`_erc_supply_spec_candidates` (the `klt erc` spec
+    document) -- both are "the envelope points at a second document this
+    module has to read, because the envelope itself does not carry what we
+    need", and both try this resolution as the compatibility fallback
+    *after* :func:`_resolve_relative_to_report` (issues #2197 and #2608).
     """
     cwd = spec.get("cwd") if spec.get("kind") == "command" else None
     if cwd and not os.path.isabs(path):
@@ -5664,6 +5681,80 @@ def _erc_supply_spec_hash_reason(
     return None
 
 
+def _erc_supply_spec_candidates(spec_path: str, spec: dict[str, Any]) -> list[str]:
+    """Every filesystem path the cited `klt erc` envelope's own ``spec``
+    field could mean **from this grading context**, in the order
+    :func:`_erc_supply_spec_document` should try them (issue #2608).
+
+    A path an envelope names is not portable -- it was written relative to
+    whatever directory the producing run used, which need not be the one
+    grading happens in (:func:`_resolve_input_artifact_value` documents the
+    same hazard for the input-artifact re-hash, and resolves it the same
+    two-candidate way). So:
+
+    - relative to the **evidence file's own directory** first
+      (:func:`_resolve_relative_to_report`), the way a reader who opened the
+      ERC report and followed its reference would. This is the ordinary `klt
+      erc supply.gds erc_supply_spec.json` run made from the layout
+      directory -- the natural place to run a per-block check -- whose
+      envelope records ``"spec": "erc_supply_spec.json"``, a path that
+      resolves only from there. ``None`` for a command-backed entry (the
+      cwd resolution below already *is* "the producing run's own
+      directory" for one) and for an absolute path (nothing to rebase).
+    - relative to the directory the producing run itself used
+      (:func:`_resolve_relative_to_spec`: ``spec["cwd"]`` for a
+      command-backed entry, this process's own cwd otherwise) second -- the
+      pre-#2608 behaviour, kept as the compatibility fallback for a spec
+      document that genuinely lives elsewhere.
+
+    Exactly the resolution order issue #2197 gave `klt yield`'s samples
+    document (:func:`_yield_samples_content_hash`); this was the last
+    "the envelope points at a second document" site still resolving from
+    one directory only.
+    """
+    candidates: list[str] = []
+    evidence_relative = _resolve_relative_to_report(spec_path, spec)
+    if evidence_relative is not None:
+        candidates.append(evidence_relative)
+    candidates.append(_resolve_relative_to_spec(spec_path, spec))
+    return list(dict.fromkeys(candidates))
+
+
+def _erc_supply_spec_document(
+    envelope: dict[str, Any], spec: dict[str, Any], spec_path: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Read the ERC spec document ``spec_path`` names, trying each path it
+    could mean here (:func:`_erc_supply_spec_candidates`) -- ``(document,
+    None)`` for the first candidate that both parses as a JSON object *and*
+    still matches the envelope's own ``provenance.spec.content_hash``
+    (:func:`_erc_supply_spec_hash_reason`).
+
+    A **hash match decides** which candidate is the cited document, for the
+    same reason :func:`_verify_input_artifact` prefers a match over a
+    mismatch: two directories can hold a same-named spec, and a
+    coincidentally-named neighbour must never turn a fresh citation into a
+    reported ``stale_evidence``. When no candidate matches, the *first*
+    readable candidate's own reason is reported (``stale_evidence`` /
+    ``unverifiable_provenance``) -- a genuinely edited or unpinned spec
+    still fails exactly as it did before this fallback existed. ``(None,
+    None)`` only when no candidate could be read and parsed at all.
+    """
+    read_reason: str | None = None
+    for candidate in _erc_supply_spec_candidates(spec_path, spec):
+        try:
+            document = _read_json_source(candidate, "erc spec")
+        except SignoffError:
+            continue
+        if not isinstance(document, dict):
+            continue
+        hash_reason = _erc_supply_spec_hash_reason(envelope, candidate)
+        if hash_reason is None:
+            return document, None
+        if read_reason is None:
+            read_reason = hash_reason
+    return None, read_reason
+
+
 def _erc_supply_spec(
     resolution: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -5706,16 +5797,25 @@ def _erc_supply_spec(
     supply resolved to one island" from "no supply was ever declared". This
     is the same gap, and the same remedy, as `klt yield`'s missing
     ``provenance`` block (see :func:`_yield_samples_content_hash`): read the
-    document the envelope names, via the same cwd resolution, rather than
-    fabricate a verdict from its absence. ``klt signoff`` stays a pure
-    *consumer* either way -- it changes no verb's own output.
+    document the envelope names, via the same two-candidate resolution,
+    rather than fabricate a verdict from its absence. ``klt signoff`` stays a
+    pure *consumer* either way -- it changes no verb's own output.
+
+    **Where the document is looked for** (issue #2608):
+    :func:`_erc_supply_spec_candidates` -- the evidence file's own directory
+    first, then the producing run's own (``spec["cwd"]``, else this
+    process's cwd). An ERC envelope committed beside the spec it names is
+    resolvable only the first way, and one run from a directory this
+    grading process cannot know only the second; neither convention is
+    guessed at, both are tried, and :func:`_erc_supply_spec_document`
+    settles which is the cited document by hash.
 
     **Verified against the envelope's own hash of it** (issue #2496). A
     second document read off disk is only as trustworthy as its freshness:
     without a check, editing the spec after the ERC run silently changes
     what item 11 grades while the cited findings still describe the old
-    declarations. :func:`_erc_supply_spec_hash_reason` re-hashes the same
-    file and compares against ``provenance.spec.content_hash`` (issue
+    declarations. :func:`_erc_supply_spec_hash_reason` re-hashes the
+    candidate and compares against ``provenance.spec.content_hash`` (issue
     #2049) before any declaration below is trusted.
 
     Follow-up reconciliation, exactly as for `klt yield`: if `klt erc` later
@@ -5730,17 +5830,11 @@ def _erc_supply_spec(
     if not isinstance(spec_path, str):
         return None, None
 
-    resolved_path = _resolve_relative_to_spec(spec_path, resolution["spec"])
-    try:
-        document = _read_json_source(resolved_path, "erc spec")
-    except SignoffError:
-        return None, None
-    if not isinstance(document, dict):
-        return None, None
-
-    hash_reason = _erc_supply_spec_hash_reason(envelope, resolved_path)
-    if hash_reason is not None:
-        return None, hash_reason
+    document, read_reason = _erc_supply_spec_document(
+        envelope, resolution["spec"], spec_path
+    )
+    if document is None:
+        return None, read_reason
 
     ties = document.get("ties")
     disclosure = document.get("ties_disclosure")
@@ -6972,6 +7066,126 @@ def build_fleet_report(
 #: content rather than reporting one spurious whole-block drift entry.
 VOLATILE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset({("build",)})
 
+#: The tier/fleet-report paths ``--check`` excludes from its **pass/fail**
+#: verdict but still reports, separately, as ``doc_drift`` (issue #2526): the
+#: report's verbatim quotation of the checklist doc, and the hash of that doc.
+#:
+#: **The distinction this draws.** ``--check`` exists to answer "does this
+#: committed evidence still hold". Two different things can make a committed
+#: report stop reproducing, and before issue #2526 both rendered as the same
+#: ``"drifted"``:
+#:
+#: - **the evidence moved** -- an item's ``status``/``reason``, a citation's
+#:   ``content_hash``, a count derived from them. That is the answer the gate
+#:   exists to produce, and it is untouched here.
+#: - **the yardstick's wording moved** -- ``docs/design-evidence-tiers.md``
+#:   gained a paragraph under an item. Every ``id``/``tier``/``status``/
+#:   ``reason``/``citation`` in the report is identical, but the report
+#:   *inlines* the doc's prose (:func:`_build_tier_item`'s ``title``/``text``/
+#:   ``notes``, parsed straight out of the doc by
+#:   :func:`~.design_evidence_tiers.parse_design_evidence_tiers` and echoed on
+#:   unmodified), and ``source_doc_content_hash`` hashes the doc's whole
+#:   bytes -- so an upstream wording change alone rewrote a consumer's
+#:   committed verdict of record and turned its CI freshness gate red for a
+#:   reason it did not cause.
+#:
+#: **Why exactly these fields.** No grading rule reads any of them: an item's
+#: verdict is a function of the manifest's evidence and the item's *id*, and
+#: its identity in the report is ``id`` + ``tier`` + ``partition`` -- all
+#: still compared. ``title``/``text``/``notes`` are quotation; changing a
+#: quotation changes no verdict. ``source_doc_content_hash`` is one step
+#: removed but the same class of fact: it moves on *any* byte of the doc,
+#: including a typo fix in a section this report does not even render, so it
+#: cannot distinguish "the checklist changed what it requires" from "the
+#: checklist was reworded". What *would* distinguish that -- the checklist
+#: gaining, losing or renumbering an item -- is caught by the fields that stay
+#: compared: ``t1_item_count``, ``build_t1_item_count``, ``t1_met_count``, and
+#: the per-item ``id``/``graded_by_build`` rows themselves.
+#:
+#: **It is an exclusion from the verdict, not from the report.** Every path
+#: named here that actually moved is still listed, by name, in the response's
+#: ``doc_drift_fields`` with ``doc_drift: true`` -- so a consumer that wants
+#: to warn (or fail) on "the yardstick moved" still can; it just no longer
+#: has to conflate it with "your evidence moved". And an exclusion never
+#: masks a co-occurring real change: an item whose ``text`` *and* ``status``
+#: both moved still reports ``"drifted"`` on the ``status``.
+#:
+#: Deliberately **not** excluded: ``build.grading_ruleset_id`` (already
+#: covered by :data:`VOLATILE_REPORT_PATHS`'s whole-``build`` exclusion, and
+#: still reported verbatim by ``--describe-grader``, which this does not
+#: touch) and ``source_doc`` (which names *where* the doc came from -- a
+#: report graded against a ``--tiers-doc`` override instead of the bundled
+#: copy is a different grading run, not a reworded one).
+DOC_PROSE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        # Tier report (`--manifest`).
+        ("source_doc_content_hash",),
+        ("items", LIST_ITEM, "title"),
+        ("items", LIST_ITEM, "text"),
+        ("items", LIST_ITEM, "notes"),
+        # Fleet roll-up (`--fleet`): the same hash at the top level and once
+        # per block, plus the doc-sourced `title` the two reduced item views
+        # (`blocking_item`, `ungraded_items[]`) carry. Their `id`/`reason`
+        # -- what actually names the blocker -- stay compared.
+        ("blocks", LIST_ITEM, "source_doc_content_hash"),
+        ("blocks", LIST_ITEM, "blocking_item", "title"),
+        ("blocks", LIST_ITEM, "ungraded_items", LIST_ITEM, "title"),
+    }
+)
+
+
+def _check_signoff_report(
+    report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
+) -> dict[str, Any]:
+    """The diff half both ``--check`` modes share (issues #2249, #2526):
+    ``{schema_version, mode, report, status, drift, doc_drift,
+    doc_drift_fields, fresh}``.
+
+    Two diffs of the same pair, both through
+    :func:`~._report_verify.diff_verdict_fields`, both excluding
+    :data:`VOLATILE_REPORT_PATHS`:
+
+    1. the **verdict** diff, over a view of each side with
+       :data:`DOC_PROSE_REPORT_PATHS` stripped out
+       (:func:`~._report_verify.strip_path_patterns`) -- this one alone
+       decides ``status`` (and therefore the exit code);
+    2. the **whole** diff, un-stripped. Every entry it has that the first
+       does not is by construction a doc-prose path that moved, and is
+       reported as ``doc_drift_fields`` with ``doc_drift: true``.
+
+    Subtracting one from the other, rather than diffing a prose-only
+    projection, is what guarantees the two signals partition the drift: no
+    field can be reported in both, and no field that moved can go unreported
+    in either.
+
+    ``fresh`` is embedded un-stripped, exactly as before -- the exclusion
+    applies to the comparison, never to what the response shows.
+    """
+    result = build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=VOLATILE_REPORT_PATHS,
+        committed_for_diff=strip_path_patterns(committed, DOC_PROSE_REPORT_PATHS),
+        fresh_for_diff=strip_path_patterns(fresh, DOC_PROSE_REPORT_PATHS),
+        mode="check",
+    )
+    verdict_fields = {entry["field"] for entry in result["drift"]}
+    doc_drift_fields = [
+        entry
+        for entry in diff_verdict_fields(
+            committed, fresh, exclude=VOLATILE_REPORT_PATHS
+        )
+        if entry["field"] not in verdict_fields
+    ]
+    # Re-seat `fresh` last: it is the whole report, so the two small signals
+    # this adds belong above it for a reader of the raw JSON.
+    fresh_payload = result.pop("fresh")
+    result["doc_drift"] = bool(doc_drift_fields)
+    result["doc_drift_fields"] = doc_drift_fields
+    result["fresh"] = fresh_payload
+    return result
+
 
 def check_tier_report(
     report_path: str, manifest: dict[str, Any], *, tiers_doc: str | None = None
@@ -6983,30 +7197,31 @@ def check_tier_report(
     Re-grades ``manifest`` (:func:`build_tier_report` -- the same work
     rendering the report does, including actually running any command-backed
     evidence it cites) and diffs the result against the committed report,
-    excluding :data:`VOLATILE_REPORT_PATHS`. ``status: "match"`` when nothing
-    else moved; ``"drifted"``, naming every field that did, otherwise --
-    a changed item ``status``/``reason``, a moved citation ``content_hash``,
-    a different ``source_doc_content_hash`` (the checklist itself changed), a
-    different ``t1_met_count``.
+    excluding :data:`VOLATILE_REPORT_PATHS` (build identity) and
+    :data:`DOC_PROSE_REPORT_PATHS` (the checklist's own wording).
+    ``status: "match"`` when nothing else moved; ``"drifted"``, naming every
+    field that did, otherwise -- a changed item ``status``/``reason``, a moved
+    citation ``content_hash``, a different ``t1_met_count``.
+
+    A doc-prose-only difference is **reported, not graded** (issue #2526):
+    ``doc_drift: true`` plus a ``doc_drift_fields`` list naming what moved,
+    alongside ``status: "match"``. See :data:`DOC_PROSE_REPORT_PATHS` for why
+    "the checklist was reworded" and "your evidence moved" have to be two
+    signals rather than one.
 
     This is the mode a consumer gating on "does the committed evidence still
     hold" should use **instead of byte-comparing the report file against a
     fresh render**: that comparison fails between two correct installs of the
     same pinned commit, on nothing but how each was provisioned (see
-    :data:`VOLATILE_REPORT_PATHS`).
+    :data:`VOLATILE_REPORT_PATHS`), and again on any upstream rewording of
+    the bundled checklist (see :data:`DOC_PROSE_REPORT_PATHS`).
 
     Raises :class:`SignoffError` for a missing/unparseable committed report,
     or one that is not a tier report at all -- never a traceback.
     """
     committed = _load_committed_signoff_report(report_path, "items", "--manifest")
     fresh = build_tier_report(manifest, tiers_doc=tiers_doc)
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_REPORT_PATHS,
-        mode="check",
-    )
+    return _check_signoff_report(report_path, committed, fresh)
 
 
 def check_fleet_report(
@@ -7016,20 +7231,19 @@ def check_fleet_report(
     :func:`check_tier_report` contract, one level up -- verify a committed
     *fleet* roll-up still reproduces from fleet manifest ``F``.
 
-    Inherits everything, including the exclusion, by re-rendering through
-    :func:`build_fleet_report` (which itself calls :func:`build_tier_report`
-    once per block): a roll-up carries exactly one ``build`` block, at the
-    top level, so the same one-path exclusion covers it.
+    Inherits everything, including both exclusions and the ``doc_drift``
+    signal, by re-rendering through :func:`build_fleet_report` (which itself
+    calls :func:`build_tier_report` once per block) and diffing through the
+    same :func:`_check_signoff_report`: a roll-up carries exactly one
+    ``build`` block, at the top level, so
+    :data:`VOLATILE_REPORT_PATHS`' one path covers it, while
+    :data:`DOC_PROSE_REPORT_PATHS` names the roll-up's own doc-sourced
+    surface separately -- ``source_doc_content_hash`` once per block as well
+    as at the top level, and the ``title`` its reduced item views carry.
     """
     committed = _load_committed_signoff_report(report_path, "blocks", "--fleet")
     fresh = build_fleet_report(fleet, tiers_doc=tiers_doc)
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_REPORT_PATHS,
-        mode="check",
-    )
+    return _check_signoff_report(report_path, committed, fresh)
 
 
 def _load_committed_signoff_report(

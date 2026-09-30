@@ -41,6 +41,7 @@ import os
 import re
 from typing import TYPE_CHECKING, Any
 
+from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import region as _region
 from .decks import ExtractionDeck
 from .extract_spef import ExtractError
@@ -364,8 +365,9 @@ def _abstract_cell_well_tie_cover(
       gf180mcu, sg13g2/sg13cmos5l): the ``tap_nplus``-covered diffusion
       slice, minus ``poly``, mirroring ``_extract_netlist``'s own
       ``(tap_nplus_region & active & nwell_body_cover) - poly`` well-tie
-      half. Only the ``nplus`` (well-tie) implant is read here, never
-      ``tap_pplus``: a p+ diffusion *inside* an nwell is a PMOS
+      half (plus, when the deck sets ``tap_nplus_complement``, the
+      p+-absence form of issue #2591). Only the ``nplus`` (well-tie) side
+      is read here, never ``tap_pplus``: a p+ diffusion *inside* an nwell is a PMOS
       source/drain, not a tie, and restoring it as a conductor would short
       that device's terminals onto the well.
 
@@ -402,11 +404,23 @@ def _abstract_cell_well_tie_cover(
         cell = layout.cell(cell_index)
         if deck.tap is not None:
             return _region(layout, cell, deck.tap)
-        if deck.tap_nplus is None:
+        if deck.tap_nplus is None and deck.tap_nplus_complement is None:
             return kdb.Region()
-        return (
-            _region(layout, cell, deck.tap_nplus) & _region(layout, cell, deck.active)
-        ) - _region(layout, cell, deck.poly)
+        active = _region(layout, cell, deck.active)
+        poly = _region(layout, cell, deck.poly)
+        tie = (_region(layout, cell, deck.tap_nplus) & active) - poly
+        if deck.tap_nplus_complement is not None:
+            # Issue #2591: the p+-absence well-tie form, same helper
+            # `_extract_netlist` uses. `well` is the whole active extent
+            # here -- the caller intersects with `nwell_body_cover` anyway,
+            # and a cell's own nwell may be drawn in its parent.
+            tie = tie | _complement_well_tie(
+                active,
+                poly,
+                active,
+                _region(layout, cell, deck.tap_nplus_complement),
+            )
+        return tie
 
     cover = kdb.Region()
     # One read per *cell type*, reused across every instance of it -- the

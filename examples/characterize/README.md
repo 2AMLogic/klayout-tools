@@ -12,8 +12,8 @@ klt characterize examples/characterize/request-batch.json    # two cells, one .l
 
 Needs `ngspice` on `$PATH` and nothing else — no PDK, no Docker. The run is
 a single transient (`4 input transitions x 4 output loads x 2 arcs = 32`
-switching cell instances plus `2**2 = 4` static leakage instances, in one
-deck) and takes a few seconds.
+switching cell instances, plus `2**2 = 4` static leakage instances and one
+capacitance probe per input pin, in one deck) and takes a few seconds.
 
 ## Files
 
@@ -42,15 +42,22 @@ Outputs land in `.klt/characterize/` next to the request (gitignored):
   `fall_transition` and `timing_sense : negative_unate`, an
   `internal_power()` group with `rise_power`/`fall_power` per arc, and the
   cell carries `cell_leakage_power` plus one `leakage_power()` group per
-  input state.
+  input state. Both inputs also carry a **measured** `capacitance` with its
+  `rise_capacitance`/`fall_capacitance` split — neither is declared in
+  `request.json`, which is the point: the number comes from this run's own
+  simulation, not from somebody else's library. (`request-batch.json` does
+  declare one, on `inv_demo`'s `A`, so the combined `.lib` shows the
+  override path too: a declared value is emitted alone, with no split.)
 - `testbench.spice` — the generated deck. Worth reading once: one `X`
   instance plus one `PWL` source plus one load cap per grid point, and the
   *other* input tied to `vdd` for each arc (the non-controlling value for a
   NAND, derived from `function : "!(A*B)"` rather than declared). Each
   instance reaches the rails through its own 0 V ammeter pair
-  (`Vpd*`/`Vpg*`, integrated by the `*_qv*`/`*_qg*` `INTEG` cards), and the
+  (`Vpd*`/`Vpg*`, integrated by the `*_qv*`/`*_qg*` `INTEG` cards); the
   `lk*` instances never switch -- they measure one input state's leakage
-  each.
+  each; and the `cp*` instances drive one input pin through its own 0 V
+  ammeter (`Vcm*`, integrated by the `*_qcr`/`*_qcf` cards) to measure that
+  pin's capacitance.
 - `sim-request.json` / `sim-report.json` — the `klt sim` request this verb
   generated and the raw per-measurement report it read back, so every number
   in the `.lib` is traceable to a `.meas` card.

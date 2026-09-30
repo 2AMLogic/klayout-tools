@@ -184,7 +184,24 @@ def _print_check_text(result: dict) -> None:
         print(f"  [{mark}] {check['field']}")
         if not check["match"]:
             print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
+            # Issue #2595: an echoed `layout`/`reference` that resolves to no
+            # existing file re-hashes to `null`, which on its own reads as
+            # "the recorded hash moved". Say what actually happened, and --
+            # for the common cause, a committed request/report pair whose
+            # relative paths were written against the report's own directory
+            # -- where the input really is.
+            missing = check.get("input_not_found")
+            if missing is None:
+                print(f"      actual:   {check['actual']}")
+            else:
+                print(f"      actual:   None (input not found: {missing['resolved']})")
+                if missing["found_relative_to_report"] is not None:
+                    print(
+                        "      note:     it exists relative to the report's own "
+                        f"directory ({missing['found_relative_to_report']}); "
+                        "--check resolves relative paths against the current "
+                        "working directory -- re-run from there"
+                    )
     # Issue #1373: engine-version drift is a non-fatal advisory, never folded
     # into the `[OK]`/`[DRIFTED]` hash-integrity list above -- it does not
     # affect `status`/exit code, so a scripted gate parsing that list alone

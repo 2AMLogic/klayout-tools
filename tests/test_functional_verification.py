@@ -105,6 +105,60 @@ _RESULTS_XML_EMPTY = """\
 </testsuites>
 """
 
+# cocotb 2.1.0 restructured its JUnit writer (issue #2592): the per-test timing
+# facts moved off the `<testcase>` element's own attributes into a child
+# `<properties>` block, with the unit reported separately, so there is no
+# `sim_time_ns` attribute to read any more.
+#
+# Shape and property names captured live from a real cocotb 2.1.0 + Icarus 13.0
+# run of `examples/functional-verification/` (2026-09-28), reformatted with
+# indentation for readability -- 2.1.0's own output is no longer pretty-printed.
+# Note that 2.1.0 hangs `random_seed` off each `<testcase>` too, where 2.0.x put
+# it on the `<testsuite>` (see `_RESULTS_XML_WITH_SKIP` above).
+#
+# Deliberately mixed here: `test_gcd_known_pairs` reports `ns`,
+# `test_gcd_random_pairs` reports `ps` (the unit must be honoured, never
+# assumed), the failing test carries its `<properties>` block alongside the
+# `<failure>` child, and the skipped test -- which never ran -- carries no
+# `<properties>` block at all.
+_RESULTS_XML_COCOTB_210_PROPERTIES = """\
+<testsuites name="cocotb tests">
+  <testsuite name="test_gcd" errors="0" failures="1" skipped="1" tests="4" time="0.064">
+    <testcase classname="test_gcd" name="test_gcd_known_pairs" time="0.014">
+      <properties>
+        <property name="cocotb" value="True" />
+        <property name="random_seed" value="1790625831" />
+        <property name="file" value="/tmp/gcd/test_gcd.py" />
+        <property name="line" value="52" />
+        <property name="sim_time_unit" value="ns" />
+        <property name="sim_time_start" value="0.0" />
+        <property name="sim_time_stop" value="520.0" />
+        <property name="sim_time_duration" value="520.0" />
+        <property name="sim_time_ratio" value="222424.20818423046" />
+      </properties>
+    </testcase>
+    <testcase classname="test_gcd" name="test_gcd_random_pairs" time="0.047">
+      <properties>
+        <property name="sim_time_unit" value="ps" />
+        <property name="sim_time_duration" value="4720000.0" />
+      </properties>
+    </testcase>
+    <testcase classname="test_gcd" name="test_gcd_deliberately_wrong_expectation" \
+time="0.003">
+      <properties>
+        <property name="sim_time_unit" value="ns" />
+        <property name="sim_time_duration" value="130.0" />
+      </properties>
+      <failure error_type="AssertionError" \
+error_msg="gcd(48, 18): got 6, want 999 (deliberate failure)" />
+    </testcase>
+    <testcase classname="test_gcd" name="test_gcd_never_ran" time="0">
+      <skipped />
+    </testcase>
+  </testsuite>
+</testsuites>
+"""
+
 _GCD_RTL = "module gcd(input wire clk); endmodule\n"
 _TESTBENCH = "# stub testbench module -- never imported by these tests\n"
 
@@ -703,6 +757,131 @@ def test_parse_results_xml_failure_entry(tmp_path):
 def test_parse_results_xml_missing_file(tmp_path):
     with pytest.raises(FunctionalVerificationError, match="produced no results file"):
         parse_results_xml(str(tmp_path / "results.xml"))
+
+
+# --------------------------------------------------------------------------- #
+# `sim_time_ns` across both cocotb JUnit XML shapes (issue #2592)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_results_xml_cocotb_210_properties_block_populates_sim_time_ns(tmp_path):
+    """cocotb 2.1.0 moved the per-test timing facts into a child
+    `<properties>` block, dropping the `sim_time_ns` attribute entirely
+    (issue #2592). The fallback must read `sim_time_duration` and scale it by
+    the *reported* `sim_time_unit` -- so every entry that ran carries a real
+    number again instead of a silent `null`."""
+    path = _write(tmp_path / "results.xml", _RESULTS_XML_COCOTB_210_PROPERTIES)
+    tests = parse_results_xml(path)
+
+    assert [test["status"] for test in tests] == [
+        "passed",
+        "passed",
+        "failed",
+        "skipped",
+    ]
+    # `ns` -- the common case, used verbatim.
+    assert tests[0]["name"] == "test_gcd_known_pairs"
+    assert tests[0]["sim_time_ns"] == 520.0
+    assert tests[0]["real_time_s"] == pytest.approx(0.014)
+    # `ps` -- the unit is honoured, never assumed to be `ns`.
+    assert tests[1]["sim_time_ns"] == 4720.0
+    # A `<properties>` block alongside a `<failure>` child is still read.
+    assert tests[2]["sim_time_ns"] == 130.0
+    assert tests[2]["error_type"] == "AssertionError"
+    # A test that never ran has no `<properties>` block at all: null, not a raise.
+    assert tests[3]["sim_time_ns"] is None
+
+
+def test_parse_results_xml_sim_time_attribute_is_preferred_over_properties(tmp_path):
+    """The 2.0.x attribute path is tried *first* and wins outright, so a
+    stored historical `results.xml` -- or any future cocotb that emits both
+    shapes at once -- parses exactly as it does today."""
+    path = _write(
+        tmp_path / "results.xml",
+        """\
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <testcase classname="test_gcd" name="test_gcd_known_pairs" time="0.005" \
+sim_time_ns="520.0">
+      <properties>
+        <property name="sim_time_unit" value="ps" />
+        <property name="sim_time_duration" value="999.0" />
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>
+""",
+    )
+
+    tests = parse_results_xml(path)
+
+    assert tests[0]["sim_time_ns"] == 520.0
+
+
+def test_parse_results_xml_unreadable_timing_facts_degrade_to_null(tmp_path):
+    """Neither shape present, an unrecognised unit token, and a
+    non-numeric duration all resolve to `sim_time_ns: null` -- never a raise,
+    and never a guessed scale (a wrong unit would be off by orders of
+    magnitude, which is worse than reporting nothing)."""
+    path = _write(
+        tmp_path / "results.xml",
+        """\
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <testcase classname="test_gcd" name="no_timing_facts_at_all" time="0.001" />
+    <testcase classname="test_gcd" name="unknown_unit" time="0.001">
+      <properties>
+        <property name="sim_time_unit" value="parsecs" />
+        <property name="sim_time_duration" value="520.0" />
+      </properties>
+    </testcase>
+    <testcase classname="test_gcd" name="unparseable_duration" time="0.001">
+      <properties>
+        <property name="sim_time_unit" value="ns" />
+        <property name="sim_time_duration" value="not-a-number" />
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>
+""",
+    )
+
+    tests = parse_results_xml(path)
+
+    assert [test["status"] for test in tests] == ["passed", "passed", "passed"]
+    assert [test["sim_time_ns"] for test in tests] == [None, None, None]
+
+
+def test_extract_random_seed_property_reads_the_cocotb_210_shape(tmp_path):
+    """The same 2.1.0 reshuffle also moved `random_seed` from a
+    `<testsuite>` property down into each `<testcase>`'s `<properties>`
+    block. `environment.random_seed` must still resolve -- pinned here so a
+    regression in the seed echo cannot hide behind the timing fix."""
+    path = _write(tmp_path / "results.xml", _RESULTS_XML_COCOTB_210_PROPERTIES)
+
+    assert fv._extract_random_seed_property(path) == 1790625831
+
+
+def test_parse_results_xml_suite_level_property_is_not_a_testcase_timing_fact(tmp_path):
+    """Only a `<testcase>`'s *own* `<properties>` children are read: a
+    suite-level property of the same name must never be attributed to a test
+    inside that suite."""
+    path = _write(
+        tmp_path / "results.xml",
+        """\
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <property name="sim_time_unit" value="ns" />
+    <property name="sim_time_duration" value="9999.0" />
+    <testcase classname="test_gcd" name="test_gcd_known_pairs" time="0.005" />
+  </testsuite>
+</testsuites>
+""",
+    )
+
+    tests = parse_results_xml(path)
+
+    assert tests[0]["sim_time_ns"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -2481,6 +2660,19 @@ def test_integration_real_icarus_gcd_worked_example(tmp_path):
     assert failed[0]["name"] == "test_gcd_deliberately_wrong_expectation"
     assert failed[0]["error_type"] == "AssertionError"
     assert "want 999" in failed[0]["error_message"]
+    # Issue #2592: every test that *ran* must report a real simulated time, on
+    # whatever JUnit XML shape the installed cocotb emits. Asserted against the
+    # real toolchain (not just a synthetic fixture) precisely so the next
+    # upstream JUnit reshuffle fails loudly here instead of silently nulling
+    # this field again, the way cocotb 2.1.0's did.
+    executed = [test for test in report["tests"] if test["status"] != "skipped"]
+    assert executed, "the worked example must execute at least one test"
+    for test in executed:
+        assert test["sim_time_ns"] is not None, (
+            f"{test['name']}: sim_time_ns is null -- the installed cocotb's "
+            "results.xml shape is not being parsed for simulated time"
+        )
+        assert test["sim_time_ns"] > 0
     assert report["coverage"] is None
     assert report["environment"]["cocotb_version"]
     assert report["environment"]["engine_version"]
@@ -2542,10 +2734,16 @@ def test_integration_real_icarus_testcase_filter_passes(tmp_path):
     assert report["status"] == "pass"
     assert report["failed_count"] == 0
     assert report["passed_count"] == 2
-    # cocotb still lists the filtered-out test, as a skip -- the exact
-    # `get_results()` undercount the contract's own counts avoid.
-    assert report["skipped_count"] == 1
-    assert report["test_count"] == 3
+    # cocotb >= 2.1 (the 2.1.0 pin, issue #2583) no longer lists the
+    # filtered-out test at all: the runner turns `testcase` names into a
+    # `COCOTB_TEST_FILTER` regex and deselected tests are absent from
+    # `results.xml` (`tests="2" skipped="0"`, verified live), where the
+    # 2.0.x regression manager recorded them as skips. A `<skipped>`
+    # entry for a test that *ran* and skipped itself (the count the
+    # contract's own three-way breakdown exists for) is still parsed and
+    # counted -- see the stubbed `_RESULTS_XML_WITH_SKIP` tests above.
+    assert report["skipped_count"] == 0
+    assert report["test_count"] == 2
 
 
 @pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
