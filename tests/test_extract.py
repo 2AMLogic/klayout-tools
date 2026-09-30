@@ -1765,6 +1765,7 @@ def test_gf180mcu_nmos_body_isolation_scoping_is_opt_in(tmp_path):
         _net_label_positions,
         _device_instance_paths,
         _def_pin_promotion,
+        _substrate_spreading,
     ) = _extract_netlist(layout, layout.top_cell(), disabled_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -3409,6 +3410,62 @@ def test_mos_array_series_finger_topology_round_trips_as_a_chain(tmp_path):
     assert len(sd_nets) == fingers + 1
 
 
+def test_mos_array_sg13g2_dummy_gates_suppressed(tmp_path):
+    """Issue #2590: `klt gen mos_array` (ihp-sg13g2, `dummy > 0`) piped into
+    `klt extract --deck sg13g2` suppresses the dummy gates instead of
+    extracting them as spurious real `nfet` devices -- the sg13g2
+    counterpart of `test_mos_array_sky130_dummy_gates_suppressed` (#491).
+    `dummy_devices_dropped` matches `2 * rows * dummy` and the extracted
+    `device_count` matches `klt gen`'s own real-cell-only count."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "ihp-sg13g2")
+    params = {"rows": 2, "cols": 2, "dummy": 1}
+    gen_report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "ihp-sg13g2", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_sg.gds")},
+        }
+    )
+    real = params["rows"] * params["cols"]
+    assert gen_report["device_count"] == real
+
+    report = run_extract(
+        str(tmp_path / "mos_sg.gds"), "sg13g2", output=str(tmp_path / "mos_sg.spice")
+    )
+
+    assert report["device_count"] == real
+    assert report["device_counts"] == {"nfet": real}
+    assert report["dummy_devices_dropped"] == 2 * params["rows"] * params["dummy"]
+
+
+def test_mos_array_sg13g2_without_dummies_drops_nothing(tmp_path):
+    """Issue #2590's edge case: a `dummy: 0` request on the same family
+    draws no marker shape at all, so the additive suppression is a no-op --
+    `dummy_devices_dropped` stays 0 and every drawn unit still extracts."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "ihp-sg13g2")
+    params = {"rows": 2, "cols": 2, "dummy": 0}
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "ihp-sg13g2", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "mos_sg0.gds")},
+        }
+    )
+
+    report = run_extract(
+        str(tmp_path / "mos_sg0.gds"), "sg13g2", output=str(tmp_path / "mos_sg0.spice")
+    )
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_count"] == params["rows"] * params["cols"]
+
+
 def test_res_array_sky130_dummy_resistors_suppressed(tmp_path):
     """Issue #491: `klt gen res_array` (sky130, `dummy > 0`) piped into `klt
     extract --deck sky130` suppresses the dummy resistor bodies instead of
@@ -4844,6 +4901,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _net_label_positions,
         _device_instance_paths,
         _def_pin_promotion,
+        _substrate_spreading,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -7624,6 +7682,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _net_label_positions,
         _device_instance_paths,
         _def_pin_promotion,
+        _substrate_spreading,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -12212,7 +12271,13 @@ def test_parasitics_summary_block_shape(tmp_path):
         "mom_crosscheck",
         "mom_rlc_override",
         "substrate_dc_tie",
+        "substrate_spreading",
     }
+    # `substrate_spreading` (issue #2561): `None` unless
+    # `--substrate-spreading <net>` was given -- present in every
+    # `--parasitics` run for schema stability, exactly like
+    # `mom_crosscheck`/`mom_rlc_override` above.
+    assert para["substrate_spreading"] is None
     # `substrate_dc_tie` (issue #1263): every synthesized substrate identity
     # this extraction produced, plus the shunt resistance used to give it a
     # DC path to SPICE's global ground node `0`. `node_scope` (issue #1503):
@@ -16471,19 +16536,22 @@ def _add_dummy_nfet(layout: kdb.Layout, x0: int, *, marker: str = "full") -> Non
 
 
 def test_dummy_field_defaults_none_on_shipped_decks():
-    """The `dummy` field is opt-in per deck (issue #295). Three of the four
-    families that accept a `dummy` `klt gen` param now declare a curated
-    marker layer: sky130 as of issue #491 (`(83, 20)`), gf180mcu as of issue
-    #2599 (`(100, 50)`), and sg13cmos5l as of issue #2602 (`(100, 50)`) --
-    see each `EXTRACTION_DECK`'s own comment for why that layer was chosen.
-    All three are the deck-side half of a fix whose extractor-side half
-    (this field itself) shipped in #295/#462. `sg13g2` still declares none
-    (tracked separately, issue #2590), so its extraction is unaffected and
-    the field's opt-in default is still exercised here."""
+    """The `dummy` field is opt-in per deck (issue #295). Every family that
+    accepts a `dummy` `klt gen` param now declares a curated marker layer:
+    sky130 as of issue #491 (`(83, 20)`), gf180mcu as of issue #2599
+    (`(100, 50)`), sg13g2 as of issue #2590 (`(99, 50)`), and sg13cmos5l as
+    of issue #2602 (`(100, 50)`) -- see each `EXTRACTION_DECK`'s own comment
+    for why that layer was chosen. All four are the deck-side half of a fix
+    whose extractor-side half (this field itself) shipped in #295/#462. No
+    shipped deck leaves the field unset any more, so the opt-in default is
+    pinned on the dataclass field itself instead."""
+    assert {f.name: f.default for f in dataclasses.fields(ExtractionDeck)}[
+        "dummy"
+    ] is None
     assert get_extraction_deck("sky130").dummy == (83, 20)
     assert get_extraction_deck("gf180mcu").dummy == (100, 50)
+    assert get_extraction_deck("sg13g2").dummy == (99, 50)
     assert get_extraction_deck("sg13cmos5l").dummy == (100, 50)
-    assert get_extraction_deck("sg13g2").dummy is None
 
 
 def test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer():
@@ -16520,6 +16588,46 @@ def test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer():
     from klayout_tools.decks.gf180mcu import DECK as GF180MCU_DRC_DECK
 
     assert not [rule for rule in GF180MCU_DRC_DECK if rule.layer[0] == 100]
+
+
+def test_sg13g2_dummy_marker_does_not_collide_with_any_read_layer():
+    """Issue #2590: sg13g2's curated dummy marker is a deck-local
+    convention layer, so it must not coincide with any other layer this
+    deck reads -- otherwise real geometry would be silently suppressed as
+    "dummy". It reuses the `Recog.*` device-recognition layer *number* (99,
+    the structural analogue of the `marker.*` number sky130's `(83, 20)`
+    reuses) on a datatype IHP-Open-PDK assigns no purpose to; the deck's own
+    layer-99 entries (`Recog.diode` 99/31, `Recog.mom` 99/39,
+    `Recog.momf` 99/40) are all on other datatypes."""
+    deck = get_extraction_deck("sg13g2")
+    assert deck.dummy == (99, 50)
+    assert deck.dummy not in deck.device_recognition_layers
+    assert deck.dummy not in deck.merge_layers
+    # The marker is necessarily *in* `connectivity_layers` (the extractor has
+    # to read it to suppress on it), so `deck.dummy not in
+    # deck.connectivity_layers` cannot be asserted directly -- and
+    # `deck.dummy not in (deck.connectivity_layers - {deck.dummy})` would be
+    # a tautology. Recompute the set from a copy of this same deck with the
+    # `dummy` field cleared: that is every layer this deck reads for *some
+    # other* role, built by the deck's own machinery rather than restated
+    # here, so the marker's absence from it is a real invariant.
+    layers_read_for_other_roles = dataclasses.replace(
+        deck, dummy=None
+    ).connectivity_layers
+    assert deck.dummy not in layers_read_for_other_roles
+    # ...and its only other layer-99 members are the three `Recog.*`
+    # entries, all on other datatypes.
+    assert sorted(layer for layer in deck.connectivity_layers if layer[0] == 99) == [
+        (99, 31),
+        (99, 39),
+        (99, 40),
+        (99, 50),
+    ]
+    # No DRC rule in this family's curated deck references layer 99 at all,
+    # so `klt drc --deck sg13g2` never checks the convention layer.
+    from klayout_tools.decks.sg13g2 import DECK as SG13G2_DRC_DECK
+
+    assert not [rule for rule in SG13G2_DRC_DECK if rule.layer[0] == 99]
 
 
 def test_sg13cmos5l_dummy_marker_does_not_collide_with_any_read_layer():

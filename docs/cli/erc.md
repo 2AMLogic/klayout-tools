@@ -315,14 +315,39 @@ draws that the spec never declared" below.
     reported as `nets[].unlabelled_islands` / `unlabelled_area_um2` /
     `unlabelled_bbox` — which is what catches a severed single-label rail
     that `erc.unconnected_net` cannot see (see "`erc.unconnected_net` counts
-    labelled islands, not conductor islands" below). Reporting only: no
-    verdict changes. Only `stackup` roles are accepted (a `vias` role, an
-    unknown name, or a repeated name is a spec error); `null` or `[]` is the
-    undeclared form, identical to omitting the key. **Declare a role only if
-    the ownership claim is true of your stream** — every unlabelled shape on
-    an owned role is counted, including unrelated nets and fill (see below).
+    labelled islands, not conductor islands" below). Since issue #2524 a
+    non-zero remainder is also a **finding**
+    (`erc.unlabelled_conductor`), so declaring this key is a graded
+    assertion, not merely a reporting switch. Only `stackup` roles are
+    accepted (a `vias` role, an unknown name, or a repeated name is a spec
+    error); `null` or `[]` is the undeclared form, identical to omitting the
+    key. **Declare a role only if the ownership claim is true of your
+    stream** — every unlabelled shape on an owned role is counted,
+    including unrelated nets and fill; where the role legitimately carries
+    some, declare it away with `unlabelled_allowed_boxes` below rather than
+    leaving the role unowned and unmeasured (see below).
+  - `unlabelled_allowed_boxes` (array of `[left, bottom, right, top]`
+    micrometre boxes, optional, default absent, issue #2524) — the regions
+    on this net's owned `roles` where unlabelled conductor is *expected*:
+    dummy/fill, a deliberately floating shield, a seal-ring fragment. The
+    declared carve-out that makes `erc.unlabelled_conductor` safe to gate
+    on — structurally the `devices[]` carve-out (see "Device bodies are not
+    wires" above) applied one level up, with what it actually removed
+    echoed in `provenance.net_exclusions` so a reviewer can audit it. Takes
+    the same literal-geometry shape as `ties[].tap_boxes`/`well_boxes`, and
+    the same validation (a malformed or inverted box is a spec error, never
+    a silent no-op). Exclusion is per **island**, not per area: an
+    unlabelled island survives unless *all* of its geometry on the owned
+    roles falls inside the declared boxes, so a fill declaration that
+    happens to overlap a real severed orphan cannot silence it. The three
+    `unlabelled_*` report values stay the **raw** measurement — a carve-out
+    narrows what gates, never what was measured. Requires a non-empty
+    `roles` on the same entry (there is otherwise no remainder for it to
+    narrow, and the declaration would read as honoured while doing
+    nothing); `null` or `[]` is the undeclared form.
   - Omitted entirely -> `erc.unconnected_net`/`erc.multiply_driven_net`/
-    `erc.supply_short`/`erc.expected_short_missing` are never computed.
+    `erc.supply_short`/`erc.expected_short_missing`/
+    `erc.unlabelled_conductor` are never computed.
 
   **A `"supply"` (or signal) connectivity spec must declare every metal
   layer the design's real PDN straps use.** The worked `stackup`/`vias`
@@ -382,7 +407,9 @@ draws that the spec never declared" below.
     layer to name. Valid **only** with `well_layer: null`, and required
     with it (an empty/omitted list there is a spec error, not a tie that
     quietly checks nothing); declaring it alongside a drawn `well_layer` is
-    an error too — to narrow a drawn well's taps, use `tap_boxes`. Unlike
+    an error too — to narrow a drawn well's taps, use `tap_boxes`, and to say
+    which of its shapes this entry is about, use `well_requires_boxes` /
+    `well_excludes_boxes` below. Unlike
     every other optional key on this entry, this one *substitutes* for a
     required field rather than narrowing one, so it is graded under its own
     coverage classification (`erc_coverage.checked_by_well_assertion`,
@@ -413,6 +440,27 @@ draws that the spec never declared" below.
     to the same falsifiability test every narrowing form here is: a
     declared selection that keeps *every* drawn shape, or none of them, is
     recorded as skipped work (`degenerate_well_selection`).
+  - `well_requires_boxes` / `well_excludes_boxes` (optional arrays of
+    `[left, bottom, right, top]` micrometre boxes, default `[]`, issue #2540)
+    — the same well-side class selection, expressed in **literal geometry**
+    instead of a marker layer, for a two-class tub the PDK draws no layer to
+    separate. Each merged shape of `well_layer` is kept only when it interacts
+    with the **union** of `well_requires_boxes` (when that list is non-empty)
+    and with **none** of the `well_excludes_boxes` union — note the union: a
+    box list is one region named in pieces, unlike `well_requires`, where each
+    *layer* is a separate condition. The well-side counterpart of `tap_boxes`,
+    and there for the same reason: the marker form needs a PDK layer that
+    distinguishes the classes, and a single-tub PDK with no per-class marker
+    draws none (see "A two-class tub with no marker layer to separate them"
+    below). Composes with `well_requires`/`well_excludes` — all four narrow the
+    same selection — and requires a drawn `well_layer` exactly as they do.
+    Because *which shapes belong to this entry* then rests on the caller's
+    word, a tie graded through one is additionally named in
+    `erc_coverage.checked_by_well_assertion`; the well itself is still drawn
+    geometry, still measured, and each selected shape is still independently
+    graded. Same falsifiability test, same reason token: a selection keeping
+    every drawn shape, or none of them (including boxes matching no shape at
+    all), is recorded as skipped work (`degenerate_well_selection`).
   - `tap_layer` (string, `"<layer>/<datatype>"`, required) — the tap
     (substrate/well contact) layer expected inside each well shape.
   - `tap_requires` (optional array of `"<layer>/<datatype>"`, default
@@ -478,10 +526,23 @@ draws that the spec never declared" below.
       any routed design, so the honest thing a release-pinned flow can do is
       declare no tie and say why. Cleared by a different *build*, not by a
       redrawn layout. Records `"ties_disclosed_tool_limitation"`.
+  - `undeclared_classes` (optional array of non-empty strings, issue #2541)
+    — the caller's own names for the tie classes this spec does *not*
+    declare (e.g. `["p_substrate"]`). Each one becomes a separate
+    `erc_coverage.inapplicable` entry, `erc.missing_tie:["<name>"]`,
+    carrying whichever reason token `kind` selects — **whether or not
+    `ties` is empty**. That is what makes the disclosure reachable for a
+    *partial* declaration: a spec that declares the one well class it can
+    express and honestly cannot express the other. Present-but-empty, a
+    non-string/blank entry, and a duplicate are all spec errors; so is a
+    name a `ties[]` entry already declares, since the same class cannot be
+    both checked work and a disclosed non-declaration. Omitted → no named
+    entries, and every pre-#2541 spec's report is byte-identical.
   - Changes no geometry and no finding. What it changes is the
     `erc_coverage.inapplicable` reason recorded for the undeclared
     `erc.missing_tie` work when `ties` is empty (one of the two tokens
-    above, instead of `"no_ties_declared"`) — so a consumer (`klt signoff`'s
+    above, instead of `"no_ties_declared"`), plus one entry per
+    `undeclared_classes` name — so a consumer (`klt signoff`'s
     T1 item 11, `docs/design-evidence-tiers.md`) can distinguish a
     considered, disclosed omission from "nobody declared ties at all", which
     previously rendered identically, *and* can tell the two disclosed
@@ -494,8 +555,10 @@ draws that the spec never declared" below.
     themselves whether a disclosed tool limitation applies to the run in
     front of them.
   - Echoed verbatim as the top-level `ties_disclosure` field, carrying
-    `kind` only when the spec itself declared it (so a pre-#2247 spec's
-    report is byte-identical); `null` when omitted.
+    `kind`/`undeclared_classes` only when the spec itself declared them (so
+    a pre-#2247 / pre-#2541 spec's report is byte-identical); `null` when
+    omitted. The echo is prose for a human reader — the machine-readable
+    channel is `erc_coverage`, which is why the classes are named there too.
 - `devices` (optional array, default `[]`, issue #2183) — where a drawn
   **device body** sits on an already-declared conductor role, so the
   connectivity model stops reading it as a wire (see "Device bodies are
@@ -543,7 +606,8 @@ string) and for the `devices[]` declaration that fixes it.
 
 `gates[]`, every antenna ratio derived from it, and the `nets[]`-driven
 findings (`erc.unconnected_net` / `erc.multiply_driven_net` /
-`erc.supply_short` / `erc.expected_short_missing`) all come from that one
+`erc.supply_short` / `erc.expected_short_missing` /
+`erc.unlabelled_conductor`) all come from that one
 graph. Since issue #2169 the
 `ties[]` declarations are **not** part of it — see "Well/tap connectivity"
 below.
@@ -905,6 +969,76 @@ naming the right remedy: re-run against a build whose tie extraction is
 isolated and declare the tie, rather than go looking for a tap that is
 already there.
 
+##### Disclosing one class while declaring another (`undeclared_classes`, issue #2541)
+
+Both forms above describe a spec that declares **zero** `ties[]`, and until
+issue #2541 that was the only shape a disclosure could describe: the reason
+token is recorded against the *undeclared* `erc.missing_tie` work, and that
+work only existed when `ties` was entirely empty. A spec that declared one
+well class and genuinely could not express another therefore had no
+machine-readable way to say so — its `erc_coverage` was byte-identical to
+that of a spec which declared the same one tie and never considered the
+second class at all. The top-level `ties_disclosure` echo carried the prose,
+but it names no work identity and no reason token, so a grader reading
+`erc_coverage` (which is what T1 item 11 reads) could not tell the two
+apart. That produced a perverse incentive worth naming: declaring the one
+tie you *can* check made the record less legible than declaring nothing.
+
+`undeclared_classes` names the classes the disclosure is about, giving that
+undeclared work the identity it lacked:
+
+```json
+{
+  "ties": [
+    {
+      "name": "nwell_tie",
+      "well_layer": "10/0",
+      "tap_layer": "11/0",
+      "tap_requires": ["12/0"],
+      "connect_to": "li1",
+      "net": "VDD"
+    }
+  ],
+  "ties_disclosure": {
+    "kind": "unexpressible",
+    "reason": "the p-substrate class is deliberately not declared: this PDK draws no pwell/tub layer for a native-substrate block, so there is no well geometry to name",
+    "undeclared_classes": ["p_substrate"]
+  }
+}
+```
+
+The run records the declared tie as `checked`
+(`erc.missing_tie:["nwell_tie"]`, real evaluated work) *and* the disclosed
+class as `inapplicable`:
+
+```json
+{"id": "erc.missing_tie:[\"p_substrate\"]", "reason": "ties_disclosed_unexpressible"}
+```
+
+Notes on the shape:
+
+- **Inapplicable, not skipped.** A class the caller says cannot be
+  expressed is work this run was never asked to do, not requested work that
+  failed to run — the same classification the empty-`ties` disclosure
+  already gets — so it leaves `erc_status` alone. A *declared* tie that
+  could not be graded is still the skip that makes the scope
+  `clean_partial`.
+- **One identity space.** The disclosed classes sit in the same
+  `erc.missing_tie:` identity space declared ties occupy, which is what
+  lets an existing grader read them without new parsing. A disclosed name
+  that collides with a `ties[].name` is rejected at the spec: the same
+  class cannot be both checked work and a disclosed non-declaration.
+- **Still unverified, still unmet.** Naming a class proves nothing about
+  it. As with `reason` and `kind`, nothing here checks that such a class
+  exists or that it is really inexpressible; what changes is only that a
+  reader of the report of record can see *which* class was disclosed and
+  *which* obstacle was claimed, instead of a sentence no grader can act on.
+- **Opt-in.** A disclosure that names no classes behaves exactly as it did
+  before #2541 — inert alongside a non-empty `ties`, and the bare
+  `erc.missing_tie:[]` entry when `ties` is empty. When `ties` is empty
+  *and* classes are named, both are recorded: the bare entry is still the
+  true "nothing was declared" fact pre-#2541 readers key on.
+
 #### A block with no drawn well at all (`well_boxes`, issue #2255)
 
 Everything above relaxes how the **tap** side is expressed. The well side
@@ -915,7 +1049,10 @@ stream to point at — could not declare its substrate tie in any form. Only
 the drawn-well (n-well) half of such a design was ever graded, and
 `ties_disclosure` could not cover the gap either: a disclosure describes
 *undeclared* work, so a spec that declares its n-well tie and can express
-nothing for its substrate had nothing to disclose.
+nothing for its substrate had nothing to disclose. (Issue #2541 since gave
+that spec a disclosure path — `undeclared_classes`, above — but it remains
+a disclosure, and an unmet item 11: a substrate tie a block really does
+draw is better *declared* with `well_boxes` than disclosed.)
 
 The declarable form is `well_layer: null` plus a `well_boxes` list naming
 the substrate region the tie covers, in the same `[left, bottom, right,
@@ -960,7 +1097,11 @@ corroborates the region at all. Three consequences follow, all deliberate:
   `checked_by_assertion`. A tie can appear in both (an asserted substrate
   region whose tap is also caller-named), in either, or in neither. They are
   not merged because they are different claims: one says *which drawn
-  geometry is the tap*, the other says *where the substrate is*.
+  geometry is the tap*, the other says the **well side** of this verdict rested
+  on caller-named coordinates. Since issue #2540 that second list has two
+  members: this form, and a drawn well whose *class selection* was named in
+  boxes (`well_requires_boxes`/`well_excludes_boxes`) — see "A two-class tub
+  with no marker layer to separate them" below.
 - **It has its own falsifiability test**, and it is not `tap_narrowed`.
   That test measures what an assertion removes from a drawn baseline; here
   there is no baseline to remove from. The equivalent bar is
@@ -1115,6 +1256,125 @@ independently: one can be `checked` while the other is skipped.
 read anything in `erc_coverage.skipped` as a clean missing-tie verdict, and
 it matches on the `erc.missing_tie:` work-identity prefix rather than on the
 skip reason, so the new token is covered by construction.
+
+#### A two-class tub with no marker layer to separate them (`well_requires_boxes`/`well_excludes_boxes`, issue #2540)
+
+Both selectors above work by intersecting a **marker layer** into the derived
+well region, so they are only reachable for a stream that happens to draw a
+layer separating the classes. That is the ordinary case — a PDK marks its
+special device — but it is not the only one. A stream whose one drawn tub layer
+carries two deliberately differently-biased classes and draws **no** layer that
+distinguishes them (an analog bias, charge-pump or level-shifter block on any
+PDK with a single n-tub layer and no per-class marker) could declare neither
+class in any non-degenerate form. Every route ended somewhere unusable:
+
+- **one unselected entry** grades every merged shape of `well_layer` against
+  its own `net`, so it reports a false `erc.missing_tie` on every well of the
+  class it did not name (the defect `well_requires` removes *when a marker
+  exists*);
+- **a `well_requires`/`well_excludes` selection** built from any layer present
+  in both classes keeps every shape, and one built from a layer present in
+  neither keeps none — both endpoints are `degenerate_well_selection`, skipped
+  work rather than a graded check;
+- **`well_boxes`**, the one key that names well geometry outright, is rejected
+  beside a drawn `well_layer`, and before this issue its rejection message
+  pointed only at `well_requires`/`well_excludes` — advice this stream cannot
+  take;
+- **`well_layer: null`** instead is not an alternative either: the wells *are*
+  drawn, and an assertion over the whole extent grades
+  `degenerate_well_assertion`.
+
+The two box selectors are the well-side counterpart of `tap_boxes` — the same
+literal-geometry escape hatch, for the same reason (no PDK marker exists to
+narrow by), one level up. The caller names the coordinates of the shapes their
+class owns:
+
+```json
+{
+  "ties": [
+    {
+      "name": "device_body_wells",
+      "well_layer": "64/20",
+      "well_excludes_boxes": [[18.4, 3.2, 26.0, 11.9]],
+      "tap_layer": "65/44",
+      "tap_is_dedicated": true,
+      "connect_to": "li1",
+      "net": "VPWR"
+    },
+    {
+      "name": "bias_tub",
+      "well_layer": "64/20",
+      "well_requires_boxes": [[18.4, 3.2, 26.0, 11.9]],
+      "tap_layer": "65/44",
+      "tap_is_dedicated": true,
+      "connect_to": "li1",
+      "net": "VBIAS"
+    }
+  ]
+}
+```
+
+The two entries are complementary by construction in exactly the way the
+marker-layer pair is: whatever the boxes touch belongs to one, everything else
+to the other, and every well on the layer is graded exactly once.
+
+**This selects whole drawn shapes too.** Everything the previous section says
+about selection-vs-intersection applies unchanged, and matters more here: a
+caller naming the tub they mean has no reason to also enclose its tap ring, so
+intersecting would routinely push a real, correctly-wired tap outside the
+graded region. A box need only *interact* with (touch or overlap) a shape to
+select it, and the shape that survives is the whole merged shape the layout
+draws — which is also what each finding's `bbox` reports.
+
+**A box list is a union; a layer list is a conjunction.** Three
+`well_requires_boxes` boxes select the shapes touching *any* of them (three
+wells of this class), the same way `tap_boxes` and `well_boxes` form one region
+out of a box list. Each `well_requires` **layer**, by contrast, is a separate
+condition a shape must satisfy. Both readings are deliberate and neither is
+negotiable per-spec: coordinates come in pieces, conditions come in lists.
+
+**All four selectors compose.** `well_requires_boxes` alongside `well_requires`
+is neither rejected nor ignored — they narrow the same selection, as `tap_boxes`
+composes with `tap_requires` — and the degeneracy verdict is measured on the
+**combined** result. A marker that selects a tub plus an exclusion box that
+removes it again keeps nothing, and is graded `degenerate_well_selection` on
+that combined answer rather than on either key read alone.
+
+**It is graded as a well-side assertion**, so a tie scoped this way appears in
+`erc_coverage.checked_by_well_assertion` as well as in `checked`. That list's
+question is "did the well side of this verdict rest on the caller's word?", and
+here it did — not about where the well *is* (the layer draws that, and it is
+still what gets measured), but about which of its shapes this entry's bias class
+owns. Three strengths of the same claim, and the envelope distinguishes them:
+
+| Well side declared by | In `checked_by_well_assertion`? | Why |
+|---|---|---|
+| `well_layer` alone, or with `well_requires`/`well_excludes` | No | the stream draws both the well and the partition |
+| `well_layer` + `well_requires_boxes`/`well_excludes_boxes` | Yes | the well is drawn and measured; the partition is the caller's |
+| `well_layer: null` + `well_boxes` | Yes | nothing in the stream corroborates the region at all |
+
+The list does not say *which* of the two asserted forms was used. It answers the
+one question above; a reader needing the finer distinction has the spec
+document, which is the artifact that records the claim.
+
+**The falsifiability test is unchanged and shared**, reusing
+`degenerate_well_selection` rather than adding a token: a declared box selection
+that keeps every merged shape of the drawn layer, or none of them, is recorded
+in `erc_coverage.skipped` and the roll-up reports
+`erc_status: "clean_partial"`. The "keeps none" endpoint is the one a
+literal-geometry key makes easy to hit by accident — a stale coordinate, a spec
+written against a different origin — and it is refused rather than read as a
+clean run over an empty set. As with the marker form, the test is
+presence-gated (a tie with no selector claims every shape, the strongest claim
+available) and geometric within a declared selection (boxes that happen to
+touch every well in *this* stream are as degenerate as naming the layer
+itself).
+
+`klt signoff`'s T1 item 11 needs no change for this either. A tie scoped by
+boxes is `checked`, not skipped, so it can reach **met**; the citation's
+`power_delivery.ties_checked_by_well_assertion` quotes the widened list, so the
+weaker well-side provenance is stated in the verdict of record rather than
+reachable only by re-opening the ERC envelope.
 
 #### A well layer with no geometry at all (issue #2377)
 
@@ -1388,10 +1648,28 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   without it, declaring the tie would only remove a finding, leaving the
   tied conductor no better covered than not declaring the second name at
   all.
+- **`erc.unlabelled_conductor`** (issue #2524) — a declared `nets[]` entry
+  that owns `stackup` roles (`nets[].roles`, issue #2510) on which some
+  conductor is reachable from **no label at all**: the severed
+  single-label rail's orphan `erc.unconnected_net` structurally cannot see
+  (see "`erc.unconnected_net` counts labelled islands, not conductor
+  islands" below). Its own rule id rather than a reason on
+  `erc.unconnected_net`, because the condition is materially different — a
+  *partially* labelled net with an unreached remainder, versus no
+  connectivity to the label at all — and a caller filtering or suppressing
+  per rule must be able to tell them apart. Reported **once per claimant**
+  of the role, matching the granularity of the `nets[].unlabelled_islands`
+  field it is derived from. Entirely opt-in: the measurement exists only
+  where `roles` was declared, so no spec written before #2510 can acquire
+  this finding. Legitimate unlabelled conductor on an owned role is
+  declared away with `nets[].unlabelled_allowed_boxes` — see "Measuring the
+  unlabelled remainder" below for the escape hatch and the decision behind
+  gating it at all.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
   (one per merged polygon of a `ties[]` entry's `well_layer` — narrowed to
-  the shapes its `well_requires`/`well_excludes` class selection keeps,
-  issue #2339 — or of its
+  the shapes its class selection keeps —
+  `well_requires`/`well_excludes`, issue #2339, or
+  `well_requires_boxes`/`well_excludes_boxes`, issue #2540 — or of its
   asserted `well_boxes`, issue #2255, for a block that draws none), a tap must
   be drawn inside it (`tap_layer`, narrowed by `tap_requires`) *and* at
   least one such tap must be electrically connected — via the tie
@@ -1458,7 +1736,7 @@ count the verdict was decided on, including when it passed:
   labelled island — and the field is what makes that bound visible rather
   than removing it.
 
-#### Measuring the unlabelled remainder (`nets[].roles`, issue #2510)
+#### Measuring the unlabelled remainder (`nets[].roles`, issues #2510/#2524)
 
 `matched_islands` makes the bound visible; it does not remove it. The
 quantity the rule actually wants to be zero is the net's conductor geometry
@@ -1477,18 +1755,21 @@ The attribution therefore comes from the spec. A net that declares
 "nets": [
   {"name": "VDD", "matched_islands": 1, "expected_islands": 1,
    "roles": ["met4"], "unlabelled_islands": 1, "unlabelled_area_um2": 812.5,
-   "unlabelled_bbox": {"left": 140000, "bottom": 0, "right": 145000, "top": 162500}},
+   "unlabelled_bbox": {"left": 140000, "bottom": 0, "right": 145000, "top": 162500},
+   "unlabelled_allowed_islands": 0},
   {"name": "VSS", "matched_islands": 1, "expected_islands": 1,
    "roles": [], "unlabelled_islands": null, "unlabelled_area_um2": null,
-   "unlabelled_bbox": null}
+   "unlabelled_bbox": null, "unlabelled_allowed_islands": null}
 ]
 ```
 
 Here `VDD` still grades clean on `erc.unconnected_net` (one labelled
-island), but the remainder shows the severed piece and where it is. Label
-the orphan too and the remainder drops to `0` while the finding fires — the
-third row of the table above. `VSS` declared no roles, so its remainder is
-`null` (not measured), never a guessed `0`.
+island), but the remainder shows the severed piece and where it is — and
+since issue #2524 it also fails, as `erc.unlabelled_conductor`. Label
+the orphan too and the remainder drops to `0` while `erc.unconnected_net`
+fires instead — the third row of the table above. `VSS` declared no roles,
+so its remainder is `null` (not measured), never a guessed `0`, and it can
+never acquire the finding.
 
 This **closes the bound for a net that declares truthful ownership, and only
 for it**. What the scoping decides, deliberately:
@@ -1502,10 +1783,9 @@ for it**. What the scoping decides, deliberately:
   assigning it to none would recreate the silent case.
 - **Every unlabelled shape on an owned role counts** — including unlabelled
   dummy/fill conductor, or an unrelated unlabelled net, if the ownership
-  claim is not actually true of the stream. This is why the measurement is
-  **reporting only**: a non-zero remainder changes no verdict, roll-up,
-  `status`/`erc_status`, or exit code. Promoting it to a finding is a
-  separate decision.
+  claim is not actually true of the stream. Where the role legitimately
+  carries some, declare it with `nets[].unlabelled_allowed_boxes` — see
+  "The remainder gates" below.
 - **A cross-layer cut** (a missing via severing one routing layer from the
   next) is caught only when the orphaned side lies on an owned role.
 - `unlabelled_area_um2` sums each owned role's merged remainder area (two
@@ -1513,6 +1793,85 @@ for it**. What the scoping decides, deliberately:
   area); `unlabelled_islands` counts distinct unlabelled electrical islands
   with geometry on any owned role (one spanning two owned roles through a via
   counts once).
+
+##### The remainder gates: `erc.unlabelled_conductor` and its escape hatch (issue #2524)
+
+Issue #2510 shipped the measurement above as **reporting only** and left
+"should a non-zero remainder be a finding" as an explicit open decision,
+because a stream drawing legitimate unlabelled fill on an owned role would
+otherwise fail on a correct layout. **Issue #2524 takes that decision: it
+gates.** A remainder that survives the entry's own declared carve-out is
+`erc.unlabelled_conductor`, and it counts toward `erc_finding_count` /
+`erc_status` / the exit code like any other finding. Four sub-decisions, each
+deliberate:
+
+- **A new rule id, not a new reason on `erc.unconnected_net`.** The two
+  conditions are materially different — a *partially* labelled net with an
+  unreached remainder, versus no connectivity to the declared label at all
+  (or the wrong number of labelled islands) — and folding them into one
+  rule's reasons would cost every caller who filters or suppresses per rule
+  the ability to tell them apart. Adding a rule id is an additive
+  value-set change under [`docs/json-contract.md`](../json-contract.md), not
+  a `schema_version` bump — the same latitude `erc.expected_short_missing`
+  (issue #2463) took.
+- **Opt-in by construction.** The finding is reachable only where
+  `nets[].roles` was declared, which is also the only condition under which
+  the measurement exists at all. A spec written before #2510 grades
+  byte-identically: its remainder is still `null`, and no verdict moves.
+- **The escape hatch is a declared carve-out**,
+  `nets[].unlabelled_allowed_boxes` — the same shape as `devices[]` (see
+  "Device bodies are not wires" above) one level up. The caller names the
+  regions on the owned roles where unlabelled conductor is expected, those
+  regions are subtracted before the rule is evaluated, and what the
+  declaration **actually** removed is echoed in
+  `provenance.net_exclusions`. There is deliberately **no** auto-detection
+  of fill today — the exclusion is only ever the caller's explicit,
+  auditable word — and should a future `--deck`-driven fill-marker
+  auto-detection be added, an explicit declaration takes precedence over it,
+  the same direction `devices[]`' `superseded_by` already records. This is
+  what makes gating safe:
+  the alternative for a role carrying real fill was an unownable role (no
+  measurement at all) or a permanent finding on a correct layout.
+- **One finding per claimant, not one per role.** A shared unlabelled island
+  is already reported under *each* net claiming the role (above), so the
+  finding matches that granularity rather than deduplicating: a finding
+  shaped differently from the field it is derived from would make the two
+  disagree for no reader's benefit, and each claimant's finding is
+  independently accurate.
+
+```json
+"nets": [
+  {"name": "VDD", "matched_islands": 1, "expected_islands": 1,
+   "roles": ["li1"], "unlabelled_islands": 2, "unlabelled_area_um2": 2.0,
+   "unlabelled_bbox": {"left": 0, "bottom": 0, "right": 9000, "top": 1000},
+   "unlabelled_allowed_islands": 1}
+],
+"provenance": {
+  "net_exclusions": [
+    {"net": "VDD", "boxes": [[-0.5, -0.5, 1.5, 1.5]],
+     "excluded_islands": 1, "excluded_area_um2": 1.0}
+  ]
+}
+```
+
+Two unlabelled islands were measured on the role `VDD` owns; the declared
+box covers one of them (a fill strap), so one finding fires for the other
+(the severed orphan). Note what the report does *not* do:
+
+- **The three `unlabelled_*` values stay the raw measurement.**
+  `unlabelled_islands: 0` goes on meaning exactly what #2510 documented —
+  every piece of conductor on the owned roles is reachable from a label —
+  rather than weakening to "…or was excluded". What the carve-out removed
+  is reported separately as `unlabelled_allowed_islands`.
+- **Exclusion is per island, not per area.** An island survives unless
+  *all* of its geometry on the owned roles falls inside the declared boxes,
+  so a fill declaration that happens to overlap a real severed orphan
+  cannot silence it. `provenance.net_exclusions[].excluded_area_um2` still
+  reports the partial bite, so the overlap is visible rather than implied.
+- **A declaration that removed nothing is still echoed**, with zeroes — the
+  same falsifiability bar `provenance.devices[].body_area_um2 == 0.0` is
+  held to (issue #2226). A mis-transcribed coordinate or a fill region that
+  moved is distinguishable from a box that bit.
 
 **What to do about it.** Where you cannot declare truthful role ownership,
 the coverage this rule gives you is still bounded by your own stream:
@@ -1528,7 +1887,11 @@ the coverage this rule gives you is still bounded by your own stream:
   in a sign-off narrative for a single-label block. Cite
   `nets[].matched_islands` alongside it so the reader can see the bound —
   or, where the net owns its roles, cite `nets[].unlabelled_islands: 0`,
-  which is the severed-rail negative.
+  which is the severed-rail negative. `klt signoff`'s T1 item 11 does this
+  for you since issue #2524: a met item's citation carries
+  `power_delivery.supply_unlabelled_islands` per declared supply that owns
+  its roles (`{}` when none did — the honest "not measured", never a
+  fabricated zero).
 
 ### Locating the islands of a multi-island `erc.unconnected_net` (issue #2194)
 
@@ -1763,7 +2126,7 @@ issue #2179 each carries its own roll-up:
 | Field | Question it answers | Needs a PDK antenna table? |
 | ----- | ------------------- | -------------------------- |
 | `status` | Both signals together: did every *graded* antenna level pass **and** are there no `erc_findings`? | Yes — it is `not_checked` when no level could be graded |
-| `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.expected_short_missing`, `erc.floating_gate`, `erc.missing_tie` | No |
+| `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.expected_short_missing`, `erc.unlabelled_conductor`, `erc.floating_gate`, `erc.missing_tie` | No |
 
 The distinction is not academic. `--pdk` resolves against a limit table
 **this command carries for sky130 only** (see "Sky130 antenna-ratio limits"
@@ -1793,8 +2156,9 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
   `degenerate_well_assertion` — a caller-asserted substrate region
   indistinguishable from the whole top-cell extent), a degenerate *well
   selection* (issue #2339, `degenerate_well_selection` — a declared
-  `well_requires`/`well_excludes` that kept every merged shape of the drawn
-  `well_layer`, or none of them), and an *empty well region* (issue #2377,
+  `well_requires`/`well_excludes`, or issue #2540's literal-geometry
+  `well_requires_boxes`/`well_excludes_boxes`, that kept every merged shape of
+  the drawn `well_layer`, or none of them), and an *empty well region* (issue #2377,
   `empty_well_region` — a *drawn* `well_layer` that draws no geometry at all
   in this stream: a typo'd layer/datatype, a PDK whose tub layer number
   changed, a GDS written without the tub layer; never applicable to an
@@ -2098,22 +2462,23 @@ forward regardless (a `diode_insertion` remedy):
 | `remedy.layer`   | string          | The violating `levels[].layer` value — identical to the entry this remedy is attached to.        |
 | `remedy.target_layer` | string \| null | For `"layer_jumping"`, the adjacent `stackup` role name to route through instead; `null` for `"diode_insertion"`. |
 | `remedy.justification` | string    | Human-readable explanation citing the specific ratio/limit values and (for `"layer_jumping"`) the target layer's own margin.     |
-| `nets`           | array\<object\> | (issue #2497) One entry per declared `nets[]` spec entry, in spec order — the island count `erc.unconnected_net` actually graded that net on, retained **whether or not it produced a finding**. `[]` when the spec declares no `nets`. Reporting only: no value in an entry is an input to any finding, roll-up, or `status`/`erc_status`. See "`erc.unconnected_net` counts labelled islands, not conductor islands" above, and (issue #2510) its "Measuring the unlabelled remainder" subsection for the `roles`/`unlabelled_*` keys. |
+| `nets`           | array\<object\> | (issue #2497) One entry per declared `nets[]` spec entry, in spec order — the island count `erc.unconnected_net` actually graded that net on, retained **whether or not it produced a finding**. `[]` when the spec declares no `nets`. The `matched_islands`/`expected_islands` pair is reporting only (neither is an input to any finding, roll-up, or `status`/`erc_status`); the `unlabelled_*` keys are **not**, since issue #2524 — a surviving remainder is `erc.unlabelled_conductor`. See "`erc.unconnected_net` counts labelled islands, not conductor islands" above, and (issues #2510/#2524) its "Measuring the unlabelled remainder" subsection for the `roles`/`unlabelled_*` keys. |
 | `nets[].name`    | string          | The declared `nets[].name`, echoed verbatim.                                                     |
 | `nets[].matched_islands` | integer | How many disconnected electrical islands **carry this net's declared label** — `0` when nothing in the layout carries the name at all. This is the number the `erc.unconnected_net` verdict is decided on, and it equals the number of islands the net's conductor geometry forms **only when the stream labels every piece** (see the bound above). On a failing multi-island finding it equals `len(erc_findings[].islands)` for that net. |
 | `nets[].expected_islands` | integer | The entry's own `nets[].islands` declaration (issue #2400), default `1` — echoed so a committed report can be graded (`matched_islands == expected_islands` is clean) without the spec document in hand. |
 | `nets[].roles` | array\<string\> | (issue #2510) The entry's own `nets[].roles` declaration — the `stackup` roles this net owns outright — echoed so the remainder below is readable without the spec. `[]` when the entry declares none. |
-| `nets[].unlabelled_islands` | integer \| null | (issue #2510) How many distinct electrical islands carrying **no label at all** have conductor on any of `roles` — `0` means every piece of conductor on the owned roles is reachable from a label. `null` when `roles` is empty (not measured). Reporting only. See "Measuring the unlabelled remainder" above for the scoping. |
-| `nets[].unlabelled_area_um2` | number \| null | (issue #2510) The unlabelled remainder's area in µm², summed per owned role (each role's merged remainder). `null` when `roles` is empty. |
-| `nets[].unlabelled_bbox` | object \| null | (issue #2510) The remainder's extent across all owned roles (`{left, bottom, right, top}`, raw database units — the `erc_findings[].bbox` convention), so a non-zero remainder points at the orphan. `null` when the remainder is empty or not measured. |
+| `nets[].unlabelled_islands` | integer \| null | (issue #2510) How many distinct electrical islands carrying **no label at all** have conductor on any of `roles` — `0` means every piece of conductor on the owned roles is reachable from a label. `null` when `roles` is empty (not measured). Always the **raw** measurement: a declared `unlabelled_allowed_boxes` carve-out narrows what gates, never what was measured (issue #2524). See "Measuring the unlabelled remainder" above for the scoping. |
+| `nets[].unlabelled_area_um2` | number \| null | (issue #2510) The unlabelled remainder's area in µm², summed per owned role (each role's merged remainder). `null` when `roles` is empty. Raw, like the count above. |
+| `nets[].unlabelled_bbox` | object \| null | (issue #2510) The remainder's extent across all owned roles (`{left, bottom, right, top}`, raw database units — the `erc_findings[].bbox` convention), so a non-zero remainder points at the orphan. `null` when the remainder is empty or not measured. Raw, like the two above. |
+| `nets[].unlabelled_allowed_islands` | integer \| null | (issue #2524) How many of `unlabelled_islands` the entry's own `nets[].unlabelled_allowed_boxes` declaration excused — the islands that did **not** gate `erc.unlabelled_conductor` because all of their geometry on the owned roles falls inside a declared box. `0` for an entry that owns roles and declared no boxes; `null` alongside the three raw values when `roles` is empty. The gating count is `unlabelled_islands - unlabelled_allowed_islands`. |
 | `erc_findings`   | array\<object\> | One entry per ERC violation found by the checks in "ERC finding checks" above (issue #861) — empty when clean, or when no `nets`/`ties` spec sections were provided (the `erc.floating_gate` check still always runs). |
-| `erc_findings[].rule` | string     | One of `erc.floating_gate`, `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.missing_tie`, `erc.supply_short`, `erc.expected_short_missing` (issue #2463) — matching `klt drc`'s `violations[].rule` convention. A new rule id is an additive value-set change (`docs/json-contract.md`), not a `schema_version` bump. |
+| `erc_findings[].rule` | string     | One of `erc.floating_gate`, `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.missing_tie`, `erc.supply_short`, `erc.expected_short_missing` (issue #2463), `erc.unlabelled_conductor` (issue #2524) — matching `klt drc`'s `violations[].rule` convention. A new rule id is an additive value-set change (`docs/json-contract.md`), not a `schema_version` bump. |
 | `erc_findings[].description` | string | Human-readable explanation of this specific finding.                                       |
 | `erc_findings[].net` | string \| null | The primary net name implicated (a `nets[].name`/`ties[].net` value, or a gate's own `gates[].net`). |
 | `erc_findings[].other_net` | string \| null | The second net name implicated, for `erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing` only; `null` otherwise. The pair is always sorted, so `net` < `other_net` for those rules. |
 | `erc_findings[].gate_id` | string \| null | The `gates[].gate_id` implicated, for `erc.floating_gate` only; `null` otherwise.           |
-| `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
-| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`, and the *zero*-match `erc.unconnected_net`, which have no one place to point at). For a **multi-island** `erc.unconnected_net` (issue #2194) this is the box spanning every island — see `islands[]` below for the per-island boxes. |
+| `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, a tie's own `name`, or — for `erc.unlabelled_conductor`, issue #2524 — the owned role carrying the most surviving remainder area, ties broken by declared `roles` order, the same "one deterministic layer to open a viewer on" convention `islands[].layer` uses); `null` for the two net-connectivity rules. |
+| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`, and the *zero*-match `erc.unconnected_net`, which have no one place to point at). For a **multi-island** `erc.unconnected_net` (issue #2194) this is the box spanning every island — see `islands[]` below for the per-island boxes. For `erc.unlabelled_conductor` (issue #2524) it is the extent of the *surviving* remainder across every owned role, so it points at the orphan rather than at the excluded fill. |
 | `erc_findings[].islands` | array\<object\> \| null | (issue #2194) One entry per disconnected electrical island, populated **only** for a multi-island `erc.unconnected_net`; `null` for every other finding (including the zero-match one). Entries are in ascending KLayout cluster-id order — deterministic for a given layout+spec. See "Locating the islands of a multi-island `erc.unconnected_net`" above. |
 | `erc_findings[].islands[].bbox` | object \| null | That island's whole extent, unioned across every `stackup` role it has geometry on, in the same raw-database-unit convention as `erc_findings[].bbox`. Populated for every island of a net that resolved to geometry (a labelled net always has `stackup` geometry by construction). |
 | `erc_findings[].islands[].layer` | string \| null | The `stackup` role carrying the most of this island's area (ties broken by stackup order) — the most useful layer to open a viewer on, not an exhaustive list of the roles it touches. |
@@ -2121,10 +2486,11 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
 | `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration — a degenerate tap, issue #2199, or a degenerate well assertion, issue #2255), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. Additionally carries `layers_in_stream_without_declaration` (issue #2389), the drawn-but-undeclared layer disclosure, which grades nothing. |
-| `ties_disclosure` | object \| null | (issues #2234, #2247) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`, plus `"kind": "unexpressible"\|"tool_limitation"` when the spec declared one); `null` when the spec did not declare one. See "A tie with no distinguishing marker layer at all" and "When the obstacle is the build, not the stream" above. |
+| `ties_disclosure` | object \| null | (issues #2234, #2247, #2541) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`, plus `"kind": "unexpressible"\|"tool_limitation"` and `"undeclared_classes": [<string>, …]` when the spec declared them); `null` when the spec did not declare one. Prose for a human reader — the machine-readable channel is `erc_coverage`, which carries one `inapplicable` entry per disclosed class. See "A tie with no distinguishing marker layer at all", "When the obstacle is the build, not the stream", and "Disclosing one class while declaring another" above. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
 | `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region — `area(marker ∩ on's own drawn region)`, **not** the marker layer's own area (issue #2226), since a device-body marker is conventionally drawn with enclosure past the conductor it marks. `0.0` therefore means this declaration changed nothing at all: its marker layer carries no geometry in this layout, is drawn on a different datatype, or does not touch the role it was declared `on` (that last case also warns on stderr). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
+| `provenance.net_exclusions` | array\<object\> | (issue #2524) One entry per `nets[]` entry that declared `unlabelled_allowed_boxes`, in spec order — `{"net", "boxes", "excluded_islands", "excluded_area_um2"}`, where `boxes` echoes the declaration verbatim (micrometre `[left, bottom, right, top]`) and the two `excluded_*` values are what it **actually** removed from the unlabelled remainder `erc.unlabelled_conductor` is graded on. `[]` when no declared net asked for one. The same auditability contract `provenance.devices` establishes one level down: a declaration that *suppresses a finding* has to be readable from the report, or two runs of the same layout disagree about `erc.unlabelled_conductor` with nothing in either payload to say why. `excluded_islands: 0` with a non-zero `excluded_area_um2` is the per-island rule working as intended (a box that bit into an island without covering it); both zero means the declaration changed nothing at all — a box over empty space, a mis-transcribed coordinate — distinguishable from one that bit, exactly as `provenance.devices[].body_area_um2 == 0.0` is. |
 
 ## Checked-work coverage
 
@@ -2143,7 +2509,8 @@ declined the accumulation, the same shape of caller-side skip as omitting
 which need no `--pdk` at all. One checked ID per subject actually checked:
 per discovered gate (`erc.floating_gate`), per declared `nets[]` entry
 (`erc.net_connectivity` — the `erc.unconnected_net`/
-`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`
+`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`/
+`erc.unlabelled_conductor`
 rules all key off the same declaration), and per declared `ties[]` entry (`erc.missing_tie`). A spec
 that declares no `nets`/`ties` asked for none of that work, so those rules
 are recorded as **inapplicable** (`no_nets_declared`/`no_ties_declared`,
@@ -2157,6 +2524,15 @@ was never computed" from "the declared supplies came back clean" off the
 envelope alone. The gate scope is never empty: a run in which no net
 carries gate-role geometry is exit 1, not a zero-coverage report.
 
+A disclosure that names `undeclared_classes` (issue #2541) additionally
+records one `erc.missing_tie:["<class>"]` **inapplicable** entry per named
+class, carrying the same reason token, whether or not `ties` is empty —
+the only way a *partial* declaration (one well class declared and checked,
+another honestly inexpressible) can state that considered omission in the
+envelope rather than only in the prose `ties_disclosure` echo. Inapplicable
+rather than skipped for the same reason the empty-`ties` disclosure is, so
+it never moves `erc_status`.
+
 A declared `ties[]` entry is the one case this scope records as **skipped**:
 work that was requested and could not be performed. Four reasons today —
 `degenerate_tap_declaration` (issue #2199: the declared tap region is
@@ -2164,7 +2540,9 @@ indistinguishable from an ordinary source/drain contact),
 `degenerate_well_assertion` (issue #2255: a caller-asserted substrate region
 is indistinguishable from the whole top-cell extent),
 `degenerate_well_selection` (issue #2339: a declared well-side class
-selection kept every merged shape of the drawn `well_layer`, or none of
+selection — marker layers, or issue #2540's literal-geometry
+`well_requires_boxes`/`well_excludes_boxes`, one test for all four — kept every
+merged shape of the drawn `well_layer`, or none of
 them), and `empty_well_region` (issue #2377: a *drawn* `well_layer` that
 draws no geometry at all in this stream — a typo'd layer/datatype, a PDK
 whose tub layer number changed, a GDS written without the tub layer; never
@@ -2178,8 +2556,12 @@ drawn well at all", and "One well layer, two bias classes" above.
 **No new coverage list for a well-side selection.** `well_requires`/
 `well_excludes` narrow *drawn* geometry, exactly as `tap_requires` does, so
 a tie graded through one is an ordinary geometrically-derived pass and
-appears only in `checked`. The two lists below exist because a caller
-*assertion* is not corroborated by the stream; a selection is.
+appears only in `checked`. Their literal-geometry counterparts
+(`well_requires_boxes`/`well_excludes_boxes`, issue #2540) add no list either
+— but they *do* land the tie in the existing `checked_by_well_assertion`, since
+the partition they express is the caller's word rather than something the
+stream draws. The two lists below exist because a caller *assertion* is not
+corroborated by the stream; a marker-layer selection is.
 
 `erc_coverage` additionally carries two assertion lists, both subsets of
 `checked`, both `[]` when unused, and both purely informational — additive
@@ -2191,13 +2573,18 @@ any other checked, non-degenerate tie:
   identities whose **tap** region was derived (at least in part) from a
   caller assertion (`ties[].tap_boxes`) rather than pure PDK-marker
   narrowing.
-- `checked_by_well_assertion` (array\<string\>, issue #2255) — the work
-  identities whose **well** region was itself asserted
-  (`ties[].well_layer: null` + `ties[].well_boxes`), because the block
-  draws no well/tub layer at all. Deliberately a separate list rather than
-  more entries in the first: asserting which drawn geometry counts as the
-  tap and asserting where the substrate is are different claims, and the
-  second is the weaker one. A tie may appear in both.
+- `checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) — the
+  work identities whose **well side** rested on caller-named coordinates, in
+  either of two forms: the region itself asserted (`ties[].well_layer: null` +
+  `ties[].well_boxes`, because the block draws no well/tub layer at all), or a
+  drawn well whose *class selection* was named in boxes
+  (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`, because no drawn
+  layer separates the tub's two bias classes). Deliberately a separate list
+  rather than more entries in the first: asserting which drawn geometry counts
+  as the tap and naming the well side in coordinates are different claims, and
+  the second is the weaker one. A tie may appear in both. The list does not
+  distinguish its own two forms — it answers "did the well side rest on the
+  caller's word?", and the spec document records which way it was said.
 
 `erc_coverage` carries one further key that is not a work-item list at all:
 

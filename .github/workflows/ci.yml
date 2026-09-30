@@ -16,6 +16,21 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# uv caches (issue #2559): every `astral-sh/setup-uv` step below RESTORES on any
+# ref but SAVES only on pushes to main (`save-cache`). The repo's Actions cache
+# is capped at 10 GB and the inventory on 2026-09-27 held a 2.57 GB entry on
+# `refs/pull/2384/merge` -- a PR branch's own save buys nothing (every PR can
+# already restore main's entry for the same key) while consuming cap-limited
+# storage that then evicts the entries PRs actually restore from. main-only
+# saves make the cache one deterministic mechanism: main writes, everyone reads.
+# Mirrors rjwalters/loom#9065, which fixed the identical problem for that repo's
+# Swatinem/rust-cache steps via that action's equivalent `save-if` input.
+#
+# `prune-cache` was evaluated and deliberately NOT adopted -- see the PR for
+# issue #2559. `uv cache prune --ci` removes the unzipped-wheel archive dir,
+# which is ~99% of this project's uv cache (measured locally: 127 MB -> 0.3 MB),
+# so it would trade away essentially the whole restorable payload to reclaim the
+# ~40 MB a current-generation entry actually occupies (run 36316430288).
 jobs:
   lint:
     name: Lint (ruff)
@@ -34,6 +49,9 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install dependencies
         # --locked fails the job if uv.lock is stale relative to pyproject.toml.
@@ -129,10 +147,12 @@ jobs:
     # No toolchain-install step: ubuntu-latest images ship a rustup-managed
     # stable Rust, so `cargo` is already on PATH (matching how this repo
     # avoids third-party actions elsewhere).
-    # Heavy jobs run on Blacksmith autoscaled runners (measured 2026-09-21,
-    # run 35661296359: warm parity with the retired ci-heavy pool, wall 370s
-    # vs 561s); fork PRs route back to GitHub-hosted instead of being skipped.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # GitHub-hosted (free on a public repo). These heavy legs ran on
+    # Blacksmith autoscaled runners from 2026-09-24 (#2214) until the
+    # 2026-09-30 org-wide Blacksmith outage; the operator then moved every
+    # public repo to hosted (2AMLogic/2am D5, retiring Blacksmith). Same
+    # runner for same-repo and fork PRs, so there is no fork gate any more.
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       # fail-fast: false so e.g. a congestion regression doesn't cancel the
@@ -231,6 +251,9 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build + install the ${{ matrix.extension_module }} extension
         # `--group <crate>` resolves `klt-<crate>-native` from
@@ -535,6 +558,9 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build + install the klt_statime_native extension
         # `--group statime` resolves klt-statime-native from native/statime/
@@ -761,6 +787,9 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install dependencies (includes the klayout wheel)
         run: uv sync --locked
@@ -841,10 +870,12 @@ jobs:
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
-    # Heavy jobs run on Blacksmith autoscaled runners (measured 2026-09-21,
-    # run 35661296359: warm parity with the retired ci-heavy pool, wall 370s
-    # vs 561s); fork PRs route back to GitHub-hosted instead of being skipped.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # GitHub-hosted (free on a public repo). These heavy legs ran on
+    # Blacksmith autoscaled runners from 2026-09-24 (#2214) until the
+    # 2026-09-30 org-wide Blacksmith outage; the operator then moved every
+    # public repo to hosted (2AMLogic/2am D5, retiring Blacksmith). Same
+    # runner for same-repo and fork PRs, so there is no fork gate any more.
+    runs-on: ubuntu-24.04
     # Explicit bound (issue #1009) so a stuck runner or hung step fails
     # outright instead of silently riding the platform default of 360
     # minutes. A real cold-cache run (Yosys/Icarus Verilog/Verilator all
@@ -858,7 +889,14 @@ jobs:
       fail-fast: false
       matrix:
         # 3.10 is the floor declared in pyproject.toml (requires-python).
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # 3.14 is the current CPython release: `requires-python` declares no
+        # upper bound, so this repo already claims to install and run there --
+        # the leg exists so that claim is tested rather than asserted (issue
+        # #2593). Each new leg costs a real ~370-420s of CI compute against
+        # .github/ci-wall-clock-budget.json's total, so add one deliberately:
+        # a leg per interpreter this package actually claims to support, not
+        # one per interpreter that exists.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
 
@@ -866,14 +904,19 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies (includes the klayout wheel)
         # --extra functional-verification pulls in the pinned cocotb (issue
-        # #423, Phase 3 of Epic #391) -- a no-op on any interpreter >=3.14
-        # per pyproject.toml's own marker (none in this job's matrix today,
-        # but the resolver handles it correctly either way, verified while
-        # developing this pin).
+        # #423, Phase 3 of Epic #391). This now resolves on every leg of the
+        # matrix including 3.14: the extra's `python_version < "3.14"` marker
+        # was dropped in issue #2593 once cocotb 2.1.0 added 3.14 support and
+        # started shipping cp314 wheels. `--locked` means a cocotb line that
+        # ever reintroduces a real ceiling fails here loudly at resolve time
+        # rather than silently dropping cocotb from a leg's resolved set.
         run: uv sync --locked --extra dev --extra functional-verification
 
       - name: Install ngspice
@@ -1246,6 +1289,9 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install dependencies (klayout wheel + numpy)
         # Only the primary checkout gets a venv -- same reasoning as the
@@ -1484,6 +1530,9 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install dependencies (includes the klayout wheel)
         # Only the primary checkout gets a venv. Each generator inserts its
@@ -1604,10 +1653,10 @@ jobs:
             --out /tmp/ci-history.json
 
       - name: Check wall-clock budget
-        # --report-only for fork PRs: ci.yml's runner conditional routes those
-        # to ubuntu-latest, whose per-job timings the budgets -- measured on
-        # the self-hosted pool -- do not describe. A fixed threshold tuned
-        # against self-hosted numbers would otherwise redden every fork PR.
+        # --report-only for fork PRs. Historically forks ran on a different
+        # pool from same-repo runs; since the 2026-09-30 move off Blacksmith
+        # both run on GitHub-hosted, so this carve-out can go once the
+        # budgets are re-measured on hosted (docs/guides/ci-wall-clock-budget.md).
         # Same-repo runs gate for real (exit 1 fails this job).
         #
         # No `uv sync`: the script is standard-library-only on purpose, so the

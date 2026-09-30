@@ -183,11 +183,14 @@ implemented deliberately rather than rediscovered:
 Engines: ``"icarus"`` (default -- the CI-cheap interpreter) and
 ``"verilator"`` (opt-in, required for coverage). cocotb itself is an
 *optional* runtime dependency, deliberately not in ``pyproject.toml``'s
-``dependencies``: cocotb 2.0.1 refuses to run on Python 3.14+ while this
-repo supports 3.10+ with no upper bound, so pinning it would break ``klt``
-installs that never verify anything. It is discovered at call time and a
-missing install is a clear, actionable error -- exactly the posture ``klt
-synthesize`` takes toward a missing ``yosys`` binary.
+``dependencies`` but in its own ``functional-verification`` extra: it is a
+compiled package with a simulator toolchain behind it, and the large
+majority of ``klt`` installs never verify anything. It is discovered at call
+time and a missing install is a clear, actionable error -- exactly the
+posture ``klt synthesize`` takes toward a missing ``yosys`` binary. (Until
+issue #2593 the extra also carried a ``python_version < "3.14"`` marker,
+because cocotb 2.0.1 refused to run on 3.14+; cocotb 2.1.0 added 3.14
+support, the marker is gone, and CI now covers 3.10 through 3.14.)
 """
 
 from __future__ import annotations
@@ -1592,15 +1595,16 @@ def _extract_random_seed_property(results_xml: str) -> int | None:
 
 
 def _import_runner():
-    """Import ``cocotb_tools.runner`` lazily, turning a missing/too-new-Python
-    cocotb install into an actionable :class:`FunctionalVerificationError`
-    rather than an ImportError traceback at ``klt`` startup."""
+    """Import ``cocotb_tools.runner`` lazily, turning a missing cocotb install
+    into an actionable :class:`FunctionalVerificationError` rather than an
+    ImportError traceback at ``klt`` startup."""
     try:
         from cocotb_tools import runner
     except ImportError as exc:  # pragma: no cover - exercised via monkeypatch
         raise FunctionalVerificationError(
             f"cocotb is not installed (import failed: {exc}) -- install it with "
-            "`pip install cocotb`"
+            "`pip install cocotb`, or `uv sync --extra functional-verification` "
+            "for this repo's pinned version"
         ) from exc
     return runner
 

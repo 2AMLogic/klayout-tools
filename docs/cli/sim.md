@@ -145,10 +145,12 @@ naming what *is* supported:
 - **Backends**: `local` and `local-parallel` only; `remote`/`batch` pin
   the ngspice toolchain and are refused for this engine.
 - **Refused**: `monte_carlo` (no seed wiring),
-  `options.fail_fast_probe` (reads ngspice's rawfile stream), and
+  `options.fail_fast_probe` (reads ngspice's rawfile stream),
   `options.osdi_preload` (`pre_osdi` is an ngspice control command; Xyce
   loads Verilog-A as its own plugins — see "OSDI (Verilog-A) model
-  preload").
+  preload"), and `measurements[].expr` (`let`/`print` are ngspice control
+  commands with no Xyce `.control` block to carry them — see "Measurements
+  that are not `.meas` cards").
 
 Two syntax divergences the deck generator handles for you (both verified
 against Xyce 7.10.0; the full list with the measured ngspice-vs-Xyce
@@ -310,7 +312,7 @@ implements against.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. Validated up front by `remote_launcher.ami_pdk_key` — the *same* check the `batch` backend applies, see "Both off-host backends validate `models.pdk` up front" below. |
+| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. Validated up front by `remote_launcher.ami_pdk_key` — the *same* check the `batch` backend applies, see "Both off-host backends validate `models.pdk` up front" below. `sg13g2` is registered (#2573) but no AMI has been built/published for it yet (#2574) — a request will fail at `resolve_ami` with a "no published AMI" error until an operator runs `scripts/aws/build-remote-sim-ami.sh --pdk sg13g2` for the target region. |
 | `remote.region` | string, required | AWS region to provision in. No default — an unset region is a usage error, not an inferred one (`RemoteLaunchError` from `remote_launcher.require_cost_config`, mirroring `repo:remote`'s "no silent defaults for cost-relevant fields" discipline). |
 | `remote.key_name` | string, required | AWS EC2 keypair name attached to the provisioned instance, so `remote.ssh_key_path`'s private key can authenticate. |
 | `remote.ssh_key_path` | string, required | Local path to the private key matching `remote.key_name`, used for every SSH/SCP call the transport makes. |
@@ -386,8 +388,9 @@ headroom, smallest fitting `c7i` size — the 5-corner × 8-thread case selects
 (`data/remote-sim-ami-manifest.json`, schema at
 `docs/schemas/remote-sim-ami-manifest.schema.json`) produced by
 `scripts/aws/build-remote-sim-ami.sh` — ngspice, the curated `sky130A`/
-`gf180mcu` model decks, and `klt` itself are baked into the AMI, never
-fetched per job. Only the netlist and a generated request document
+`gf180mcu`/`sg13g2` model decks (`sg13g2`'s recipe additionally bakes
+compiled OSDI models — see that script's SG13G2 branch), and `klt` itself
+are baked into the AMI, never fetched per job. Only the netlist and a generated request document
 (kilobytes to low megabytes) are pushed per job, by
 `klayout_tools.remote_transport` — no IAM instance profile is attached to
 the guest by default (baked AMI + SSH/SCP transport means the guest never
@@ -477,8 +480,8 @@ What differs from `remote` is *who acquires the machine*:
 
 `remote` and `batch` (`sim._OFFHOST_BACKENDS`) both run on images the same
 AMI pipeline publishes, so both accept exactly the same PDK set
-(`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`) and both refuse an
-unsupported one **before spending anything** — `remote` before its
+(`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`) and both
+refuse an unsupported one **before spending anything** — `remote` before its
 `run-instances` call, `batch` before its first S3 write
 ([#2523](https://github.com/2AMLogic/klayout-tools/issues/2523)):
 
@@ -491,10 +494,10 @@ paths rather than restated per backend, so the two can never disagree about
 what is supported. Consequences worth knowing:
 
 - **A variant reducible to a published family is accepted** on both, on the
-  same terms: `models.pdk: "gf180mcuC"` → family `gf180mcu`. The *variant*
-  name is what keeps flowing off-host (`job.json`'s `pdk_variant`), because
-  the executing box resolves the PDK locally exactly as the `local` backend
-  does.
+  same terms: `models.pdk: "gf180mcuC"` → family `gf180mcu`, or
+  `models.pdk: "ihp-sg13g2"` → family `sg13g2`. The *variant* name is what
+  keeps flowing off-host (`job.json`'s `pdk_variant`), because the executing
+  box resolves the PDK locally exactly as the `local` backend does.
 - **A variant whose family has no published image is refused even though it
   resolves locally** — `sky130B` reduces to `sky130`, which is not a
   published key (only `sky130A` is), so it is named rather than silently
@@ -937,6 +940,11 @@ Verilog-A compact models does **not** need a `.control` block in the body
 either — declare the compiled `.osdi` files in `options.osdi_preload` instead
 (see "OSDI (Verilog-A) model preload" below).
 
+Because `klt sim` owns that single `.control` block, a measurement that has no
+top-level `.meas` form — most notably an operating-point quantity — is
+declared as a `measurements[].expr` expression rather than smuggled in through
+the netlist body; see "Measurements that are not `.meas` cards" below.
+
 ## Saved signal set (`save all`)
 
 ngspice's `.save` card **restricts** the batch run's saved node/branch set —
@@ -979,6 +987,161 @@ two apart, so `no_such_vector` names the *symptom* ("nothing resolved for
 this name"), not the cause; treat it as "check the signal name against the
 netlist body, including any `.save` card it carries" rather than a
 self-diagnosing error.
+
+## Measurements that are not `.meas` cards (`measurements[].expr`)
+
+A `measurements[]` entry declares **exactly one** of two forms:
+
+| Form    | What it is                                                          | Where it lands in the deck                    |
+| ------- | ------------------------------------------------------------------- | --------------------------------------------- |
+| `spice` | A verbatim top-level `.meas` card                                   | File scope, before the `.control` block       |
+| `expr`  | A single-line ngspice **expression**, evaluated after the analysis  | Inside `klt sim`'s own `.control` block       |
+
+Declaring both, or neither, is an application error (exit 1).
+
+### Why `expr` exists
+
+A top-level `.meas` card is the only measurement shape ngspice's batch mode
+accepts at file scope, and ngspice's `.MEASURE` implements no `op` analysis
+type at all (see `measurements[]` in the request table, and the `.meas op`
+rejection above). The "Netlist convention" section above also gives `klt sim`
+sole ownership of the deck's single `.control` block — the caller cannot
+inject one from either side. Together, those two facts meant that **a
+quantity which is not a single `.meas` card's search had no expression in a
+request whatsoever**
+([#2533](https://github.com/2AMLogic/klayout-tools/issues/2533)):
+
+- an **operating-point** quantity (`analysis.kind: "op"`) — no `.MEASURE OP`
+  exists, so there was no card to write;
+- a **reduction or combination** of saved vectors — peak-to-peak swing,
+  a ratio of two nodes, a derived figure of merit — which needs arithmetic
+  across a vector or across two `.meas`-shaped searches that no single card
+  performs.
+
+A block whose ratified spec rows are of either kind could not produce a `klt
+sim` envelope covering its spec at all — and design-signoff tier-1 item 5
+("full corner verification vs a ratified spec") accepts only a `sim` envelope
+for an analog partition, so citing the `.meas`-expressible subset would have
+graded the item `met` on evidence narrower than the spec it names. `expr`
+closes that for any spec row derivable from a single corner's single solve;
+see [`signoff.md`](signoff.md) and the "Still one analysis per corner" bullet
+below for what remains.
+
+### What `klt sim` generates
+
+For each `expr` entry, in **declared order**, inside the generated `.control`
+block:
+
+```
+let <name> = <expr>
+print <name>
+```
+
+Emitted **after** the analysis command (the expression reads the vectors the
+analysis produced) and **after** the optional rawfile `write` — deliberately:
+`let` adds its result to the current plot and `write` dumps every vector in
+that plot, so evaluating earlier would silently add derived vectors to the
+`options.waveforms` artifact. Declaring an `expr` never changes what the
+rawfile/waveform artifact contains.
+
+A `print`ed **scalar** lands in the log as `<name> = <value>` — the same shape
+a successful `.meas` result uses — so it is harvested, unit-stamped, and
+graded against `limits`/`plausible_range` exactly like a `.meas` measurement,
+and it participates in `monte_carlo` statistics and `coverage` identically.
+There is no separate response shape and no `schema_version` bump: an `expr`
+measurement is an ordinary `corners[].measurements[]` entry.
+
+Because the `let` lines are emitted in declaration order into one plot, a
+later expression may reference an earlier one's name:
+
+```json
+"measurements": [
+  { "name": "vmid",    "expr": "v(mid)",      "unit": "V"  },
+  { "name": "vmid_mv", "expr": "vmid * 1e3",  "unit": "mV" }
+]
+```
+
+### The expression must reduce to a single real scalar
+
+This is the one contract rule the tool cannot check up front. ngspice's
+`print` renders a **multi-point** vector (or a complex `ac`/`sp` result) as an
+indexed table rather than a `<name> = <value>` line, so nothing is harvested
+and the measurement grades `status: "error"` with a `code: "measurement"`
+diagnostic that names both causes. Reduce the expression yourself —
+`vecmax()`, `vecmin()`, `mean()`, `db()`, `mag()`, `<expr>[0]` — rather than
+relying on `print`:
+
+```json
+{ "name": "swing", "expr": "vecmax(v(out)) - vecmin(v(out))", "unit": "V" }
+```
+
+Worked `op` example — the case that had no expression at all before:
+
+```json
+{
+  "netlist": "divider.spice",
+  "analysis": { "kind": "op", "args": "" },
+  "measurements": [
+    {
+      "name": "vmid",
+      "expr": "v(mid)",
+      "unit": "V",
+      "limits": { "min": 1.9, "max": 2.1 }
+    }
+  ]
+}
+```
+
+### Constraints and interactions
+
+- **Name rules are stricter than for a `spice` card.** An `expr` name is
+  emitted as an ngspice vector name *and* read back out of the log, so it must
+  match `[A-Za-z_][A-Za-z0-9_]*` — no dots, no leading digit. A `.meas`
+  card's `name` is unaffected (it is never a `let` target), so an existing
+  request using e.g. `stage1.vout` keeps working.
+- **Case is preserved in the response, but folded for matching.** ngspice
+  lower-cases the vector name it prints (`print Vmid` → `vmid = 2.0e+00`), so
+  an `expr`'s value is harvested case-insensitively; the response entry still
+  carries the caller's own spelling (`"name": "Vmid"`). A `.meas` card's name
+  is folded the same way
+  ([#2546](https://github.com/2AMLogic/klayout-tools/issues/2546)) — ngspice
+  lower-cases that one in its report too, so an upper/mixed-case `spice` name
+  now harvests exactly as a matching-case one always has.
+- **An `expr` name must be unique** across the whole `measurements[]` list
+  (compared case-insensitively, per the previous bullet): a second `let
+  <name>` overwrites the first, so both response entries would report the same
+  value. Duplicate names among `spice`-only entries are left to ngspice
+  exactly as before.
+- **Single line only.** The expression is spliced verbatim into one `let`
+  line; an embedded newline would become a separate control command.
+- **`corners.*` / `monte_carlo`**: nothing special. The `let`/`print` pair is
+  regenerated in every corner's own deck, after that corner's `alter` cards
+  and analysis, so the expression is evaluated against that corner's solve.
+  Monte Carlo statistics (`monte_carlo.quantiles`, `k_sigma`, the `mean ±
+  k*stddev` window) apply to an `expr` measurement's per-sample values with no
+  extra declaration — the stats layer keys off `measurements[].name`, not the
+  form it was declared in.
+- **`engine: "xyce"` refuses `expr`** (application error, exit 1): `let` and
+  `print` are ngspice control commands and the Xyce deck has no `.control`
+  block (its analysis is a plain top-level dot card). Use `engine: "ngspice"`,
+  or express the quantity as a `.meas` card. Refused by name rather than
+  silently dropped — a corner that ran without its `expr` lines would report
+  every such measurement as "produced no value", which reads as a circuit
+  regression instead of an unsupported request field.
+- **`remote`/`batch` backends** need no special handling: `expr` is deck text,
+  not a host artifact, and the off-host worker generates the deck from the
+  same request document.
+- **Still one analysis per corner.** `expr` reaches everything derivable from
+  *one* corner's *one* solve. A measurement defined across several analyses in
+  one corner, or across corners/Monte Carlo draws (a differential between a
+  loaded and an unloaded run, a statistic rescaled by a separate calibration
+  run), is a different gap — tracked in
+  [#2482](https://github.com/2AMLogic/klayout-tools/issues/2482) — and is
+  **not** addressed by this field.
+- **`--op-lint`** scans a measurement's `v(...)` references from `expr` as
+  well as from `spice`, so an operating-point measurement naming a node the
+  netlist does not define is still a named finding rather than a silent 0 V
+  (see "Operating-point lint" below).
 
 ## Off-host backends stage the netlist's `.include` closure
 
@@ -1507,10 +1670,69 @@ anyone sampled.
 { "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" } }
 ```
 
-Resolved via [`klt pdk find`](pdk.md)'s search order (`--pdk-root`/`$PDK_ROOT`,
-the ciel/volare stores, conventional prefixes); `lib`, when relative, is
+Resolved via [`klt pdk find`](pdk.md)'s search order; `lib`, when relative, is
 joined against the resolved variant directory. Optional `models.pdk_root`
 pins the search the same way `klt pdk find --pdk-root` does.
+
+**The resolution order, explicitly** (first match wins; the winning step is
+reported as `provenance.pdk.source`):
+
+| # | Candidate root | Notes |
+|---|---|---|
+| 1 | `models.pdk_root` | Pins the root and **disables** steps 2–4 entirely. |
+| 2 | `$PDK_ROOT` | The invoking process's environment. A `$PDK_ROOT` that holds no matching install is skipped, falling through to step 3. |
+| 3 | `~/.ciel`, then `~/.volare` | The ciel/volare stores, in that order — **`~/.ciel` first**. |
+| 4 | `/usr/local/share/pdk`, `/usr/share/pdk`, `~/share/pdk` | Conventional open_pdks install prefixes, in that order. |
+
+`models.pdk` (or `$PDK`) selects **which variant** within whichever root
+wins; it does not reorder the roots.
+
+**More than one install of the same variant is an ordinary host state**, not
+a misconfiguration: a machine that has followed the tooling's own migration
+carries both a `volare`-managed and a `ciel`-managed `sky130A` — two
+different `open_pdks` builds, whose `libs.tech/combined/continuous/
+models_fet.spice` (the FET cards a mismatch Monte Carlo draws from) need not
+be byte-identical. Step 3 above then silently prefers `~/.ciel`, and a
+campaign that verified `~/.volare` against a pinned `open_pdks` commit can
+produce a record naming that pin with a simulation behind it that read the
+other build. Since issue
+[#2564](https://github.com/2AMLogic/klayout-tools/issues/2564) that
+substitution is **reported rather than discarded**:
+
+- **stderr** carries a one-line warning naming the absolute root actually
+  read, every root skipped, and the remedy:
+
+  ```text
+  klt: warning: 2 installs provide PDK variant 'sky130A'; read
+  /home/u/.ciel (search root: ~/.ciel), skipped /home/u/.volare (search
+  root: ~/.volare). Resolution is first-match-wins, so a pinned open_pdks
+  build may not be the one this run read -- pin the root explicitly
+  (--pdk-root, or a request's models.pdk_root) to disable the search and
+  choose deliberately.
+  ```
+
+- **`--format json`** records the skipped installs on
+  `provenance.pdk.ambiguous_sources` — the path-free search-order labels
+  (`["search root: ~/.volare"]`), never the absolute roots, which would bake
+  the resolving machine's home directory into committed evidence. The key is
+  **absent** when resolution was unambiguous, so an ordinary run's
+  `provenance` is unchanged.
+
+- **`--format text`** echoes the resolved PDK on its own line beside
+  `models_lib`, plus a `WARNING` line when the variant was installed more
+  than once:
+
+  ```text
+  models_lib: <outside repo>
+  pdk: sky130A open_pdks 0fe599b (via search root: ~/.ciel)
+  pdk: WARNING: variant also installed under search root: ~/.volare -- resolution is first-match-wins; pin models.pdk_root to choose deliberately
+  ```
+
+**Pinning `models.pdk_root` is the fix**, and it is quiet by construction:
+step 1 disables the search, so there is no second candidate to be ambiguous
+against. `$PDK_ROOT` narrows the search to one *first* candidate but does not
+disable it, so a run pinned that way still reports any other install it
+skipped.
 
 ```json
 { "models": { "lib": "$PDK_ROOT/sky130A/libs.tech/ngspice/sky130.lib.spice" } }
@@ -1760,8 +1982,10 @@ has no `.MEASURE OP` — an operating point has no sweep variable for a
 measurement to search over the way DC/AC/TRAN/SP do — so a `.meas op` card
 (regardless of the request's own `analysis.kind`) is rejected up front with
 an actionable `SimError` instead of failing deep inside an ngspice parse
-error. Use `analysis.kind: "tran"` with a short single-step transient and
-`.meas tran ... at=<t>` to read back an operating-point-like value instead.
+error. Declare the quantity as a `measurements[].expr` expression instead (the
+first-class answer — see "Measurements that are not `.meas` cards" above), or
+use `analysis.kind: "tran"` with a short single-step transient and
+`.meas tran ... at=<t>` to read back an operating-point-like value.
 
 ### Grading a recovered diagnostic as inconclusive (`options.fail_on_diagnostic`)
 
@@ -2046,7 +2270,7 @@ klt sim <request.json> --op-lint [--op-lint-corner <corner_id>] [--format text|j
 | `drain_tied_to_rail` | `error` | An NMOS whose drain node is ground, or a PMOS whose drain node is the positive supply — the drain voltage can never move. |
 | `gate_shorted_to_source` | `error` | Gate and source are the same node: `Vgs` is 0 by construction. |
 | `bulk_not_tied` | `warning` | Bulk is tied to neither the device's own source nor the matching rail. A warning, not an error — a deep-nwell/isolated device may genuinely want this. |
-| `missing_node` | `error` | A declared I/O node (`op_lint.nodes`, or any `v(<node>)` reference inside the request's own `.meas` cards) that does not appear in the netlist at all — the usual cause of a measurement that silently reads 0 V. |
+| `missing_node` | `error` | A declared I/O node (`op_lint.nodes`, or any `v(<node>)` reference inside the request's own measurements — `spice` cards and `expr` expressions alike) that does not appear in the netlist at all — the usual cause of a measurement that silently reads 0 V. |
 | `floating_node` | `warning` | A node with exactly one element terminal on it and no DC path. This is the *structural* counterpart of the singular-matrix / gmin-stepping narration the sweep classifies from the log ([#205](https://github.com/2AMLogic/klayout-tools/issues/205)); that classification is reused here verbatim rather than re-implemented, so the two never disagree. |
 
 Every threshold comparison is on **magnitudes**: BSIM4 reports a PMOS's
@@ -2226,8 +2450,8 @@ the *response* echoes back.
 | `monte_carlo.vary`       | string            | `"mismatch"`, `"process"`, or `"both"` — which axis the sample sequence varies. Required when `monte_carlo` is present.                                                 |
 | `monte_carlo.quantiles`  | array\<number\>   | Percentiles in `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]`. See "Monte Carlo statistics" above.                                                      |
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
-| `analysis`               | object, required  | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per request. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) and `spice` (a verbatim `.meas` card), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. |
+| `analysis`               | object, required  | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per request. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card) or `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
@@ -2358,7 +2582,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored`/`inconclusive` (issues #1849, #2492). See below. |
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when nothing made one necessary — either no process axis at all, or a `corners.process` bundle whose every section named its own `lib` (issue #2522); never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `corner_section_libs` (issue #2522 — one `{name, path, scope, sha256}` per distinct per-section corner library a `corners.process` bundle named, in first-appearance order; see "Per-section corner libraries" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
-| `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
+| `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`), and carries the additional `ambiguous_sources` key when the resolved variant was installed more than once on this host (issue #2564 — see "Model library resolution" above); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 | `plots`         | array\<object\> | Additive/optional (issue #1723): only present when `--plot` was used — every SVG actually written, as `{corner_id, signal, path}`, in corner/signal order. See "Waveform plots" above. |

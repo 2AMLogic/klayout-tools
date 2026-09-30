@@ -242,6 +242,143 @@ def test_earlier_step_beats_later(tmp_path, monkeypatch):
     assert report["variant"] == "sky130A"
 
 
+# --------------------------------------------------------------------------- #
+# Ambiguous resolution: several installs hold the same variant (issue #2564)
+# --------------------------------------------------------------------------- #
+
+
+def test_find_reports_second_install_of_same_variant(tmp_path, monkeypatch):
+    # The reported host state: a volare-managed and a ciel-managed install of
+    # the *same* variant, different open_pdks builds. Resolution stays
+    # first-match-wins (ciel), but the skipped volare root is now reported
+    # instead of silently discarded.
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A", sources="open_pdks aaaa111")
+    _make_install(home / ".volare", "sky130A", sources="open_pdks bbbb222")
+
+    report = pdk.find_pdk(variant="sky130A")
+
+    assert report["root"] == str(home / ".ciel")
+    assert report["version"] == "open_pdks aaaa111"
+    assert report["ambiguous_roots"] == [
+        {"root": str(home / ".volare"), "resolved_via": "search root: ~/.volare"}
+    ]
+
+
+def test_find_reports_every_skipped_install_in_search_order(tmp_path, monkeypatch):
+    # Three installs of one variant across $PDK_ROOT, a store, and a
+    # conventional prefix: both losers are reported, in search order.
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.volare"])
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", ["~/share/pdk"])
+    home = tmp_path / "home"
+    env_root = tmp_path / "env"
+    _make_install(env_root, "sky130A")
+    _make_install(home / ".volare", "sky130A")
+    _make_install(home / "share" / "pdk", "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(env_root))
+
+    report = pdk.find_pdk(variant="sky130A")
+
+    assert report["resolved_via"] == "PDK_ROOT environment variable"
+    assert [entry["resolved_via"] for entry in report["ambiguous_roots"]] == [
+        "search root: ~/.volare",
+        "search root: ~/share/pdk",
+    ]
+
+
+def test_find_single_install_reports_no_ambiguity(tmp_path, monkeypatch):
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    _make_install(tmp_path / "home" / ".ciel", "sky130A")
+
+    assert pdk.find_pdk(variant="sky130A")["ambiguous_roots"] == []
+
+
+def test_find_ambiguity_ignores_a_different_variant(tmp_path, monkeypatch):
+    # A second install is only ambiguity when it holds the *resolved*
+    # variant -- a sibling sky130B install is an unrelated PDK, not a
+    # competing build of the one this run read.
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    _make_install(home / ".volare", "sky130B")
+
+    assert pdk.find_pdk(variant="sky130A")["ambiguous_roots"] == []
+
+
+def test_find_ambiguity_applies_to_the_default_variant_too(tmp_path, monkeypatch):
+    # No `--pdk`/`$PDK`: the default is the first root's first variant, and
+    # ambiguity is still judged against *that* name.
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    _make_install(home / ".volare", "sky130A")
+    _make_install(home / ".volare", "sky130B")
+
+    report = pdk.find_pdk()
+
+    assert report["variant"] == "sky130A"
+    assert [entry["root"] for entry in report["ambiguous_roots"]] == [
+        str(home / ".volare")
+    ]
+
+
+def test_find_pdk_root_flag_disables_ambiguity(tmp_path, monkeypatch):
+    # An explicit root pins the answer and disables the search entirely, so
+    # there is no second candidate to be ambiguous against -- this is the
+    # remedy the warning points a caller at, and it must be quiet.
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    _make_install(home / ".volare", "sky130A")
+
+    report = pdk.find_pdk(variant="sky130A", root=str(home / ".volare"))
+
+    assert report["root"] == str(home / ".volare")
+    assert report["ambiguous_roots"] == []
+
+
+def test_find_same_root_reached_twice_is_not_ambiguity(tmp_path, monkeypatch):
+    # $PDK_ROOT naming the very store dir the search would have reached
+    # anyway is one install found twice, not two conflicting builds.
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel"])
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(home / ".ciel"))
+
+    report = pdk.find_pdk(variant="sky130A")
+
+    assert report["resolved_via"] == "PDK_ROOT environment variable"
+    assert report["ambiguous_roots"] == []
+
+
+def test_ambiguity_warning_names_chosen_and_skipped_roots():
+    warning = pdk.ambiguity_warning(
+        {
+            "root": "/home/u/.ciel",
+            "variant": "sky130A",
+            "resolved_via": "search root: ~/.ciel",
+            "ambiguous_roots": [
+                {"root": "/home/u/.volare", "resolved_via": "search root: ~/.volare"}
+            ],
+        }
+    )
+
+    assert warning is not None
+    assert warning.startswith("klt: warning: 2 installs provide PDK variant")
+    assert "read /home/u/.ciel" in warning
+    assert "skipped /home/u/.volare (search root: ~/.volare)" in warning
+    # Names the remedy, not just the hazard.
+    assert "--pdk-root" in warning
+
+
+def test_ambiguity_warning_is_none_when_unambiguous(tmp_path, monkeypatch):
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel"])
+    _make_install(tmp_path / "home" / ".ciel", "sky130A")
+
+    assert pdk.ambiguity_warning(pdk.find_pdk(variant="sky130A")) is None
+
+
 def test_pdk_root_nonexistent_falls_through(tmp_path, monkeypatch):
     # $PDK_ROOT set but pointing at a nonexistent dir: skip to the store.
     monkeypatch.setenv("PDK_ROOT", str(tmp_path / "does-not-exist"))

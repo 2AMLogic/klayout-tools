@@ -358,6 +358,63 @@ wanted, belongs behind an opt-in flag).
 A slowdown is never reported as both — when compute is over, the wall-clock
 line is suppressed so the actionable breach is not buried.
 
+## Cache-miss rebuilds are not compute
+
+Each `Tests` leg restores pinned **Yosys**, **SymbiYosys + Bitwuzla**,
+**Icarus Verilog** and **Verilator** builds from `actions/cache`, and rebuilds
+them **from source only when that restore misses** — up to ~570 s per leg, and
+in the worst sampled case ~1,780 s. That time is a property of the cache
+service, not of the code under test.
+
+Issue #2617: on 2026-09-29/30 the Actions cache service degraded (restores
+returning `(500) Internal Server Error`, then reporting "Cache not found" for
+entries that existed), every leg rebuilt from source, the check counted that as
+compute, and `main` plus every open PR went red. Eleven Judge-approved PRs were
+each analysed by hand and all eleven were environmental. A cache outage looked
+exactly like a code regression — so the check now tells them apart.
+
+**How the split is made.** The `/jobs` payload the check already reads carries
+each job's `steps[]`, so no extra API call and no workflow change is needed.
+Per job, the check excludes:
+
+- every step whose name ends with **`" (cache miss only)"`** *and that actually
+  ran* — on a cache hit these steps are reported `skipped`, so a rebuild step
+  with any other conclusion is an unambiguous miss signal;
+- that job's own **`Cache …` / `Post Cache …`** restore and save steps, but
+  **only in a job where a rebuild ran**. These are ~1 s each on a healthy run;
+  the retry loop of a degraded cache service is exactly when they stop being
+  ~1 s, and a freshly built cache also has to be uploaded.
+
+Nothing else is ever excluded. `pytest`, the techmap build, the apt installs
+and every other step stay in the compute figure, so a real slowdown breaches
+just as it did before — including in the same run as a cache miss.
+`tests/test_ci_wall_clock.py` pins both halves of that:
+`test_cache_miss_rebuild_time_does_not_breach_the_budget` and
+`test_a_real_slowdown_alongside_a_cache_miss_still_fails`.
+
+**What you see.** The per-job row shows the compute figure with the excluded
+time called out (`(+202s cache miss, excluded)`), a `CACHE MISS:` block names
+the affected jobs and the exact rebuild steps, and `--annotate` emits one
+`::notice::` per affected job — a notice, not an error, because a missed cache
+is neither the author's doing nor the author's to fix. `--format json` keeps it
+auditable: per job `cache_miss_seconds`, `cache_miss_steps` and `total_seconds`
+(what the GitHub UI shows) alongside the budget-compared `seconds`, plus a
+run-level `total_cache_miss_seconds`.
+
+**Run wall clock is *not* adjusted.** It measures the run as it really elapsed,
+and its breach is report-only anyway; when a cache miss is present the queue
+guidance says so rather than pointing only at runner contention.
+
+**This is a step-name convention, and it is load-bearing.** Renaming those
+steps in `ci.yml` without updating `CACHE_MISS_STEP_SUFFIX` /
+`CACHE_STEP_PREFIXES` in `scripts/check_ci_wall_clock.py` would silently fold
+rebuild time back into compute and re-create the false-red.
+`test_cache_miss_step_naming_convention_still_holds_in_ci_yml` guards the link.
+
+**Raising the budgets is not the alternative.** #2582's 420 → 480 s bump did
+not turn its run green, and a budget loose enough to absorb a 1,780 s rebuild
+would no longer catch anything real.
+
 ## Fork PRs are report-only
 
 `ci.yml`'s runner conditional routes fork PRs from `blacksmith-4vcpu-ubuntu-2404`
@@ -423,6 +480,25 @@ way in issue #2612):
    from before a job was added (or from a branch that adds one) is not a
    comparable total. Per-job rows have no such constraint and can use the
    wider sample.
+4. **Sample the *compute* figure, not the raw job duration.** The one-liner
+   above measures `completed_at - started_at`, which still includes any
+   cache-miss rebuild the check now excludes (see
+   [Cache-miss rebuilds are not compute](#cache-miss-rebuilds-are-not-compute)).
+   A cache-outage window therefore inflates the sample exactly where the gate
+   no longer looks. The simplest way to get the number the check compares is to
+   run the check itself over each sampled run and read `--format json`:
+
+   ```bash
+   gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" > /tmp/jobs.json
+   python3 scripts/check_ci_wall_clock.py --jobs-json /tmp/jobs.json \
+     --format json --report-only \
+     | jq -r '.jobs[] | [.name, .seconds, .cache_miss_seconds] | @tsv'
+   ```
+
+   The budgets recorded above predate this split and were derived from raw
+   durations, which makes them mildly *conservative* (a touch looser than a
+   compute-only derivation would give) — noted rather than corrected here,
+   since only the next full re-measure should move those numbers.
 
 Exclude a run only when it is a *distinguishable incident* rather than the
 noise the budget exists to tolerate — e.g. `36003284901`, whose four `Tests`

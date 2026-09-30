@@ -339,7 +339,8 @@ Resolves one install/variant.
     "libs_ref": "/usr/share/pdk/sky130A/libs.ref"
   },
   "broken_symlinks": [],
-  "has_pcell_library": true
+  "has_pcell_library": true,
+  "ambiguous_roots": []
 }
 ```
 
@@ -353,6 +354,49 @@ Resolves one install/variant.
 | `assets` | object | Tool area → absolute directory. |
 | `broken_symlinks` | array | Dangling symlinks found under any resolved `assets` directory (issue #1406). `[]` when the install is clean. |
 | `has_pcell_library` | boolean | The variant ships at least one Python package under `libs.tech/klayout/python/` (issue #1535) — the PDK's own KLayout PCell library. See below. |
+| `ambiguous_roots` | array | Later candidate roots in the search order that **also** hold a variant of the resolved name (issue #2564) — `[{"root", "resolved_via"}]`, in search order. `[]` for the common single-install case, and always `[]` when `--pdk-root` pinned the root (the search is disabled). See below. |
+
+### Several installs of one variant (`ambiguous_roots`, issue #2564)
+
+A host that has followed the tooling's own migration ordinarily carries
+**both** a `volare`-managed (`~/.volare`) and a `ciel`-managed (`~/.ciel`)
+install of the same variant — two different `open_pdks` builds under one
+name. Resolution is unchanged and remains strict first-match-wins (`~/.ciel`
+is checked first), but the fact that the choice was ambiguous is no longer
+discarded:
+
+```json
+"ambiguous_roots": [
+  { "root": "/home/u/.volare", "resolved_via": "search root: ~/.volare" }
+]
+```
+
+This matters because the failure it exposes is silent and produces a
+*plausible* result: a caller that verified `~/.volare` against a pinned
+`open_pdks` commit, then ran a verb that resolved `~/.ciel`, gets a record
+naming the pin with a simulation behind it that read a different build. The
+only prior trace was `resolved_via`, which nobody had reason to suspect.
+
+- Only candidates **after** the winner are probed. The resolution loop
+  returns at the first root holding the effective variant, so an earlier
+  candidate either held nothing at all or did not hold that name.
+- A second install counts only when it holds the **resolved variant's own
+  name**. A sibling `sky130B` next to the chosen `sky130A` is an unrelated
+  PDK, not a competing build.
+- Candidate paths are de-duplicated: a `$PDK_ROOT` naming the very store
+  directory the search would have reached anyway is one install found twice,
+  not two conflicting ones.
+- **The remedy is to pin the root** — `--pdk-root` (or a request-level
+  `models.pdk_root` for [`klt sim`](sim.md)), which disables the search
+  entirely and is therefore always unambiguous. `$PDK_ROOT` narrows the
+  search to one first candidate but does not disable it, so it still reports
+  any other install it skipped.
+
+Callers that surface this to a human render it via
+`klayout_tools.pdk.ambiguity_warning(report)` — a pure formatter returning a
+one-line warning (naming the absolute root read, every root skipped, and the
+remedy) or `None` when unambiguous. `klt sim` prints it to stderr; see
+[`sim.md`](sim.md)'s "Model library resolution".
 
 ### PCell libraries (`has_pcell_library`, issue #1535)
 

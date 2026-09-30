@@ -425,6 +425,33 @@ written to every block.
       `erc.expected_short_missing` naming a declared supply — blocks this
       item in the short's place, so declaring the tie converts a false
       blocking finding into a real check rather than into no evidence.
+      **The severed-rail half of "exactly one island" is gradeable too,
+      where the spec declares the roles a supply owns** (issue #2524).
+      `erc.unconnected_net` counts islands *carrying the declared label*,
+      so a single-label supply rail severed into a labelled piece and an
+      unlabelled orphan grades clean (`docs/cli/erc.md` →
+      "`erc.unconnected_net` counts labelled islands, not conductor
+      islands") — the ordinary shape for hand-built or generated analog,
+      where the label names a port rather than annotating every rail
+      segment. Before this rule existed, a met item 11 on such a block
+      rested on a negative the evidence could not actually state. A supply
+      that declares `nets[].roles` (issue #2510) turns the measurement on,
+      and conductor on those owned roles reachable from no label is
+      `erc.unlabelled_conductor`, which blocks this item under the same
+      declared-name filter `erc.unconnected_net` uses. The **negative** is
+      what a met item now carries: `power_delivery.supply_unlabelled_islands`
+      names each declared supply that owns its roles and that net's
+      `nets[].unlabelled_islands` — all `0` for a met item — so a grader can
+      see the clean verdict was measured over the whole conductor, not only
+      over what carried a label. It is `{}` for a cited run whose supplies
+      declared no `roles` (and for every pre-#2510 envelope): the honest
+      "not measured", never a fabricated zero, so "checked, and it is zero"
+      stays distinguishable from "nobody asked". **Declaring `nets[].roles`
+      is therefore optional but strictly better evidence** — and where an
+      owned role legitimately carries unlabelled fill or a floating shield,
+      `nets[].unlabelled_allowed_boxes` declares that away with the carve-out
+      echoed in `provenance.net_exclusions`, rather than forcing the role to
+      be left unowned and the severed-rail question unasked.
       The run must also report zero
       `erc.missing_tie`, from a tie the run actually *checked*: a `ties[]`
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
@@ -461,7 +488,7 @@ written to every block.
       that catches a degenerate tap). What a grader gains is the
       provenance, not a weaker bar: a met citation's
       `power_delivery.ties_checked_by_well_assertion` names which ties
-      rested on an asserted well, beside
+      rested on the caller's word about the well side, beside
       `ties_checked_by_assertion` for the tap side — two distinct claims,
       reported distinctly, so "the well itself was the caller's word" never
       hides inside "a tap box was asserted".
@@ -484,6 +511,28 @@ written to every block.
       `degenerate_well_selection` — caught by the same gate, which matches
       on the `erc.missing_tie:` work-identity prefix rather than on the
       reason token.
+      **…and when no drawn layer separates those two classes** — a PDK with
+      a single n-tub layer and no per-class marker, ordinary in analog bias,
+      charge-pump and level-shifter circuits — the selection above has
+      nothing to name, and every route (one unselected entry, a selection
+      built from a layer present in both classes or in neither, or
+      `well_boxes` beside a drawn well) ended in a false finding or skipped
+      work. Such a block reaches **met** by scoping each class with
+      `ties[].well_requires_boxes`/`well_excludes_boxes` (issue #2540): the
+      same selection, expressed in literal micrometre boxes instead of a
+      marker layer — the well-side counterpart of `tap_boxes`. The well is
+      still drawn and still measured, and each selected shape is still
+      independently graded, so the bar is unchanged: the same
+      `degenerate_well_selection` skip catches a box selection that kept
+      every shape of the layer or none of them. What differs from the
+      marker form is the provenance, and it is stated: because *which
+      shapes belong to this entry* rests on the caller's word, the tie is
+      named in the met citation's
+      `power_delivery.ties_checked_by_well_assertion` beside the
+      native-substrate form. That list therefore answers one question —
+      "did the well side of this verdict rest on the caller's word?" — with
+      a marker-layer selection (the stream draws its own partition) staying
+      out of it.
       When a stream genuinely cannot express a tap at all, a top-level
       `ties_disclosure` declares that explicitly; the item still renders
       `supply_spec_disclosed_unexpressible` rather than a met item — a
@@ -510,6 +559,23 @@ written to every block.
       the question), `supply_spec_disclosed_unexpressible` (no tap to
       name), and `supply_spec_disclosed_tool_limitation` (a tap, and a
       build that cannot be trusted to grade it).
+      **A disclosure now reaches a partial declaration too** (issue #2541).
+      All three states above describe a spec declaring *zero* ties, because
+      the disclosure's reason token was recorded only against the
+      entirely-undeclared `erc.missing_tie` work — so a spec that declared
+      the one well class it could express and honestly could not express
+      the other produced an `erc_coverage` byte-identical to one that
+      declared the same tie and never considered the second class, and
+      declaring real, checkable work made the record *less* machine-readable
+      than declaring nothing. `ties_disclosure.undeclared_classes` names
+      those classes, and `klt erc` records one
+      `erc.missing_tie:["<class>"]` **inapplicable** entry per name carrying
+      the same disclosed reason token. The declared class is graded
+      exactly as before — a partial declaration is not downgraded, and its
+      checked tie still carries this item on its own terms — and the
+      disclosed class is still the caller's word, so it establishes
+      nothing; what it establishes is *legibility*, which is the whole
+      point of the disclosure vocabulary.
       **The spec's own coverage of the layout must be disclosed, not
       assumed** (issue #2389), on the same principle item 3 applies to a
       DRC deck's rule-free layers: `klt erc` scopes its connectivity model

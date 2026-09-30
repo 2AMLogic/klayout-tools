@@ -94,10 +94,16 @@ def _print_declared_nets(report: dict) -> None:
         # declares no roles -- and every stored pre-#2510 payload -- renders
         # exactly as before.
         if entry.get("unlabelled_islands") is not None:
+            # Issue #2524: the declared `unlabelled_allowed_boxes` carve-out's
+            # own effect, appended only when it excused something -- so a
+            # measured-but-undeclared entry (and every stored pre-#2524
+            # payload) renders exactly as #2510 left it.
+            allowed = entry.get("unlabelled_allowed_islands") or 0
+            suffix = f" allowed={allowed}" if allowed else ""
             print(
                 f"    unlabelled on {','.join(entry['roles'])}: "
                 f"islands={entry['unlabelled_islands']} "
-                f"area={entry['unlabelled_area_um2']}um^2"
+                f"area={entry['unlabelled_area_um2']}um^2{suffix}"
             )
 
 
@@ -169,6 +175,15 @@ def _print_text(report: dict) -> None:
             else f"ties_disclosure ({kind})"
         )
         print(f"{label}: {disclosure['reason']}")
+        # (issue #2541) Which classes the disclosure is about, when the
+        # spec named them -- a partial declaration's disclosure says
+        # nothing useful in the courtesy view without them ("some tie you
+        # cannot see was not declared"). Printed as a trailing line rather
+        # than folded into the label above so the existing single-line
+        # rendering of every pre-#2541 disclosure is unchanged.
+        undeclared = disclosure.get("undeclared_classes") or []
+        if undeclared:
+            print(f"  undeclared classes: {', '.join(undeclared)}")
     _print_declared_nets(report)
     print(f"erc_findings: {report['erc_finding_count']}")
     for finding in report["erc_findings"]:

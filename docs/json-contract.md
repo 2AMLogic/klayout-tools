@@ -76,6 +76,18 @@ never silently mis-executed. Each such addition is recorded in
 `docs/cli/<verb>.md` — for the example above, `docs/cli/lvs.md`'s "Digital
 gate-level LVS" section and its `request` field table.
 
+The same holds for a **new optional request field** that widens what an
+already-shipped field can express, as long as a request valid before is still
+valid and still means what it meant. `klt sim`'s `measurements[].expr` (issue
+#2533) is the reference case: a `measurements[]` entry used to require
+`spice` (a verbatim `.meas` card) and now takes exactly one of `spice` or
+`expr` (an ngspice expression evaluated after the analysis). Every pre-#2533
+request is unchanged — byte-identical deck, byte-identical response — and the
+*response* shape is untouched, so there is no `schema_version` bump: an
+`expr` measurement is reported as an ordinary
+`corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
+"Measurements that are not `.meas` cards (`measurements[].expr`)".
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt
@@ -368,6 +380,19 @@ bump, matching this block's own additive-envelope convention. See
 [`docs/cli/erc.md`](cli/erc.md)'s "Deck-driven device-marker
 auto-detection".
 
+Issue #2524 adds a third verb-local key on the same principle,
+`provenance.net_exclusions`: one entry per `nets[]` spec declaration that
+carried `unlabelled_allowed_boxes` (`{net, boxes, excluded_islands,
+excluded_area_um2}`), `[]` when none did. That key subtracts caller-declared
+regions — legitimate unlabelled fill on a role a net declared it owns — from
+the unlabelled remainder the `erc.unlabelled_conductor` finding is graded
+on, so a declaration *suppresses a finding*, and the two `excluded_*` values
+report what it actually removed. Same reasoning as `provenance.devices`'
+`body_area_um2`, one level up: without the echo, two runs of the same layout
+disagree about a finding with nothing in either payload to say why, and a
+box over empty space is indistinguishable from one that bit. See
+[`docs/cli/erc.md`](cli/erc.md)'s "The remainder gates".
+
 `klt power` (issue #2349) emits the block for the same two-input reason
 `klt erc` does — its IR/EM verdict is a joint function of the layout
 *and* the spec's `stackup`/`vias` sheet-resistance and EM declarations,
@@ -452,6 +477,20 @@ stability statement, concrete precedents, and drift-detection guidance, and
   SPICE-vs-SPICE compare is topological and resolves no PDK, so `pdk` stays
   `null` there. See `docs/cli/drc.md`/`docs/cli/lvs.md` for each verb's exact
   condition.
+  - `ambiguous_sources` (issue #2564) — present **only** when more than one
+    candidate install on the resolving host held the resolved variant; the
+    `source`-style search-order labels of the ones the first-match-wins
+    resolution skipped, e.g. `["search root: ~/.volare"]`. Deliberately the
+    path-free labels and not the absolute roots: this block is committed
+    evidence, and a raw store path carries the resolving machine's home
+    directory (the same reasoning behind the `{path, scope}` shape used for
+    paths elsewhere). The absolute roots are named in the accompanying
+    stderr warning instead. Absent in the ordinary single-install case, so
+    an unambiguous run's `provenance` is byte-identical to what it was
+    before this field existed and a stored-report diff cannot drift on it.
+    Populated by `klt sim` today; the underlying detection lives in
+    `klayout_tools.pdk.find_pdk` (`ambiguous_roots`) and is available to
+    every verb that resolves a PDK — see `docs/cli/pdk.md`.
 - `deck` — the rule (or model) deck the run used, as
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
   hex digest of the deck file actually used, so "clean against *this exact*

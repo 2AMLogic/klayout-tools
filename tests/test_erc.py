@@ -1584,13 +1584,15 @@ def test_declared_islands_rejects_non_positive_integer_values(tmp_path, bad):
 # bound unstated.
 
 
-#: The `nets[]` remainder keys (issue #2510) for an entry that declares no
+#: The `nets[]` remainder keys (issue #2510, plus issue #2524's
+#: `unlabelled_allowed_islands`) for an entry that declares no
 #: `nets[].roles`: echoed empty, and not measured (`None`, never `0`).
 _UNMEASURED = {
     "roles": [],
     "unlabelled_islands": None,
     "unlabelled_area_um2": None,
     "unlabelled_bbox": None,
+    "unlabelled_allowed_islands": None,
 }
 
 
@@ -1694,8 +1696,10 @@ def test_unlabelled_remainder_is_nonzero_on_the_severed_single_label_rail(
 ):
     """AC (issue #2510): the severed single-label rail that grades clean on
     `erc.unconnected_net` reports its orphan as the unlabelled remainder of
-    the role VDD owns -- one island, 1 um^2, located at the orphan itself --
-    while the verdict stays clean (reporting only)."""
+    the role VDD owns -- one island, 1 um^2, located at the orphan itself.
+    Since issue #2524 that remainder also *gates* (see
+    `erc.unlabelled_conductor` below); the measurement itself is unchanged,
+    which is what this test pins."""
     report = _run_severed(
         tmp_path,
         "remainder",
@@ -1719,6 +1723,7 @@ def test_unlabelled_remainder_is_nonzero_on_the_severed_single_label_rail(
                 "right": _um(9),
                 "top": _um(1),
             },
+            "unlabelled_allowed_islands": 0,
         }
     ]
 
@@ -1749,9 +1754,11 @@ def test_unlabelled_remainder_reports_every_unlabelled_shape_on_an_owned_role(
     """The scoping is the caller's ownership declaration, taken at its word:
     with the base fixture's unrelated, unlabelled li1 gate strap still drawn,
     `roles: ["li1"]` is not true of this stream, and the strap is reported
-    beside the orphan. This is why the measurement is reporting only -- a
-    stream with unlabelled fill on an owned role must not fail a correct
-    layout -- and why the key is opt-in rather than inferred."""
+    beside the orphan -- which is why the key is opt-in rather than inferred.
+    Issue #2524: that over-report is exactly what
+    `nets[].unlabelled_allowed_boxes` exists to declare away; undeclared, it
+    now gates (`erc.unlabelled_conductor`, tested below) rather than being
+    reported silently."""
     report = _run_severed(
         tmp_path,
         "remainder_strap",
@@ -1768,9 +1775,13 @@ def test_unlabelled_remainder_reports_every_unlabelled_shape_on_an_owned_role(
         "right": _um(9),
         "top": _um(1),
     }
+    assert entry["unlabelled_allowed_islands"] == 0
     assert [
         f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
     ] == []
+    assert [f["rule"] for f in report["erc_findings"] if f["net"] == "VDD"] == [
+        "erc.unlabelled_conductor"
+    ]
 
 
 def test_unlabelled_remainder_does_not_count_another_labelled_net(tmp_path):
@@ -1855,6 +1866,302 @@ def test_declared_net_roles_omitted_forms_are_unmeasured(tmp_path, empty):
     assert report["nets"] == [
         {"name": "VDD", "matched_islands": 1, "expected_islands": 1, **_UNMEASURED}
     ]
+
+
+# --- `erc.unlabelled_conductor`: the remainder gates (issue #2524) ------------
+#
+# Issue #2510 shipped the remainder as reporting only and left "should a
+# non-zero remainder be a finding" as an explicit open decision. #2524 takes
+# it: a non-zero remainder on a role a net declared it owns is
+# `erc.unlabelled_conductor`, with `nets[].unlabelled_allowed_boxes` as the
+# declared carve-out for legitimate unlabelled fill on an owned role. The
+# opt-in property is preserved -- no `roles`, no measurement, no finding.
+
+
+def _unlabelled_findings(report):
+    return [
+        f for f in report["erc_findings"] if f["rule"] == "erc.unlabelled_conductor"
+    ]
+
+
+def test_unlabelled_conductor_fires_on_the_severed_single_label_rail(tmp_path):
+    """AC (issue #2524): the severed single-label rail #2510 could only
+    *report* now fails. `erc.unconnected_net` still grades clean (the rule
+    genuinely sees one labelled island), so the new rule id is what carries
+    the verdict -- and `erc_status` reflects it."""
+    report = _run_severed(
+        tmp_path,
+        "gates",
+        [{"name": "VDD", "kind": "supply", "roles": ["li1"]}],
+    )
+
+    assert [
+        f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"
+    ] == []
+    findings = _unlabelled_findings(report)
+    assert len(findings) == 1
+    assert findings[0]["net"] == "VDD"
+    assert findings[0]["layer"] == "li1"
+    assert findings[0]["bbox"] == {
+        "left": _um(8),
+        "bottom": _um(0),
+        "right": _um(9),
+        "top": _um(1),
+    }
+    assert "unlabelled conductor" in findings[0]["description"]
+    assert report["erc_status"] == "violations"
+    assert report["nets"][0]["unlabelled_islands"] == 1
+    assert report["nets"][0]["unlabelled_allowed_islands"] == 0
+
+
+def test_unlabelled_conductor_never_fires_without_a_roles_declaration(tmp_path):
+    """The opt-in property #2510 established is preserved exactly: a spec
+    that declares no `nets[].roles` has nothing measured (`None`, not `0`)
+    and can never acquire this finding, so no pre-#2524 spec changes
+    verdict."""
+    report = _run_severed(
+        tmp_path,
+        "gates_no_roles",
+        [{"name": "VDD", "kind": "supply"}],
+    )
+
+    assert _unlabelled_findings(report) == []
+    assert report["nets"] == [
+        {
+            "name": "VDD",
+            "matched_islands": 1,
+            "expected_islands": 1,
+            **_UNMEASURED,
+        }
+    ]
+
+
+def test_unlabelled_conductor_clears_once_the_orphan_is_labelled(tmp_path):
+    """The fix the finding asks for: label the orphan and this rule goes
+    silent (the remainder is zero) while `erc.unconnected_net` picks the
+    defect up as the two-island count it can now see."""
+    report = _run_severed(
+        tmp_path,
+        "gates_labelled",
+        [{"name": "VDD", "kind": "supply", "roles": ["li1"]}],
+        label_orphan=True,
+    )
+
+    assert _unlabelled_findings(report) == []
+    assert (
+        len([f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"])
+        == 1
+    )
+
+
+def test_unlabelled_conductor_fires_once_per_claimant_of_a_shared_role(tmp_path):
+    """Reporting granularity matches the report field it is derived from
+    (issue #2510): a shared unlabelled island is reported under *each* net
+    claiming the role, so the finding is too -- one per claimant, each
+    independently accurate, rather than a deduplicated single finding that
+    would disagree with `nets[].unlabelled_islands`."""
+    layout, top, poly, li1, label = _severed_rail_layout(gate_strap=False)
+    top.shapes(li1).insert(kdb.Box.new(_um(11), _um(0), _um(14), _um(1)))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(12), _um(0.5))))
+    gds = tmp_path / "claimants.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "claimants.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply", "roles": ["li1"]},
+                {"name": "VSS", "kind": "supply", "roles": ["li1"]},
+            ]
+        ),
+    )
+
+    findings = _unlabelled_findings(run_erc(str(gds), str(spec)))
+    assert sorted(f["net"] for f in findings) == ["VDD", "VSS"]
+
+
+def test_unlabelled_allowed_boxes_suppresses_declared_fill(tmp_path):
+    """The escape hatch (issue #2524, modelled on #2183's `devices[]`
+    carve-out): the base fixture's unrelated unlabelled li1 strap over the
+    gate is legitimate conductor on a role VDD claims. Declaring it excludes
+    it from the finding -- the orphan at 8-9um still fires, and the excluded
+    island is counted in `nets[].unlabelled_allowed_islands` rather than
+    silently vanishing from the raw measurement."""
+    report = _run_severed(
+        tmp_path,
+        "allowed_fill",
+        [
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                "unlabelled_allowed_boxes": [[-0.5, -0.5, 1.5, 1.5]],
+            }
+        ],
+        gate_strap=True,
+    )
+
+    entry = report["nets"][0]
+    # The raw measurement is unchanged -- the exclusion narrows what *gates*,
+    # never what was measured.
+    assert entry["unlabelled_islands"] == 2
+    assert entry["unlabelled_area_um2"] == 2.0
+    assert entry["unlabelled_allowed_islands"] == 1
+
+    findings = _unlabelled_findings(report)
+    assert len(findings) == 1
+    assert findings[0]["bbox"]["left"] == _um(8)
+    assert report["provenance"]["net_exclusions"] == [
+        {
+            "net": "VDD",
+            "boxes": [[-0.5, -0.5, 1.5, 1.5]],
+            "excluded_islands": 1,
+            "excluded_area_um2": 1.0,
+        }
+    ]
+
+
+def test_unlabelled_allowed_boxes_covering_everything_clears_the_finding(tmp_path):
+    """The full-suppression case: a declaration covering every unlabelled
+    island on the owned role leaves no finding at all, and the report says so
+    -- `unlabelled_islands` still `2`, every one of them excluded, and
+    `provenance.net_exclusions` naming what was carved out."""
+    report = _run_severed(
+        tmp_path,
+        "allowed_all",
+        [
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                "unlabelled_allowed_boxes": [[-1.0, -1.0, 10.0, 2.0]],
+            }
+        ],
+        gate_strap=True,
+    )
+
+    assert _unlabelled_findings(report) == []
+    # Nothing on VDD is left to report -- the only remaining finding is the
+    # base fixture's own unstrapped gate, which this rule says nothing about.
+    assert [f["rule"] for f in report["erc_findings"] if f["net"] == "VDD"] == []
+    entry = report["nets"][0]
+    assert (entry["unlabelled_islands"], entry["unlabelled_allowed_islands"]) == (2, 2)
+    assert report["provenance"]["net_exclusions"][0]["excluded_islands"] == 2
+
+
+def test_unlabelled_allowed_boxes_partial_cover_does_not_excuse_an_island(tmp_path):
+    """Exclusion is per *island*, not per area: a box covering only part of
+    an unlabelled island leaves that island counted, so a declared fill
+    region overlapping a real severed orphan cannot silence it. The echoed
+    `excluded_area_um2` still reports what the box actually removed, so the
+    partial bite is visible rather than implied."""
+    report = _run_severed(
+        tmp_path,
+        "allowed_partial",
+        [
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                "unlabelled_allowed_boxes": [[8.0, 0.0, 8.5, 1.0]],
+            }
+        ],
+    )
+
+    findings = _unlabelled_findings(report)
+    assert len(findings) == 1
+    assert report["nets"][0]["unlabelled_allowed_islands"] == 0
+    echo = report["provenance"]["net_exclusions"][0]
+    assert echo["excluded_islands"] == 0
+    assert echo["excluded_area_um2"] == 0.5
+
+
+def test_unlabelled_allowed_boxes_that_removed_nothing_is_still_echoed(tmp_path):
+    """Same falsifiability bar `provenance.devices[].body_area_um2` is held
+    to (issue #2226): a declaration that subtracted nothing at all -- a box
+    over empty space -- is echoed with zeroes rather than being
+    indistinguishable from one that bit."""
+    report = _run_severed(
+        tmp_path,
+        "allowed_miss",
+        [
+            {
+                "name": "VDD",
+                "kind": "supply",
+                "roles": ["li1"],
+                "unlabelled_allowed_boxes": [[40.0, 40.0, 41.0, 41.0]],
+            }
+        ],
+    )
+
+    assert len(_unlabelled_findings(report)) == 1
+    assert report["provenance"]["net_exclusions"] == [
+        {
+            "net": "VDD",
+            "boxes": [[40.0, 40.0, 41.0, 41.0]],
+            "excluded_islands": 0,
+            "excluded_area_um2": 0.0,
+        }
+    ]
+
+
+def test_net_exclusions_is_empty_when_no_net_declares_one(tmp_path):
+    """`provenance.net_exclusions` is always present and `[]` when unused --
+    the same convention `provenance.devices` follows, so a reader never has
+    to distinguish "absent" from "declared nothing"."""
+    report = _run_severed(
+        tmp_path,
+        "no_exclusions",
+        [{"name": "VDD", "kind": "supply", "roles": ["li1"]}],
+    )
+    assert report["provenance"]["net_exclusions"] == []
+
+
+def test_unlabelled_allowed_boxes_requires_a_roles_declaration(tmp_path):
+    """An exclusion with nothing to exclude from is an assertion that reads
+    as honoured while doing nothing -- rejected loudly, the same way
+    `nets[].roles` rejects a typo'd role name."""
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "allowed_no_roles.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "allowed_no_roles.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[{"name": "VDD", "unlabelled_allowed_boxes": [[0.0, 0.0, 1.0, 1.0]]}]
+        ),
+    )
+    with pytest.raises(ErcError, match=r"nets\[0\]\.unlabelled_allowed_boxes"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize(
+    "bad, match",
+    [
+        ("0,0,1,1", r"must be an array"),
+        ([[0.0, 0.0, 1.0]], r"4-number"),
+        ([[1.0, 0.0, 0.0, 1.0]], r"left < right"),
+        ([[0.0, 0.0, 1.0, True]], r"4-number"),
+    ],
+)
+def test_unlabelled_allowed_boxes_rejects_malformed_values(tmp_path, bad, match):
+    """The same literal-geometry validation `ties[].tap_boxes`/`well_boxes`
+    get (`_parse_um_boxes`): a silently-dropped box would weaken an assertion
+    the caller believes they made."""
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "allowed_bad.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "allowed_bad.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[{"name": "VDD", "roles": ["li1"], "unlabelled_allowed_boxes": bad}]
+        ),
+    )
+    with pytest.raises(
+        ErcError, match=rf"nets\[0\]\.unlabelled_allowed_boxes.*{match}"
+    ):
+        run_erc(str(gds), str(spec))
 
 
 def test_declared_nets_report_zero_matches_and_a_declared_island_count(tmp_path):
@@ -3298,9 +3605,17 @@ def test_an_empty_well_boxes_list_on_a_null_well_layer_is_rejected(tmp_path):
 
 
 def test_well_boxes_alongside_a_drawn_well_layer_is_rejected(tmp_path):
-    """The two well forms are mutually exclusive: a box list applied to a
-    drawn well is either a tap narrowing (`tap_boxes` already expresses
-    that, better) or a second, unstated claim."""
+    """The two *well-region* forms stay mutually exclusive: `well_boxes` says
+    where the well **is**, and a drawn `well_layer` already answers that. A box
+    list applied to a drawn well is therefore never that claim -- it is either
+    a tap narrowing (`tap_boxes`) or a statement about *which of the layer's
+    shapes* this entry is about.
+
+    Issue #2540 gave the second reading its own keys, so this rejection's
+    advice must now name a route a stream with no per-class marker layer can
+    actually take: before it, the message pointed only at
+    `well_requires`/`well_excludes`, which such a stream cannot use -- circular
+    advice that left the shape unreachable in every direction."""
     gds, spec = _native_substrate_spec_error(
         tmp_path,
         "boxes_and_layer",
@@ -3312,8 +3627,17 @@ def test_well_boxes_alongside_a_drawn_well_layer_is_rejected(tmp_path):
             "net": "VSS",
         },
     )
-    with pytest.raises(ErcError, match="well_layer.*must be null"):
+    with pytest.raises(ErcError, match="well_layer.*must be null") as excinfo:
         run_erc(str(gds), str(spec))
+
+    message = str(excinfo.value)
+    # The reachable route for a tub whose classes no drawn layer separates.
+    assert "well_requires_boxes" in message
+    assert "well_excludes_boxes" in message
+    # …still alongside the marker-layer route, for a stream that has one, and
+    # the tap-side one.
+    assert "'well_requires'/'well_excludes'" in message
+    assert "tap_boxes" in message
 
 
 def test_an_omitted_well_layer_key_is_still_missing_not_asserted(tmp_path):
@@ -3382,7 +3706,7 @@ def test_well_boxes_rejects_an_inverted_box(tmp_path):
 # is about.
 
 
-def _two_class_well_layout(*, base_tub_tap: bool = True):
+def _two_class_well_layout(*, base_tub_tap: bool = True, marker: bool = True):
     """`_routed_tie_layout`'s routed two-gate block plus a second n-tub on
     the **same** `nwell` layer (10/0), biased to the *other* rail: the
     base tub of a diode-connected vertical bipolar, sitting in the p-well
@@ -3405,6 +3729,16 @@ def _two_class_well_layout(*, base_tub_tap: bool = True):
 
     `base_tub_tap=False` omits the tub's implant-marked tap, leaving the
     untied-well case for the falsifiability tests.
+
+    `marker=False` (issue #2540) omits the class marker entirely: the same two
+    deliberately differently-biased classes on the same one drawn tub layer,
+    on a PDK that draws **no** layer distinguishing them. Every other layer in
+    the stream (contact 11/0, tap implant 12/0) is present in both classes, so
+    no `well_requires`/`well_excludes` selection over this stream can partition
+    it -- which is the state `well_requires_boxes`/`well_excludes_boxes` exist
+    for. The marker's own footprint is what those boxes name, so a
+    `marker=False` run with box selectors and a `marker=True` run with layer
+    selectors grade the identical geometry.
     """
     layout, top = _routed_tie_layout()
     nwell = layout.layer(10, 0)
@@ -3413,7 +3747,10 @@ def _two_class_well_layout(*, base_tub_tap: bool = True):
     bjt_marker = layout.layer(14, 0)
 
     top.shapes(nwell).insert(kdb.Box.new(_um(3), _um(0.4), _um(6.5), _um(2.8)))
-    top.shapes(bjt_marker).insert(kdb.Box.new(_um(5.2), _um(0.8), _um(6.2), _um(2.4)))
+    if marker:
+        top.shapes(bjt_marker).insert(
+            kdb.Box.new(_um(5.2), _um(0.8), _um(6.2), _um(2.4))
+        )
     if base_tub_tap:
         top.shapes(contact).insert(kdb.Box.new(_um(4), _um(1.2), _um(4.6), _um(1.8)))
         top.shapes(tap_implant).insert(kdb.Box.new(_um(3.8), _um(1), _um(4.8), _um(2)))
@@ -3421,8 +3758,8 @@ def _two_class_well_layout(*, base_tub_tap: bool = True):
     return layout, top
 
 
-def _run_two_class_well(tmp_path, stem, ties, *, base_tub_tap=True):
-    layout, _top = _two_class_well_layout(base_tub_tap=base_tub_tap)
+def _run_two_class_well(tmp_path, stem, ties, *, base_tub_tap=True, marker=True):
+    layout, _top = _two_class_well_layout(base_tub_tap=base_tub_tap, marker=marker)
     gds = tmp_path / f"{stem}.gds"
     layout.write(str(gds))
     spec = tmp_path / f"{stem}.erc.json"
@@ -3737,6 +4074,412 @@ def test_a_null_well_selection_is_the_same_as_omitting_it(tmp_path, key):
 
     assert report["erc_coverage"]["skipped"] == []
     assert _BASE_ID in report["erc_coverage"]["checked"]
+
+
+# --- ties: literal-geometry well-side class selection (issue #2540) ------
+#
+# The selectors above narrow by *marker layer*, so they are only reachable
+# for a stream that draws a layer separating the well classes. A PDK with a
+# single n-tub layer and no per-class marker draws none: every layer in the
+# stream is present in both classes, so every marker-driven selection over it
+# keeps every shape or none -- degenerate either way -- a single unselected
+# entry reports a false `erc.missing_tie` on every well of the class it did
+# not name, and `well_boxes` is rejected beside a drawn `well_layer`. Every
+# route ended in a false finding or skipped work.
+#
+# `well_requires_boxes`/`well_excludes_boxes` are the well-side counterpart of
+# `tap_boxes` (issue #2234): the caller names the coordinates of the shapes
+# their class owns. The layouts below are `marker=False` -- the marker shape
+# removed, its footprint named as a box instead -- so these tests grade the
+# identical geometry the #2339 tests above do, reached without a marker layer.
+
+# The bipolar base tub's own footprint, in micrometres: exactly the box the
+# 14/0 marker occupies in the `marker=True` layout, and deliberately *not*
+# covering that tub's tap contact (x in [4.0, 4.6]) -- so a selection that
+# intersected this box into the well layer instead of selecting whole shapes
+# of it would push the tub's real tap outside the graded region.
+_BASE_TUB_BOX = [5.2, 0.8, 6.2, 2.4]
+# A box spanning the whole block: interacts with both classes.
+_WHOLE_BLOCK_BOX = [0.0, 0.0, 20.0, 12.0]
+
+
+def test_a_two_class_tub_with_no_separating_marker_reports_a_false_missing_tie(
+    tmp_path,
+):
+    """The reproduction from issue #2540, step 1. Same shape as
+    `test_one_tub_layer_two_bias_classes_is_unsatisfiable_without_selection`
+    above, but on a stream that draws *no* layer separating the classes -- so
+    unlike that case, #2339's selectors cannot rescue it."""
+    report = _run_two_class_well(
+        tmp_path, "no_marker_before", _two_class_ties(), marker=False
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 2
+    assert {f["layer"] for f in missing} == {"device_body_wells", "bipolar_base_tub"}
+    assert report["erc_status"] == "violations"
+
+
+def test_a_marker_layer_selection_cannot_partition_a_marker_free_tub(tmp_path):
+    """Why the box form is needed rather than better advice about the layer
+    form: on this stream every candidate marker layer is present in *both*
+    classes, so naming one keeps every shape (degenerate) and naming anything
+    else keeps none (degenerate). Both endpoints are skipped work, never a
+    graded check -- the dead end issue #2540 is about."""
+    keeps_all = _run_two_class_well(
+        tmp_path,
+        "no_marker_keeps_all",
+        [_two_class_ties(base_overrides={"well_requires": ["12/0"]})[1]],
+        marker=False,
+    )
+    keeps_none = _run_two_class_well(
+        tmp_path,
+        "no_marker_keeps_none",
+        [_two_class_ties(base_overrides={"well_requires": ["14/0"]})[1]],
+        marker=False,
+    )
+
+    assert _tie_skips(keeps_all) == {_BASE_ID: "degenerate_well_selection"}
+    assert _tie_skips(keeps_none) == {_BASE_ID: "degenerate_well_selection"}
+
+
+def test_well_selection_boxes_partition_a_tub_with_no_separating_marker(tmp_path):
+    """Issue #2540's acceptance criterion, and the shape #2339 named as its own
+    unimplemented "suggested shape 2": the two classes of one drawn tub layer,
+    on a stream with no layer separating them, each scoped by literal geometry
+    -- one naming the base tub's coordinates, the complementary one excluding
+    them -- report **zero** `erc.missing_tie` findings, with both ties graded
+    as real, checked work rather than skipped."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes",
+        _two_class_ties(
+            body_overrides={"well_excludes_boxes": [_BASE_TUB_BOX]},
+            base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]},
+        ),
+        marker=False,
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert {_BODY_ID, _BASE_ID} <= set(report["erc_coverage"]["checked"])
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_status"] == "clean"
+    assert report["gate_count"] == 2
+
+
+def test_box_selected_ties_are_graded_as_a_well_side_assertion(tmp_path):
+    """The classification: the well *is* drawn and still measured, but which of
+    its shapes belongs to this entry rested on the caller's word, so the tie is
+    named in `checked_by_well_assertion` beside the `well_boxes` form -- and
+    the tap side, which named no boxes, stays out of `checked_by_assertion`.
+
+    This is what `klt signoff`'s T1 item 11 reads: both identities are in
+    `checked`, neither is in `skipped`, and the citation's
+    `power_delivery.ties_checked_by_well_assertion` quotes this list, so the
+    weaker well-side provenance is stated in the verdict of record."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_coverage",
+        _two_class_ties(
+            body_overrides={"well_excludes_boxes": [_BASE_TUB_BOX]},
+            base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]},
+        ),
+        marker=False,
+    )
+
+    coverage = report["erc_coverage"]
+    assert coverage["checked_by_well_assertion"] == sorted([_BODY_ID, _BASE_ID])
+    # A subset of `checked`, never a separate kind of work.
+    assert set(coverage["checked_by_well_assertion"]) <= set(coverage["checked"])
+    assert coverage["checked_by_assertion"] == []
+
+
+def test_a_marker_layer_selection_is_still_not_a_well_side_assertion(tmp_path):
+    """The control for the test above, and the line the widened list must not
+    blur: a *marker-layer* selection narrows geometry the stream itself draws,
+    so it stays an ordinary geometrically-derived pass. Only caller-named
+    coordinates land in the assertion list."""
+    report = _run_two_class_well(
+        tmp_path,
+        "marker_not_asserted",
+        _two_class_ties(
+            body_overrides={"well_excludes": ["14/0"]},
+            base_overrides={"well_requires": ["14/0"]},
+        ),
+    )
+
+    assert {_BODY_ID, _BASE_ID} <= set(report["erc_coverage"]["checked"])
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
+
+
+def test_well_requires_boxes_selects_whole_shapes_not_the_box_footprint(tmp_path):
+    """The same reason the marker form selects rather than intersects, now for
+    a caller-named box: `_BASE_TUB_BOX` deliberately does not cover the base
+    tub's tap contact. Intersecting it into `well_layer` would shrink the
+    graded region to the box, with the tub's real, correctly-wired tap outside
+    it, and report "no tap contact drawn inside it"."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_whole_shape",
+        [_two_class_ties(base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]})[1]],
+        marker=False,
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _BASE_ID in report["erc_coverage"]["checked"]
+    assert report["erc_coverage"]["skipped"] == []
+
+
+def test_a_box_selected_well_class_still_reports_its_own_untied_well(tmp_path):
+    """The falsifiability that earns the box selection its `checked` grade: it
+    narrows *what is graded*, never what a finding may say. Drop the base tub's
+    tap and the box-scoped entry reports that tub -- and only that tub -- with
+    the finding's `bbox` the whole drawn shape rather than the caller's box,
+    which is the observable difference between selecting and intersecting."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_untied",
+        _two_class_ties(
+            body_overrides={"well_excludes_boxes": [_BASE_TUB_BOX]},
+            base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]},
+        ),
+        base_tub_tap=False,
+        marker=False,
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+    assert missing[0]["layer"] == "bipolar_base_tub"
+    assert missing[0]["net"] == "VSS"
+    assert "no 'bipolar_base_tub' tap contact drawn" in missing[0]["description"]
+    assert missing[0]["bbox"]["left"] == _um(3.0)
+    assert missing[0]["bbox"]["right"] == _um(6.5)
+    assert report["erc_status"] == "violations"
+
+
+def test_a_box_selection_that_keeps_every_well_is_degenerate(tmp_path):
+    """The #2199 bar, unchanged for the new spelling: a box list that every
+    drawn well shape interacts with partitions nothing, so the entry grades the
+    other bias class against its own net exactly as an unselected tie would.
+    Skipped work under the *same* reason the marker form uses -- one defect,
+    one token, whichever key named it."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_keeps_all",
+        [
+            _two_class_ties(base_overrides={"well_requires_boxes": [_WHOLE_BLOCK_BOX]})[
+                1
+            ]
+        ],
+        marker=False,
+    )
+
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+    assert _BASE_ID not in report["erc_coverage"]["checked"]
+    assert _BASE_ID not in report["erc_coverage"]["checked_by_well_assertion"]
+    assert report["erc_status"] == "violations"
+
+
+def test_box_selection_matching_no_drawn_shape_is_degenerate(tmp_path):
+    """The other endpoint, and the one a literal-geometry key makes easy to hit
+    by accident: boxes naming empty space (a stale coordinate, a spec written
+    against a different origin) select no well at all, so the per-well loop
+    runs zero times and zero findings mean "nothing was examined". Refused as
+    an absence-of-evidence pass, not accepted because the boxes parsed."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_keeps_none",
+        [
+            _two_class_ties(
+                base_overrides={"well_requires_boxes": [[30.0, 30.0, 31.0, 31.0]]}
+            )[1]
+        ],
+        marker=False,
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_an_excludes_boxes_that_removes_every_well_is_degenerate(tmp_path):
+    """Held to the same bar from the other side: an exclusion box every drawn
+    shape interacts with selects nothing."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_excludes_all",
+        [
+            _two_class_ties(base_overrides={"well_excludes_boxes": [_WHOLE_BLOCK_BOX]})[
+                1
+            ]
+        ],
+        marker=False,
+    )
+
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+
+
+def test_selection_boxes_are_a_union_not_a_conjunction(tmp_path):
+    """Two disjoint boxes select the shapes touching *either* of them, the way
+    every other literal-geometry key on this entry forms one region out of a
+    box list. Read as a conjunction (each box a separate condition, as each
+    `well_requires` **layer** is) two disjoint boxes would select nothing and
+    grade degenerate -- so this is a behaviour a reader has to be able to rely
+    on, not an implementation detail."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_union",
+        [
+            _two_class_ties(
+                base_overrides={
+                    "well_requires_boxes": [_BASE_TUB_BOX, [1.0, 9.0, 2.0, 10.0]]
+                }
+            )[1]
+        ],
+        marker=False,
+    )
+
+    # Both classes selected -> keeps every shape -> degenerate, which is only
+    # reachable if the two boxes were unioned rather than intersected.
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+
+
+def test_selection_boxes_compose_with_a_marker_layer_selection(tmp_path):
+    """All four selectors narrow the same selection, exactly as `tap_boxes`
+    composes with `tap_requires` on the tap side. Combining them is neither
+    rejected nor silently ignored: the marker keeps the base tub, the box
+    keeps it too, and the result is still one graded class -- carrying the
+    well-side assertion classification, because a box took part."""
+    report = _run_two_class_well(
+        tmp_path,
+        "marker_plus_boxes",
+        [
+            _two_class_ties(
+                base_overrides={
+                    "well_requires": ["14/0"],
+                    "well_requires_boxes": [_BASE_TUB_BOX],
+                }
+            )[1]
+        ],
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_coverage"]["checked_by_well_assertion"] == [_BASE_ID]
+
+
+def test_composed_selectors_are_graded_on_their_combined_result(tmp_path):
+    """The composition is geometric, not "which key was given": a marker that
+    selects the base tub combined with an exclusion box that removes it again
+    keeps nothing, and is graded degenerate on that combined answer rather than
+    on either key in isolation."""
+    report = _run_two_class_well(
+        tmp_path,
+        "marker_minus_boxes",
+        [
+            _two_class_ties(
+                base_overrides={
+                    "well_requires": ["14/0"],
+                    "well_excludes_boxes": [_BASE_TUB_BOX],
+                }
+            )[1]
+        ],
+    )
+
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_selection_boxes_on_an_asserted_substrate_region_are_rejected(tmp_path, key):
+    """A selection picks among *drawn* shapes, in either spelling. An asserted
+    substrate region (`well_layer: null` + `well_boxes`) already names exactly
+    the region it claims, box by box, so narrowing it further -- by a marker
+    layer or by a second box list -- would be a second, unstated claim."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"assertion_{key}",
+        {
+            "well_layer": None,
+            "well_boxes": [[0.0, 0.0, 4.0, 4.0]],
+            key: [[1.0, 1.0, 2.0, 2.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match=f"{key} selects among the drawn"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_a_non_array_well_selection_box_list_is_rejected(tmp_path, key):
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"non_array_{key}",
+        {
+            "well_layer": "10/0",
+            key: "4.0",
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match=f"{key} must be an array"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_a_malformed_well_selection_box_is_rejected(tmp_path, key):
+    """The same per-box validation `tap_boxes`/`well_boxes` apply: a
+    silently-dropped box would weaken a selection the caller believes they
+    declared -- and here that shows up as a *wider* graded class, not a
+    narrower one."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"malformed_{key}",
+        {
+            "well_layer": "10/0",
+            key: [[1.0, 2.0, 3.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match=rf"{key}\[0\]"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_an_inverted_well_selection_box_is_rejected(tmp_path, key):
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"inverted_{key}",
+        {
+            "well_layer": "10/0",
+            key: [[3.0, 2.0, 1.0, 4.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match="left < right and bottom < top"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_a_null_well_selection_box_list_is_the_same_as_omitting_it(tmp_path, key):
+    """`null` is the documented "omitted" spelling for every optional list on
+    this entry -- it must not become an empty selection that matches nothing,
+    nor put the tie in the well-side assertion list."""
+    report = _run_two_class_well(
+        tmp_path,
+        f"null_{key}",
+        [_two_class_ties(base_overrides={key: None})[1]],
+    )
+
+    assert report["erc_coverage"]["skipped"] == []
+    assert _BASE_ID in report["erc_coverage"]["checked"]
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
 
 
 # --- ties: a well layer with no geometry at all (issue #2377) ------------
@@ -4057,6 +4800,302 @@ def test_cli_text_output_names_a_non_default_disclosure_kind(tmp_path, capsys):
         "ties_disclosure (tool_limitation): pinned klt cannot grade a "
         "declared tie (#2169)" in out
     )
+
+
+# --- ties: a disclosed *partial* declaration (issue #2541) ---------------
+#
+# Every test above declares *zero* `ties[]`. The gap #2541 reports is the
+# other shape: a spec that declares the one well class it can express and
+# genuinely cannot express the other. Before `undeclared_classes`, the
+# disclosure's reason token only ever reached `erc_coverage` from the
+# `if not ties` branch, so such a spec's coverage block was byte-identical
+# to one that declared the same tie and never considered the second class --
+# declaring real, checkable work made the record *less* machine-readable
+# than declaring nothing at all.
+
+#: The native-substrate case the issue names: the n-well class is declared
+#: and checked; the p-substrate class has no drawn pwell/tub layer to name.
+_P_SUBSTRATE_DISCLOSURE = {
+    "reason": (
+        "the p-substrate class is deliberately not declared: this PDK draws "
+        "no pwell/tub layer for a native-substrate block, so there is no "
+        "well geometry to name"
+    ),
+    "undeclared_classes": ["p_substrate"],
+}
+
+
+def _run_partial_declaration(tmp_path, stem, *, disclosure=None, ties=None):
+    """The issue's own reproduction shape: the native-substrate fixture (no
+    pwell drawn anywhere in the stream), a spec declaring the one well class
+    it *can* express -- the n-well tie, narrowed by the real implant marker,
+    so it is genuinely checked work -- and optionally a top-level
+    `ties_disclosure` for the class it cannot."""
+    layout, _top = _routed_tie_layout(draw_pwell=False)
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec_body = _routed_tie_spec(
+        ties=ties
+        if ties is not None
+        else [_routed_tie_entries(tap_requires=["12/0"])[0]]
+    )
+    if disclosure is not None:
+        spec_body["ties_disclosure"] = disclosure
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, spec_body)
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def _inapplicable_reasons(report):
+    return {
+        record["id"]: record["reason"]
+        for record in report["erc_coverage"]["inapplicable"]
+    }
+
+
+def test_a_partial_declaration_reaches_the_disclosure_reason(tmp_path):
+    """The reported bug, verbatim: one declared `ties[]` entry, run twice --
+    once as-is, once with a disclosure for the class the spec cannot express
+    -- must not produce identical `erc_coverage`."""
+    plain = _run_partial_declaration(tmp_path, "partial_plain")
+    disclosed = _run_partial_declaration(
+        tmp_path, "partial_disclosed", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+
+    # The whole point: the two coverage blocks are no longer byte-identical.
+    assert plain["erc_coverage"] != disclosed["erc_coverage"]
+
+    # The declared class is unchanged, real, checked work in both runs.
+    declared = 'erc.missing_tie:["nwell_tie"]'
+    assert declared in plain["erc_coverage"]["checked"]
+    assert declared in disclosed["erc_coverage"]["checked"]
+
+    # The undeclared class now has an identity of its own, carrying the
+    # disclosed reason token -- readable without re-parsing the free-text
+    # `reason` and without re-opening the spec document.
+    assert not any(
+        record["id"].startswith("erc.missing_tie")
+        for record in plain["erc_coverage"]["inapplicable"]
+    )
+    assert (
+        _inapplicable_reasons(disclosed)['erc.missing_tie:["p_substrate"]']
+        == "ties_disclosed_unexpressible"
+    )
+
+
+def test_a_partial_declaration_discloses_a_tool_limitation_too(tmp_path):
+    """Both disclosed obstacles reach a partial declaration, exactly as they
+    do the empty-`ties[]` one (issue #2247): the two have different remedies
+    and must not collapse into one token here either."""
+    unexpressible = _run_partial_declaration(
+        tmp_path, "partial_unexpressible", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+    tool_limited = _run_partial_declaration(
+        tmp_path,
+        "partial_tool_limited",
+        disclosure={
+            "kind": "tool_limitation",
+            "reason": (
+                "klayout-tools#2169: a second declared tie on the pinned "
+                "release joins the well/tap regions into the primary graph"
+            ),
+            "undeclared_classes": ["p_substrate"],
+        },
+    )
+
+    identity = 'erc.missing_tie:["p_substrate"]'
+    assert (
+        _inapplicable_reasons(unexpressible)[identity] == "ties_disclosed_unexpressible"
+    )
+    assert (
+        _inapplicable_reasons(tool_limited)[identity]
+        == "ties_disclosed_tool_limitation"
+    )
+
+
+def test_a_disclosed_partial_declaration_moves_no_finding_and_no_status(tmp_path):
+    """Same principle every disclosure here rests on: it is the caller's
+    word, so it changes the coverage *reason* and nothing else -- not a
+    finding, not `erc_status`, not the declared tie's own grade."""
+    plain = _run_partial_declaration(tmp_path, "partial_status_plain")
+    disclosed = _run_partial_declaration(
+        tmp_path, "partial_status_disclosed", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+
+    assert plain["erc_findings"] == disclosed["erc_findings"] == []
+    assert plain["erc_status"] == disclosed["erc_status"] == "clean"
+    assert plain["erc_coverage"]["checked"] == disclosed["erc_coverage"]["checked"]
+    assert (
+        plain["erc_coverage"]["skipped"] == disclosed["erc_coverage"]["skipped"] == []
+    )
+
+
+def test_a_partial_disclosure_that_names_no_class_stays_inert(tmp_path):
+    """Naming the classes is the opt-in. A disclosure alongside a non-empty
+    `ties[]` that names none is accepted exactly as it always was (issue
+    #2234 rejected neither shape), and -- deliberately -- still records
+    nothing: there is no undeclared class for a reason to attach to, so
+    every already-committed spec's report stays byte-identical."""
+    plain = _run_partial_declaration(tmp_path, "partial_inert_plain")
+    unnamed = _run_partial_declaration(
+        tmp_path,
+        "partial_inert_unnamed",
+        disclosure={"reason": "no pwell is drawn on this stream"},
+    )
+
+    assert plain["erc_coverage"] == unnamed["erc_coverage"]
+    # The echo still carries the prose, so nothing is lost -- it is simply
+    # not machine-readable, which is the state #2541 exists to let a caller
+    # leave.
+    assert unnamed["ties_disclosure"] == {"reason": "no pwell is drawn on this stream"}
+
+
+def test_the_empty_ties_disclosure_path_is_unchanged(tmp_path):
+    """Regression for case (a): a spec with no `ties[]` at all and a
+    disclosure that names no classes must render exactly as it did before
+    #2541 -- the bare `erc.missing_tie:[]` entry, same reason token."""
+    report = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "empty_unchanged",
+        {"ties_disclosure": {"reason": "no implant layers are drawn on this stream"}},
+    )
+    assert (
+        _inapplicable_reasons(report)["erc.missing_tie:[]"]
+        == "ties_disclosed_unexpressible"
+    )
+    assert report["ties_disclosure"] == {
+        "reason": "no implant layers are drawn on this stream"
+    }
+
+
+def test_named_classes_add_to_the_bare_entry_when_ties_is_empty(tmp_path):
+    """A spec that declares no `ties[]` *and* names the classes it cannot
+    express keeps the bare "nothing was declared" entry -- that fact is
+    still true and pre-#2541 readers key on it -- and gains one named entry
+    per class."""
+    report = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "empty_named",
+        {
+            "ties_disclosure": {
+                "reason": "no implant layers are drawn on this stream",
+                "undeclared_classes": ["n_well", "p_substrate"],
+            }
+        },
+    )
+
+    reasons = _inapplicable_reasons(report)
+    assert reasons["erc.missing_tie:[]"] == "ties_disclosed_unexpressible"
+    assert reasons['erc.missing_tie:["n_well"]'] == "ties_disclosed_unexpressible"
+    assert reasons['erc.missing_tie:["p_substrate"]'] == "ties_disclosed_unexpressible"
+
+
+def test_a_disclosed_class_never_shares_an_identity_with_a_declared_tie(tmp_path):
+    """The disclosed classes live in the *same* `erc.missing_tie:` identity
+    space declared ties occupy, which is what makes them readable by a
+    grader that already walks that space -- so no identity may appear in two
+    coverage categories. A spec that declares and discloses the same class
+    contradicts itself and is a spec error, not an internal invariant
+    failure."""
+    disclosed = _run_partial_declaration(
+        tmp_path, "identity_space", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+    coverage = disclosed["erc_coverage"]
+    identities = [
+        *coverage["checked"],
+        *(record["id"] for record in coverage["skipped"]),
+        *(record["id"] for record in coverage["inapplicable"]),
+    ]
+    assert len(identities) == len(set(identities))
+
+    with pytest.raises(ErcError, match="which ties\\[\\] already declares"):
+        _run_partial_declaration(
+            tmp_path,
+            "identity_collision",
+            disclosure={
+                "reason": "cannot express it",
+                "undeclared_classes": ["nwell_tie"],
+            },
+        )
+
+
+@pytest.mark.parametrize("value", [[], "p_substrate", {}, 3, True])
+def test_undeclared_classes_rejects_a_non_array_or_empty_array(tmp_path, value):
+    """An empty array is the unfalsifiable "disclosed nothing" shape the
+    disclosure keys exist to rule out -- rejected for the same reason an
+    empty `reason` is."""
+    with pytest.raises(
+        ErcError, match="ties_disclosure.undeclared_classes must be a non-empty array"
+    ):
+        _run_partial_declaration(
+            tmp_path,
+            f"bad_classes_{abs(hash(str(value)))}",
+            disclosure={"reason": "because", "undeclared_classes": value},
+        )
+
+
+@pytest.mark.parametrize("value", ["", "   ", 7, None, ["nested"]])
+def test_undeclared_classes_rejects_a_non_string_entry(tmp_path, value):
+    with pytest.raises(
+        ErcError, match=r"ties_disclosure.undeclared_classes\[0\] must be a non-empty"
+    ):
+        _run_partial_declaration(
+            tmp_path,
+            f"bad_entry_{abs(hash(str(value)))}",
+            disclosure={"reason": "because", "undeclared_classes": [value]},
+        )
+
+
+def test_undeclared_classes_rejects_a_duplicate(tmp_path):
+    """Two entries for one class would emit one coverage identity twice --
+    rejected at the spec, the same way a duplicate `ties[].name` is."""
+    with pytest.raises(
+        ErcError, match="duplicate ties_disclosure.undeclared_classes entry"
+    ):
+        _run_partial_declaration(
+            tmp_path,
+            "dup_classes",
+            disclosure={
+                "reason": "because",
+                "undeclared_classes": ["p_substrate", "p_substrate"],
+            },
+        )
+
+
+def test_undeclared_classes_null_is_omitted(tmp_path):
+    """An explicit JSON `null` is "not declared", matching every other
+    optional key in this spec -- not a rejected value."""
+    report = _run_partial_declaration(
+        tmp_path,
+        "null_classes",
+        disclosure={"reason": "no pwell is drawn", "undeclared_classes": None},
+    )
+    assert report["ties_disclosure"] == {"reason": "no pwell is drawn"}
+
+
+def test_undeclared_classes_is_echoed_verbatim(tmp_path):
+    """The echo carries the names back, `kind` included, so a reader of the
+    report of record sees the same vocabulary the coverage identities use."""
+    report = _run_partial_declaration(
+        tmp_path, "echo_classes", disclosure=_P_SUBSTRATE_DISCLOSURE
+    )
+    assert report["ties_disclosure"] == _P_SUBSTRATE_DISCLOSURE
+
+
+def test_cli_text_output_names_the_undeclared_classes(tmp_path, capsys):
+    """The courtesy view must not render a partial declaration's disclosure
+    as "some tie you cannot see was not declared" either."""
+    gds = tmp_path / "partial_cli.gds"
+    layout, _top = _routed_tie_layout(draw_pwell=False)
+    layout.write(str(gds))
+    spec = tmp_path / "partial_cli.erc.json"
+    spec_body = _routed_tie_spec(ties=[_routed_tie_entries(tap_requires=["12/0"])[0]])
+    spec_body["ties_disclosure"] = _P_SUBSTRATE_DISCLOSURE
+    _write_spec(spec, spec_body)
+
+    main(["erc", str(gds), str(spec), "--pdk", "sky130"])
+    out = capsys.readouterr().out
+    assert "undeclared classes: p_substrate" in out
 
 
 def test_ties_rejects_a_non_boolean_tap_is_dedicated(tmp_path):

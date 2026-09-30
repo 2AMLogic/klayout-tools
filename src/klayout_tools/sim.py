@@ -48,6 +48,18 @@ file, appending the corner's ``.lib``/``.temp`` cards, the request's
 and runs the declared analysis. A netlist that already carries its own
 ``.end``/`.control`` is not supported in this version (see docs/cli/sim.md).
 
+Because that convention gives this module sole ownership of the deck's only
+``.control`` block, a measurement that is *not* expressible as a top-level
+``.meas`` card -- an operating-point quantity (``.MEASURE`` has no ``op``
+type, see ``_SUPPORTED_MEAS_TYPES``), or any reduction/combination of saved
+vectors -- had no expression in a request at all. ``measurements[].expr``
+(issue #2533) is the caller-facing seam into that block: one ngspice
+expression bound to one response name, emitted as a ``let``/``print`` pair
+after the analysis and harvested from the log by the same
+``<name> = <value>`` pattern a ``.meas`` result uses. See
+``_validate_measurement_forms`` for the contract and
+``_corner_deck_control_lines`` for the emission ordering.
+
 Failure classification is from the ngspice log text, never the process exit
 code -- ngspice reliably exits ``0`` even when a ``.meas`` fails or the
 matrix is singular (see the spike's "Failure signalling" survey row, verified
@@ -107,6 +119,7 @@ from .coverage import (
 )
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk
+from .pdk import ambiguity_warning as pdk_ambiguity_warning
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -630,6 +643,17 @@ _MEAS_CARD_TYPE_RE = re.compile(r"^\s*\.meas(?:ure)?\s+(\S+)", re.IGNORECASE)
 #: variable for a measurement to search over, unlike DC/AC/TRAN/SP.
 _SUPPORTED_MEAS_TYPES = frozenset({"dc", "ac", "tran", "sp"})
 
+#: A ``measurements[].expr`` measurement's name (issue #2533). Stricter than
+#: ``measurements[].name`` for a ``spice`` card, and deliberately so: an
+#: ``expr`` name is *emitted into the deck* as an ngspice vector name
+#: (``let <name> = ...``) and then read back out of the log by
+#: :data:`_MEAS_VALUE_RE`, so it has to be simultaneously legal on both
+#: sides. ngspice vector names admit no ``.`` (which `_MEAS_VALUE_RE` would
+#: otherwise accept) and no leading digit; anything else would either fail
+#: to parse in the deck or fail to harvest from the log, both of which would
+#: surface as the unhelpfully generic "produced no value".
+_EXPR_MEAS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 #: Ordered diagnostic classifiers: (code, compiled pattern). Order matters --
 #: singular-matrix and nonconvergence text can co-occur in one log (ngspice
 #: tries gmin/source stepping as a nonconvergence *recovery* strategy after a
@@ -824,9 +848,176 @@ def _validate_meas_card(name: str, spice: str) -> None:
         raise SimError(
             f"measurement '{name}' declares an unsupported .meas analysis "
             f"type '{meas_type}': ngspice has no `.MEASURE {meas_type.upper()}` "
-            'analysis type; use analysis.kind: "tran" with a short '
-            "single-step transient and `.meas tran ... at=<t>` instead"
+            "analysis type; declare the quantity as an expression instead "
+            f'(measurements[].expr, e.g. {{"name": "{name}", "expr": '
+            '"v(out)"}), which `klt sim` evaluates after the analysis inside '
+            'its own `.control` block -- or use analysis.kind: "tran" with '
+            "a short single-step transient and `.meas tran ... at=<t>`"
         )
+
+
+def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None:
+    """Validate the *form* of every ``request.measurements[]`` entry: that it
+    declares exactly one of ``spice`` (a verbatim top-level ``.meas`` card --
+    the only form before issue #2533) or ``expr`` (an ngspice expression
+    ``klt sim`` evaluates after the analysis, inside its own ``.control``
+    block), and that an ``expr`` entry's name/expression are emittable and
+    harvestable.
+
+    Why ``expr`` exists at all (issue #2533): a top-level ``.meas`` card is
+    the *only* measurement shape ngspice's batch mode accepts at file scope,
+    and ``.MEASURE`` implements no ``op`` analysis type
+    (:data:`_SUPPORTED_MEAS_TYPES`) -- so an operating-point quantity, or any
+    quantity that is a reduction/combination of saved vectors rather than a
+    single card's search, had no expression in a request at all. The
+    *harvesting* side already tolerated it: a ``print``ed scalar lands in the
+    log as ``<name> = <value>``, the shape :data:`_MEAS_VALUE_RE` reads (see
+    that pattern's own note about the print fallback). Only the emitting side
+    was closed, because the netlist convention gives ``klt sim`` sole
+    ownership of the deck's single ``.control`` block (see this module's
+    docstring). ``expr`` is that block's caller-facing seam -- declarative
+    (one expression bound to one response name), so it composes with
+    ``corners.*``/``monte_carlo`` exactly like a ``.meas`` card does rather
+    than needing its own reduction contract.
+
+    Validation rules, and why each is a hard error rather than a best-effort:
+
+    - **Exactly one of ``spice``/``expr``.** Both would emit the measurement
+      twice under one name (a file-scope ``.meas`` card *and* a
+      ``let``/``print`` pair) and leave which one won up to log ordering.
+      Neither leaves nothing to run.
+    - **``expr`` is a single non-empty line.** It is spliced verbatim into a
+      generated ``.control`` block; an embedded newline would silently turn
+      the tail of the expression into a *separate control command*.
+    - **``expr`` names match :data:`_EXPR_MEAS_NAME_RE`.** The name is both
+      an ngspice vector name in the deck and the key read back out of the
+      log; see that pattern's docstring.
+    - **An ``expr`` name is unique across the whole ``measurements[]``
+      list.** A duplicate ``let`` silently overwrites the earlier vector, so
+      both response entries would report the *second* expression's value.
+      Only checked for entries involving an ``expr`` -- a request whose
+      duplicate names are all ``spice`` cards behaves exactly as it did
+      before this issue (ngspice's own ``.meas`` handling owns that case).
+
+    Does **not** validate the expression's ngspice syntax or that it reduces
+    to a scalar: neither is knowable without running the engine, and both
+    surface at harvest time as the measurement's own ``status: "error"``
+    (with the ``expr``-specific hint :func:`_run_corner` attaches). Same
+    boundary ``spice`` already has -- hand-written SPICE is passed through,
+    not parsed.
+
+    Split across three helpers (:func:`_validate_measurement_form`,
+    :func:`_validate_expr_body`, :func:`_validate_expr_names_unique`) rather
+    than written as one loop, so no single function carries the whole rule
+    set's branch count -- see ``scripts/check_complexity_baseline.py``.
+    """
+    for spec in measurements_spec:
+        _validate_measurement_form(spec)
+    _validate_expr_names_unique(measurements_spec)
+
+
+def _validate_measurement_form(spec: dict[str, Any]) -> None:
+    """One ``request.measurements[]`` entry's form: a ``name`` plus exactly
+    one of ``spice``/``expr``, and -- for an ``expr`` -- a name that survives
+    the round trip through the deck and back out of the log. See
+    :func:`_validate_measurement_forms` for why each rule exists."""
+    name = spec.get("name")
+    has_spice = spec.get("spice") is not None
+    has_expr = spec.get("expr") is not None
+    if name is None or not (has_spice or has_expr):
+        raise SimError(
+            "each request.measurements[] entry requires 'name' and "
+            "exactly one of 'spice' (a verbatim .meas card) or 'expr' "
+            "(an ngspice expression evaluated after the analysis)"
+        )
+    if has_spice and has_expr:
+        raise SimError(
+            f"measurement '{name}' declares both 'spice' and 'expr': "
+            "they are alternative forms of the same measurement (a "
+            "top-level .meas card vs. an expression evaluated inside "
+            "`klt sim`'s own .control block) -- declare exactly one"
+        )
+    if not has_expr:
+        return
+    _validate_expr_body(name, spec["expr"])
+    if not _EXPR_MEAS_NAME_RE.match(str(name)):
+        raise SimError(
+            f"measurement '{name}' cannot be declared with 'expr': its "
+            "name is emitted as an ngspice vector name (`let <name> = "
+            "...`) and read back from the log, so it must match "
+            "[A-Za-z_][A-Za-z0-9_]* (no dots, no leading digit)"
+        )
+
+
+def _validate_expr_body(name: Any, expr: Any) -> None:
+    """A ``measurements[].expr`` value itself: one non-empty line of ngspice
+    expression text. Nothing about the *expression* is parsed (see
+    :func:`_validate_measurement_forms`) -- only that it can be spliced into
+    a single ``let`` line without becoming a second control command."""
+    if not isinstance(expr, str) or not expr.strip():
+        raise SimError(
+            f"measurement '{name}' has an empty or non-string 'expr': it "
+            "must be a single-line ngspice expression, e.g. "
+            '"v(d) - v(s)" or "vecmax(v(out)) - vecmin(v(out))"'
+        )
+    if "\n" in expr or "\r" in expr:
+        raise SimError(
+            f"measurement '{name}' has a multi-line 'expr': it is "
+            "spliced verbatim into one `let` line of the generated "
+            ".control block, so a newline would split it into a "
+            "separate control command -- use a single-line expression"
+        )
+
+
+def _validate_expr_names_unique(measurements_spec: list[dict[str, Any]]) -> None:
+    """No ``expr`` measurement shares its ``name`` with any other entry.
+
+    Checked in one pass over the whole list rather than incrementally, so an
+    ``expr`` entry colliding with a ``spice`` card declared *later* is caught
+    too (declaration order does not change the hazard: ``let <name>``
+    overwrites whatever held that name).
+
+    Compared **case-insensitively**, because the deck/log round trip is:
+    ngspice lower-cases both a printed vector name and a ``.meas`` name in its
+    own report, so ``vmid`` and ``Vmid`` are one name by the time
+    :func:`_harvest_measurement_value` reads them back -- and that function's
+    lower-cased fallback for an ``expr`` would otherwise be able to pick up
+    another entry's value.
+    """
+    counts: dict[Any, int] = {}
+    for spec in measurements_spec:
+        key = _measurement_name_key(spec.get("name"))
+        counts[key] = counts.get(key, 0) + 1
+    for spec in _expr_measurements(measurements_spec):
+        name = spec.get("name")
+        if counts.get(_measurement_name_key(name), 0) > 1:
+            raise SimError(
+                f"measurement '{name}' is declared more than once and one "
+                "declaration uses 'expr': a second `let " + str(name) + "` "
+                "would overwrite the first, so both response entries would "
+                "report the same value -- give each measurement a unique name "
+                "(compared case-insensitively: ngspice lower-cases the name "
+                "it prints back)"
+            )
+
+
+def _measurement_name_key(name: Any) -> Any:
+    """A ``measurements[].name`` reduced to the identity ngspice actually
+    round-trips: the lower-cased string. A non-string name is returned
+    unchanged so this stays total (``_validate_measurement_form`` is what
+    rejects one)."""
+    return name.lower() if isinstance(name, str) else name
+
+
+def _expr_measurements(
+    measurements_spec: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The ``measurements[]`` entries declared as an ``expr`` (issue #2533),
+    in the caller's own declaration order -- which is also the order their
+    ``let`` lines are emitted in, so a later expression may reference an
+    earlier one's name (verified against ngspice 46: ``let b = a * 2`` after
+    ``let a = ...`` resolves)."""
+    return [spec for spec in measurements_spec if spec.get("expr") is not None]
 
 
 def _validate_fail_on_diagnostic(value: Any) -> tuple[str, ...]:
@@ -1180,18 +1371,21 @@ def run_sim(
             )
         except PdkNotFoundError:
             provenance_pdk = None
+        _warn_pdk_ambiguity(provenance_pdk)
 
     analysis = request.get("analysis") or {}
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
 
     measurements_spec = request.get("measurements", [])
+    # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
+    # expression evaluated after the analysis, inside the generated
+    # `.control` block) are the two declarable forms, exactly one per entry
+    # -- see `_validate_measurement_forms` for the full rule set.
+    _validate_measurement_forms(measurements_spec)
     for spec in measurements_spec:
-        if "name" not in spec or "spice" not in spec:
-            raise SimError(
-                "each request.measurements[] entry requires 'name' and 'spice'"
-            )
-        _validate_meas_card(spec["name"], spec["spice"])
+        if spec.get("spice") is not None:
+            _validate_meas_card(spec["name"], spec["spice"])
         if spec.get("k_sigma") is not None:
             _validate_k_sigma(
                 spec["k_sigma"], f"request.measurements[{spec['name']!r}].k_sigma"
@@ -1338,6 +1532,7 @@ def run_sim(
         monte_carlo_declared=monte_carlo_spec is not None,
         fail_fast_probe=fail_fast_probe,
         osdi_preload_declared=bool(osdi_preload),
+        expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -1987,6 +2182,23 @@ def run_sim(
 # --------------------------------------------------------------------------- #
 # Model/netlist path resolution
 # --------------------------------------------------------------------------- #
+
+
+def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
+    """Print :func:`klayout_tools.pdk.ambiguity_warning` to stderr when the
+    run's PDK root was resolved by *search* and more than one install on this
+    host holds the requested variant (issue #2564).
+
+    The run is still well-defined -- resolution is first-match-wins -- but a
+    record can name a pinned ``open_pdks`` commit that a *different* build
+    actually produced, and nothing else says so up front: the JSON's
+    ``provenance.pdk.source`` is correct but purely after-the-fact, and a
+    caller only finds it by inspecting provenance it had no reason to
+    suspect. No-op for an unresolved PDK or an unambiguous one.
+    """
+    warning = pdk_ambiguity_warning(resolution) if resolution else None
+    if warning is not None:
+        print(warning, file=sys.stderr)
 
 
 def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
@@ -3112,6 +3324,7 @@ def _enforce_xyce_support_boundary(
     monte_carlo_declared: bool,
     fail_fast_probe: bool,
     osdi_preload_declared: bool = False,
+    expr_measurements_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -3162,6 +3375,21 @@ def _enforce_xyce_support_boundary(
             "`pre_osdi` is an ngspice control command, and Xyce loads "
             "Verilog-A models as its own compiled plugins (`-plugin`), not "
             "OSDI shared libraries; use engine 'ngspice' or drop the option"
+        )
+    if expr_measurements_declared:
+        # Issue #2533: an `expr` measurement is emitted as ngspice
+        # `let`/`print` commands inside the generated `.control` block, and
+        # the Xyce deck has no control block to carry them (see
+        # `_write_xyce_deck`'s docstring). Refused by name rather than
+        # silently dropped: a corner that ran without its `expr` lines would
+        # report every such measurement as "produced no value", which reads
+        # as a circuit regression rather than an unsupported request field.
+        raise SimError(
+            "measurements[].expr is not supported for engine 'xyce': it is "
+            "evaluated by ngspice `let`/`print` commands inside a `.control` "
+            "block, and the Xyce deck has none (its analysis is a plain "
+            "top-level dot card); use engine 'ngspice', or express the "
+            "quantity as a `.meas` card in measurements[].spice"
         )
 
 
@@ -3866,17 +4094,17 @@ def _run_corner(
     # `_parse_xyce_measurements` lower-cases its keys to normalize that);
     # `_parse_engine_measurements` -> `_parse_measurements` for ngspice does
     # the same, storing keys exactly as the (already lower-cased) log
-    # printed them. So the lookup here is always case-insensitive: fold the
-    # requested `name` to lower-case for both engines rather than only for
-    # Xyce -- an upper/mixed-case `spice`-form name (e.g. `Vout`) still
-    # harvests even though ngspice's own report prints `vout = ...` (#2546).
-    # The *response* below still echoes the caller's original `name`
-    # spelling -- only this internal lookup is case-folded.
+    # printed them. `_harvest_measurement_value` folds the requested `name`
+    # to lower-case on a miss for both engines and both measurement forms
+    # (#2546) -- an upper/mixed-case `spice`-form name (e.g. `Vout`) still
+    # harvests even though ngspice's own report prints `vout = ...`. The
+    # *response* below still echoes the caller's original `name` spelling --
+    # only the internal lookup is case-folded.
     measurement_values = _parse_engine_measurements(log_text, engine)
     measurement_results: list[dict[str, Any]] = []
     for spec in measurements_spec:
         name = spec["name"]
-        value = measurement_values.get(name.lower())
+        value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
         unit = spec.get("unit")
         if value is None:
             measurement_results.append(
@@ -3892,7 +4120,7 @@ def _run_corner(
                 {
                     "severity": "error",
                     "code": "measurement",
-                    "message": f"measurement '{name}' produced no value",
+                    "message": _no_value_message(spec),
                 }
             )
         else:
@@ -4014,6 +4242,73 @@ def _run_corner(
     return corner, engine_version
 
 
+def _harvest_measurement_value(
+    measurement_values: dict[str, float],
+    spec: dict[str, Any],
+    *,
+    is_xyce: bool,
+) -> float | None:
+    """This measurement's parsed value from the engine log's harvested
+    ``{name: value}`` map, or ``None`` when the engine printed none.
+
+    Two lookups, because the emitting paths differ in how they case the name
+    they print:
+
+    - **Xyce** upper-cases measurement names in its own output (``Vout`` ->
+      ``VOUT``), and :func:`_parse_xyce_measurements` lower-cases its keys to
+      compensate, so a Xyce lookup is always on the lower-cased name.
+    - **ngspice** (both an ``.meas`` card and an ``expr``, issue #2533) lower-
+      cases the name it prints regardless of how the request spelled it
+      (``.meas tran Vout ...`` prints back as ``vout = ...``; ``let Vmid =
+      ...`` / ``print Vmid`` prints ``vmid = 2.000000e+00``, verified against
+      ngspice 46) -- issue #2546 fixed the ``.meas`` case by folding the
+      lookup, and an ``expr`` name needs the identical fold or a mixed-case
+      one that :data:`_EXPR_MEAS_NAME_RE` accepts could never be harvested.
+      So the verbatim lookup is tried first (the common case where the
+      request already spelled the name lower-case, byte-identical to
+      before either fix) and a miss falls back to the lower-cased name for
+      both measurement forms. Safe against picking up the wrong measurement
+      because :func:`_validate_expr_names_unique` rejects an ``expr`` whose
+      name collides case-insensitively with any other entry's.
+    """
+    name = spec["name"]
+    if is_xyce:
+        return measurement_values.get(str(name).lower())
+    value = measurement_values.get(name)
+    if value is None:
+        return measurement_values.get(str(name).lower())
+    return value
+
+
+def _no_value_message(spec: dict[str, Any]) -> str:
+    """The ``code: "measurement"`` diagnostic text for a measurement that
+    came back with no value.
+
+    Byte-identical to pre-#2533 for a ``spice`` (``.meas`` card)
+    measurement -- callers and committed evidence records match on that
+    string. An ``expr`` measurement gets the two causes named instead,
+    because they are *its* failure modes and neither is visible in the
+    generic wording: the expression did not resolve at all (ngspice logs its
+    own ``Error: RHS "..." invalid`` for that), or it resolved to a
+    multi-point vector, which ``print`` renders as an indexed table rather
+    than the ``<name> = <value>`` line the harvest reads. Both are the
+    single most likely first-use mistake with this field, and the raw log
+    alone does not distinguish "your expression is wrong" from "this node
+    does not exist".
+    """
+    name = spec["name"]
+    if spec.get("expr") is None:
+        return f"measurement '{name}' produced no value"
+    return (
+        f"measurement '{name}' produced no value: its 'expr' "
+        f"({spec['expr']!r}) printed no '{name} = <value>' line -- check "
+        "that the expression resolves against this analysis's saved vectors "
+        "and reduces to a single scalar (a multi-point or complex result "
+        "prints as a table instead; reduce it with e.g. vecmax()/mean()/"
+        "db()/<expr>[0])"
+    )
+
+
 def _read_log_file(path: str) -> str:
     """Best-effort whole-file read of an engine log: a missing or unreadable
     file yields empty text, never an exception (``_run_corner``'s
@@ -4090,9 +4385,17 @@ def _write_corner_deck(
     declared OSDI libraries (issue #2513, ``options.osdi_preload``), then
     (when this corner has measurements or a rawfile to capture) restores
     the full saved set, ``alter``s the supply sources, optionally captures
-    an ASCII rawfile, and runs the declared analysis. The ``.control``
-    block itself is built by :func:`_corner_deck_control_lines`, which owns
-    the ordering contract between those commands.
+    an ASCII rawfile, runs the declared analysis, and evaluates any
+    ``measurements[].expr`` (issue #2533). The ``.control`` block itself is
+    built by :func:`_corner_deck_control_lines`, which owns the ordering
+    contract between those commands.
+
+    Only ``measurements[].spice`` entries land at file scope here -- an
+    ``expr`` measurement has no file-scope card at all (there is no
+    top-level ngspice syntax for it; that is the whole reason issue #2533
+    exists), so it is emitted by :func:`_corner_deck_control_lines` instead.
+    A request with no ``expr`` measurement therefore produces a
+    byte-identical deck to before that issue.
     """
     lines = ["* klt sim -- generated corner deck, do not edit"]
     if point.mc_seed is not None:
@@ -4119,7 +4422,8 @@ def _write_corner_deck(
     lines.append(f".temp {point.temperature_c}")
 
     for spec in measurements_spec:
-        lines.append(spec["spice"])
+        if spec.get("spice") is not None:
+            lines.append(spec["spice"])
 
     lines.extend(
         _corner_deck_control_lines(
@@ -4180,7 +4484,30 @@ def _corner_deck_control_lines(
        set" section for why that is deferred to a follow-up.
     3. One ``alter`` per supply rail, then the analysis command, wrapped by
        the ASCII-rawfile ``set filetype``/``write`` pair when a rawfile was
-       requested, then ``quit``.
+       requested.
+    4. One ``let <name> = <expr>`` / ``print <name>`` pair per
+       ``measurements[].expr`` entry (issue #2533), in declared order, then
+       ``quit``.
+
+       **After the analysis**, necessarily: the expression reads the vectors
+       the analysis produced. **After the rawfile ``write``**, deliberately:
+       ``let`` adds its result to the current plot and ``write`` dumps every
+       vector in that plot, so evaluating before the write would silently
+       add the derived vectors to the ``options.waveforms`` artifact -- an
+       ``expr`` measurement must not change what the rawfile/waveform
+       artifact contains. In *declared* order, so a later expression may
+       reference an earlier one's name (see :func:`_expr_measurements`).
+
+       One ``print`` per measurement rather than a single multi-vector
+       ``print``: ngspice renders a multi-vector ``print`` as an indexed
+       table, whereas a lone scalar prints as ``<name> = <value>`` -- the
+       exact shape :data:`_MEAS_VALUE_RE` harvests (verified against ngspice
+       46). A non-scalar expression prints a table too, which yields no
+       value for that name; :func:`_run_corner` turns that into the
+       measurement's own ``status: "error"`` with an ``expr``-specific hint.
+
+       No lines at all when no ``expr`` is declared, so every pre-#2533
+       request's deck is byte-identical.
     """
     lines = [".control"]
     for path in osdi_preload:
@@ -4194,6 +4521,9 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {analysis['args']}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+    for spec in _expr_measurements(measurements_spec):
+        lines.append(f"let {spec['name']} = {spec['expr']}")
+        lines.append(f"print {spec['name']}")
     lines.append("quit")
     lines.append(".endc")
     return lines
@@ -4231,6 +4561,13 @@ def _write_xyce_deck(
       ``.meas`` abbreviation, and its ``.MEASURE`` implements the same
       DC/AC/TRAN/NOISE set ngspice's does (no ``.measure op`` -- same
       ``_validate_meas_card`` gate as ngspice).
+    - ``measurements[].expr`` (issue #2533) has no Xyce form at all, for the
+      same reason as the first bullet: it is emitted as ngspice
+      ``let``/``print`` commands inside a ``.control`` block this deck does
+      not have. ``_enforce_xyce_support_boundary`` refuses such a request
+      up front by name; the loop below skips ``expr`` entries only so this
+      writer stays total rather than raising ``KeyError`` if a future caller
+      reaches it directly.
 
     Monte Carlo seed cards are never emitted: ``run_sim`` refuses
     ``monte_carlo`` for this engine before any deck exists.
@@ -4250,7 +4587,8 @@ def _write_xyce_deck(
     # `dc`/`tran`/`op` command to live in.
     lines.append("." + f"{analysis['kind']} {analysis['args']}".strip())
     for spec in measurements_spec:
-        lines.append(spec["spice"])
+        if spec.get("spice") is not None:
+            lines.append(spec["spice"])
     lines.append(".end")
 
     with open(deck_path, "w", encoding="utf-8") as handle:

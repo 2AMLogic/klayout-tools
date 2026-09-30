@@ -654,6 +654,12 @@ _SKY130_DUMMY_LAYER = (83, 20)
 #: own comment for the `LVS_*`-family provenance of (100, 50).
 _GF180_DUMMY_LAYER = (100, 50)
 
+#: sg13g2's curated dummy-device marker layer (issue #2590) -- matches
+#: `klayout_tools.decks.sg13g2.EXTRACTION_DECK.dummy` and
+#: `klayout_tools.gen_layer_params._PDK_ROLE_LAYERS["sg13g2"]["dummy"]`. See
+#: that deck's own comment for the `Recog.*`-family provenance of (99, 50).
+_SG13G2_DUMMY_LAYER = (99, 50)
+
 
 def test_list_generators_includes_all_four_phase2_families():
     """`klt gen --list` must show all four analog primitive families the
@@ -2665,11 +2671,11 @@ def test_gf180mcu_res_array_metal_level_default_zero_is_poly_body_unchanged(
 
     extract_report = run_extract(str(output_default), "gf180mcu")
     # `>= 3` (not `== 3`): gf180mcu's `_PDK_ROLE_LAYERS` entry declares no
-    # `"dummy"` role layer at all (the same pre-existing gap
-    # `test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged`
-    # documents for sg13g2, out of this issue's scope), so this family's
-    # dummy units are not suppressed by `klt extract` and count as ordinary
-    # `"ppolyf_u"` devices alongside the `num` real ones.
+    # `"dummy"` role layer at all -- the last family with that gap, now that
+    # sky130 (#491) and sg13g2 (#2590) both declare one; wiring gf180mcu up is
+    # tracked separately in #2599. So this family's dummy units are not
+    # suppressed by `klt extract` and count as ordinary `"ppolyf_u"` devices
+    # alongside the `num` real ones.
     assert extract_report["device_counts"].get("ppolyf_u", 0) >= 3
 
 
@@ -5759,7 +5765,7 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
     `EXTRACTION_DECK.resistors[0]`'s `marker`/`requires`) -- issue #369's
     precedent, mirrored for the third family."""
     output = tmp_path / "res_array_sg13g2.gds"
-    generate(
+    gen_report = generate(
         {
             "generator": "res_array",
             "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
@@ -5769,7 +5775,13 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
 
     report = run_extract(str(output), "sg13g2")
 
-    assert report["device_counts"].get("rsil", 0) > 0
+    # Exactly the generator's own real-device count, no longer a loose
+    # `> 0`: issue #2590 gave this family a curated `dummy` marker layer, so
+    # the default `dummy: 1`'s two edge-fill units are suppressed rather than
+    # padding the `"rsil"` count. Comparing against `gen_report` rather than a
+    # literal keeps this tied to `res_array`'s documented default `num`.
+    assert report["device_counts"] == {"rsil": gen_report["device_count"]}
+    assert report["dummy_devices_dropped"] == 2
 
 
 def test_sg13g2_res_array_explicit_generic_matches_default(tmp_path, sg13g2_pdk_root):
@@ -5976,6 +5988,257 @@ def test_sg13g2_res_array_metal_level_draws_expected_device_class(
     assert device["params"]["r_ohm"] == pytest.approx(length_um / width_um * sheet_rho)
 
 
+# --------------------------------------------------------------------------- #
+# Fixed-size cut/via layers (issue #2585)
+# --------------------------------------------------------------------------- #
+
+
+def _drawn_box_sides_um(path, layer_pair):
+    """Every distinct ``(width_um, height_um)`` drawn on ``layer_pair`` in the
+    flattened top cell of the GDS at ``path``."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(path))
+    top = layout.top_cell()
+    top.flatten(True)
+    shapes = top.shapes(layout.layer(*layer_pair))
+    return {
+        (round(s.box.width() * layout.dbu, 6), round(s.box.height() * layout.dbu, 6))
+        for s in shapes.each()
+        if s.is_box()
+    }, len(list(shapes.each()))
+
+
+def test_cut_fixed_size_table_agrees_with_every_curated_deck():
+    """Every `_PDK_CUT_FIXED_SIZE_UM` entry is a genuine *fixed*-size rule
+    already present (as its minimum half) in that family's curated deck:
+    the table value equals the deck's own `"width"` threshold on that layer,
+    and -- once a deck carries the upper bound itself as `threshold_max_dbu`
+    (#2370/#2388) -- equals that too, so the two sources can never disagree
+    about how big a generator draws the cut."""
+    from klayout_tools.decks import get_deck, get_nominal_dbu
+    from klayout_tools.gen_layer_params import _deck_cut_max_size_um
+
+    for family, layers in gen._PDK_CUT_FIXED_SIZE_UM.items():
+        rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+        for layer, size_um in layers.items():
+            minima = [
+                round(rule.threshold_dbu * nominal_dbu_um, 6)
+                for rule in rules
+                if rule.check == "width"
+                and rule.layer == layer
+                and rule.other_layer is None
+                and rule.derived_layer is None
+            ]
+            assert minima, (family, layer)
+            assert max(minima) == size_um, (family, layer, minima)
+            deck_max = _deck_cut_max_size_um(family, layer)
+            assert deck_max is None or deck_max == size_um, (family, layer)
+
+
+@pytest.mark.parametrize(
+    ("family", "layer", "expected_um"),
+    [
+        ("sky130", (68, 44), 0.15),  # via -- table (via.1a_b)
+        ("sky130", (66, 44), 0.0),  # licon1 -- no curated size bound
+        ("sky130", (67, 44), 0.0),  # mcon -- minimum-only here
+        ("sg13g2", (6, 0), 0.16),  # Cont -- Cnt.a
+        ("sg13g2", (19, 0), 0.19),  # Via1 -- V1.a
+        ("sg13g2", (66, 0), 0.19),  # Via4 -- V4.a
+        ("gf180mcu", (33, 0), 0.22),  # contact -- deck threshold_max_dbu
+    ],
+)
+def test_cut_fixed_size_um_resolves_deck_and_table(family, layer, expected_um):
+    import klayout.db as kdb
+
+    assert gen._cut_fixed_size_um(family, layer) == expected_um
+    assert gen._cut_fixed_size_um(family, kdb.LayerInfo(*layer)) == expected_um
+
+
+def test_cut_fixed_size_um_absent_layer_is_zero():
+    assert gen._cut_fixed_size_um("sg13g2", None) == 0.0
+
+
+def test_fixed_cut_side_um_only_ever_clamps_down():
+    assert gen._fixed_cut_side_um(0.22, 0.0) == 0.22
+    assert gen._fixed_cut_side_um(0.22, 0.16) == 0.16
+    # A fixed size above the generator's own side is a minimum-side concern
+    # for the per-family floors -- never grown here.
+    assert gen._fixed_cut_side_um(0.22, 0.42) == 0.22
+
+
+def test_clamp_cut_boxes_shrinks_about_centre_to_exact_size():
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell("T")
+    li = layout.layer(6, 0)
+    cell.shapes(li).insert(kdb.Box(0, 0, 220, 220))  # generic 0.22um cut
+    cell.shapes(li).insert(kdb.Box(1000, 0, 1221, 221))  # odd remainder
+    cell.shapes(li).insert(kdb.Box(2000, 0, 2150, 2150))  # oversized one axis
+    cell.shapes(li).insert(kdb.Box(3000, 0, 3100, 3100))  # already small
+
+    gen._clamp_cut_boxes(cell, li, layout.dbu, 0.16)
+
+    boxes = sorted(
+        (s.box.left, s.box.bottom, s.box.right, s.box.top)
+        for s in cell.shapes(li).each()
+    )
+    assert boxes == [
+        (30, 30, 190, 190),
+        (1030, 30, 1190, 190),
+        (2000, 995, 2150, 1155),
+        (3000, 1470, 3100, 1630),
+    ]
+
+
+def test_clamp_cut_boxes_zero_fixed_size_is_a_no_op():
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    cell = layout.create_cell("T")
+    li = layout.layer(66, 44)
+    cell.shapes(li).insert(kdb.Box(0, 0, 220, 220))
+    gen._clamp_cut_boxes(cell, li, layout.dbu, 0.0)
+    assert [s.box for s in cell.shapes(li).each()] == [kdb.Box(0, 0, 220, 220)]
+
+
+@pytest.mark.parametrize(
+    ("generator_name", "params"),
+    [
+        ("mos_array", {}),
+        ("mos_array", {"gate_contact": True, "add_guard_ring": True}),
+        ("diff_pair", {}),
+        ("guard_ring", {}),
+        ("res_array", {}),
+    ],
+)
+def test_sg13g2_generators_draw_cont_at_its_fixed_size(
+    generator_name, params, tmp_path, sg13g2_pdk_root, monkeypatch
+):
+    """sg13g2's `Cont` is a fixed-size cut (`Cnt.a`, min *and* max 0.16um):
+    every contact a generator draws there is exactly 0.16um square -- not the
+    PDK-generic 0.22um budget.
+
+    The design choice issue #2585 made: the cut shrinks *inside* its
+    unchanged 0.22um-derived contact region. So compared with the same
+    request drawn with the clamp disabled, every other layer is identical,
+    every cut keeps its centre, and the reported ports do not move."""
+    import klayout.db as kdb
+
+    from klayout_tools import gen_describe, gen_layer_params
+
+    def _generate(name):
+        output = tmp_path / f"{generator_name}_sg13g2_{name}.gds"
+        report = generate(
+            {
+                "generator": generator_name,
+                "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+                "params": params,
+                "options": {"output": str(output)},
+            }
+        )
+        return output, report
+
+    fixed_output, fixed_report = _generate("fixed")
+    sides, count = _drawn_box_sides_um(fixed_output, (6, 0))
+    assert count > 0
+    assert sides == {(0.16, 0.16)}
+
+    monkeypatch.setattr(gen_layer_params, "_cut_fixed_size_um", lambda *a: 0.0)
+    monkeypatch.setattr(gen_describe, "_cut_fixed_size_um", lambda *a: 0.0)
+    generic_output, generic_report = _generate("generic")
+    assert _drawn_box_sides_um(generic_output, (6, 0))[0] == {(0.22, 0.22)}
+
+    assert fixed_report["ports"] == generic_report["ports"]
+    assert fixed_report["bbox_um"] == generic_report["bbox_um"]
+
+    def _flat_regions(path):
+        layout = kdb.Layout()
+        layout.read(str(path))
+        top = layout.top_cell()
+        top.flatten(True)
+        return {
+            (info.layer, info.datatype): kdb.Region(top.begin_shapes_rec(li))
+            for li, info in zip(
+                layout.layer_indexes(), layout.layer_infos(), strict=True
+            )
+        }
+
+    fixed_regions = _flat_regions(fixed_output)
+    generic_regions = _flat_regions(generic_output)
+    assert fixed_regions.keys() == generic_regions.keys()
+    for layer, region in fixed_regions.items():
+        if layer == (6, 0):
+            continue
+        assert (region ^ generic_regions[layer]).is_empty(), layer
+
+    def _centres(region):
+        return sorted((p.bbox().center().x, p.bbox().center().y) for p in region.each())
+
+    assert _centres(fixed_regions[(6, 0)]) == _centres(generic_regions[(6, 0)])
+    # Enclosure only grows: every 0.16um cut sits inside the 0.22um one.
+    assert (fixed_regions[(6, 0)] - generic_regions[(6, 0)]).is_empty()
+
+
+@pytest.mark.parametrize("level", [1, 2])
+def test_sg13g2_res_array_metal_level_draws_via_at_its_fixed_size(
+    tmp_path, sg13g2_pdk_root, level
+):
+    """sg13g2's `Via1`/`Via2` are fixed-size cuts (`V1.a`/`V2.a`, 0.19um):
+    `metal_level`'s end vias are drawn at exactly that side."""
+    output = tmp_path / f"res_array_sg13g2_via_m{level}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"num": 1, "dummy": 0, "width_um": 1.0, "metal_level": level},
+            "options": {"output": str(output)},
+        }
+    )
+    via_layer = {1: (19, 0), 2: (29, 0)}[level]
+    sides, count = _drawn_box_sides_um(output, via_layer)
+    assert count == 2
+    assert sides == {(0.19, 0.19)}
+
+
+def test_sky130_res_array_metal_level_2_draws_via_at_its_fixed_size(tmp_path, pdk_root):
+    """sky130's met2 resistor's end via drops to met1 on `via` (68/44), a
+    fixed-size cut (`via.1a_a`/`via.1a_b`, 0.15um)."""
+    output = tmp_path / "res_array_sky130_via_m2.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"num": 1, "dummy": 0, "metal_level": 2},
+            "options": {"output": str(output)},
+        }
+    )
+    sides, count = _drawn_box_sides_um(output, (68, 44))
+    assert count == 2
+    assert sides == {(0.15, 0.15)}
+
+
+def test_sky130_minimum_only_contact_keeps_the_generic_size(tmp_path, pdk_root):
+    """sky130's `licon1` carries no curated upper size bound, so its cuts
+    stay at the generic 0.22um budget -- issue #2585 only moves fixed-size
+    layers."""
+    output = tmp_path / "mos_array_sky130_licon.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+    sides, count = _drawn_box_sides_um(output, (66, 44))
+    assert count > 0
+    assert sides == {(0.22, 0.22)}
+
+
 def test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged(
     tmp_path, sg13g2_pdk_root
 ):
@@ -6004,14 +6267,19 @@ def test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged(
     assert report_default["ports"] == report_explicit["ports"]
 
     extract_report = run_extract(str(output_default), "sg13g2")
-    # `>= 3` (not `== 3`, unlike sky130's own version of this test above):
-    # sg13g2's `_PDK_ROLE_LAYERS` entry declares no `"dummy"` role layer at
-    # all (a pre-existing gap, out of this issue's scope -- see
-    # `test_sg13g2_res_array_default_params_recognised_as_rsil`'s own
-    # `> 0`, not `== num`, assertion above for the same reason), so this
-    # family's dummy units are not suppressed by `klt extract` and count as
-    # ordinary `"rsil"` devices alongside the `num` real ones.
-    assert extract_report["device_counts"].get("rsil", 0) >= 3
+    # `== 3`, matching sky130's own version of this test above: as of issue
+    # #2590 sg13g2's curated extraction deck declares a `dummy` marker layer
+    # and `_PDK_ROLE_LAYERS["sg13g2"]` a matching `"dummy"` role, so
+    # `res_array`'s edge-fill units -- two of them, one per end at
+    # `dummy: 1` -- are suppressed by `klt extract` and only the `num` real
+    # units survive. A loose `>= 3` bound (this test's pre-#2590 shape, from
+    # when those dummies extracted as ordinary `"rsil"` devices) could no
+    # longer tell working suppression (`3`) from a regression back to none
+    # (`5`), so assert both halves exactly. `klt lvs` coverage of the same
+    # behaviour lives in
+    # `test_lvs_res_array_sg13g2_dummy_suppression_no_unmatched_device`.
+    assert extract_report["dummy_devices_dropped"] == 2
+    assert extract_report["device_counts"] == {"rsil": 3}
 
 
 def test_sg13g2_res_array_metal_level_3_rejected(tmp_path, sg13g2_pdk_root):
@@ -6290,6 +6558,90 @@ def test_sg13g2_cap_array_draws_mim_stack_layers(tmp_path, sg13g2_pdk_root):
     assert _SG13G2_CAP_BOTTOM_PLATE_LAYER in present
     assert _SG13G2_CAP_TOP_VIA_LAYER in present
     assert _SG13G2_CAP_TOP_VIA_METAL_LAYER in present
+
+
+#: IHP-Open-PDK's own `MIM.c` ("Min. Metal5 enclosure of MIM is 0.60 um" --
+#: `drc_rules['Mim_c']` = 0.6 in `sg13g2_tech_default.json`, applied by
+#: `rule_decks/beol/6_11_mim.drc`), the rule that governs how far this
+#: family's drawn `Metal5` bottom plate must extend past its `MIM` top plate
+#: (issue #2576). The curated `klayout_tools.decks.sg13g2` deck carries no
+#: `MIM` rule group at all, so `klt drc --deck sg13g2` cannot catch a
+#: shortfall here -- these tests measure the drawn geometry directly instead.
+_SG13G2_MIM_C_ENCLOSURE_UM = 0.6
+
+
+@pytest.mark.parametrize(
+    ("plate_w_um", "plate_h_um"),
+    ((5.0, 5.0), (25.7, 25.7), (2.0, 11.3)),
+)
+def test_sg13g2_cap_array_bottom_plate_clears_mim_c_enclosure(
+    plate_w_um, plate_h_um, tmp_path, sg13g2_pdk_root
+):
+    """The drawn `Metal5` bottom plate must enclose the `MIM` top plate by at
+    least `MIM.c`'s 0.60um on all four sides, at any plate size -- issue
+    #2576, where the generic `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) drew every
+    sg13g2 `cap_array` stream 0.1um short of the family's own foundry rule.
+
+    This is deliberately a *geometry* assertion, not a `klt drc --deck
+    sg13g2` clean-status one: that deck transcribes no `MIM` rule group, so
+    it reported `clean` on the pre-fix, rule-violating output too."""
+    output = tmp_path / "cap_array_sg13g2_mim_c.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {
+                "plate_w_um": plate_w_um,
+                "plate_h_um": plate_h_um,
+                "num": 1,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    top = _layer_bbox(output, *_SG13G2_CAP_TOP_PLATE_LAYER)
+    bottom = _layer_bbox(output, *_SG13G2_CAP_BOTTOM_PLATE_LAYER)
+    enclosures = {
+        "left": top["left"] - bottom["left"],
+        "bottom": top["bottom"] - bottom["bottom"],
+        "right": bottom["right"] - top["right"],
+        "top": bottom["top"] - top["top"],
+    }
+    for side, enclosure in enclosures.items():
+        assert enclosure >= _SG13G2_MIM_C_ENCLOSURE_UM - 1e-9, (side, enclosures)
+
+
+def test_sg13g2_cap_bottom_plate_margin_floor_is_the_mim_c_minimum():
+    """The floor itself: sg13g2 declares `MIM.c`'s own 0.60um as its
+    `cap_bottom_plate_margin_min_um`, and every other family is left on the
+    generic `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) -- so sky130's and
+    sg13cmos5l's drawn geometry is unchanged by issue #2576 and gf180mcu
+    keeps its own, larger virtual-bottom-plate oversize (1.06um)."""
+    assert (
+        gen._cap_geometry_min_um("sg13g2")["cap_bottom_plate_margin_min_um"]
+        == _SG13G2_MIM_C_ENCLOSURE_UM
+    )
+    assert gen._cap_geometry_min_um("sky130")["cap_bottom_plate_margin_min_um"] == 0.0
+    assert (
+        gen._cap_geometry_min_um("sg13cmos5l")["cap_bottom_plate_margin_min_um"] == 0.0
+    )
+    assert (
+        gen._cap_geometry_min_um("gf180mcu")["cap_bottom_plate_margin_min_um"] == 1.06
+    )
+
+    # The default-sized unit cell grows by exactly the 0.1um shortfall on
+    # each side: 5.0 + 2*0.6, not the pre-fix 5.0 + 2*0.5.
+    sg13g2_unit = gen._cap_unit_layout(
+        5.0,
+        5.0,
+        bottom_plate_margin_min_um=_SG13G2_MIM_C_ENCLOSURE_UM,
+    )
+    assert sg13g2_unit["total_w_um"] == pytest.approx(
+        5.0 + 2 * _SG13G2_MIM_C_ENCLOSURE_UM
+    )
+    assert gen._cap_unit_layout(5.0, 5.0)["total_w_um"] == pytest.approx(
+        5.0 + 2 * gen.CAP_BOTTOM_PLATE_MARGIN_UM
+    )
 
 
 def test_sg13g2_cap_array_extracts_as_cap_cmim_device(tmp_path, sg13g2_pdk_root):
@@ -8802,11 +9154,80 @@ def test_mos_array_sd_implant_absence_noted_on_sg13g2(
     }
     # The issue's own observed stream: Activ (1/0), GatPoly (5/0), Cont
     # (6/0), Metal1 (8/0) -- plus NWell (31/0) for the pfet well -- and no
-    # implant shape on either `nSD` (7/0) or `pSD` (14/0).
-    expected = {(1, 0), (5, 0), (6, 0), (8, 0)}
+    # implant shape on either `nSD` (7/0) or `pSD` (14/0). The curated
+    # dummy marker (99/50, issue #2590) joins it because this repro requests
+    # `dummy: 1`; it is a deck-local extraction marker, not an implant.
+    expected = {(1, 0), (5, 0), (6, 0), (8, 0), _SG13G2_DUMMY_LAYER}
     if flavor == "pfet":
         expected.add((31, 0))
     assert present == expected
+
+
+def test_mos_array_sg13g2_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, sg13g2_pdk_root
+):
+    """Issue #2590 (the sg13g2 counterpart of sky130's own #491): on
+    ``ihp-sg13g2``, ``mos_array`` draws the deck's curated ``dummy`` marker
+    layer (``99, 50``) over each dummy unit's gate footprint -- and *only*
+    the dummy units, never a real cell -- so ``klt extract``'s existing
+    dummy-suppression guards (#295/#462) fire on this family too. A
+    ``dummy: 0`` request draws no shapes on that layer at all (the pre-#2590
+    regression case)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_sg13g2_dummy_marker.gds"
+    rows, cols, dummy = 1, 2, 2
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"rows": rows, "cols": cols, "dummy": dummy},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SG13G2_DUMMY_LAYER in present
+
+    dummy_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_SG13G2_DUMMY_LAYER))
+    )
+    poly_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(5, 0))  # GatPoly.drawing
+    )
+    # A strict subset of the drawn poly: it covers only the dummy gates'
+    # footprint, never a real cell's.
+    assert not dummy_region.is_empty()
+    assert (dummy_region - poly_region).is_empty()
+    assert dummy_region.area() < poly_region.area()
+
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(1, 0))  # Activ.drawing
+    )
+    # The channel component `klt extract` recognises as a gate is
+    # poly & active -- one connected component per dummy unit device, the
+    # same count `dummy_devices_dropped` reports for this request.
+    assert (dummy_region & active_region).merged().count() == 2 * dummy * rows
+
+    output_no_dummy = tmp_path / "mos_array_sg13g2_no_dummy_marker.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"rows": rows, "cols": cols, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    assert _SG13G2_DUMMY_LAYER not in {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
 
 
 @pytest.mark.parametrize("flavor", ["nfet", "pfet"])

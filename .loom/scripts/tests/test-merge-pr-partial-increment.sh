@@ -28,7 +28,6 @@
 # edit), and degrades to today's warn-only behavior when that fetch fails.
 #
 # Strategy: the functions under test (_partial_increment_refs,
-# _closing_refs_stdin, _body_closing_refs, _closing_ref_snippets,
 # _pr_commit_messages, _check_partial_increment_close_conflict,
 # _reset_one_partial_issue, _reset_partial_increment_labels) depend only on
 # globals (PR_JSON, REPO_NWO, PR_NUMBER, FORGE_TYPE, GH,
@@ -59,10 +58,11 @@ MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 # the reading that closes an unfinished issue.
 # shellcheck source=lib/require-daemon-bin.sh
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
-# The post-merge reset's decision is `loom-daemon merge-pr partial-reset`
-# and the pre-merge conflict guard's is `merge-pr partial-conflict` (#8191
-# slices), so the same binary must carry both verbs too.
-loom_test_require_daemon_bin "$HELPERS_DIR" merge-pr-refs "merge-pr partial-reset" "merge-pr partial-conflict"
+# The post-merge reset's decision is `loom-daemon merge-pr partial-reset`, the
+# pre-merge conflict guard's is `merge-pr partial-conflict`, and the pass's two
+# audit-comment BODIES are `merge-pr partial-comment` (#8191 slices), so the
+# same binary must carry all three verbs too.
+loom_test_require_daemon_bin "$HELPERS_DIR" merge-pr-refs "merge-pr partial-reset" "merge-pr partial-conflict" "merge-pr partial-comment"
 
 # Colors
 RED='\033[0;31m'
@@ -160,9 +160,9 @@ source "$HELPERS_DIR/lib/forge-helpers.sh"
 
 # --- Extract the functions under test from merge-pr.sh and source them ---
 # Two spans, each bounded by an anchor line that is NOT part of the span:
-#   1. `_strip_fenced_code_blocks() {` .. `_check_partial_increment_close_conflict
-#      || true` — the #4569 pre-merge guard, its pure-text ref extractors, and
-#      the #5234 code-span/fence-stripping helper the extractors depend on.
+#   1. `_mp_refs() {` .. `_check_partial_increment_close_conflict || true` —
+#      the #4569 pre-merge guard and the loom-daemon-backed ref extractor it
+#      depends on.
 #      Stopping at the INVOCATION line keeps the top-level call out of the
 #      sourced file (we drive the guard explicitly from the tests).
 #   2. `_reset_one_partial_issue() {` .. `# Handle auto-merge mode` — the
@@ -183,15 +183,14 @@ trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" 2>/dev/null || true' EXIT
 awk '
   /^# requires-daemon:/                                  { print; next }
   /^_mp_daemon_roll_hint\(\) \{/                         { print; next }
-  /^_strip_fenced_code_blocks\(\) \{/                    { capture=1 }
+  /^_mp_refs\(\) \{/                                     { capture=1 }
   /^_check_partial_increment_close_conflict \|\| true/   { capture=0 }
   /^_reset_one_partial_issue\(\) \{/                    { capture=1 }
   /^# Handle auto-merge mode/                           { capture=0 }
   capture { print }
 ' "$MERGE_PR_SRC" > "$FUNCS_FILE"
 
-for _fn in _strip_fenced_code_blocks _partial_increment_refs _closing_refs_stdin \
-           _body_closing_refs _closing_ref_snippets _partial_increment_ref_snippets \
+for _fn in _mp_refs _partial_increment_refs \
            _pr_commit_messages _check_partial_increment_close_conflict \
            _reset_one_partial_issue _reset_partial_increment_labels; do
     if ! grep -q "^${_fn}() {" "$FUNCS_FILE"; then
@@ -431,25 +430,6 @@ assert_not_contains "$log" "issue edit 888" \
 # ---------------------------------------------------------------------------
 # #4569: closing-keyword conflict detection + premature-close revert.
 # ---------------------------------------------------------------------------
-
-echo ""
-echo "Testing _body_closing_refs (GitHub closing-keyword extraction)..."
-
-# The incident phrasing: a closing keyword buried in prose, NOT line-leading.
-assert_eq "123" "$(_body_closing_refs '3. Verify the publish, then close #123.')" \
-  "Prose 'then close #123' is a closing reference (keyword is not line-leading)"
-assert_eq "123" "$(_body_closing_refs 'Closes #123')" \
-  "Canonical 'Closes #123' trailer extracted"
-assert_eq "$(printf '7\n9')" "$(_body_closing_refs 'Fixes #7 and resolved #9')" \
-  "Tense/case variants (Fixes/resolved) both extracted, numerically sorted"
-assert_eq "" "$(_body_closing_refs 'Contributes to #123')" \
-  "Non-closing 'Contributes to #123' is NOT a closing reference"
-assert_eq "" "$(_body_closing_refs 'Discloses #123 and Updates #456')" \
-  "Word-boundary guard: 'Discloses'/'Updates' are not closing keywords"
-assert_eq "" "$(_body_closing_refs 'close issue #123')" \
-  "'close issue #123' is NOT a closing reference (keyword not adjacent to #N)"
-assert_eq "1234" "$(_body_closing_refs 'Closes #1234')" \
-  "Full number is extracted (no #123 prefix confusion)"
 
 echo ""
 echo "Testing _partial_increment_refs prose/code-span guarding (#5234)..."
@@ -1014,6 +994,84 @@ assert_not_contains "$(read_log)" "issue edit 777" \
 assert_contains "$reopen_fail_err" "Could not reopen issue #777 after its premature auto-close" \
   "#8191: failed reopen of #777 -> warns with the manual reopen command"
 
+# T31 (#8191): the two audit-comment BODIES moved to `loom-daemon merge-pr
+# partial-comment`. A daemon that cannot render one must NOT post an empty
+# comment over the explanation -- the failure mode a bare `comment="$(... ||
+# true)"` would have produced -- and must not disturb the mutations the comment
+# merely describes. The label swap has already happened by then; only the note
+# is lost, and it is lost loudly.
+reset_log
+fake_no_comment="$STUB_DIR/fake-loom-daemon-no-partial-comment"
+cat > "$fake_no_comment" <<'FAKEDAEMON'
+#!/usr/bin/env bash
+# Answers `partial-reset` (so the pass reaches the SWAP) but not
+# `partial-comment` -- the exact version skew a half-rolled host has.
+if [[ "${1:-}" == "merge-pr" && "${2:-}" == "partial-comment" ]]; then
+  echo "error: unrecognized subcommand 'partial-comment'" >&2
+  exit 2
+fi
+exec "$LOOM_TEST_REAL_DAEMON" "$@"
+FAKEDAEMON
+chmod +x "$fake_no_comment"
+saved_bin="${LOOM_DAEMON_BIN:-}"
+export LOOM_TEST_REAL_DAEMON="$saved_bin"
+export LOOM_DAEMON_BIN="$fake_no_comment"
+PARTIAL_OPEN_BEFORE_MERGE=""
+PARTIAL_CONFLICT_ISSUES=""
+PR_JSON='{"body":"Part of #123"}'
+run_capturing_stderr _reset_partial_increment_labels
+no_comment_err="$(read_stderr)"
+no_comment_log="$(read_log)"
+export LOOM_DAEMON_BIN="$saved_bin"
+assert_contains "$no_comment_log" "issue edit 123 --repo owner/repo --remove-label loom:building --add-label loom:issue" \
+  "#8191: a daemon without 'merge-pr partial-comment' still performs the label swap (the comment is the only casualty)"
+assert_not_contains "$no_comment_log" "issue comment 123" \
+  "#8191: ...and posts NO comment at all, rather than an empty one over the audit trail"
+assert_contains "$no_comment_err" "was NOT posted" \
+  "#8191: the skipped audit comment is reported, not swallowed"
+
+# T32 (#8191): on the happy path the posted body is the one the daemon
+# rendered, in both arms of its single conditional -- the plain swap, and the
+# swap that follows a #4569 reopen.
+reset_log
+PARTIAL_OPEN_BEFORE_MERGE=""
+PARTIAL_CONFLICT_ISSUES=""
+PR_JSON='{"body":"Part of #123"}'
+_reset_partial_increment_labels 2>/dev/null
+plain_comment_log="$(read_log)"
+assert_contains "$plain_comment_log" "## Partial Increment Merged" \
+  "#8191: the plain swap posts the daemon-rendered partial-increment body"
+assert_contains "$plain_comment_log" "*Reset by merge-pr.sh (#3667) at " \
+  "#8191: ...with its attribution sign-off intact"
+assert_not_contains "$plain_comment_log" "**Reopened** this issue" \
+  "#8191: ...and without the reopen bullet, which nothing reopened"
+assert_not_contains "$plain_comment_log" "LOOM-MERGE-PR-COMMENT" \
+  "#8191: the protocol sentinel is stripped before the body is posted"
+# ...and the sentinel's TERMINATING NEWLINE goes with it. Asserting only the
+# sentinel's absence would still pass if the strip removed the marker but left
+# its newline, which would post a body whose first line is blank. `--body` is
+# immediately followed by the heading in the stub's `echo "$*"` transcript only
+# when nothing was left behind. This is the half of the `${out#…$nl}` /
+# `[[ … == "…$nl"* ]]` pair that a wrong ANSI-C quote breaks off-Linux (see the
+# `$nl` note in merge-pr.sh) -- on bash 3.2 a literal `$'\n'` in those patterns
+# fails the match outright, which T31's "posts NO comment" assertion would read
+# as healthy; this one would not.
+assert_contains "$plain_comment_log" "--body ## Partial Increment Merged" \
+  "#8191: the body starts AT the heading -- the sentinel's newline is stripped too, not left as a blank first line"
+
+reset_log
+PARTIAL_OPEN_BEFORE_MERGE="777"
+PARTIAL_CONFLICT_ISSUES="777"
+PR_JSON='{"body":"Verify, then close #777.\n\nContributes to #777"}'
+run_capturing_stderr _reset_partial_increment_labels
+reopen_comment_log="$(read_log)"
+assert_contains "$reopen_comment_log" "## Premature Auto-Close Reverted" \
+  "#8191: the reopen posts the daemon-rendered premature-close body"
+assert_contains "$reopen_comment_log" "instead of \`close #777\`" \
+  "#8191: ...naming the offending issue in the advice it gives the Builder"
+assert_contains "$reopen_comment_log" "- **Reopened** this issue" \
+  "#8191: the follow-on swap's body leads with the reopen bullet"
+
 # --- Source-contains guards (fail if a refactor drops the key behavior) ---
 echo ""
 echo "Testing merge-pr.sh source guards..."
@@ -1043,7 +1101,16 @@ assert_contains "$src" "_check_partial_increment_close_conflict || true" \
   "merge-pr.sh invokes the #4569 conflict guard BEFORE either merge path"
 assert_contains "$src" 'forge_gh_reopen_issue_rl_safe "$REPO_NWO" "$issue_num"' \
   "merge-pr.sh reverts a premature auto-close via the rate-limit-safe reopen wrapper (#4856)"
-assert_contains "$src" 'forge_gh_comment_rl_safe "$REPO_NWO" "$issue_num" "$comment"' \
+# The BODY argument is no longer a `$comment` local: both bodies are
+# `loom-daemon merge-pr partial-comment` since #8191's slice, so the third
+# argument is now the daemon's output with its sentinel stripped. The assertion
+# is narrowed to the part that is still this file's responsibility — that the
+# post goes through the #4856 wrapper, repo-scoped and issue-scoped — and the
+# body itself is asserted behaviourally by T31/T32 below and byte-for-byte by
+# loom-daemon/tests/merge_pr_partial_comment_differential.rs. This is a
+# narrowing of an existing assertion, not a retirement: nothing it used to
+# forbid is now allowed.
+assert_contains "$src" 'forge_gh_comment_rl_safe "$REPO_NWO" "$issue_num"' \
   "merge-pr.sh posts the partial-increment / premature-close comments via the rate-limit-safe wrapper (#4856)"
 retired "merge-pr.sh's source contains the closing-keyword alternation" \
     "the GitHub closing-keyword set (and its \\b guard, which is what stops 'Discloses #N' matching) must not drift from the one forge_pr_close_targets uses" \
@@ -1053,14 +1120,10 @@ assert_contains "$src" 'repos/$REPO_NWO/pulls/$PR_NUMBER/commits' \
   "merge-pr.sh reads the PR's commit messages for closing keywords (#4595)"
 assert_contains "$src" '--paginate' \
   "merge-pr.sh paginates the commits fetch (>30-commit PRs are not truncated)"
-assert_contains "$src" '_strip_fenced_code_blocks' \
-  "merge-pr.sh strips fenced code blocks before matching a partial-increment declaration (#5234)"
 retired "merge-pr.sh's source contains the inline-code-span strip" \
     "inline code spans are blanked before the line-leading anchor runs, so the anchor sees the text a reader sees rather than the raw markup. (The #5234 incident itself is caught by the ANCHOR, not by this strip: its mention is mid-sentence. On a single line the strip only ever ADDS matches -- measured, 0 of 29 corpus entries change without it.)" \
     "the strip is now blank_inline_code() in Rust; this file no longer runs sed" \
     "merge_pr::refs::tests::the_inline_code_strip_changes_the_answer_and_this_pins_which_way, which asserts the one single-line shape where the strip is load-bearing (\"\`x\` Part of #5\" -> [5]) and would fail if the strip were removed -- the property the original successor did NOT pin."
-assert_contains "$src" '_partial_increment_ref_snippets' \
-  "merge-pr.sh quotes the matched partial-increment declaration text in the pre-merge warning (#5234 AC #4)"
 
 # --- Summary ---
 echo ""

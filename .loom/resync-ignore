@@ -154,7 +154,29 @@ scripts/tests/test-dep-recheck-fingerprint.sh
 # label-state-machine.md templates, so an unpinned resync would silently drop
 # it — the same reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674.
 # If the upstream Loom project ever adopts an equivalent propagation, these
-# pins can be dropped and the files resynced normally.
+# pins can be dropped and the files resynced normally. Re-verified 2026-09-27
+# (#2549) against rjwalters/loom @ d1a43413: upstream's
+# defaults/.claude/commands/loom/champion-pr-merge.md still has no `Blocked by
+# #<PR>` / `loom:operator`-to-issue propagation, so the pin stays.
+#
+# #2549 BROADENS what this pin holds, so read the pin as "this file is now
+# locally maintained", not just "it carries one extra propagation". Freezing
+# champion-pr-merge.md at its 2026-09 baseline also froze the merge-step wiring
+# for merge-pr.sh's newer exit codes, which kept moving upstream: exit 4
+# (#8508, `--redate-stale-checks` performed the #8248 freshness guard's own
+# remedy) and exit 5 (#8896, `--auto`'s bounded settle-wait expired) are
+# re-queue signals, NOT merge failures, and the pinned copy's `MERGE_RC`
+# branching only knew exit 3 — so a PR whose CI merely outran
+# LOOM_AUTO_MERGE_TIMEOUT was narrated and labelled as a failed merge. The
+# exit-4/exit-5 branches, the `Exception: exit codes 3, 4 and 5` section, and
+# the link to `.loom/docs/merge-pr-exit-code-exceptions.md` (which supersedes
+# the formerly-inline squash/merge-ancestry trap note) were hand-ported from
+# upstream in #2549. `.loom/scripts/tests/test-merge-pr-head-mismatch.sh` is
+# the oracle for all of this — it asserts the wiring against this pinned file,
+# so when merge-pr.sh grows another exit code, that suite fails and the new
+# branch must be hand-ported here too. Whoever eventually drops this pin must
+# confirm the resynced upstream file still carries the exit-code wiring as
+# well as an equivalent operator-state propagation.
 commands/loom/champion-pr-merge.md
 docs/label-state-machine.md
 

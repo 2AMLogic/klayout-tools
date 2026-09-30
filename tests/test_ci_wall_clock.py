@@ -63,7 +63,27 @@ def _job(
     started: str,
     completed: str | None,
     conclusion: str | None = "success",
+    steps: list[dict] | None = None,
 ) -> dict:
+    job = {
+        "name": name,
+        "started_at": started,
+        "completed_at": completed,
+        "conclusion": conclusion,
+    }
+    if steps is not None:
+        job["steps"] = steps
+    return job
+
+
+def _step(
+    name: str,
+    *,
+    started: str,
+    completed: str,
+    conclusion: str = "success",
+) -> dict:
+    """One entry of a job's `steps[]`, as the `/jobs` API returns it."""
     return {
         "name": name,
         "started_at": started,
@@ -390,6 +410,261 @@ def test_compute_breach_alongside_a_queue_breach_still_fails(tmp_path: Path) -> 
     assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert {b["kind"] for b in payload["breaches"]} == {"compute", "queue"}
+
+
+# --------------------------------------------------------------------------
+# actions/cache misses are not compute (issue #2617)
+# --------------------------------------------------------------------------
+#
+# `ci.yml`'s Tests legs restore pinned Yosys/SymbiYosys/Icarus/Verilator
+# builds from `actions/cache` and rebuild them from source only when that
+# restore misses -- steps named `"... (cache miss only)"`, gated on the cache
+# action's `cache-hit` output, and reported as `skipped` on a hit. When the
+# Actions cache service degraded on 2026-09-29/30 those rebuilds ran on every
+# leg, the check counted them as compute, and eleven Judge-approved PRs went
+# red for a slowdown that was not in the code. The rule below is deliberately
+# narrow: a rebuild step that actually ran, plus that job's own cache
+# restore/save steps, are excluded -- nothing else, ever.
+
+
+def _cache_miss_job(
+    *,
+    rebuild_from: str,
+    rebuild_to: str,
+    pytest_from: str,
+    pytest_to: str,
+    completed: str,
+    rebuild_conclusion: str = "success",
+    restore_from: str = "2026-09-30T07:00:00Z",
+    restore_to: str = "2026-09-30T07:00:02Z",
+) -> dict:
+    """A `Slow job` (360 s budget) shaped like a real `Tests (Python X)` leg."""
+    return _job(
+        "Slow job",
+        started="2026-09-30T07:00:00Z",
+        completed=completed,
+        steps=[
+            _step(
+                "Cache pinned Verilator build",
+                started=restore_from,
+                completed=restore_to,
+            ),
+            _step(
+                "Build + install pinned Verilator (cache miss only)",
+                started=rebuild_from,
+                completed=rebuild_to,
+                conclusion=rebuild_conclusion,
+            ),
+            _step("pytest", started=pytest_from, completed=pytest_to),
+        ],
+    )
+
+
+def _cache_args(tmp_path: Path, job: dict, *extra: str) -> list[str]:
+    return [
+        "--jobs-json",
+        str(_jobs(tmp_path, [job])),
+        "--run-json",
+        str(_run_meta(tmp_path, "2026-09-30T07:00:00Z")),
+        "--budget",
+        str(_budget(tmp_path)),
+        *extra,
+    ]
+
+
+def test_cache_miss_rebuild_time_does_not_breach_the_budget(tmp_path: Path) -> None:
+    """AC1: a leg whose *only* overage is a pinned-tool rebuild after a cache
+    miss passes, and the report names the miss instead of blaming the code.
+
+    600 s wall on a 360 s budget, of which 300 s is the Verilator rebuild plus
+    the cache restore: 300 s of real compute, comfortably inside budget."""
+    job = _cache_miss_job(
+        rebuild_from="2026-09-30T07:00:02Z",
+        rebuild_to="2026-09-30T07:05:00Z",  # 298 s of source build
+        pytest_from="2026-09-30T07:05:00Z",
+        pytest_to="2026-09-30T07:09:58Z",  # 298 s of real work
+        completed="2026-09-30T07:10:00Z",  # 600 s job
+    )
+    result = _run(*_cache_args(tmp_path, job))
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    assert "CACHE MISS" in result.stdout
+    assert "Build + install pinned Verilator (cache miss only)" in result.stdout
+    assert "OK: every job" in result.stdout
+
+
+def test_a_real_slowdown_alongside_a_cache_miss_still_fails(tmp_path: Path) -> None:
+    """AC2: the exclusion is not an allowance. Same 600 s leg, but only 120 s
+    of it is the cache miss and pytest itself has grown to 478 s -- 480 s of
+    compute against a 360 s budget still breaches, and the report says the
+    cache miss has already been discounted."""
+    job = _cache_miss_job(
+        rebuild_from="2026-09-30T07:00:02Z",
+        rebuild_to="2026-09-30T07:02:00Z",  # 118 s of source build
+        pytest_from="2026-09-30T07:02:00Z",
+        pytest_to="2026-09-30T07:09:58Z",  # 478 s: the genuine regression
+        completed="2026-09-30T07:10:00Z",
+    )
+    result = _run(*_cache_args(tmp_path, job))
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    assert "480s exceeds the 360s budget" in result.stdout
+    # The miss is still reported -- but as context, not as an excuse.
+    assert "CACHE MISS" in result.stdout
+    assert "ALREADY excluded" in result.stdout
+
+
+def test_a_cache_hit_excludes_nothing(tmp_path: Path) -> None:
+    """On a hit the rebuild step is reported `skipped`, so there is no miss to
+    discount and a 598 s pytest breaches exactly as it did before #2617."""
+    job = _cache_miss_job(
+        rebuild_from="2026-09-30T07:00:02Z",
+        rebuild_to="2026-09-30T07:00:02Z",
+        rebuild_conclusion="skipped",
+        pytest_from="2026-09-30T07:00:02Z",
+        pytest_to="2026-09-30T07:10:00Z",
+        completed="2026-09-30T07:10:00Z",
+    )
+    result = _run(*_cache_args(tmp_path, job))
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    assert "600s exceeds the 360s budget" in result.stdout
+    assert "CACHE MISS" not in result.stdout
+
+
+def test_cache_restore_time_is_excluded_only_when_a_rebuild_actually_ran(
+    tmp_path: Path,
+) -> None:
+    """A slow `actions/cache` step on its own is not licence to discount it:
+    without a rebuild step having run there was no miss, so the full 600 s
+    still counts."""
+    job = _cache_miss_job(
+        restore_from="2026-09-30T07:00:00Z",
+        restore_to="2026-09-30T07:01:40Z",  # 100 s of cache I/O
+        rebuild_from="2026-09-30T07:01:40Z",
+        rebuild_to="2026-09-30T07:01:40Z",
+        rebuild_conclusion="skipped",
+        pytest_from="2026-09-30T07:01:40Z",
+        pytest_to="2026-09-30T07:10:00Z",
+        completed="2026-09-30T07:10:00Z",
+    )
+    result = _run(*_cache_args(tmp_path, job))
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    assert "600s exceeds the 360s budget" in result.stdout
+
+
+def test_cache_miss_seconds_are_reported_separately_in_json(tmp_path: Path) -> None:
+    """The JSON stays auditable: the excluded time is published, not silently
+    dropped, so a reader can always reconstruct the job's real duration."""
+    job = _cache_miss_job(
+        rebuild_from="2026-09-30T07:00:02Z",
+        rebuild_to="2026-09-30T07:05:00Z",
+        pytest_from="2026-09-30T07:05:00Z",
+        pytest_to="2026-09-30T07:09:58Z",
+        completed="2026-09-30T07:10:00Z",
+    )
+    result = _run(*_cache_args(tmp_path, job, "--format", "json"))
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["total_job_seconds"] == 300
+    assert payload["total_cache_miss_seconds"] == 300
+    (row,) = payload["jobs"]
+    assert row["seconds"] == 300
+    assert row["cache_miss_seconds"] == 300
+    assert row["total_seconds"] == 600  # what the GitHub UI shows
+    assert row["over_budget"] is False
+    assert row["cache_miss_steps"] == [
+        "Build + install pinned Verilator (cache miss only)"
+    ]
+
+
+def test_cache_miss_is_annotated_as_a_notice_not_an_error(tmp_path: Path) -> None:
+    """A missed cache is neither the author's doing nor the author's to fix,
+    so it annotates as `::notice::` -- but it does annotate, because it is the
+    first thing a reader of a slow run needs to know."""
+    job = _cache_miss_job(
+        rebuild_from="2026-09-30T07:00:02Z",
+        rebuild_to="2026-09-30T07:05:00Z",
+        pytest_from="2026-09-30T07:05:00Z",
+        pytest_to="2026-09-30T07:09:58Z",
+        completed="2026-09-30T07:10:00Z",
+    )
+    result = _run(*_cache_args(tmp_path, job, "--annotate"))
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    notices = [ln for ln in result.stdout.splitlines() if ln.startswith("::notice")]
+    assert len(notices) == 1
+    assert "CI cache miss" in notices[0] and "Slow job" in notices[0]
+    assert "::error" not in result.stdout
+
+
+def test_cache_miss_is_named_in_the_step_summary(tmp_path: Path) -> None:
+    """AC1's "its summary names the cache miss": the job summary is where a
+    reader lands from a red (or suspiciously slow) run."""
+    summary = tmp_path / "summary.md"
+    env = dict(os.environ, GITHUB_STEP_SUMMARY=str(summary))
+    job = _cache_miss_job(
+        rebuild_from="2026-09-30T07:00:02Z",
+        rebuild_to="2026-09-30T07:05:00Z",
+        pytest_from="2026-09-30T07:05:00Z",
+        pytest_to="2026-09-30T07:09:58Z",
+        completed="2026-09-30T07:10:00Z",
+    )
+    result = _run(*_cache_args(tmp_path, job), env=env)
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    written = summary.read_text()
+    assert "CACHE MISS" in written
+    assert "Build + install pinned Verilator (cache miss only)" in written
+
+
+def test_cache_miss_in_an_unbudgeted_job_uses_the_default_budget(
+    tmp_path: Path,
+) -> None:
+    """The exclusion composes with the default-budget fallback: 720 s of wall
+    on a job with no row of its own, 300 s of it a cache miss, is 420 s of
+    compute against the 600 s default -- green, and still named."""
+    job = _job(
+        "Brand new job",
+        started="2026-09-30T07:00:00Z",
+        completed="2026-09-30T07:12:00Z",  # 720 s > the 600 s default
+        steps=[
+            _step(
+                "Build + install pinned Yosys (cache miss only)",
+                started="2026-09-30T07:00:00Z",
+                completed="2026-09-30T07:05:00Z",
+            ),
+            _step(
+                "pytest",
+                started="2026-09-30T07:05:00Z",
+                completed="2026-09-30T07:12:00Z",
+            ),
+        ],
+    )
+    result = _run(*_cache_args(tmp_path, job, "--format", "json"))
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    (row,) = json.loads(result.stdout)["jobs"]
+    assert row["budget_seconds"] == 600
+    assert (row["seconds"], row["cache_miss_seconds"]) == (420, 300)
+
+
+def test_malformed_step_timestamps_never_take_the_check_down(tmp_path: Path) -> None:
+    """Step timings only ever *subtract* from the compute figure, so a broken
+    one must degrade to "subtract nothing" rather than fail the check (exit 2)
+    and leave the budget unenforced."""
+    job = _job(
+        "Slow job",
+        started="2026-09-30T07:00:00Z",
+        completed="2026-09-30T07:10:00Z",
+        steps=[
+            {
+                "name": "Build + install pinned Verilator (cache miss only)",
+                "started_at": "not-a-timestamp",
+                "completed_at": None,
+                "conclusion": "success",
+            },
+            "not-a-step",
+        ],
+    )
+    result = _run(*_cache_args(tmp_path, job))
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    assert "600s exceeds the 360s budget" in result.stdout
 
 
 # --------------------------------------------------------------------------
@@ -1466,6 +1741,25 @@ def test_repo_budget_files_rolling_window_block_is_accepted(tmp_path: Path) -> N
     )
     result = _run("--jobs-json", str(jobs), "--budget", str(BUDGET_FILE))
     assert result.returncode == EXIT_OK, result.stdout + result.stderr
+
+
+def test_cache_miss_step_naming_convention_still_holds_in_ci_yml() -> None:
+    """The cache-miss exclusion (#2617) matches on a *step-name convention*,
+    so the convention is load-bearing: renaming those steps in `ci.yml`
+    without updating the script would silently put rebuild time back into the
+    compute figure and re-create the false-red this check was fixed for."""
+    workflow = WORKFLOW.read_text()
+    script = SCRIPT.read_text()
+    # Mirrored from scripts/check_ci_wall_clock.py's CACHE_MISS_STEP_SUFFIX /
+    # CACHE_STEP_PREFIXES.
+    assert '" (cache miss only)"' in script
+    assert '"Cache ", "Post Cache "' in script
+    # Yosys, SymbiYosys/Bitwuzla, Icarus Verilog, Verilator.
+    assert workflow.count("(cache miss only)") >= 4
+    # Each rebuild is gated on its `actions/cache` step's `cache-hit` output,
+    # and that step's name is what the restore/save exclusion matches on.
+    assert "uses: actions/cache@" in workflow
+    assert workflow.count("name: Cache pinned ") >= 4
 
 
 def test_repo_budgets_leave_headroom_over_the_measured_baseline() -> None:
