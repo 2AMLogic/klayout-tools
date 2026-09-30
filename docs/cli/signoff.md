@@ -41,11 +41,13 @@ Four modes, one verb:
 
 Plus one modifier on modes 2 and 3: **`--check <committed-report>`** (issue
 #2249) re-grades the manifest and reports whether a previously committed
-report still reproduces (`status: "match"`/`"drifted"`), excluding the
-`build` block — which states how the running install was *provisioned*, not
-only which commit it came from. It is what a gate script should use in place
-of byte-comparing a committed report against a fresh render. See "Verifying a
-committed report: `--check`" below.
+report still reproduces (`status: "match"`/`"drifted"`), excluding two
+surfaces that move without any verdict moving with them: the `build` block —
+which states how the running install was *provisioned*, not only which commit
+it came from — and the report's verbatim quotation of the checklist doc,
+which is reported separately as `doc_drift` (issue #2526). It is what a gate
+script should use in place of byte-comparing a committed report against a
+fresh render. See "Verifying a committed report: `--check`" below.
 
 ```
 klt signoff <file>... [--format text|json] [--color auto|always|never] [--no-color]
@@ -85,9 +87,12 @@ klt signoff --describe-grader [--format text|json]
   report **still reproduces** (`status: "match"`/`"drifted"`) instead of
   rendering a fresh one. A *modifier* on the two doc-parsing modes, not a
   fifth mode; refused (exit `1`) in envelope-aggregation and
-  `--describe-grader` modes, neither of which renders such a report. Use
-  this instead of byte-comparing a committed report against a fresh render —
-  see "Verifying a committed report: `--check`" below.
+  `--describe-grader` modes, neither of which renders such a report. A
+  difference that is only the checklist's own wording is reported as
+  `doc_drift: true` alongside `status: "match"` rather than failing the gate
+  (issue #2526). Use this instead of byte-comparing a committed report
+  against a fresh render — see "Verifying a committed report: `--check`"
+  below.
 - `--describe-grader` — print which T1 item ids this build has grading rules
   for, plus its grading-code content hash. Mutually exclusive with
   `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. See
@@ -1332,7 +1337,8 @@ evidence #2176 exists to carry, so prefer `--check`, which keeps it.
 **"does this committed tier/fleet report still reproduce?"** — it re-grades
 `M` exactly as rendering would (including running any command-backed
 evidence it cites) and diffs the result against `REPORT`, **excluding the
-`build` block and nothing else**:
+`build` block and the report's verbatim quotation of the checklist, and
+nothing else**:
 
 ```bash
 # Evidence-drift gate. 0 = the committed report still holds, 3 = it drifted.
@@ -1350,6 +1356,11 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "items.2.status", "committed": "met", "fresh": "unmet" },
     { "field": "t1_met_count", "committed": 11, "fresh": 10 }
   ],
+  "doc_drift": true,
+  "doc_drift_fields": [
+    { "field": "items.7.text", "committed": "…", "fresh": "… (reworded)" },
+    { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
+  ],
   "fresh": { "…": "the full freshly-graded report" }
 }
 ```
@@ -1364,12 +1375,19 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
 - **The tier verdict does not decide this mode's exit code.** A faithful
   report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
   question is drift, not tier. Gate on `status`.
-- **Only build identity is excluded.** `source_doc_content_hash` (the
-  checklist itself changed), every `items[]` `status`/`reason`, every
-  citation `content_hash`/`input_verified`, `t1_met_count`,
-  `build_t1_item_count`, `graded_by_build` — all compared. This mirrors
+- **Build identity is excluded** — the whole `build` block. This mirrors
   "tool identity is excluded from the diff, and only tool identity" for the
   other five verbs.
+- **The checklist's own wording is excluded from the *verdict* and reported
+  separately** (issue #2526) — see "A reworded checklist is not evidence
+  drift" below.
+- **Everything else is compared**: every `items[]` `status`/`reason`/
+  `citation` (including each citation's `content_hash`/`input_verified`),
+  every `id`/`tier`/`partition`/`partition_boundary`, `t1_item_count`,
+  `build_t1_item_count`, `t1_met_count`, `graded_by_build`, and
+  `source_doc` (*where* the doc came from — grading against a `--tiers-doc`
+  override instead of the bundled copy is a different grading run, not a
+  reworded one).
 - **A report predating the `build` block verifies normally.** An excluded
   path is skipped whether or not either side carries it, so a report
   committed before issue #2176 still verifies on its graded content instead
@@ -1379,6 +1397,85 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   (`--manifest --check` pointed at a fleet roll-up, or the reverse) — the
   fault there is the path, so it is refused rather than diffed into a
   "drifted" verdict listing every field of both shapes.
+
+#### A reworded checklist is not evidence drift (issue #2526)
+
+A consumer that commits a tier report as its **verdict of record** and
+re-runs `--check` in CI is asking one question: *did my evidence move?* But
+a tier report inlines the checklist doc's prose, and a `klt` version pin
+does not pin the doc — upgrading `klayout-tools` (or moving within a
+version, since a `+g<hash>` dev build satisfies `==X.Y.Z`) can bring a
+reworded `design-evidence-tiers.md` with it. Before #2526 that alone
+reported `"drifted"`, identical to a real grading change, which made the
+gate unusable as a freshness gate: the two conditions it exists to separate
+produced the same red.
+
+`--check` now answers them separately.
+
+| Field | In the verdict? | Why |
+| --- | --- | --- |
+| `items[].title`, `items[].text`, `items[].notes` | No — `doc_drift` | The report's verbatim quotation of the doc, parsed straight out of it and echoed on unmodified. No grading rule reads any of them. |
+| `source_doc_content_hash` (top level, and per block in `--fleet`) | No — `doc_drift` | Hashes the doc's whole bytes, so it moves on a typo fix in a section this report does not even render. It cannot distinguish "the checklist changed what it requires" from "the checklist was reworded". |
+| `blocks[].blocking_item.title`, `blocks[].ungraded_items[].title` (`--fleet`) | No — `doc_drift` | The same doc-sourced prose, in the roll-up's reduced item views. Their `id`/`reason` — what actually names the blocker — stay in the verdict. |
+| `items[].id` / `status` / `reason` / `citation` / `tier` / `partition` | **Yes** | The verdict itself. |
+| `t1_item_count`, `build_t1_item_count`, `t1_met_count` | **Yes** | A checklist that *gained, lost or renumbered* an item — as opposed to being reworded — moves these. That is a real change to the yardstick and still fails. |
+
+What the exclusion is **not**:
+
+- **Not silent.** Every excluded field that moved is reported in
+  `doc_drift_fields` (same `{field, committed, fresh}` shape as `drift`),
+  with `doc_drift: true`. A consumer that wants to warn — or fail — on "the
+  yardstick was reworded" reads that key; it just no longer has to conflate
+  it with "the evidence moved". `--format text` prints `doc_drift: true`
+  and lists the field *names* (the values are paragraphs of checklist
+  prose).
+- **Not a way to mask a real change.** The two signals partition the drift:
+  an item whose `text` *and* `status` both moved reports `"drifted"` on the
+  `status` and lists only the `text` under `doc_drift_fields`.
+- **Not a change to `--describe-grader`.** `grading_ruleset_id` still
+  identifies the *grading code* (not the doc's prose) and is reported
+  unchanged — see "Identifying the grading build" below. It lives in the
+  `build` block, so like the rest of that block it does not by itself flip
+  `--check`'s verdict, but it is still visible verbatim in the response's
+  embedded `fresh` report and from `--describe-grader`.
+
+```bash
+# Fail on evidence drift; warn on a reworded checklist.
+klt signoff --manifest manifest.json --check reports/block.signoff.json \
+  --format json > check.json || exit 1
+jq -e '.doc_drift | not' check.json \
+  || echo "warning: the tiers checklist was reworded upstream; re-commit the report" >&2
+```
+
+#### Grading with a non-release build (`is_release: false`)
+
+**`--check` does not refuse to grade a non-release build, deliberately** —
+and every report already carries what a consumer needs in order to refuse
+on its own. `build.is_release` is `true` only for an install built from a
+tagged commit; a repo checkout, a `git+…@<sha>` install and a CI build all
+report `false` (or `null` when no git facts were recorded at all, e.g. a
+source tarball — see "`build` describes the *install*, not only the
+commit"). That is the overwhelmingly common way `klt` is run, including in
+this repo's own CI, so refusing by default would break the normal
+development loop to warn about a condition that is normal there.
+
+A consumer for whom it is *not* normal gates on it explicitly, from the
+same JSON it already reads — there is no extra flag to pass:
+
+```bash
+# Refuse to accept a verdict of record graded by a non-release build.
+klt signoff --manifest manifest.json --format json > report.json
+jq -e '.build.is_release == true' report.json \
+  || { echo "refusing: graded by a non-release klt build" >&2; exit 1; }
+
+# Under --check, the same field is on the embedded fresh report.
+jq -e '.fresh.build.is_release == true' check.json || …
+```
+
+Note that this is a separate question from drift: a version pin alone does
+not pin the grading build (that is what `grading_ruleset_id` is for, below),
+and `--check` excludes the whole `build` block from its verdict precisely
+because two legitimate installs of the same commit disagree about it.
 
 ### Identifying the grading build
 
@@ -2719,10 +2816,10 @@ Fleet roll-up mode (`--fleet`):
 
 | Exit code | Meaning                                                                 |
 | --------- | ------------------------------------------------------------------------ |
-| `0`       | `status: "match"` — the committed report still reproduces (build identity excluded). Independent of the tier verdict: a faithful report of a not-yet-T1 block is `0`. |
+| `0`       | `status: "match"` — the committed report still reproduces (build identity and the checklist's own wording excluded; the latter reported as `doc_drift`, which does not affect the exit code). Independent of the tier verdict: a faithful report of a not-yet-T1 block is `0`. |
 | `1`       | The committed report was missing/unreadable/not valid JSON/not a JSON object, or was one the requested mode could not have produced (no `items` key under `--manifest`, no `blocks` key under `--fleet`); plus every mode-1 reason above (the manifest itself is still read and graded). `--check` given without `--manifest`/`--fleet`, or with `--describe-grader`. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
-| `3`       | `status: "drifted"` — at least one field outside `build` moved.           |
+| `3`       | `status: "drifted"` — at least one field outside `build` and the checklist's own wording moved. |
 
 `--describe-grader` mode:
 

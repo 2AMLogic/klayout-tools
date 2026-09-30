@@ -29,9 +29,14 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import signoff as signoff_module
+from klayout_tools._report_verify import strip_path_patterns
 from klayout_tools.cli import main
+from klayout_tools.cli.output import render_rerun_drift
 from klayout_tools.coverage import build_check_coverage
-from klayout_tools.design_evidence_tiers import DesignEvidenceTiersError
+from klayout_tools.design_evidence_tiers import (
+    DesignEvidenceTiersError,
+    default_doc_path,
+)
 from klayout_tools.signoff import (
     SignoffError,
     build_fleet_report,
@@ -11486,6 +11491,8 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "report": committed_path,
         "status": "match",
         "drift": [],
+        "doc_drift": False,
+        "doc_drift_fields": [],
         "fresh": fresh,
     }
 
@@ -11702,17 +11709,25 @@ def test_cli_check_is_refused_by_the_modes_that_render_no_such_report(tmp_path, 
     )
 
 
-def test_check_excludes_build_identity_and_nothing_else(tmp_path):
-    """The exclusion is exactly one path (issue #2249): every *other*
-    top-level field of a tier report is compared, so a future field cannot
-    quietly join the unchecked set. Guards against widening
-    `VOLATILE_REPORT_PATHS` by accident."""
+def test_check_excludes_build_identity_and_the_checklist_prose_and_nothing_else(
+    tmp_path,
+):
+    """The verdict exclusion is exactly two registered sets -- build identity
+    (issue #2249) and the report's quotation of the checklist (issue #2526):
+    every *other* top-level field of a tier report is still compared, so a
+    future field cannot quietly join the unchecked set. Guards against
+    widening either set by accident."""
     assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
+    # The only *top-level* doc-prose path; the rest are per-item/per-block.
+    excluded_top_level = {"build", "source_doc_content_hash"}
+    assert {
+        path[0] for path in signoff_module.DOC_PROSE_REPORT_PATHS if len(path) == 1
+    } == {"source_doc_content_hash"}
 
     manifest = _manifest()
     fresh = build_tier_report(manifest)
     for field in fresh:
-        if field == "build":
+        if field in excluded_top_level:
             continue
         tampered = _write(
             tmp_path, f"tampered-{field}.json", {**fresh, field: "tampered"}
@@ -11720,6 +11735,321 @@ def test_check_excludes_build_identity_and_nothing_else(tmp_path):
         result = check_tier_report(tampered, manifest)
         assert result["status"] == "drifted", field
         assert any(entry["field"].startswith(field) for entry in result["drift"]), field
+        assert result["doc_drift"] is False, field
+
+
+# --------------------------------------------------------------------------- #
+# `--check` vs. the checklist's own wording (issue #2526): a pinned `klt`
+# version does not pin the *doc* it grades against, and a tier report inlines
+# that doc's prose -- so before this, an upstream rewording alone turned a
+# consumer's committed verdict of record into `"drifted"`, indistinguishable
+# from a real grading change.
+# --------------------------------------------------------------------------- #
+
+
+def _committed_with_reworded_prose(tmp_path, report: dict, name: str) -> str:
+    """``report`` as an upstream release that only *reworded* the checklist
+    would have rendered it: two items' `text` gained paragraphs, an item's
+    `title` and `notes` moved, and the whole-doc hash moved with them --
+    every `id`/`tier`/`status`/`reason`/`citation` identical (issue #2526)."""
+    reworded = json.loads(json.dumps(report))  # deep copy
+    reworded["source_doc_content_hash"] = "sha256:" + "0" * 64
+    reworded["items"][0]["text"] = "Reworded upstream.\n\nWith a new paragraph."
+    reworded["items"][1]["text"] = "Also reworded, at length, upstream."
+    reworded["items"][2]["title"] = "DRC clean (signoff deck)"
+    reworded["items"][3]["notes"] = ["A clarifying bullet added upstream."]
+    return _write(tmp_path, name, reworded)
+
+
+def test_check_does_not_fail_on_checklist_prose_alone(tmp_path):
+    """The regression this exclusion exists for: the committed report and the
+    fresh one differ *only* in the doc's wording and its content hash, so the
+    gate stays green (`"match"`, exit-code-0 territory) -- what moved is the
+    yardstick, not the evidence."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    fresh = build_tier_report(manifest)
+    committed_path = _committed_with_reworded_prose(tmp_path, fresh, "committed.json")
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    # Surfaced, never silently swallowed: every prose field that moved is
+    # named, so a consumer can still choose to warn on it.
+    assert result["doc_drift"] is True
+    assert {entry["field"] for entry in result["doc_drift_fields"]} == {
+        "source_doc_content_hash",
+        "items.0.text",
+        "items.1.text",
+        "items.2.title",
+        "items.3.notes",
+    }
+    # `fresh` is still the full, un-stripped report -- the exclusion applies
+    # to the comparison, not to what the response shows.
+    assert result["fresh"] == fresh
+
+
+def test_check_does_not_fail_on_the_doc_hash_alone(tmp_path):
+    """The narrowest form of the same case, called out separately because it
+    is the one a consumer hits even when no *rendered* item's prose moved: a
+    typo fix anywhere in the doc moves `source_doc_content_hash`."""
+    manifest = _manifest()
+    fresh = build_tier_report(manifest)
+    committed_path = _write(
+        tmp_path,
+        "committed.json",
+        {**fresh, "source_doc_content_hash": "sha256:" + "1" * 64},
+    )
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "match"
+    assert result["doc_drift"] is True
+    assert [entry["field"] for entry in result["doc_drift_fields"]] == [
+        "source_doc_content_hash"
+    ]
+
+
+def test_check_still_drifts_on_a_graded_field_beside_a_prose_change(tmp_path):
+    """The exclusion must not mask a genuine change that happens to co-occur
+    with a prose one: the same item's `text` *and* `status` both moved, and
+    the `status` alone is enough to report `"drifted"`. The two signals
+    partition the drift -- no field is reported in both."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    fresh = build_tier_report(manifest)
+    stale = json.loads(json.dumps(fresh))
+    stale["items"][2]["text"] = "reworded upstream"
+    stale["items"][2]["status"] = "unmet"
+    stale["items"][2]["reason"] = "no_evidence"
+    committed_path = _write(tmp_path, "committed.json", stale)
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    assert {entry["field"] for entry in result["drift"]} == {
+        "items.2.status",
+        "items.2.reason",
+    }
+    assert result["doc_drift"] is True
+    assert [entry["field"] for entry in result["doc_drift_fields"]] == ["items.2.text"]
+
+
+@pytest.mark.parametrize("field", ["status", "reason", "tier"])
+def test_check_still_drifts_on_every_verdict_bearing_item_field(tmp_path, field):
+    """The AC's upper bound, held explicitly: this narrows what counts as "the
+    yardstick moved", it does not widen what `--check` will call a match."""
+    manifest = _manifest()
+    fresh = build_tier_report(manifest)
+    stale = json.loads(json.dumps(fresh))
+    stale["items"][0][field] = "tampered"
+    committed_path = _write(tmp_path, f"committed-{field}.json", stale)
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    assert [entry["field"] for entry in result["drift"]] == [f"items.0.{field}"]
+
+
+def test_check_still_drifts_when_a_citation_moved(tmp_path):
+    """`citation` is the fourth verdict-bearing field the exclusion must never
+    reach -- a moved `content_hash` is the evidence itself drifting."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    fresh = build_tier_report(manifest)
+    cited = next(item for item in fresh["items"] if item["citation"] is not None)
+    index = fresh["items"].index(cited)
+    stale = json.loads(json.dumps(fresh))
+    stale["items"][index]["citation"]["content_hash"] = "sha256:" + "2" * 64
+    committed_path = _write(tmp_path, "committed.json", stale)
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    assert [entry["field"] for entry in result["drift"]] == [
+        f"items.{index}.citation.content_hash"
+    ]
+
+
+def test_check_fleet_excludes_the_same_doc_prose_and_still_names_real_drift(tmp_path):
+    """Fleet mode gets the same treatment, including the two places a roll-up
+    carries the doc hash (top level and once per block) and the doc-sourced
+    `title` its reduced item views carry -- while a block-level count that
+    moved is still `"drifted"`."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    fleet = {"blocks": [{"block": "b1", "kind": "analog", "evidence": {"3": drc_path}}]}
+    fresh = build_fleet_report(fleet)
+
+    reworded = json.loads(json.dumps(fresh))
+    reworded["source_doc_content_hash"] = "sha256:" + "3" * 64
+    reworded["blocks"][0]["source_doc_content_hash"] = "sha256:" + "3" * 64
+    reworded["blocks"][0]["blocking_item"]["title"] = "Reworded upstream"
+    reworded["blocks"][0]["ungraded_items"][0]["title"] = "Reworded upstream too"
+    result = check_fleet_report(
+        _write(tmp_path, "fleet-reworded.json", reworded), fleet
+    )
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["doc_drift"] is True
+    assert {entry["field"] for entry in result["doc_drift_fields"]} == {
+        "source_doc_content_hash",
+        "blocks.0.source_doc_content_hash",
+        "blocks.0.blocking_item.title",
+        "blocks.0.ungraded_items.0.title",
+    }
+
+    # …and the roll-up's own verdict-bearing fields are untouched by it.
+    stale = json.loads(json.dumps(fresh))
+    stale["blocks"][0]["t1_met_count"] = 11
+    stale["blocks"][0]["blocking_item"]["reason"] = "tampered"
+    drifted = check_fleet_report(_write(tmp_path, "fleet-stale.json", stale), fleet)
+    assert drifted["status"] == "drifted"
+    assert {entry["field"] for entry in drifted["drift"]} == {
+        "blocks.0.t1_met_count",
+        "blocks.0.blocking_item.reason",
+    }
+    assert drifted["doc_drift"] is False
+
+
+def test_check_matches_a_report_graded_against_a_reworded_copy_of_the_doc(tmp_path):
+    """End to end, against a real doc rather than a hand-edited report (the
+    issue's own scenario): grade the same manifest twice, once against the
+    bundled `design-evidence-tiers.md` and once against a copy whose *only*
+    change is added prose under one item. The committed report still
+    verifies, and the rewording is reported as `doc_drift`."""
+    bundled = Path(default_doc_path()).read_text(encoding="utf-8")
+    marker = "    keeps the harness and evidence formats valid."
+    assert marker in bundled  # item 10's closing line, in the bundled doc
+
+    # One path, graded twice -- the doc's *contents* change underneath it, the
+    # way an upgraded install's bundled copy does. (Grading the bundled copy
+    # and then a `--tiers-doc` copy would also move `source_doc`, which names
+    # where the doc came from and is deliberately still compared.)
+    doc = tmp_path / "design-evidence-tiers.md"
+    doc.write_text(bundled, encoding="utf-8")
+    manifest = _manifest()
+    committed_path = _write(
+        tmp_path, "committed.json", build_tier_report(manifest, tiers_doc=str(doc))
+    )
+
+    doc.write_text(
+        bundled.replace(
+            marker,
+            marker + " A clarifying sentence added by a later upstream release.",
+        ),
+        encoding="utf-8",
+    )
+
+    # The premise: the two renders are genuinely different files, so the
+    # documented "re-render and byte-compare" gate would fail between them.
+    assert build_tier_report(manifest, tiers_doc=str(doc)) != json.loads(
+        Path(committed_path).read_text()
+    )
+
+    result = check_tier_report(committed_path, manifest, tiers_doc=str(doc))
+
+    assert result["status"] == "match"
+    assert result["doc_drift"] is True
+    assert {entry["field"] for entry in result["doc_drift_fields"]} == {
+        "source_doc_content_hash",
+        "items.9.text",
+    }
+
+
+def test_cli_check_reports_doc_drift_without_failing(tmp_path, capsys):
+    """The gate contract, end to end: a prose-only difference exits `0`, says
+    so in both renderings, and names the fields -- by name only in text mode,
+    since the values are paragraphs of checklist prose."""
+    manifest = _manifest()
+    manifest_path = _write(tmp_path, "manifest.json", manifest)
+    committed_path = _committed_with_reworded_prose(
+        tmp_path, build_tier_report(manifest), "committed.json"
+    )
+
+    exit_code = main(
+        ["signoff", "--manifest", manifest_path, "--check", committed_path]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "status: match" in out
+    assert "doc_drift: true" in out
+    assert "doc drift (checklist wording -- excluded from the verdict):" in out
+    assert "  items.0.text" in out
+    assert "Reworded upstream." not in out  # names the field, not the prose
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--check",
+            committed_path,
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "match"
+    assert payload["doc_drift"] is True
+    assert {entry["field"] for entry in payload["doc_drift_fields"]} >= {
+        "source_doc_content_hash",
+        "items.0.text",
+    }
+    # Both values are still reported in JSON, so a consumer that *does* want
+    # to show the rewording can.
+    prose = next(
+        entry
+        for entry in payload["doc_drift_fields"]
+        if entry["field"] == "items.0.text"
+    )
+    assert prose["committed"].startswith("Reworded upstream.")
+    assert prose["fresh"] != prose["committed"]
+
+
+def test_doc_prose_exclusion_is_path_keyed_not_name_keyed():
+    """Why `strip_path_patterns` rather than `strip_keys` (issue #2526): the
+    excluded fields are named by *where* they are, so a same-named field
+    somewhere else -- a citation block that grows a `text`, a future
+    per-item `source_doc_content_hash` -- keeps being compared instead of
+    silently joining the unchecked set."""
+    report = {
+        "source_doc_content_hash": "sha256:aaa",
+        "items": [{"id": 3, "text": "prose", "citation": {"text": "not prose"}}],
+        "text": "top-level, not an item's",
+    }
+
+    stripped = strip_path_patterns(report, signoff_module.DOC_PROSE_REPORT_PATHS)
+
+    assert stripped == {
+        "items": [{"id": 3, "citation": {"text": "not prose"}}],
+        "text": "top-level, not an item's",
+    }
+
+
+def test_cli_check_text_output_omits_doc_drift_for_the_other_verbs(capsys):
+    """`render_rerun_drift` is shared with five other verbs' `--rerun`, whose
+    payloads carry no `doc_drift` key -- their output must stay byte-identical
+    to what it was before issue #2526."""
+    render_rerun_drift(
+        {
+            "report": "committed.json",
+            "status": "drifted",
+            "drift": [{"field": "violation_count", "committed": 0, "fresh": 2}],
+        }
+    )
+
+    assert capsys.readouterr().out == (
+        "report: committed.json\n"
+        "status: drifted\n"
+        "\n"
+        "drift:\n"
+        "  violation_count:\n"
+        "      committed: 0\n"
+        "      fresh:     2\n"
+    )
 
 
 # --------------------------------------------------------------------------- #
