@@ -88,6 +88,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   measured at, and IHP documents neither choice for its own library. See
   [`docs/cli/characterize.md`](docs/cli/characterize.md)'s "Pin capacitance"
   section.
+- **Changed** (#2615, CI infrastructure only — no `klt` command, payload or
+  `schema_version` is affected): the `CI wall-clock budget` gate no longer
+  compares one run's absolute job durations against hand-committed ceilings.
+  On the shared autoscaled runner pool that model could not tell a code
+  regression from our own dispatch fleet saturating the pool — contention
+  inflates every leg of every concurrent run together, the same shape a
+  regression has, and the ceiling needed to survive the measured envelope
+  (~5.5x the median) would have passed the very slowdowns the gate exists to
+  catch. `scripts/check_ci_wall_clock.py` now compares each job against a
+  rolling median/MAD of the last 15 `main` runs, scaled by a contention factor
+  measured from runs that were on the pool at the same time, and downgrades a
+  breach another run of the same commit contradicts to `UNCONFIRMED` (reported,
+  exit 0). The committed `jobs` ceilings are retained as the fallback for jobs
+  with too little history and for runs where no history could be fetched. The
+  history is read live via the new `scripts/fetch_ci_wall_clock_history.py`,
+  which never fails the build. The check's own `--format json` payload gains a
+  `model` block plus `basis`/`baseline_seconds`/`confirmed` fields and its
+  `schema_version` goes 1 → 2 (purely additive; every prior field is still
+  emitted). See `docs/guides/ci-wall-clock-budget.md`.
+  The history only uses runs *created* on the current runner pool: the fetcher
+  drops runs older than `rolling_window.max_age_days` (14) or created before
+  `rolling_window.history_not_before`, which is pinned to #2624's move to
+  GitHub-hosted runners (2026-09-30T15:06:07Z). It filters both on the API
+  listing and again per run. History durations also exclude cache-miss rebuild
+  time, as the judged run's do (#2617). The fixed fallback ceilings are still
+  the 2026-09-29 Blacksmith derivation and owe a re-measure on hosted runners.
+
 - **Fixed** (#2608, `klt signoff` T1 item 11; additive — **no**
   `schema_version` bump, and no new reason string: a citation that previously
   rendered `supply_spec_incomplete` for a spec document that could not be

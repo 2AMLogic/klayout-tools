@@ -1,13 +1,49 @@
 # CI wall-clock budget
 
 `ci.yml` carries a **wall-clock budget**: a final `CI wall-clock budget` job
-that measures the run it belongs to and fails if a job, the total compute, or
-the run's wall clock has regressed past a committed threshold. This page records
-the profiling that produced those thresholds and how to re-derive them.
+that measures the run it belongs to and fails if a job or the total compute has
+regressed past what recent runs say is normal. Since issue #2615 the comparison
+is **cross-run** — a rolling baseline plus a measured pool-contention factor —
+rather than a hand-committed constant. This page records the model, the
+measurements behind it, and what to do when it fires.
 
-- Budgets: [`.github/ci-wall-clock-budget.json`](../../.github/ci-wall-clock-budget.json)
+- Budgets / tuning: [`.github/ci-wall-clock-budget.json`](../../.github/ci-wall-clock-budget.json)
 - Check: [`scripts/check_ci_wall_clock.py`](../../scripts/check_ci_wall_clock.py)
+- History fetcher: [`scripts/fetch_ci_wall_clock_history.py`](../../scripts/fetch_ci_wall_clock_history.py)
 - Tests: `tests/test_ci_wall_clock.py`
+- Measured replay data: `tests/fixtures/ci_wall_clock/actions_timings.json`
+
+> **Runner pool today: GitHub-hosted.** Since #2624 merged
+> (2026-09-30T15:06:07Z) every `ci.yml` job runs on GitHub-hosted
+> `ubuntu-24.04`, same-repo and fork PRs alike. The Blacksmith autoscaled pool
+> the heavy jobs used from 2026-09-24 is retired. The measurements on this page
+> were taken on Blacksmith and are kept as the record of how the model was
+> derived; where this page says "the autoscaled pool" it means that pool, in
+> the past tense. **The fixed fallback ceilings are owed a re-measure on hosted
+> runners** — see [Re-measuring](#re-measuring).
+
+## If this check just failed your build
+
+Read the `basis` column in the job's step summary first, then:
+
+1. **`rolling`** — the job took longer than the median of recent `main` runs
+   allows, *and* no concurrent run was measurably slow at the same time. If the
+   slowdown is real, shrink it. If the new cost is justified, say so in the PR
+   and merge: the rolling baseline absorbs it by itself within a few `main`
+   runs. **Do not hand-edit `.github/ci-wall-clock-budget.json` — for a job on
+   the rolling basis, nothing in its `jobs` map is consulted.**
+2. **Believe the pool was busy?** — **re-run the job.** This is a real answer,
+   not a shrug: the check reads other runs of the *same commit*, and a clean
+   one downgrades the breach to `UNCONFIRMED`, which exits 0. If it breaches
+   again on identical code, the slowness is in the code and the build stays
+   red. (Pool contention caused by workloads *outside* this repo's Actions
+   history is invisible to the pool factor — this is the case that path
+   exists for.)
+3. **`fixed ceiling`** — that job has fewer than `min_samples` runs of history
+   (it is new, or was renamed) and is on the committed fallback. Those numbers
+   *are* editable, and a first estimate for a new job belongs there.
+4. **`queue` breach** — never fails the build. It is runner-pool contention,
+   not the code (issue #1971); see "Compute breaches vs. queue breaches" below.
 
 ## Why this exists
 
@@ -35,7 +71,15 @@ allows 45 minutes for a job whose median is 4 minutes — so a leg can triple in
 cost and stay green. The budget check fires in the band where a real regression
 actually lives.
 
-## Measured baseline
+## Measured baseline (2026-09-17, historical)
+
+This is the profiling that produced the last hand-derived ceilings. It is kept
+because the *shape* it describes still holds and because the `baseline` block
+in the budget file is still asserted against the fallback ceilings — but the
+`budget` columns below are the **fallback** values, not what CI evaluates
+today. The live model is described under "The model" above. (The `Tests` rows
+were later raised 360 → 420 by PR #2392 and the total 1,500 → 2,100; the table
+records the numbers as first derived.)
 
 Measured **2026-09-29** (issue #2612), replacing the 2026-09-17 baseline and
 the interim bumps stacked on it. Two runner-pool changes had landed without the
@@ -99,10 +143,10 @@ is under 700 s. Any future attempt to make this repo's CI faster starts and
 very nearly ends with the Python test matrix: either it gets faster, or it gets
 split so the four Python versions stop each paying the full suite's cost.
 
-**The autoscaled pool is far noisier than the fixed pool it replaced.** On the
-2026-09-17 baseline a `Tests` leg ran 172-200 s — a 16% spread from median to
-max. On Blacksmith the same suite runs a 253 s median with a 361 s p90, a 412 s
-p95, and a 996 s max: the max is ~3.9x the median. The median itself grew by
+**The autoscaled (Blacksmith) pool was far noisier than the fixed pool it
+replaced.** On the 2026-09-17 baseline a `Tests` leg ran 172-200 s — a 16%
+spread from median to max. On Blacksmith the same suite ran a 253 s median
+with a 361 s p90, a 412 s p95, and a 996 s max: the max is ~3.9x the median. The median itself grew by
 ~40%, but that is dwarfed by the tail, and the tail is what the gate kept
 firing on — 8 of 72 sampled main-push runs had at least one leg over the old
 420 s budget on diffs that touch nothing about test runtime.
@@ -112,7 +156,8 @@ firing on — 8 of 72 sampled main-push runs had at least one leg over the old
 siblings, running the identical suite on the same pool at the same moment, stay
 normal. The excluded 2026-09-24 incident is the opposite shape
 (724/741/810/816: all four together), and so is a genuine code regression. This
-asymmetry is the basis of the design note below.
+asymmetry is the basis of the pool-contention factor described under "The
+model" below.
 
 **The run is not queue-starved, but it queues deeper under burst.** 1,684 s of
 compute finishing in 477 s of wall clock is ~3.5x overlap. The tail is worse
@@ -121,76 +166,208 @@ get a machine (2,255 s wall on 1,633 s of compute). That is a queue breach, not
 a compute breach — report-only by design, and exactly the signal the wall-clock
 threshold exists to surface.
 
-**Short jobs are noisy in relative terms.** `Golden artifacts` has a 16 s
-median and a 54 s max; `site/ (tsc + vitest)` runs 9 s and spikes to 34 s — a
-3.4x spread from runner cold-start variance alone. That is why every job under
-~60 s gets a flat 120 s floor rather than a proportional budget: a tight
-threshold on a 9-second job measures the runner, not the code.
+**Short jobs are noisy in relative terms.** `Lint (ruff)` has a 12 s median
+and a 55 s max — a 4.5x spread from runner cold-start variance alone. That is
+why short jobs get a flat floor rather than a proportional budget: a tight
+threshold on a 9-second job measures the runner, not the code. (The floor was
+120 s in the fixed-ceiling generation; the rolling model's
+`job_floor_seconds` is 180 s.)
 
-## Budget derivation
+## Why the fixed ceilings had to go (issue #2615)
 
-- **Per job**: roughly `2x p90`, rounded to a clean number, with a **120 s
-  floor** for the reason above. The floor means short jobs only trip the gate
-  on a large, unambiguous regression.
-- **The four `Tests` legs**: pooled over 755 leg observations they measure
-  median 253 s, p90 361 s, p95 412 s, max 996 s. `2x p90` is 722 s, rounded to
-  **700** (the 2026-09-17 baseline rounded `2x194 = 388` down to 360 the same
-  way), shared by all four because they are one suite differing only by
-  interpreter. 700 is also the knee of the in-sample false-breach curve: every
-  ceiling from 700 to 800 leaves the same 4 of 755 legs over, so another 100 s
-  of laxity buys nothing. It drops the sampled main-push false-breach rate from
-  8 of 72 runs to 2 — one of which is the excluded bad-node incident, leaving a
-  single non-incident residual (run `36611724105`, one leg at 809 s). That
-  residual is what the design note below is about, not an argument for another
-  150 s of laxity. PR #2571's interim 700 s unblock is therefore
-  confirmed by derivation rather than left standing as a placeholder (its
-  companion total of 2,600 s is superseded by the 3,000 s below).
-- **Two rows moved with the pools, not with the code**: `— static timing` goes
-  120 → **150** because `6da0c9a4` moved it to GitHub-hosted (p90 43 s → 64 s,
-  `2x p90` = 128 s), and `Native engines (Rust)` **holds 240** rather than
-  dropping to the 200 its `2x p90` of 182 s suggests — its sibling legs on the
-  same Blacksmith pool show max/p90 ratios up to 3.4x, so a 200 s ceiling would
-  measure the pool. 240 s is still 1.8x its observed 136 s max.
-- **Unbudgeted job**: falls back to `default_job_budget_seconds` (600 s), so a
-  newly added job is covered on the day it lands rather than whenever someone
-  remembers to add a row. Budget coverage cannot silently drift as jobs are
-  added.
-- **Total job-seconds**: 3,000 s — 6% above the observed 2,833 s max and 78%
-  above the median. Deliberately *not* the ~3,460 s that four 700 s legs plus
-  the cheap jobs could reach with every per-job budget still passing: this is
-  the only threshold that catches death by a thousand cheap jobs, so it has to
-  bind somewhere below the sum of the per-job ceilings.
-- **Run wall clock**: **1,800 s, unchanged** — 1.8x the observed 1,006 s max
-  for a comparable run, and still clear of the 2,255 s burst-queue excursion
-  described above only in the sense that such an excursion *should* annotate.
-  It is the one number that includes pre-run queue time, which is not a
-  property of the code under test, and the only threshold whose breach does not
-  fail the build.
+The original model compared **one run's** absolute durations against constants
+committed in the budget file. On the shared autoscaled Blacksmith pool of
+2026-09-24 → 2026-09-30 that model could no longer tell *"this code got slower"* apart from *"our own dispatch fleet
+saturated the pool while this run was on it"*. Measured over 274 `ci.yml` runs,
+2026-09-24 → 2026-09-29:
 
-### Is a fixed per-job ceiling still the right model?
+| Situation | The four `Tests (Python 3.1x)` legs |
+|---|---|
+| Quiet pool | median 253 s, p90 361 s |
+| 2026-09-29 **19:39-20:03**, four concurrent runs on four unrelated branches | **every leg of every run** at 849-1247 s |
+| 2026-09-29 **17:09-17:12**, four concurrent runs | worst legs 996 / 824 / 664 / 537 s |
+| 2026-09-24 run `36003284901` (a genuine whole-matrix slowdown, nothing else on the pool) | 724-816 s |
 
-**Judgment call, recorded per issue #2612: no, but the fix is a better
-statistic rather than a bigger number — and it is out of scope here.** On the
-retired fixed pool a `Tests` leg's max was 1.16x its median, so a `2x p90`
-ceiling sat comfortably between "noise" and "regression". On the autoscaled
-pool the max is 3.9x the median, which puts the noise tail *above* the
-regression signal: 700 s is the loosest useful ceiling, and by construction it
-can no longer notice a 2x slowdown of the 253 s median — the exact class of
-regression #2359/#2392 caught.
+Two things follow, and they are structural rather than a tuning problem:
 
-The concrete recommendation, if this is ever revisited in
-`scripts/check_ci_wall_clock.py`, is to gate the matrix on the **median of the
-four legs** rather than on each leg independently. The four run the same suite
-on the same pool in the same run, so pool noise moves one leg
-(439/442/459/996) while code moves all four (724/741/810/816). Over the same
-sample the median-of-four statistic runs median 252 s, p90 350 s, p99 510 s,
-**max 564 s** — against a 996 s worst single leg. A ceiling in the 550-600 s
-band would therefore have breached **0 of 188** sampled runs while still
-tripping on the excluded incident (median-of-four 775 s) *and*, unlike the
-700 s per-leg ceiling, on a uniform 2x slowdown of the 253 s median. That is a
-gate that is simultaneously quieter and ~1.2x tighter. A two-consecutive-breach
-rule would also suppress single-run noise, but it costs a run of latency and
-needs cross-run state; the median-of-legs statistic needs neither.
+1. **Contention inflates every leg of every concurrent run together** — the
+   same shape a genuine regression has. No *within-run* statistic separates
+   the second row from the fourth, including "take the median of the four
+   legs" (which does handle an isolated single-leg spike such as
+   `439/442/459/996`, but not this).
+2. To stay quiet through row two, a fixed per-leg ceiling would have to sit
+   around **1400 s — ~5.5x the median**. At that setting the gate is a
+   gross-failure backstop, not a regression detector: the class of regression
+   it was built for (#2359/#2392, a 2x constant-factor slowdown) passes
+   silently. Re-deriving the constant after every pool change was itself the
+   other recurring failure mode (#2406, #2612).
+
+The only thing that distinguishes a slow *run* from slow *code* is **state
+from other runs**.
+
+## The model
+
+Three inputs, applied in this order, per job and for total compute.
+
+### 1. A rolling baseline
+
+Each job is compared against the **median** of that same job's duration over
+the last `baseline_runs` completed runs on `baseline_branch` (`main`). The
+allowance is
+
+```
+sensitivity = max(job_ratio x median,  median + job_mad_multiplier x MAD,  job_floor_seconds)
+```
+
+- **Median and MAD, not mean and standard deviation.** Both survive a minority
+  of arbitrarily bad samples, which is exactly the shape of the data — the
+  253 s median above comes from a sample whose max is 1247 s. A single
+  contended run inside the window cannot drag the gate open.
+- **`job_ratio` (1.5)** is the regression band. **`job_mad_multiplier` (8)**
+  widens it only for jobs that genuinely are that noisy, instead of loosening
+  every job to accommodate the worst one. **`job_floor_seconds` (180)** is the
+  successor to the old 120 s floor: a tight threshold on a 12-second job
+  measures the runner, not the code.
+- **Fewer than `min_samples` (5) observations ⇒ the committed fixed ceiling.**
+  That is what the `jobs` map in the budget file is now *for*: covering a job
+  on the day it lands, and covering every job when no history could be
+  fetched at all.
+
+### 2. A pool-contention factor
+
+Runs whose window **overlapped this one's** by at least
+`min_peer_overlap_seconds` (120 s), on a **different commit**, are direct
+evidence of what the pool was doing to everybody at that moment. For each such
+peer, its ratios against the same rolling baselines are reduced to their
+`peer_quantile` (p90); across peers the **maximum** is taken and clamped into
+`[1.0, max_pool_factor]`. Every threshold is then multiplied by it.
+
+- **p90 within a peer, not its median**: contention is heavy-tailed and hits
+  the longest jobs hardest, so the median across a peer's ~15 jobs badly
+  understates what the pool did to its four test legs.
+- **Maximum across peers**: one peer demonstrably suffering is sufficient
+  evidence that the pool was bad. This is deliberately the conservative
+  direction — the failure this whole issue is about is a gate that cried wolf,
+  not one that was too forgiving.
+- Only jobs with a baseline of at least `min_baseline_seconds` (30 s) vote,
+  and a peer needs `min_peer_jobs` (3) of them to count at all.
+- Peers are usually still *in flight* when this check runs. Their unfinished
+  jobs contribute elapsed-so-far, which is a **lower bound** — such a job can
+  prove the pool was slow, never that it was fast, so one that has not yet
+  passed its own baseline is ignored.
+
+On the 19:39-20:03 episode this measures a **4.1x** factor; on the 17:09
+episode, **2.6-3.2x**; on run `36003284901`, which had nothing else on the
+pool, **1.0x**.
+
+### 3. Same-commit corroboration
+
+A compute breach is marked **`UNCONFIRMED`** — reported, annotated as a
+warning, exit 0 — when another run of the *same commit* measured the same
+subject inside a **quiet-pool** threshold (the same allowance with the pool
+factor forced to 1.0). Same code, two verdicts, means the slow one measured
+the pool.
+
+This is the "require the breach to repeat" half of #2615, kept as a filter
+rather than as the whole model: it costs a run of latency, so it is not used
+to gate the *first* observation (run `36003284901` is a single `main` push and
+must still fail), only to absorb the residual false positives the pool factor
+cannot see. It is also what makes "re-run the job" a real instruction.
+
+### What stays fixed
+
+**`run_wall_clock_budget_seconds` is untouched by the rolling model.** It is
+the one number that includes pre-run queue time, it is classified `queue`
+rather than `compute`, and a queue breach never fails the build — so there is
+nothing for a rolling baseline to protect against there.
+
+### Where the history comes from
+
+**Live `gh api` reads at check time** — this was #2615's main open design
+question, and the alternative (a committed or cached rolling artifact) was
+rejected:
+
+- The **concurrency evidence only exists live**. Peers are minutes old and
+  frequently still running; no artifact written by an earlier run can contain
+  them.
+- A committed artifact would be **rewritten by, and conflict between, every
+  PR**, and would need a bot push on every `main` run to stay fresh —
+  re-introducing "somebody has to maintain the number" in a new shape.
+- The **permission already exists**: the `CI wall-clock budget` job grants
+  `actions: read` and already calls `gh api` for its own run.
+- The cost is bounded: two list calls plus one `/jobs` call per selected run,
+  capped by `--max-api-calls`, on a job that deliberately runs on
+  `ubuntu-latest` so it is never queued behind the pool it measures.
+
+**Only runs from the current pool are used.** A run's timings describe the
+pool it ran on, so the fetcher drops every run *created* before the later of
+`max_age_days` (14) before the run being checked and `history_not_before` (the
+instant of the last runner-pool change, currently #2624's merge) — once as a
+`created=>=` filter on the API listing and again on each returned run, because
+the listing's order is not a guarantee. This is not hypothetical: a
+`?branch=main&status=completed` listing was observed returning eleven
+2026-09-15 runs from two pools ago, which set `Tests` medians of ~210 s against
+hosted legs of 284-501 s and falsely reddened a green `main` run. Filtering is
+on `created_at`, not `run_started_at`: a re-run executes its original commit's
+`ci.yml`, and so its original runner labels. The history payload records the
+`cutoff` it applied and how many listed runs it dropped (`dropped_stale_runs`).
+
+**History durations are compute, too.** The fetcher subtracts the same
+cache-miss rebuild time the check subtracts from the run being judged (see
+[Cache-miss rebuilds are not compute](#cache-miss-rebuilds-are-not-compute)),
+by calling the check's own `measure_cache_miss`, so a cache outage inside the
+window can neither inflate a baseline nor fake a busy pool.
+
+The trade-off accepted is a dependency on the Actions API, which is why
+[`scripts/fetch_ci_wall_clock_history.py`](../../scripts/fetch_ci_wall_clock_history.py)
+**never fails**: any error writes a valid, empty history and exits 0, and the
+check falls back to the committed ceilings — its pre-#2615 behaviour, not a
+broken build.
+
+### What this model does *not* catch
+
+- **A regression smaller than ~1.5x of the job's median.** On a quiet pool the
+  four test legs already spread 255-495 s across ordinary green `main` runs; a
+  20% slowdown is below that noise floor and no threshold tuned against it can
+  see one without reddening green runs. The 2026-09-29 measurements are the
+  evidence, and a dedicated benchmark — not a CI wall-clock gate — is the
+  right instrument for that band.
+- **A genuine regression that happens to land during a contention episode.**
+  The pool factor widens the gate for everyone on the pool, including the one
+  PR that really did get slower. It is caught on the next quiet run of the
+  same code, typically the `main` run after merge.
+- **Contention from workloads outside this repo's Actions history** (other
+  repos sharing the pool). No peer run is visible, so the factor stays 1.0.
+  Run `36611724105` — a Loom-surfaces resync commit with literally no compute
+  change, whose legs ran 422-809 s with no overlapping `ci.yml` run — is the
+  measured example, and re-running it is the documented answer.
+
+### Tuning
+
+Everything above is in the budget file's `rolling_window` block; an unknown key
+there is a hard error (exit 2) rather than a silent fallback to defaults, so a
+typo cannot quietly disable the tuning it claims to apply. Set
+`"enabled": false` to fall back entirely to the committed ceilings.
+`max_age_days` and `history_not_before` (along with `baseline_branch`,
+`baseline_runs`, `peer_window_runs` and `min_peer_overlap_seconds`) are read by
+the fetcher, which decides *which* runs are history; the check accepts them in
+the block without using them.
+
+## Historical: the last hand-derived generation
+
+The `jobs` numbers still in the budget file are the final fixed-ceiling
+generation, kept as the fallback described above. They were derived as:
+
+- **Per job**: roughly `2x p90` of the 2026-09-17 baseline, rounded, with a
+  **120 s floor**.
+- **Unbudgeted job**: `default_job_budget_seconds` (600 s).
+- **Total job-seconds**: 1,500 s, ~37% above the observed 1,094 s max, later
+  raised to 1,560 (#2276's numpy cross-check job), 1,800 (PR #1869's multi-box
+  PEEC tests) and 2,100 (PR #2392), with the four test legs going 360 → 420 at
+  the same time. That compounding of headroom-on-headroom, each step
+  individually justified, is what the rolling window replaces.
+- **Run wall clock**: 1,800 s, ~2.3x the observed 782 s max — and still the
+  live value, since wall clock is out of the rolling model's scope.
 
 ## Compute breaches vs. queue breaches
 
@@ -199,15 +376,16 @@ finding of issue #1971 — telling a reader to optimise jobs that are fine is ho
 six hours of queue time gets misread as slow tests.
 
 - A per-job or total-compute overrun is a **compute** breach: the work grew.
-  Shrink it, or raise the budget in the same PR and say why.
+  Shrink it, or let the rolling baseline absorb a justified increase.
 - A wall-clock overrun *while compute is within budget* is a **queue** breach:
   runner-pool contention. Optimising the jobs would achieve nothing.
 
-**Only a compute breach fails the build.** A queue-only breach prints its
-report, annotates and lands in the step summary, then exits 0 — failing a build
-for contention no PR author can fix is how a red check earns the reflex of
-being ignored (a hard queue gate, if ever wanted, belongs behind an opt-in
-flag).
+**Only a *confirmed* compute breach fails the build.** A queue-only breach — and
+since #2615, an `UNCONFIRMED` compute breach, one another run of the same commit
+contradicts — prints its report, annotates as a `::warning::` and lands in the
+step summary, then exits 0. Failing a build for contention no PR author can fix
+is how a red check earns the reflex of being ignored (a hard queue gate, if ever
+wanted, belongs behind an opt-in flag).
 
 A slowdown is never reported as both — when compute is over, the wall-clock
 line is suppressed so the actionable breach is not buried.
@@ -271,20 +449,58 @@ would no longer catch anything real.
 
 ## Fork PRs are report-only
 
-`ci.yml`'s runner conditional routes fork PRs from `blacksmith-4vcpu-ubuntu-2404`
-back to `ubuntu-latest`, whose per-job timings the budgets above — measured on
-whichever pool serves each job for a same-repo run — do not describe. A fixed
-threshold tuned against Blacksmith numbers would redden every fork PR, so the
-workflow passes
-`--report-only` for them: breaches print as `::warning::` annotations and the
-job still exits 0. Same-repo pushes and PRs gate for real.
+The workflow passes `--report-only` for fork PRs: breaches print as
+`::warning::` annotations and the job still exits 0. Same-repo pushes and PRs
+gate for real.
+
+The original reason no longer holds. Until 2026-09-30 `ci.yml` routed
+same-repo runs to Blacksmith and fork PRs to GitHub-hosted, so a threshold
+tuned on Blacksmith numbers would have reddened every fork PR. Since #2624
+both run on the same hosted `ubuntu-24.04` runners. `ci.yml` keeps the
+carve-out until the fallback ceilings are re-measured on hosted (below); after
+that it has no remaining reason to exist.
 
 ## Re-measuring
 
-After any deliberate change in CI cost — adding a job, splitting the test
-matrix, moving work between jobs — re-derive the baseline and update both the
-`baseline` block and the `jobs` budgets in
-`.github/ci-wall-clock-budget.json`:
+**A pool change no longer requires re-deriving the *rolling* thresholds.**
+That was the second failure mode #2615 closed: every per-job and
+total-compute threshold on the rolling basis is derived from recent `main`
+runs, so moving jobs to another runner pool, or resizing the one they are on,
+is absorbed within `min_samples` `main` runs with nothing to hand-tune. The
+same goes for a deliberate, justified increase in a job's cost.
+
+**It does still require two edits, and one of them is owed now.**
+
+- **Bump `rolling_window.history_not_before`** to the instant the pool change
+  merges, in the same PR. Otherwise the window blends two pools until the old
+  pool's runs age out of it, and a listing that happens to return old runs
+  compares hosted runs against the old pool (the false red described under
+  [Where the history comes from](#where-the-history-comes-from)). For #2624 it
+  is `2026-09-30T15:06:07Z`. Until `min_samples` usable `main` runs exist
+  after the cutoff, jobs are judged on their fixed ceilings.
+- **Re-measure the fixed fallback.** The `jobs` ceilings,
+  `total_job_budget_seconds` and the `baseline` block describe the pool they
+  were measured on. The rolling window does not replace them: they are what
+  every job is judged against while the new pool has too little history, and
+  whenever the history cannot be fetched at all. **#2624 moved every job from
+  Blacksmith to GitHub-hosted runners and owes this re-measure.** The current
+  numbers are the 2026-09-29 Blacksmith derivation. Hosted public-repo runners
+  are the same 4-vCPU size, so they are a reasonable interim fallback, but
+  they are not a hosted measurement. Once the re-measure lands, the fork-PR
+  `--report-only` carve-out above can go too.
+
+Beyond a pool change, three things still need a human:
+
+1. **A new or renamed job** — it has no history, so it runs on
+   `default_job_budget_seconds` (600 s) or on a row you add to `jobs`. Give it
+   a deliberately conservative first estimate and delete nothing; once it has
+   `min_samples` runs the rolling window takes over and the row becomes inert.
+2. **The `baseline` block** in the budget file, which records the 2026-09-29
+   profiling and is asserted against the fallback ceilings by
+   `tests/test_ci_wall_clock.py::test_repo_budgets_leave_headroom_over_the_measured_baseline`
+   so a transcription slip cannot ship a fallback that is already breached.
+3. **Re-tuning `rolling_window`** if the model itself starts misfiring. To
+   re-derive the raw numbers the way #2615 did:
 
 ```bash
 REPO=2AMLogic/klayout-tools
@@ -348,29 +564,10 @@ sanity-check that the excluded run would still breach the budget you derived.
 asserts the recorded baseline sits below the budgets, so a transcription slip
 cannot ship a budget that is already breached on a green run.
 
-**Re-measurement is also mandatory after any runner-pool change** — moving a
-job between pools, resizing runners, or otherwise changing what a `runs-on`
-label resolves to — even when nothing else in `ci.yml` changes. Every number on
-this page (the per-job budgets, the total-compute budget, and especially the
-wall-clock budget, which is queue time plus compute) is calibrated against
-*these* pools' contention and hardware. A pool change invalidates that
-calibration exactly like a job-cost change does, and a stale budget is either a
-spurious compute breach (pool got slower) or a gate that no longer catches a
-real regression (pool got faster).
-
-This is not hypothetical: the 2026-09-24 Blacksmith migration and the
-2026-09-28 partial move back to GitHub-hosted both shipped without it, and the
-resulting stale budget failed `main` on 8 of 72 sampled runs whose diffs did
-not touch test runtime (issue #2612). **A PR that changes a `runs-on:` value
-should re-derive the affected rows in the same PR**, exactly as a PR that adds
-compute is expected to.
-
-That applies to the next one already in the plan: `6da0c9a4` was explicitly
-"the first half" of retiring Blacksmith across 2AM Logic. The four `Tests`
-legs and the three `native` matrix legs are the half still on
-`blacksmith-4vcpu-ubuntu-2404`, and they are the rows whose numbers this page
-is least confident about — moving them is the moment to redo the table above,
-not a moment to reuse it.
+Any re-tuning should be validated by replaying the captured episodes in
+`tests/fixtures/ci_wall_clock/actions_timings.json` — the contention runs must
+stay green, run `36003284901` must stay red, and the leave-one-out replay over
+the fifteen measured `main` runs must stay green.
 
 ## Running the check locally
 
@@ -380,10 +577,17 @@ REPO=2AMLogic/klayout-tools
 gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" > /tmp/ci-jobs.json
 gh api "repos/$REPO/actions/runs/$RUN_ID"                   > /tmp/ci-run.json
 
+# Optional but recommended -- without it every job falls back to its committed
+# fixed ceiling, which is NOT what CI evaluates.
+python3 scripts/fetch_ci_wall_clock_history.py \
+  --repo "$REPO" --run-id "$RUN_ID" --out /tmp/ci-history.json
+
 python3 scripts/check_ci_wall_clock.py \
-  --jobs-json /tmp/ci-jobs.json --run-json /tmp/ci-run.json
+  --jobs-json /tmp/ci-jobs.json --run-json /tmp/ci-run.json \
+  --history-json /tmp/ci-history.json
 ```
 
-Exit codes: `0` within budget, a queue-only breach, or `--report-only`; `1` a
-compute budget breach; `2` the check could not run — a malformed budget file or
-a payload with nothing measurable in it never reports a vacuous pass.
+Exit codes: `0` within budget, a queue-only breach, an `UNCONFIRMED` compute
+breach, or `--report-only`; `1` a confirmed compute budget breach; `2` the
+check could not run — a malformed budget or history file, or a payload with
+nothing measurable in it, never reports a vacuous pass.

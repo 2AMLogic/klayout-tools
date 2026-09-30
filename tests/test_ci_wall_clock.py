@@ -13,19 +13,32 @@ breach, total-compute breach and queue-breach cases are fully controlled.
 Two tests deliberately *do* read this repo's checked-in budget file and
 `ci.yml`, asserting the wiring stays in place and that every budgeted job
 name still names a real job.
+
+Issue #2615 replaced the single-run fixed ceiling with a cross-run model
+(rolling baseline + pool-contention factor + same-commit corroboration). The
+"Rolling-window model" section below exercises that logic, and the "Replaying
+real runs" section replays *measured* timings captured from this repo's own
+Actions history -- the four concurrent runs of 2026-09-29 19:39-20:03 that the
+old model reddened for pool contention, and the genuine whole-matrix slowdown
+of run 36003284901 that it must still catch. Those numbers are not invented:
+see tests/fixtures/ci_wall_clock/actions_timings.json for their provenance.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check_ci_wall_clock.py"
+FETCH_SCRIPT = REPO_ROOT / "scripts" / "fetch_ci_wall_clock_history.py"
 BUDGET_FILE = REPO_ROOT / ".github" / "ci-wall-clock-budget.json"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+MEASURED = REPO_ROOT / "tests" / "fixtures" / "ci_wall_clock" / "actions_timings.json"
 
 # Exit-code contract, mirroring scripts/check-release-lag.sh's tiering:
 #   0 = within budget, a queue-only breach, or a report-only run,
@@ -104,6 +117,48 @@ def _jobs(tmp_path: Path, jobs: list[dict]) -> Path:
 
 def _run_meta(tmp_path: Path, run_started_at: str) -> Path:
     return _write(tmp_path / "run.json", {"run_started_at": run_started_at})
+
+
+# --------------------------------------------------------------------------
+# Rolling-window helpers (issue #2615)
+# --------------------------------------------------------------------------
+
+
+def _history_run(
+    run_id: int,
+    roles: list[str],
+    jobs: dict[str, int],
+    *,
+    partial: list[str] | None = None,
+    head_sha: str = "sha",
+) -> dict:
+    return {
+        "run_id": run_id,
+        "head_sha": head_sha,
+        "head_branch": "main",
+        "roles": roles,
+        "jobs": jobs,
+        "partial_jobs": partial or [],
+    }
+
+
+def _history(tmp_path: Path, runs: list[dict], *, schema_version: int = 1) -> Path:
+    return _write(
+        tmp_path / "history.json",
+        {
+            "schema_version": schema_version,
+            "generated_at": "2026-09-29T21:00:00+00:00",
+            "run_id": 1,
+            "head_sha": "current",
+            "error": None,
+            "runs": runs,
+        },
+    )
+
+
+def _baseline_runs(jobs: dict[str, int], *, count: int = 8) -> list[dict]:
+    """`count` identical baseline runs -- a zero-MAD, unambiguous window."""
+    return [_history_run(1000 + i, ["baseline"], dict(jobs)) for i in range(count)]
 
 
 # --------------------------------------------------------------------------
@@ -896,6 +951,943 @@ def test_step_summary_is_written_when_github_step_summary_is_set(
 
 
 # --------------------------------------------------------------------------
+# Rolling-window model (issue #2615)
+# --------------------------------------------------------------------------
+#
+# The fixture budget's committed ceiling for "Slow job" is 360 s. With eight
+# identical 300 s baseline runs the rolling threshold is
+# max(1.5 x 300, 300 + k x 0, 180) = 450 s, so the two bases are trivially
+# distinguishable by the verdict on a 400 s job.
+
+
+def _rolling_case(
+    tmp_path: Path,
+    seconds: int,
+    history_runs: list[dict],
+    *,
+    extra: tuple[str, ...] = (),
+) -> tuple[subprocess.CompletedProcess, dict]:
+    end = 7 * 3600 + 10 + seconds
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Slow job",
+                started="2026-09-17T07:00:10Z",
+                completed=f"2026-09-17T{end // 3600:02d}:"
+                f"{end % 3600 // 60:02d}:{end % 60:02d}Z",
+            )
+        ],
+    )
+    result = _run(
+        "--jobs-json",
+        str(jobs),
+        "--budget",
+        str(_budget(tmp_path)),
+        "--history-json",
+        str(_history(tmp_path, history_runs)),
+        "--format",
+        "json",
+        *extra,
+    )
+    return result, _leading_json(result.stdout)
+
+
+def _leading_json(stdout: str) -> dict:
+    """The `--format json` payload, ignoring any `::annotation::` lines that
+    `--annotate` prints after it."""
+    if not stdout.startswith("{"):
+        return {}
+    payload, _ = json.JSONDecoder().raw_decode(stdout)
+    return payload
+
+
+def test_rolling_window_replaces_the_committed_ceiling(tmp_path: Path) -> None:
+    """A job with history is judged against that history, not against the
+    hand-committed number -- the whole point of #2615. 400 s is over the
+    committed 360 s ceiling and under the 450 s rolling threshold."""
+    result, payload = _rolling_case(tmp_path, 400, _baseline_runs({"Slow job": 300}))
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    assert payload["model"]["kind"] == "rolling"
+    job = payload["jobs"][0]
+    assert job["basis"] == "rolling"
+    assert job["budget_seconds"] == 450
+    assert job["baseline_seconds"] == 300.0
+    assert payload["breaches"] == []
+
+
+def test_rolling_window_still_fails_a_job_past_its_rolling_threshold(
+    tmp_path: Path,
+) -> None:
+    result, payload = _rolling_case(tmp_path, 600, _baseline_runs({"Slow job": 300}))
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    breach = next(b for b in payload["breaches"] if b["scope"] == "job")
+    assert breach["basis"] == "rolling"
+    assert breach["confirmed"] is True
+
+
+def test_jobs_without_enough_history_keep_the_committed_ceiling(
+    tmp_path: Path,
+) -> None:
+    """Fewer than `min_samples` observations (default 5) is not a baseline.
+    A newly added job stays covered by its committed fallback from day one
+    rather than being ungated while history accumulates."""
+    result, payload = _rolling_case(
+        tmp_path, 400, _baseline_runs({"Slow job": 300}, count=3)
+    )
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    assert payload["jobs"][0]["basis"] == "fixed"
+    assert payload["jobs"][0]["budget_seconds"] == 360
+
+
+def test_without_history_the_check_is_exactly_its_pre_2615_self(
+    tmp_path: Path,
+) -> None:
+    """No `--history-json` at all: every job on its committed ceiling. This is
+    what keeps the check runnable locally and green when the Actions API is
+    unreachable."""
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Slow job",
+                started="2026-09-17T07:00:10Z",
+                completed="2026-09-17T07:06:50Z",  # 400s > the 360s ceiling
+            )
+        ],
+    )
+    result = _run(
+        "--jobs-json", str(jobs), "--budget", str(_budget(tmp_path)), "--format", "json"
+    )
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["model"]["kind"] == "fixed"
+    assert payload["jobs"][0]["basis"] == "fixed"
+
+
+def test_concurrent_runs_on_other_commits_widen_the_thresholds(
+    tmp_path: Path,
+) -> None:
+    """The measurement that separates "this code got slower" from "the pool
+    was saturated": peers that overlapped this run's window, inflated 3x
+    against the same baseline, widen this run's thresholds 3x."""
+    # Three baselined jobs, because a peer needs at least `min_peer_jobs`
+    # baselined rows before it is credible evidence about the pool.
+    history = _baseline_runs({"Slow job": 300, "Other job": 100, "Third job": 100}) + [
+        _history_run(
+            2001, ["peer"], {"Slow job": 900, "Other job": 300, "Third job": 300}
+        ),
+    ]
+    result, payload = _rolling_case(tmp_path, 1200, history)
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    assert payload["model"]["peer_runs"] == 1
+    assert payload["model"]["pool_factor"] == 3.0
+    assert payload["jobs"][0]["budget_seconds"] == 1350
+    assert payload["breaches"] == []
+
+
+def test_the_pool_contention_allowance_is_capped(tmp_path: Path) -> None:
+    """Past `max_pool_factor` the honest answer is "the pool is broken", not
+    "widen the gate without limit"."""
+    history = _baseline_runs({"Slow job": 300, "Other job": 100, "Third job": 100}) + [
+        _history_run(
+            2001,
+            ["peer"],
+            {"Slow job": 30000, "Other job": 10000, "Third job": 10000},
+        ),
+    ]
+    result, payload = _rolling_case(tmp_path, 3000, history)
+    assert payload["model"]["pool_factor"] == 6.0
+    assert payload["jobs"][0]["budget_seconds"] == 2700
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+
+
+def test_a_still_running_peer_job_can_only_raise_the_pool_factor(
+    tmp_path: Path,
+) -> None:
+    """Concurrent runs are usually still in flight when this check runs, so
+    their unfinished jobs contribute elapsed-so-far -- a lower bound. A job
+    that has only been running 10 s proves nothing about the pool and must not
+    drag the estimate down; one already past its baseline does count."""
+    history = _baseline_runs({"Slow job": 300, "Other job": 100, "Third job": 100}) + [
+        _history_run(
+            2001,
+            ["peer"],
+            {"Slow job": 900, "Other job": 300, "Third job": 300, "Fourth": 10},
+            partial=["Fourth"],
+        ),
+    ]
+    _, payload = _rolling_case(tmp_path, 400, history)
+    assert payload["model"]["pool_factor"] == 3.0
+
+
+def test_one_noisy_run_in_the_history_window_does_not_move_the_baseline(
+    tmp_path: Path,
+) -> None:
+    """The baseline is a median, not a mean, precisely so a single contended
+    run inside the window cannot drag the gate open behind everyone's back.
+    Seven 300 s runs and one 3000 s run still baseline at 300 s."""
+    history = _baseline_runs({"Slow job": 300}, count=7) + [
+        _history_run(1999, ["baseline"], {"Slow job": 3000})
+    ]
+    result, payload = _rolling_case(tmp_path, 600, history)
+    assert payload["jobs"][0]["baseline_seconds"] == 300.0
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+
+
+def test_a_clean_run_of_the_same_commit_downgrades_the_breach(
+    tmp_path: Path,
+) -> None:
+    """One noisy run does not fail the build: identical code measured inside
+    the quiet-pool threshold on another run means this run measured the pool.
+    Reported as UNCONFIRMED, annotated as a warning, exit 0 -- which is what
+    makes "re-run it" a real answer rather than a shrug."""
+    history = _baseline_runs({"Slow job": 300}) + [
+        _history_run(3001, ["same-tree"], {"Slow job": 310}),
+    ]
+    result, payload = _rolling_case(tmp_path, 600, history, extra=("--annotate",))
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    breach = next(b for b in payload["breaches"] if b["scope"] == "job")
+    assert breach["confirmed"] is False
+    assert "::warning" in result.stdout and "::error" not in result.stdout
+
+
+def test_a_same_commit_run_that_also_breached_confirms_it(tmp_path: Path) -> None:
+    """The other half of the rule: when every run of the same commit is slow,
+    the slowness is a property of the code and the build goes red."""
+    history = _baseline_runs({"Slow job": 300}) + [
+        _history_run(3001, ["same-tree"], {"Slow job": 620}),
+    ]
+    result, payload = _rolling_case(tmp_path, 600, history)
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    breach = next(b for b in payload["breaches"] if b["scope"] == "job")
+    assert breach["confirmed"] is True
+
+
+def test_total_compute_gets_the_same_rolling_treatment(tmp_path: Path) -> None:
+    """Death by a thousand jobs is still gated -- against the rolling median
+    of recent total compute, not against a committed number."""
+    history = _baseline_runs({"Slow job": 300, "Other job": 100})
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Other job",
+                started="2026-09-17T07:00:10Z",
+                completed="2026-09-17T07:10:10Z",  # 600s, no per-job baseline breach
+            )
+        ]
+        * 3,
+    )
+    result = _run(
+        "--jobs-json",
+        str(jobs),
+        "--budget",
+        str(_budget(tmp_path)),
+        "--history-json",
+        str(_history(tmp_path, history)),
+        "--format",
+        "json",
+    )
+    payload = json.loads(result.stdout)
+    assert payload["total_job_budget_basis"] == "rolling"
+    # 400 s of baseline total -> max(1.35 x 400, 400, 600) = 600 s allowed.
+    assert payload["total_job_budget_seconds"] == 600
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+
+
+def test_a_malformed_history_file_cannot_run(tmp_path: Path) -> None:
+    """A *missing* history is a supported fallback; a *broken* one is a wiring
+    mistake. Degrading silently to the loose fallback is how a gate stops
+    gating without anyone noticing, so this is exit 2."""
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Slow job",
+                started="2026-09-17T07:00:10Z",
+                completed="2026-09-17T07:05:10Z",
+            )
+        ],
+    )
+    result = _run(
+        "--jobs-json",
+        str(jobs),
+        "--budget",
+        str(_budget(tmp_path)),
+        "--history-json",
+        str(_history(tmp_path, [], schema_version=99)),
+    )
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+
+
+def test_an_unknown_rolling_window_key_cannot_run(tmp_path: Path) -> None:
+    """A typo in the tuning block must not silently leave the model on its
+    defaults while the file claims otherwise."""
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Slow job",
+                started="2026-09-17T07:00:10Z",
+                completed="2026-09-17T07:00:22Z",
+            )
+        ],
+    )
+    result = _run(
+        "--jobs-json",
+        str(jobs),
+        "--budget",
+        str(_budget(tmp_path, rolling_window={"job_ration": 2.0})),
+    )
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+
+
+def test_the_rolling_model_can_be_switched_off_in_the_budget_file(
+    tmp_path: Path,
+) -> None:
+    result, payload = _rolling_case(
+        tmp_path,
+        400,
+        _baseline_runs({"Slow job": 300}),
+        extra=(),
+    )
+    assert result.returncode == EXIT_OK
+    disabled = _write(
+        tmp_path / "disabled.json",
+        {
+            "schema_version": 1,
+            "exclude_jobs": ["CI wall-clock budget"],
+            "default_job_budget_seconds": 600,
+            "total_job_budget_seconds": 1500,
+            "run_wall_clock_budget_seconds": 1800,
+            "jobs": {"Fast job": 120, "Slow job": 360},
+            "rolling_window": {"enabled": False},
+        },
+    )
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Slow job",
+                started="2026-09-17T07:00:10Z",
+                completed="2026-09-17T07:06:50Z",
+            )
+        ],
+    )
+    off = _run(
+        "--jobs-json",
+        str(jobs),
+        "--budget",
+        str(disabled),
+        "--history-json",
+        str(_history(tmp_path, _baseline_runs({"Slow job": 300}))),
+        "--format",
+        "json",
+    )
+    assert off.returncode == EXIT_BREACH, off.stdout + off.stderr
+    assert json.loads(off.stdout)["model"]["kind"] == "fixed"
+
+
+# --------------------------------------------------------------------------
+# Replaying real runs (issue #2615's acceptance criteria)
+# --------------------------------------------------------------------------
+
+
+def _measured() -> dict:
+    return json.loads(MEASURED.read_text())
+
+
+def _replay_jobs_payload(tmp_path: Path, run: dict) -> Path:
+    """Rebuild a `/jobs` payload from a measured run's job-name -> seconds."""
+    start = datetime.datetime.fromisoformat(
+        run["run_started_at"].replace("Z", "+00:00")
+    )
+
+    def stamp(offset: int) -> str:
+        return (
+            (start + datetime.timedelta(seconds=offset))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+    return _jobs(
+        tmp_path,
+        [
+            _job(name, started=stamp(5), completed=stamp(5 + seconds))
+            for name, seconds in run["jobs"].items()
+        ],
+    )
+
+
+def _replay(
+    tmp_path: Path,
+    fixture: dict,
+    run_id: str,
+    baseline_ids: list[str],
+    peer_ids: list[str] | None = None,
+    same_tree_ids: list[str] | None = None,
+) -> tuple[subprocess.CompletedProcess, dict]:
+    runs = fixture["runs"]
+    history = [
+        _history_run(
+            int(rid), ["baseline"], runs[rid]["jobs"], head_sha=runs[rid]["head_sha"]
+        )
+        for rid in baseline_ids
+    ]
+    history += [
+        _history_run(
+            int(rid), ["peer"], runs[rid]["jobs"], head_sha=runs[rid]["head_sha"]
+        )
+        for rid in peer_ids or []
+    ]
+    history += [
+        _history_run(
+            int(rid), ["same-tree"], runs[rid]["jobs"], head_sha=runs[rid]["head_sha"]
+        )
+        for rid in same_tree_ids or []
+    ]
+    result = _run(
+        "--jobs-json",
+        str(_replay_jobs_payload(tmp_path, runs[run_id])),
+        # Deliberately THIS repo's real budget file: the replay validates the
+        # tuning that actually ships, not a fixture's.
+        "--budget",
+        str(BUDGET_FILE),
+        "--history-json",
+        str(_history(tmp_path, history)),
+        "--format",
+        "json",
+    )
+    return result, _leading_json(result.stdout)
+
+
+def test_replay_the_2026_09_29_contention_episodes_stay_green(
+    tmp_path: Path,
+) -> None:
+    """Acceptance criterion 1 of #2615, replayed against measured data.
+
+    Between 19:39 and 20:03 on 2026-09-29 four runs on four unrelated
+    branches were on the pool together and EVERY leg of EVERY one of them
+    landed at 849-1247 s against a ~290 s median -- one of them a PR whose
+    entire diff was JSON and Markdown. The old fixed ceiling reddened all of
+    them. Each must now pass, because the other three are direct evidence of
+    what the pool was doing at the time."""
+    fixture = _measured()
+    baseline = fixture["groups"]["baseline_main_2026_09_26_to_29"]
+    for group in ("contention_2026_09_29_1939", "contention_2026_09_29_1709"):
+        episode = fixture["groups"][group]
+        for run_id in episode:
+            peers = [r for r in episode if r != run_id]
+            result, payload = _replay(tmp_path, fixture, run_id, baseline, peers)
+            assert result.returncode == EXIT_OK, (
+                f"{group}/{run_id} reddened the build: "
+                f"{payload.get('breaches')}\n{result.stdout}{result.stderr}"
+            )
+            assert payload["model"]["pool_factor"] > 1.0
+            assert payload["breaches"] == []
+
+
+def test_replay_run_36003284901_still_fails_as_a_real_slowdown(
+    tmp_path: Path,
+) -> None:
+    """Acceptance criterion 2 of #2615, replayed against measured data.
+
+    Run 36003284901 is a `main` push whose four Tests legs ran 724-816 s
+    against a 309-334 s baseline with NOTHING else on the pool. No pool
+    evidence, no clean run of the same commit: a confirmed compute breach that
+    must still redden the build, or the gate has been widened into
+    uselessness."""
+    fixture = _measured()
+    result, payload = _replay(
+        tmp_path,
+        fixture,
+        "36003284901",
+        fixture["groups"]["baseline_main_before_2026_09_24"],
+    )
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    assert payload["model"]["pool_factor"] == 1.0
+    breached = {b["subject"] for b in payload["breaches"] if b["confirmed"]}
+    assert breached >= {
+        "Tests (Python 3.10)",
+        "Tests (Python 3.11)",
+        "Tests (Python 3.12)",
+        "Tests (Python 3.13)",
+    }
+
+
+def test_replay_each_quiet_main_run_against_its_own_peers_stays_green(
+    tmp_path: Path,
+) -> None:
+    """The false-positive floor: leave-one-out over the fifteen measured
+    baseline-branch runs. Every one of them must pass when judged against the
+    other fourteen -- a model that reddens ordinary green runs is no better
+    than the fixed ceiling it replaces."""
+    fixture = _measured()
+    window = fixture["groups"]["baseline_main_2026_09_26_to_29"]
+    for run_id in window:
+        result, payload = _replay(
+            tmp_path, fixture, run_id, [r for r in window if r != run_id]
+        )
+        assert result.returncode == EXIT_OK, (
+            f"quiet main run {run_id} reddened the build: {payload.get('breaches')}"
+        )
+
+
+def test_replay_the_invisible_contention_case_is_absorbed_by_a_re_run(
+    tmp_path: Path,
+) -> None:
+    """The documented residual limitation, and its documented answer.
+
+    Run 36611724105 is a Loom-surfaces resync commit -- literally zero compute
+    change -- whose legs ran 422-809 s. It had no overlapping `ci.yml` run, so
+    the pool factor cannot see that the pool was busy (the contention came
+    from workloads outside this repo's Actions history). It therefore breaches
+    on its own, and the maintainer's documented answer is to re-run it: with
+    one clean run of the same commit available, the breach is UNCONFIRMED and
+    the build goes green."""
+    fixture = _measured()
+    baseline = fixture["groups"]["baseline_main_2026_09_26_to_29"]
+    alone, _ = _replay(tmp_path, fixture, "36611724105", baseline)
+    assert alone.returncode == EXIT_BREACH, alone.stdout + alone.stderr
+
+    rerun, payload = _replay(
+        tmp_path,
+        fixture,
+        "36611724105",
+        baseline,
+        same_tree_ids=["36584780975"],
+    )
+    assert rerun.returncode == EXIT_OK, rerun.stdout + rerun.stderr
+    assert all(
+        not b["confirmed"] for b in payload["breaches"] if b["kind"] == "compute"
+    )
+
+
+# --------------------------------------------------------------------------
+# The history fetcher
+# --------------------------------------------------------------------------
+
+
+def _fake_gh(tmp_path: Path, responses: dict[str, object]) -> Path:
+    """A stand-in `gh` that answers `gh api <path>` from a JSON map."""
+    table = tmp_path / "responses.json"
+    table.write_text(json.dumps(responses))
+    script = tmp_path / "fake-gh"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"table = json.loads(open({str(table)!r}).read())\n"
+        "path = sys.argv[-1]\n"
+        "if path not in table:\n"
+        "    sys.stderr.write('no such path: ' + path)\n"
+        "    sys.exit(1)\n"
+        "print(json.dumps(table[path]))\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _wf_run(
+    run_id: int,
+    sha: str,
+    branch: str,
+    start: str,
+    end: str,
+    *,
+    created: str | None = None,
+) -> dict:
+    return {
+        "id": run_id,
+        "head_sha": sha,
+        "head_branch": branch,
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": created or start,
+        "run_started_at": start,
+        "updated_at": end,
+    }
+
+
+def _listing_paths(repo: str, cutoff: str | None) -> tuple[str, str]:
+    """The fetcher's two run-list API paths for a given `created` cutoff."""
+    created = "" if cutoff is None else "&created=" + quote(cutoff)
+    base = f"repos/{repo}/actions/workflows/ci.yml/runs"
+    return (
+        f"{base}?branch=main&status=completed&per_page=20{created}",
+        f"{base}?per_page=40{created}",
+    )
+
+
+def _fetch_budget(tmp_path: Path, **rolling) -> Path:
+    """A budget file carrying only the fetcher's `rolling_window` keys --
+    the repo's real one pins `history_not_before` to 2026-09-30, which would
+    (correctly) reject these tests' 2026-09-29 runs."""
+    return _write(
+        tmp_path / "fetch-budget.json",
+        {"rolling_window": {"history_not_before": "", **rolling}},
+    )
+
+
+def _run_fetcher(
+    tmp_path: Path, responses: dict, budget: Path, *extra: str
+) -> tuple[subprocess.CompletedProcess, dict]:
+    out = tmp_path / "history.json"
+    result = subprocess.run(
+        [
+            "python3",
+            str(FETCH_SCRIPT),
+            "--repo",
+            "owner/name",
+            "--run-id",
+            "900",
+            "--out",
+            str(out),
+            "--budget",
+            str(budget),
+            "--gh",
+            str(_fake_gh(tmp_path, responses)),
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result, json.loads(out.read_text())
+
+
+def _jobs_api(jobs: dict[str, tuple[str, str | None]]) -> dict:
+    return {
+        "jobs": [
+            {
+                "name": name,
+                "started_at": started,
+                "completed_at": completed,
+                "conclusion": "success" if completed else None,
+            }
+            for name, (started, completed) in jobs.items()
+        ]
+    }
+
+
+def test_fetcher_labels_baseline_peer_and_same_tree_runs(tmp_path: Path) -> None:
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "feature/x", "2026-09-29T19:39:56Z", "2026-09-29T20:00:04Z"
+    )
+    older_main = _wf_run(
+        800, "older", "main", "2026-09-29T14:00:00Z", "2026-09-29T14:10:00Z"
+    )
+    overlapping = _wf_run(
+        700, "other", "feature/y", "2026-09-29T19:42:06Z", "2026-09-29T20:03:22Z"
+    )
+    untouching = _wf_run(
+        600, "far", "feature/z", "2026-09-29T10:00:00Z", "2026-09-29T10:05:00Z"
+    )
+    same_tree = _wf_run(
+        500, "current", "feature/x", "2026-09-29T18:00:00Z", "2026-09-29T18:10:00Z"
+    )
+    job_payload = _jobs_api({"Tests": ("2026-09-29T19:40:00Z", "2026-09-29T19:45:00Z")})
+    # Default max_age_days (14) before the current run's created_at.
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-15T19:39:56Z")
+    responses = {
+        f"repos/{repo}/actions/runs/900": current,
+        baseline_path: {"workflow_runs": [older_main, same_tree]},
+        peer_path: {"workflow_runs": [overlapping, untouching, same_tree]},
+    }
+    for run_id in (800, 700, 500):
+        responses[f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"] = job_payload
+
+    out = tmp_path / "history.json"
+    result = subprocess.run(
+        [
+            "python3",
+            str(FETCH_SCRIPT),
+            "--repo",
+            repo,
+            "--run-id",
+            "900",
+            "--out",
+            str(out),
+            "--budget",
+            str(_fetch_budget(tmp_path)),
+            "--gh",
+            str(_fake_gh(tmp_path, responses)),
+            "--baseline-runs",
+            "15",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(out.read_text())
+    assert payload["schema_version"] == 1
+    roles = {entry["run_id"]: entry["roles"] for entry in payload["runs"]}
+    assert roles[800] == ["baseline"]
+    assert roles[700] == ["peer"]
+    assert roles[500] == ["same-tree"]
+    assert 600 not in roles  # no overlap with the current run's window
+    assert payload["runs"][0]["jobs"]["Tests"] == 300
+    assert payload["cutoff"] == "2026-09-15T19:39:56+00:00"
+    assert payload["dropped_stale_runs"] == 0
+
+
+def _stale_pool_case(tmp_path: Path) -> tuple[dict, dict]:
+    """The #2616 re-verify repro, reduced: a `main` listing that ignores the
+    `created` filter and hands back runs from a retired pool alongside the
+    current pool's runs."""
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "main", "2026-09-30T17:10:41Z", "2026-09-30T17:30:00Z"
+    )
+    hosted = [
+        _wf_run(
+            800 + i,
+            f"hosted{i}",
+            "main",
+            f"2026-09-30T1{5 + i // 2}:{20 + i:02d}:00Z",
+            f"2026-09-30T1{5 + i // 2}:{40 + i:02d}:00Z",
+        )
+        for i in range(3)
+    ]
+    # Created before the pool change -- one of them re-run AFTER it, which
+    # must not launder it: a re-run executes its original commit's ci.yml.
+    retired = [
+        _wf_run(
+            100 + i,
+            f"old{i}",
+            "main",
+            "2026-09-30T16:00:00Z" if i == 0 else f"2026-09-15T0{i}:00:00Z",
+            "2026-09-30T16:10:00Z" if i == 0 else f"2026-09-15T0{i}:10:00Z",
+            created=f"2026-09-15T0{i}:00:00Z",
+        )
+        for i in range(4)
+    ]
+    undated = _wf_run(
+        99, "undated", "main", "2026-09-30T16:00:00Z", "2026-09-30T16:05:00Z"
+    )
+    undated.pop("created_at")
+    fast = _jobs_api({"Tests": ("2026-09-15T01:00:00Z", "2026-09-15T01:03:30Z")})
+    slow = _jobs_api({"Tests": ("2026-09-30T15:20:00Z", "2026-09-30T15:26:00Z")})
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-30T15:06:07Z")
+    responses: dict = {
+        f"repos/{repo}/actions/runs/900": current,
+        # Old runs FIRST: order is not a guarantee either.
+        baseline_path: {"workflow_runs": [*retired, undated, *hosted]},
+        peer_path: {"workflow_runs": []},
+    }
+    for run in retired + [undated]:
+        responses[f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100"] = fast
+    for run in hosted:
+        responses[f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100"] = slow
+    return responses, {r["id"] for r in hosted}
+
+
+def test_fetcher_never_uses_a_run_from_before_the_pool_change(
+    tmp_path: Path,
+) -> None:
+    """#2616 re-verify finding 1: a baseline from a retired pool falsely
+    reddens a green run on the current one. Every run created before
+    `history_not_before` is dropped client-side, whatever the listing returns
+    and in whatever order."""
+    responses, hosted_ids = _stale_pool_case(tmp_path)
+    _, payload = _run_fetcher(
+        tmp_path,
+        responses,
+        _fetch_budget(tmp_path, history_not_before="2026-09-30T15:06:07Z"),
+    )
+    assert {entry["run_id"] for entry in payload["runs"]} == hosted_ids
+    assert all(entry["jobs"]["Tests"] == 360 for entry in payload["runs"])
+    assert payload["cutoff"] == "2026-09-30T15:06:07+00:00"
+    assert payload["dropped_stale_runs"] == 5  # four retired + one undated
+
+
+def test_the_repo_budget_file_pins_the_2624_pool_change() -> None:
+    """The shipped cutoff must be at or after #2624's merge -- the moment
+    ci.yml left Blacksmith for GitHub-hosted runners."""
+    rolling = json.loads(BUDGET_FILE.read_text())["rolling_window"]
+    cutoff = datetime.datetime.fromisoformat(
+        rolling["history_not_before"].replace("Z", "+00:00")
+    )
+    assert cutoff >= datetime.datetime(
+        2026, 9, 30, 15, 6, 7, tzinfo=datetime.timezone.utc
+    )
+    assert isinstance(rolling["max_age_days"], int) and rolling["max_age_days"] > 0
+
+
+def test_fetcher_drops_runs_older_than_max_age_days(tmp_path: Path) -> None:
+    """Without a pool bound, the age bound alone keeps a stale listing out."""
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "main", "2026-09-30T12:00:00Z", "2026-09-30T12:20:00Z"
+    )
+    recent = _wf_run(
+        801, "recent", "main", "2026-09-28T12:00:00Z", "2026-09-28T12:10:00Z"
+    )
+    ancient = _wf_run(
+        101, "ancient", "main", "2026-09-10T12:00:00Z", "2026-09-10T12:10:00Z"
+    )
+    job_payload = _jobs_api({"Tests": ("2026-09-28T12:00:00Z", "2026-09-28T12:05:00Z")})
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-23T12:00:00Z")
+    responses = {
+        f"repos/{repo}/actions/runs/900": current,
+        baseline_path: {"workflow_runs": [ancient, recent]},
+        peer_path: {"workflow_runs": []},
+        f"repos/{repo}/actions/runs/801/jobs?per_page=100": job_payload,
+        f"repos/{repo}/actions/runs/101/jobs?per_page=100": job_payload,
+    }
+    _, payload = _run_fetcher(
+        tmp_path, responses, _fetch_budget(tmp_path, max_age_days=7)
+    )
+    assert [entry["run_id"] for entry in payload["runs"]] == [801]
+    assert payload["dropped_stale_runs"] == 1
+
+
+def test_fetcher_history_excludes_cache_miss_rebuilds(tmp_path: Path) -> None:
+    """#2619's cache-miss exclusion applies to the history too, or a cache
+    outage inside the window would inflate the baseline the judged run --
+    which already has its own rebuild time excluded -- is compared against."""
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "main", "2026-09-30T17:10:41Z", "2026-09-30T17:30:00Z"
+    )
+    prior = _wf_run(
+        801, "prior", "main", "2026-09-30T16:00:00Z", "2026-09-30T16:20:00Z"
+    )
+    job = {
+        "name": "Tests (Python 3.12)",
+        "started_at": "2026-09-30T16:00:00Z",
+        "completed_at": "2026-09-30T16:15:00Z",
+        "conclusion": "success",
+        "steps": [
+            _step(
+                "Cache pinned Yosys build",
+                started="2026-09-30T16:00:10Z",
+                completed="2026-09-30T16:00:30Z",
+            ),
+            _step(
+                "Build + install pinned Yosys (cache miss only)",
+                started="2026-09-30T16:00:30Z",
+                completed="2026-09-30T16:08:50Z",
+            ),
+            _step(
+                "Run pytest",
+                started="2026-09-30T16:09:00Z",
+                completed="2026-09-30T16:14:00Z",
+            ),
+        ],
+    }
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-16T17:10:41Z")
+    responses = {
+        f"repos/{repo}/actions/runs/900": current,
+        baseline_path: {"workflow_runs": [prior]},
+        peer_path: {"workflow_runs": []},
+        f"repos/{repo}/actions/runs/801/jobs?per_page=100": {"jobs": [job]},
+    }
+    _, payload = _run_fetcher(tmp_path, responses, _fetch_budget(tmp_path))
+    # 900 s raw, minus the 500 s rebuild and the 20 s cache restore.
+    assert payload["runs"][0]["jobs"]["Tests (Python 3.12)"] == 380
+
+
+def test_fetcher_never_fails_the_build_when_the_api_is_unreachable(
+    tmp_path: Path,
+) -> None:
+    """An Actions API hiccup must degrade the check to its committed ceilings,
+    never redden CI: that would be the same untrusted-gate failure #2615 is
+    about, in a new place."""
+    out = tmp_path / "history.json"
+    result = subprocess.run(
+        [
+            "python3",
+            str(FETCH_SCRIPT),
+            "--repo",
+            "owner/name",
+            "--run-id",
+            "900",
+            "--out",
+            str(out),
+            "--gh",
+            str(tmp_path / "does-not-exist"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(out.read_text())
+    assert payload["runs"] == []
+    assert payload["error"]
+    # And the check accepts that payload rather than exiting 2 on it.
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Slow job",
+                started="2026-09-17T07:00:10Z",
+                completed="2026-09-17T07:00:22Z",
+            )
+        ],
+    )
+    check = _run(
+        "--jobs-json",
+        str(jobs),
+        "--budget",
+        str(_budget(tmp_path)),
+        "--history-json",
+        str(out),
+        "--format",
+        "json",
+    )
+    assert check.returncode == EXIT_OK, check.stdout + check.stderr
+    assert json.loads(check.stdout)["model"]["kind"] == "fixed"
+
+
+def test_fetcher_never_fails_on_a_malformed_rolling_window_override(
+    tmp_path: Path,
+) -> None:
+    """A hand-edit typo in the committed budget file's `rolling_window` block
+    (e.g. a quoted number) must degrade to the default for that key, not
+    crash with an uncaught `TypeError` -- the same "never fails the build"
+    guarantee `test_fetcher_never_fails_the_build_when_the_api_is_unreachable`
+    covers for an unreachable API, here for a malformed *local* config."""
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "feature/x", "2026-09-29T19:39:56Z", "2026-09-29T20:00:04Z"
+    )
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-15T19:39:56Z")
+    responses = {
+        f"repos/{repo}/actions/runs/900": current,
+        baseline_path: {"workflow_runs": []},
+        peer_path: {"workflow_runs": []},
+    }
+    bad_budget = tmp_path / "bad-budget.json"
+    bad_budget.write_text(json.dumps({"rolling_window": {"baseline_runs": "15"}}))
+
+    out = tmp_path / "history.json"
+    result = subprocess.run(
+        [
+            "python3",
+            str(FETCH_SCRIPT),
+            "--repo",
+            repo,
+            "--run-id",
+            "900",
+            "--out",
+            str(out),
+            "--budget",
+            str(bad_budget),
+            "--gh",
+            str(_fake_gh(tmp_path, responses)),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(out.read_text())
+    assert payload["error"] is None
+    assert payload["runs"] == []
+
+
+# --------------------------------------------------------------------------
 # Wiring against this repo's own checked-in files
 # --------------------------------------------------------------------------
 
@@ -929,6 +1921,39 @@ def test_ci_workflow_invokes_the_budget_check() -> None:
     # same-repo run -- that is the "fails visibly rather than drifting"
     # requirement. Fork PRs get --report-only instead.
     assert "--report-only" in workflow
+
+
+def test_ci_workflow_feeds_the_rolling_window(tmp_path: Path) -> None:
+    """Without the history the check silently degrades to its committed
+    ceilings -- a gate that has stopped gating, which is exactly the failure
+    #2615 exists to end. So the fetch step and the flag that consumes it are
+    both part of the wiring contract."""
+    workflow = WORKFLOW.read_text()
+    assert "scripts/fetch_ci_wall_clock_history.py" in workflow
+    assert "--history-json" in workflow
+    assert "actions: read" in workflow
+
+
+def test_repo_budget_files_rolling_window_block_is_accepted(tmp_path: Path) -> None:
+    """The shipped tuning block must survive the check's own validation --
+    including its rejection of unknown keys, which is what turns a typo into a
+    failure rather than a silent fallback to defaults."""
+    budget = json.loads(BUDGET_FILE.read_text())
+    rolling = budget["rolling_window"]
+    assert rolling["enabled"] is True
+    assert rolling["baseline_branch"] == "main"
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Lint (ruff)",
+                started="2026-09-17T07:00:10Z",
+                completed="2026-09-17T07:00:22Z",
+            )
+        ],
+    )
+    result = _run("--jobs-json", str(jobs), "--budget", str(BUDGET_FILE))
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
 
 
 def test_cache_miss_step_naming_convention_still_holds_in_ci_yml() -> None:
