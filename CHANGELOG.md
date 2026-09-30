@@ -84,6 +84,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   `model` block plus `basis`/`baseline_seconds`/`confirmed` fields and its
   `schema_version` goes 1 → 2 (purely additive; every prior field is still
   emitted). See `docs/guides/ci-wall-clock-budget.md`.
+  The history only uses runs *created* on the current runner pool: the fetcher
+  drops runs older than `rolling_window.max_age_days` (14) or created before
+  `rolling_window.history_not_before`, which is pinned to #2624's move to
+  GitHub-hosted runners (2026-09-30T15:06:07Z). It filters both on the API
+  listing and again per run. History durations also exclude cache-miss rebuild
+  time, as the judged run's do (#2617). The fixed fallback ceilings are still
+  the 2026-09-29 Blacksmith derivation and owe a re-measure on hosted runners.
 
 - **Fixed** (#2608, `klt signoff` T1 item 11; additive — **no**
   `schema_version` bump, and no new reason string: a citation that previously

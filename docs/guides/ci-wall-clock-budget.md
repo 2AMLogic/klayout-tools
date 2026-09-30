@@ -13,6 +13,15 @@ measurements behind it, and what to do when it fires.
 - Tests: `tests/test_ci_wall_clock.py`
 - Measured replay data: `tests/fixtures/ci_wall_clock/actions_timings.json`
 
+> **Runner pool today: GitHub-hosted.** Since #2624 merged
+> (2026-09-30T15:06:07Z) every `ci.yml` job runs on GitHub-hosted
+> `ubuntu-24.04`, same-repo and fork PRs alike. The Blacksmith autoscaled pool
+> the heavy jobs used from 2026-09-24 is retired. The measurements on this page
+> were taken on Blacksmith and are kept as the record of how the model was
+> derived; where this page says "the autoscaled pool" it means that pool, in
+> the past tense. **The fixed fallback ceilings are owed a re-measure on hosted
+> runners** — see [Re-measuring](#re-measuring).
+
 ## If this check just failed your build
 
 Read the `basis` column in the job's step summary first, then:
@@ -134,10 +143,10 @@ is under 700 s. Any future attempt to make this repo's CI faster starts and
 very nearly ends with the Python test matrix: either it gets faster, or it gets
 split so the four Python versions stop each paying the full suite's cost.
 
-**The autoscaled pool is far noisier than the fixed pool it replaced.** On the
-2026-09-17 baseline a `Tests` leg ran 172-200 s — a 16% spread from median to
-max. On Blacksmith the same suite runs a 253 s median with a 361 s p90, a 412 s
-p95, and a 996 s max: the max is ~3.9x the median. The median itself grew by
+**The autoscaled (Blacksmith) pool was far noisier than the fixed pool it
+replaced.** On the 2026-09-17 baseline a `Tests` leg ran 172-200 s — a 16%
+spread from median to max. On Blacksmith the same suite ran a 253 s median
+with a 361 s p90, a 412 s p95, and a 996 s max: the max is ~3.9x the median. The median itself grew by
 ~40%, but that is dwarfed by the tail, and the tail is what the gate kept
 firing on — 8 of 72 sampled main-push runs had at least one leg over the old
 420 s budget on diffs that touch nothing about test runtime.
@@ -167,8 +176,8 @@ threshold on a 9-second job measures the runner, not the code. (The floor was
 ## Why the fixed ceilings had to go (issue #2615)
 
 The original model compared **one run's** absolute durations against constants
-committed in the budget file. On the shared autoscaled pool that model can no
-longer tell *"this code got slower"* apart from *"our own dispatch fleet
+committed in the budget file. On the shared autoscaled Blacksmith pool of
+2026-09-24 → 2026-09-30 that model could no longer tell *"this code got slower"* apart from *"our own dispatch fleet
 saturated the pool while this run was on it"*. Measured over 274 `ci.yml` runs,
 2026-09-24 → 2026-09-29:
 
@@ -290,6 +299,25 @@ rejected:
   capped by `--max-api-calls`, on a job that deliberately runs on
   `ubuntu-latest` so it is never queued behind the pool it measures.
 
+**Only runs from the current pool are used.** A run's timings describe the
+pool it ran on, so the fetcher drops every run *created* before the later of
+`max_age_days` (14) before the run being checked and `history_not_before` (the
+instant of the last runner-pool change, currently #2624's merge) — once as a
+`created=>=` filter on the API listing and again on each returned run, because
+the listing's order is not a guarantee. This is not hypothetical: a
+`?branch=main&status=completed` listing was observed returning eleven
+2026-09-15 runs from two pools ago, which set `Tests` medians of ~210 s against
+hosted legs of 284-501 s and falsely reddened a green `main` run. Filtering is
+on `created_at`, not `run_started_at`: a re-run executes its original commit's
+`ci.yml`, and so its original runner labels. The history payload records the
+`cutoff` it applied and how many listed runs it dropped (`dropped_stale_runs`).
+
+**History durations are compute, too.** The fetcher subtracts the same
+cache-miss rebuild time the check subtracts from the run being judged (see
+[Cache-miss rebuilds are not compute](#cache-miss-rebuilds-are-not-compute)),
+by calling the check's own `measure_cache_miss`, so a cache outage inside the
+window can neither inflate a baseline nor fake a busy pool.
+
 The trade-off accepted is a dependency on the Actions API, which is why
 [`scripts/fetch_ci_wall_clock_history.py`](../../scripts/fetch_ci_wall_clock_history.py)
 **never fails**: any error writes a valid, empty history and exits 0, and the
@@ -320,6 +348,10 @@ Everything above is in the budget file's `rolling_window` block; an unknown key
 there is a hard error (exit 2) rather than a silent fallback to defaults, so a
 typo cannot quietly disable the tuning it claims to apply. Set
 `"enabled": false` to fall back entirely to the committed ceilings.
+`max_age_days` and `history_not_before` (along with `baseline_branch`,
+`baseline_runs`, `peer_window_runs` and `min_peer_overlap_seconds`) are read by
+the fetcher, which decides *which* runs are history; the check accepts them in
+the block without using them.
 
 ## Historical: the last hand-derived generation
 
@@ -417,24 +449,47 @@ would no longer catch anything real.
 
 ## Fork PRs are report-only
 
-`ci.yml`'s runner conditional routes fork PRs from `blacksmith-4vcpu-ubuntu-2404`
-back to `ubuntu-latest`, whose per-job timings the budgets above — measured on
-whichever pool serves each job for a same-repo run — do not describe. A fixed
-threshold tuned against Blacksmith numbers would redden every fork PR, so the
-workflow passes
-`--report-only` for them: breaches print as `::warning::` annotations and the
-job still exits 0. Same-repo pushes and PRs gate for real.
+The workflow passes `--report-only` for fork PRs: breaches print as
+`::warning::` annotations and the job still exits 0. Same-repo pushes and PRs
+gate for real.
+
+The original reason no longer holds. Until 2026-09-30 `ci.yml` routed
+same-repo runs to Blacksmith and fork PRs to GitHub-hosted, so a threshold
+tuned on Blacksmith numbers would have reddened every fork PR. Since #2624
+both run on the same hosted `ubuntu-24.04` runners. `ci.yml` keeps the
+carve-out until the fallback ceilings are re-measured on hosted (below); after
+that it has no remaining reason to exist.
 
 ## Re-measuring
 
-**A pool change no longer requires a re-measure.** That was the second failure
-mode #2615 closed: every per-job and total-compute threshold is now derived
-from the last `baseline_runs` runs on `main`, so adding, removing or resizing
-runners, or changing what `[self-hosted, heavy]` resolves to, is absorbed
-within a few `main` runs with nothing to edit. The same goes for a deliberate,
-justified increase in a job's cost.
+**A pool change no longer requires re-deriving the *rolling* thresholds.**
+That was the second failure mode #2615 closed: every per-job and
+total-compute threshold on the rolling basis is derived from recent `main`
+runs, so moving jobs to another runner pool, or resizing the one they are on,
+is absorbed within `min_samples` `main` runs with nothing to hand-tune. The
+same goes for a deliberate, justified increase in a job's cost.
 
-Three things still need a human:
+**It does still require two edits, and one of them is owed now.**
+
+- **Bump `rolling_window.history_not_before`** to the instant the pool change
+  merges, in the same PR. Otherwise the window blends two pools until the old
+  pool's runs age out of it, and a listing that happens to return old runs
+  compares hosted runs against the old pool (the false red described under
+  [Where the history comes from](#where-the-history-comes-from)). For #2624 it
+  is `2026-09-30T15:06:07Z`. Until `min_samples` usable `main` runs exist
+  after the cutoff, jobs are judged on their fixed ceilings.
+- **Re-measure the fixed fallback.** The `jobs` ceilings,
+  `total_job_budget_seconds` and the `baseline` block describe the pool they
+  were measured on. The rolling window does not replace them: they are what
+  every job is judged against while the new pool has too little history, and
+  whenever the history cannot be fetched at all. **#2624 moved every job from
+  Blacksmith to GitHub-hosted runners and owes this re-measure.** The current
+  numbers are the 2026-09-29 Blacksmith derivation. Hosted public-repo runners
+  are the same 4-vCPU size, so they are a reasonable interim fallback, but
+  they are not a hosted measurement. Once the re-measure lands, the fork-PR
+  `--report-only` carve-out above can go too.
+
+Beyond a pool change, three things still need a human:
 
 1. **A new or renamed job** — it has no history, so it runs on
    `default_job_budget_seconds` (600 s) or on a row you add to `jobs`. Give it

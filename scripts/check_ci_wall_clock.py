@@ -69,7 +69,9 @@ the `" (cache miss only)"` rebuild steps that actually *ran* -- plus that job's
 own `actions/cache` restore/save steps, whose retry time the same outage
 inflates -- from the job's compute figure, and reports the miss explicitly.
 Nothing else is subtracted: a slower pytest step still breaches, exactly as
-before.
+before. `scripts/fetch_ci_wall_clock_history.py` applies the same subtraction
+(this module's `measure_cache_miss`) to every history run, so the rolling
+baseline and the judged run are the same kind of number.
 
 Exit codes (mirroring `scripts/check-release-lag.sh`'s tiering):
 
@@ -360,6 +362,8 @@ _FETCHER_ONLY_ROLLING_KEYS = frozenset(
         "baseline_runs",
         "peer_window_runs",
         "min_peer_overlap_seconds",
+        "max_age_days",
+        "history_not_before",
     }
 )
 

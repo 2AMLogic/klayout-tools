@@ -31,6 +31,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check_ci_wall_clock.py"
@@ -1487,16 +1488,72 @@ def _fake_gh(tmp_path: Path, responses: dict[str, object]) -> Path:
     return script
 
 
-def _wf_run(run_id: int, sha: str, branch: str, start: str, end: str) -> dict:
+def _wf_run(
+    run_id: int,
+    sha: str,
+    branch: str,
+    start: str,
+    end: str,
+    *,
+    created: str | None = None,
+) -> dict:
     return {
         "id": run_id,
         "head_sha": sha,
         "head_branch": branch,
         "status": "completed",
         "conclusion": "success",
+        "created_at": created or start,
         "run_started_at": start,
         "updated_at": end,
     }
+
+
+def _listing_paths(repo: str, cutoff: str | None) -> tuple[str, str]:
+    """The fetcher's two run-list API paths for a given `created` cutoff."""
+    created = "" if cutoff is None else "&created=" + quote(cutoff)
+    base = f"repos/{repo}/actions/workflows/ci.yml/runs"
+    return (
+        f"{base}?branch=main&status=completed&per_page=20{created}",
+        f"{base}?per_page=40{created}",
+    )
+
+
+def _fetch_budget(tmp_path: Path, **rolling) -> Path:
+    """A budget file carrying only the fetcher's `rolling_window` keys --
+    the repo's real one pins `history_not_before` to 2026-09-30, which would
+    (correctly) reject these tests' 2026-09-29 runs."""
+    return _write(
+        tmp_path / "fetch-budget.json",
+        {"rolling_window": {"history_not_before": "", **rolling}},
+    )
+
+
+def _run_fetcher(
+    tmp_path: Path, responses: dict, budget: Path, *extra: str
+) -> tuple[subprocess.CompletedProcess, dict]:
+    out = tmp_path / "history.json"
+    result = subprocess.run(
+        [
+            "python3",
+            str(FETCH_SCRIPT),
+            "--repo",
+            "owner/name",
+            "--run-id",
+            "900",
+            "--out",
+            str(out),
+            "--budget",
+            str(budget),
+            "--gh",
+            str(_fake_gh(tmp_path, responses)),
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result, json.loads(out.read_text())
 
 
 def _jobs_api(jobs: dict[str, tuple[str, str | None]]) -> dict:
@@ -1531,15 +1588,12 @@ def test_fetcher_labels_baseline_peer_and_same_tree_runs(tmp_path: Path) -> None
         500, "current", "feature/x", "2026-09-29T18:00:00Z", "2026-09-29T18:10:00Z"
     )
     job_payload = _jobs_api({"Tests": ("2026-09-29T19:40:00Z", "2026-09-29T19:45:00Z")})
+    # Default max_age_days (14) before the current run's created_at.
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-15T19:39:56Z")
     responses = {
         f"repos/{repo}/actions/runs/900": current,
-        f"repos/{repo}/actions/workflows/ci.yml/runs"
-        f"?branch=main&status=completed&per_page=20": {
-            "workflow_runs": [older_main, same_tree]
-        },
-        f"repos/{repo}/actions/workflows/ci.yml/runs?per_page=40": {
-            "workflow_runs": [overlapping, untouching, same_tree]
-        },
+        baseline_path: {"workflow_runs": [older_main, same_tree]},
+        peer_path: {"workflow_runs": [overlapping, untouching, same_tree]},
     }
     for run_id in (800, 700, 500):
         responses[f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"] = job_payload
@@ -1555,6 +1609,8 @@ def test_fetcher_labels_baseline_peer_and_same_tree_runs(tmp_path: Path) -> None
             "900",
             "--out",
             str(out),
+            "--budget",
+            str(_fetch_budget(tmp_path)),
             "--gh",
             str(_fake_gh(tmp_path, responses)),
             "--baseline-runs",
@@ -1572,6 +1628,165 @@ def test_fetcher_labels_baseline_peer_and_same_tree_runs(tmp_path: Path) -> None
     assert roles[500] == ["same-tree"]
     assert 600 not in roles  # no overlap with the current run's window
     assert payload["runs"][0]["jobs"]["Tests"] == 300
+    assert payload["cutoff"] == "2026-09-15T19:39:56+00:00"
+    assert payload["dropped_stale_runs"] == 0
+
+
+def _stale_pool_case(tmp_path: Path) -> tuple[dict, dict]:
+    """The #2616 re-verify repro, reduced: a `main` listing that ignores the
+    `created` filter and hands back runs from a retired pool alongside the
+    current pool's runs."""
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "main", "2026-09-30T17:10:41Z", "2026-09-30T17:30:00Z"
+    )
+    hosted = [
+        _wf_run(
+            800 + i,
+            f"hosted{i}",
+            "main",
+            f"2026-09-30T1{5 + i // 2}:{20 + i:02d}:00Z",
+            f"2026-09-30T1{5 + i // 2}:{40 + i:02d}:00Z",
+        )
+        for i in range(3)
+    ]
+    # Created before the pool change -- one of them re-run AFTER it, which
+    # must not launder it: a re-run executes its original commit's ci.yml.
+    retired = [
+        _wf_run(
+            100 + i,
+            f"old{i}",
+            "main",
+            "2026-09-30T16:00:00Z" if i == 0 else f"2026-09-15T0{i}:00:00Z",
+            "2026-09-30T16:10:00Z" if i == 0 else f"2026-09-15T0{i}:10:00Z",
+            created=f"2026-09-15T0{i}:00:00Z",
+        )
+        for i in range(4)
+    ]
+    undated = _wf_run(
+        99, "undated", "main", "2026-09-30T16:00:00Z", "2026-09-30T16:05:00Z"
+    )
+    undated.pop("created_at")
+    fast = _jobs_api({"Tests": ("2026-09-15T01:00:00Z", "2026-09-15T01:03:30Z")})
+    slow = _jobs_api({"Tests": ("2026-09-30T15:20:00Z", "2026-09-30T15:26:00Z")})
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-30T15:06:07Z")
+    responses: dict = {
+        f"repos/{repo}/actions/runs/900": current,
+        # Old runs FIRST: order is not a guarantee either.
+        baseline_path: {"workflow_runs": [*retired, undated, *hosted]},
+        peer_path: {"workflow_runs": []},
+    }
+    for run in retired + [undated]:
+        responses[f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100"] = fast
+    for run in hosted:
+        responses[f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100"] = slow
+    return responses, {r["id"] for r in hosted}
+
+
+def test_fetcher_never_uses_a_run_from_before_the_pool_change(
+    tmp_path: Path,
+) -> None:
+    """#2616 re-verify finding 1: a baseline from a retired pool falsely
+    reddens a green run on the current one. Every run created before
+    `history_not_before` is dropped client-side, whatever the listing returns
+    and in whatever order."""
+    responses, hosted_ids = _stale_pool_case(tmp_path)
+    _, payload = _run_fetcher(
+        tmp_path,
+        responses,
+        _fetch_budget(tmp_path, history_not_before="2026-09-30T15:06:07Z"),
+    )
+    assert {entry["run_id"] for entry in payload["runs"]} == hosted_ids
+    assert all(entry["jobs"]["Tests"] == 360 for entry in payload["runs"])
+    assert payload["cutoff"] == "2026-09-30T15:06:07+00:00"
+    assert payload["dropped_stale_runs"] == 5  # four retired + one undated
+
+
+def test_the_repo_budget_file_pins_the_2624_pool_change() -> None:
+    """The shipped cutoff must be at or after #2624's merge -- the moment
+    ci.yml left Blacksmith for GitHub-hosted runners."""
+    rolling = json.loads(BUDGET_FILE.read_text())["rolling_window"]
+    cutoff = datetime.datetime.fromisoformat(
+        rolling["history_not_before"].replace("Z", "+00:00")
+    )
+    assert cutoff >= datetime.datetime(
+        2026, 9, 30, 15, 6, 7, tzinfo=datetime.timezone.utc
+    )
+    assert isinstance(rolling["max_age_days"], int) and rolling["max_age_days"] > 0
+
+
+def test_fetcher_drops_runs_older_than_max_age_days(tmp_path: Path) -> None:
+    """Without a pool bound, the age bound alone keeps a stale listing out."""
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "main", "2026-09-30T12:00:00Z", "2026-09-30T12:20:00Z"
+    )
+    recent = _wf_run(
+        801, "recent", "main", "2026-09-28T12:00:00Z", "2026-09-28T12:10:00Z"
+    )
+    ancient = _wf_run(
+        101, "ancient", "main", "2026-09-10T12:00:00Z", "2026-09-10T12:10:00Z"
+    )
+    job_payload = _jobs_api({"Tests": ("2026-09-28T12:00:00Z", "2026-09-28T12:05:00Z")})
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-23T12:00:00Z")
+    responses = {
+        f"repos/{repo}/actions/runs/900": current,
+        baseline_path: {"workflow_runs": [ancient, recent]},
+        peer_path: {"workflow_runs": []},
+        f"repos/{repo}/actions/runs/801/jobs?per_page=100": job_payload,
+        f"repos/{repo}/actions/runs/101/jobs?per_page=100": job_payload,
+    }
+    _, payload = _run_fetcher(
+        tmp_path, responses, _fetch_budget(tmp_path, max_age_days=7)
+    )
+    assert [entry["run_id"] for entry in payload["runs"]] == [801]
+    assert payload["dropped_stale_runs"] == 1
+
+
+def test_fetcher_history_excludes_cache_miss_rebuilds(tmp_path: Path) -> None:
+    """#2619's cache-miss exclusion applies to the history too, or a cache
+    outage inside the window would inflate the baseline the judged run --
+    which already has its own rebuild time excluded -- is compared against."""
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "main", "2026-09-30T17:10:41Z", "2026-09-30T17:30:00Z"
+    )
+    prior = _wf_run(
+        801, "prior", "main", "2026-09-30T16:00:00Z", "2026-09-30T16:20:00Z"
+    )
+    job = {
+        "name": "Tests (Python 3.12)",
+        "started_at": "2026-09-30T16:00:00Z",
+        "completed_at": "2026-09-30T16:15:00Z",
+        "conclusion": "success",
+        "steps": [
+            _step(
+                "Cache pinned Yosys build",
+                started="2026-09-30T16:00:10Z",
+                completed="2026-09-30T16:00:30Z",
+            ),
+            _step(
+                "Build + install pinned Yosys (cache miss only)",
+                started="2026-09-30T16:00:30Z",
+                completed="2026-09-30T16:08:50Z",
+            ),
+            _step(
+                "Run pytest",
+                started="2026-09-30T16:09:00Z",
+                completed="2026-09-30T16:14:00Z",
+            ),
+        ],
+    }
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-16T17:10:41Z")
+    responses = {
+        f"repos/{repo}/actions/runs/900": current,
+        baseline_path: {"workflow_runs": [prior]},
+        peer_path: {"workflow_runs": []},
+        f"repos/{repo}/actions/runs/801/jobs?per_page=100": {"jobs": [job]},
+    }
+    _, payload = _run_fetcher(tmp_path, responses, _fetch_budget(tmp_path))
+    # 900 s raw, minus the 500 s rebuild and the 20 s cache restore.
+    assert payload["runs"][0]["jobs"]["Tests (Python 3.12)"] == 380
 
 
 def test_fetcher_never_fails_the_build_when_the_api_is_unreachable(
@@ -1638,13 +1853,11 @@ def test_fetcher_never_fails_on_a_malformed_rolling_window_override(
     current = _wf_run(
         900, "current", "feature/x", "2026-09-29T19:39:56Z", "2026-09-29T20:00:04Z"
     )
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-09-15T19:39:56Z")
     responses = {
         f"repos/{repo}/actions/runs/900": current,
-        f"repos/{repo}/actions/workflows/ci.yml/runs"
-        f"?branch=main&status=completed&per_page=20": {"workflow_runs": []},
-        f"repos/{repo}/actions/workflows/ci.yml/runs?per_page=40": {
-            "workflow_runs": []
-        },
+        baseline_path: {"workflow_runs": []},
+        peer_path: {"workflow_runs": []},
     }
     bad_budget = tmp_path / "bad-budget.json"
     bad_budget.write_text(json.dumps({"rolling_window": {"baseline_runs": "15"}}))
