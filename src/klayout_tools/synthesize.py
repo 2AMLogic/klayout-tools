@@ -84,9 +84,10 @@ in different units (see ``klayout_tools/sta.py``'s module docstring).
 ``sta`` is ``None`` -- never a fabricated number -- when the
 ``klt_statime_native`` extension is not installed (an optional Rust
 toolchain, like every other native ``klt`` engine) or when the engine could
-not analyze this particular netlist/liberty pair; see ``docs/cli/
-synthesize.md``'s ``sta`` section for the full caveat this inherits from the
-spike unresolved (no wire delay/parasitics, no SDC).
+not analyze this particular netlist/liberty pair, and the sibling
+``sta_unavailable_reason`` field (issue #2628) says which of the two it was;
+see ``docs/cli/synthesize.md``'s ``sta`` section for the full caveat this
+inherits from the spike unresolved (no wire delay/parasitics, no SDC).
 
 Constant drivers are mapped to real tie cells (issue #854). Yosys leaves
 ``1'b0``/``1'b1`` constants as bare Verilog literals, which OpenSTA's
@@ -198,6 +199,7 @@ number). See :func:`_compute_leakage`.
 from __future__ import annotations
 
 import fnmatch
+import importlib
 import json
 import os
 import re
@@ -1234,7 +1236,9 @@ def run_synthesize(
             timeout_s=equiv_timeout_s,
         )
 
-    sta = _read_sta_timing(netlist_path, liberty_path, hdl_toplevel)
+    sta, sta_unavailable_reason = _read_sta_timing(
+        netlist_path, liberty_path, hdl_toplevel
+    )
 
     restructuring = None
     if restructure_timing:
@@ -1273,6 +1277,14 @@ def run_synthesize(
         "leakage_by_type_nw": leakage_by_type_nw,
         "timing": timing,
         "sta": sta,
+        # Issue #2628: *why* `sta` is `null`, so a caller can tell "STA
+        # unavailable here -- install the optional extension and retry" from
+        # "STA not applicable to this netlist/liberty pair". `null` exactly
+        # when `sta` is non-`null`. Free-text, matching the
+        # `unavailable_reason` precedent in
+        # `place_and_route_power_audit.py`. Additive field, no
+        # `schema_version` bump (docs/json-contract.md).
+        "sta_unavailable_reason": sta_unavailable_reason,
         "structural": structural,
         # Issue #2382: the fully-resolved standard-cell exclusion list this
         # run actually handed ABC, plus the two inputs it was merged from and
@@ -2697,9 +2709,47 @@ def _read_abc_timing(
     }
 
 
+#: The response's ``sta_unavailable_reason`` for the "extension not
+#: installed" case (issue #2628) -- the one case a caller can act on
+#: directly, so the reason names the install path rather than just the
+#: absence. Kept as a module constant so the test suite pins the exact
+#: string a consumer branches on.
+STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED = (
+    "the optional klt_statime_native extension is not installed, so no "
+    "gate-level static timing analysis was attempted -- from a repo "
+    "checkout, run `uv sync --group statime` (or `maturin develop "
+    "--release` inside native/statime/) and re-run to populate `sta`"
+)
+
+
+def _statime_native_is_importable() -> bool:
+    """Whether ``import klt_statime_native`` succeeds in this interpreter.
+
+    Used only to *classify* an already-raised
+    :class:`~klayout_tools.sta.StaError` (see :func:`_read_sta_timing`):
+    ``sta.py`` collapses "extension missing" and "engine could not analyze
+    this netlist" into the same exception type, and a caller acting on
+    ``sta_unavailable_reason`` needs them apart -- the first is fixed by
+    installing something, the second never is.
+
+    Deliberately :func:`importlib.import_module` rather than
+    :func:`importlib.util.find_spec`: the latter raises :class:`ValueError`
+    for a ``sys.modules`` entry of ``None`` (CPython's own "this import must
+    fail" sentinel) and for a module object carrying no ``__spec__``, both
+    of which are ordinary states in the hermetic tests. The import itself is
+    free here -- by the time this is called the real load has already been
+    attempted, so a successful import is a ``sys.modules`` cache hit.
+    """
+    try:
+        importlib.import_module("klt_statime_native")
+    except ImportError:
+        return False
+    return True
+
+
 def _read_sta_timing(
     netlist_path: str, liberty_path: str, hdl_toplevel: str
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, str | None]:
     """Run :func:`klayout_tools.sta.compute_critical_path` over the
     just-produced ``netlist_path`` and shape its result into the response's
     ``sta`` field (issue #925, Epic #704 Phase 3) -- a real timing-graph
@@ -2707,21 +2757,40 @@ def _read_sta_timing(
     register-to-port, or port-to-port, whichever is globally worst),
     computed by ``klt_statime_native`` (``native/statime/``).
 
+    Returns ``(sta, sta_unavailable_reason)`` -- the response's two fields,
+    and exactly one of them is ever non-``None``.
+
     Additive and best-effort, mirroring :func:`_read_abc_timing`'s own
-    "no number to report" honesty discipline: returns ``None`` -- never a
+    "no number to report" honesty discipline: ``sta`` is ``None`` -- never a
     fabricated result -- when the ``klt_statime_native`` extension is not
     installed (a Rust toolchain is optional for every other ``klt synthesize``
     caller, so a missing extension must not turn every synthesis run into a
     hard failure) or when the native engine itself could not analyze this
     particular netlist/liberty pair (:class:`~klayout_tools.sta.StaError`).
     A genuine analysis result is never partial -- either the full
-    ``worst_path``/``worst_reg_to_reg_path`` shape comes back, or this
-    returns ``None``.
+    ``worst_path``/``worst_reg_to_reg_path`` shape comes back, or ``sta`` is
+    ``None``.
+
+    Issue #2628: a bare ``sta: null`` collapsed those two cases into one
+    value, so a caller could not tell "STA unavailable here, install the
+    extension and retry" from "STA not applicable to this netlist/liberty
+    pair". The second element keeps them apart in the response itself --
+    :data:`STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED` for the first, and the
+    :class:`~klayout_tools.sta.StaError`'s own message (which already
+    describes the failure -- e.g. a mapped cell type with no liberty entry)
+    for the second. Free text, matching the ``unavailable_reason`` precedent
+    in ``place_and_route_power_audit.py``, not a fixed vocabulary a consumer
+    would have to exhaustively match.
     """
     try:
-        return compute_critical_path(netlist_path, liberty_path, hdl_toplevel)
-    except StaError:
-        return None
+        return compute_critical_path(netlist_path, liberty_path, hdl_toplevel), None
+    except StaError as exc:
+        if not _statime_native_is_importable():
+            return None, STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED
+        return None, (
+            "the klt_statime_native engine could not analyze this "
+            f"netlist/liberty pair: {exc}"
+        )
 
 
 def _leakage_unit_scale_to_nw(liberty_text: str) -> float:

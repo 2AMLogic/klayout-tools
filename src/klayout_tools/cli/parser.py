@@ -294,22 +294,36 @@ def create_parser() -> argparse.ArgumentParser:
 def _add_sta_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``sta`` verb for standalone OpenSTA timing/power analysis.
 
-    Analyses one fixed placed-and-routed DEF at a declared corner via
-    OpenSTA, independent of `klt place-and-route`'s own in-flow STA (issue
-    #1099). See docs/cli/sta.md for the request/response contract.
+    Analyses one fixed geometry source at a declared corner via OpenSTA --
+    either a placed-and-routed DEF (``request.def``) or, DEF-free, a
+    structural Verilog netlist (``request.verilog``, issue #1825) --
+    independent of `klt place-and-route`'s own in-flow STA (issue #1099).
+    See docs/cli/sta.md for the request/response contract.
     """
     sta_parser = subparsers.add_parser(
         "sta",
         help=(
-            "standalone timing/power analysis of an already-implemented "
-            "(placed & routed) design via OpenSTA"
+            "standalone timing/power analysis via OpenSTA of a placed & "
+            "routed DEF, or of a bare gate-level netlist with no DEF"
         ),
         description=(
-            "Run a standalone OpenSTA timing/power analysis over an "
-            "already-routed DEF, independent of `klt place-and-route`'s own "
-            "in-flow STA (issue #1099). Unlike `klt place-and-route`, this "
-            "command never places, routes, or runs CTS -- there is no "
-            "`target_stage`, no netlist, no `link_design`; the `def` handed "
+            "Run a standalone OpenSTA timing/power analysis over one fixed "
+            "geometry source, independent of `klt place-and-route`'s own "
+            "in-flow STA (issue #1099). Exactly one geometry source is "
+            "required, and they are mutually exclusive: `def` -- an "
+            "already-routed (or pre-route) DEF -- or, DEF-free, `verilog` "
+            "-- a structural gate-level netlist (e.g. `klt synthesize`'s own "
+            "`netlist_path`) linked with `read_lef`/`read_verilog`/"
+            "`link_design` and timed against liberty + "
+            "`constraints.clock_port`/`clock_period_ns` alone, with no "
+            "placement or routing of any kind and OpenSTA's own ideal "
+            "wire-load estimate (optional `constraints.wire_load_model`/"
+            "`wire_load_mode`); its response is labelled "
+            '`geometry_source: "netlist_estimate"` rather than `def` '
+            'mode\'s `"routed"`, so an estimate is never mistaken for a '
+            "post-route number (issue #1825). Unlike `klt "
+            "place-and-route`, this command never places, routes, or runs "
+            "CTS -- there is no `target_stage`; the geometry handed "
             "in is the one and only geometry analysed. This is what makes "
             "correct corner characterization possible: analysing one fixed "
             "piece of geometry at N corners, rather than re-running "

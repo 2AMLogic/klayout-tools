@@ -718,6 +718,38 @@ These are issue #809's own "Known simplifications" 1–5, inherited
 hardening its numerics. Signoff timing is still Phase 4's OpenROAD/OpenSTA
 step.
 
+## Registers, clk-to-Q, and setup/hold
+
+`timing` and `sta` answer "does this number include the registers?"
+**differently**, and neither includes a full synchronous path. Stated once,
+here, so it does not have to be inferred from the caveat lists above:
+
+| | clk-to-Q launch | combinational logic | setup/hold at the capturing register |
+| --- | --- | --- | --- |
+| `timing.critical_path_ps` | **no** | yes | **no** |
+| `sta.worst_reg_to_reg_path.delay_ns` | **yes** | yes | **no** |
+
+- **`timing.critical_path_ps` has no register content at all.**
+  `dfflibmap` maps every flip-flop to a liberty cell *before* `abc` runs, so
+  the registers bound the combinational cone ABC times rather than appearing
+  inside it. There is no clk-to-Q arc in the number and no setup/hold check
+  against it — it is a pure combinational-cone delay.
+- **`sta.worst_reg_to_reg_path.delay_ns` does model clk-to-Q.** That path's
+  startpoint *is* the launching register's clock-to-output arc, and its
+  endpoint is the capturing register's `D` pin
+  (`native/statime/src/sta.rs`'s own `worst_reg_to_reg_path` definition), so
+  the launch delay is inside the reported `delay_ns`. **Setup/hold are
+  not**: `setup`/`hold` (with `recovery`/`removal`/`clear`/`preset`) are
+  recognised by the liberty parser and then excluded from delay propagation
+  — see "Known simplifications" #4 in
+  [`native/statime/README.md`](../../native/statime/README.md).
+- **Neither is slack, in either field.** Adding a setup time to
+  `worst_reg_to_reg_path.delay_ns` and comparing it against a clock period
+  would still be missing clock skew, uncertainty and wire delay; that
+  comparison is Phase 4's OpenROAD/OpenSTA step, or `klt sta` (whose
+  `verilog` mode times this same netlist against a real `create_clock` with
+  no DEF — see [`docs/cli/sta.md`](sta.md)).
+
 **`sta` is `null` — never a fabricated number — when:**
 
 - the optional `klt_statime_native` extension is not installed (it needs a
@@ -731,6 +763,30 @@ A missing extension never fails the run: synthesis itself does not depend on
 this stage, so `klt synthesize` behaves exactly as it did before #925 and
 simply reports `"sta": null`. This mirrors `timing`'s own "no number to
 report" discipline.
+
+**Which of the two it was is reported, not left to guesswork** (issue
+#2628). `sta: null` on its own cannot distinguish "STA is *unavailable* on
+this machine — install the extension and re-run" from "STA is *not
+applicable* to this netlist/liberty pair — re-running changes nothing", and
+those call for opposite responses. The always-present
+`sta_unavailable_reason` field carries the distinction:
+
+```json
+"sta": null,
+"sta_unavailable_reason": "the optional klt_statime_native extension is not installed, so no gate-level static timing analysis was attempted -- from a repo checkout, run `uv sync --group statime` (or `maturin develop --release` inside native/statime/) and re-run to populate `sta`"
+```
+
+```json
+"sta": null,
+"sta_unavailable_reason": "the klt_statime_native engine could not analyze this netlist/liberty pair: cell type 'sky130_fd_sc_hd__nonesuch' has no liberty entry"
+```
+
+It is `null` **exactly when** `sta` is non-`null`, so the pair is never
+self-contradictory. The string is free text for a human reader (the second
+form embeds the engine's own `StaError` message verbatim rather than
+flattening it into a code), following the same `unavailable_reason`
+convention `klt place-and-route`'s `power.placed` block already uses —
+**branch on `sta === null`, not on the reason's wording.**
 
 ## Timing-driven restructuring
 
@@ -1207,6 +1263,7 @@ caller decision rather than something this command should pick.
     "worst_path": { "startpoint": "_640_/Q", "endpoint": "_035_", "delay_ns": 4.4642972825718, "hops": ["..."] },
     "worst_reg_to_reg_path": { "...": "same shape" }
   },
+  "sta_unavailable_reason": null,
   "structural": {
     "latches": 0,
     "expected_latches": 0,
@@ -1258,8 +1315,9 @@ caller decision rather than something this command should pick.
 | `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, rolled up over the whole hierarchy the same way `instance_count` is, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. Keys are always real leaf standard-cell types; a sub-module *name* (which `stat -json` reports as a pseudo cell type in the parent module's own block) is never reported as one, it is expanded into the cells it instantiates (issue #821). |
 | `leakage_power_nw` | number \| null | Static leakage power, in nanowatts — issue #1626. `sum(cell_leakage_power[cell_type] * instance_count[cell_type])` over `instance_counts_by_type`, read from the same resolved liberty already loaded for `dfflibmap`/`abc -liberty` (no second liberty fetch). **Not** switching/dynamic power — that needs an activity factor this command has no vectors to supply, and is out of scope. `null` when the resolved liberty reports no `cell_leakage_power` for *any* instantiated cell type — see "`leakage_power_nw`/`leakage_by_type_nw`" below. |
 | `leakage_by_type_nw` | object\<string, number\> \| null | Per-cell-type leakage, in nanowatts — the liberty `cell_leakage_power` entry `leakage_power_nw` was summed from, one entry per instantiated cell type that had one. Keys sorted for determinism. A caller can diff this object's keys against `instance_counts_by_type`'s to spot an instantiated cell type with no leakage data (e.g. a `-dont_use`d or otherwise-unmapped type) for free. `null` exactly when `leakage_power_nw` is `null`. |
-| `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. |
-| `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. Additive as of issue #925 — `timing` is unaffected. |
+| `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. **`critical_path_ps` contains no register content at all**: no clk-to-Q launch and no setup/hold — `dfflibmap` maps every flip-flop to a liberty cell *before* `abc` runs, so registers bound the cone ABC times rather than appearing in it. See "Registers, clk-to-Q, and setup/hold" above. |
+| `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair — `sta_unavailable_reason` below says which. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. **`worst_reg_to_reg_path.delay_ns` models the launching register's clk-to-Q but excludes setup/hold**, which are parsed and then dropped from delay propagation; see "Registers, clk-to-Q, and setup/hold" above. Additive as of issue #925 — `timing` is unaffected. |
+| `sta_unavailable_reason` | string \| null | **Always present** (issue #2628) — why `sta` is `null`, so "STA unavailable here" and "STA not applicable to this netlist" are not the same value. `null` **exactly when** `sta` is non-`null`; a non-`null` string exactly when `sta` is `null`. Two cases are distinguished: the optional `klt_statime_native` extension is not installed (the reason names the install path — `uv sync --group statime`; a caller can act on this one and retry), or the engine ran and raised `StaError` while analyzing this netlist/liberty pair (the reason carries `StaError`'s own message, e.g. a mapped cell type with no liberty entry). **Free text for humans, not a fixed vocabulary** — match on `sta`'s own `null`-ness for control flow, matching the `unavailable_reason` precedent in `klt place-and-route`'s `power.placed` block. Additive field, no `schema_version` bump. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
 | `cell_exclusions` | object | **Always present** (issue #2382) — the standard-cell exclusion this run actually applied, and how it was arrived at: `{mode, requested, library_defaults, effective, validated, engine_supports_dont_use}`. `mode` is the resolved `constraints.dont_use_mode` (`"additive"` by default); `requested` is the request's own `constraints.dont_use`, normalized and deduplicated; `library_defaults` is the built-in per-library table's entry for the resolved `pdk.cell_library` (always reported, even when `mode` suppressed it, so a report says what was *not* excluded too); **`effective` is exactly the `-dont_use` glob list handed to ABC**, deduplicated and order-preserved. `validated` is `true` when every `requested` pattern was matched against the resolved liberty's cell names, or `null` when there was nothing to check or that cell list could not be established. `engine_supports_dont_use` is the `yosys -p 'help abc'` probe result, or `null` when there was nothing to exclude and no probe was made — `false` with a non-empty `requested` and an empty `effective` is the "older Yosys build dropped it" case, also surfaced as a `dont_use_unsupported` warning. Additive field, no `schema_version` bump. See "Request-level cell exclusion" above. |
 | `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`, `dont_use_unsupported`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |

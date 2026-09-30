@@ -203,7 +203,8 @@ def test_synthesize_reports_sta_none_when_analysis_fails(monkeypatch):
 
     monkeypatch.setattr("klayout_tools.synthesize.compute_critical_path", _raise)
 
-    assert _read_sta_timing("/tmp/n.v", "/tmp/l.lib", "gcd") is None
+    sta, _reason = _read_sta_timing("/tmp/n.v", "/tmp/l.lib", "gcd")
+    assert sta is None
 
 
 def test_synthesize_stage_passes_through_a_real_result(monkeypatch):
@@ -214,11 +215,102 @@ def test_synthesize_stage_passes_through_a_real_result(monkeypatch):
 
     _install_stub(monkeypatch, lambda *args: json.dumps(_FAKE_RESULT))
 
-    result = _read_sta_timing("/tmp/n.v", "/tmp/l.lib", "gcd")
+    result, reason = _read_sta_timing("/tmp/n.v", "/tmp/l.lib", "gcd")
 
     assert result is not None
     assert result["source"] == "klt_statime_native"
     assert result["worst_path"]["delay_ns"] == pytest.approx(4.4642972825718)
+    # Issue #2628: `sta_unavailable_reason` is `null` exactly when `sta` is
+    # non-`null` -- a reason alongside a real result would be a contradiction.
+    assert reason is None
+
+
+# ---------------------------------------------------------------------------
+# `sta_unavailable_reason` -- issue #2628
+# ---------------------------------------------------------------------------
+
+
+def test_missing_extension_reason_names_the_extension(monkeypatch):
+    """A `sta: null` caused by the optional extension simply not being
+    built must say so, and say what to install -- that is the one
+    `sta: null` a caller can act on. `None` in `sys.modules` is CPython's
+    own "this import must fail" sentinel, so this asserts the same thing
+    whether or not the extension happens to be built on this machine."""
+    from klayout_tools.synthesize import (
+        STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED,
+        _read_sta_timing,
+    )
+
+    monkeypatch.setitem(sys.modules, "klt_statime_native", None)
+
+    sta, reason = _read_sta_timing("/tmp/n.v", "/tmp/l.lib", "gcd")
+
+    assert sta is None
+    assert reason == STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED
+    assert "klt_statime_native" in reason
+    assert "not installed" in reason
+    # Actionable, not merely descriptive: it names the install path.
+    assert "uv sync --group statime" in reason
+
+
+def test_engine_failure_reason_carries_the_sta_error_message(monkeypatch):
+    """The other `sta: null`: the extension *is* installed and the engine
+    ran, but could not analyze this particular netlist/liberty pair. The
+    reason must carry `StaError`'s own message (which already describes the
+    failure) rather than a generic restatement -- and must NOT claim the
+    extension is missing, which is the distinction issue #2628 exists to
+    make."""
+    from klayout_tools.synthesize import (
+        STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED,
+        _read_sta_timing,
+    )
+
+    def _impl(*args):
+        raise ValueError("cell type 'sky130_fd_sc_hd__nonesuch' has no liberty entry")
+
+    _install_stub(monkeypatch, _impl)
+
+    sta, reason = _read_sta_timing("/tmp/n.v", "/tmp/l.lib", "gcd")
+
+    assert sta is None
+    assert reason is not None
+    assert reason != STA_UNAVAILABLE_EXTENSION_NOT_INSTALLED
+    assert "could not analyze" in reason
+    assert "sky130_fd_sc_hd__nonesuch" in reason
+    assert "no liberty entry" in reason
+
+
+def test_text_renderer_echoes_the_reason_when_sta_is_null(capsys):
+    """`--format text` used to print nothing at all for a `null` `sta`, so a
+    human reader had strictly less information than the JSON consumer. The
+    reason is echoed instead -- and a real `sta` still renders exactly as it
+    did, with no reason line."""
+    from klayout_tools.cli.synthesize_cmd import _print_sta
+
+    _print_sta({"sta": None, "sta_unavailable_reason": "because reasons"})
+    assert capsys.readouterr().out == "sta: none (because reasons)\n"
+
+    reshaped = {**_FAKE_RESULT, "source": "klt_statime_native"}
+    _print_sta({"sta": reshaped, "sta_unavailable_reason": None})
+    out = capsys.readouterr().out
+    assert "sta.worst_path: 4.4643 ns" in out
+    assert "sta: none" not in out
+
+
+def test_reason_classification_survives_a_stub_without_a_module_spec(monkeypatch):
+    """Regression guard for the classifier itself: `_statime_native_is_importable`
+    must use `import_module`, not `importlib.util.find_spec` -- the latter
+    raises `ValueError` both for the `None` sentinel above and for a module
+    object with no `__spec__` (exactly what `_install_stub` injects), which
+    would misreport an engine failure as a missing extension."""
+    from klayout_tools.synthesize import _statime_native_is_importable
+
+    module = _install_stub(monkeypatch, lambda *args: json.dumps(_FAKE_RESULT))
+    assert getattr(module, "__spec__", None) is None
+    assert _statime_native_is_importable() is True
+
+    monkeypatch.setitem(sys.modules, "klt_statime_native", None)
+    assert _statime_native_is_importable() is False
 
 
 # ---------------------------------------------------------------------------
