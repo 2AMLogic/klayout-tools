@@ -29,7 +29,8 @@ Scope: exactly the NLDM subset ``klt characterize`` emits -- library-level
 units/thresholds/operating conditions, one ``lu_table_template`` (plus one
 ``power_lut_template`` when any cell carries power tables), per-cell
 ``cell_leakage_power`` and per-state ``leakage_power()`` groups, and
-per-cell pins carrying ``direction``, ``capacitance``, ``function``,
+per-cell pins carrying ``direction``, ``capacitance`` (plus the
+``rise_capacitance``/``fall_capacitance`` split, issue #2512), ``function``,
 combinational ``timing()`` groups with
 ``cell_rise``/``cell_fall``/``rise_transition``/``fall_transition``, and
 ``internal_power()`` groups with ``rise_power``/``fall_power`` (issue #2503
@@ -178,13 +179,28 @@ class LeakagePower:
 
 @dataclass(frozen=True)
 class Pin:
-    """One ``pin()`` group."""
+    """One ``pin()`` group.
+
+    ``capacitance_pf`` renders the bare ``capacitance`` attribute;
+    ``rise_capacitance_pf``/``fall_capacitance_pf`` render the per-edge
+    split beside it (issue #2512), which is the shape IHP's own
+    ``sg13g2_stdcell`` uses and whose mean is exactly its ``capacitance``.
+
+    **The split wins where both are present**:
+    ``native/statime/src/liberty.rs``'s ``parse_pin`` resolves
+    ``(Some(rise), Some(fall), _) => (rise + fall) / 2`` *before* it looks at
+    the bare attribute. So a caller-supplied scalar override must be emitted
+    on its own -- pairing it with a measured split would silently discard the
+    override. :mod:`klayout_tools.characterize` enforces exactly that.
+    """
 
     name: str
     direction: str
     capacitance_pf: float | None = None
     function: str | None = None
     max_capacitance_pf: float | None = None
+    rise_capacitance_pf: float | None = None
+    fall_capacitance_pf: float | None = None
     arcs: tuple[TimingArc, ...] = ()
     internal_power: tuple[InternalPower, ...] = ()
 
@@ -372,25 +388,54 @@ def _render_cell(cell: Cell, library: Library, precision: int) -> list[str]:
         lines.append(f'      when : "{_escape(leakage.when)}";')
         lines.append("    }")
     for pin in cell.pins:
-        if pin.direction not in DIRECTIONS:
-            raise LibertyWriteError(
-                f"cell '{cell.name}' pin '{pin.name}': unknown direction "
-                f"{pin.direction!r} (expected one of {', '.join(DIRECTIONS)})"
-            )
-        lines.append(f"    pin ({pin.name}) {{")
-        lines.append(f'      direction : "{pin.direction}";')
-        if pin.function is not None:
-            lines.append(f'      function : "{_escape(pin.function)}";')
-        if pin.capacitance_pf is not None:
-            lines.append(f"      capacitance : {number(pin.capacitance_pf)};")
-        if pin.max_capacitance_pf is not None:
-            lines.append(f"      max_capacitance : {number(pin.max_capacitance_pf)};")
-        for arc in pin.arcs:
-            lines.extend(_render_arc(arc, cell, pin, library, number))
-        for power in pin.internal_power:
-            lines.extend(_render_internal_power(power, cell, pin, library, number))
-        lines.append("    }")
+        lines.extend(_render_pin(pin, cell, library, number))
     lines.append("  }")
+    return lines
+
+
+def _render_pin(pin: Pin, cell: Cell, library: Library, number) -> list[str]:
+    if pin.direction not in DIRECTIONS:
+        raise LibertyWriteError(
+            f"cell '{cell.name}' pin '{pin.name}': unknown direction "
+            f"{pin.direction!r} (expected one of {', '.join(DIRECTIONS)})"
+        )
+    lines = [f"    pin ({pin.name}) {{", f'      direction : "{pin.direction}";']
+    if pin.function is not None:
+        lines.append(f'      function : "{_escape(pin.function)}";')
+    lines.extend(_render_pin_capacitance(pin, cell, number))
+    for arc in pin.arcs:
+        lines.extend(_render_arc(arc, cell, pin, library, number))
+    for power in pin.internal_power:
+        lines.extend(_render_internal_power(power, cell, pin, library, number))
+    lines.append("    }")
+    return lines
+
+
+def _render_pin_capacitance(pin: Pin, cell: Cell, number) -> list[str]:
+    """The pin's ``capacitance`` attributes, in the order a vendor library
+    writes them (bare, then the rise/fall split, then ``max_capacitance``).
+
+    The split must be whole or absent: ``native/statime``'s reader resolves
+    ``(Some(rise), Some(fall), _)`` to their mean *before* it looks at the
+    bare attribute, so emitting a lone half would have it read as the whole
+    pin capacitance.
+    """
+    if (pin.rise_capacitance_pf is None) != (pin.fall_capacitance_pf is None):
+        raise LibertyWriteError(
+            f"cell '{cell.name}' pin '{pin.name}': rise_capacitance and "
+            "fall_capacitance must be emitted as a pair -- a reader that "
+            "prefers the split (native/statime's does) averages the two, "
+            "so a lone half would be read as the whole"
+        )
+    lines = []
+    for attribute, value in (
+        ("capacitance", pin.capacitance_pf),
+        ("rise_capacitance", pin.rise_capacitance_pf),
+        ("fall_capacitance", pin.fall_capacitance_pf),
+        ("max_capacitance", pin.max_capacitance_pf),
+    ):
+        if value is not None:
+            lines.append(f"      {attribute} : {number(value)};")
     return lines
 
 

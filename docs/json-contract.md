@@ -978,6 +978,20 @@ All six share one contract:
   pass**: `hash_check()` renders `expected: null` as `match: false`, so a
   report predating the field it would be checked against renders `"drifted"`,
   never a false `"match"`.
+- **An unresolvable input path is named, not silently `null` (issue #2595,
+  `lvs` only so far).** A committed report echoes its inputs back exactly as
+  the request gave them, so a *relative* echoed path is re-hashed against the
+  **current working directory** of the `--check` invocation — a deliberate,
+  shared convention (`drc`'s `file`, `lvs`'s `layout`/`reference`), not an
+  oversight, and unchanged here. But a path that resolves to no existing file
+  re-hashes to `null`, which alone reads as "the recorded hash moved". `klt
+  lvs --check` therefore attaches an **additive, optional** `input_not_found`
+  block (`path`, `resolved`, `found_relative_to_report`) to such a
+  `checks[]` entry; `expected`/`actual`/`match`/`status` are unchanged, and
+  the key is absent on a genuine content mismatch. Additive by the envelope
+  rules above — no `schema_version` bump, and a consumer that never reads the
+  key sees the bytes it saw before. See
+  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`".
 - **Tool identity is excluded from the diff**, and only tool identity:
   `provenance.klt_version`, `provenance.klayout_version`,
   `provenance.pdk.version`, plus (flow verbs only) `engine_version` — the
@@ -985,7 +999,21 @@ All six share one contract:
   verb that the KLayout engine build does to `klt drc`. The engine *identity*
   (`engine`) is not excluded: swapping engines is a different run. For
   `signoff` the same rule lands on the field *its* reports carry tool
-  identity in — the whole `build` block (issue #2249), and nothing else.
+  identity in — the whole `build` block (issue #2249).
+- **`klt signoff` excludes one more surface, and reports it separately**
+  (issue #2526): the report's verbatim quotation of the checklist doc — each
+  `items[]` entry's `title`/`text`/`notes`, and `source_doc_content_hash`.
+  A tier report inlines that prose, and a `klt` version pin does not pin the
+  doc, so an upstream *rewording* alone used to render `"drifted"` —
+  indistinguishable from a real grading change, which is the one distinction
+  the mode exists to make. It is excluded from `status` only: every excluded
+  field that moved is still reported, in a `doc_drift_fields` list (same
+  `{field, committed, fresh}` shape as `drift`) with a `doc_drift` boolean,
+  so a consumer can warn on "the yardstick was reworded" while failing only
+  on "the evidence moved". A checklist that *gained, lost or renumbered* an
+  item still fails, via the counts and per-item `id`s that stay compared.
+  See [`cli/signoff.md`](cli/signoff.md)'s "A reworded checklist is not
+  evidence drift".
 
 **Build identity is route-dependent, so committed reports must not be
 byte-compared (issue #2249).** A `klt signoff` tier/fleet report's `build`
