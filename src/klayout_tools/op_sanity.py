@@ -973,9 +973,13 @@ def _declared_nodes(
 
     Two sources: an explicit ``op_lint.nodes`` declaration (a flat list, or
     an ``{"inputs": [...], "outputs": [...]}`` object), and every
-    ``v(<node>)`` reference inside the request's own ``.meas`` cards -- the
+    ``v(<node>)`` reference inside the request's own measurements -- the
     latter is what makes the common Loop A failure ("my measurement reads a
     node that does not exist") a named finding instead of a silent 0 V.
+
+    A measurement contributes its ``v(...)`` references whether it is declared
+    as a ``.meas`` card (``spice``) or as a post-analysis expression (``expr``,
+    issue #2533) -- see :func:`_measurement_node_references`.
     """
     collected: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -996,15 +1000,37 @@ def _declared_nodes(
             for node in declared.get(role) or []:
                 _add(str(node), f"op_lint.nodes.{role}")
 
-    for spec in request.get("measurements") or []:
-        spice = spec.get("spice")
-        if not isinstance(spice, str):
-            continue
-        for match in _MEAS_NODE_RE.finditer(spice):
-            for group in match.groups():
-                if group:
-                    _add(group, f"measurement {spec.get('name', '?')!r}")
+    for node, origin in _measurement_node_references(request):
+        _add(node, origin)
     return collected
+
+
+def _measurement_node_references(
+    request: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Every ``v(<node>)`` reference in the request's own measurements, paired
+    with the measurement name it came from.
+
+    Scans both declarable measurement forms: a ``.meas`` card (``spice``) and
+    a post-analysis expression (``expr``, issue #2533). ``expr`` is
+    specifically how an *operating-point* quantity is declared -- the very
+    analysis this lint runs -- so leaving it unscanned would blind the lint to
+    exactly the measurements most likely to reach it.
+
+    Split out of :func:`_declared_nodes` so that function's branch count does
+    not grow with the number of scanned fields (see
+    ``scripts/check_complexity_baseline.py``).
+    """
+    references: list[tuple[str, str]] = []
+    for spec in request.get("measurements") or []:
+        origin = f"measurement {spec.get('name', '?')!r}"
+        for field in ("spice", "expr"):
+            text = spec.get(field)
+            if not isinstance(text, str):
+                continue
+            for match in _MEAS_NODE_RE.finditer(text):
+                references.extend((group, origin) for group in match.groups() if group)
+    return references
 
 
 # --------------------------------------------------------------------------- #

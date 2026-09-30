@@ -247,6 +247,55 @@ def test_run_sim_xyce_refuses_fail_fast_probe(tmp_path):
         sim.run_sim(str(request))
 
 
+def test_run_sim_xyce_refuses_expr_measurements(tmp_path):
+    """Issue #2533: `expr` is emitted as ngspice `let`/`print` commands inside
+    a `.control` block, and the Xyce deck has none. Refused by name up front
+    rather than silently dropped -- a corner that ran without its `expr`
+    lines would report every such measurement as "produced no value", which
+    reads as a circuit regression, not an unsupported request field."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [{"name": "vout", "expr": "v(out)"}],
+        },
+    )
+    with pytest.raises(sim.SimError, match=r"measurements\[\]\.expr.*'xyce'"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_xyce_still_accepts_meas_cards(tmp_path, monkeypatch):
+    """The refusal above is scoped to `expr` -- a `.meas`-card request on the
+    `xyce` engine is not newly rejected: it passes the support boundary and
+    reaches the per-corner path, which then reports a launch error rather than
+    raising. The binary name is monkeypatched (as in
+    `test_run_sim_xyce_missing_binary_reports_per_corner_error`) so the
+    assertion holds whether or not Xyce is installed."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+    monkeypatch.setattr(sim, "XYCE_BINARY", "xyce-not-on-path-xyz")
+
+    report = sim.run_sim(str(request))  # must not raise
+
+    assert report["corner_count"] == 1
+    assert any(
+        "could not launch" in d["message"] for d in report["corners"][0]["diagnostics"]
+    )
+
+
 def test_run_sim_xyce_missing_binary_reports_per_corner_error(tmp_path, monkeypatch):
     # A missing Xyce binary is not an exception: like a missing ngspice, it
     # folds into per-corner `status: "error"` diagnostics ("every corner is
@@ -686,6 +735,180 @@ def test_run_sim_meas_op_card_rejected_even_with_non_op_analysis_kind(tmp_path):
         sim.run_sim(str(request))
 
 
+def test_validate_meas_card_op_error_points_at_expr(tmp_path):
+    """Issue #2533: the `.meas op` refusal now names the field that *does*
+    express an operating-point quantity, instead of only offering the
+    single-step-transient workaround."""
+    with pytest.raises(sim.SimError, match=r"measurements\[\]\.expr"):
+        sim._validate_meas_card("vgs", ".meas op vgs find v(g)")
+
+
+# --------------------------------------------------------------------------- #
+# `measurements[].expr` form validation (issue #2533)
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_measurement_forms_accepts_either_form():
+    sim._validate_measurement_forms(
+        [
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
+            {"name": "vgs", "expr": "v(g) - v(s)"},
+        ]
+    )  # must not raise
+
+
+def test_validate_measurement_forms_rejects_neither_form():
+    with pytest.raises(sim.SimError, match="exactly one of 'spice'"):
+        sim._validate_measurement_forms([{"name": "vout", "unit": "V"}])
+
+
+def test_validate_measurement_forms_rejects_missing_name():
+    with pytest.raises(sim.SimError, match="requires 'name'"):
+        sim._validate_measurement_forms([{"expr": "v(out)"}])
+
+
+def test_validate_measurement_forms_rejects_both_forms():
+    """Both would emit the same response name twice -- one file-scope `.meas`
+    card and one `let`/`print` pair -- leaving which value wins to log
+    ordering."""
+    with pytest.raises(sim.SimError, match="declares both 'spice' and 'expr'"):
+        sim._validate_measurement_forms(
+            [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "expr": "v(out)",
+                }
+            ]
+        )
+
+
+@pytest.mark.parametrize("expr", ["", "   ", 1.5, ["v(out)"]])
+def test_validate_measurement_forms_rejects_empty_expr(expr):
+    with pytest.raises(sim.SimError, match="empty or non-string 'expr'"):
+        sim._validate_measurement_forms([{"name": "vout", "expr": expr}])
+
+
+def test_validate_measurement_forms_treats_null_expr_as_absent():
+    """`expr: null` is the house convention for an undeclared optional field
+    (same as every other `options.*`), so it reads as "no `expr` declared" --
+    which, paired with a `spice` card, is just today's request."""
+    sim._validate_measurement_forms(
+        [{"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u", "expr": None}]
+    )  # must not raise
+
+
+def test_validate_measurement_forms_rejects_multiline_expr():
+    """A newline would split the expression into a second *control command*
+    inside the generated `.control` block."""
+    with pytest.raises(sim.SimError, match="multi-line 'expr'"):
+        sim._validate_measurement_forms([{"name": "vout", "expr": "v(out)\nquit"}])
+
+
+@pytest.mark.parametrize("name", ["v.out", "1vout", "v out", "v(out)", "v-out"])
+def test_validate_measurement_forms_rejects_unemittable_expr_name(name):
+    """An `expr` name is an ngspice vector name in the deck *and* the key read
+    back out of the log, so it is held to the intersection of both."""
+    with pytest.raises(sim.SimError, match=r"\[A-Za-z_\]\[A-Za-z0-9_\]\*"):
+        sim._validate_measurement_forms([{"name": name, "expr": "v(out)"}])
+
+
+def test_validate_measurement_forms_allows_dotted_name_for_a_spice_card():
+    """The stricter name rule applies only to `expr`: a `.meas` card's name is
+    never emitted as a `let` target, so a pre-#2533 request using a dotted
+    name keeps working exactly as before."""
+    sim._validate_measurement_forms(
+        [{"name": "stage1.vout", "spice": ".meas tran stage1.vout FIND v(out) AT=1u"}]
+    )  # must not raise
+
+
+def test_validate_measurement_forms_rejects_duplicate_expr_name():
+    with pytest.raises(sim.SimError, match="declared more than once"):
+        sim._validate_measurement_forms(
+            [
+                {"name": "vout", "expr": "v(out)"},
+                {"name": "vout", "expr": "v(out) * 2"},
+            ]
+        )
+
+
+def test_validate_measurement_forms_rejects_expr_colliding_with_a_later_card():
+    """Order-independent: a `let vout` still overwrites whatever held that
+    name, so the collision is caught even when the `.meas` card is declared
+    after the `expr`."""
+    with pytest.raises(sim.SimError, match="declared more than once"):
+        sim._validate_measurement_forms(
+            [
+                {"name": "vout", "expr": "v(out)"},
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
+            ]
+        )
+
+
+def test_validate_measurement_forms_ignores_duplicate_spice_only_names():
+    """Two `.meas` cards sharing a name is ngspice's own business, exactly as
+    before this issue -- the new uniqueness rule is scoped to `expr` so no
+    previously-accepted request starts failing."""
+    sim._validate_measurement_forms(
+        [
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
+            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
+        ]
+    )  # must not raise
+
+
+def test_validate_measurement_forms_rejects_case_insensitive_duplicate_expr_name():
+    """ngspice lower-cases the name it prints back, so `Vout` and `vout` are
+    one name by harvest time -- accepting both would let
+    `_harvest_measurement_value`'s lower-cased `expr` fallback report the
+    card's value under the expression's name."""
+    with pytest.raises(sim.SimError, match="declared more than once"):
+        sim._validate_measurement_forms(
+            [
+                {"name": "Vout", "expr": "v(out)"},
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
+            ]
+        )
+
+
+def test_harvest_measurement_value_case_folds_an_expr_name():
+    """`let Vmid` / `print Vmid` prints `vmid = ...` (ngspice 46), so an
+    `expr`'s harvest falls back to the lower-cased name -- otherwise every
+    mixed-case `expr` name `_EXPR_MEAS_NAME_RE` accepts would report "produced
+    no value"."""
+    values = {"vmid": 2.0}
+    assert (
+        sim._harvest_measurement_value(
+            values, {"name": "Vmid", "expr": "v(mid)"}, is_xyce=False
+        )
+        == 2.0
+    )
+
+
+def test_harvest_measurement_value_case_folds_a_meas_card():
+    """Issue #2546: ngspice lower-cases a `.meas` name in its own report too,
+    so an upper/mixed-case card name must fall back to the lower-cased
+    lookup exactly as an `expr` name does."""
+    values = {"vout": 1.0}
+    assert (
+        sim._harvest_measurement_value(
+            values,
+            {"name": "Vout", "spice": ".meas tran Vout FIND v(out) AT=1u"},
+            is_xyce=False,
+        )
+        == 1.0
+    )
+
+
+def test_expr_measurements_preserves_declaration_order():
+    specs = [
+        {"name": "a", "expr": "v(out)"},
+        {"name": "card", "spice": ".meas tran card FIND v(out) AT=1u"},
+        {"name": "b", "expr": "a * 2"},
+    ]
+    assert [s["name"] for s in sim._expr_measurements(specs)] == ["a", "b"]
+
+
 # --------------------------------------------------------------------------- #
 # Model-library resolution (klt pdk integration, #45)
 # --------------------------------------------------------------------------- #
@@ -1094,6 +1317,138 @@ def test_write_corner_deck_save_all_follows_pre_osdi_and_still_precedes_alter(
     assert control_idx < pre_osdi_idx < save_idx
     assert pre_osdi_idx == control_idx + 1
     assert save_idx == pre_osdi_idx + 1
+
+
+# --------------------------------------------------------------------------- #
+# _write_corner_deck: `measurements[].expr` (issue #2533)
+# --------------------------------------------------------------------------- #
+
+_EXPR_SPEC = {"name": "vgs", "expr": "v(g) - v(s)", "unit": "V"}
+_CARD_SPEC = {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+
+
+def test_write_corner_deck_expr_emits_let_and_print_inside_control(tmp_path):
+    point = sim.CornerPoint("tt", {}, 27)
+    lines = _write_deck(tmp_path, point, measurements_spec=[_EXPR_SPEC])
+
+    control_idx = lines.index(".control")
+    endc_idx = lines.index(".endc")
+    let_idx = lines.index("let vgs = v(g) - v(s)")
+    print_idx = lines.index("print vgs")
+
+    assert control_idx < let_idx < print_idx < endc_idx
+    assert print_idx == let_idx + 1
+
+
+def test_write_corner_deck_expr_emits_no_file_scope_card(tmp_path):
+    """An `expr` measurement has no top-level ngspice syntax at all -- which
+    is the entire reason issue #2533 exists. Nothing may leak to file
+    scope."""
+    point = sim.CornerPoint("tt", {}, 27)
+    lines = _write_deck(tmp_path, point, measurements_spec=[_EXPR_SPEC])
+
+    control_idx = lines.index(".control")
+    assert not any(
+        "v(g) - v(s)" in line or line.startswith(".meas")
+        for line in lines[:control_idx]
+    )
+
+
+def test_write_corner_deck_expr_runs_after_the_analysis(tmp_path):
+    """The expression reads vectors the analysis produced, so it cannot run
+    before it."""
+    point = sim.CornerPoint("tt", {"vdd": 1.8}, 27)
+    lines = _write_deck(tmp_path, point, measurements_spec=[_EXPR_SPEC])
+
+    analysis_idx = next(i for i, line in enumerate(lines) if line.startswith("tran "))
+    assert analysis_idx < lines.index("let vgs = v(g) - v(s)")
+
+
+def test_write_corner_deck_expr_runs_after_the_rawfile_write(tmp_path):
+    """`let` adds its result to the current plot and `write` dumps every
+    vector in that plot, so evaluating before the write would silently add
+    the derived vectors to the `options.waveforms` artifact. Declaring an
+    `expr` must not change what the rawfile contains."""
+    point = sim.CornerPoint("tt", {}, 27)
+    raw_path = str(tmp_path / "waveform.raw")
+    lines = _write_deck(
+        tmp_path, point, measurements_spec=[_EXPR_SPEC], raw_path=raw_path
+    )
+
+    write_idx = lines.index(f"write {raw_path}")
+    assert write_idx < lines.index("let vgs = v(g) - v(s)")
+
+
+def test_write_corner_deck_expr_lines_follow_declaration_order(tmp_path):
+    """So a later expression may reference an earlier one's name (verified
+    against ngspice 46 -- see the real-ngspice chained-expression test)."""
+    point = sim.CornerPoint("tt", {}, 27)
+    lines = _write_deck(
+        tmp_path,
+        point,
+        measurements_spec=[
+            {"name": "gain", "expr": "v(out) / v(in)"},
+            _CARD_SPEC,
+            {"name": "gain_x2", "expr": "gain * 2"},
+        ],
+    )
+
+    assert [line for line in lines if line.startswith("let ")] == [
+        "let gain = v(out) / v(in)",
+        "let gain_x2 = gain * 2",
+    ]
+
+
+def test_write_corner_deck_mixed_forms_emit_card_at_file_scope_and_expr_in_control(
+    tmp_path,
+):
+    point = sim.CornerPoint("tt", {}, 27)
+    lines = _write_deck(tmp_path, point, measurements_spec=[_CARD_SPEC, _EXPR_SPEC])
+
+    control_idx = lines.index(".control")
+    assert lines.index(_CARD_SPEC["spice"]) < control_idx
+    assert control_idx < lines.index("let vgs = v(g) - v(s)")
+
+
+def test_write_corner_deck_expr_still_triggers_save_all(tmp_path):
+    """An `expr` reads saved vectors like a `.meas` card does, so it must not
+    fall through #2521's `save all` trigger."""
+    point = sim.CornerPoint("tt", {}, 27)
+    lines = _write_deck(tmp_path, point, measurements_spec=[_EXPR_SPEC])
+
+    assert "save all" in lines
+
+
+def test_write_corner_deck_without_expr_is_unchanged(tmp_path):
+    """Regression: a request declaring only `.meas` cards produces a
+    byte-identical deck to before issue #2533 -- no `let`/`print` line at
+    all."""
+    point = sim.CornerPoint("tt", {"vdd": 1.8}, 27)
+    lines = _write_deck(tmp_path, point, measurements_spec=[_CARD_SPEC])
+
+    assert not any(
+        line.startswith("let ") or line.startswith("print ") for line in lines
+    )
+    assert lines[-3:] == ["quit", ".endc", ".end"]
+
+
+def test_write_xyce_deck_skips_expr_measurements(tmp_path):
+    """`run_sim` refuses the combination up front (see the boundary test
+    below); this only pins the writer as total rather than `KeyError`-prone
+    if a future caller reaches it directly."""
+    deck_path = tmp_path / "xyce.cir"
+    sim._write_xyce_deck(
+        deck_path=str(deck_path),
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib=None,
+        point=sim.CornerPoint(None, {}, 27),
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=[_CARD_SPEC, _EXPR_SPEC],
+    )
+    lines = deck_path.read_text().splitlines()
+
+    assert _CARD_SPEC["spice"] in lines
+    assert not any("v(g) - v(s)" in line for line in lines)
 
 
 def test_corner_id_multi_rail_format():
@@ -2406,6 +2761,169 @@ def test_run_sim_stubbed_no_such_vector_augments_generic_measurement_code(
     codes = [d["code"] for d in corner["diagnostics"]]
     assert "measurement" in codes
     assert "no_such_vector" in codes
+
+
+def test_run_sim_stubbed_expr_value_is_harvested_and_graded(tmp_path, monkeypatch):
+    """Issue #2533: an `expr` measurement's `print` output uses the same
+    `<name> = <value>` shape a `.meas` result does, so it flows through the
+    existing harvest into a graded `measurements[]` entry -- request -> deck
+    -> parsed result -> `limits` verdict."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [
+                {
+                    "name": "vout_op",
+                    "expr": "v(out)",
+                    "unit": "V",
+                    "limits": {"min": 0.9, "max": 1.1},
+                }
+            ],
+        },
+    )
+    _stub_subprocess_run(
+        monkeypatch, log_text="No. of Data Rows : 1\nvout_op = 1.000000e+00\n"
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    (corner,) = report["corners"]
+    (measurement,) = corner["measurements"]
+    assert measurement == {
+        "name": "vout_op",
+        "value": 1.0,
+        "unit": "V",
+        "status": "pass",
+        "margin": pytest.approx(0.1),
+    }
+    assert corner["diagnostics"] == []
+
+
+def test_run_sim_stubbed_expr_with_no_value_names_the_expr_causes(
+    tmp_path, monkeypatch
+):
+    """The generic "produced no value" wording names neither of an `expr`'s own
+    two failure modes (the expression did not resolve; it resolved to a
+    multi-point/complex result, which `print` renders as a table). This is the
+    single most likely first-use mistake with the field, so the diagnostic
+    says so."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [{"name": "swing", "expr": "v(out)"}],
+        },
+    )
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text="Index   time            v(out)\n0\t0.0\t0.0\n1\t1e-09\t0.5\n",
+    )
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    (diagnostic,) = [d for d in corner["diagnostics"] if d["code"] == "measurement"]
+    assert "reduces to a single scalar" in diagnostic["message"]
+    assert "'v(out)'" in diagnostic["message"]
+
+
+def test_run_sim_stubbed_expr_is_evaluated_and_graded_in_every_corner(
+    tmp_path, monkeypatch
+):
+    """Issue #2533 composes with `corners.*` by construction: the `let`/`print`
+    pair is regenerated in each corner's own deck, after that corner's `alter`
+    cards, so the expression is evaluated against that corner's solve rather
+    than once for the sweep."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "corners": {"supply_v": {"vdd": [1.62, 1.98]}},
+            "measurements": [
+                {
+                    "name": "vout_op",
+                    "expr": "v(out)",
+                    "unit": "V",
+                    "limits": {"min": 0.5, "max": 2.5},
+                }
+            ],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        deck_text = Path(cmd[2]).read_text()
+        assert "let vout_op = v(out)" in deck_text
+        assert "print vout_op" in deck_text
+        vdd = float(re.search(r"alter vdd=([\d.]+)", deck_text).group(1))
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(f"No. of Data Rows : 1\nvout_op = {vdd / 2:.6e}\n")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    assert report["corner_count"] == 2
+    values = [c["measurements"][0]["value"] for c in report["corners"]]
+    assert values == [pytest.approx(0.81), pytest.approx(0.99)]
+
+
+def test_run_sim_stubbed_expr_samples_are_pooled_into_monte_carlo_statistics(
+    tmp_path, monkeypatch
+):
+    """The Monte Carlo statistics layer keys off `measurements[].name`, not the
+    form it was declared in, so an `expr` measurement's per-sample values pool
+    with no extra declaration (issue #2533's `monte_carlo` interaction)."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "monte_carlo": {"n": 3, "seed": 7, "vary": "mismatch"},
+            "measurements": [{"name": "vout_op", "expr": "v(out)", "unit": "V"}],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        deck_text = Path(cmd[2]).read_text()
+        sample_index = int(re.search(r"mc_sample_index=(\d+)", deck_text).group(1))
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(f"No. of Data Rows : 1\nvout_op = {1.0 + sample_index:.6e}\n")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    report = sim.run_sim(str(request))
+
+    (entry,) = report["measurements"]
+    assert entry["name"] == "vout_op"
+    assert entry["monte_carlo"]["n"] == 3
+    assert entry["monte_carlo"]["errored"] == 0
+    assert entry["monte_carlo"]["mean"] == pytest.approx(2.0)
+    assert entry["monte_carlo"]["min"] == pytest.approx(1.0)
+    assert entry["monte_carlo"]["max"] == pytest.approx(3.0)
+
+
+def test_no_value_message_for_a_meas_card_is_unchanged():
+    """Committed evidence records and callers match on this exact string, so
+    the `spice` wording stays byte-identical to pre-#2533."""
+    assert (
+        sim._no_value_message({"name": "vout", "spice": ".meas tran vout FIND v(out)"})
+        == "measurement 'vout' produced no value"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -7736,6 +8254,178 @@ def test_integration_save_all_overrides_netlist_bodys_restrictive_save_card(tmp_
     (measurement,) = corner["measurements"]
     assert measurement["status"] == "pass"
     assert measurement["value"] == pytest.approx(1.0 / 3.0, abs=1e-3)
+
+
+def _write_divider_body(tmp_path: Path) -> Path:
+    """A 1k/2k resistive divider off a 3 V source: `v(mid)` is exactly 2 V and
+    `v(mid)/v(in)` exactly 2/3 at the operating point, so an `expr` result can
+    be asserted against arithmetic rather than a golden number."""
+    body = tmp_path / "divider.spice"
+    body.write_text("Vin in 0 DC 3.0\nR1 in mid 1k\nR2 mid 0 2k\n")
+    return body
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_expr_makes_an_op_analysis_measurement_gradeable(tmp_path):
+    """Issue #2533's headline case, end to end against real ngspice: an
+    operating-point quantity has no `.meas` form at all (there is no
+    `.MEASURE OP`), so before this issue it could not be expressed in a
+    request. Declared as an `expr` it now runs, parses, and grades against
+    `limits` like any other measurement."""
+    _write_divider_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "divider.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [
+                {
+                    "name": "vmid",
+                    "expr": "v(mid)",
+                    "unit": "V",
+                    "limits": {"min": 1.9, "max": 2.1},
+                },
+                {"name": "ratio", "expr": "v(mid) / v(in)", "unit": ""},
+            ],
+        },
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    (corner,) = report["corners"]
+    assert corner["diagnostics"] == []
+    values = {m["name"]: m for m in corner["measurements"]}
+    assert values["vmid"]["value"] == pytest.approx(2.0, abs=1e-6)
+    assert values["vmid"]["status"] == "pass"
+    assert values["ratio"]["value"] == pytest.approx(2.0 / 3.0, abs=1e-6)
+    # No `limits` -> reported, never fails (the documented characterization
+    # mode), exactly as for a `.meas` card.
+    assert values["ratio"]["status"] == "pass"
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_expr_reduces_a_transient_vector_to_a_scalar(tmp_path):
+    """The other half of the gap: a quantity that *is* a reduction over a
+    swept analysis's vectors rather than one `.meas` card's search. Peak-to-
+    peak swing needs two `.meas` cards and a subtraction no card can do; one
+    `expr` expresses it directly."""
+    body = tmp_path / "rc.spice"
+    body.write_text("Vin in 0 SIN(0 1 1k)\nR1 in out 1k\nC1 out 0 1n\n")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "rc.spice",
+            "analysis": {"kind": "tran", "args": "1u 2m"},
+            "measurements": [
+                {"name": "vmax", "spice": ".meas tran vmax MAX v(out)", "unit": "V"},
+                {"name": "vmin", "spice": ".meas tran vmin MIN v(out)", "unit": "V"},
+                {
+                    "name": "swing",
+                    "expr": "vecmax(v(out)) - vecmin(v(out))",
+                    "unit": "V",
+                },
+            ],
+        },
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    (corner,) = report["corners"]
+    assert corner["diagnostics"] == []
+    values = {m["name"]: m["value"] for m in corner["measurements"]}
+    # The `expr` reduction and the two `.meas` cards are reading the same
+    # vector, so the identity has to hold -- the two forms coexist in one
+    # request and agree.
+    assert values["swing"] == pytest.approx(values["vmax"] - values["vmin"], rel=1e-6)
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_expr_can_reference_an_earlier_expr(tmp_path):
+    """`let` lines are emitted in declaration order into one plot, so a later
+    expression may build on an earlier one's name. Verified against the real
+    engine because it is a property of ngspice's own `let`, not of our deck
+    writer."""
+    _write_divider_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "divider.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [
+                {"name": "vmid", "expr": "v(mid)", "unit": "V"},
+                {"name": "vmid_mv", "expr": "vmid * 1e3", "unit": "mV"},
+            ],
+        },
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    (corner,) = report["corners"]
+    values = {m["name"]: m["value"] for m in corner["measurements"]}
+    assert values["vmid_mv"] == pytest.approx(2000.0, abs=1e-3)
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_expr_with_a_mixed_case_name_is_harvested(tmp_path):
+    """ngspice lower-cases the vector name it prints (`print Vmid` ->
+    `vmid = 2.000000e+00`), so a mixed-case `expr` name only grades if the
+    harvest case-folds. Against the real engine because the casing is
+    ngspice's own behaviour, not our deck writer's."""
+    _write_divider_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "divider.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [
+                {
+                    "name": "Vmid",
+                    "expr": "v(mid)",
+                    "unit": "V",
+                    "limits": {"min": 1.9, "max": 2.1},
+                }
+            ],
+        },
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    (corner,) = report["corners"]
+    assert corner["diagnostics"] == []
+    (measurement,) = corner["measurements"]
+    # The response key is the caller's own spelling, not ngspice's.
+    assert measurement["name"] == "Vmid"
+    assert measurement["value"] == pytest.approx(2.0, abs=1e-6)
+    assert measurement["status"] == "pass"
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_expr_does_not_leak_into_the_waveform_rawfile(tmp_path):
+    """`let` adds its result to the current plot and `write` dumps that plot,
+    so the `let`/`print` lines are emitted *after* the rawfile write --
+    declaring an `expr` must not change what `options.waveforms` captures."""
+    body = tmp_path / "rc.spice"
+    body.write_text("Vin in 0 SIN(0 1 1k)\nR1 in out 1k\nC1 out 0 1n\n")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "rc.spice",
+            "analysis": {"kind": "tran", "args": "10u 200u"},
+            "measurements": [{"name": "swing_probe", "expr": "vecmax(v(out))"}],
+            "options": {"waveforms": True, "keep_artifacts": True},
+        },
+    )
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["value"] is not None
+    raw_text = Path(corner["artifacts"]["raw"]).read_text()
+    assert "swing_probe" not in raw_text
 
 
 @_SKIP_NO_NGSPICE
