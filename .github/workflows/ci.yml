@@ -889,7 +889,14 @@ jobs:
       fail-fast: false
       matrix:
         # 3.10 is the floor declared in pyproject.toml (requires-python).
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # 3.14 is the current CPython release: `requires-python` declares no
+        # upper bound, so this repo already claims to install and run there --
+        # the leg exists so that claim is tested rather than asserted (issue
+        # #2593). Each new leg costs a real ~370-420s of CI compute against
+        # .github/ci-wall-clock-budget.json's total, so add one deliberately:
+        # a leg per interpreter this package actually claims to support, not
+        # one per interpreter that exists.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
 
@@ -904,10 +911,12 @@ jobs:
 
       - name: Install dependencies (includes the klayout wheel)
         # --extra functional-verification pulls in the pinned cocotb (issue
-        # #423, Phase 3 of Epic #391) -- a no-op on any interpreter >=3.14
-        # per pyproject.toml's own marker (none in this job's matrix today,
-        # but the resolver handles it correctly either way, verified while
-        # developing this pin).
+        # #423, Phase 3 of Epic #391). This now resolves on every leg of the
+        # matrix including 3.14: the extra's `python_version < "3.14"` marker
+        # was dropped in issue #2593 once cocotb 2.1.0 added 3.14 support and
+        # started shipping cp314 wheels. `--locked` means a cocotb line that
+        # ever reintroduces a real ceiling fails here loudly at resolve time
+        # rather than silently dropping cocotb from a leg's resolved set.
         run: uv sync --locked --extra dev --extra functional-verification
 
       - name: Install ngspice

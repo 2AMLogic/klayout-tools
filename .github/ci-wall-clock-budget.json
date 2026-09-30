@@ -107,13 +107,32 @@
     "single-leg (worst runs read 439/442/459/996 and 314/317/394/923) while",
     "a real regression moves all four together, as the excluded incident's",
     "724/741/810/816 shows. Changing the statistic is out of scope for this",
-    "re-measure."
+    "re-measure.",
+    "",
+    "'Tests (Python 3.14)' is new as of issue #2593, which added a 3.14 leg",
+    "to ci.yml's `test` matrix so the repo's unbounded `requires-python`",
+    "claim is tested rather than asserted. It runs the identical suite to",
+    "the other four legs on an interpreter of the same generation, so it",
+    "gets the identical 700s budget the 2026-09-29 re-measure gave its",
+    "siblings, rather than the 420s this PR originally proposed against the",
+    "since-superseded 2100s-total baseline -- re-derive it from its own",
+    "timings if its first real runs land materially above the 3.13 leg.",
+    "",
+    "total_job_budget_seconds is 3700, not 3000, for exactly that one new",
+    "leg: 3000 + 700. This is a deliberate ~23% of total CI compute bought",
+    "to close a real coverage gap, not headroom absorption -- the four",
+    "existing legs' 2026-09-29 baseline is unchanged by this PR, and no",
+    "other per-job budget was raised. run_wall_clock_budget_seconds stays",
+    "1800: matrix legs run in parallel, so a fifth leg adds compute, not",
+    "wall clock. The `baseline` block below still reflects only the",
+    "four-leg 2026-09-29 re-measure -- the 3.14 leg has no comparable",
+    "history yet."
   ],
   "exclude_jobs": [
     "CI wall-clock budget"
   ],
   "default_job_budget_seconds": 600,
-  "total_job_budget_seconds": 3000,
+  "total_job_budget_seconds": 3700,
   "run_wall_clock_budget_seconds": 1800,
   "jobs": {
     "Lint (ruff)": 120,
@@ -129,6 +148,7 @@
     "Tests (Python 3.11)": 700,
     "Tests (Python 3.12)": 700,
     "Tests (Python 3.13)": 700,
+    "Tests (Python 3.14)": 700,
     "klt verify Action smoke test": 120,
     "Golden artifacts (hash seed + path varied)": 120,
     "Tests (numpy cross-check)": 120

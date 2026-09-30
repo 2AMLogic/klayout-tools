@@ -35,32 +35,43 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.14",
 ]
-# Backs the future `klt functional-verification` verb (issue #422, Phase 3
-# of Epic #391) -- not a runtime dependency of any shipped `klt` command
-# yet, so it is its own extra rather than folded into `dependencies` or
-# `dev`. Pinned per docs/design/cocotb-verification-spike.md's finding
-# (issue #423): cocotb 2.0.1's own PyPI metadata declares
-# `Requires-Python: >=3.6.2` with **no upper bound** (verified against
-# PyPI's JSON API), so pip/uv's resolver has no signal that Python 3.14 is
-# unsupported -- `pip install cocotb` under a 3.14 interpreter proceeds to
-# build the package, then fails with cocotb's own internal check:
-# `RuntimeError: cocotb 2.0.1 only supports a maximum Python version of
-# 3.13` (verified live). The `python_version < "3.14"` marker below moves
-# that failure to dependency-*resolution* time -- the standard, idiomatic
-# way pip/uv already handle a package with no distributable release for a
-# given interpreter -- rather than a confusing traceback surfacing from deep
-# inside cocotb's own build backend. cocotb 2.1.0 (the pin this extra
-# carried at the 2026-09 bump, issue #2583) still declares no upper bound
-# (`Requires-Python: >=3.9`) but now ships cp314 wheels, so the marker is
-# conservative rather than load-bearing until it is deliberately lifted --
-# lifting it is the verb issue's call (the `klt functional-verification`
-# Python-version guard must move in lockstep), not a dependency-bump PR's.
-# Until then a `functional-verification` install attempt on 3.14 simply
-# omits cocotb from the resolved set, and any code that needs it must raise
-# its own clear "functional-verification requires Python < 3.14" error
-# before calling into it (the verb issue's concern, not this pin's).
+# Backs the `klt functional-verification` verb (issue #422, Phase 3 of Epic
+# #391) -- not a runtime dependency of any shipped `klt` command, so it is its
+# own extra rather than folded into `dependencies` or `dev`.
+#
+# History, kept because the now-removed marker is still cited as current in
+# docs/design/sdf-annotate-feasibility-spike.md and scripts/research/ (both
+# captured records, deliberately not re-edited): this extra used to carry a
+# `python_version < "3.14"` environment marker, per
+# docs/design/cocotb-verification-spike.md's finding (issue #423). cocotb
+# 2.0.1's own PyPI metadata declared `Requires-Python: >=3.6.2` with **no
+# upper bound** (verified against PyPI's JSON API), so pip/uv's resolver had no
+# signal that Python 3.14 was unsupported -- `pip install cocotb` under a 3.14
+# interpreter proceeded to build the package, then failed with cocotb's own
+# internal check: `RuntimeError: cocotb 2.0.1 only supports a maximum Python
+# version of 3.13` (verified live). The marker moved that failure to
+# dependency-*resolution* time -- the standard, idiomatic way pip/uv already
+# handle a package with no distributable release for a given interpreter --
+# rather than a confusing traceback surfacing from deep inside cocotb's own
+# build backend.
+#
+# The marker was dropped in issue #2593, once the claim it stood in for became
+# verifiable instead of assumed: cocotb 2.1.0 (this pin, bumped in issue #2583)
+# added Python 3.14 support and ships cp314 wheels, and
+# `.github/workflows/ci.yml`'s `test` matrix now carries a real 3.14 leg that
+# installs this extra. Deciding measurement, run 2026-09-28 before lifting it:
+# `uv sync --locked --python 3.14 --extra dev --extra functional-verification`
+# resolves the full 82-package set with no conflicts and installs
+# `cocotb==2.1.0` from a genuine cp314 wheel (`import cocotb` and
+# `cocotb-config --version` both report 2.1.0 under CPython 3.14.7).
+#
+# Before widening this pin past `<2.2`, re-run that measurement and check the
+# CI matrix still covers every interpreter `requires-python` claims: if a
+# future cocotb line reintroduces a real ceiling, the right answer is a marker
+# again (plus a matching guard in `klt functional-verification`), not a silent
+# install-time failure.
 functional-verification = [
-    "cocotb>=2.1.0,<2.2; python_version < \"3.14\"",
+    "cocotb>=2.1.0,<2.2",
 ]
 # Backs `tests/test_mom_cross_validation.py` (issue #895, Phase 2c of the
 # Method-of-Moments epic #701): the external MoM oracle used to cross-check

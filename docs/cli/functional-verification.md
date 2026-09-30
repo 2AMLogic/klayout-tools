@@ -162,12 +162,16 @@ the reviewer-side check.
 
 ### Requirements
 
-- **cocotb** (`pip install cocotb`). It is deliberately *not* a `klt`
-  dependency: cocotb 2.0 refuses to run on Python 3.14+, while this repo
-  supports Python 3.10+ with no upper bound, so pinning it would break `klt`
-  installs that never verify anything. A missing install is a clear,
-  actionable error (exit 1), never a traceback — the same posture `klt
-  synthesize` takes toward a missing `yosys` binary.
+- **cocotb** (`pip install cocotb`, or `uv sync --extra
+  functional-verification` for this repo's pinned version). It lives in an
+  optional extra and is deliberately *not* a base `klt` dependency: it is a
+  compiled package with a simulator toolchain behind it, and most `klt`
+  installs never verify anything. A missing install is a clear, actionable
+  error (exit 1), never a traceback — the same posture `klt synthesize`
+  takes toward a missing `yosys` binary. The extra installs on every Python
+  this project supports, 3.10 through 3.14; its old `python_version <
+  "3.14"` marker was dropped in issue #2593 once cocotb 2.1.0 added 3.14
+  support.
 - **`iverilog`** or **`verilator`** (plus `verilator_coverage` for coverage
   runs) on `$PATH`, matching the requested engine.
 
