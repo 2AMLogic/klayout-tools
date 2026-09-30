@@ -71,6 +71,57 @@ The Verilator tax is fixed per invocation, so it **compounds** inside a
 design-space-exploration loop (N candidates × that build cost) in a way it
 does not for a single per-PR run — budget it accordingly.
 
+### Which engine for which sources
+
+The table above is about *cost*. This is about *capability*, and it is the
+harder constraint: **Icarus Verilog 13.0 is not a SystemVerilog-2012
+implementation.** It parses Verilog-2005 plus a partial `-g2012` subset, and
+constructs that modern SystemVerilog IP uses routinely fall outside it. A
+packed-struct named-field assignment pattern is the one that bites first:
+
+```systemverilog
+localparam irqs_t IRQ_DEFAULT =
+    '{irq_ext: 1'b1, irq_int: 1'b0, lower_cause: 5'd03};
+```
+
+Icarus rejects that with a bare `syntax error` and stops on the **first**
+file containing it, so the diagnostic names a line number rather than the
+language feature — as reported against lowRISC Ibex in issue #2621:
+
+```
+$ iverilog -g2012 -s ibex_core -Irtl ... rtl/ibex_pkg.sv ...
+rtl/ibex_pkg.sv:322: syntax error
+I give up.
+```
+
+**Vendored open IP is the case that hits this.** lowRISC/OpenTitan `prim_*`
+primitives, lowRISC Ibex, OpenHW CV32E40P and most contemporary free RISC-V
+cores are written in modern SystemVerilog, and need `"engine": "verilator"`
+— Verilator 5.x handles the same sources. Selecting a plain-Verilog-2005
+block instead is an equally valid answer, but that is a *source* decision,
+not an engine one.
+
+**There is no pre-flight feasibility check today.** The only way to discover
+that a source set is outside Icarus's subset is to run a full request and
+read the raw `iverilog` error out of `build_icarus.log` (see "Artifacts").
+Neither the request nor the response carries an engine-feasibility field, so
+this failure is not distinguishable from any other build failure (exit 1)
+from the JSON alone.
+
+**The choice is per-request, not per-project.** `engine` is an ordinary
+request field, so one repository can verify its Verilog-2005 blocks on Icarus
+and its SystemVerilog blocks on Verilator, and can run the *identical*
+request under both — worth doing for an unrelated reason too, see "Run both
+engines on a bench that matters" below. The cost of a split is that each
+block's evidence record carries whichever engine produced it, in
+`environment.engine` / `environment.engine_version`.
+
+Two larger shapes for this gap — a cheap elaborate-only feasibility probe
+reported as a structured field, and an optional `sv2v` normalization step so
+one engine choice can serve a mixed source set — are recorded as ideas, not
+features: see the "Implementation Options" comment on
+[issue #2621](https://github.com/2AMLogic/klayout-tools/issues/2621).
+
 ### Run both engines on a bench that matters
 
 "The testbench is simulator-agnostic Python" is the premise, and **sampling
@@ -1017,7 +1068,7 @@ exactly.
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
-| `engine` | string | `"icarus"` (default) or `"verilator"`. An unsupported value is an application error (exit 1). |
+| `engine` | string | `"icarus"` (default) or `"verilator"`. An unsupported value is an application error (exit 1). Icarus 13.0 does **not** implement the full SystemVerilog-2012 subset (e.g. packed-struct named-field assignment patterns), so modern SV IP — lowRISC/OpenTitan primitives, Ibex, OpenHW cores — commonly requires `"verilator"`; today that is discovered only as a raw `iverilog` syntax error in the build log, never as a structured field. This is a per-request, not a per-project, choice — see "Which engine for which sources". |
 | `sources` | array\<string\> | RTL source file paths, resolved relative to the request. Required, non-empty. May point at original RTL **or** at `klt synthesize`'s `netlist_path` — a gate-level equivalence re-check against the same testbench needs no contract change, only a different `sources` value. |
 | `hdl_toplevel` | string | The DUT module name. Required. |
 | `testbench.module` | string | The Python test module **name** (`"test_gcd"`, not `"test_gcd.py"`), resolved as `<search dir>/<module>.py` where `<search dir>` is `testbench.search_path` if given, else the request's own directory. Required — this verb does not synthesize testbenches; the module is human- or generator-authored. |
