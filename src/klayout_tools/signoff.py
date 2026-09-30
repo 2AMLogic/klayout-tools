@@ -6237,29 +6237,39 @@ def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
 
 def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
     """The cited `klt erc` run's ``erc_coverage.checked_by_well_assertion``
-    (issue #2255): the ``erc.missing_tie`` work identities whose **well
-    region itself** came from a caller assertion (``ties[].well_layer:
-    null`` + ``ties[].well_boxes``) because the block sits in a native
-    substrate that draws no well/tub layer at all -- ``[]`` for every run
-    that used none, and for every report produced before the field existed.
+    (issues #2255 and #2540): the ``erc.missing_tie`` work identities whose
+    **well side** rested on caller-named coordinates rather than purely on
+    drawn geometry -- ``[]`` for every run that named none, and for every
+    report produced before the field existed. Two spec forms land there:
+
+    - ``ties[].well_layer: null`` + ``ties[].well_boxes`` (issue #2255) -- the
+      **well region itself** asserted, because the block sits in a native
+      substrate that draws no well/tub layer at all;
+    - ``ties[].well_requires_boxes`` / ``ties[].well_excludes_boxes`` (issue
+      #2540) -- a *drawn* well whose **class selection** was named in boxes,
+      because no drawn layer separates the tub's two bias classes.
 
     Carried into a ``"met"`` item 11 citation beside
     :func:`_erc_ties_checked_by_assertion`'s tap-side list, and deliberately
     **not** merged into it, because the two state different things about the
     same verdict. A ``tap_boxes`` assertion says which of the drawn tap
     geometry counts as the tap; the well is still drawn, and still measured.
-    A ``well_boxes`` assertion says where the substrate *is*, for a stream
-    that draws nothing to corroborate it -- the weaker of the two claims,
-    and the one a grader is most likely to want to see stated explicitly.
+    This list says the *well* side was the caller's word -- the weaker of the
+    two claims, and the one a grader is most likely to want to see stated
+    explicitly. A purely marker-layer selection
+    (``well_requires``/``well_excludes``) is not in it: the stream draws its
+    own partition, so that is an ordinary geometrically-derived pass.
 
-    It does not change the verdict: item 11 is ``"met"`` on an asserted
-    substrate tie exactly as on a drawn-well one. It can be, because the
-    assertion is falsifiable and `klt erc` falsifies it where it can -- each
-    asserted polygon must independently contain a tap that reaches the
-    declared net, and an assertion indistinguishable from the whole top-cell
-    extent is rejected as degenerate (``docs/cli/erc.md`` → "A block with no
-    drawn well at all"), landing in ``erc_coverage.skipped`` where
-    :func:`_erc_missing_tie_skipped` already renders it ``unmet``.
+    It does not change the verdict: item 11 is ``"met"`` on either asserted
+    form exactly as on a drawn-well one. It can be, because both are
+    falsifiable and `klt erc` falsifies them where it can -- each asserted
+    polygon must independently contain a tap that reaches the declared net, an
+    assertion indistinguishable from the whole top-cell extent is rejected as
+    degenerate (``docs/cli/erc.md`` → "A block with no drawn well at all"),
+    and a box selection keeping every shape of the drawn layer or none of them
+    is rejected the same way (same doc → "A two-class tub with no marker layer
+    to separate them"). Both land in ``erc_coverage.skipped`` where
+    :func:`_erc_missing_tie_skipped` already renders them ``unmet``.
     """
     block = envelope.get("erc_coverage")
     if not isinstance(block, dict):
@@ -6446,8 +6456,12 @@ def _grade_power_delivery(
       (:func:`_erc_supply_findings`). A **native-substrate** block, whose
       ties assert their substrate region because no well/tub layer is drawn
       (``ties[].well_boxes``), reaches ``"met"`` on the same terms as a
-      drawn-well one; which of its ties rested on that assertion is stated
-      in the citation's ``power_delivery.ties_checked_by_well_assertion``
+      drawn-well one -- as does a block whose one drawn tub layer carries two
+      bias classes that no drawn layer separates, scoped by caller-named
+      boxes (``ties[].well_requires_boxes``/``well_excludes_boxes``, issue
+      #2540). Which of its ties rested on the caller's word about the well
+      side is stated in the citation's
+      ``power_delivery.ties_checked_by_well_assertion``
       (:func:`_erc_ties_checked_by_well_assertion`). Issue #2524 adds the
       severed-rail half of the same question: a supply whose declared owned
       roles (``nets[].roles``) carry conductor reachable from no label is

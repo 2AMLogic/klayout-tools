@@ -206,6 +206,38 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   (:data:`REASON_DEGENERATE_WELL_SELECTION`, see
   :func:`_degenerate_tie_reasons`) rather than as a pass.
 
+  **Caller-asserted well-side class selection**
+  (``ties[].well_requires_boxes`` / ``ties[].well_excludes_boxes``, issue
+  #2540): the selectors above narrow by *marker layer*, so they are only
+  reachable for a stream that happens to draw a layer separating the well
+  classes. A single drawn tub carrying two deliberately differently-biased
+  classes with **no** layer that distinguishes them could therefore declare
+  neither entry: every marker-driven selection over it keeps every shape or
+  none (:data:`REASON_DEGENERATE_WELL_SELECTION`), a single unselected entry
+  reports a false ``erc.missing_tie`` on every well of the class it did not
+  name, and ``well_boxes`` -- the one key naming well geometry outright --
+  is rejected beside a drawn ``well_layer``. These two keys close that hole
+  with the same literal-geometry escape hatch ``tap_boxes`` (issue #2234)
+  gives the tap side: the caller names the coordinates of the shapes their
+  class owns, as the same ``[left, bottom, right, top]`` micrometre box
+  list, and selection proceeds exactly as for a marker layer -- whole merged
+  shapes of the drawn ``well_layer``, kept when they interact with the
+  ``well_requires_boxes`` union and dropped when they interact with the
+  ``well_excludes_boxes`` one. They compose with ``well_requires`` /
+  ``well_excludes`` (all four narrow the same selection, as ``tap_boxes``
+  composes with ``tap_requires``) and, like them, ride on the *drawn* form
+  only.
+
+  Unlike a marker-layer selection, this rests on the caller's word about
+  *which* drawn shapes are theirs, so a tie graded through it is named in
+  ``erc_coverage.checked_by_well_assertion`` beside the ``well_boxes`` form
+  -- the same "the well side of this verdict rested on caller-named
+  coordinates" disclosure, one step weaker than drawn-marker selection and
+  one step stronger than substituting for the layer entirely. The
+  falsifiability bar is unchanged and shared with the marker form: a
+  declared selection that keeps every drawn shape, or none of them, is
+  graded as *skipped* work (:data:`REASON_DEGENERATE_WELL_SELECTION`).
+
   **Disclosed non-declaration** (top-level ``ties_disclosure``, issues
   #2234 and #2247): a run that deliberately declares no tap can say so
   explicitly, and say *why*, instead of simply omitting ``ties`` -- via a
@@ -480,6 +512,19 @@ from .extract import (
 #: measurement: a declared carve-out narrows what gates, never what was
 #: measured, so ``unlabelled_islands: 0`` still means exactly what #2510
 #: documented.
+#: Issue #2540 adds two more optional spec keys (``ties[].well_requires_boxes``
+#: and ``ties[].well_excludes_boxes`` -- the literal-geometry form of #2339's
+#: well-side class selectors, for a two-class tub with no marker layer
+#: separating the classes; see :func:`_select_well_class`) and no new output
+#: field or coverage list at all. A tie graded through one is named in the
+#: already-shipped ``erc_coverage.checked_by_well_assertion`` list, whose
+#: documented meaning widens from "the well region was itself asserted" to
+#: "the well side of this verdict rested on caller-named coordinates" -- a
+#: superset no previously-possible run can land in, since neither key can be
+#: populated by a spec written before this issue. A spec that declares
+#: neither selects nothing and produces byte-identical output, and the
+#: existing :data:`REASON_DEGENERATE_WELL_SELECTION` token is reused rather
+#: than joined by a new one. No bump.
 SCHEMA_VERSION = 1
 
 
@@ -548,7 +593,10 @@ REASON_DEGENERATE_WELL_ASSERTION = "degenerate_well_assertion"
 
 #: The stable ``erc_coverage`` skip reason for a ``ties[]`` entry whose
 #: declared well-side selection (``well_requires``/``well_excludes``, issue
-#: #2339) did not actually select a *proper, non-empty* subset of the drawn
+#: #2339, or their literal-geometry counterparts
+#: ``well_requires_boxes``/``well_excludes_boxes``, issue #2540 -- the same
+#: test, applied to whichever of the four the spec declared) did not
+#: actually select a *proper, non-empty* subset of the drawn
 #: ``well_layer``: it either kept every merged shape on that layer (the
 #: selection distinguishes nothing, so the entry silently grades the other
 #: bias class against its own ``net`` exactly as an unselected tie would) or
@@ -559,7 +607,8 @@ REASON_DEGENERATE_WELL_ASSERTION = "degenerate_well_assertion"
 #: Kept distinct from :data:`REASON_DEGENERATE_WELL_ASSERTION` because the
 #: two say different things to go fix -- that one says "name the substrate
 #: region you are actually claiming, not the die"; this one says "the marker
-#: layer you named does not partition this well layer" -- and from
+#: layer (or box list) you named does not partition this well layer" -- and
+#: from
 #: :data:`REASON_DEGENERATE_TAP_DECLARATION`, which is about the tap. Unlike
 #: the tap test, this one fires only when a selection was *declared*: a tie
 #: with no well-side selector claims every shape on the layer, which is the
@@ -884,13 +933,33 @@ def _connectivity_coverage(
     the same idea applied one level down, and deliberately a **separate**
     list rather than more entries in ``checked_by_assertion``: there, the
     caller asserted which of the drawn ``tap_layer`` geometry counts as the
-    tap, inside a well the layout actually draws; here, the caller asserted
-    the **well region itself**, because the block sits in a native substrate
-    that draws no well/tub layer at all. Those are different claims with
-    different evidence value, and a reader grading the report of record must
-    be able to tell which one was made. A tie can appear in both lists (an
-    asserted substrate region whose tap is also named by ``tap_boxes``) or
-    in either alone.
+    tap; here, the caller named the **well side** of the tie in coordinates
+    rather than in drawn geometry. Those are different claims with different
+    evidence value, and a reader grading the report of record must be able to
+    tell which one was made. A tie can appear in both lists (an asserted
+    well side whose tap is also named by ``tap_boxes``) or in either alone.
+
+    Two spec forms land a tie in this list, and they are different strengths
+    of the same kind of claim:
+
+    - ``well_layer: null`` + ``well_boxes`` (issue #2255) -- the caller
+      asserted the **well region itself**, because the block sits in a native
+      substrate that draws no well/tub layer at all. Nothing in the stream
+      corroborates the region.
+    - ``well_requires_boxes``/``well_excludes_boxes`` (issue #2540) -- the
+      well *is* drawn and is still what gets measured; what the caller named
+      in coordinates is **which of its merged shapes** this entry's bias
+      class owns, for a two-class tub with no marker layer separating the
+      classes. Stronger than the first form (the shapes are real, drawn
+      geometry, and each is still independently graded) and weaker than
+      ``well_requires``/``well_excludes``, whose partition the stream itself
+      draws -- which is exactly why a marker-layer selection stays out of
+      this list and a box-driven one does not.
+
+    The list does not distinguish the two forms, deliberately: it answers one
+    question -- "did the well side of this verdict rest on the caller's
+    word?" -- and a consumer needing the finer distinction has the spec
+    document, which is the artifact that actually records the claim.
 
     A spec that declares no ``nets``/``ties`` asked for none of that work,
     so those rules are recorded as **inapplicable**, never skipped: a skip
@@ -1561,8 +1630,10 @@ def _parse_um_boxes(
     """One spec entry's ``[left, bottom, right, top]`` micrometre box list
     under ``key`` -- the shared parser behind ``ties[].tap_boxes`` (issue
     #2234, :func:`_parse_tap_boxes`), ``ties[].well_boxes`` (issue #2255,
-    :func:`_parse_well_boxes`) and ``nets[].unlabelled_allowed_boxes`` (issue
-    #2524, :func:`_parse_unlabelled_allowed_boxes`), which take the identical
+    :func:`_parse_well_boxes`), ``ties[].well_requires_boxes`` /
+    ``ties[].well_excludes_boxes`` (issue #2540, :func:`_parse_well_selection`)
+    and ``nets[].unlabelled_allowed_boxes`` (issue #2524,
+    :func:`_parse_unlabelled_allowed_boxes`), which take the identical
     literal-geometry shape and differ only in what the boxes *mean*.
 
     ``[left, bottom, right, top]`` is the same tuple
@@ -1649,72 +1720,112 @@ def _parse_well_boxes(
 
 def _parse_well_selection(
     entry: dict[str, Any], spec_path: str, index: int, drawn_well: bool
-) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
-    """``ties[].well_requires`` / ``ties[].well_excludes`` (optional, issue
-    #2339): the marker layers that pick out *which* merged shapes of a drawn
-    ``well_layer`` this tie is about -- kept when the shape interacts with
-    geometry on every ``well_requires`` layer and with none of the
-    ``well_excludes`` layers.
+) -> dict[str, Any]:
+    """The four **well-side class selectors** on one ``ties[]`` entry: which
+    merged shapes of a drawn ``well_layer`` this tie is about.
 
-    The well-side counterpart of ``tap_requires``, for the one thing the tap
-    side cannot express: a single drawn tub layer carrying two
-    differently-biased well classes (device-body wells on one rail, a
-    vertical bipolar's base tub on the other). Each class is declared as its
-    own ``ties[]`` entry with its own ``net``, selected by a PDK device
-    marker -- one entry naming it under ``well_requires``, the complementary
-    entry naming the same marker under ``well_excludes``.
+    Two spellings of the same operation, and they compose:
 
-    Both require a **drawn** ``well_layer``: there is nothing to select from
-    on a tie whose well region is a caller assertion (``well_layer: null`` +
-    ``well_boxes``, issue #2255) -- the asserted boxes already *are* exactly
-    the region the caller means, box by box, so a second layer-driven
-    narrowing on top of them would be an unstated claim about geometry that
-    corroborates nothing. Rejected rather than silently ignored, for the
-    same reason :func:`_parse_um_boxes` rejects a malformed box.
+    - ``well_requires`` / ``well_excludes`` (optional, issue #2339) -- marker
+      *layers*. A shape is kept when it interacts with geometry on every
+      ``well_requires`` layer and with none of the ``well_excludes`` layers.
+    - ``well_requires_boxes`` / ``well_excludes_boxes`` (optional, issue
+      #2540) -- literal ``[left, bottom, right, top]`` micrometre *boxes*, the
+      same shape ``tap_boxes``/``well_boxes`` take. A shape is kept when it
+      interacts with the union of ``well_requires_boxes`` and with none of the
+      ``well_excludes_boxes`` union.
 
-    Split out of :func:`_parse_well_declaration` to keep that function
-    under the repo's C901 complexity ratchet, as
-    :func:`_parse_tap_requires` is split out of :func:`_validate_ties`.
+    All four exist for the one thing the tap side cannot express: a single
+    drawn tub layer carrying two differently-biased well classes (device-body
+    wells on one rail, a vertical bipolar's base tub on the other). Each class
+    is declared as its own ``ties[]`` entry with its own ``net``.
+
+    The **layer** pair needs a PDK layer that separates the classes, which is
+    the ordinary case (a device marker over the special tub) but not the only
+    one: a PDK with a single n-tub layer and no per-class marker draws nothing
+    that distinguishes them, and on such a stream every marker-driven
+    selection keeps every shape or none -- degenerate either way (see
+    :data:`REASON_DEGENERATE_WELL_SELECTION`). The **box** pair is the
+    literal-geometry escape hatch for exactly that stream, and the well-side
+    counterpart of ``tap_boxes`` (issue #2234), which is the same escape hatch
+    for a tap with no distinguishing implant. It needs no PDK marker layer to
+    exist at all: the caller points at the coordinates of the shapes their
+    class owns.
+
+    All four require a **drawn** ``well_layer``: there is nothing to select
+    from on a tie whose well region is itself a caller assertion
+    (``well_layer: null`` + ``well_boxes``, issue #2255) -- the asserted boxes
+    already *are* exactly the region the caller means, box by box, so a second
+    narrowing on top of them, layer- or box-driven, would be an unstated claim
+    about geometry that corroborates nothing. Rejected rather than silently
+    ignored, for the same reason :func:`_parse_um_boxes` rejects a malformed
+    box.
+
+    Returns the four parsed values as a dict, merged into the tie entry by
+    :func:`_parse_well_declaration`. Split out of that function to keep it
+    under the repo's C901 complexity ratchet, as :func:`_parse_tap_requires`
+    is split out of :func:`_validate_ties`.
     """
-    requires = _parse_tie_layer_list(entry, "well_requires", spec_path, index)
-    excludes = _parse_tie_layer_list(entry, "well_excludes", spec_path, index)
-    if not drawn_well and (requires or excludes):
-        named = "well_requires" if requires else "well_excludes"
+    selection: dict[str, Any] = {
+        "well_requires": _parse_tie_layer_list(
+            entry, "well_requires", spec_path, index
+        ),
+        "well_excludes": _parse_tie_layer_list(
+            entry, "well_excludes", spec_path, index
+        ),
+        "well_requires_boxes": _parse_um_boxes(
+            entry, "well_requires_boxes", spec_path, index
+        ),
+        "well_excludes_boxes": _parse_um_boxes(
+            entry, "well_excludes_boxes", spec_path, index
+        ),
+    }
+    named = next((key for key, value in selection.items() if value), None)
+    if not drawn_well and named is not None:
         raise ErcError(
             f"spec '{spec_path}': ties[{index}].{named} selects among the "
             f"drawn shapes of a well layer, so ties[{index}].well_layer must "
             "name one (got null); an asserted substrate region already names "
             "exactly the region it claims, box by box, in 'well_boxes'"
         )
-    return requires, excludes
+    return selection
 
 
 def _parse_well_declaration(
     entry: dict[str, Any], spec_path: str, index: int
 ) -> dict[str, Any]:
     """One ``ties[]`` entry's well declaration -- the ``well_layer`` /
-    ``well_boxes`` / ``well_requires`` / ``well_excludes`` keys, of which
-    exactly one of the first two is populated (issue #2255).
+    ``well_boxes`` keys, of which exactly one is populated (issue #2255), plus
+    the four well-side class selectors that ride on the first
+    (:func:`_parse_well_selection`).
 
-    Two mutually exclusive forms, because they are different evidence and
-    conflating them would let an assertion hide behind drawn geometry:
+    Two mutually exclusive forms for *where the well is*, because they are
+    different evidence and conflating them would let an assertion hide behind
+    drawn geometry:
 
     - ``"well_layer": "<layer>/<datatype>"`` (every spec before #2255) --
       the drawn well/tub layer, each of whose merged shapes is checked
       independently. ``well_boxes`` alongside it is rejected rather than
-      silently applied: there is nothing this module could do with a box
-      list over a drawn well that is not either a narrowing ``tap_boxes``
-      already expresses better, or a second, unstated claim.
+      silently applied: a box list over a drawn well is never a statement
+      about where the well *is* -- it is either a tap narrowing (``tap_boxes``
+      expresses that, better) or a statement about *which of the layer's
+      shapes* this entry is about, which since issue #2540 has its own keys
+      (``well_requires_boxes``/``well_excludes_boxes``) whose grading says so.
+      The error message names both, so the rejection points at a reachable
+      state rather than only at the marker-layer selectors a stream with no
+      separating marker cannot use.
     - ``"well_layer": null`` + a non-empty ``well_boxes`` -- the
       native-substrate form: nothing is drawn, so the caller names the
       region they are claiming.
 
-    ``well_requires``/``well_excludes`` (issue #2339,
-    :func:`_parse_well_selection`) ride on the *drawn* form only: they pick
-    which of that layer's merged shapes this tie is about, so a single tub
-    layer holding two differently-biased well classes can be declared as
-    two complementary entries instead of one entry that reports every well
-    of the other class as untied.
+    The selectors (``well_requires``/``well_excludes``, issue #2339;
+    ``well_requires_boxes``/``well_excludes_boxes``, issue #2540) ride on the
+    *drawn* form only: they pick which of that layer's merged shapes this tie
+    is about, so a single tub layer holding two differently-biased well
+    classes can be declared as two complementary entries instead of one entry
+    that reports every well of the other class as untied. They are a
+    narrowing, never a substitution, so unlike ``well_boxes`` they compose
+    with a drawn ``well_layer`` -- they *require* one.
 
     ``well_layer: null`` with no ``well_boxes`` is an error, not a tie that
     quietly checks nothing: "there is no well to name and I am not asserting
@@ -1730,13 +1841,9 @@ def _parse_well_declaration(
     """
     well_boxes = _parse_well_boxes(entry, spec_path, index)
     raw = entry["well_layer"]
-    well_requires, well_excludes = _parse_well_selection(
-        entry, spec_path, index, raw is not None
-    )
     declaration: dict[str, Any] = {
         "well_boxes": well_boxes,
-        "well_requires": well_requires,
-        "well_excludes": well_excludes,
+        **_parse_well_selection(entry, spec_path, index, raw is not None),
     }
     if raw is None:
         if not well_boxes:
@@ -1754,7 +1861,9 @@ def _parse_well_declaration(
             f"region for a tie with no drawn well, so ties[{index}].well_layer "
             f"must be null (got {str(raw)!r}); to narrow a drawn well's taps, "
             "use 'tap_boxes', and to select which of its shapes this tie is "
-            "about, 'well_requires'/'well_excludes'"
+            "about, 'well_requires_boxes'/'well_excludes_boxes' (literal "
+            "geometry, for a tub whose classes no drawn layer separates) or "
+            "'well_requires'/'well_excludes' (a marker layer that does)"
         )
     return {
         "well_layer": _parse_layer_datatype(
@@ -1829,7 +1938,22 @@ def _validate_ties(
     :func:`_parse_well_selection`), and held to the same falsifiability bar
     as every other narrowing here: a selection keeping every drawn shape, or
     none of them, is graded as skipped work (see
-    :func:`_degenerate_tie_reasons`)."""
+    :func:`_degenerate_tie_reasons`).
+
+    ``well_requires_boxes``/``well_excludes_boxes`` (optional arrays of the
+    same ``[left, bottom, right, top]`` micrometre boxes, issue #2540) select
+    the same way from literal geometry instead of from a marker layer -- the
+    well-side counterpart of ``tap_boxes``, and for the same reason it exists
+    on the tap side: the marker-layer form above needs the PDK to draw a layer
+    that separates the classes, and a single-tub PDK with no per-class marker
+    draws none, leaving a deliberately two-class tub undeclarable in any
+    non-degenerate form. They compose with the marker form (all four narrow
+    the same selection), ride on the same drawn-``well_layer`` requirement,
+    and are graded by the same degeneracy test. Because the *which shapes*
+    half of such a tie rests on the caller's word, a tie graded through one is
+    additionally named in ``erc_coverage.checked_by_well_assertion`` (see
+    :func:`_connectivity_coverage`), which a purely marker-driven selection
+    stays out of."""
     raw = spec.get("ties", [])
     if raw is None:
         raw = []
@@ -3333,8 +3457,10 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
 
     A tie is **selection-degenerate**
     (:data:`REASON_DEGENERATE_WELL_SELECTION`, issue #2339) when it
-    *declared* a well-side class selection (``well_requires`` /
-    ``well_excludes``) that did not actually partition the drawn
+    *declared* a well-side class selection -- ``well_requires`` /
+    ``well_excludes`` (marker layers) or ``well_requires_boxes`` /
+    ``well_excludes_boxes`` (literal geometry, issue #2540), one test for all
+    four -- that did not actually partition the drawn
     ``well_layer``: it kept every merged shape on it (the selection
     distinguishes nothing, so the entry grades the other bias class against
     its own ``net`` exactly as an unselected tie would -- the false
@@ -3348,7 +3474,8 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     before this key existed. The measurement itself is geometric, in
     :func:`_select_well_class`, so a selector that happens to keep
     everything in *this* stream is as degenerate as one that names the well
-    layer itself.
+    layer itself -- and a box list that matches no shape of the drawn layer
+    at all lands on the "kept none" endpoint, not on a silent pass.
 
     A tie's well region is **empty** (:data:`REASON_EMPTY_WELL_REGION`,
     issue #2377) when it names a *drawn* ``well_layer`` (never ``well_boxes``
@@ -3394,6 +3521,58 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     return reasons
 
 
+#: The four ``ties[]`` keys that *select* which merged shapes of a drawn
+#: ``well_layer`` an entry is about -- the marker-layer pair (issue #2339) and
+#: its literal-geometry counterpart (issue #2540). Named once, because two
+#: separate places must agree on the same answer to "did this spec declare a
+#: well-side selection at all?": :func:`_select_well_class` (which returns the
+#: region untouched and never degenerate when none was declared) and
+#: :func:`_has_well_selection`'s callers.
+_WELL_SELECTION_KEYS = (
+    "well_requires",
+    "well_excludes",
+    "well_requires_boxes",
+    "well_excludes_boxes",
+)
+
+
+def _has_well_selection(tie: dict[str, Any]) -> bool:
+    """Whether this tie *declared* a well-side class selection in any of its
+    four spellings (:data:`_WELL_SELECTION_KEYS`).
+
+    The degeneracy test for a selection is presence-gated, unlike the tap
+    one: a tie with no well-side selector claims every shape on its layer,
+    which is the strongest claim available and exactly what every spec
+    written before issue #2339 means -- see
+    :data:`REASON_DEGENERATE_WELL_SELECTION`.
+    """
+    return any(tie[key] for key in _WELL_SELECTION_KEYS)
+
+
+def _boxes_region(
+    kdb: Any, layout: Any, boxes: list[tuple[float, float, float, float]]
+) -> Any:
+    """The merged region a ``ties[]`` micrometre-box list names -- the one
+    conversion behind every literal-geometry key on that entry
+    (``tap_boxes``, ``well_boxes``, ``well_requires_boxes`` /
+    ``well_excludes_boxes``), so the three callers cannot drift on how a
+    caller's coordinates become geometry.
+
+    ``[left, bottom, right, top]`` micrometres go through the same
+    :func:`~klayout_tools._layout.clip_box` conversion ``klt clip`` uses, and
+    the boxes are merged, so adjacent or overlapping boxes become one polygon
+    -- which is load-bearing for ``well_boxes`` (each merged polygon must
+    independently hold a tap) and harmless for the selection keys, which only
+    ever ask whether a well shape interacts with the union.
+    """
+    from ._layout import clip_box as _clip_box
+
+    region = kdb.Region()
+    for box_um in boxes:
+        region += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
+    return region.merged()
+
+
 def _tie_well_region(
     kdb: Any,
     layout: Any,
@@ -3427,13 +3606,7 @@ def _tie_well_region(
     if not tie["well_boxes"]:
         return _region(layout, top_cell, tie["well_layer"]).merged(), False
 
-    from ._layout import clip_box as _clip_box
-
-    asserted = kdb.Region()
-    for box_um in tie["well_boxes"]:
-        asserted += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
-    asserted = asserted.merged()
-
+    asserted = _boxes_region(kdb, layout, tie["well_boxes"])
     extent = kdb.Region(top_cell.bbox())
     extent_area = extent.area()
     if extent_area <= 0:
@@ -3446,20 +3619,45 @@ def _tie_well_region(
 
 
 def _select_well_class(
+    kdb: Any,
     layout: Any,
     top_cell: Any,
     tie: dict[str, Any],
     well_region: Any,
 ) -> tuple[Any, bool]:
     """This tie's well region narrowed to the *class* of well shapes it
-    declares -- ``(selected_region, selection_degenerate)``, issue #2339.
+    declares -- ``(selected_region, selection_degenerate)``, issues #2339 and
+    #2540.
 
     A shape of the drawn ``well_layer`` is kept when it interacts with
-    geometry on every ``well_requires`` layer and with none of the
-    ``well_excludes`` layers. With neither key declared (every spec before
-    this issue) the region is returned untouched and never degenerate: a tie
-    with no well-side selector claims every shape on the layer, which is the
-    strongest claim available, not the weakest.
+    geometry on every ``well_requires`` layer, with none of the
+    ``well_excludes`` layers, with the union of ``well_requires_boxes`` (when
+    that key is non-empty) and with none of the ``well_excludes_boxes`` union.
+    With none of the four declared (every spec before issue #2339) the region
+    is returned untouched and never degenerate: a tie with no well-side
+    selector claims every shape on the layer, which is the strongest claim
+    available, not the weakest.
+
+    **Boxes are a union, layers are a conjunction**, and both follow from what
+    a caller is saying. Each ``well_requires`` *layer* is a separate condition
+    a shape must satisfy (``Comp ∩ Nplus``-style reasoning, one layer at a
+    time), whereas a box *list* is one region named in pieces -- the same
+    union every other literal-geometry key on this entry forms
+    (:func:`_boxes_region`). So three ``well_requires_boxes`` boxes select the
+    shapes touching *any* of them (three wells of this class), not the shapes
+    touching all three (which for disjoint boxes is none).
+
+    ``well_requires_boxes``/``well_excludes_boxes`` (issue #2540) exist because
+    the marker form is only reachable for a stream that draws a layer
+    separating the classes. A single drawn tub carrying two deliberately
+    differently-biased classes with no such layer has nothing to name: every
+    marker-driven selection over it keeps every shape or none, i.e. is
+    degenerate by the test below, and the alternatives are a false
+    ``erc.missing_tie`` on every well of the undeclared class or a
+    ``well_boxes`` substitution the parser rejects beside a drawn
+    ``well_layer``. The box form is the same escape hatch ``tap_boxes`` (issue
+    #2234) is on the tap side, and composes with the marker form exactly as
+    ``tap_boxes`` composes with ``tap_requires``.
 
     **Selection, not intersection** -- and that is the whole design, not an
     implementation detail. ``tap_requires`` narrows the tap by ``&``-ing
@@ -3483,9 +3681,11 @@ def _select_well_class(
     ``tap_narrowed`` and ``well_degenerate`` are): a *declared* selection
     that keeps every drawn shape, or keeps none of them, did not partition
     anything -- see :data:`REASON_DEGENERATE_WELL_SELECTION` and
-    :func:`_degenerate_tie_reasons`.
+    :func:`_degenerate_tie_reasons`. One test for all four keys, so a box list
+    matching no shape of the drawn layer lands on the "kept none" endpoint
+    rather than reading as a clean run over an empty set.
     """
-    if not tie["well_requires"] and not tie["well_excludes"]:
+    if not _has_well_selection(tie):
         return well_region, False
 
     selected = well_region
@@ -3493,6 +3693,14 @@ def _select_well_class(
         selected = selected.interacting(_region(layout, top_cell, required))
     for excluded in tie["well_excludes"]:
         selected = selected.not_interacting(_region(layout, top_cell, excluded))
+    if tie["well_requires_boxes"]:
+        selected = selected.interacting(
+            _boxes_region(kdb, layout, tie["well_requires_boxes"])
+        )
+    if tie["well_excludes_boxes"]:
+        selected = selected.not_interacting(
+            _boxes_region(kdb, layout, tie["well_excludes_boxes"])
+        )
     selected = selected.merged()
     degenerate = selected.is_empty() or (well_region - selected).is_empty()
     return selected, degenerate
@@ -3621,20 +3829,23 @@ def _extract_connectivity(
     assertion additionally carries is its own degeneracy verdict
     (``well_degenerate``), measured here against the top cell's own extent.
 
-    **A drawn well may hold more than one bias class (issue #2339).** When
-    the tie declares ``well_requires``/``well_excludes``, only the merged
-    well shapes of that class survive into everything above
+    **A drawn well may hold more than one bias class (issues #2339, #2540).**
+    When the tie declares any well-side selector --
+    ``well_requires``/``well_excludes`` (marker layers) or
+    ``well_requires_boxes``/``well_excludes_boxes`` (literal micrometre boxes,
+    for a tub whose classes the PDK draws no layer to separate) -- only the
+    merged well shapes of that class survive into everything above
     (:func:`_select_well_class`) -- so the taps clipped to the well, the
     ``tap_narrowed`` measurement taken inside it, and the per-well loop in
     :func:`_tie_findings` all see one bias class rather than every shape the
     tub layer draws. A second, complementary entry declares the other class
     against its own ``net``, and the two are graded independently, keyed on
-    the tie ``name`` rather than on the shared ``well_layer``.
+    the tie ``name`` rather than on the shared ``well_layer``. The selection
+    *narrows* the drawn layer in both spellings -- it never substitutes for it,
+    which is what separates all four keys from ``well_boxes``.
     """
     # Imported lazily, matching `load_layout`'s lazy `klayout.db` import.
     import klayout.db as kdb
-
-    from ._layout import clip_box as _clip_box
 
     l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
 
@@ -3673,12 +3884,15 @@ def _extract_connectivity(
         # distinct from `well_selection_degenerate` below -- see
         # `_degenerate_tie_reasons`.
         well_region_empty = not tie["well_boxes"] and well_region.is_empty()
-        # `well_requires`/`well_excludes` (issue #2339): keep only the merged
-        # well shapes of the class this tie declares, so one tub layer
-        # carrying two differently-biased classes can be declared as two
-        # complementary entries. A no-op unless the spec asked for it.
+        # `well_requires`/`well_excludes` (issue #2339) and their
+        # literal-geometry counterparts `well_requires_boxes`/
+        # `well_excludes_boxes` (issue #2540): keep only the merged well
+        # shapes of the class this tie declares, so one tub layer carrying
+        # two differently-biased classes can be declared as two
+        # complementary entries -- whether or not the PDK draws a layer that
+        # separates them. A no-op unless the spec asked for it.
         well_region, well_selection_degenerate = _select_well_class(
-            layout, top_cell, tie, well_region
+            kdb, layout, top_cell, tie, well_region
         )
         drawn_tap = _region(layout, top_cell, tie["tap_layer"])
         tap_region = drawn_tap
@@ -3689,10 +3903,7 @@ def _extract_connectivity(
         # `tap_requires` (both narrow the same region) but needs no drawn
         # PDK marker layer to exist at all.
         if tie["tap_boxes"]:
-            asserted_region = kdb.Region()
-            for box_um in tie["tap_boxes"]:
-                asserted_region += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
-            tap_region = tap_region & asserted_region.merged()
+            tap_region = tap_region & _boxes_region(kdb, layout, tie["tap_boxes"])
         tap_sites = (tap_region & well_region).merged()
         tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
         l2n.connect(tap_sites)
@@ -3718,13 +3929,24 @@ def _extract_connectivity(
                 # non-degenerate asserted tie as `checked_by_assertion`
                 # (issue #2234).
                 "tap_asserted": bool(tie["tap_boxes"]),
-                # Issue #2255: whether this tie's *well* region was asserted
-                # by the caller (`well_layer: null` + `well_boxes`) rather
-                # than read off a drawn layer, and whether that assertion is
-                # indistinguishable from the whole top-cell extent. Read by
-                # `_degenerate_tie_reasons` and by `_connectivity_coverage`'s
-                # `checked_by_well_assertion`.
-                "well_asserted": bool(tie["well_boxes"]),
+                # Whether the *well* side of this tie rested on caller-named
+                # coordinates rather than purely on drawn geometry -- read by
+                # `_connectivity_coverage`'s `checked_by_well_assertion`. Two
+                # forms: the whole region asserted (`well_layer: null` +
+                # `well_boxes`, issue #2255), or the drawn layer's shapes
+                # *selected* by literal boxes (`well_requires_boxes`/
+                # `well_excludes_boxes`, issue #2540). A marker-layer
+                # selection is not one of them: the stream draws its own
+                # partition, so it is an ordinary geometrically-derived pass.
+                "well_asserted": bool(
+                    tie["well_boxes"]
+                    or tie["well_requires_boxes"]
+                    or tie["well_excludes_boxes"]
+                ),
+                # Issue #2255: whether the caller's *asserted* well region
+                # (`well_boxes`) is indistinguishable from the whole top-cell
+                # extent -- always `False` for a drawn `well_layer`. Read by
+                # `_degenerate_tie_reasons`.
                 "well_degenerate": well_degenerate,
                 # Issue #2377: whether this tie names a *drawn* `well_layer`
                 # that draws no geometry at all in this stream -- always
@@ -3733,10 +3955,11 @@ def _extract_connectivity(
                 # `_degenerate_tie_reasons`, before `well_selection_degenerate`
                 # below is even considered.
                 "well_region_empty": well_region_empty,
-                # Issue #2339: whether this tie's declared well-side class
-                # selection kept a proper, non-empty subset of the drawn
-                # `well_layer` -- `False` for every tie that declared none.
-                # Read by `_degenerate_tie_reasons`.
+                # Issues #2339/#2540: whether this tie's declared well-side
+                # class selection -- marker layers or literal boxes, one test
+                # for both -- failed to keep a proper, non-empty subset of the
+                # drawn `well_layer`. `False` for every tie that declared no
+                # selection at all. Read by `_degenerate_tie_reasons`.
                 "well_selection_degenerate": well_selection_degenerate,
             }
         )
@@ -3794,6 +4017,9 @@ def run_erc(
       bottom, right, top], ...] (optional, issue #2255), "well_requires":
       ["<layer>/<datatype>", ...] (optional, issue #2339),
       "well_excludes": ["<layer>/<datatype>", ...] (optional, issue #2339),
+      "well_requires_boxes": [[left, bottom, right, top], ...] (optional,
+      issue #2540), "well_excludes_boxes": [[left, bottom, right, top], ...]
+      (optional, issue #2540),
       "tap_layer":
       "<layer>/<datatype>", "tap_requires": ["<layer>/<datatype>", ...]
       (optional, issue #2169), "tap_is_dedicated": <bool> (optional, issue
@@ -3818,8 +4044,15 @@ def run_erc(
       it interacts with geometry on every ``well_requires`` layer and with
       none of the ``well_excludes`` layers, so each class is declarable as
       its own entry against its own ``net`` instead of one entry reporting
-      every well of the other class as untied. A declared selection that
-      keeps every drawn shape, or none of them, is skipped as degenerate.
+      every well of the other class as untied.
+      ``well_requires_boxes``/``well_excludes_boxes`` (issue #2540) select the
+      same way from literal micrometre boxes instead of a marker layer, for a
+      two-class tub the PDK draws no layer to separate -- composing with the
+      marker form, requiring the same drawn ``well_layer``, and additionally
+      naming the tie in ``erc_coverage.checked_by_well_assertion`` because the
+      *which shapes* half then rests on the caller's word. A declared
+      selection that keeps every drawn shape, or none of them, is skipped as
+      degenerate, in either spelling.
       Ties are extracted
       in their own connectivity graph (:func:`_extract_connectivity`), so
       they affect ``erc.missing_tie`` and nothing else.
@@ -4162,12 +4395,16 @@ def run_erc(
             for tie in tie_layers
             if tie["tap_asserted"] and tie["name"] not in degenerate_ties
         }
-        # Issue #2255: the same distinction one level up -- a non-degenerate
-        # tie whose *well* region was asserted (`well_layer: null` +
-        # `well_boxes`) because the block draws no well/tub layer at all.
-        # Its own `checked_by_well_assertion` list, never folded into the
-        # tap-side one: asserting which drawn geometry is the tap and
-        # asserting the region itself are different claims.
+        # Issues #2255/#2540: the same distinction one level up -- a
+        # non-degenerate tie whose *well* side rested on caller-named
+        # coordinates, either because the region itself was asserted
+        # (`well_layer: null` + `well_boxes`, for a block that draws no
+        # well/tub layer at all) or because the drawn layer's shapes were
+        # selected by literal boxes (`well_requires_boxes`/
+        # `well_excludes_boxes`, for a two-class tub no drawn layer
+        # separates). Its own `checked_by_well_assertion` list, never folded
+        # into the tap-side one: asserting which drawn geometry is the tap
+        # and naming the well side in coordinates are different claims.
         well_asserted_ties = {
             tie["name"]
             for tie in tie_layers
