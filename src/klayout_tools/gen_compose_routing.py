@@ -2301,6 +2301,23 @@ def _self_net_drawn_short(
     return overlap_um2, crossed
 
 
+def _unroutable(reason: str) -> dict[str, Any]:
+    """Build ``route_two_pin``'s minimal 4-key rejection result.
+
+    Every rejection path inside ``route_two_pin`` returns this exact shape
+    (``routed``/``route_length_um``/``points_um``/``reason``) -- a
+    deliberately minimal contract distinct from the function's 9-key success
+    return, not a partial version of it. Factored into one helper so the 12
+    call sites can't drift from each other.
+    """
+    return {
+        "routed": False,
+        "route_length_um": None,
+        "points_um": None,
+        "reason": reason,
+    }
+
+
 def route_two_pin(
     pin_a: dict[str, Any],
     pin_b: dict[str, Any],
@@ -2777,12 +2794,7 @@ def route_two_pin(
     # A block with no reported ports[] (a hand-crafted generator_report) can't
     # supply a routable position -- treat as unroutable rather than crashing.
     if not isinstance(port_a, dict) or not isinstance(port_b, dict):
-        return {
-            "routed": False,
-            "route_length_um": None,
-            "points_um": None,
-            "reason": "one or both ports report no position (empty ports[])",
-        }
+        return _unroutable("one or both ports report no position (empty ports[])")
 
     off_a = offsets_um[pin_a["block"]]
     off_b = offsets_um[pin_b["block"]]
@@ -2797,12 +2809,7 @@ def route_two_pin(
     dir_a = int(port_a.get("direction_deg", 0)) % 360
     dir_b = int(port_b.get("direction_deg", 0)) % 360
     if dir_a not in _DIRECTION_VECTORS or dir_b not in _DIRECTION_VECTORS:
-        return {
-            "routed": False,
-            "route_length_um": None,
-            "points_um": None,
-            "reason": "a port reports a non-orthogonal direction_deg",
-        }
+        return _unroutable("a port reports a non-orthogonal direction_deg")
 
     va = _DIRECTION_VECTORS[dir_a]
     vb = _DIRECTION_VECTORS[dir_b]
@@ -2850,21 +2857,16 @@ def route_two_pin(
             if _ring_gap_ports(block):
                 ring_pins.append((pin, block))
                 continue
-            return {
-                "routed": False,
-                "route_length_um": None,
-                "points_um": None,
-                "reason": (
-                    f"block '{pin['block']}' has a closed guard/collector ring "
-                    f"(reports a TAP_*/COLL_* port and no GAP_* opening) -- a "
-                    f"route to its non-tap port '{pin['port']}' would cross the "
-                    "ring's own metal loop and merge this net with the ring's "
-                    "tap net; route to the ring's own tap port instead, "
-                    "regenerate the block with a routing opening in the ring "
-                    "(params.ring_gap_side/ring_gap_um), or regenerate it with "
-                    "add_guard_ring/add_collector_ring: false"
-                ),
-            }
+            return _unroutable(
+                f"block '{pin['block']}' has a closed guard/collector ring "
+                f"(reports a TAP_*/COLL_* port and no GAP_* opening) -- a "
+                f"route to its non-tap port '{pin['port']}' would cross the "
+                "ring's own metal loop and merge this net with the ring's "
+                "tap net; route to the ring's own tap port instead, "
+                "regenerate the block with a routing opening in the ring "
+                "(params.ring_gap_side/ring_gap_um), or regenerate it with "
+                "add_guard_ring/add_collector_ring: false"
+            )
 
     # Routability heuristic: a jog perpendicular to the ports' facing axis has
     # to squeeze through the channel between the two blocks. When both ports
@@ -2892,27 +2894,17 @@ def route_two_pin(
         if va[1] == 0 and vb[1] == 0 and abs(a[1] - b[1]) > 1e-9:
             gap = _block_gap_um(bbox_a, bbox_b, axis="x")
             if 0.0 <= gap < width_um:
-                return {
-                    "routed": False,
-                    "route_length_um": None,
-                    "points_um": None,
-                    "reason": (
-                        f"vertical jog needs a channel >= width {width_um}um "
-                        f"but the gap between blocks is only {gap:.4g}um"
-                    ),
-                }
+                return _unroutable(
+                    f"vertical jog needs a channel >= width {width_um}um "
+                    f"but the gap between blocks is only {gap:.4g}um"
+                )
         elif va[0] == 0 and vb[0] == 0 and abs(a[0] - b[0]) > 1e-9:
             gap = _block_gap_um(bbox_a, bbox_b, axis="y")
             if 0.0 <= gap < width_um:
-                return {
-                    "routed": False,
-                    "route_length_um": None,
-                    "points_um": None,
-                    "reason": (
-                        f"horizontal jog needs a channel >= width {width_um}um "
-                        f"but the gap between blocks is only {gap:.4g}um"
-                    ),
-                }
+                return _unroutable(
+                    f"horizontal jog needs a channel >= width {width_um}um "
+                    f"but the gap between blocks is only {gap:.4g}um"
+                )
 
     # Recessed same-direction vertical ports (#461): a gate landing pad now
     # sits *above* its own gate port, so a port facing +y no longer sits on
@@ -2975,12 +2967,7 @@ def route_two_pin(
             width_um,
         )
         if conflict is not None:
-            return {
-                "routed": False,
-                "route_length_um": None,
-                "points_um": None,
-                "reason": conflict,
-            }
+            return _unroutable(conflict)
 
     # Obstacle-overlap check (#199 case 1): sum how much of the drawn backbone
     # lies inside each block's bbox *interior* (a boundary touch doesn't
@@ -3345,12 +3332,7 @@ def route_two_pin(
             effective_route_layer = cross_block_route_layer
             short_reason = None
     if short_reason is not None:
-        return {
-            "routed": False,
-            "route_length_um": None,
-            "points_um": None,
-            "reason": short_reason,
-        }
+        return _unroutable(short_reason)
 
     # effective_width_um (#1620): the width this leg actually draws at --
     # cross_block_width_um once the retry above switched effective_route_layer
@@ -3651,25 +3633,20 @@ def route_two_pin(
         own_port = pin_a["port"] if own_id == own_a else pin_b["port"]
         own_dir = dir_a if own_id == own_a else dir_b
         allowed_um = allowances_um.get(own_id, 0.0)
-        return {
-            "routed": False,
-            "route_length_um": None,
-            "points_um": None,
-            "reason": (
-                f"backbone's {effective_width_um}um-wide drawn path crosses "
-                f"{crossed_um:.4g}um of block '{own_id}''s interior on the side "
-                f"*away* from its own pin '{own_port}' (which faces "
-                f"{own_dir}deg) -- that pin's {allowed_um:.4g}um edge margin "
-                "only describes the approach on the side it faces, so this "
-                "route reaches the pin from behind, crossing whatever the "
-                "block draws in between (another device's terminal, a strap) "
-                "and drawing a silent short to it (issue #1895); connect this "
-                "pin from the side its port faces, supply waypoints_um that "
-                "bring the approach around to that side, or route to a "
-                "layer_role with a metal2/via stack instead (or configure "
-                "routing.cross_block_layer_role, issue #1168)"
-            ),
-        }
+        return _unroutable(
+            f"backbone's {effective_width_um}um-wide drawn path crosses "
+            f"{crossed_um:.4g}um of block '{own_id}''s interior on the side "
+            f"*away* from its own pin '{own_port}' (which faces "
+            f"{own_dir}deg) -- that pin's {allowed_um:.4g}um edge margin "
+            "only describes the approach on the side it faces, so this "
+            "route reaches the pin from behind, crossing whatever the "
+            "block draws in between (another device's terminal, a strap) "
+            "and drawing a silent short to it (issue #1895); connect this "
+            "pin from the side its port faces, supply waypoints_um that "
+            "bring the approach around to that side, or route to a "
+            "layer_role with a metal2/via stack instead (or configure "
+            "routing.cross_block_layer_role, issue #1168)"
+        )
 
     for other_id, crossed_um in blocking_um.items():
         allowed_um = allowances_um.get(other_id, 0.0)
@@ -3694,12 +3671,7 @@ def route_two_pin(
                 "width) -- the route is not point-to-point between only the "
                 "two connected blocks"
             )
-        return {
-            "routed": False,
-            "route_length_um": None,
-            "points_um": None,
-            "reason": reason + detour_note,
-        }
+        return _unroutable(reason + detour_note)
 
     # Via-drop resolution (#454, check 5 -- see docstring; generalized to a
     # multi-hop ladder by issue #1567): only consulted when both a
@@ -3725,16 +3697,11 @@ def route_two_pin(
                 extraction_deck, effective_route_layer, port_layer
             )
             if drop_error is not None:
-                return {
-                    "routed": False,
-                    "route_length_um": None,
-                    "points_um": None,
-                    "reason": (
-                        f"pin '{pin['port']}' on block '{pin['block']}' is drawn "
-                        f"on layer {port_layer}, which routing.layer_role's "
-                        f"{effective_route_layer} cannot reach: {drop_error}"
-                    ),
-                }
+                return _unroutable(
+                    f"pin '{pin['port']}' on block '{pin['block']}' is drawn "
+                    f"on layer {port_layer}, which routing.layer_role's "
+                    f"{effective_route_layer} cannot reach: {drop_error}"
+                )
             if ladder is not None:
                 # One via_drops entry per hop (issue #1567): a single-hop
                 # ladder (the pre-#1567 case) produces exactly the one entry
@@ -3831,17 +3798,12 @@ def route_two_pin(
             )
             if lane_conflict is None:
                 return retry
-        return {
-            "routed": False,
-            "route_length_um": None,
-            "points_um": None,
-            "reason": (
-                conflict_reason + " -- a bounded same-block cross-layer detour "
-                f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
-                "looped clear of the block's own bbox) was tried first, and "
-                "each one still conflicted"
-            ),
-        }
+        return _unroutable(
+            conflict_reason + " -- a bounded same-block cross-layer detour "
+            f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
+            "looped clear of the block's own bbox) was tried first, and "
+            "each one still conflicted"
+        )
 
     # Channel track retry (#1467, see docstring): only armed for the
     # untracked (channel_offset_um == 0.0) top-level attempt at an
@@ -3926,18 +3888,13 @@ def route_two_pin(
                 "channel_track": 0,
                 "reason": None,
             }
-        return {
-            "routed": False,
-            "route_length_um": None,
-            "points_um": None,
-            "reason": (
-                channel_track_reason
-                + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
-                "leg's shared-channel horizontal jog shifted farther from "
-                "the row, one route width's worth of clearance per track) "
-                "were tried first, and each one still conflicted"
-            ),
-        }
+        return _unroutable(
+            channel_track_reason
+            + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
+            "leg's shared-channel horizontal jog shifted farther from "
+            "the row, one route width's worth of clearance per track) "
+            "were tried first, and each one still conflicted"
+        )
 
     return {
         "routed": True,

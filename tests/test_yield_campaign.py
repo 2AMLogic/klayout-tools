@@ -392,6 +392,95 @@ def test_run_campaign_yield_only_fields_never_reach_sim_run(tmp_path, monkeypatc
     assert captured["yield_kwargs"]["min_samples"] == 10
 
 
+def test_resolve_request_strips_only_known_yield_only_limit_keys(tmp_path):
+    """Issue #2517: `target_yield` is `klt yield`'s bound, not one `klt sim`
+    was ever meant to apply -- it must not reach the dispatched request (where
+    it lands in `klt sim`'s coverage *skip* list as `unrecognized_limit_key`
+    and downgrades the run to `pass_partial`). The strip is scoped to the
+    known yield-only keys: a genuinely unrecognised key is a real spec bug and
+    still passes straight through, so `klt sim` can report it."""
+    spec = _base_spec()
+    spec["measurements"][0]["limits"] = {
+        "min": 0.3,
+        "max": 0.7,
+        "exclusive_min": True,
+        "target_yield": 0.9,
+        "not_a_real_limit_key": 1.5,
+    }
+
+    request, _, yield_limits, _, _ = yield_campaign._resolve_request(
+        spec, spec_dir=str(tmp_path), seed_override=None
+    )
+
+    limits = request["measurements"][0]["limits"]
+    assert "target_yield" not in limits
+    assert limits == {
+        "min": 0.3,
+        "max": 0.7,
+        "exclusive_min": True,
+        "not_a_real_limit_key": 1.5,
+    }
+    # ...and what was taken out is handed back for the report side to restore.
+    assert yield_limits == {"vout": {"target_yield": 0.9}}
+    # The caller's own spec object is never mutated.
+    assert spec["measurements"][0]["limits"]["target_yield"] == 0.9
+
+
+def test_resolve_request_leaves_a_spec_without_target_yield_untouched(tmp_path):
+    """Regression guard for the no-`target_yield` case: nothing is stripped,
+    nothing is carried, and the dispatched limits are byte-identical."""
+    spec = _base_spec()
+    spec["measurements"][0]["limits"] = {"min": 0.3, "max": 0.7}
+
+    request, _, yield_limits, _, _ = yield_campaign._resolve_request(
+        spec, spec_dir=str(tmp_path), seed_override=None
+    )
+
+    assert request["measurements"][0]["limits"] == {"min": 0.3, "max": 0.7}
+    assert yield_limits == {}
+
+
+def test_run_campaign_target_yield_never_reaches_sim_but_survives_to_yield(
+    tmp_path, monkeypatch
+):
+    """The dispatched `klt sim` request carries no `target_yield` under any
+    `measurements[].limits`, but the sample set `klt yield` reads still does
+    -- stripping it pre-dispatch must not delete the campaign's own yield
+    claim (issue #2517)."""
+    _write_body(tmp_path)
+    spec_path = _write_spec(tmp_path, _base_spec())
+
+    captured: dict = {}
+
+    def fake_run_sim(request_path, *, artifacts_dir, backend, hosts):
+        with open(request_path, encoding="utf-8") as handle:
+            captured["request"] = json.load(handle)
+        # Echo the request's own limits back, exactly as `sim.run_sim` does
+        # (the rollup entry carries `spec.get("limits")` verbatim).
+        report = _fake_sim_report()
+        report["measurements"][0]["limits"] = dict(
+            captured["request"]["measurements"][0]["limits"]
+        )
+        return report
+
+    def fake_run_yield(samples_path, **kwargs):
+        with open(samples_path, encoding="utf-8") as handle:
+            captured["sample_set"] = json.load(handle)
+        return _fake_yield_report()
+
+    monkeypatch.setattr(yield_campaign.sim, "run_sim", fake_run_sim)
+    monkeypatch.setattr(yield_campaign, "run_yield", fake_run_yield)
+
+    run_campaign(str(spec_path))
+
+    dispatched = captured["request"]["measurements"]
+    assert all("target_yield" not in (m.get("limits") or {}) for m in dispatched)
+    assert dispatched[0]["limits"] == {"min": 0.3, "max": 0.7}
+
+    restored = captured["sample_set"]["measurements"][0]["limits"]
+    assert restored == {"min": 0.3, "max": 0.7, "target_yield": 0.9}
+
+
 def test_run_campaign_sim_dispatch_failure_raises_campaign_error(tmp_path, monkeypatch):
     _write_body(tmp_path)
     spec_path = _write_spec(tmp_path, _base_spec())
@@ -459,10 +548,51 @@ def test_run_campaign_end_to_end_runs_phase1_pipeline_unmodified(tmp_path, monke
     assert os.path.isfile(campaign["sim_report_path"])
     assert os.path.isfile(campaign["request_path"])
 
+    # Issue #2517: the spec's `target_yield` is held out of the dispatched
+    # request (so `klt sim` does not file it as uncovered work and downgrade
+    # the run to `pass_partial`) but is restored on the sample set, so the
+    # yield half still has a claim to grade -- a report with no `target_yield`
+    # anywhere grades `"reported"` instead of pass/fail.
+    assert report["status"] in {"pass", "fail"}
+    assert report["measurements"][0]["limits"]["target_yield"] == pytest.approx(0.9)
+
     with open(campaign["sim_report_path"], encoding="utf-8") as handle:
         sim_report = json.load(handle)
     assert sim_report["corner_count"] == 6
     assert len(sim_report["corners"]) == 6
+    assert sim_report["measurements"][0]["limits"]["target_yield"] == pytest.approx(0.9)
+
+    with open(campaign["request_path"], encoding="utf-8") as handle:
+        dispatched = json.load(handle)
+    assert "target_yield" not in dispatched["measurements"][0]["limits"]
+
+
+@requires_native
+def test_run_campaign_end_to_end_without_target_yield_still_passes(
+    tmp_path, monkeypatch
+):
+    """Regression guard (issue #2517): a spec that never declares a
+    `target_yield` was already clean before the strip landed, and must stay
+    clean -- `sim_status` is still `"pass"`, not `"pass_partial"`."""
+    _write_body(tmp_path)
+    spec = _base_spec()
+    spec["measurements"][0]["limits"] = {"min": 0.3, "max": 0.7}
+    spec_path = _write_spec(tmp_path, spec)
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  5.00000e-01\n"
+        ),
+    )
+
+    report = run_campaign(str(spec_path))
+
+    assert report["campaign"]["sim_status"] == "pass"
+
+    with open(report["campaign"]["sim_report_path"], encoding="utf-8") as handle:
+        sim_report = json.load(handle)
+    assert sim_report["measurements"][0]["limits"] == {"min": 0.3, "max": 0.7}
 
 
 @requires_native

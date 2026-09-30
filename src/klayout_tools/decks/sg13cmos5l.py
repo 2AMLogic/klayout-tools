@@ -990,6 +990,55 @@ EXTRACTION_DECK = ExtractionDeck(
     # so `GatPoly.pin` is the same `5/2` pair `sg13g2.py`'s own module
     # docstring cites from `sg13g2.lyp`.
     poly_label=(5, 2),  # GatPoly.pin
+    # Dummy-device marker (issue #2602, the sg13cmos5l counterpart of
+    # sky130's #491 and gf180mcu's #2599 declarations -- see
+    # `decks/sky130.py`'s `dummy=(83, 20)` comment, `decks/gf180mcu.py`'s
+    # `dummy=(100, 50)` comment, and `ExtractionDeck.dummy`'s docstring in
+    # `decks/extraction.py` for the extractor-side machinery this field
+    # drives, which shipped in #295/#462 and needs no change here). Without
+    # it, `klt gen res_array`'s own `"dummy": N` param -- the only
+    # dummy-drawing generator this family's `_GENERATOR_FAMILY_DEFERRED`
+    # table (`gen_layer_params.py`) currently lets run on `sg13cmos5l`, per
+    # this issue's own scope note -- drew edge-fill resistor units that
+    # `klt lvs` on this family could then only report as
+    # `device.unmatched`.
+    #
+    # sg13cmos5l has no *native* per-device dummy-recognition mark either
+    # -- the same "no native mark, curated substitute" situation sky130's
+    # and gf180mcu's own comments document -- so `(100, 50)` was picked by
+    # checking whether gf180mcu's own choice of layer *number* 100 carries
+    # over, rather than assuming it does by analogy: sg13cmos5l's own
+    # transcribed `sg13cmos5l.lyp` (module docstring's pinned commit
+    # `607e18d4bd9214a52575c194b4181ef449f9252f`, fetched directly rather
+    # than inherited from the vendored snapshot) declares **no** `100/*`
+    # source pair at all -- unlike gf180mcu, where layer 100 carries a real
+    # `LVS_*` annotation family (`100/5`, `100/7`, `100/8`) this deck's
+    # sibling module reuses. Cross-checked the other two files this deck's
+    # own module docstring already cites as authoritative for GDS layer
+    # numbers -- `layers_def.drc` and `layers_definitions.lvs` (both
+    # symlinked into the pinned sibling `ihp-sg13g2` checkout at
+    # `_IHP_OPEN_PDK_G2_PIN_COMMIT`, fetched directly the same way) -- and
+    # neither references layer 100 with *any* datatype either (the closest
+    # match, `get_polygons(99, 100)`, is layer 99 datatype 100, not layer
+    # 100). So on sg13cmos5l layer 100 is not a reused-but-differently-
+    # purposed number the way gf180mcu's is -- it is wholly unassigned,
+    # zero collision risk by construction. Datatype 50 is kept anyway
+    # (rather than, say, datatype 0) purely for cross-PDK consistency with
+    # gf180mcu's own `(100, 50)` choice, and because it follows this
+    # codebase's own "well above any real, contiguous datatype block"
+    # convention. This deck reserves `(100, 50)` as an extraction-only,
+    # deck-local marker: no official sg13cmos5l purpose string, and no rule
+    # in this module's own `DECK` references layer 100 at all, so `klt drc
+    # --deck sg13cmos5l` never checks it.
+    #
+    # Verified non-colliding against every layer this `EXTRACTION_DECK`
+    # otherwise reads (`ExtractionDeck.connectivity_layers` -- the
+    # `active`/`poly`/`nwell`/`contact` core, the `metals`/`vias`/
+    # `metal_labels` stacks, `tap_nplus`/`tap_pplus`/`well_label`/
+    # `poly_label`, and every `resistors`/`mos_flavours`/`mom_capacitors`
+    # recognition layer): none of them is on layer 100 at all.
+    # `tests/test_extract.py` asserts that non-collision directly.
+    dummy=(100, 50),
     contact=(6, 0),  # Cont.drawing -- lands directly on Metal1, no li1-like
     # local-interconnect level (same single-first-metal-level shape as
     # sg13g2.py's own deck).

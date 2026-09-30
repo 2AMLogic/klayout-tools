@@ -873,6 +873,34 @@ spike, per its own scope.
   comparing against an older draft of this file understands why the exit
   condition looks the way it does.
 
+## Addendum: cocotb 2.1.0 re-verification (2026-09, issue #2583)
+
+The pin in `pyproject.toml`'s `functional-verification` extra moved from
+`cocotb>=2.0.1,<2.1` to `cocotb>=2.1.0,<2.2` (the Renovate bump this
+repository tracks as PR #2578, landed with issue #2583's fixes). Everything
+above stays as captured against 2.0.1 — it is a historical record, not
+re-edited. What was re-verified live under 2.1.0 (klayout-tools CI matrix,
+Icarus Verilog 13.0):
+
+- **§6's worked example still reproduces its exact pass/fail structure**
+  (`TESTS=3 PASS=2 FAIL=1 SKIP=0`, exit 3; report counts `3/2/1/0`), and the
+  `testcase` filter still flips it to a clean pass — the `Runner` API
+  surface this spike recommended (`get_runner` → `.build()`/`.test()`,
+  `results_xml=`, `seed=`) is unchanged.
+- **One observable behavior delta:** 2.0.x's regression manager listed a
+  `testcase`-filtered-out test in `results.xml` as a `<skipped>` entry
+  (quoted in §4); 2.1.0 compiles the names into a `COCOTB_TEST_FILTER`
+  regex and **deselected tests do not appear at all** (`tests="2"
+  skipped="0"`, verified live). `<skipped>` entries for tests that ran and
+  skipped themselves are still emitted and still counted. The contract
+  change this drives is documented where the field lives:
+  `docs/cli/functional-verification.md` → `testbench.testcase`.
+- cocotb 2.1.0's own metadata now declares `Requires-Python: >=3.9` (still
+  no upper bound) and ships cp314 wheels, so the extra's
+  `python_version < "3.14"` marker is conservative rather than
+  load-bearing — see `pyproject.toml`'s comment for the lift-it-in-
+  lockstep-with-the-verb caveat.
+
 ## Related
 
 - #391 parent epic

@@ -1341,19 +1341,43 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # same NWell, so the two can never collide), and a `pSD`-covered Activ shape
 # *outside* every NWell is a substrate tie (ties the NMOS body to the
 # substrate's real net -- opposite doping from the NMOS's own S/D, which is
-# `nSD`-covered Activ outside NWell). This is exactly how the real IHP
-# SG13G2 PDK's own LVS deck derives `ntap`/`ptap` with no dedicated tap mask
-# (see `general_derivations.lvs`, cited above). `tap`/`well_label` stay
+# `nSD`-covered Activ outside NWell). The *substrate*-tie half matches the
+# real IHP SG13G2 PDK's own LVS deck (`general_derivations.lvs`: `pactiv =
+# activ.and(psd_drw)`, `ptap_all = pactiv.and(pwell)...`). The *well*-tie
+# half, as #1273 first shipped it, did **not**: upstream never requires
+# `nSD.drawing` (7/0) over a tie -- n+ is the family's default doping, so
+# `nactiv = activ.not(psd_drw.join(nsd_block))` (`nsd_block` is 7/21, not
+# 7/0) and `ntap = nactiv.and(nwell_drw)...not(gatpoly)` -- and it even uses
+# drawn 7/0 as an *exclusion* term (`mos_exclude`/`taps_exclude` in
+# `mos_derivations.lvs`/`tap_derivations.lvs`). A layout drawn the upstream
+# way (unimplanted Activ inside NWell) therefore got no well tie here and
+# reported `device.body_unverified` on every tied PMOS.
+#
+# Issue #2591 closes that gap by accepting *either* form: `tap_nplus` (7/0)
+# is kept, so a layout drawn to the #1273 convention still extracts
+# unchanged, and `tap_nplus_complement` (14/0, `pSD`) additionally derives a
+# well tie from the *absence* of `pSD` exactly as upstream does --
+# `(Activ & NWell) - pSD - GatPoly`. Two remaining, deliberate differences
+# from `general_derivations.lvs`, both documented on
+# `ExtractionDeck.tap_nplus_complement`: (1) an unimplanted piece touching a
+# PMOS gate is left as that PMOS's source/drain rather than promoted to a
+# tie (upstream would not recognise a `pSD`-less PMOS at all; this engine
+# does, and must not silently delete it), and (2) `nsd_block` (7/21),
+# `ntap1_mk` and `Recog.diode` are not subtracted, and 7/0 is not treated as
+# an exclusion -- this curated deck reads 7/0 as a positive tie marker
+# instead, the one place it still knowingly diverges. `tap`/`well_label` stay
 # `None`: sg13g2 draws no distinct tap mask (the derivation above is the
 # whole point), and -- as this module's own `metal_labels` note below
 # explains -- sg13g2 has no datatype-25-style `.text` text layer for `NWell`
 # distinct from its per-metal `*_text` layers, so there is no `well_label`
 # candidate (unlike `poly_label`, fixed by issue #1476 below -- see the
 # note directly above `EXTRACTION_DECK`'s definition). A layout drawing no
-# tie extracts exactly as it always did (both
-# `tap_nplus`/`tap_pplus` are additive-only derivation inputs -- see
-# `ExtractionDeck.tap_nplus`/`.tap_pplus`'s own docstring for the exact
-# derivation `extract.py` performs).
+# tie extracts exactly as it always did (`tap_nplus`/`tap_pplus`/
+# `tap_nplus_complement` are additive-only derivation inputs -- see
+# `ExtractionDeck.tap_nplus`/`.tap_pplus`/`.tap_nplus_complement`'s own
+# docstring for the exact derivation `extract.py` performs). The one new
+# reading since issue #2591: an unimplanted Activ shape inside NWell that
+# touches no gate -- which upstream calls an `ntap` -- is now a well tie.
 #
 # Issue #1476 (blocking sg13g2-bandgap's `bandgap_startup` LVS, see the
 # `sg13g2-bandgap#4` tracker's "Permanent blockers" item 4): `poly_label`
@@ -1454,10 +1478,15 @@ EXTRACTION_DECK = ExtractionDeck(
     # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie
     # region from these same implant layers (issue #1273, mirroring
     # gf180mcu's #1084; see the module docstring note above this deck's
-    # definition for the full derivation).
+    # definition for the full derivation, and for issue #2591's correction
+    # of the well-tie half against upstream).
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
+    # Issue #2591: upstream's own well-tie form -- Activ inside NWell with
+    # *no* pSD over it (`nactiv = activ.not(psd_drw...)`), unioned with the
+    # positive `tap_nplus` form above so either drawing convention extracts.
+    tap_nplus_complement=(14, 0),  # pSD.drawing -- absence marks an n+ well tie
     well_label=None,
     poly_label=(5, 1),  # GatPoly.label -- issue #1476
     nfet_class="nfet",
