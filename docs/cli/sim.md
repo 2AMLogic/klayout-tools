@@ -1507,10 +1507,69 @@ anyone sampled.
 { "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" } }
 ```
 
-Resolved via [`klt pdk find`](pdk.md)'s search order (`--pdk-root`/`$PDK_ROOT`,
-the ciel/volare stores, conventional prefixes); `lib`, when relative, is
+Resolved via [`klt pdk find`](pdk.md)'s search order; `lib`, when relative, is
 joined against the resolved variant directory. Optional `models.pdk_root`
 pins the search the same way `klt pdk find --pdk-root` does.
+
+**The resolution order, explicitly** (first match wins; the winning step is
+reported as `provenance.pdk.source`):
+
+| # | Candidate root | Notes |
+|---|---|---|
+| 1 | `models.pdk_root` | Pins the root and **disables** steps 2–4 entirely. |
+| 2 | `$PDK_ROOT` | The invoking process's environment. A `$PDK_ROOT` that holds no matching install is skipped, falling through to step 3. |
+| 3 | `~/.ciel`, then `~/.volare` | The ciel/volare stores, in that order — **`~/.ciel` first**. |
+| 4 | `/usr/local/share/pdk`, `/usr/share/pdk`, `~/share/pdk` | Conventional open_pdks install prefixes, in that order. |
+
+`models.pdk` (or `$PDK`) selects **which variant** within whichever root
+wins; it does not reorder the roots.
+
+**More than one install of the same variant is an ordinary host state**, not
+a misconfiguration: a machine that has followed the tooling's own migration
+carries both a `volare`-managed and a `ciel`-managed `sky130A` — two
+different `open_pdks` builds, whose `libs.tech/combined/continuous/
+models_fet.spice` (the FET cards a mismatch Monte Carlo draws from) need not
+be byte-identical. Step 3 above then silently prefers `~/.ciel`, and a
+campaign that verified `~/.volare` against a pinned `open_pdks` commit can
+produce a record naming that pin with a simulation behind it that read the
+other build. Since issue
+[#2564](https://github.com/2AMLogic/klayout-tools/issues/2564) that
+substitution is **reported rather than discarded**:
+
+- **stderr** carries a one-line warning naming the absolute root actually
+  read, every root skipped, and the remedy:
+
+  ```text
+  klt: warning: 2 installs provide PDK variant 'sky130A'; read
+  /home/u/.ciel (search root: ~/.ciel), skipped /home/u/.volare (search
+  root: ~/.volare). Resolution is first-match-wins, so a pinned open_pdks
+  build may not be the one this run read -- pin the root explicitly
+  (--pdk-root, or a request's models.pdk_root) to disable the search and
+  choose deliberately.
+  ```
+
+- **`--format json`** records the skipped installs on
+  `provenance.pdk.ambiguous_sources` — the path-free search-order labels
+  (`["search root: ~/.volare"]`), never the absolute roots, which would bake
+  the resolving machine's home directory into committed evidence. The key is
+  **absent** when resolution was unambiguous, so an ordinary run's
+  `provenance` is unchanged.
+
+- **`--format text`** echoes the resolved PDK on its own line beside
+  `models_lib`, plus a `WARNING` line when the variant was installed more
+  than once:
+
+  ```text
+  models_lib: <outside repo>
+  pdk: sky130A open_pdks 0fe599b (via search root: ~/.ciel)
+  pdk: WARNING: variant also installed under search root: ~/.volare -- resolution is first-match-wins; pin models.pdk_root to choose deliberately
+  ```
+
+**Pinning `models.pdk_root` is the fix**, and it is quiet by construction:
+step 1 disables the search, so there is no second candidate to be ambiguous
+against. `$PDK_ROOT` narrows the search to one *first* candidate but does not
+disable it, so a run pinned that way still reports any other install it
+skipped.
 
 ```json
 { "models": { "lib": "$PDK_ROOT/sky130A/libs.tech/ngspice/sky130.lib.spice" } }
@@ -2358,7 +2417,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored`/`inconclusive` (issues #1849, #2492). See below. |
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when nothing made one necessary — either no process axis at all, or a `corners.process` bundle whose every section named its own `lib` (issue #2522); never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `corner_section_libs` (issue #2522 — one `{name, path, scope, sha256}` per distinct per-section corner library a `corners.process` bundle named, in first-appearance order; see "Per-section corner libraries" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
-| `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
+| `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`), and carries the additional `ambiguous_sources` key when the resolved variant was installed more than once on this host (issue #2564 — see "Model library resolution" above); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 | `plots`         | array\<object\> | Additive/optional (issue #1723): only present when `--plot` was used — every SVG actually written, as `{corner_id, signal, path}`, in corner/signal order. See "Waveform plots" above. |
