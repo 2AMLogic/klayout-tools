@@ -1103,12 +1103,25 @@ and `backend: "remote"` with `hosts > 1` shards across a real, guarded
 EC2 fleet (Epic #375's K-instance launch, fleet-level cost gate, vCPU quota
 pre-check, and one-shard retry).
 
+One spec field is *not* handed through: a measurement's
+`limits.target_yield` is `klt yield`'s bound, never one `klt sim` applies,
+so it is held out of the dispatched request the same way the run-level
+`confidence`/`target_ci_halfwidth`/`min_samples` fields are. `klt sim`
+grades its own [measurement coverage](sim.md) against the limit keys it
+recognises (`min`/`max`) and files anything else as *uncovered* work, which
+would otherwise downgrade every campaign's `sim_status` to `"pass_partial"`
+for a bound `klt sim` was never asked to check. The key is restored on the
+collected report below, so the yield half still sees the claim it grades.
+Any *other* unrecognised limit key is left in place deliberately -- that is
+a spec bug, and `klt sim`'s coverage report is where it should surface.
+
 ### Collection
 
 The dispatched `klt sim` report -- already shaped exactly like any other
 `klt sim` Monte Carlo report -- is written to `<out-dir>/sample-set.json`
-and handed to the exact `klt yield` reader/pipeline described earlier in
-this document, unmodified: the same `klt sim` report auto-detection, the
+(with each measurement's `limits.target_yield` restored, see "Dispatch"
+above) and handed to the exact `klt yield` reader/pipeline described earlier
+in this document, unmodified: the same `klt sim` report auto-detection, the
 same distribution fit/CI/Cpk/negative-control/analytic-cross-check pipeline.
 The response is Phase 1's own yield-report JSON (see "JSON schema" above)
 with one added `campaign` block:

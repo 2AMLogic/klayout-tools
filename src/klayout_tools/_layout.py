@@ -215,6 +215,34 @@ def region(
     return kdb.Region(cell.begin_shapes_rec(layer_index))
 
 
+def complement_well_tie(
+    active: kdb.Region,
+    poly: kdb.Region,
+    well: kdb.Region,
+    p_implant: kdb.Region,
+) -> kdb.Region:
+    """Well-tie candidate diffusion derived from the *absence* of a p+
+    implant (issue #2591, ``ExtractionDeck.tap_nplus_complement``):
+    ``(active & well) - p_implant - poly`` -- IHP SG13G2's own
+    ``general_derivations.lvs`` ``ntap`` form -- minus every merged piece
+    that touches or overlaps a gate (``active & poly``).
+
+    That last step is a deliberate, conservative divergence from the
+    foundry derivation: an unimplanted piece abutting a gate is the
+    source/drain of a MOS drawn without its implant, which this engine
+    still recognises as a device, so promoting it to a tie would delete the
+    device and short its terminals onto the well. Shared by ``extract.py``
+    (flat derivation) and ``extract_abstract.py`` (abstract-cell well-tie
+    bridge) so both read the identical geometry.
+    """
+    candidate = ((active & well) - p_implant) - poly
+    if candidate.is_empty():
+        return candidate
+    # `not_interacting` counts edge-touching as interacting, so a piece
+    # butted directly against a gate edge is dropped along with overlaps.
+    return candidate.merged().not_interacting(active & poly)
+
+
 def texts(
     layout: kdb.Layout, cell: kdb.Cell, layer: tuple[int, int] | None
 ) -> kdb.Texts:
