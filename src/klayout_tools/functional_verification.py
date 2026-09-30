@@ -1600,7 +1600,7 @@ def _import_runner():
     except ImportError as exc:  # pragma: no cover - exercised via monkeypatch
         raise FunctionalVerificationError(
             f"cocotb is not installed (import failed: {exc}) -- install it with "
-            "`pip install cocotb` (cocotb 2.0 supports Python <= 3.13)"
+            "`pip install cocotb`"
         ) from exc
     return runner
 
