@@ -14,6 +14,51 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2608, `klt signoff` T1 item 11; additive — **no**
+  `schema_version` bump, and no new reason string: a citation that previously
+  rendered `supply_spec_incomplete` for a spec document that could not be
+  found now grades on that document's real declarations): the `klt erc`
+  envelope item 11 cites echoes its spec document's *path*, and `klt signoff`
+  re-reads that document to recover the declarations the envelope does not
+  carry (declared supplies, stackup, ties). That path was resolved from one
+  directory only — `spec["cwd"]` for a command-backed manifest entry, the
+  grading process's own cwd otherwise — so an ERC run made from the layout
+  directory, which records a bare `"spec": "erc_supply_spec.json"`, was
+  unreadable from a repo-root `klt signoff --manifest`. It is now resolved
+  the same two-candidate way issue #2197 resolves `klt yield`'s samples
+  document: **relative to the ERC report's own directory first**, then
+  relative to the producing run's directory as the previous, compatibility
+  fallback. Where both candidates hold a same-named document the envelope's
+  own `provenance.spec.content_hash` (issue #2049) decides which is the cited
+  spec, so a coincidentally-named neighbour beside the evidence can never
+  turn a fresh citation into a reported `stale_evidence`; a genuinely edited
+  or unpinned spec still renders `stale_evidence`/`unverifiable_provenance`
+  exactly as issue #2496 made it. A spec found at neither candidate still
+  renders `supply_spec_incomplete` — unprovable, never assumed. No `klt erc`
+  output changed, and no manifest needs editing.
+- **Fixed** (#2602, `klt gen` / `klt extract` / `klt lvs` on `sg13cmos5l`;
+  additive — **no** `schema_version` bump, but user-visible: the
+  `sg13cmos5l` deck's `provenance.deck` sha256 changes, a `dummy > 0`
+  generated stream carries one new layer, and a `res_array` that previously
+  extracted `2 * rows * dummy` extra devices now does not): `klt gen
+  res_array` (the only dummy-drawing generator this family's
+  `_GENERATOR_FAMILY_DEFERRED` table lets run on `sg13cmos5l`) accepts a
+  `"dummy": N` param on `sg13cmos5l`, but that family's curated extraction
+  deck declared no `dummy` marker layer — so the tool's own generator drew
+  edge-fill resistor units the tool's own `klt lvs` could only report as
+  `device.unmatched`. `decks/sg13cmos5l.py`'s `EXTRACTION_DECK` now
+  declares `dummy=(100, 50)` — a deck-local convention layer on a layer
+  number this family's own transcribed `.lyp`/DRC/LVS layer tables assign
+  no purpose to at all (sg13cmos5l has no native per-device dummy mark; see
+  that deck's own comment for the provenance and the non-collision
+  verification), and `res_array` draws it over each dummy unit's
+  recognised body-segment footprint, so the extractor-side
+  dummy-suppression machinery that shipped in #295/#462 fires on this
+  family too. This is the `sg13cmos5l` counterpart of sky130's own
+  `(83, 20)` declaration (#491) and gf180mcu's own `(100, 50)` declaration
+  (#2599). `sg13g2` still declares no `dummy` layer and is unaffected
+  (tracked separately, #2590). A `dummy: 0` request on `sg13cmos5l` draws
+  no marker shape and extracts exactly as before.
 - **Fixed** (#2595, `klt lvs --check`; additive — **no** `schema_version`
   bump, and no change to where an input path is resolved): `--check` resolves
   the `layout`/`reference` paths a committed report echoes back relative to
@@ -79,6 +124,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   still declare no `dummy` layer and are unaffected (tracked separately).
   A `dummy: 0` request on `gf180mcu` draws no marker shape and extracts
   exactly as before.
+- **Fixed** (#2591, `klt extract`/`klt lvs` on `sg13g2`; additive — **no**
+  `schema_version` bump, but `provenance.deck.content_hash` for `sg13g2`
+  changes): the curated `sg13g2` extraction deck only recognised a well tie
+  painted with `nSD.drawing` (7/0), while upstream IHP SG13G2's own LVS deck
+  (`general_derivations.lvs`) derives `ntap` from the *absence* of `pSD`
+  and never requires 7/0 — so a layout drawn the foundry way got no well tie
+  and reported `device.body_unverified` on every tied PMOS. A new optional
+  `ExtractionDeck.tap_nplus_complement` field derives a well tie from
+  `(active & nwell) - <p+ implant> - poly` (minus any piece touching a gate,
+  so a `pSD`-less PMOS is never swallowed as a tie); `sg13g2` sets it to
+  `pSD` (14/0) and keeps `tap_nplus = (7, 0)`, so either convention extracts
+  the same tie. The deck's comment no longer claims full `ntap` parity with
+  upstream. Substrate-tie behaviour and every other deck are unchanged.
 - **Fixed** (#2580, `klt gen`; additive — **no** `schema_version` bump, but
   user-visible: a `mos_array` request that previously returned an empty
   `drc_hints.notes` can now carry an entry): `klt gen mos_array` draws a
@@ -121,6 +179,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   resolution" section now documents the resolution order explicitly.
   Request-level pinning is available today as `models.pdk_root`; a
   `models.root`-style alias was **not** added.
+
+- **Fixed** (#2517, `klt yield-campaign`; no schema change — **no**
+  `schema_version` bump): every campaign run reported
+  `campaign.sim_status: "pass_partial"`, even a completely clean one. A
+  campaign spec declares each measurement's limits once, in the shape both
+  verbs read (`{"min": …, "max": …, "target_yield": …}`), and the spec was
+  handed straight to `klt sim` — whose recognised limit keys are `min`/`max`
+  only, so `target_yield` was filed into the measurement-coverage **skip**
+  list as `unrecognized_limit_key`, and a non-empty skip list downgrades an
+  otherwise-passing check to `"pass_partial"` (#2109's rollup rule). The
+  campaign path now holds a measurement's `limits.target_yield` out of the
+  dispatched request — exactly as it already held out the run-level
+  `confidence`/`target_ci_halfwidth`/`min_samples` fields — and restores it
+  on the collected report before that report becomes the sample set `klt
+  yield` reads. The restore matters: with no separate `--limits` file in
+  this flow, the sim report *is* where `klt yield` gets its limits, so a bare
+  strip would have deleted the campaign's own yield claim and left every
+  measurement ungraded (`status: "reported"`) instead of pass/fail. The
+  strip is a closed list of known yield-only keys, not "anything besides
+  `min`/`max`" — any *other* unrecognised limit key still reaches `klt sim`
+  and still shows up in its coverage report, which is where a real spec bug
+  belongs. `klt sim`'s own coverage contract is untouched for every other
+  caller. See [`docs/cli/yield.md`](docs/cli/yield.md)'s "Campaign
+  orchestration → Dispatch" section.
 
 - **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
   user-visible: a corner that previously reported `status: "error"` can now

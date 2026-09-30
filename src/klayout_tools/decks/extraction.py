@@ -351,6 +351,28 @@ class ExtractionDeck:
     itself is set: a genuinely distinct drawn tap layer always wins over a
     derived one.
 
+    ``tap_nplus_complement`` (issue #2591) is a third, optional derivation
+    input for the same ``tap is None`` case: a p+ implant layer whose
+    *absence* marks n+ diffusion, for a PDK family whose own LVS deck treats
+    n+ as the default doping and never requires a positive n-implant over a
+    well tie (IHP SG13G2's ``general_derivations.lvs``: ``nactiv =
+    activ.not(psd_drw.join(nsd_block))``, ``ntap = nactiv.and(nwell_drw)
+    ...not(gatpoly)``). When set, ``extract.py`` additionally derives a well
+    tie from ``(active & nwell) - tap_nplus_complement - poly``, unioned
+    with the positive ``tap_nplus`` form above (so a layout drawn either way
+    extracts the same tie). One deliberate, conservative restriction versus
+    that upstream derivation: a candidate piece that *touches or overlaps a
+    PMOS gate* (``active & nwell & poly``) is dropped, never promoted to a
+    tie -- it is the source/drain of a PMOS drawn without its p+ implant,
+    which this engine (unlike the foundry deck) still recognises as a PMOS,
+    and reclassifying it as a tie would silently delete that device and
+    short its terminals onto the well. A tie butted against a properly
+    implanted PMOS source (the p+ region sits between it and the gate) is
+    unaffected. ``None`` (the default) derives nothing from this field --
+    every deck but sg13g2 as of its introduction, byte-for-byte the same
+    behaviour as before it existed. Like ``tap_nplus``/``tap_pplus`` it is
+    ignored outright when ``tap`` is set.
+
     ``contact`` connects ``active``/``poly``/``tap`` to the first metal
     level. ``metals`` is the ordered metal-stack layer list (index 0 is the
     one ``contact`` lands on); ``metal_labels`` is the matching list of
@@ -529,6 +551,7 @@ class ExtractionDeck:
     tap: tuple[int, int] | None = None
     tap_nplus: tuple[int, int] | None = None
     tap_pplus: tuple[int, int] | None = None
+    tap_nplus_complement: tuple[int, int] | None = None
     well_label: tuple[int, int] | None = None
     poly_label: tuple[int, int] | None = None
     dummy: tuple[int, int] | None = None
@@ -723,8 +746,8 @@ class ExtractionDeck:
         than ``metals``/``vias`` connectivity or bipolar/capacitor/resistor/
         diode device recognition -- ``active``/``poly``/``nwell``/
         ``contact``, the optional ``tap``/``tap_nplus``/``tap_pplus``/
-        ``well_label``/``poly_label``/``dummy``, and every ``metal_labels``
-        entry. ``None`` optionals are skipped.
+        ``tap_nplus_complement``/``well_label``/``poly_label``/``dummy``,
+        and every ``metal_labels`` entry. ``None`` optionals are skipped.
 
         Subtracted from :attr:`device_recognition_only_layers` (issue #619):
         a bipolar device can legitimately reuse the deck's own MOS-core
@@ -746,6 +769,7 @@ class ExtractionDeck:
             self.tap,
             self.tap_nplus,
             self.tap_pplus,
+            self.tap_nplus_complement,
             self.well_label,
             self.poly_label,
             self.dummy,
@@ -803,7 +827,8 @@ class ExtractionDeck:
         of ``klt drc``'s ``coverage.layers_in_stream_without_rules``).
 
         Includes the MOS-recognition layers (``active``/``poly``/``nwell``/
-        ``contact``, plus optional ``tap``/``tap_nplus``/``tap_pplus``), the
+        ``contact``, plus optional ``tap``/``tap_nplus``/``tap_pplus``/
+        ``tap_nplus_complement``), the
         ``metals``/``vias`` stack
         (:attr:`merge_layers`) and every label layer (``well_label``/
         ``poly_label``/``metal_labels``), and each ``bipolars``/
@@ -826,6 +851,7 @@ class ExtractionDeck:
             self.tap,
             self.tap_nplus,
             self.tap_pplus,
+            self.tap_nplus_complement,
             self.well_label,
             self.poly_label,
             self.dummy,

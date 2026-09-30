@@ -2360,7 +2360,12 @@ ordinary transistor active), but (issue #1084) declares `tap_nplus`/
 drawn `Nplus`/`Pplus`-over-`Comp` tie — a layout that draws one gets the
 same real-net resolution as sky130's drawn tap; a layout that draws neither
 still lands its NMOS/PMOS bodies on an anonymous, deck-synthesized net
-unconditionally, exactly as before #1084. Comparing a synthesized net
+unconditionally, exactly as before #1084. **sg13g2** derives its ties the
+same way from `nSD`/`pSD` over `Activ` and — since issue #2591 — also
+accepts the upstream IHP convention of an *unimplanted* `Activ` well tie
+inside `NWell` (`ExtractionDeck.tap_nplus_complement`), so a layout drawn
+to the foundry deck's own convention no longer reports
+`device.body_unverified` for its tied PMOS bodies. Comparing a synthesized net
 against a schematic reference's real ground/rail net still produces a
 genuine `NetlistComparer` finding if they disagree, but a *clean* compare on
 that dimension does not mean the well/substrate tie was actually verified

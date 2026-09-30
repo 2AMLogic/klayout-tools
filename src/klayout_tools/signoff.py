@@ -1790,7 +1790,11 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #:   ``request.power`` block.
 #: - :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- the cited `klt erc` run's own
 #:   spec document does not ask the question item 11 grades: it could not be
-#:   read, declares no ``"kind": "supply"`` net, declares no ``ties[]``
+#:   read at *any* path it could mean from here (issue #2608 --
+#:   :func:`_erc_supply_spec_candidates` tries the evidence file's own
+#:   directory as well as the producing run's, so this no longer fires for a
+#:   spec committed beside its evidence), declares no ``"kind": "supply"``
+#:   net, declares no ``ties[]``
 #:   with no disclosure of why (see :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`
 #:   below for the disclosed case, issue #2234) -- an uncomputed check is
 #:   not a clean one -- declares a ``ties[]`` entry the ERC run itself
@@ -4949,6 +4953,13 @@ def _resolve_relative_to_report(path: str, spec: dict[str, Any]) -> str | None:
     silently failing to find it. Resolving it against the report file's own
     directory first -- see :func:`_yield_samples_content_hash` -- fixes that
     without requiring the manifest or the `klt yield` invocation to change.
+
+    Issue #2608: `klt erc`'s spec document (``envelope["spec"]``) is the
+    same shape of reference and is resolved the same way -- see
+    :func:`_erc_supply_spec_candidates`. A `klt erc` run made from the
+    layout directory records ``"spec": "erc_supply_spec.json"``, which a
+    repo-root ``klt signoff --manifest`` could not open before that
+    fallback existed.
     """
     if os.path.isabs(path):
         return path
@@ -5600,11 +5611,11 @@ def _resolve_relative_to_spec(path: str, spec: dict[str, Any]) -> str:
     a command-backed entry, this process's own cwd otherwise.
 
     Shared by :func:`_yield_samples_content_hash` (the `klt yield` samples
-    document -- as the compatibility fallback tried *after*
-    :func:`_resolve_relative_to_report`, per issue #2197) and
-    :func:`_erc_supply_spec` (the `klt erc` spec document) -- both are "the
-    envelope points at a second document this module has to read, because
-    the envelope itself does not carry what we need".
+    document) and :func:`_erc_supply_spec_candidates` (the `klt erc` spec
+    document) -- both are "the envelope points at a second document this
+    module has to read, because the envelope itself does not carry what we
+    need", and both try this resolution as the compatibility fallback
+    *after* :func:`_resolve_relative_to_report` (issues #2197 and #2608).
     """
     cwd = spec.get("cwd") if spec.get("kind") == "command" else None
     if cwd and not os.path.isabs(path):
@@ -5664,6 +5675,80 @@ def _erc_supply_spec_hash_reason(
     return None
 
 
+def _erc_supply_spec_candidates(spec_path: str, spec: dict[str, Any]) -> list[str]:
+    """Every filesystem path the cited `klt erc` envelope's own ``spec``
+    field could mean **from this grading context**, in the order
+    :func:`_erc_supply_spec_document` should try them (issue #2608).
+
+    A path an envelope names is not portable -- it was written relative to
+    whatever directory the producing run used, which need not be the one
+    grading happens in (:func:`_resolve_input_artifact_value` documents the
+    same hazard for the input-artifact re-hash, and resolves it the same
+    two-candidate way). So:
+
+    - relative to the **evidence file's own directory** first
+      (:func:`_resolve_relative_to_report`), the way a reader who opened the
+      ERC report and followed its reference would. This is the ordinary `klt
+      erc supply.gds erc_supply_spec.json` run made from the layout
+      directory -- the natural place to run a per-block check -- whose
+      envelope records ``"spec": "erc_supply_spec.json"``, a path that
+      resolves only from there. ``None`` for a command-backed entry (the
+      cwd resolution below already *is* "the producing run's own
+      directory" for one) and for an absolute path (nothing to rebase).
+    - relative to the directory the producing run itself used
+      (:func:`_resolve_relative_to_spec`: ``spec["cwd"]`` for a
+      command-backed entry, this process's own cwd otherwise) second -- the
+      pre-#2608 behaviour, kept as the compatibility fallback for a spec
+      document that genuinely lives elsewhere.
+
+    Exactly the resolution order issue #2197 gave `klt yield`'s samples
+    document (:func:`_yield_samples_content_hash`); this was the last
+    "the envelope points at a second document" site still resolving from
+    one directory only.
+    """
+    candidates: list[str] = []
+    evidence_relative = _resolve_relative_to_report(spec_path, spec)
+    if evidence_relative is not None:
+        candidates.append(evidence_relative)
+    candidates.append(_resolve_relative_to_spec(spec_path, spec))
+    return list(dict.fromkeys(candidates))
+
+
+def _erc_supply_spec_document(
+    envelope: dict[str, Any], spec: dict[str, Any], spec_path: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Read the ERC spec document ``spec_path`` names, trying each path it
+    could mean here (:func:`_erc_supply_spec_candidates`) -- ``(document,
+    None)`` for the first candidate that both parses as a JSON object *and*
+    still matches the envelope's own ``provenance.spec.content_hash``
+    (:func:`_erc_supply_spec_hash_reason`).
+
+    A **hash match decides** which candidate is the cited document, for the
+    same reason :func:`_verify_input_artifact` prefers a match over a
+    mismatch: two directories can hold a same-named spec, and a
+    coincidentally-named neighbour must never turn a fresh citation into a
+    reported ``stale_evidence``. When no candidate matches, the *first*
+    readable candidate's own reason is reported (``stale_evidence`` /
+    ``unverifiable_provenance``) -- a genuinely edited or unpinned spec
+    still fails exactly as it did before this fallback existed. ``(None,
+    None)`` only when no candidate could be read and parsed at all.
+    """
+    read_reason: str | None = None
+    for candidate in _erc_supply_spec_candidates(spec_path, spec):
+        try:
+            document = _read_json_source(candidate, "erc spec")
+        except SignoffError:
+            continue
+        if not isinstance(document, dict):
+            continue
+        hash_reason = _erc_supply_spec_hash_reason(envelope, candidate)
+        if hash_reason is None:
+            return document, None
+        if read_reason is None:
+            read_reason = hash_reason
+    return None, read_reason
+
+
 def _erc_supply_spec(
     resolution: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -5706,16 +5791,25 @@ def _erc_supply_spec(
     supply resolved to one island" from "no supply was ever declared". This
     is the same gap, and the same remedy, as `klt yield`'s missing
     ``provenance`` block (see :func:`_yield_samples_content_hash`): read the
-    document the envelope names, via the same cwd resolution, rather than
-    fabricate a verdict from its absence. ``klt signoff`` stays a pure
-    *consumer* either way -- it changes no verb's own output.
+    document the envelope names, via the same two-candidate resolution,
+    rather than fabricate a verdict from its absence. ``klt signoff`` stays a
+    pure *consumer* either way -- it changes no verb's own output.
+
+    **Where the document is looked for** (issue #2608):
+    :func:`_erc_supply_spec_candidates` -- the evidence file's own directory
+    first, then the producing run's own (``spec["cwd"]``, else this
+    process's cwd). An ERC envelope committed beside the spec it names is
+    resolvable only the first way, and one run from a directory this
+    grading process cannot know only the second; neither convention is
+    guessed at, both are tried, and :func:`_erc_supply_spec_document`
+    settles which is the cited document by hash.
 
     **Verified against the envelope's own hash of it** (issue #2496). A
     second document read off disk is only as trustworthy as its freshness:
     without a check, editing the spec after the ERC run silently changes
     what item 11 grades while the cited findings still describe the old
-    declarations. :func:`_erc_supply_spec_hash_reason` re-hashes the same
-    file and compares against ``provenance.spec.content_hash`` (issue
+    declarations. :func:`_erc_supply_spec_hash_reason` re-hashes the
+    candidate and compares against ``provenance.spec.content_hash`` (issue
     #2049) before any declaration below is trusted.
 
     Follow-up reconciliation, exactly as for `klt yield`: if `klt erc` later
@@ -5730,17 +5824,11 @@ def _erc_supply_spec(
     if not isinstance(spec_path, str):
         return None, None
 
-    resolved_path = _resolve_relative_to_spec(spec_path, resolution["spec"])
-    try:
-        document = _read_json_source(resolved_path, "erc spec")
-    except SignoffError:
-        return None, None
-    if not isinstance(document, dict):
-        return None, None
-
-    hash_reason = _erc_supply_spec_hash_reason(envelope, resolved_path)
-    if hash_reason is not None:
-        return None, hash_reason
+    document, read_reason = _erc_supply_spec_document(
+        envelope, resolution["spec"], spec_path
+    )
+    if document is None:
+        return None, read_reason
 
     ties = document.get("ties")
     disclosure = document.get("ties_disclosure")
