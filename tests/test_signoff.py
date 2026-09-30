@@ -9089,6 +9089,10 @@ def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
         # Issue #2255: likewise for the well side -- every tie here names a
         # drawn `well_layer`.
         "ties_checked_by_well_assertion": [],
+        # Issue #2524: this fixture's supplies declare no `nets[].roles`, so
+        # the severed-rail negative was never measured -- `{}`, not a
+        # fabricated zero.
+        "supply_unlabelled_islands": {},
     }
 
 
@@ -9634,6 +9638,164 @@ def test_item_11_unmet_when_erc_reports_a_supply_side_finding(
     item = _item_11(result)
     assert item["status"] == "unmet", label
     assert item["reason"] == "supply_not_continuous", label
+
+
+#: Issue #2524: the ERC run item 11 could not previously grade at all -- a
+#: single-label supply rail severed into a labelled piece and an unlabelled
+#: orphan. `erc.unconnected_net` counts islands *carrying the label*, so it
+#: reports nothing (`matched_islands: 1`, clean); the defect is visible only
+#: as the unlabelled remainder on the role the spec says `VPWR` owns.
+ERC_UNLABELLED_CONDUCTOR_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "status": "violations",
+    "nets": [
+        {
+            "name": "VPWR",
+            "matched_islands": 1,
+            "expected_islands": 1,
+            "roles": ["met4"],
+            "unlabelled_islands": 1,
+            "unlabelled_area_um2": 812.5,
+            "unlabelled_bbox": {
+                "left": 140000,
+                "bottom": 0,
+                "right": 145000,
+                "top": 162500,
+            },
+            "unlabelled_allowed_islands": 0,
+        }
+    ],
+    "erc_findings": [
+        {
+            "rule": "erc.unlabelled_conductor",
+            "description": (
+                "declared net 'VPWR' owns role met4, carrying 1 unlabelled "
+                "conductor island (812.5 um^2) reachable from no label"
+            ),
+            "net": "VPWR",
+            "other_net": None,
+            "gate_id": None,
+            "layer": "met4",
+            "bbox": {"left": 140000, "bottom": 0, "right": 145000, "top": 162500},
+            "islands": None,
+        }
+    ],
+    "erc_finding_count": 1,
+}
+
+#: The same run with the rail whole: the remainder measured and zero, which
+#: is the severed-rail *negative* a met item 11 can cite (issue #2524).
+ERC_UNLABELLED_REMAINDER_CLEAN_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "nets": [
+        {
+            "name": "VPWR",
+            "matched_islands": 1,
+            "expected_islands": 1,
+            "roles": ["met4"],
+            "unlabelled_islands": 0,
+            "unlabelled_area_um2": 0.0,
+            "unlabelled_bbox": None,
+            "unlabelled_allowed_islands": 0,
+        }
+    ],
+}
+
+
+def test_item_11_unmet_when_a_declared_supply_owns_unlabelled_conductor(tmp_path):
+    """Issue #2524: `erc.unlabelled_conductor` on a declared supply blocks
+    item 11, under the same declared-name filter `erc.unconnected_net` uses.
+
+    This is the case the item structurally could not see before: the cited
+    run's island count is a clean `1`, because the severed orphan carries no
+    label to be counted. Without this clause a met item 11 would rest on a
+    negative the evidence never established."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    erc_envelope=ERC_UNLABELLED_CONDUCTOR_ENVELOPE,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_not_continuous"
+
+
+def test_item_11_unlabelled_conductor_on_a_signal_net_does_not_block(tmp_path):
+    """The declared-name filter is what keeps the new clause scoped: an
+    unlabelled remainder on a declared *signal* net is a real finding, but it
+    is not power delivery and must not block this item -- the same separation
+    that keeps `erc.floating_gate` and the signal-side
+    `erc.multiply_driven_net` out."""
+    erc = {
+        **ERC_UNLABELLED_CONDUCTOR_ENVELOPE,
+        "erc_findings": [
+            {**ERC_UNLABELLED_CONDUCTOR_ENVELOPE["erc_findings"][0], "net": "A"}
+        ],
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=erc
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["status"] == "met"
+
+
+def test_item_11_met_citation_states_the_severed_rail_negative(tmp_path):
+    """Issue #2524: a met item whose cited run declared `nets[].roles` states
+    the negative it now rests on -- `unlabelled_islands: 0` per declared
+    supply -- rather than leaving it implicit in an island count that could
+    not have seen a severed single-label rail."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    erc_envelope=ERC_UNLABELLED_REMAINDER_CLEAN_ENVELOPE,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["supply_unlabelled_islands"] == {
+        "VPWR": 0
+    }
+
+
+def test_item_11_met_citation_reports_no_negative_when_no_role_was_declared(
+    tmp_path,
+):
+    """The honest empty, not a fabricated zero (issue #2524): a cited run
+    whose supplies declared no `nets[].roles` -- and every pre-#2510 envelope
+    -- carries `{}`, because nothing measured the remainder. A grader must be
+    able to tell "checked, and it is zero" from "nobody asked"."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={"11": _power_delivery_evidence(tmp_path, kind="digital")},
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["supply_unlabelled_islands"] == {}
 
 
 def test_item_11_unmet_when_two_declared_supplies_are_shorted(tmp_path):
