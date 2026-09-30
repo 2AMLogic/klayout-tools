@@ -831,7 +831,13 @@ from typing import (
 )
 
 from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
-from ._report_verify import build_rerun_result, load_committed_report
+from ._report_verify import (
+    LIST_ITEM,
+    build_rerun_result,
+    diff_verdict_fields,
+    load_committed_report,
+    strip_path_patterns,
+)
 from .build_identity import version_report
 from .coverage import (
     coverage_nothing_checked,
@@ -7142,6 +7148,126 @@ def build_fleet_report(
 #: content rather than reporting one spurious whole-block drift entry.
 VOLATILE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset({("build",)})
 
+#: The tier/fleet-report paths ``--check`` excludes from its **pass/fail**
+#: verdict but still reports, separately, as ``doc_drift`` (issue #2526): the
+#: report's verbatim quotation of the checklist doc, and the hash of that doc.
+#:
+#: **The distinction this draws.** ``--check`` exists to answer "does this
+#: committed evidence still hold". Two different things can make a committed
+#: report stop reproducing, and before issue #2526 both rendered as the same
+#: ``"drifted"``:
+#:
+#: - **the evidence moved** -- an item's ``status``/``reason``, a citation's
+#:   ``content_hash``, a count derived from them. That is the answer the gate
+#:   exists to produce, and it is untouched here.
+#: - **the yardstick's wording moved** -- ``docs/design-evidence-tiers.md``
+#:   gained a paragraph under an item. Every ``id``/``tier``/``status``/
+#:   ``reason``/``citation`` in the report is identical, but the report
+#:   *inlines* the doc's prose (:func:`_build_tier_item`'s ``title``/``text``/
+#:   ``notes``, parsed straight out of the doc by
+#:   :func:`~.design_evidence_tiers.parse_design_evidence_tiers` and echoed on
+#:   unmodified), and ``source_doc_content_hash`` hashes the doc's whole
+#:   bytes -- so an upstream wording change alone rewrote a consumer's
+#:   committed verdict of record and turned its CI freshness gate red for a
+#:   reason it did not cause.
+#:
+#: **Why exactly these fields.** No grading rule reads any of them: an item's
+#: verdict is a function of the manifest's evidence and the item's *id*, and
+#: its identity in the report is ``id`` + ``tier`` + ``partition`` -- all
+#: still compared. ``title``/``text``/``notes`` are quotation; changing a
+#: quotation changes no verdict. ``source_doc_content_hash`` is one step
+#: removed but the same class of fact: it moves on *any* byte of the doc,
+#: including a typo fix in a section this report does not even render, so it
+#: cannot distinguish "the checklist changed what it requires" from "the
+#: checklist was reworded". What *would* distinguish that -- the checklist
+#: gaining, losing or renumbering an item -- is caught by the fields that stay
+#: compared: ``t1_item_count``, ``build_t1_item_count``, ``t1_met_count``, and
+#: the per-item ``id``/``graded_by_build`` rows themselves.
+#:
+#: **It is an exclusion from the verdict, not from the report.** Every path
+#: named here that actually moved is still listed, by name, in the response's
+#: ``doc_drift_fields`` with ``doc_drift: true`` -- so a consumer that wants
+#: to warn (or fail) on "the yardstick moved" still can; it just no longer
+#: has to conflate it with "your evidence moved". And an exclusion never
+#: masks a co-occurring real change: an item whose ``text`` *and* ``status``
+#: both moved still reports ``"drifted"`` on the ``status``.
+#:
+#: Deliberately **not** excluded: ``build.grading_ruleset_id`` (already
+#: covered by :data:`VOLATILE_REPORT_PATHS`'s whole-``build`` exclusion, and
+#: still reported verbatim by ``--describe-grader``, which this does not
+#: touch) and ``source_doc`` (which names *where* the doc came from -- a
+#: report graded against a ``--tiers-doc`` override instead of the bundled
+#: copy is a different grading run, not a reworded one).
+DOC_PROSE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        # Tier report (`--manifest`).
+        ("source_doc_content_hash",),
+        ("items", LIST_ITEM, "title"),
+        ("items", LIST_ITEM, "text"),
+        ("items", LIST_ITEM, "notes"),
+        # Fleet roll-up (`--fleet`): the same hash at the top level and once
+        # per block, plus the doc-sourced `title` the two reduced item views
+        # (`blocking_item`, `ungraded_items[]`) carry. Their `id`/`reason`
+        # -- what actually names the blocker -- stay compared.
+        ("blocks", LIST_ITEM, "source_doc_content_hash"),
+        ("blocks", LIST_ITEM, "blocking_item", "title"),
+        ("blocks", LIST_ITEM, "ungraded_items", LIST_ITEM, "title"),
+    }
+)
+
+
+def _check_signoff_report(
+    report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
+) -> dict[str, Any]:
+    """The diff half both ``--check`` modes share (issues #2249, #2526):
+    ``{schema_version, mode, report, status, drift, doc_drift,
+    doc_drift_fields, fresh}``.
+
+    Two diffs of the same pair, both through
+    :func:`~._report_verify.diff_verdict_fields`, both excluding
+    :data:`VOLATILE_REPORT_PATHS`:
+
+    1. the **verdict** diff, over a view of each side with
+       :data:`DOC_PROSE_REPORT_PATHS` stripped out
+       (:func:`~._report_verify.strip_path_patterns`) -- this one alone
+       decides ``status`` (and therefore the exit code);
+    2. the **whole** diff, un-stripped. Every entry it has that the first
+       does not is by construction a doc-prose path that moved, and is
+       reported as ``doc_drift_fields`` with ``doc_drift: true``.
+
+    Subtracting one from the other, rather than diffing a prose-only
+    projection, is what guarantees the two signals partition the drift: no
+    field can be reported in both, and no field that moved can go unreported
+    in either.
+
+    ``fresh`` is embedded un-stripped, exactly as before -- the exclusion
+    applies to the comparison, never to what the response shows.
+    """
+    result = build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=VOLATILE_REPORT_PATHS,
+        committed_for_diff=strip_path_patterns(committed, DOC_PROSE_REPORT_PATHS),
+        fresh_for_diff=strip_path_patterns(fresh, DOC_PROSE_REPORT_PATHS),
+        mode="check",
+    )
+    verdict_fields = {entry["field"] for entry in result["drift"]}
+    doc_drift_fields = [
+        entry
+        for entry in diff_verdict_fields(
+            committed, fresh, exclude=VOLATILE_REPORT_PATHS
+        )
+        if entry["field"] not in verdict_fields
+    ]
+    # Re-seat `fresh` last: it is the whole report, so the two small signals
+    # this adds belong above it for a reader of the raw JSON.
+    fresh_payload = result.pop("fresh")
+    result["doc_drift"] = bool(doc_drift_fields)
+    result["doc_drift_fields"] = doc_drift_fields
+    result["fresh"] = fresh_payload
+    return result
+
 
 def check_tier_report(
     report_path: str, manifest: dict[str, Any], *, tiers_doc: str | None = None
@@ -7153,30 +7279,31 @@ def check_tier_report(
     Re-grades ``manifest`` (:func:`build_tier_report` -- the same work
     rendering the report does, including actually running any command-backed
     evidence it cites) and diffs the result against the committed report,
-    excluding :data:`VOLATILE_REPORT_PATHS`. ``status: "match"`` when nothing
-    else moved; ``"drifted"``, naming every field that did, otherwise --
-    a changed item ``status``/``reason``, a moved citation ``content_hash``,
-    a different ``source_doc_content_hash`` (the checklist itself changed), a
-    different ``t1_met_count``.
+    excluding :data:`VOLATILE_REPORT_PATHS` (build identity) and
+    :data:`DOC_PROSE_REPORT_PATHS` (the checklist's own wording).
+    ``status: "match"`` when nothing else moved; ``"drifted"``, naming every
+    field that did, otherwise -- a changed item ``status``/``reason``, a moved
+    citation ``content_hash``, a different ``t1_met_count``.
+
+    A doc-prose-only difference is **reported, not graded** (issue #2526):
+    ``doc_drift: true`` plus a ``doc_drift_fields`` list naming what moved,
+    alongside ``status: "match"``. See :data:`DOC_PROSE_REPORT_PATHS` for why
+    "the checklist was reworded" and "your evidence moved" have to be two
+    signals rather than one.
 
     This is the mode a consumer gating on "does the committed evidence still
     hold" should use **instead of byte-comparing the report file against a
     fresh render**: that comparison fails between two correct installs of the
     same pinned commit, on nothing but how each was provisioned (see
-    :data:`VOLATILE_REPORT_PATHS`).
+    :data:`VOLATILE_REPORT_PATHS`), and again on any upstream rewording of
+    the bundled checklist (see :data:`DOC_PROSE_REPORT_PATHS`).
 
     Raises :class:`SignoffError` for a missing/unparseable committed report,
     or one that is not a tier report at all -- never a traceback.
     """
     committed = _load_committed_signoff_report(report_path, "items", "--manifest")
     fresh = build_tier_report(manifest, tiers_doc=tiers_doc)
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_REPORT_PATHS,
-        mode="check",
-    )
+    return _check_signoff_report(report_path, committed, fresh)
 
 
 def check_fleet_report(
@@ -7186,20 +7313,19 @@ def check_fleet_report(
     :func:`check_tier_report` contract, one level up -- verify a committed
     *fleet* roll-up still reproduces from fleet manifest ``F``.
 
-    Inherits everything, including the exclusion, by re-rendering through
-    :func:`build_fleet_report` (which itself calls :func:`build_tier_report`
-    once per block): a roll-up carries exactly one ``build`` block, at the
-    top level, so the same one-path exclusion covers it.
+    Inherits everything, including both exclusions and the ``doc_drift``
+    signal, by re-rendering through :func:`build_fleet_report` (which itself
+    calls :func:`build_tier_report` once per block) and diffing through the
+    same :func:`_check_signoff_report`: a roll-up carries exactly one
+    ``build`` block, at the top level, so
+    :data:`VOLATILE_REPORT_PATHS`' one path covers it, while
+    :data:`DOC_PROSE_REPORT_PATHS` names the roll-up's own doc-sourced
+    surface separately -- ``source_doc_content_hash`` once per block as well
+    as at the top level, and the ``title`` its reduced item views carry.
     """
     committed = _load_committed_signoff_report(report_path, "blocks", "--fleet")
     fresh = build_fleet_report(fleet, tiers_doc=tiers_doc)
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_REPORT_PATHS,
-        mode="check",
-    )
+    return _check_signoff_report(report_path, committed, fresh)
 
 
 def _load_committed_signoff_report(

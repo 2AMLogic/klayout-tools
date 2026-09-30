@@ -16471,17 +16471,19 @@ def _add_dummy_nfet(layout: kdb.Layout, x0: int, *, marker: str = "full") -> Non
 
 
 def test_dummy_field_defaults_none_on_shipped_decks():
-    """The `dummy` field is opt-in per deck (issue #295). sky130's curated
-    deck declares a curated marker layer as of issue #491 (`(83, 20)`) and
-    gf180mcu's as of issue #2599 (`(100, 50)`) -- see each
-    `EXTRACTION_DECK`'s own comment for why that layer was chosen. Both are
-    the deck-side half of a fix whose extractor-side half (this field
-    itself) shipped in #295/#462. `sg13cmos5l` still declares none (deferred
-    by #2599 to its own follow-up, #2602), so its extraction is unaffected
-    and the field's opt-in default is still exercised here."""
+    """The `dummy` field is opt-in per deck (issue #295). Three of the four
+    families that accept a `dummy` `klt gen` param now declare a curated
+    marker layer: sky130 as of issue #491 (`(83, 20)`), gf180mcu as of issue
+    #2599 (`(100, 50)`), and sg13cmos5l as of issue #2602 (`(100, 50)`) --
+    see each `EXTRACTION_DECK`'s own comment for why that layer was chosen.
+    All three are the deck-side half of a fix whose extractor-side half
+    (this field itself) shipped in #295/#462. `sg13g2` still declares none
+    (tracked separately, issue #2590), so its extraction is unaffected and
+    the field's opt-in default is still exercised here."""
     assert get_extraction_deck("sky130").dummy == (83, 20)
     assert get_extraction_deck("gf180mcu").dummy == (100, 50)
-    assert get_extraction_deck("sg13cmos5l").dummy is None
+    assert get_extraction_deck("sg13cmos5l").dummy == (100, 50)
+    assert get_extraction_deck("sg13g2").dummy is None
 
 
 def test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer():
@@ -16518,6 +16520,104 @@ def test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer():
     from klayout_tools.decks.gf180mcu import DECK as GF180MCU_DRC_DECK
 
     assert not [rule for rule in GF180MCU_DRC_DECK if rule.layer[0] == 100]
+
+
+def test_sg13cmos5l_dummy_marker_does_not_collide_with_any_read_layer():
+    """Issue #2602: sg13cmos5l's curated dummy marker is a deck-local
+    convention layer, so it must not coincide with any other layer this deck
+    reads -- otherwise real geometry would be silently suppressed as
+    "dummy". Unlike gf180mcu's `(100, 50)` (which reuses a real, differently
+    -datatyped `LVS_*` layer number), sg13cmos5l's own transcribed
+    `.lyp`/DRC/LVS layer tables declare no `100/*` source pair at all -- see
+    `EXTRACTION_DECK.dummy`'s own comment for the full provenance -- so
+    `(100, 50)` is picked from a wholly unassigned layer number, not merely
+    an unused datatype on an assigned one."""
+    deck = get_extraction_deck("sg13cmos5l")
+    assert deck.dummy == (100, 50)
+    assert deck.dummy not in deck.device_recognition_layers
+    assert deck.dummy not in deck.merge_layers
+    # The marker is necessarily *in* `connectivity_layers` (the extractor has
+    # to read it to suppress on it), so `deck.dummy not in
+    # deck.connectivity_layers` cannot be asserted directly. Recompute the
+    # set from a copy of this same deck with the `dummy` field cleared: that
+    # is every layer this deck reads for *some other* role, built by the
+    # deck's own machinery rather than restated here, so the marker's
+    # absence from it is a real invariant.
+    layers_read_for_other_roles = dataclasses.replace(
+        deck, dummy=None
+    ).connectivity_layers
+    assert deck.dummy not in layers_read_for_other_roles
+    # ...and the marker is the *only* layer-100 member of the full set: this
+    # deck reads nothing else on that number at all.
+    assert [layer for layer in deck.connectivity_layers if layer[0] == 100] == [
+        (100, 50)
+    ]
+    # No DRC rule in this family's curated deck references layer 100 either,
+    # so `klt drc --deck sg13cmos5l` never checks the convention layer.
+    from klayout_tools.decks.sg13cmos5l import DECK as SG13CMOS5L_DRC_DECK
+
+    assert not [rule for rule in SG13CMOS5L_DRC_DECK if rule.layer[0] == 100]
+
+
+def test_res_array_sg13cmos5l_dummy_resistors_suppressed(tmp_path):
+    """Issue #2602: `klt gen res_array` (sg13cmos5l, `dummy > 0`) piped into
+    `klt extract --deck sg13cmos5l` suppresses the dummy resistor bodies
+    instead of extracting them as spurious real `rsil` devices -- the
+    sg13cmos5l counterpart of `test_res_array_sky130_dummy_resistors_suppressed`
+    (#491) and `test_res_array_gf180mcu_dummy_resistors_suppressed` (#2599).
+    `res_array` is the only dummy-drawing generator this family's
+    `_GENERATOR_FAMILY_DEFERRED` table currently lets run on `sg13cmos5l`."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "ihp-sg13cmos5l")
+    params = {"num": 4, "dummy": 2, "rows": 1}
+    gen_report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "ihp-sg13cmos5l", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "res_cmos5l.gds")},
+        }
+    )
+    assert gen_report["device_count"] == params["num"]
+
+    report = run_extract(
+        str(tmp_path / "res_cmos5l.gds"),
+        "sg13cmos5l",
+        output=str(tmp_path / "res_cmos5l.spice"),
+    )
+
+    assert report["device_count"] == params["num"]
+    assert report["device_counts"] == {"rsil": params["num"]}
+    assert report["dummy_devices_dropped"] == 2 * params["rows"] * params["dummy"]
+
+
+def test_res_array_sg13cmos5l_without_dummies_drops_nothing(tmp_path):
+    """Issue #2602's edge case: a `dummy: 0` request on the same family
+    draws no marker shape at all, so the additive suppression is a no-op --
+    `dummy_devices_dropped` stays 0 and every drawn unit still extracts."""
+    from klayout_tools.gen import generate
+
+    root = _make_pdk_install(tmp_path, "ihp-sg13cmos5l")
+    params = {"num": 4, "dummy": 0, "rows": 1}
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "ihp-sg13cmos5l", "root": root},
+            "params": params,
+            "options": {"output": str(tmp_path / "res_cmos5l0.gds")},
+        }
+    )
+
+    report = run_extract(
+        str(tmp_path / "res_cmos5l0.gds"),
+        "sg13cmos5l",
+        output=str(tmp_path / "res_cmos5l0.spice"),
+    )
+
+    assert report["dummy_devices_dropped"] == 0
+    assert report["device_count"] == params["num"]
+    assert report["device_counts"] == {"rsil": params["num"]}
 
 
 def test_dummy_devices_dropped_is_zero_without_dummy_layer(tmp_path):

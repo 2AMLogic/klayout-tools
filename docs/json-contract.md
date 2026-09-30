@@ -1012,7 +1012,21 @@ All six share one contract:
   verb that the KLayout engine build does to `klt drc`. The engine *identity*
   (`engine`) is not excluded: swapping engines is a different run. For
   `signoff` the same rule lands on the field *its* reports carry tool
-  identity in — the whole `build` block (issue #2249), and nothing else.
+  identity in — the whole `build` block (issue #2249).
+- **`klt signoff` excludes one more surface, and reports it separately**
+  (issue #2526): the report's verbatim quotation of the checklist doc — each
+  `items[]` entry's `title`/`text`/`notes`, and `source_doc_content_hash`.
+  A tier report inlines that prose, and a `klt` version pin does not pin the
+  doc, so an upstream *rewording* alone used to render `"drifted"` —
+  indistinguishable from a real grading change, which is the one distinction
+  the mode exists to make. It is excluded from `status` only: every excluded
+  field that moved is still reported, in a `doc_drift_fields` list (same
+  `{field, committed, fresh}` shape as `drift`) with a `doc_drift` boolean,
+  so a consumer can warn on "the yardstick was reworded" while failing only
+  on "the evidence moved". A checklist that *gained, lost or renumbered* an
+  item still fails, via the counts and per-item `id`s that stay compared.
+  See [`cli/signoff.md`](cli/signoff.md)'s "A reworded checklist is not
+  evidence drift".
 
 **Build identity is route-dependent, so committed reports must not be
 byte-compared (issue #2249).** A `klt signoff` tier/fleet report's `build`

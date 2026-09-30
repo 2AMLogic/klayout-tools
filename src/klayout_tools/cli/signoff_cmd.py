@@ -27,14 +27,30 @@ each other.
 ``--check REPORT`` (issue #2249) is a *modifier* on the two doc-parsing
 modes, not a fifth mode: it re-grades the same manifest and, instead of
 rendering the report, diffs the result against a previously committed one --
-excluding the ``build`` block, which states how the running install was
-provisioned rather than which commit it came from (see
-:data:`..signoff.VOLATILE_REPORT_PATHS`). It exists so a gate script asking
-"does this committed evidence still hold" no longer has to byte-compare the
-committed file against a fresh render: that comparison fails between two
-byte-legitimate installs of the *same pinned commit*, purely on provisioning
-route. Refused (exit 1) with the envelope-aggregation and
-``--describe-grader`` modes, neither of which renders such a report.
+excluding two surfaces that move without any verdict moving with them:
+
+- the ``build`` block, which states how the running install was provisioned
+  rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`);
+- the report's verbatim quotation of the checklist doc -- each item's
+  ``title``/``text``/``notes`` and the whole-doc ``source_doc_content_hash``
+  (:data:`..signoff.DOC_PROSE_REPORT_PATHS`, issue #2526).
+
+It exists so a gate script asking "does this committed evidence still hold"
+no longer has to byte-compare the committed file against a fresh render:
+that comparison fails between two byte-legitimate installs of the *same
+pinned commit*, purely on provisioning route, and again whenever an upstream
+release reworded the bundled checklist. Refused (exit 1) with the
+envelope-aggregation and ``--describe-grader`` modes, neither of which
+renders such a report.
+
+The second exclusion is reported, not silently dropped: the ``--check``
+response carries ``doc_drift`` (bool) and ``doc_drift_fields`` (the
+``{field, committed, fresh}`` entries excluded from the verdict), so a
+consumer can warn on "the yardstick was reworded" while still failing only
+on "the evidence moved". ``doc_drift`` never affects the exit code; a
+change to any item's ``status``/``reason``/``citation``/``tier`` still
+reports ``"drifted"`` and exits ``3``, including when it co-occurs with a
+prose change on the same item.
 
 The two doc-parsing modes read ``design-evidence-tiers.md`` from
 ``--tiers-doc``, else ``$KLT_TIERS_DOC``, else the copy bundled inside the
@@ -64,7 +80,9 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
         (``tier: "T1"``). Fleet mode: every block's tier is ``"T1"``.
         ``--describe-grader`` mode: always (it is informational only and
         cannot fail once argument validation passes). Under ``--check``:
-        ``status: "match"`` -- the committed report still reproduces.
+        ``status: "match"`` -- the committed report still reproduces
+        (``doc_drift: true`` does not change this: a reworded checklist is
+        reported, not failed on).
     1 - failed to run (missing/unreadable/malformed input file, an envelope
         with an unrecognized shape, or an invalid manifest/fleet manifest,
         or -- under ``--check`` -- a missing/unparseable committed report or
@@ -75,9 +93,10 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
         successfully, but at least one T1 item is ``"unmet"``
         (``tier: null``). Fleet mode: ran successfully, but at least one
         block's tier is not ``"T1"``. Under ``--check``: ``status:
-        "drifted"`` -- at least one field outside ``build`` moved (the tier
-        verdict itself does not decide this mode's exit code; a report of a
-        not-yet-T1 block that still reproduces exactly is ``0``).
+        "drifted"`` -- at least one field outside ``build`` and the
+        checklist's own wording moved (the tier verdict itself does not
+        decide this mode's exit code; a report of a not-yet-T1 block that
+        still reproduces exactly is ``0``).
     4 - envelope-aggregation mode only: refused -- two or more inputs'
         provenance blocks disagree (see docs/cli/signoff.md's "Provenance
         consistency" section) -- no pass/fail verdict is produced
