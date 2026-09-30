@@ -70,6 +70,14 @@ Resolution order (first hit wins; the winning step is reported as
 4. Conventional install prefixes: ``/usr/local/share/pdk``,
    ``/usr/share/pdk``, ``~/share/pdk``.
 
+First-match-wins is deliberate, but it is **not** silent (issue #2564): when
+a later candidate root also holds a variant of the resolved name -- the
+ordinary state of a host carrying both a ``volare``- and a ``ciel``-managed
+install -- :func:`find_pdk` reports those skipped installs in
+``ambiguous_roots`` and :func:`ambiguity_warning` renders them as a warning
+line. Ambiguity that is reported is a nuisance; ambiguity that is discarded
+silently corrupts provenance.
+
 See ``docs/cli/pdk.md`` for the documented CLI surface, JSON payloads, and the
 frozen ``klt pdk env`` export-line shape.
 """
@@ -153,6 +161,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             },
             "broken_symlinks": [{"asset": <asset key>, "path": <abs path>}, ...],
             "has_pcell_library": <bool>,
+            "ambiguous_roots": [{"root": <abs root>, "resolved_via": <str>}, ...],
         }
 
     Every ``assets`` key is always present; a value is the absolute directory
@@ -178,12 +187,29 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
     caller can gate on ``bool(report["broken_symlinks"])`` without special-
     casing the empty result. Additive field; see ``docs/json-contract.md``.
 
+    ``ambiguous_roots`` (issue #2564) reports every **later** candidate root
+    in the search order that also holds a variant of the resolved name --
+    the ordinary state of a host carrying both a ``volare``-managed and a
+    ``ciel``-managed install of the same variant. Resolution itself is
+    unchanged (strict first-match-wins), but the fact that the choice was
+    ambiguous is no longer discarded: without it, a run can name a pinned
+    ``open_pdks`` commit that the tool never actually read, and the only
+    trace is a ``resolved_via`` nobody had reason to suspect. Each entry is
+    ``{"root": <abs path>, "resolved_via": <search-order label>}``, in search
+    order; duplicate candidate paths (``$PDK_ROOT`` pointing at a store dir,
+    say) are reported once, and never as ambiguity against themselves. ``[]``
+    -- the common, single-install case -- so a caller can gate on
+    ``bool(report["ambiguous_roots"])``, or render
+    :func:`ambiguity_warning`, without special-casing the empty result. An
+    explicit ``root=`` disables the search entirely, so it is always ``[]``.
+    Additive field; see ``docs/json-contract.md``.
+
     Raises :class:`PdkNotFoundError` when nothing resolves.
     """
     effective_variant = variant if variant is not None else os.environ.get("PDK")
     candidates = _candidate_roots(root)
 
-    for root_path, resolved_via in candidates:
+    for index, (root_path, resolved_via) in enumerate(candidates):
         variants = _probe_root(root_path)
         if not variants:
             continue
@@ -205,9 +231,68 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             "assets": assets,
             "broken_symlinks": _broken_symlinks_in_assets(assets),
             "has_pcell_library": bool(_pcell_packages_for_assets(assets)),
+            "ambiguous_roots": _ambiguous_roots(
+                candidates[index + 1 :], chosen["name"], root_path
+            ),
         }
 
     raise PdkNotFoundError(_not_found_message(candidates, effective_variant))
+
+
+def _ambiguous_roots(
+    remaining: list[tuple[str, str]], variant_name: str, winning_root: str
+) -> list[dict[str, str]]:
+    """Return the ``remaining`` search candidates that *also* hold a variant
+    named ``variant_name`` -- the installs :func:`find_pdk`'s first-match-wins
+    loop skipped (issue #2564).
+
+    Only candidates *after* the winner are probed: the loop returns at the
+    first root holding the effective variant, so an earlier candidate either
+    held nothing at all (the ``$PDK``/``--pdk``-unset case picks the first
+    root with *any* variant) or did not hold this name. Candidate paths are
+    de-duplicated against ``winning_root`` and against each other, so a
+    ``$PDK_ROOT`` that names the very store dir the search would have reached
+    anyway is not reported as a second, conflicting install.
+    """
+    seen = {winning_root}
+    matches: list[dict[str, str]] = []
+    for root_path, resolved_via in remaining:
+        if root_path in seen:
+            continue
+        seen.add(root_path)
+        if any(entry["name"] == variant_name for entry in _probe_root(root_path)):
+            matches.append({"root": root_path, "resolved_via": resolved_via})
+    return matches
+
+
+def ambiguity_warning(report: dict[str, Any]) -> str | None:
+    """Render a one-line warning for a :func:`find_pdk` report whose
+    ``ambiguous_roots`` is non-empty, or ``None`` when the resolution was
+    unambiguous (issue #2564).
+
+    Pure formatter: this module never prints (see the module docstring), so a
+    caller emits the returned string itself -- to stderr for a CLI verb, or
+    into its own diagnostics channel. The message names the **absolute** root
+    actually read and every root skipped, because that is the only form of
+    the information a caller can act on; the JSON reports carry the
+    path-free ``resolved_via`` labels instead (see ``docs/json-contract.md``'s
+    path-privacy rule for committed evidence).
+    """
+    skipped = report.get("ambiguous_roots") or []
+    if not skipped:
+        return None
+    others = ", ".join(
+        f"{entry['root']} ({entry['resolved_via']})" for entry in skipped
+    )
+    return (
+        f"klt: warning: {len(skipped) + 1} installs provide PDK variant "
+        f"{report['variant']!r}; read {report['root']} "
+        f"({report['resolved_via']}), skipped {others}. Resolution is "
+        "first-match-wins, so a pinned open_pdks build may not be the one "
+        "this run read -- pin the root explicitly (--pdk-root, or a "
+        "request's models.pdk_root) to disable the search and choose "
+        "deliberately."
+    )
 
 
 def list_pdks(root: str | None = None) -> dict[str, Any]:

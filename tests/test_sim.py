@@ -7455,6 +7455,155 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
     assert prov["input"]["content_hash"].startswith("sha256:")
 
 
+def _make_pdk_store(tmp_path, name, *, stamp, variant="sky130A"):
+    """Fabricate one open_pdks-layout install holding ``variant``.
+
+    Enough of the layout for `pdk.find_pdk` to probe it (`libs.tech`) plus
+    the model library a `models.lib` relative ref resolves against.
+    """
+    root = tmp_path / name
+    variant_dir = root / variant
+    (variant_dir / "libs.tech" / "ngspice").mkdir(parents=True)
+    (variant_dir / "libs.tech" / "klayout").mkdir(parents=True)
+    (variant_dir / "SOURCES").write_text(stamp, encoding="utf-8")
+    (variant_dir / "libs.tech" / "ngspice" / "sky130.lib.spice").write_text(
+        ".lib tt\n.param corner_scale=1.0\n.endl tt\n", encoding="utf-8"
+    )
+    return root
+
+
+def _isolate_pdk_search(monkeypatch, stores):
+    """Point the resolver's search space at ``stores`` and nothing else.
+
+    `klt sim`'s PDK-root resolution reads the host's real `$PDK_ROOT` and
+    ciel/volare stores; this keeps the ambiguity tests below hermetic.
+    """
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(pdk, "STORE_DIRS", [str(store) for store in stores])
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
+
+
+def _pdk_request(tmp_path):
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "models": {
+                "pdk": "sky130A",
+                "lib": "libs.tech/ngspice/sky130.lib.spice",
+            },
+        },
+    )
+
+
+def test_cli_text_echoes_the_resolved_pdk(tmp_path, monkeypatch, capsys):
+    """Issue #2564: which PDK build the models came from used to be
+    JSON-only, so an interactive run could not see that the resolved install
+    was not the one the caller had pinned."""
+    _write_body(tmp_path)
+    ciel = _make_pdk_store(tmp_path, "ciel", stamp="open_pdks aaaa111")
+    _isolate_pdk_search(monkeypatch, [ciel])
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+
+    main(["sim", str(_pdk_request(tmp_path))])
+
+    captured = capsys.readouterr()
+    assert f"pdk: sky130A open_pdks aaaa111 (via search root: {ciel})" in captured.out
+    # One unambiguous install: nothing to warn about, on either stream.
+    assert "WARNING" not in captured.out
+    assert "installs provide PDK variant" not in captured.err
+
+
+def test_cli_warns_when_several_installs_hold_the_variant(
+    tmp_path, monkeypatch, capsys
+):
+    """Issue #2564: a host carrying both a ciel- and a volare-managed
+    install of one variant resolves first-match-wins. The run is still
+    well-defined, but a record can name a pinned open_pdks commit the
+    simulation never read -- so the substitution must be reported, not left
+    as an after-the-fact `provenance.pdk.source` nobody thought to check."""
+    _write_body(tmp_path)
+    ciel = _make_pdk_store(tmp_path, "ciel", stamp="open_pdks aaaa111")
+    volare = _make_pdk_store(tmp_path, "volare", stamp="open_pdks bbbb222")
+    _isolate_pdk_search(monkeypatch, [ciel, volare])
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+
+    main(["sim", str(_pdk_request(tmp_path))])
+
+    captured = capsys.readouterr()
+    # stderr: the actionable form -- both absolute roots, and the remedy.
+    assert "klt: warning: 2 installs provide PDK variant 'sky130A'" in captured.err
+    assert f"read {ciel}" in captured.err
+    assert f"skipped {volare}" in captured.err
+    assert "models.pdk_root" in captured.err
+    # stdout (text format): the chosen build, plus the ambiguity flagged.
+    assert f"pdk: sky130A open_pdks aaaa111 (via search root: {ciel})" in captured.out
+    assert f"pdk: WARNING: variant also installed under search root: {volare}" in (
+        captured.out
+    )
+
+
+def test_cli_json_records_skipped_installs_in_provenance(tmp_path, monkeypatch, capsys):
+    _write_body(tmp_path)
+    ciel = _make_pdk_store(tmp_path, "ciel", stamp="open_pdks aaaa111")
+    volare = _make_pdk_store(tmp_path, "volare", stamp="open_pdks bbbb222")
+    _isolate_pdk_search(monkeypatch, [ciel, volare])
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+
+    main(["sim", str(_pdk_request(tmp_path)), "--format", "json"])
+
+    block = json.loads(capsys.readouterr().out)["provenance"]["pdk"]
+    assert block["source"] == f"search root: {ciel}"
+    assert block["version"] == "open_pdks aaaa111"
+    assert block["ambiguous_sources"] == [f"search root: {volare}"]
+
+
+def test_cli_json_omits_ambiguous_sources_for_a_single_install(
+    tmp_path, monkeypatch, capsys
+):
+    _write_body(tmp_path)
+    ciel = _make_pdk_store(tmp_path, "ciel", stamp="open_pdks aaaa111")
+    _isolate_pdk_search(monkeypatch, [ciel])
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+
+    main(["sim", str(_pdk_request(tmp_path)), "--format", "json"])
+
+    block = json.loads(capsys.readouterr().out)["provenance"]["pdk"]
+    assert set(block) == {"name", "source", "version"}
+
+
+def test_cli_pinned_models_pdk_root_is_never_ambiguous(tmp_path, monkeypatch, capsys):
+    """The remedy the warning points at must itself be quiet: pinning
+    `models.pdk_root` disables the search, so there is no second candidate."""
+    _write_body(tmp_path)
+    ciel = _make_pdk_store(tmp_path, "ciel", stamp="open_pdks aaaa111")
+    volare = _make_pdk_store(tmp_path, "volare", stamp="open_pdks bbbb222")
+    _isolate_pdk_search(monkeypatch, [ciel, volare])
+    _stub_subprocess_run(monkeypatch, log_text="clean run\n")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "models": {
+                "pdk": "sky130A",
+                "pdk_root": str(volare),
+                "lib": "libs.tech/ngspice/sky130.lib.spice",
+            },
+        },
+    )
+
+    main(["sim", str(request), "--format", "json"])
+
+    captured = capsys.readouterr()
+    block = json.loads(captured.out)["provenance"]["pdk"]
+    assert block["version"] == "open_pdks bbbb222"
+    assert "ambiguous_sources" not in block
+    assert "installs provide PDK variant" not in captured.err
+
+
 def test_cli_default_format_is_text(tmp_path, monkeypatch, capsys):
     _write_body(tmp_path)
     request = _write_request(

@@ -438,6 +438,46 @@ def test_build_provenance_pdk_none_when_unresolved():
     assert _provenance.build_provenance(pdk=None)["pdk"] is None
 
 
+def test_build_provenance_pdk_records_ambiguous_sources():
+    # Issue #2564: several installs held the resolved variant. The skipped
+    # ones are recorded by their path-free search-order label -- committed
+    # evidence must not carry the resolving machine's home directory.
+    pdk = {
+        "variant": "sky130A",
+        "root": "/home/u/.ciel/sky130A",
+        "version": "abc123",
+        "resolved_via": "search root: ~/.ciel",
+        "ambiguous_roots": [
+            {"root": "/home/u/.volare", "resolved_via": "search root: ~/.volare"}
+        ],
+    }
+
+    block = _provenance.build_provenance(pdk=pdk)["pdk"]
+
+    assert block["source"] == "search root: ~/.ciel"
+    assert block["ambiguous_sources"] == ["search root: ~/.volare"]
+    assert "/home/u" not in json.dumps(block)
+
+
+@pytest.mark.parametrize("ambiguous", [None, []])
+def test_build_provenance_pdk_omits_ambiguous_sources_when_unambiguous(ambiguous):
+    # Absent (not `[]`) in the normal case, so an unambiguous run's
+    # provenance is byte-identical to what it was before the field existed
+    # and a `--rerun` diff against an older committed report cannot drift.
+    pdk = {
+        "variant": "sky130A",
+        "version": "abc123",
+        "resolved_via": "volare",
+        "ambiguous_roots": ambiguous,
+    }
+
+    assert _provenance.build_provenance(pdk=pdk)["pdk"] == {
+        "name": "sky130A",
+        "source": "volare",
+        "version": "abc123",
+    }
+
+
 def test_build_provenance_input_hash_is_sha256_prefixed(tmp_path):
     layout_file = tmp_path / "top.gds"
     layout_file.write_bytes(b"gds bytes\n")
