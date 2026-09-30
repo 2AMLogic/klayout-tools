@@ -302,9 +302,26 @@ def test_sg13g2_derives_well_substrate_taps_from_implant_layers():
     `test_sg13g2_poly_label_is_gatpoly_label` below for issue #1476's own
     coverage of that field."""
     assert EXTRACTION_DECK.tap is None
+    # Issue #2591: the well tie is accepted in *either* form -- the positive
+    # `nSD.drawing` marker #1273 introduced, or upstream
+    # `general_derivations.lvs`'s own `ntap` form (Activ inside NWell with
+    # no `pSD` over it, `nactiv = activ.not(psd_drw...)`).
     assert EXTRACTION_DECK.tap_nplus == (7, 0)  # nSD.drawing
+    assert EXTRACTION_DECK.tap_nplus_complement == (14, 0)  # absence of pSD
+    # Substrate tie is unchanged (out of scope for #2591): upstream's own
+    # `pactiv = activ.and(psd_drw)` form.
     assert EXTRACTION_DECK.tap_pplus == (14, 0)  # pSD.drawing
     assert EXTRACTION_DECK.well_label is None
+
+
+def test_sg13g2_deck_comment_no_longer_claims_full_ntap_parity():
+    """Issue #2591: the deck's note used to assert the `nSD`-keyed well tie
+    was "exactly how" upstream derives `ntap`, which was false (upstream
+    derives it from the absence of `pSD`, and treats 7/0 as an exclusion).
+    The corrected note must name the upstream form it now mirrors."""
+    source = Path(sg13g2_deck_module.__file__).read_text()
+    assert "This is exactly how the real IHP" not in source
+    assert "nactiv = activ.not(psd_drw.join(nsd_block))" in source
 
 
 def test_sg13g2_poly_label_is_gatpoly_label():
@@ -529,6 +546,162 @@ def test_golden_pair_sg13g2_pfet_l_w_matches_drawn_geometry(tmp_path: Path):
     assert device["nets"]["d"] == "D"
     assert device["nets"]["g"] == "G"
     assert EXTRACTION_DECK.pfet_provenance.rule_id == "sg13_lv_pmos"
+
+
+# --------------------------------------------------------------------------- #
+# Well-/substrate-tie conventions (issue #2591)
+# --------------------------------------------------------------------------- #
+
+
+def _make_tied_pmos_layout(
+    *,
+    tie_implant: tuple[int, int] | None,
+    pmos_psd: bool = True,
+) -> kdb.Layout:
+    """`_make_pmos_layout`'s PMOS plus a separate well-tie Activ island
+    inside the same NWell, contacted up to a Metal1 pad labelled `VDD`.
+
+    `tie_implant=None` draws the tie the way upstream IHP SG13G2's own LVS
+    deck expects it (`general_derivations.lvs`: unimplanted Activ inside
+    NWell is `ntap`); `tie_implant=(7, 0)` paints `nSD.drawing` over it, the
+    #1273 curated convention. `pmos_psd` covers the transistor's own Activ
+    with `pSD` (14/0), as a real SG13G2 PMOS is drawn."""
+    layout = _make_pmos_layout()
+    top = layout.top_cell()
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Widen the well to hold the tie island too.
+    draw(31, 0, _box_um(-1, -1, 5, 2))
+    if pmos_psd:
+        draw(14, 0, _box_um(-0.2, -0.2, 2.2, 1.2))  # pSD over the PMOS
+
+    draw(1, 0, _box_um(3, 0, 4, 1))  # Activ.drawing -- well-tie island
+    if tie_implant is not None:
+        draw(*tie_implant, _box_um(2.8, -0.2, 4.2, 1.2))
+    draw(6, 0, _box_um(3.4, 0.4, 3.6, 0.6))  # Cont on the tie
+    draw(8, 0, _box_um(3.2, 0.2, 3.8, 0.8))  # Metal1 tie pad
+    top.shapes(layout.layer(8, 25)).insert(
+        kdb.Text("VDD", kdb.Trans(round(3.5 / _DBU_UM), round(0.5 / _DBU_UM)))
+    )
+    return layout
+
+
+@pytest.mark.parametrize(
+    "tie_implant",
+    [None, (7, 0)],
+    ids=["upstream_no_nsd", "curated_nsd_drawing"],
+)
+def test_sg13g2_well_tie_extracts_in_either_convention(
+    tmp_path: Path, tie_implant: tuple[int, int] | None
+):
+    """Issue #2591: a well tie drawn the upstream way (no `nSD` over it)
+    and one drawn to the #1273 convention (`nSD.drawing` painted over it)
+    both tie the PMOS body to the tie's routed `VDD` net -- neither leaves
+    it on an anonymous, unbiased well net."""
+    path = _write_gds(
+        _make_tied_pmos_layout(tie_implant=tie_implant), tmp_path / "tied.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "tied.spice"))
+
+    assert report["device_counts"] == {"pfet": 1}
+    (device,) = report["devices"]
+    assert device["nets"]["b"] == "VDD"
+    assert device["nets"]["s"] == "S"
+    assert device["nets"]["d"] == "D"
+    assert report["unbiased_pmos_body_nets"] == []
+
+
+def test_sg13g2_upstream_style_well_tie_clears_body_unverified_under_lvs(
+    tmp_path: Path,
+):
+    """Issue #2591 acceptance: `klt lvs` on `ihp-sg13g2` (deck `sg13g2`)
+    no longer reports `device.body_unverified` for a PMOS whose body is
+    tied the upstream-faithful way (unimplanted Activ inside NWell)."""
+    import json
+
+    from klayout_tools.lvs import run_lvs
+
+    path = _write_gds(_make_tied_pmos_layout(tie_implant=None), tmp_path / "tied.gds")
+    reference = str(tmp_path / "ref.spice")
+    extracted = run_extract(path, "sg13g2", output=reference)
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "layout": {"file": path, "deck": "sg13g2"},
+                "reference": {"netlist": reference, "top": extracted["top"]},
+            }
+        )
+    )
+    report = run_lvs(str(request))
+
+    assert report["status"] == "match"
+    assert not [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "device.body_unverified"
+        and (m.get("device") or {}).get("class") == "pfet"
+    ]
+
+
+def test_sg13g2_pmos_without_psd_is_not_swallowed_as_a_well_tie(tmp_path: Path):
+    """Issue #2591's deliberate guard: unimplanted Activ that touches a
+    gate is a (pSD-less) PMOS's source/drain, never a well tie -- the
+    existing `_make_pmos_layout` fixtures draw no `pSD` and must keep
+    extracting their PMOS with its own S/D nets."""
+    path = _write_gds(
+        _make_tied_pmos_layout(tie_implant=None, pmos_psd=False),
+        tmp_path / "no_psd.gds",
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "no_psd.spice"))
+
+    assert report["device_counts"] == {"pfet": 1}
+    (device,) = report["devices"]
+    assert device["nets"]["s"] == "S"
+    assert device["nets"]["d"] == "D"
+    # The separate tie island still ties the body.
+    assert device["nets"]["b"] == "VDD"
+
+
+def _make_tied_nmos_layout(*, tie_implant: tuple[int, int] | None) -> kdb.Layout:
+    """`_make_nmos_layout`'s NMOS (outside NWell) plus a separate Activ
+    island contacted to a Metal1 pad labelled `VSS`, optionally covered by
+    `tie_implant`."""
+    layout = _make_nmos_layout()
+    top = layout.top_cell()
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(1, 0, _box_um(3, 0, 4, 1))  # Activ.drawing -- substrate-tie island
+    if tie_implant is not None:
+        draw(*tie_implant, _box_um(2.8, -0.2, 4.2, 1.2))
+    draw(6, 0, _box_um(3.4, 0.4, 3.6, 0.6))
+    draw(8, 0, _box_um(3.2, 0.2, 3.8, 0.8))
+    top.shapes(layout.layer(8, 25)).insert(
+        kdb.Text("VSS", kdb.Trans(round(3.5 / _DBU_UM), round(0.5 / _DBU_UM)))
+    )
+    return layout
+
+
+def test_sg13g2_substrate_tie_still_requires_psd(tmp_path: Path):
+    """Regression guard for issue #2591 (substrate tie is out of scope):
+    a `pSD`-covered Activ island outside NWell ties the NMOS body to its
+    routed net, while an unimplanted one does *not* -- the p+-absence well-
+    tie form never leaks outside the well."""
+    tied = _write_gds(_make_tied_nmos_layout(tie_implant=(14, 0)), tmp_path / "psd.gds")
+    report = run_extract(tied, "sg13g2", output=str(tmp_path / "psd.spice"))
+    (device,) = report["devices"]
+    assert device["class"] == "nfet"
+    assert device["nets"]["b"] == "VSS"
+
+    bare = _write_gds(_make_tied_nmos_layout(tie_implant=None), tmp_path / "bare.gds")
+    report = run_extract(bare, "sg13g2", output=str(tmp_path / "bare.spice"))
+    (device,) = report["devices"]
+    assert device["class"] == "nfet"
+    assert device["nets"]["b"] == EXTRACTION_DECK.substrate_net
 
 
 # --------------------------------------------------------------------------- #

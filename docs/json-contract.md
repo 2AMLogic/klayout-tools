@@ -978,6 +978,20 @@ All six share one contract:
   pass**: `hash_check()` renders `expected: null` as `match: false`, so a
   report predating the field it would be checked against renders `"drifted"`,
   never a false `"match"`.
+- **An unresolvable input path is named, not silently `null` (issue #2595,
+  `lvs` only so far).** A committed report echoes its inputs back exactly as
+  the request gave them, so a *relative* echoed path is re-hashed against the
+  **current working directory** of the `--check` invocation — a deliberate,
+  shared convention (`drc`'s `file`, `lvs`'s `layout`/`reference`), not an
+  oversight, and unchanged here. But a path that resolves to no existing file
+  re-hashes to `null`, which alone reads as "the recorded hash moved". `klt
+  lvs --check` therefore attaches an **additive, optional** `input_not_found`
+  block (`path`, `resolved`, `found_relative_to_report`) to such a
+  `checks[]` entry; `expected`/`actual`/`match`/`status` are unchanged, and
+  the key is absent on a genuine content mismatch. Additive by the envelope
+  rules above — no `schema_version` bump, and a consumer that never reads the
+  key sees the bytes it saw before. See
+  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`".
 - **Tool identity is excluded from the diff**, and only tool identity:
   `provenance.klt_version`, `provenance.klayout_version`,
   `provenance.pdk.version`, plus (flow verbs only) `engine_version` — the

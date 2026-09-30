@@ -2360,7 +2360,12 @@ ordinary transistor active), but (issue #1084) declares `tap_nplus`/
 drawn `Nplus`/`Pplus`-over-`Comp` tie — a layout that draws one gets the
 same real-net resolution as sky130's drawn tap; a layout that draws neither
 still lands its NMOS/PMOS bodies on an anonymous, deck-synthesized net
-unconditionally, exactly as before #1084. Comparing a synthesized net
+unconditionally, exactly as before #1084. **sg13g2** derives its ties the
+same way from `nSD`/`pSD` over `Activ` and — since issue #2591 — also
+accepts the upstream IHP convention of an *unimplanted* `Activ` well tie
+inside `NWell` (`ExtractionDeck.tap_nplus_complement`), so a layout drawn
+to the foundry deck's own convention no longer reports
+`device.body_unverified` for its tied PMOS bodies. Comparing a synthesized net
 against a schematic reference's real ground/rail net still produces a
 genuine `NetlistComparer` finding if they disagree, but a *clean* compare on
 that dimension does not mean the well/substrate tie was actually verified
@@ -3222,6 +3227,58 @@ directory of the `--check` invocation, the same convention `klt drc
 --check`'s `file` field uses; if the original request used request-file-
 relative paths, invoke `--check` from that same directory, or commit
 reports whose `layout`/`reference` are already absolute paths.
+
+**`input_not_found` (issue #2595): hitting that limitation says so.** The
+anchoring above is deliberate and unchanged — re-anchoring `klt lvs --check`
+to the report's own directory without doing the same to `klt drc --check`
+would leave the two verbs silently disagreeing about what a committed
+relative path means. What *did* change is legibility: re-hashing a path that
+names no existing file yields `actual: null`, which on its own is
+indistinguishable from "the recorded hash no longer matches". So a
+`checks[]` entry for `layout`/`reference` now carries an **additional,
+optional** `input_not_found` block whenever the echoed path could not be
+found — `expected`, `actual`, `match` and the resulting `status` are
+unchanged, and the key is absent entirely on a genuine content mismatch (the
+input resolved, its bytes moved):
+
+```json
+{
+  "field": "environment.layout_sha256",
+  "expected": "<hex>",
+  "actual": null,
+  "match": false,
+  "input_not_found": {
+    "path": "design.gds",
+    "resolved": "/work/design.gds",
+    "found_relative_to_report": "/work/pair/design.gds"
+  }
+}
+```
+
+- `path` — the echoed path verbatim, as the committed report recorded it.
+- `resolved` — the absolute path that was actually looked for (the echoed
+  path anchored to the current working directory).
+- `found_relative_to_report` — the absolute path the input *does* occupy
+  relative to the committed report's own directory, when it is there;
+  `null` otherwise (always `null` for an echoed absolute path, which has no
+  report-relative candidate to try). A non-`null` value is the tell for the
+  directory-portability trap above: the committed request/report pair is
+  intact, `--check` was just invoked from somewhere else.
+
+Text output (`--format text`, the default) renders the same information in
+place of the bare `actual: None`:
+
+```
+  [DRIFTED] environment.layout_sha256
+      expected: 1ab7…
+      actual:   None (input not found: /work/design.gds)
+      note:     it exists relative to the report's own directory
+                (/work/pair/design.gds); --check resolves relative paths
+                against the current working directory -- re-run from there
+```
+
+`klt drc --check` does not (yet) carry this block — its `provenance.input`
+path resolution is unchanged by this issue.
 
 ### Full mode (`--rerun`)
 
