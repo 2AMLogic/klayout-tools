@@ -117,7 +117,11 @@ narrower claim than "verified against the target PDK's own signoff tooling"
 own official deck end to end, and the gap is not always benign: see the
 `gf180mcu`/`mos_array` note immediately after the table for a documented,
 concrete instance where curated-deck-clean output has real, reproducible
-violations under gf180mcu's own signoff deck.
+violations under gf180mcu's own signoff deck, and the
+`sg13g2`/`cap_array` note after it (issue #2576) for a second instance of
+the same shape — a drawn dimension 0.1µm short of a foundry rule the
+curated `sg13g2` deck transcribes no counterpart of, so `klt drc --deck
+sg13g2` reported `clean` throughout.
 
 | Generator | `sky130` | `gf180mcu` | `sg13g2` | `sg13cmos5l` |
 | --------- | :------: | :--------: | :------: | :----------: |
@@ -242,6 +246,45 @@ than its width; `ring_padding_um` is documented only as `>= 0` and is not
 required to land on the grid, so off-grid values are a supported input, not an
 edge case.
 
+**sg13g2 — `cap_array`'s MiM bottom-plate enclosure was 0.1µm short of the
+PDK's own `MIM.c` (issue #2576).** Every pre-#2576 `sg13g2` `cap_array`
+stream drew its `Metal5` bottom plate exactly `0.5µm` past the `MIM` top
+plate on all four sides — the generic `CAP_BOTTOM_PLATE_MARGIN_UM` default —
+while IHP-Open-PDK's own signoff deck
+(`libs.tech/klayout/tech/drc/rule_decks/beol/6_11_mim.drc`, rule `MIM.c`
+"Min. Metal5 enclosure of MIM is 0.60 um", value `drc_rules['Mim_c']` = 0.6)
+requires `0.6µm`. Because this repo's curated `sg13g2` deck transcribes **no
+`MIM` rule group at all** — no plate-enclosure rule, no plate width/space
+rule — `klt drc --deck sg13g2` reported `status: "clean"` on that
+rule-violating output at every `plate_w_um`/`plate_h_um`; the only signal
+anything was unchecked was the bare `MIM` layer pair appearing under
+`coverage.layers_in_stream_without_rules`. #2576 fixes the *geometry*: the
+family now carries its own `cap_bottom_plate_margin_min_um` floor of `0.6µm`
+(`gen.py`'s `_PDK_CAP_GEOMETRY_MIN_UM`, the same per-family mechanism
+`gf180mcu`'s own `1.06µm` MiM floor uses), applied as `max(generic, floor)`
+so `sky130`/`gf180mcu`/`sg13cmos5l` geometry is byte-for-byte unchanged. A
+default-sized unit cell's bottom plate is therefore `5.0 + 2 × 0.6 = 6.2µm`
+on a side, not the pre-fix `6.0µm`. Unlike #1575/#1577/#1580 — whose
+gf180mcu margins had no reachable signoff deck to check them against — this
+one **was** verified end to end against the PDK's own runset (IHP-Open-PDK
+`libs.tech/klayout/tech/drc/ihp-sg13g2.drc`, `tables=main`, run under a
+local KLayout batch binary against the `ihp-open-pdk` tree
+`scripts/fetch-ihp-sg13g2.sh` fetches): the pre-fix stream reports **4
+`MIM.c` violations** (one per plate edge) and the post-fix stream reports
+**0 violations of any rule**, as does `cap_array`'s own documented default
+output (`num: 3`). That run is not reproducible in CI — it needs both a
+fetched multi-hundred-MB PDK tree and the KLayout *application* binary — so
+the committed regression guard is a direct bbox measurement of the two drawn
+plates (`tests/test_gen.py`'s
+`test_sg13g2_cap_array_bottom_plate_clears_mim_c_enclosure`), not a
+clean-status assertion: `klt drc --deck sg13g2` can neither confirm nor deny
+this dimension, since the curated deck still carries no `MIM` rule to check. Transcribing sg13g2's full `MIM` rule group into the
+curated deck — which would also clear that layer pair out of
+`coverage.layers_in_stream_without_rules` — is deliberately *not* part of
+this fix: it is a separate, larger change (the whole `MIM.a`–`MIM.f` group,
+not just `MIM.c`), tracked by issue #2581, and the floor above makes the
+drawn geometry foundry-legal regardless of what the curated deck can check.
+
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
 up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;
@@ -307,7 +350,11 @@ sg13g2` (no currently-supported family's `guard_ring` output is). `cap_array`'s
 default output round-trips through `klt extract --deck sg13g2` to the
 `"cap_cmim"` device class (issue #1455); `TopMetal1`'s own coarse 1.64µm
 minimum-width DRC rule widens the drawn top-plate landing pad past the
-generic default for this family only (see the `cap_array` section above).
+generic default for this family only (see the `cap_array` section above),
+and `MIM.c`'s 0.60µm `Metal5`-enclosure-of-`MIM` minimum widens the drawn
+bottom plate past the generic 0.5µm margin the same way (issue #2576 — see
+the note above the start of this section for why `klt drc --deck sg13g2`
+never caught the original shortfall and cannot verify the fix either).
 
 **sg13cmos5l (IHP-Open-PDK's SG13G2_CMOS5L sibling, issue #1462).** Only
 `mos_array`/`res_array` are wired up against this family's curated deck
@@ -455,6 +502,35 @@ higher-voltage flavours, the companion `_PDK_RES_FLAVOR_LAYERS`/
 This is a scope statement for what a contribution needs to satisfy, not a
 commitment that a fourth family or full `sg13g2` generator coverage is
 currently planned or in progress.
+
+#### Fixed-size cut/via layers (issue #2585)
+
+Every generator lays its contacts and vias out around one PDK-generic cut
+budget, `CONTACT_SIZE_UM` (0.22 µm): contact regions, landing pads, ring
+bands and reported port widths are all `CONTACT_SIZE_UM + 2 *
+ENCLOSURE_MARGIN_UM` wide. Widening that cut to a family's *minimum* (e.g.
+gf180mcu's 0.26 µm vias) is always safe. Some foundry cut rules are
+*fixed-size*, though — a minimum **and** a maximum — and 0.22 µm is over the
+maximum on:
+
+| Family | Cut layer | Fixed size | Upstream rule |
+|---|---|---|---|
+| `sky130` | `via` (68/44) | 0.15 µm | `via.1a_a` + `via.1a_b` |
+| `sg13g2` | `Cont` (6/0) | 0.16 µm | `Cnt.a` |
+| `sg13g2` | `Via1`–`Via4` (19/0, 29/0, 49/0, 66/0) | 0.19 µm | `V1.a`, `Vn.a` |
+
+On those layers every drawn cut is clamped **down** to the fixed size, about
+its own centre, *inside* the unchanged 0.22 µm-derived contact region —
+`produce_impl` draws the generic layout and then clamps the cut layer
+(`gen._clamp_cut_boxes`), and `klt gen compose` clamps its via-drop squares
+the same way. The only geometry that changes is the cut itself: every other
+layer, every port coordinate and every `bbox_um` is exactly what the generic
+layout produced, and each cut's enclosure only grows. The per-layer size is
+resolved by `gen_layer_params._cut_fixed_size_um` from the curated deck's own
+`DrcRule.threshold_max_dbu` where the deck declares one (gf180mcu's
+`contact`/`via1`–`via4`, already equal to what the generators draw) and
+from `_PDK_CUT_FIXED_SIZE_UM` for the rules above, which the curated decks do
+not yet bound from above.
 
 ### `mos_array` (family 1: matched transistor array)
 

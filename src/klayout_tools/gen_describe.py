@@ -65,6 +65,7 @@ from .gen_layer_params import (
     _cap_family_layers,
     _cap_geometry_min_um,
     _contact_gate_extra_offset_um,
+    _cut_fixed_size_um,
     _gate_bottom_endcap_um,
     _gate_pad_clearance_um,
     _metal_res_geometry_min_um,
@@ -1680,6 +1681,9 @@ def _well_island_layer_params(
     return {
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "contact_fixed_size_um": _cut_fixed_size_um(
+            family, _PDK_ROLE_LAYERS[family].get("contact")
+        ),
         "metal_layer": _role_layer_info(family, "metal"),
         "metal_label_layer": (
             metal_label if metal_label is not None else kdb.LayerInfo(0, 0)

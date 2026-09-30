@@ -34,6 +34,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         GATE_LENGTH_SAFE_MIN_UM,
         GUARD_RING_DEFAULT_PADDING_UM,
         WELL_ENCLOSURE_MARGIN_UM,
+        _clamp_cut_boxes,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
@@ -360,6 +361,18 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "geometry to every existing caller",
                 default=0.0,
             )
+            # Fixed drawn side of every cut on contact_layer (issue #2585) --
+            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
+            # family and layer. `0.0` (no upper size bound) leaves the cuts
+            # exactly as laid out; see `gen._clamp_cut_boxes`.
+            self.param(
+                "contact_fixed_size_um",
+                self.TypeDouble,
+                "Fixed drawn side (um) every cut on contact_layer is clamped "
+                "down to on the resolved PDK family -- 0.0 leaves the "
+                "generator's own cut size unchanged",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"mos_array({self.rows}x{self.cols},w={self.w_um},l={self.l_um})"
@@ -579,5 +592,9 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         c["x0_um"],
                         c["y0_um"],
                     )
+
+            # Issue #2585: clamp every cut on a fixed-size cut/via layer down
+            # to that size, inside the unchanged generic-budget layout.
+            _clamp_cut_boxes(self.cell, li_contact, dbu, self.contact_fixed_size_um)
 
     return {"mos_array": _MosArrayPCell}

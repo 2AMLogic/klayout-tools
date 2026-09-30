@@ -149,6 +149,36 @@ def _print_op_lint_text(report: dict) -> None:
             )
 
 
+def _print_pdk(report: dict) -> None:
+    """Echo the resolved PDK beside `models_lib` in text output (issue #2564).
+
+    Which PDK *build* the models actually came from used to be JSON-only
+    (`provenance.pdk`), so an interactive run could not see that the resolved
+    install was not the one the caller had pinned. Print it by its
+    reproducible identity -- variant, `open_pdks` stamp, and the search-order
+    step that won -- never the absolute root, keeping the same path-privacy
+    posture `render_path_field` gives `netlist`/`models_lib` above. When more
+    than one install held the variant, flag it outright: the absolute roots
+    are in the accompanying stderr warning
+    (`klayout_tools.pdk.ambiguity_warning`). No-op for a run that resolved no
+    PDK (the usual case for a request with no process axis).
+    """
+    pdk_block = (report.get("provenance") or {}).get("pdk")
+    if pdk_block is None:
+        return
+    print(
+        f"pdk: {pdk_block['name']} {pdk_block['version'] or '-'} "
+        f"(via {pdk_block['source']})"
+    )
+    ambiguous = pdk_block.get("ambiguous_sources")
+    if ambiguous:
+        print(
+            f"pdk: WARNING: variant also installed under "
+            f"{', '.join(ambiguous)} -- resolution is first-match-wins; "
+            f"pin models.pdk_root to choose deliberately"
+        )
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `netlist` is the `{path, scope}` shape
     # `env_provenance.repo_relative_path` defines -- `render_path_field` is
@@ -175,6 +205,7 @@ def _print_text(report: dict) -> None:
     # `netlist` above -- rendered through the shared helper so a PDK outside
     # the repo prints `<outside repo>`, never an absolute home path.
     print(f"models_lib: {render_path_field(env['models_lib'])}")
+    _print_pdk(report)
 
     budget = env.get("budget")
     if budget is not None:

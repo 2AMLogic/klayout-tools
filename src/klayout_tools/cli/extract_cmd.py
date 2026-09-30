@@ -218,6 +218,7 @@ _REQUEST_FIELD_DESTS = {
         "pdk_root",
         "parasitics",
         "mom_net",
+        "substrate_spreading",
         "spef",
         "critical_nets",
         "parasitics_nets",
@@ -310,6 +311,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "pdk_root": _path("pdk_root"),
             "parasitics": _bool("parasitics"),
             "mom_net": _str("mom_net"),
+            "substrate_spreading": _str("substrate_spreading"),
             "spef": _path("spef"),
             "critical_nets": _str_list("critical_nets"),
             "parasitics_nets": _str_list("parasitics_nets"),
@@ -410,6 +412,11 @@ def run(args: argparse.Namespace) -> int:
             # as a SPEF file at this path. `None` when the flag was never
             # given, unchanged from every call site that predates it.
             spef_output=args.spef,
+            # `--substrate-spreading` (issue #2561): two-terminal closed-form
+            # estimate of the bulk resistance between this net's substrate
+            # taps. `None` when the flag was never given, unchanged from
+            # every call site that predates it.
+            substrate_spreading_net=args.substrate_spreading,
             # `--def-net-names` (issue #951): names routed nets from the DEF
             # net name their geometry carries as a GDS shape property instead
             # of from text labels. `False` when the flag was never given,
@@ -499,6 +506,28 @@ def _run_check(args: argparse.Namespace) -> int:
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+
+
+def _print_substrate_spreading(block: dict | None) -> None:
+    """One human-readable line for ``parasitics.substrate_spreading``
+    (issue #2561), or nothing when ``--substrate-spreading`` was not given.
+
+    The min/max across the reported pairs is the honest one-line summary: a
+    single "the" resistance does not exist for a net with more than two taps
+    (see ``pairwise_approximation``), and the JSON carries every pair for a
+    caller that needs them. The line says "not a network solve" out loud so
+    a reader skimming text output cannot mistake it for one.
+    """
+    if block is None:
+        return
+    print(
+        f"substrate_spreading: net={block['net']}  "
+        f"taps={block['tap_count']}  "
+        f"pairs={block['pair_count']}  "
+        f"R={block['min_resistance_ohm']}..{block['max_resistance_ohm']} ohm  "
+        f"(rho={block['resistivity_ohm_cm']} ohm-cm, "
+        "two-terminal estimate, not a network solve)"
+    )
 
 
 def _print_text(report: dict) -> None:
@@ -595,6 +624,10 @@ def _print_text(report: dict) -> None:
                 f"delta={mom_crosscheck['delta_ff']} fF "
                 f"({mom_crosscheck['delta_pct']}%)"
             )
+        # Additive (issue #2561): only printed when --substrate-spreading was
+        # given. Called unconditionally, with the `None` test inside the
+        # helper, so this line adds no branch to an already long function.
+        _print_substrate_spreading(parasitics.get("substrate_spreading"))
         # Additive (issue #988): only printed when --mom-rlc-net was given.
         mom_rlc_override = parasitics.get("mom_rlc_override")
         if mom_rlc_override is not None:

@@ -1807,7 +1807,7 @@ live re-measurement above.
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly for this full PDN: no tapcells/fillers. `sky130_fd_sc_hd` runs still emit a small, separate row-rail obstruction regardless (issue #1442) — see "Row-rail fallback" below. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
-| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sky130hd"` — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`/`power.connects`** (supplying both is a validation error, not a per-field override). The preset's own standard-cell library must match `pdk.cell_library`. An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's ORFS provenance and exact geometry. |
+| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"` — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`/`power.connects`** (supplying both is a validation error, not a per-field override). The preset's own standard-cell library must match `pdk.cell_library`. An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
 | `power.straps` | array\<object\> | Required when `power` is given **unless** `power.preset` supplies it (issue #2123), non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `spacing_um` (positive number, omitted by default — issue #1133), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
 | `power.straps[].spacing_um` | number \| omitted | Additive field (issue #1133) → `add_pdn_stripe -spacing`. The paired power/ground stripe spacing on this strap's own layer (used when a grid draws power and ground as an adjacent pair on one layer rather than on a single pitch). Omitted (the default) emits no `-spacing` flag, byte-identical to before this field existed. Not tied to having a second strap — describes this stripe alone. |
 | `power.connects` | array\<object\> \| omitted | Additive field (issue #1133); mutually exclusive with `power.preset` (issue #2123). Per-pair `add_pdn_connect` via-stack tuning. Omitted (the default, `[]`) preserves this command's prior plain `add_pdn_connect -grid {grid} -layers {lower upper}` call for every consecutive `power.straps` pair. A pair with no matching entry here still gets that plain call — only pairs named in `power.connects` get the extra flags below. |
@@ -2281,6 +2281,12 @@ are `0` by construction. Live-verified end to end; see the
 `sg13g2_stdcell` entry under "Live verification" above for that run's
 numbers and the request body it used.
 
+**You do not have to retype that geometry** (issue #2447). The exact strap
+block above ships as `"power": {"preset": "sg13g2"}` — see "Platform PDN
+presets" below. The explicit form is still supported and still validated
+identically; the preset is simply the same recipe with the transcription
+step removed.
+
 **This is an explicit per-library allowlist, not a fallback.** A library
 absent from *both* `_TAPCELL_CELLS` and `_NO_TAPCELL_LIBRARIES` still raises
 the same clear error, because the two states look identical in
@@ -2494,20 +2500,35 @@ so it runs through the same checks, emits the same `add_pdn_stripe` /
 opaque. The generated Tcl is kept under `.klt/place-and-route/` as usual, so
 the fully-expanded grid is inspectable too.
 
-**Supported presets**, each transcribed from
+**Supported presets.** The three ORFS-derived recipes were transcribed from
 `The-OpenROAD-Project/OpenROAD-flow-scripts` @
-`95ebc50a258390f4c7896e5f04db743f62279c2d` (2026-09-19):
+`95ebc50a258390f4c7896e5f04db743f62279c2d` (2026-09-19); `"sg13g2"` (issue
+#2447) comes from IHP-Open-PDK v0.3.0 instead, because IHP ships no ORFS
+platform at all:
 
-| `preset` | `pdk.cell_library` | ORFS source | Straps (bottom→top) | Via-stack tuning |
+| `preset` | `pdk.cell_library` | Upstream source | Straps (bottom→top) | Via-stack tuning |
 | --- | --- | --- | --- | --- |
-| `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, `split_cuts {Metal3 0.128}`. `Metal4↔Metal5`: none. |
-| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | identical to the 7t row above |
-| `"sky130hd"` | `sky130_fd_sc_hd` | `flow/platforms/sky130hd/pdn.tcl` | `met1` w 0.48 / p 5.44 / off 0, followpins · `met4` w 1.600 / p 27.140 / off 13.570 · `met5` w 1.600 / p 27.200 / off 13.600 | none — that config's two `add_pdn_connect` lines carry no flags |
+| `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, `split_cuts {Metal3 0.128}`. `Metal4↔Metal5`: none. |
+| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | ORFS `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | identical to the 7t row above |
+| `"sg13g2"` | `sg13g2_stdcell` | IHP-Open-PDK v0.3.0 `libs.tech/librelane/config.tcl` (+ `libs.tech/librelane/sg13g2_stdcell/config.tcl` for `PDN_RAIL_WIDTH`) | `Metal1` w 0.44 / **p 7.56 (derived — see below)** / off 0, followpins · `TopMetal1` w 2.2 / sp 4.0 / p 75.6 / off 13.6 · `TopMetal2` w 2.2 / sp 4.0 / p 75.6 / off 13.6 | none — that config names no via-stack tuning |
+| `"sky130hd"` | `sky130_fd_sc_hd` | ORFS `flow/platforms/sky130hd/pdn.tcl` | `met1` w 0.48 / p 5.44 / off 0, followpins · `met4` w 1.600 / p 27.140 / off 13.570 · `met5` w 1.600 / p 27.200 / off 13.600 | none — that config's two `add_pdn_connect` lines carry no flags |
 
 (The two gf180mcu configs differ in exactly one place: the taller 9-track
 row's own `Metal1` rail width/pitch. `platforms/gf180/config.mk`'s
 `PDN_TCL ?= …/pdn_grid_strategy_$(TRACK_OPTION)_6M.cfg` is what selects
 between them per `TRACK_OPTION`.)
+
+**One number in the `"sg13g2"` row is derived, not cited.** Every other
+value in the table above appears literally in the file its row names. The
+`Metal1` rail's pitch, 7.56, does not: IHP's LibreLane config states no rail
+pitch at all, because `-followpins` takes its placement from the standard-cell
+rows themselves. 7.56 is this repo's own derivation — 2× the 3.78 µm
+`CoreSite` row height, i.e. one VDD/VSS rail pair. The preset entry's own
+`source` string says so too, so a reader re-deriving the recipe from
+`libs.tech/librelane/config.tcl` is not left hunting for a number that is not
+in it. (This is the same geometry the `sg13g2_stdcell` PDN section above
+documents as an explicit `power.straps` block under issue #2441; the preset
+is that block, shipped so no caller has to retype it.)
 
 **`preset` and explicit `straps`/`connects` are mutually exclusive.**
 Supplying both is a validation error — deliberately, rather than a
@@ -2530,21 +2551,27 @@ likewise a validation error listing the supported set, matching the existing
 equivalent Tcl for *any* request, preset or explicit: their `global
 connections` / `voltage domains` sections (built instead from the
 per-library pin-pattern table plus the caller's own
-`power_net`/`ground_net` — which default to the same `VDD`/`VSS` all three
+`power_net`/`ground_net` — which default to the same `VDD`/`VSS` all four
 configs use), `define_pdn_grid`'s `-pins {Metal5}`/`-pins {met5}` (see the
 row-rail fallback below for why PG nets are deliberately never promoted
 into the top-level DEF `PINS` / Verilog port list here), and `pdn.tcl`'s
 `macro grids` section (this command's already-documented v1 macro-PDN
 exclusion).
 
-**Live verification.** All three presets were run end to end against a real
-`openroad` (`26Q3-2056-g41a28926b9`, `openroad/orfs:latest`) and real
+**Live verification.** The three ORFS presets were run end to end against a
+real `openroad` (`26Q3-2056-g41a28926b9`, `openroad/orfs:latest`) and real
 volare/ciel PDK installs on 2026-09-19 — the GCD worked example,
 `klt synthesize` → `klt place-and-route` through a full detailed route, with
 `"power": {"preset": …}` and no hand-written strap geometry at all. Each
 reached `power.placed.status: "complete"`, `power.placed.missing: []` and
-`warnings: []` under the measured audit above. Automated as
-`test_integration_real_openroad_preset_pdn_{sky130hd,gf180mcu_9t,gf180mcu_7t}`
+`warnings: []` under the measured audit above. `"sg13g2"`'s geometry was
+verified the same way on 2026-09-24 against `openroad
+26Q3-1278-g4421880472` + a real fetched IHP-Open-PDK v0.3.0 install, as the
+explicit `power.straps` block issue #2441 landed (`route_drc_violation_count:
+0`; see the `sg13g2_stdcell` section above for that run's full numbers) —
+the preset table now holds exactly that block, so the preset path and the
+explicit path resolve to the same geometry by construction. Automated as
+`test_integration_real_openroad_preset_pdn_{sky130hd,gf180mcu_9t,gf180mcu_7t,sg13g2}`
 in `tests/test_place_and_route.py`, gated (skipped, never failed) on a
 machine without both halves of the toolchain, exactly like the existing
 worked-example integration tests.

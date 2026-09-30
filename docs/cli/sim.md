@@ -312,7 +312,7 @@ implements against.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. Validated up front by `remote_launcher.ami_pdk_key` — the *same* check the `batch` backend applies, see "Both off-host backends validate `models.pdk` up front" below. |
+| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. Validated up front by `remote_launcher.ami_pdk_key` — the *same* check the `batch` backend applies, see "Both off-host backends validate `models.pdk` up front" below. `sg13g2` is registered (#2573) but no AMI has been built/published for it yet (#2574) — a request will fail at `resolve_ami` with a "no published AMI" error until an operator runs `scripts/aws/build-remote-sim-ami.sh --pdk sg13g2` for the target region. |
 | `remote.region` | string, required | AWS region to provision in. No default — an unset region is a usage error, not an inferred one (`RemoteLaunchError` from `remote_launcher.require_cost_config`, mirroring `repo:remote`'s "no silent defaults for cost-relevant fields" discipline). |
 | `remote.key_name` | string, required | AWS EC2 keypair name attached to the provisioned instance, so `remote.ssh_key_path`'s private key can authenticate. |
 | `remote.ssh_key_path` | string, required | Local path to the private key matching `remote.key_name`, used for every SSH/SCP call the transport makes. |
@@ -388,8 +388,9 @@ headroom, smallest fitting `c7i` size — the 5-corner × 8-thread case selects
 (`data/remote-sim-ami-manifest.json`, schema at
 `docs/schemas/remote-sim-ami-manifest.schema.json`) produced by
 `scripts/aws/build-remote-sim-ami.sh` — ngspice, the curated `sky130A`/
-`gf180mcu` model decks, and `klt` itself are baked into the AMI, never
-fetched per job. Only the netlist and a generated request document
+`gf180mcu`/`sg13g2` model decks (`sg13g2`'s recipe additionally bakes
+compiled OSDI models — see that script's SG13G2 branch), and `klt` itself
+are baked into the AMI, never fetched per job. Only the netlist and a generated request document
 (kilobytes to low megabytes) are pushed per job, by
 `klayout_tools.remote_transport` — no IAM instance profile is attached to
 the guest by default (baked AMI + SSH/SCP transport means the guest never
@@ -479,8 +480,8 @@ What differs from `remote` is *who acquires the machine*:
 
 `remote` and `batch` (`sim._OFFHOST_BACKENDS`) both run on images the same
 AMI pipeline publishes, so both accept exactly the same PDK set
-(`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`) and both refuse an
-unsupported one **before spending anything** — `remote` before its
+(`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`) and both
+refuse an unsupported one **before spending anything** — `remote` before its
 `run-instances` call, `batch` before its first S3 write
 ([#2523](https://github.com/2AMLogic/klayout-tools/issues/2523)):
 
@@ -493,10 +494,10 @@ paths rather than restated per backend, so the two can never disagree about
 what is supported. Consequences worth knowing:
 
 - **A variant reducible to a published family is accepted** on both, on the
-  same terms: `models.pdk: "gf180mcuC"` → family `gf180mcu`. The *variant*
-  name is what keeps flowing off-host (`job.json`'s `pdk_variant`), because
-  the executing box resolves the PDK locally exactly as the `local` backend
-  does.
+  same terms: `models.pdk: "gf180mcuC"` → family `gf180mcu`, or
+  `models.pdk: "ihp-sg13g2"` → family `sg13g2`. The *variant* name is what
+  keeps flowing off-host (`job.json`'s `pdk_variant`), because the executing
+  box resolves the PDK locally exactly as the `local` backend does.
 - **A variant whose family has no published image is refused even though it
   resolves locally** — `sky130B` reduces to `sky130`, which is not a
   published key (only `sky130A` is), so it is named rather than silently
@@ -1669,10 +1670,69 @@ anyone sampled.
 { "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" } }
 ```
 
-Resolved via [`klt pdk find`](pdk.md)'s search order (`--pdk-root`/`$PDK_ROOT`,
-the ciel/volare stores, conventional prefixes); `lib`, when relative, is
+Resolved via [`klt pdk find`](pdk.md)'s search order; `lib`, when relative, is
 joined against the resolved variant directory. Optional `models.pdk_root`
 pins the search the same way `klt pdk find --pdk-root` does.
+
+**The resolution order, explicitly** (first match wins; the winning step is
+reported as `provenance.pdk.source`):
+
+| # | Candidate root | Notes |
+|---|---|---|
+| 1 | `models.pdk_root` | Pins the root and **disables** steps 2–4 entirely. |
+| 2 | `$PDK_ROOT` | The invoking process's environment. A `$PDK_ROOT` that holds no matching install is skipped, falling through to step 3. |
+| 3 | `~/.ciel`, then `~/.volare` | The ciel/volare stores, in that order — **`~/.ciel` first**. |
+| 4 | `/usr/local/share/pdk`, `/usr/share/pdk`, `~/share/pdk` | Conventional open_pdks install prefixes, in that order. |
+
+`models.pdk` (or `$PDK`) selects **which variant** within whichever root
+wins; it does not reorder the roots.
+
+**More than one install of the same variant is an ordinary host state**, not
+a misconfiguration: a machine that has followed the tooling's own migration
+carries both a `volare`-managed and a `ciel`-managed `sky130A` — two
+different `open_pdks` builds, whose `libs.tech/combined/continuous/
+models_fet.spice` (the FET cards a mismatch Monte Carlo draws from) need not
+be byte-identical. Step 3 above then silently prefers `~/.ciel`, and a
+campaign that verified `~/.volare` against a pinned `open_pdks` commit can
+produce a record naming that pin with a simulation behind it that read the
+other build. Since issue
+[#2564](https://github.com/2AMLogic/klayout-tools/issues/2564) that
+substitution is **reported rather than discarded**:
+
+- **stderr** carries a one-line warning naming the absolute root actually
+  read, every root skipped, and the remedy:
+
+  ```text
+  klt: warning: 2 installs provide PDK variant 'sky130A'; read
+  /home/u/.ciel (search root: ~/.ciel), skipped /home/u/.volare (search
+  root: ~/.volare). Resolution is first-match-wins, so a pinned open_pdks
+  build may not be the one this run read -- pin the root explicitly
+  (--pdk-root, or a request's models.pdk_root) to disable the search and
+  choose deliberately.
+  ```
+
+- **`--format json`** records the skipped installs on
+  `provenance.pdk.ambiguous_sources` — the path-free search-order labels
+  (`["search root: ~/.volare"]`), never the absolute roots, which would bake
+  the resolving machine's home directory into committed evidence. The key is
+  **absent** when resolution was unambiguous, so an ordinary run's
+  `provenance` is unchanged.
+
+- **`--format text`** echoes the resolved PDK on its own line beside
+  `models_lib`, plus a `WARNING` line when the variant was installed more
+  than once:
+
+  ```text
+  models_lib: <outside repo>
+  pdk: sky130A open_pdks 0fe599b (via search root: ~/.ciel)
+  pdk: WARNING: variant also installed under search root: ~/.volare -- resolution is first-match-wins; pin models.pdk_root to choose deliberately
+  ```
+
+**Pinning `models.pdk_root` is the fix**, and it is quiet by construction:
+step 1 disables the search, so there is no second candidate to be ambiguous
+against. `$PDK_ROOT` narrows the search to one *first* candidate but does not
+disable it, so a run pinned that way still reports any other install it
+skipped.
 
 ```json
 { "models": { "lib": "$PDK_ROOT/sky130A/libs.tech/ngspice/sky130.lib.spice" } }
@@ -2522,7 +2582,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored`/`inconclusive` (issues #1849, #2492). See below. |
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when nothing made one necessary — either no process axis at all, or a `corners.process` bundle whose every section named its own `lib` (issue #2522); never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `corner_section_libs` (issue #2522 — one `{name, path, scope, sha256}` per distinct per-section corner library a `corners.process` bundle named, in first-appearance order; see "Per-section corner libraries" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
-| `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
+| `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`), and carries the additional `ambiguous_sources` key when the resolved variant was installed more than once on this host (issue #2564 — see "Model library resolution" above); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 | `plots`         | array\<object\> | Additive/optional (issue #1723): only present when `--plot` was used — every SVG actually written, as `{corner_id, signal, path}`, in corner/signal order. See "Waveform plots" above. |

@@ -592,11 +592,8 @@ DECK: list[DrcRule] = [
         id="cont.width.1",
         description=(
             "minimum (and, on the real rule, maximum) Cont width -- "
-            "approximated here as a minimum-width floor only; this "
-            "engine's width_check has no upper bound, the same "
-            "min-size-only approximation sky130.py's via.width.1/"
-            "gf180mcu.py's contact.width.1 already document for their own "
-            "fixed-size-cut rules"
+            "approximated here as a minimum-width floor only, pending the "
+            "generator fix issue #2585 tracks"
         ),
         layer=(6, 0),  # Cont.drawing
         check="width",
@@ -605,6 +602,19 @@ DECK: list[DrcRule] = [
         # cont_sq.without_bbox_width(0.16um)  (min AND max bbox width)
         # -> "5.14. Cnt.a : Min. and max. Cont width : 0.16 um"
         # (sg13g2_tech_default.json: drc_rules.Cnt_a == 0.16)
+        #
+        # No `threshold_max_dbu` yet, and that is a *deferral*, not a
+        # judgement that the max half is unenforceable (issue #2388). The
+        # upstream rule is literally bounding-box shaped
+        # (`without_bbox_width`), which is exactly what
+        # `DrcRule.threshold_max_dbu` (issue #2370) measures -- the same
+        # field `topvia1.width.1`/`topvia2.width.1` below already set. It is
+        # held back only because every `klt gen` generator draws this cut at
+        # the PDK-generic `gen.CONTACT_SIZE_UM` (0.22um, 0.06um over the
+        # foundry maximum), so enforcing the max half turns twenty
+        # currently-green sg13g2 generator tests red -- correctly, since that
+        # geometry genuinely violates "Cnt.a". Fixing the generator is issue
+        # #2585; this rule gets its `threshold_max_dbu` once that lands.
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.a"),
     ),
@@ -688,14 +698,16 @@ DECK: list[DrcRule] = [
         description=(
             "minimum (and, on the real rule, maximum) Via1 width -- "
             "approximated as a minimum-width floor only, the same "
-            "min-size-only approximation cont.width.1 above makes"
+            "#2585-deferred approximation cont.width.1 above makes"
         ),
         layer=(19, 0),  # Via1.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
         # 5_19_via1.drc rule "V1.a": via1_nseal.without_bbox_min/max(0.19um)
         # -> "5.19. V1.a : Min. and max. Via1 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.V1_a == 0.19)
+        # (sg13g2_tech_default.json: drc_rules.V1_a == 0.19). No
+        # `threshold_max_dbu` yet for the same, deferred reason
+        # cont.width.1's note above gives in full (issue #2388/#2585).
         scope="V1",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_19_via1.drc", "V1.a"),
     ),
@@ -757,7 +769,7 @@ DECK: list[DrcRule] = [
         description=(
             "minimum (and, on the real rule, maximum) Via2 width -- "
             "approximated as a minimum-width floor only, the same "
-            "min-size-only approximation via1.width.1 above makes"
+            "#2585-deferred approximation via1.width.1 above makes"
         ),
         layer=(29, 0),  # Via2.drawing
         check="width",
@@ -766,7 +778,8 @@ DECK: list[DrcRule] = [
         # "Vn.a" rule): via2_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V2.a : Min. and max. Via2 width: 0.19 um"
         # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19, shared by
-        # Via2-Via4)
+        # Via2-Via4). No `threshold_max_dbu` yet: see cont.width.1's note
+        # above (issue #2388/#2585).
         scope="V2",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V2.a"),
     ),
@@ -844,7 +857,8 @@ DECK: list[DrcRule] = [
         description=(
             "minimum (and, on the real rule, maximum) Via3 width -- "
             "approximated as a minimum-width floor only, the same "
-            "min-size-only approximation via1.width.1/via2.width.1 above make"
+            "#2585-deferred approximation via1.width.1/via2.width.1 above "
+            "make"
         ),
         layer=(49, 0),  # Via3.drawing
         check="width",
@@ -852,7 +866,9 @@ DECK: list[DrcRule] = [
         # 5_20_vian.drc rule "V3.a" (via_no=3 instance of "Vn.a"):
         # via3_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V3.a : Min. and max. Via3 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19)
+        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19). No
+        # `threshold_max_dbu` yet: see cont.width.1's note above (issue
+        # #2388/#2585).
         scope="V3",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.a"),
     ),
@@ -913,7 +929,7 @@ DECK: list[DrcRule] = [
         description=(
             "minimum (and, on the real rule, maximum) Via4 width -- "
             "approximated as a minimum-width floor only, the same "
-            "min-size-only approximation via1.width.1/via2.width.1/"
+            "#2585-deferred approximation via1.width.1/via2.width.1/"
             "via3.width.1 above make"
         ),
         layer=(66, 0),  # Via4.drawing
@@ -922,7 +938,9 @@ DECK: list[DrcRule] = [
         # 5_20_vian.drc rule "V4.a" (via_no=4 instance of "Vn.a"):
         # via4_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V4.a : Min. and max. Via4 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19)
+        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19). No
+        # `threshold_max_dbu` yet: see cont.width.1's note above (issue
+        # #2388/#2585).
         scope="V4",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.a"),
     ),
@@ -991,18 +1009,26 @@ DECK: list[DrcRule] = [
     # lower one, since the upstream source genuinely defines both.
     DrcRule(
         id="topvia1.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) TopVia1 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "min-size-only approximation via1.width.1 above makes"
-        ),
+        description="min/max TopVia1 size (fixed 0.42 x 0.42 um square)",
         layer=(125, 0),  # TopVia1.drawing
         check="width",
         threshold_dbu=420,  # 0.42 um
+        threshold_max_dbu=420,  # 0.42 um -- same value: a *fixed*-size rule
         # 5_21_topvia1.drc rule "TV1.a":
         # topvia1_nseal.without_bbox_min/max(0.42um)
         # -> "5.21. TV1.a : Min. and max. TopVia1 width: 0.42 um"
-        # (sg13g2_tech_default.json: drc_rules.TV1_a == 0.42)
+        # (sg13g2_tech_default.json: drc_rules.TV1_a == 0.42). Both halves
+        # are enforced (issue #2370/#2388): `threshold_dbu` is the
+        # minimum-width lower bound (`Region.width_check`), and the equal
+        # `threshold_max_dbu` is the fixed-size upper bound, measured as a
+        # bounding-box size (`Region.with_bbox_max`, see
+        # `_run_width_max_check` in `drc.py`) -- exactly the
+        # `without_bbox_min/max` semantics the upstream rule itself uses.
+        # Threshold value unmodified. Unlike cont.width.1/via1-4.width.1
+        # above, this rule's max half needed no #2585 deferral: every
+        # generator that draws a TopVia1 already draws it at exactly 0.42um
+        # (`max(gen.CONTACT_SIZE_UM, top_via_min_w_um)` resolves to the
+        # family floor here, which *is* the fixed size).
         scope="TV1",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_21_topvia1.drc", "TV1.a"),
     ),
@@ -1086,19 +1112,17 @@ DECK: list[DrcRule] = [
     # TopMetal2-above) are transcribed.
     DrcRule(
         id="topvia2.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) TopVia2 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "min-size-only approximation via1.width.1/topvia1.width.1 above "
-            "make"
-        ),
+        description="min/max TopVia2 size (fixed 0.90 x 0.90 um square)",
         layer=(133, 0),  # TopVia2.drawing
         check="width",
         threshold_dbu=900,  # 0.90 um
+        threshold_max_dbu=900,  # 0.90 um -- same value: a *fixed*-size rule
         # 5_24_topvia2.drc rule "TV2.a":
         # topvia2_nseal.without_bbox_min/max(0.90um)
         # -> "5.24. TV2.a : Min. and max. TopVia2 width: 0.90 um"
-        # (sg13g2_tech_default.json: drc_rules.TV2_a == 0.9)
+        # (sg13g2_tech_default.json: drc_rules.TV2_a == 0.9). Both halves
+        # enforced (issue #2370/#2388), and no #2585 deferral was needed:
+        # see topvia1.width.1's note above.
         scope="TV2",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_24_topvia2.drc", "TV2.a"),
     ),

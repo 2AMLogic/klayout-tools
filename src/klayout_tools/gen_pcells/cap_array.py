@@ -31,6 +31,7 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         _MAX_CAP_TOP_PLATE_REQUIRES,
         _cap_array_layout,
+        _clamp_cut_boxes,
         _insert_boxes,
     )
 
@@ -160,6 +161,18 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     "the top plate",
                     default=False,
                 )
+            # Fixed drawn side of every cut on cap_top_via_layer (issue #2585) --
+            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
+            # family and layer. `0.0` (no upper size bound) leaves the cuts
+            # exactly as laid out; see `gen._clamp_cut_boxes`.
+            self.param(
+                "cap_top_via_fixed_size_um",
+                self.TypeDouble,
+                "Fixed drawn side (um) every cut on cap_top_via_layer is clamped "
+                "down to on the resolved PDK family -- 0.0 leaves the "
+                "generator's own cut size unchanged",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"cap_array(w={self.plate_w_um},h={self.plate_h_um},n={self.num})"
@@ -236,5 +249,15 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         c["x0_um"],
                         c["y0_um"],
                     )
+
+            # Issue #2585: clamp every cut on a fixed-size cut/via layer down
+            # to that size, inside the unchanged generic-budget layout.
+            if self.cap_top_via_present and self.cap_top_via_fixed_size_um > 0.0:
+                _clamp_cut_boxes(
+                    self.cell,
+                    self.layout.layer(self.cap_top_via_layer),
+                    dbu,
+                    self.cap_top_via_fixed_size_um,
+                )
 
     return {"cap_array": _CapArrayPCell}
