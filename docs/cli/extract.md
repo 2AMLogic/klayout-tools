@@ -448,6 +448,21 @@ neither derives no tap at all — byte-for-byte the same extraction as before
 these fields existed. Ignored outright when `tap` itself is set: a
 genuinely distinct drawn tap layer always wins.
 
+**Well tie from the *absence* of a p+ implant (issue #2591).** Some families'
+own LVS decks treat n+ as the default doping and never require an n-implant
+over a well tie — IHP SG13G2's `general_derivations.lvs` derives `ntap` as
+`activ.not(psd_drw...).and(nwell_drw)...not(gatpoly)`. For those,
+`ExtractionDeck.tap_nplus_complement` names the p+ implant layer (sg13g2:
+`pSD`, 14/0) and `klt extract` additionally derives a well tie from
+`(active & nwell) - tap_nplus_complement - poly`, unioned with the positive
+`tap_nplus` form — so an sg13g2 layout drawn either the upstream way
+(unimplanted `Activ` inside `NWell`) or the earlier curated way
+(`nSD.drawing` over the tie) extracts the same tie. One deliberate
+restriction: an unimplanted piece that touches or overlaps a gate is left as
+that MOS's source/drain, never promoted to a tie, so a PMOS drawn without
+its `pSD` keeps extracting as a PMOS. The substrate-tie side is unchanged.
+`None` (every other deck) derives nothing from this field.
+
 Connecting a well region to *every* contact inside it (rather than only a
 genuinely distinct tap region) is deliberately **not** done — the well is a
 background region spanning the whole PMOS area, so a blanket rule like that

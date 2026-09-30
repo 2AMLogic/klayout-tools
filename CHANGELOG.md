@@ -124,6 +124,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   still declare no `dummy` layer and are unaffected (tracked separately).
   A `dummy: 0` request on `gf180mcu` draws no marker shape and extracts
   exactly as before.
+- **Fixed** (#2591, `klt extract`/`klt lvs` on `sg13g2`; additive — **no**
+  `schema_version` bump, but `provenance.deck.content_hash` for `sg13g2`
+  changes): the curated `sg13g2` extraction deck only recognised a well tie
+  painted with `nSD.drawing` (7/0), while upstream IHP SG13G2's own LVS deck
+  (`general_derivations.lvs`) derives `ntap` from the *absence* of `pSD`
+  and never requires 7/0 — so a layout drawn the foundry way got no well tie
+  and reported `device.body_unverified` on every tied PMOS. A new optional
+  `ExtractionDeck.tap_nplus_complement` field derives a well tie from
+  `(active & nwell) - <p+ implant> - poly` (minus any piece touching a gate,
+  so a `pSD`-less PMOS is never swallowed as a tie); `sg13g2` sets it to
+  `pSD` (14/0) and keeps `tap_nplus = (7, 0)`, so either convention extracts
+  the same tie. The deck's comment no longer claims full `ntap` parity with
+  upstream. Substrate-tie behaviour and every other deck are unchanged.
 - **Fixed** (#2580, `klt gen`; additive — **no** `schema_version` bump, but
   user-visible: a `mos_array` request that previously returned an empty
   `drc_hints.notes` can now carry an entry): `klt gen mos_array` draws a
