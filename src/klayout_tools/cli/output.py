@@ -114,18 +114,34 @@ def render_rerun_drift(result: dict) -> None:
     ``result["drift"]`` as a list of ``{"field", "committed", "fresh"}``
     entries -- so this renderer is not verb-specific formatting that happens
     to coincide, but one shared drift-report shape across the three verbs.
+
+    ``klt signoff --check`` additionally carries ``doc_drift``/
+    ``doc_drift_fields`` (issue #2526) -- fields that moved but do not bear
+    on the verdict, so ``status`` can stay ``"match"`` while the caller is
+    still told the checklist's wording moved. Rendered only when present, so
+    every other verb's output is byte-identical to what it was, and rendered
+    as field *names* only: the values are whole paragraphs of checklist
+    prose, which is precisely what a consumer asked not to have dumped into
+    its gate output.
     """
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
+    if "doc_drift" in result:
+        print(f"doc_drift: {str(result['doc_drift']).lower()}")
     drift = result["drift"]
-    if not drift:
-        return
-    print()
-    print("drift:")
-    for entry in drift:
-        print(f"  {entry['field']}:")
-        print(f"      committed: {entry['committed']!r}")
-        print(f"      fresh:     {entry['fresh']!r}")
+    if drift:
+        print()
+        print("drift:")
+        for entry in drift:
+            print(f"  {entry['field']}:")
+            print(f"      committed: {entry['committed']!r}")
+            print(f"      fresh:     {entry['fresh']!r}")
+    doc_drift_fields = result.get("doc_drift_fields") or []
+    if doc_drift_fields:
+        print()
+        print("doc drift (checklist wording -- excluded from the verdict):")
+        for entry in doc_drift_fields:
+            print(f"  {entry['field']}")
 
 
 def emit_error(

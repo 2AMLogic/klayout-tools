@@ -36,9 +36,14 @@ Scope of this increment -- what the emitted ``.lib`` deliberately does
   cell whose output ``function`` references anything that is not a declared
   input pin is refused with a named error, never characterized as if it were
   combinational (see :mod:`klayout_tools.characterize_arcs`);
-- no measured pin capacitance -- ``pins[].capacitance_pf`` is echoed from
-  the request when given and the attribute is omitted when it is not, rather
-  than fabricated.
+- no ``when``-qualified arc/power splitting, no ``bus``/``bundle`` pins, no
+  input-pin (hidden) internal power.
+
+Input **pin capacitance is measured** (issue #2512) -- one extra probe
+instance per input pin on the same deck, emitted as the pin's
+``capacitance`` plus its ``rise_capacitance``/``fall_capacitance`` split. A
+caller-declared ``pins[].capacitance_pf`` still overrides it, and the
+response's ``capacitance_source`` says which of the two won.
 
 The emitted file is checked against ``native/statime``'s own Liberty reader
 before the run reports success (:func:`roundtrip_check`), so "it parses"
@@ -343,6 +348,7 @@ def _characterize_cell(
     _check_settle_margin(plan, grid, tables, options)
     power_tables = _build_power_tables(plan, grid, values, corner)
     leakage = _build_leakage(plan, values, corner)
+    pin_capacitance = _build_pin_capacitance(plan, values, corner)
 
     return {
         "cell": cell,
@@ -351,6 +357,7 @@ def _characterize_cell(
         "tables": tables,
         "power_tables": power_tables,
         "leakage": leakage,
+        "pin_capacitance": pin_capacitance,
         "testbench_path": testbench_path,
         "sim_request_path": sim_request_path,
         "sim_report_path": sim_report_path,
@@ -1032,6 +1039,14 @@ def _build_stimulus_plan(
     one per input state, supply (and every input held high) through its own
     ammeter, low inputs tied to ground -- whose average supply current over
     the whole run is the static current of that state. Same deck, same run.
+
+    **Pin capacitance (issue #2512)** rides on one further instance per
+    *input pin* (``cp<i>``): the pin is driven through its own 0 V ammeter,
+    the cell's other inputs are held at the same side-input state that pin's
+    timing arc uses, and the charge that flows into the pin over each input
+    edge is one ``INTEG`` card away. Divided by the supply that is the pin's
+    ``rise_capacitance``/``fall_capacitance``; see
+    :func:`_build_pin_capacitance`.
     """
     vdd = corner["supply_v"]
     ramps = options["ramps_ns"]
@@ -1050,7 +1065,9 @@ def _build_stimulus_plan(
         "* a single tran run drives every input low->high->low once. Every",
         "* instance reaches the rails through its own 0 V ammeter pair (Vpd*/Vpg*)",
         "* so its per-edge supply charge can be integrated; lk* instances never",
-        "* switch and measure the static (leakage) current of one input state.",
+        "* switch and measure the static (leakage) current of one input state;",
+        "* cp* instances drive one input pin through its own 0 V ammeter so the",
+        "* charge it draws over each edge gives that pin's capacitance.",
     ]
     # No `.control` block here, OSDI preload or not: the testbench is a
     # circuit body per `klt sim`'s netlist convention, and any
@@ -1119,6 +1136,71 @@ def _build_stimulus_plan(
                     }
                 )
 
+    cap_points: list[dict[str, Any]] = []
+    cap_ramp_ns = min(ramps)
+    cap_load_pf = min(grid["output_load_pf"])
+    # The charge is integrated over the *library's own slew-threshold region*
+    # of the applied ramp, not over the whole rail-to-rail edge -- see
+    # `_build_pin_capacitance` for why. The stimulus is a known linear ramp,
+    # so the two crossing times are exact arithmetic, needing no `WHEN`
+    # trigger and staying deterministic across simulators.
+    lower_rise = thresholds.slew_lower_threshold_pct_rise / 100.0
+    upper_rise = thresholds.slew_upper_threshold_pct_rise / 100.0
+    lower_fall = thresholds.slew_lower_threshold_pct_fall / 100.0
+    upper_fall = thresholds.slew_upper_threshold_pct_fall / 100.0
+    cap_windows = {
+        # (start_ns, stop_ns, fraction of VDD the window spans)
+        "qcr": (
+            rise_start + cap_ramp_ns * lower_rise,
+            rise_start + cap_ramp_ns * upper_rise,
+            upper_rise - lower_rise,
+        ),
+        "qcf": (
+            fall_start + cap_ramp_ns * (1.0 - upper_fall),
+            fall_start + cap_ramp_ns * (1.0 - lower_fall),
+            upper_fall - lower_fall,
+        ),
+    }
+    for pin_index, pin_name in enumerate(cell["input_pins"]):
+        tag = f"cp{pin_index}"
+        side_state = _capacitance_side_state(pin_name, arcs, cell)
+        lines.extend(
+            _capacitance_instance_lines(
+                tag=tag,
+                cell=cell,
+                pin_name=pin_name,
+                side_state=side_state,
+                rail_nodes=rail_nodes,
+                vdd=vdd,
+                ramp_ns=cap_ramp_ns,
+                load_pf=cap_load_pf,
+                rise_start=rise_start,
+                fall_start=fall_start,
+            )
+        )
+        for suffix, (start, stop, _span) in cap_windows.items():
+            measurements.append(
+                {
+                    "name": f"{tag}_{suffix}",
+                    "spice": (
+                        f".meas tran {tag}_{suffix} INTEG i(Vcm{tag}) "
+                        f"FROM={_spice_number(start)}n TO={_spice_number(stop)}n"
+                    ),
+                    "unit": "C",
+                }
+            )
+        cap_points.append(
+            {
+                "tag": tag,
+                "pin": pin_name,
+                "side_inputs": {pin: value for pin, value in side_state},
+                "ramp_ns": cap_ramp_ns,
+                "output_load_pf": cap_load_pf,
+                "rise_span": cap_windows["qcr"][2],
+                "fall_span": cap_windows["qcf"][2],
+            }
+        )
+
     leakage_states = _leakage_states(cell)
     for state_index, state in enumerate(leakage_states):
         tag = f"lk{state_index}"
@@ -1143,6 +1225,7 @@ def _build_stimulus_plan(
         "measurements": measurements,
         "points": points,
         "arc_count": len(arcs),
+        "cap_points": tuple(cap_points),
         "leakage_states": leakage_states,
         "window": {
             "rise_start_ns": rise_start,
@@ -1221,6 +1304,85 @@ def _instance_lines(
         # cell's vdd pin, i(Vpg) the current flowing OUT of its gnd pin.
         f"Vpd{tag} vdd pd_{tag} DC 0",
         f"Vpg{tag} pg_{tag} 0 DC 0",
+        f"X{tag} {' '.join(nodes)} {cell['subckt']}",
+    ]
+    for output in cell["output_pins"]:
+        lines.append(
+            f"C{tag}_{_slug(output)} {node_of[output]} 0 {_spice_number(load_pf)}p"
+        )
+    return lines
+
+
+def _capacitance_side_state(
+    pin_name: str, arcs: tuple[DerivedArc, ...], cell: dict[str, Any]
+) -> tuple[tuple[str, bool], ...]:
+    """The state the cell's *other* inputs are held at while ``pin_name``'s
+    capacitance is measured.
+
+    The acceptance bar (issue #2512) is "the same side-input states the
+    timing arcs use", so this reuses the first derived arc whose
+    ``related_pin`` is this pin -- the same state, in the same deterministic
+    order, that arc's delay tables were measured at. That matters: an input
+    of a NAND held at the *controlling* state would see no output movement
+    and therefore no Miller charge, reporting a capacitance well below the
+    one the pin actually presents in the situation a timing analysis cares
+    about.
+
+    An input pin no arc names (an unused pin, or a second output's input on a
+    multi-output cell) has no such state; its neighbours are held low, the
+    same fallback :func:`_full_side_state` applies to an unreferenced pin.
+    """
+    for arc in arcs:
+        if arc.related_pin == pin_name:
+            return _full_side_state(arc, cell)
+    return tuple((pin, False) for pin in cell["input_pins"] if pin != pin_name)
+
+
+def _capacitance_instance_lines(
+    *,
+    tag: str,
+    cell: dict[str, Any],
+    pin_name: str,
+    side_state: tuple[tuple[str, bool], ...],
+    rail_nodes: dict[str, str],
+    vdd: float,
+    ramp_ns: float,
+    load_pf: float,
+    rise_start: float,
+    fall_start: float,
+) -> list[str]:
+    """One never-metered-supply instance whose single job is to let the charge
+    drawn by ``pin_name`` be integrated.
+
+    The pin is fed from a ramp source through a 0 V ammeter (``Vcm<tag>``),
+    so ``i(Vcm<tag>)`` is the current flowing *into* the pin; its integral
+    over an input edge is the charge that edge moved. Supplies go straight to
+    the shared rails -- this instance contributes to no power or leakage
+    measurement, so it needs no ammeter pair of its own.
+    """
+    side_map = dict(side_state)
+    node_of: dict[str, str] = {}
+    for pin in cell["pins"]:
+        name = pin["name"]
+        if pin["direction"] == "output":
+            node_of[name] = f"o_{tag}_{_slug(name)}"
+        elif name == pin_name:
+            node_of[name] = f"ci_{tag}"
+        else:
+            node_of[name] = "vdd" if side_map[name] else "0"
+
+    nodes = [
+        node_of.get(terminal) or rail_nodes[terminal] for terminal in cell["terminals"]
+    ]
+    lines = [
+        f"Vc{tag} cs_{tag} 0 PWL(0 0 "
+        f"{_spice_number(rise_start)}n 0 "
+        f"{_spice_number(rise_start + ramp_ns)}n {_spice_number(vdd)} "
+        f"{_spice_number(fall_start)}n {_spice_number(vdd)} "
+        f"{_spice_number(fall_start + ramp_ns)}n 0)",
+        # 0 V ammeter in series with the pin: i(Vcm<tag>) is the current the
+        # source delivers INTO the pin.
+        f"Vcm{tag} cs_{tag} ci_{tag} DC 0",
         f"X{tag} {' '.join(nodes)} {cell['subckt']}",
     ]
     for output in cell["output_pins"]:
@@ -1611,8 +1773,27 @@ def _build_power_tables(
     ``C_load * V**2`` on the rise", sums to the same cycle total but piles all
     the internal-node energy onto the rise edge; measured against IHP's
     ``sg13g2_stdcell`` it is the worse fit by several femtojoules per point.
-    The vendor's split does differ on arcs through a series stack -- see
-    ``docs/cli/characterize.md``'s "Accuracy against a vendor library".)
+
+    The vendor's own split *does* differ from both conventions on arcs that
+    switch a series-stack internal node -- ``sg13g2_nand2_1``'s ``B->Y`` and
+    ``sg13g2_nor2_1``'s ``A->Y`` (issue #2527) -- and it is not a rail-choice
+    artifact: node-voltage tracing on a standalone instance of each cell
+    shows the internal node *discharging* through the just-switched
+    transistor in well under a nanosecond (driven hard on) but *recharging*
+    through the other, permanently-on transistor over a many-tens-of-ns
+    subthreshold tail (it settles near ``Vdd - Vth``, not the rail, because
+    that transistor never turns fully off). Any window short enough to be
+    practical -- ours included, ``settle_ns`` below is a few input ramps'
+    worth, not the ~100 ns the tail needs -- captures the fast discharge in
+    full but only the leading edge of the slow recharge, so whichever output
+    edge is the *recharge* edge reads low relative to its true,
+    infinite-settle energy. That is a window-*length* effect: it shows up on
+    ``Q_vdd`` and ``Q_gnd`` alike, so no per-edge rail-attribution convention
+    -- symmetric or otherwise -- corrects it, and matching the vendor's own
+    split would mean guessing their (undocumented, and almost certainly
+    different) window length rather than adopting a principled convention.
+    See ``docs/cli/characterize.md``'s "Accuracy against a vendor library"
+    for the measured deltas this leaves in place.)
 
     Supply leakage integrated over the (settle-dominated) window is left in:
     at the static currents a standard cell draws (tens to ~100 pW on IHP
@@ -1690,6 +1871,68 @@ def _build_leakage(
         )
     mean = sum(entry["value_pw"] for entry in states) / len(states)
     return {"cell_leakage_power_pw": mean, "states": states}
+
+
+def _build_pin_capacitance(
+    plan: dict[str, Any],
+    values: dict[str, float],
+    corner: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Per-input-pin measured capacitance (pF), split by input edge.
+
+    Each probe instance's ammeter integral is the charge the source pushed
+    into the pin while that pin crossed the **library's own slew-threshold
+    region** (20% -> 80% of the supply by default), so::
+
+        rise_capacitance = +Q_rise / (V * rise threshold span)
+        fall_capacitance = -Q_fall / (V * fall threshold span)
+        capacitance      = (rise_capacitance + fall_capacitance) / 2
+
+    (The fall integral is negative -- the charge comes back out -- hence the
+    sign flip.) The mean is the convention IHP's own ``sg13g2_stdcell`` uses:
+    its ``sg13g2_inv_1`` pin ``A`` reports ``capacitance : 0.00286745``, which
+    is exactly the mean of its ``rise_capacitance`` 0.0029192 and
+    ``fall_capacitance`` 0.00281571.
+
+    **Why the threshold region and not the whole rail-to-rail edge.** A pin's
+    charge over a *full* swing includes the entire Miller contribution: the
+    gate-drain charge changes by ``C_gd * (dV_gate - dV_out)``, i.e.
+    ``2 * C_gd * V`` once the output has swung the other way, so the
+    full-swing number is the "total charge moved", not the effective load a
+    driver sees while *it* is switching. Measured against IHP's
+    ``sg13g2_stdcell`` that convention runs 15-31% above the vendor's
+    ``capacitance`` across eight pins of five cells; the threshold-region
+    convention lands at 0.84-0.98x of it. The threshold region is also the
+    self-consistent choice for this writer: the emitted ``.lib`` already
+    declares those thresholds in its header, so the pin capacitance means
+    what the file says its measurements mean.
+    """
+    vdd = corner["supply_v"]
+    measured: dict[str, dict[str, Any]] = {}
+    for point in plan["cap_points"]:
+        tag = point["tag"]
+        charges: dict[str, float] = {}
+        for suffix in ("qcr", "qcf"):
+            key = f"{tag}_{suffix}"
+            if key not in values:
+                raise CharacterizeError(
+                    f"no measured value for '{key}' -- the simulation report "
+                    f"does not cover pin '{point['pin']}'s capacitance probe"
+                )
+            charges[suffix] = values[key]
+        # Coulombs / volts = farads; * 1e12 = pF (the library's
+        # capacitive_load_unit).
+        rise_pf = charges["qcr"] / (vdd * point["rise_span"]) * 1e12
+        fall_pf = -charges["qcf"] / (vdd * point["fall_span"]) * 1e12
+        measured[point["pin"]] = {
+            "rise_capacitance_pf": rise_pf,
+            "fall_capacitance_pf": fall_pf,
+            "capacitance_pf": (rise_pf + fall_pf) / 2.0,
+            "side_inputs": point["side_inputs"],
+            "output_load_pf": point["output_load_pf"],
+            "input_transition_ramp_ns": point["ramp_ns"],
+        }
+    return measured
 
 
 def _check_settle_margin(
@@ -1786,6 +2029,46 @@ def _build_library(
     )
 
 
+def _resolve_pin_capacitance(
+    pin: dict[str, Any], measured: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Decide what one pin's ``capacitance`` is, and say where it came from.
+
+    Precedence (issue #2512): a caller-declared ``pins[].capacitance_pf``
+    always wins -- overriding a measurement with a known-good number is a
+    legitimate thing to do, and an override that the tool quietly discarded
+    would be worse than no override at all. Otherwise the measured value is
+    used. Output pins have neither.
+
+    The returned dict is both what the emitter reads and what the response
+    reports, so the two can never disagree about which source won.
+    """
+    declared = pin["capacitance_pf"] if pin["direction"] == "input" else None
+    entry = measured.get(pin["name"]) if pin["direction"] == "input" else None
+    measured_pf = entry["capacitance_pf"] if entry else None
+    if declared is not None:
+        source = "declared"
+        effective = declared
+    elif measured_pf is not None:
+        source = "measured"
+        effective = measured_pf
+    else:
+        source = None
+        effective = None
+    return {
+        "capacitance_pf": effective,
+        "capacitance_source": source,
+        "declared_capacitance_pf": declared,
+        "measured_capacitance_pf": measured_pf,
+        "measured_rise_capacitance_pf": (
+            entry["rise_capacitance_pf"] if entry else None
+        ),
+        "measured_fall_capacitance_pf": (
+            entry["fall_capacitance_pf"] if entry else None
+        ),
+    }
+
+
 def _build_liberty_cell(
     *, result: dict[str, Any], grid: dict[str, tuple[float, ...]]
 ) -> liberty_writer.Cell:
@@ -1815,24 +2098,43 @@ def _build_liberty_cell(
             )
         )
 
-    pins = tuple(
-        liberty_writer.Pin(
-            name=pin["name"],
-            direction=pin["direction"],
-            capacitance_pf=pin["capacitance_pf"],
-            function=pin["function"],
-            max_capacitance_pf=(
-                max(grid["output_load_pf"]) if pin["direction"] == "output" else None
-            ),
-            arcs=tuple(arcs_by_output.get(pin["name"], ())),
-            internal_power=tuple(power_by_output.get(pin["name"], ())),
+    measured_caps = result["pin_capacitance"]
+    pins = []
+    for pin in cell["pins"]:
+        resolved = _resolve_pin_capacitance(pin, measured_caps)
+        pins.append(
+            liberty_writer.Pin(
+                name=pin["name"],
+                direction=pin["direction"],
+                capacitance_pf=resolved["capacitance_pf"],
+                function=pin["function"],
+                max_capacitance_pf=(
+                    max(grid["output_load_pf"])
+                    if pin["direction"] == "output"
+                    else None
+                ),
+                # Emitted only for a measured value. A caller-declared scalar
+                # override must stand alone: `native/statime`'s reader prefers
+                # the rise/fall pair over the bare attribute, so pairing the
+                # override with the measured split would silently discard it.
+                rise_capacitance_pf=(
+                    resolved["measured_rise_capacitance_pf"]
+                    if resolved["capacitance_source"] == "measured"
+                    else None
+                ),
+                fall_capacitance_pf=(
+                    resolved["measured_fall_capacitance_pf"]
+                    if resolved["capacitance_source"] == "measured"
+                    else None
+                ),
+                arcs=tuple(arcs_by_output.get(pin["name"], ())),
+                internal_power=tuple(power_by_output.get(pin["name"], ())),
+            )
         )
-        for pin in cell["pins"]
-    )
     leakage = result["leakage"]
     return liberty_writer.Cell(
         name=cell["name"],
-        pins=pins,
+        pins=tuple(pins),
         area=cell["area"],
         cell_leakage_power=leakage["cell_leakage_power_pw"],
         leakage_power=tuple(
@@ -2057,7 +2359,12 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
                     "name": pin["name"],
                     "direction": pin["direction"],
                     "function": pin["function"],
-                    "capacitance_pf": pin["capacitance_pf"],
+                    # `capacitance_pf` is what the `.lib` carries;
+                    # `capacitance_source` says whether that came from the
+                    # request or from this run's own measurement, and the
+                    # `declared_`/`measured_` fields keep both visible even
+                    # when one of them lost (issue #2512).
+                    **_resolve_pin_capacitance(pin, result["pin_capacitance"]),
                 }
                 for pin in cell["pins"]
             ],
@@ -2115,6 +2422,8 @@ def _build_response(
     grid_points = len(grid["input_transition_ns"]) * len(grid["output_load_pf"])
     arc_count = sum(len(result["arcs"]) for result in results)
     leakage_count = sum(len(result["plan"]["leakage_states"]) for result in results)
+    # Two INTEG cards (one per input edge) per input pin per cell.
+    capacitance_count = sum(2 * len(result["plan"]["cap_points"]) for result in results)
     timing_count = grid_points * arc_count * len(_TABLES)
     power_count = grid_points * arc_count * len(_POWER_CARDS)
     entries = [_cell_entry(result) for result in results]
@@ -2142,7 +2451,10 @@ def _build_response(
             "measurement_count": timing_count,
             "power_measurement_count": power_count,
             "leakage_measurement_count": leakage_count,
-            "total_measurement_count": timing_count + power_count + leakage_count,
+            "capacitance_measurement_count": capacitance_count,
+            "total_measurement_count": (
+                timing_count + power_count + leakage_count + capacitance_count
+            ),
         },
         "thresholds": {
             name: getattr(thresholds, name) for name in thresholds.__dataclass_fields__

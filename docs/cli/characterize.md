@@ -68,7 +68,8 @@ corner; every *combinational* timing arc of each cell; `cell_rise`,
 `cell_fall`, `rise_transition`, `fall_transition`, `related_pin`,
 `timing_sense`, `timing_type : combinational`; per-arc `internal_power()`
 with `rise_power`/`fall_power`; per-cell `cell_leakage_power` and one
-`leakage_power()` group per input state.
+`leakage_power()` group per input state; per-input-pin **measured**
+`capacitance` with its `rise_capacitance`/`fall_capacitance` split.
 
 **Out of scope**, deliberately — read the absence of a group as "this
 command did not measure it", never as an assertion about the cell:
@@ -77,7 +78,6 @@ command did not measure it", never as an assertion about the cell:
 |---|---|
 | more than one corner per invocation / per file | invoke once per corner; see "Multiple corners" below |
 | sequential-cell constraint arcs (`setup_*`/`hold_*`/`recovery_*`), `ff`/`latch` groups | not yet filed — a sequential cell is **refused**, not mis-characterized (see "Sequential cells are refused") |
-| measured pin capacitance | issue #2512 — `pins[].capacitance_pf` is echoed from the request when given and the attribute is omitted when it is not |
 | `when`-qualified arc/power splitting, `bus`/`bundle` pins, input-pin (hidden) `internal_power` | not yet filed |
 
 ## How it works
@@ -118,13 +118,18 @@ command did not measure it", never as an assertion about the cell:
 5. **Leakage on `2**n` static instances, same deck.** One never-switching
    instance per input state, its supply through its own ammeter; the average
    supply current over the run is that state's static current.
-6. **Emit and verify.** Tables are reshaped into a Liberty NLDM library
+6. **Pin capacitance on one probe instance per input pin, same deck.** The
+   pin is driven through its own 0 V ammeter with the cell's other inputs at
+   that pin's timing-arc side-input state, and the charge it draws while it
+   crosses the library's own slew thresholds is two more `INTEG` cards. See
+   "Pin capacitance".
+7. **Emit and verify.** Tables are reshaped into a Liberty NLDM library
    (`src/klayout_tools/liberty_writer.py`) and written, then the emitted file
    is parsed back through `native/statime`'s own Liberty reader before the
    run reports success.
 
-In batch mode steps 1-5 run once **per cell** (one `klt sim` corner per
-cell, artifacts under `<outdir>/cells/<cell>/`), and step 6 runs once over
+In batch mode steps 1-6 run once **per cell** (one `klt sim` corner per
+cell, artifacts under `<outdir>/cells/<cell>/`), and step 7 runs once over
 the combined library. See "Batch mode".
 
 ### Input slew: what `index_1` means and what is applied
@@ -235,7 +240,9 @@ only, subtract `C_load * V**2` on the rise" -- sums to the same cycle total
 but piles all internal-node energy onto the rise edge. Measured against
 IHP's `sg13g2_stdcell` it is the worse fit: mean per-point error ~2-5 fJ
 against ~0.2-1.3 fJ for the symmetric split. The vendor split does differ on
-arcs through a series stack -- see "Accuracy against a vendor library".)
+arcs through a series stack, but not because it picks a different rail --
+see "Accuracy against a vendor library" for why neither convention fixes
+that, and issue #2527 for the node-voltage evidence.)
 
 Consequences worth knowing:
 
@@ -262,6 +269,88 @@ Each state becomes a `leakage_power()` group whose `when` is the conjunction
 of its input literals (`"A&!B"`), and `cell_leakage_power` is the unweighted
 mean over all states -- the convention IHP's own library uses (its
 `sg13g2_inv_1` reports 63.0032 = the mean of 82.469 and 43.5374).
+
+## Pin capacitance
+
+Every **input** pin gets a measured `capacitance`, plus the
+`rise_capacitance`/`fall_capacitance` split beside it. Output pins get
+neither (they get `max_capacitance`, the grid's largest load).
+
+### How it is measured
+
+One extra instance per input pin joins the same deck (`cp<i>`), so this costs
+no second simulator run:
+
+- The pin is fed from its own `PWL` ramp through a **0 V ammeter**, so
+  `i(Vcm<tag>)` is the current flowing into the pin.
+- The cell's other inputs are held at **that pin's timing-arc side-input
+  state** — the same state its `cell_rise`/`cell_fall` tables were measured
+  at. This matters: a NAND input held at the *controlling* value would see no
+  output movement at all, and report a capacitance with none of the Miller
+  contribution the pin actually presents when it is doing something.
+- Outputs carry the grid's lightest load (`index_2[0]`); the ramp is the one
+  for the grid's fastest transition (`index_1[0]`).
+- Two `INTEG` cards integrate the pin current over the **library's own
+  slew-threshold region** of each edge (20% → 80% of the supply by default).
+  The stimulus is a known linear ramp, so both crossing times are exact
+  arithmetic — no `WHEN` trigger, and the same numbers on any simulator.
+
+```
+rise_capacitance = +Q_rise / (V * (upper_pct - lower_pct) / 100)
+fall_capacitance = -Q_fall / (V * (upper_pct - lower_pct) / 100)
+capacitance      = (rise_capacitance + fall_capacitance) / 2
+```
+
+The mean is the vendor convention: IHP's `sg13g2_inv_1` pin `A` reports
+`capacitance : 0.00286745`, exactly the mean of its `rise_capacitance`
+0.0029192 and `fall_capacitance` 0.00281571.
+
+### Why the threshold region, not the whole edge
+
+A pin's charge over a *full* rail-to-rail swing includes the entire Miller
+contribution — the gate-drain charge changes by `C_gd * (dV_gate - dV_out)`,
+i.e. `2 * C_gd * V` once the output has swung the other way — so it measures
+"total charge moved", not the effective load a driver sees while it is
+switching. Measured against IHP's `sg13g2_stdcell`, the full-swing convention
+runs **1.15–1.31x** the vendor's `capacitance` across eight pins of five
+cells; the threshold-region convention lands at **0.84–0.98x**. The threshold
+region is also the self-consistent choice for this writer: the emitted `.lib`
+already declares those thresholds in its header, so the pin capacitance means
+what the file says its measurements mean.
+
+The **output load** barely matters (the output swings rail to rail whatever
+the load, so the Miller charge is the same — only the timing changes; across
+the same eight pins, swapping the lightest grid load for the heaviest moved
+each value by under 3%). The **input slew** matters a lot: at the slowest
+point of the vendor 3x3 grid (1.263 ns) the same pins come out at 1.35–1.56x
+the vendor value, because the output has fully switched inside the threshold
+window. That is why the probe's operating point is pinned to `index_1[0]` /
+`index_2[0]` and stated here rather than left implicit.
+
+### Declared values still win
+
+A caller-declared `cell.pins[].capacitance_pf` **overrides** the measurement —
+copying a known-good number out of a signed-off library is legitimate. When
+it does:
+
+- the `.lib` carries that value as `capacitance` **alone**, with no
+  `rise_capacitance`/`fall_capacitance`. `native/statime`'s reader resolves
+  `(Some(rise), Some(fall), _) => (rise + fall) / 2` *before* it looks at the
+  bare attribute, so emitting the measured split beside a declared scalar
+  would silently discard the override;
+- the response keeps both numbers visible. Each `pins[]` entry carries
+  `capacitance_source` (`"measured"` / `"declared"` / `null` for an output),
+  `declared_capacitance_pf`, and `measured_capacitance_pf` — so a reader can
+  always tell which one the `.lib` got, and what the other one would have
+  been.
+
+### What is not emitted
+
+Nothing here is `when`-qualified: a pin whose capacitance genuinely differs
+between side-input states (an input deep in a series stack) gets one value,
+measured at its arc's state. That is the same single-state limitation the
+`non_unate` arcs carry, for the same reason, and the response's
+`arcs[].side_inputs` shows the state.
 
 ## Batch mode
 
@@ -329,8 +418,8 @@ backends (the default here) and is refused by name for `remote`/`batch`.
     "subckt": "sg13g2_nand2_1",
     "netlist": "sg13g2_stdcell.spice",
     "pins": [
-      { "name": "A", "direction": "input", "capacitance_pf": 0.0018 },
-      { "name": "B", "direction": "input", "capacitance_pf": 0.0018 },
+      { "name": "A", "direction": "input" },
+      { "name": "B", "direction": "input" },
       { "name": "Y", "direction": "output", "function": "!(A*B)" }
     ],
     "power_pins": { "vdd": "VDD", "gnd": "VSS" },
@@ -382,7 +471,7 @@ shape as the request-level one below). The object's fields:
 | `name` | string, **required** | Must be a terminal of the subcircuit. |
 | `direction` | `"input"` \| `"output"`, **required** | `inout` is out of scope. |
 | `function` | string, **required for outputs** | The pin's Liberty boolean expression over the declared input pins. Accepted syntax: `( )`, prefix `!`, postfix `'`, AND (`&`, `*`, or juxtaposition), `^`, OR (`+`, `|`), and the constants `0`/`1`. |
-| `capacitance_pf` | number | Echoed into the `.lib` as `capacitance`. **Not measured** — omitted from the emitted file when absent rather than fabricated. |
+| `capacitance_pf` | number | **Optional override.** Input pin capacitance is *measured* (see "Pin capacitance"); give this only to override the measurement with a known-good value. A declared value is emitted as the pin's `capacitance` **alone** — the measured `rise_capacitance`/`fall_capacitance` split is dropped, because a reader that prefers the pair would otherwise discard the override. Ignored on an output pin. |
 
 Every subcircuit terminal must be accounted for by `pins` + `power_pins`:
 an unaccounted terminal is an error, because the generated testbench would
@@ -493,9 +582,39 @@ state it measured so the limitation is visible rather than implied.
     "subckt": "nand2_demo",
     "netlist": { "path": "examples/characterize/cells.spice", "scope": "repo" },
     "pins": [
-      { "name": "A", "direction": "input", "function": null, "capacitance_pf": 0.002 },
-      { "name": "B", "direction": "input", "function": null, "capacitance_pf": 0.002 },
-      { "name": "Y", "direction": "output", "function": "!(A*B)", "capacitance_pf": null }
+      {
+        "name": "A",
+        "direction": "input",
+        "function": null,
+        "capacitance_pf": 0.0121175,
+        "capacitance_source": "measured",
+        "declared_capacitance_pf": null,
+        "measured_capacitance_pf": 0.0121175,
+        "measured_rise_capacitance_pf": 0.0120437,
+        "measured_fall_capacitance_pf": 0.0121913
+      },
+      {
+        "name": "B",
+        "direction": "input",
+        "function": null,
+        "capacitance_pf": 0.0131404,
+        "capacitance_source": "measured",
+        "declared_capacitance_pf": null,
+        "measured_capacitance_pf": 0.0131404,
+        "measured_rise_capacitance_pf": 0.0142643,
+        "measured_fall_capacitance_pf": 0.0120166
+      },
+      {
+        "name": "Y",
+        "direction": "output",
+        "function": "!(A*B)",
+        "capacitance_pf": null,
+        "capacitance_source": null,
+        "declared_capacitance_pf": null,
+        "measured_capacitance_pf": null,
+        "measured_rise_capacitance_pf": null,
+        "measured_fall_capacitance_pf": null
+      }
     ]
   },
   "corner": {
@@ -512,7 +631,8 @@ state it measured so the limitation is visible rather than implied.
     "measurement_count": 128,
     "power_measurement_count": 128,
     "leakage_measurement_count": 4,
-    "total_measurement_count": 260
+    "capacitance_measurement_count": 4,
+    "total_measurement_count": 264
   },
   "thresholds": {
     "input_threshold_pct_rise": 50.0,
@@ -601,7 +721,7 @@ each a full `len(index_1) x len(index_2)` `values` matrix — and so is
 |---|---|---|
 | `schema_version` | integer | Version of this command's JSON shape (`1`), per-command per [`../json-contract.md`](../json-contract.md). |
 | `corner` | object | Echo of the characterized corner. |
-| `grid` | object | The two index axes plus derived counts, summed over every cell: `points` (`len(index_1) * len(index_2)`), `arc_count`, `measurement_count` (timing cards, `points * arc_count * 4` -- unchanged from #2502), `power_measurement_count` (`INTEG` rail-charge cards, `points * arc_count * 4`), `leakage_measurement_count` (one per input state per cell), and `total_measurement_count` (their sum). |
+| `grid` | object | The two index axes plus derived counts, summed over every cell: `points` (`len(index_1) * len(index_2)`), `arc_count`, `measurement_count` (timing cards, `points * arc_count * 4` -- unchanged from #2502), `power_measurement_count` (`INTEG` rail-charge cards, `points * arc_count * 4`), `leakage_measurement_count` (one per input state per cell), `capacitance_measurement_count` (two per input pin per cell, one per edge), and `total_measurement_count` (their sum). |
 | `thresholds` | object | Every resolved Liberty threshold, defaults included — the definitions the tables mean. |
 | `units` | object | The units of every value in this response and the `.lib`: `time` `ns`, `capacitance` `pF`, `internal_energy` `pJ`, `leakage_power` `pW`. |
 | `cells` | array | One entry per characterized cell, in request order: `{cell, arcs, leakage, simulation}`, each shaped exactly like the single-cell top-level fields below. **This is the batch-mode data.** |
@@ -618,12 +738,27 @@ each a full `len(index_1) x len(index_2)` `values` matrix — and so is
 (the `{path, scope}` envelope — an *input*, same shape as `klt sim`'s own
 `netlist`), and `pins[]` as resolved.
 
+Each `cells[].cell.pins[]` entry carries `name`, `direction`, `function`,
+and the capacitance block (issue #2512):
+
+| Field | Type | Description |
+|---|---|---|
+| `capacitance_pf` | number \| null | **What the `.lib` carries** as the pin's `capacitance`. `null` for an output pin. |
+| `capacitance_source` | `"measured"` \| `"declared"` \| null | Where `capacitance_pf` came from. `null` for an output pin. |
+| `declared_capacitance_pf` | number \| null | The request's `pins[].capacitance_pf`, if any. |
+| `measured_capacitance_pf` | number \| null | This run's own measurement — reported even when a declared value overrode it, so the override is auditable. |
+| `measured_rise_capacitance_pf` / `measured_fall_capacitance_pf` | number \| null | The per-edge split. Emitted into the `.lib` as `rise_capacitance`/`fall_capacitance` **only** when `capacitance_source` is `"measured"`. |
+
 **Compatibility.** Every #2502 field is still present with its #2502 meaning
 for a single-cell (`cell`) request; power tables, `leakage`, `units`,
 `cells`, `comparison`, and the extra `grid` counts are additions. The
 top-level `cell`/`arcs`/`leakage`/`simulation` are `null` only for a batch
 (`cells`) request -- a request shape that did not exist before #2503, so no
-existing consumer meets the nulls unawares.
+existing consumer meets the nulls unawares. #2512 adds the five
+`*_capacitance*` pin fields beside `capacitance_pf` and the
+`capacitance_measurement_count` grid entry; `capacitance_pf` itself keeps its
+shape (`number | null`) but is now populated from the measurement when the
+request declares nothing, where #2502/#2503 left it `null`.
 
 **Path-field shapes.** `cell.netlist` uses the `{path, scope}` envelope
 because it is an *input* being pinned (matching `klt sim`'s own `netlist`).
@@ -697,7 +832,16 @@ grid node (our axes equal to, or a subset of, the vendor's) reads the vendor
 value directly; any other point is bilinearly interpolated from the
 reference table, and that table reports `interpolated: true`.
 
-**Nothing is silently omitted.** A group present on one side and not the
+**Pin `capacitance` is not one of the compared fields.** Unlike a delay
+table, a Liberty `capacitance` has no single normative definition — the
+number depends on the voltage window the pin charge is integrated over and
+the input slew it is measured at, and IHP documents neither choice — so
+folding it into the same tolerance machinery would assert an agreement that
+is not meaningful. It gets a separate, deliberately loose rough check
+instead; see "Enforced by a test" below and "Pin capacitance" above for the
+observed spread.
+
+**Nothing else is silently omitted.** A group present on one side and not the
 other lands in `missing`; every field reports how many points it actually
 `compared`; and `summary.within_tolerance` is `true` only when every field
 was compared at least once, every point is inside its bound, and `missing`
@@ -812,8 +956,34 @@ difference:
   `C_load * V**2 / 2`), so a 0.5% disagreement in the load charge
   dominates. Hence a relative bound with a 3 fJ absolute floor: it
   holds every observed point without pretending the per-edge split is a
-  settled question. The cause of the stacked-arc split is tracked in issue
-  #2527 rather than tuned away here.
+  settled question.
+
+  Issue #2527 investigated the stacked-arc split by tracing the internal
+  node's own voltage (`x1.net1` on a standalone `sg13g2_nand2_1` /
+  `sg13g2_nor2_1` instance, input held at each steady state for a long
+  settle first) rather than reasoning from the rail charges alone. Both
+  cells show the same asymmetry: the internal node *discharges* through
+  the switching transistor in well under a nanosecond (driven hard on:
+  `net1` was 1.03 V on `nand2_1`, 0 V within 0.5 ns of `B` rising) but
+  *recharges* through the other, permanently-on transistor over a
+  many-tens-of-ns subthreshold tail (`net1` is still only at 0.94 V, not
+  its ~1.03 V steady state, 140 ns after `B` falls) — because that second
+  transistor's gate never switches, so it never turns fully on either;
+  `sg13g2_nor2_1`'s PMOS stack mirrors this exactly, with the roles of
+  rise and fall swapped. Any window short enough to be practical for a
+  characterization grid -- this command's included, `settle_ns` is a few
+  input ramps' worth, not the ~100 ns the tail needs -- captures the fast
+  discharge in full but only the leading edge of the slow recharge, so the
+  recharge edge (`B->Y`'s rise, `A->Y`'s fall) reads low relative to its
+  true, infinite-settle energy. That is a window-*length* effect: it
+  shows up identically on `Q_vdd` and `Q_gnd`, so no per-edge
+  rail-attribution convention -- symmetric or "vdd/gnd only" -- corrects
+  it (see "Power and leakage" above for why the alternative convention is
+  rejected on separate, stronger grounds anyway). Reproducing the vendor's
+  own split would mean guessing the length of a characterization window
+  IHP's tooling does not document, not adopting a principled rule, so the
+  symmetric split stays and the tolerance above stays as the observed
+  worst case rather than being tightened.
 - **Leakage is a few percent low**, consistently across states; the worst
   state (`sg13g2_nand2_1` `A&!B`, −11.6%) is the one whose static current
   flows through a partially-on stack.
@@ -835,7 +1005,11 @@ difference:
   asserts **each field is within `DEFAULT_TOLERANCES`** (parametrized per
   field, so a regression names the field it broke). It also checks the
   combined `.lib` round-trips through `native/statime` and the
-  `--compare-to` CLI text path. It needs `ngspice` plus a fetched IHP PDK with
+  `--compare-to` CLI text path. It additionally rough-checks every measured
+  input-pin **capacitance** against the vendor's own value for the same pin
+  (a `0.7x`-`1.3x` band, bracketing the observed `0.84`-`0.98x` with margin —
+  see "Pin capacitance" for why this is a ballpark check and not a tolerance).
+  It needs `ngspice` plus a fetched IHP PDK with
   compiled OSDI models (`scripts/fetch-ihp-sg13g2.sh` +
   `scripts/fetch-sg13g2-sim-toolchain.sh`, or `KLT_IHP_SG13G2_ROOT` pointing
   at the `ihp-sg13g2` directory) and is skipped otherwise — CI does not fetch
