@@ -9324,8 +9324,8 @@ def test_lvs_unused_device_class_mismatch_is_warning_not_error(tmp_path, monkeyp
 
 
 # --------------------------------------------------------------------------- #
-# Array dummy-device suppression reaches `klt lvs`: sky130 (issue #491) and
-# gf180mcu (issue #2599)
+# Array dummy-device suppression reaches `klt lvs`: sky130 (issue #491),
+# gf180mcu (issue #2599), sg13g2 (issue #2590) and sg13cmos5l (issue #2602)
 # --------------------------------------------------------------------------- #
 
 
@@ -9473,6 +9473,179 @@ def test_lvs_mos_array_gf180mcu_dummy_suppression_no_unmatched_device(
         entry["layout"] == "VSUBS" and entry["reference"] == "VSUBS"
         for entry in report["net_correspondence"]
     )
+
+
+def test_lvs_mos_array_sg13g2_dummy_suppression_no_unmatched_device(
+    tmp_path, monkeypatch
+):
+    """Issue #2590's own reproduction: `klt gen mos_array` on `ihp-sg13g2`
+    with `"dummy": 1` used to extract each dummy as a real `nfet`, so a
+    reference netlist declaring only the real devices saw N
+    `device.unmatched` errors (plus the supply nets those dummies hang off
+    dropping out of `net_correspondence`). sg13g2's curated deck now
+    declares a `dummy` marker layer and `mos_array` draws it, so the compare
+    is clean -- the sg13g2 counterpart of sky130's own #491 fix.
+
+    `dummy: 0` output (the pre-#2590 workaround) stands in for the reference
+    schematic's own real-cells-only topology; `dummy: 1` output is the
+    physical layout with edge fill."""
+    from klayout_tools import pdk
+    from klayout_tools.extract import run_extract
+    from klayout_tools.gen import generate
+
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(pdk, "STORE_DIRS", [])
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
+
+    pdk_root = tmp_path / "pdk_install"
+    (pdk_root / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
+
+    # The issue's own `klt gen` params, minus `dummy` (varied below).
+    base_params = {
+        "w_um": 1.6,
+        "l_um": 0.13,
+        "rows": 1,
+        "cols": 4,
+        "topology": "common_centroid",
+        "flavor": "nfet",
+        "gate_contact": True,
+        "add_guard_ring": True,
+    }
+
+    def _extract(dummy: int, name: str):
+        gds = tmp_path / f"{name}.gds"
+        generate(
+            {
+                "generator": "mos_array",
+                "pdk": {"variant": "ihp-sg13g2", "root": str(pdk_root)},
+                "params": {**base_params, "dummy": dummy},
+                "options": {"output": str(gds)},
+            }
+        )
+        spice = tmp_path / f"{name}.spice"
+        return spice, run_extract(str(gds), "sg13g2", output=str(spice))
+
+    reference_path, ref_extracted = _extract(0, "mos_array_sg13g2_ref")
+    layout_extracted_path, layout_extracted = _extract(1, "mos_array_sg13g2_dummy")
+
+    # The two dummy columns are suppressed at extraction, so both sides
+    # carry only the four real devices.
+    assert layout_extracted["dummy_devices_dropped"] == 2
+    assert ref_extracted["dummy_devices_dropped"] == 0
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "netlist": str(layout_extracted_path),
+                "top": layout_extracted["top"],
+            },
+            "reference": {"netlist": str(reference_path), "top": ref_extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 4, "reference": 4, "matched": 4}
+    assert not any(m["category"] == "device.unmatched" for m in report["mismatches"])
+    # The array's body rail is paired, not dropped -- the knock-on symptom
+    # the issue reports alongside `device.unmatched`.
+    assert any(
+        entry["layout"] == "VSUBS" and entry["reference"] == "VSUBS"
+        for entry in report["net_correspondence"]
+    )
+
+
+def test_lvs_res_array_sg13g2_dummy_suppression_no_unmatched_device(
+    tmp_path, monkeypatch
+):
+    """The `res_array` half of issue #2590, on its own terms: `klt gen
+    res_array` on `ihp-sg13g2` with `"dummy": N` used to extract each
+    edge-fill unit as a real `rsil` resistor, so a reference netlist
+    declaring only the real units saw `2 * N` `device.unmatched` errors.
+    sg13g2's curated deck now declares a `dummy` marker layer and
+    `res_array` draws it over each dummy unit's body segment, so the compare
+    is clean -- the sg13g2 counterpart of
+    `test_lvs_res_array_dummy_suppression_no_unmatched_device`'s own sky130
+    (#491) coverage, and the `res_array` counterpart of
+    `test_lvs_mos_array_sg13g2_dummy_suppression_no_unmatched_device` above.
+
+    `dummy: 0` output (the pre-#2590 workaround) stands in for the reference
+    schematic's own real-units-only topology; `dummy: 2` output is the
+    physical layout with edge fill at both ends."""
+    from klayout_tools import pdk
+    from klayout_tools.extract import run_extract
+    from klayout_tools.gen import generate
+
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(pdk, "STORE_DIRS", [])
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
+
+    pdk_root = tmp_path / "pdk_install"
+    (pdk_root / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
+
+    def _extract(dummy: int, name: str):
+        gds = tmp_path / f"{name}.gds"
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": "ihp-sg13g2", "root": str(pdk_root)},
+                "params": {"num": 4, "dummy": dummy},
+                "options": {"output": str(gds)},
+            }
+        )
+        spice = tmp_path / f"{name}.spice"
+        return spice, run_extract(str(gds), "sg13g2", output=str(spice))
+
+    reference_path, ref_extracted = _extract(0, "res_array_sg13g2_ref")
+    layout_extracted_path, layout_extracted = _extract(2, "res_array_sg13g2_dummy")
+
+    # Two dummy units per end at `dummy: 2`, so four are suppressed at
+    # extraction and both sides carry only the four real `rsil` units.
+    assert layout_extracted["dummy_devices_dropped"] == 4
+    assert ref_extracted["dummy_devices_dropped"] == 0
+    assert layout_extracted["device_counts"] == {"rsil": 4}
+    assert ref_extracted["device_counts"] == {"rsil": 4}
+
+    # Both request sides carry an explicit `"deck": "sg13g2"`. sg13g2's `rsil`
+    # is a *three*-terminal bulk resistor (both ends plus the substrate rail),
+    # which `klt extract` writes as a subcircuit call (`X$n a b vsubs rsil
+    # ...`) rather than a SPICE `R` card. Without a deck on each side to bind
+    # that call to a device class, the SPICE reader treats both circuits as
+    # device-less, and the compare degenerates to a 0-vs-0 `match` that never
+    # compares a device -- see the sg13cmos5l counterpart's docstring below.
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "netlist": str(layout_extracted_path),
+                "top": layout_extracted["top"],
+                "deck": "sg13g2",
+            },
+            "reference": {
+                "netlist": str(reference_path),
+                "top": ref_extracted["top"],
+                "deck": "sg13g2",
+            },
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    # A real device compare: four `rsil` on each side, all matched, and no
+    # `device.unmatched` (the issue's headline symptom). Verified by clearing
+    # the deck's `dummy` field: the layout side then carries 8 devices against
+    # the reference's 4 and the compare fails with `device.unmatched` errors.
+    assert report["counts"]["devices"] == {"layout": 4, "reference": 4, "matched": 4}
+    assert not any(m["category"] == "device.unmatched" for m in report["mismatches"])
+    # With the deck bound, warning-only categories (e.g.
+    # `device.geometry_not_compared`) legitimately appear; what must be absent
+    # is any error-severity mismatch -- no `net.unmatched`/`topology` errors
+    # from the dummies' floating end nets either.
+    assert not [m for m in report["mismatches"] if m["severity"] == "error"]
+    assert report["counts"]["nets"]["layout"] == report["counts"]["nets"]["reference"]
 
 
 def test_lvs_res_array_sg13cmos5l_dummy_suppression_no_unmatched_device(

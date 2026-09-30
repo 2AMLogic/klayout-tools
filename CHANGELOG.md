@@ -155,6 +155,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   still declare no `dummy` layer and are unaffected (tracked separately).
   A `dummy: 0` request on `gf180mcu` draws no marker shape and extracts
   exactly as before.
+- **Fixed** (#2590, `klt gen` / `klt extract` / `klt lvs` on `ihp-sg13g2`;
+  additive — **no** `schema_version` bump, but user-visible: the `sg13g2`
+  deck's `provenance.deck` sha256 changes, the generated stream carries one
+  new layer, and an array that previously extracted `2 * rows * dummy`
+  extra devices now does not): `klt gen mos_array`/`res_array` accept a
+  `"dummy": N` param on `ihp-sg13g2`, but that family's curated extraction
+  deck declared no `dummy` marker layer — so the tool's own generator drew
+  edge-fill devices the tool's own `klt lvs` could only report as
+  `device.unmatched`, with knock-on `topology` conflicts on whichever
+  supply rail the dummies tie to, and no option, hint or deck field to say
+  "these are dummies." `decks/sg13g2.py`'s `EXTRACTION_DECK` now declares
+  `dummy=(99, 50)` — a deck-local convention layer reusing SG13G2's own
+  `Recog.*` device-recognition layer number on a datatype IHP-Open-PDK
+  assigns no purpose to (SG13G2 has no native per-device dummy mark; see
+  that deck's own comment for the provenance) — and the generators draw it
+  over each dummy unit's gate/body footprint, so the extractor-side
+  dummy-suppression machinery that shipped in #295/#462 fires on this
+  family too. This is the `sg13g2` counterpart of sky130's own `(83, 20)`
+  declaration (#491); `gf180mcu` (#2599) and `sg13cmos5l` (#2602) declare
+  their own markers separately, so all four families that accept a `dummy`
+  `klt gen` param now carry one.
 - **Fixed** (#2585, `klt gen`/`klt gen compose`; additive — **no**
   `schema_version` bump, but user-visible: drawn cut/via geometry on the
   layers below shrinks): every generator drew its contacts and vias at one

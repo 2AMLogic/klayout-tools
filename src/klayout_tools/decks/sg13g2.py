@@ -1489,6 +1489,53 @@ EXTRACTION_DECK = ExtractionDeck(
     tap_nplus_complement=(14, 0),  # pSD.drawing -- absence marks an n+ well tie
     well_label=None,
     poly_label=(5, 1),  # GatPoly.label -- issue #1476
+    # Dummy-device marker (issue #2590, the sg13g2 counterpart of sky130's
+    # own issue #491 declaration -- see `decks/sky130.py`'s `dummy=(83, 20)`
+    # comment and `ExtractionDeck.dummy`'s docstring in `decks/extraction.py`
+    # for the extractor-side machinery this field drives, which shipped in
+    # #295/#462 and needs no change here). Without it, `klt gen mos_array`'s
+    # own `"dummy": N` param drew edge-fill devices on this family that
+    # `klt lvs` then reported as `device.unmatched`, with knock-on
+    # `topology` conflicts on whichever supply rail the dummies tie to.
+    #
+    # SG13G2 has no *native* per-device dummy-recognition mark: the only
+    # dummy-adjacent purposes in `sg13g2.lyp` are the per-conductor density-
+    # fill pair (`<Layer>.filler`/`<Layer>.nofill`, datatypes 22/23 on
+    # `Activ`/`GatPoly`/`Metal1`..`TopMetal2`), which are fill-generation/
+    # DRC-density concepts, not a device-recognition mark the way
+    # `Recog.esd`/`Recog.diode` are -- the identical "no native mark,
+    # curated substitute" situation sky130's own comment documents.
+    #
+    # `(99, 50)` therefore reuses sg13g2's own *device-recognition marker*
+    # layer number (99, the `Recog.*` family -- `Recog.drawing 99/0`,
+    # `Recog.pin 99/2`, and the contiguous device-purpose block
+    # `Recog.esd 99/30` .. `Recog.momf 99/40`, plus `Recog.pcm 99/100`),
+    # which is the structural analogue of the `marker.*` layer number
+    # sky130's `(83, 20)` reuses. Datatype 50 is assigned no purpose at all:
+    # verified against the pinned IHP-Open-PDK v0.3.0 install this deck is
+    # transcribed from (`libs.tech/klayout/tech/sg13g2.lyp`,
+    # `.../drc/rule_decks/layers_def.drc`, `.../lvs/rule_decks/
+    # layers_definitions.lvs` -- between them they declare exactly
+    # 99/{0,2,30..39,100}) and against the newer `_IHP_OPEN_PDK_MOM_COMMIT`
+    # this deck already transcribes for its MoM capacitors (which adds
+    # `Recog.momf` 99/40 and nothing above it below 99/100). Datatype 50
+    # leaves nine datatypes of headroom above upstream's contiguous 30..40
+    # device-purpose block, so an upstream purpose extension does not
+    # immediately collide. This deck reserves it as an extraction-only,
+    # deck-local marker: no official SG13G2 purpose string, and no rule in
+    # this module's own `DECK` references layer 99 at all, so `klt drc
+    # --deck sg13g2` never checks it.
+    #
+    # Verified non-colliding against every layer this `EXTRACTION_DECK`
+    # otherwise reads (`ExtractionDeck.connectivity_layers` -- the
+    # `active`/`poly`/`nwell`/`contact` core, the `metals`/`vias`/
+    # `metal_labels` stacks, `tap_nplus`/`tap_pplus`/`poly_label`, and every
+    # `bipolars`/`capacitors`/`mom_capacitors`/`resistors`/`diodes`
+    # recognition layer): layer 99's only other appearances here are
+    # `Recog.diode` (99/31) and the MoM markers (99/39, 99/40), all on
+    # different datatypes. `tests/test_extract.py` asserts this
+    # non-collision directly.
+    dummy=(99, 50),
     nfet_class="nfet",
     pfet_class="pfet",
     substrate_net="vsubs",

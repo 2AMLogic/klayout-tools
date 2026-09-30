@@ -980,6 +980,16 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "via1": (19, 0),  # Via1.drawing -- EXTRACTION_DECK.vias[0] (Metal1<->Metal2)
         "metal3": (30, 0),  # Metal3.drawing -- EXTRACTION_DECK.metals[2]
         "via2": (29, 0),  # Via2.drawing -- EXTRACTION_DECK.vias[1] (Metal2<->Metal3)
+        "dummy": (99, 50),  # curated marker, matches
+        # `klayout_tools.decks.sg13g2.EXTRACTION_DECK.dummy` -- see that
+        # deck's own comment for why SG13G2 has no native dummy-device GDS
+        # layer and why (99, 50) was chosen (issue #2590, the sg13g2
+        # counterpart of sky130's own #491). Drawn per dummy unit device by
+        # `mos_array`/`res_array` (never over a real, non-dummy unit) so
+        # `klt extract`'s existing dummy-suppression guards (issue #295/#462)
+        # actually fire on this family too -- without it, `klt gen
+        # mos_array`'s own `dummy` param produced geometry `klt lvs` on the
+        # same family could only report as `device.unmatched`.
     },
     # sg13cmos5l (IHP-Open-PDK's SG13G2_CMOS5L sibling), issue #1462 -- the
     # fourth family this table supports. Every number here is transcribed
