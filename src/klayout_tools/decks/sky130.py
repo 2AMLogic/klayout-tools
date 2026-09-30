@@ -711,7 +711,16 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=140,  # 0.14 um
         # sky130A_mr.drc rule "m2.1": m2.width(0.14, euclidian)
-        # -> "m2.1 : min. m2 width : 0.14um"
+        # -> "m2.1 : min. m2 width : 0.14um". No `threshold_max_dbu` here
+        # (issue #2388's re-check): unlike this file's own via.width.1/
+        # gf180mcu's contact.width.1, "m2.1" is a plain minimum-width
+        # check with no fixed-size/maximum counterpart in either
+        # sky130A_mr.drc or the resolved sky130A.lydrc -- confirmed by
+        # the #747 golden-deck cross-check recording no expected
+        # disagreement for this rule (tests/golden_deck/sky130/
+        # manifest.json). docs/cli/drc.md previously grouped this rule
+        # into its "Four more...approximate a max-bound rule" list; that
+        # was a miscategorization and has been corrected.
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.1"),
     ),
@@ -747,6 +756,21 @@ DECK: list[DrcRule] = [
         # capped at the same 0.15um length ("via.1a_b") -- our width_check
         # primitive only supports a minimum-width lower bound, so only the
         # min-size half of the rule is enforced here.)
+        #
+        # No `threshold_max_dbu` yet, and that is a *deferral*, not a
+        # judgement that the max half is unenforceable (issue #2388). The
+        # max half is expressible -- `DrcRule.threshold_max_dbu` (issue
+        # #2370) would encode "via.1a_b"'s 0.15um cap exactly, the same way
+        # gf180mcu's `contact.width.1` already does. It is held back because
+        # `klt gen compose`'s via-drop ladder draws this cut at the
+        # PDK-generic `gen.CONTACT_SIZE_UM` (0.22um), so enforcing the real
+        # foundry maximum turns eight currently-green composer tests red --
+        # correctly, since that geometry genuinely violates "via.1a_b".
+        # Fixing the generator is issue #2585; this rule gets its
+        # `threshold_max_dbu` once that lands. Even then the *rectangularity*
+        # half ("via.1a") stays approximated: a bounding-box bound cannot
+        # reject an L-shaped cut that fits inside a 0.15um box.
+        # See docs/cli/drc.md's "sky130" approximation notes.
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.1a_a"),
     ),

@@ -612,6 +612,51 @@ exactly a 0.22 × 0.22 um (resp. 0.26 × 0.26 um) square, a minimum **and** a
 maximum. `DrcRule.threshold_max_dbu` adds that second bound; `contact.width.1`
 and `via1.width.1`–`via4.width.1` set it equal to their own `threshold_dbu`.
 
+Issue #2388 began backfilling the identical treatment onto the equivalent
+fixed-size cut/via rules in the other three decks. **Six rules landed; six
+more are deferred behind a generator defect, and one was found not to need
+the field at all.** Each rule that took `threshold_max_dbu` sets it equal to
+its own `threshold_dbu` — these are fixed sizes, not ranges.
+
+**Landed** (no downstream fallout):
+
+| Deck | Rules | Upstream source shape |
+|---|---|---|
+| `sg13cmos5l` | `via1.width.1`–`via3.width.1`, `topvia1.width.1` | `<layer>_nseal.without_bbox_min/max(...)` |
+| `sg13g2` | `topvia1.width.1`, `topvia2.width.1` | `<layer>_nseal.without_bbox_min/max(...)` |
+
+**Deferred behind issue #2585** — sg13g2's `cont.width.1` /
+`via1.width.1`–`via4.width.1` and sky130's `via.width.1`. Their upstream
+rules are unambiguously fixed-size (sg13g2's `Cnt.a` is
+`cont_sq.without_bbox_width(0.16um)`, "Min. **and max.** Cont width";
+sky130's `via.1a_b` is `via_not_mt.drc(length > 0.15)`, "maximum length of
+via : 0.15um" — an equivalent `edges.without_length(nil, 0.15 + 1.dbu)` form
+is kept commented-out alongside it upstream), so the field is exactly right
+for them. The blocker is on the *other* side of the loop: `klt gen` and
+`klt gen compose` draw every cut at a PDK-generic `gen.CONTACT_SIZE_UM`
+(0.22 um), which is over the foundry maximum on all six layers. Enforcing
+the max half turns 28 generator/composer tests red — correctly, because that
+geometry really does violate the rule. Issue #2585 fixes the generator; these
+six rules take `threshold_max_dbu` once it lands. sg13g2's
+`topvia1.width.1`/`topvia2.width.1` escaped the same fate only because their
+per-family via floor (0.42/0.90 um) already equals the fixed size, so
+`max(generic, floor)` happens to land exactly on it — the same accident that
+let gf180mcu's rules land in #2370.
+
+Sky130's `via.width.1` will still carry one residual approximation even after
+#2585: the official rule also requires the cut be **rectangular** (`via.1a`),
+which a bounding-box bound cannot express — an L-shaped or cross-shaped cut
+fitting inside a 0.15 um box would pass. See that rule's own docstring in
+`sky130.py`.
+
+`met2.width.1` was considered for the same backfill and found *not* to need
+it: its own upstream rule (`m2.1`, in both `sky130A_mr.drc` and the resolved
+`sky130A.lydrc`) is `m2.width(0.14, euclidian)` — a plain minimum-width check
+with no maximum counterpart, confirmed by the #747 golden-deck cross-check
+recording no disagreement for it. No `threshold_max_dbu` was added, and the
+"Four more" grouping below that previously listed it as approximating a
+max-bound rule has been corrected.
+
 The maximum is measured as a **bounding-box size** bound, not as an inverted
 `width_check`:
 
@@ -769,19 +814,31 @@ the DRC-DSL script runner does. `li1.enclosing.licon1.1` and
 `tap.enclosing.licon.1` (issue #2321) approximate `second_edges`-conditional
 enclosure rules (`li.5`, `licon.7`) at their unconditional zero-margin
 floor, the one positive-margin transcription that provably flags no
-correct-by-construction geometry. Four more (`met2.width.1`, `via.width.1`,
+correct-by-construction geometry. Three more (`via.width.1`,
 `met1.enclosing.via.1`, `met2.enclosing.via.1`) approximate an official rule
-that additionally bounds a max size, length, or a periphery-scoped/
+that additionally bounds a max length/rectangularity or a periphery-scoped/
 corner-relaxed refinement our single-layer/two-layer check primitives don't
 support — the same class of approximation `met1.enclosing.mcon.1` already
-makes. (The max-size half of that class is no longer inherently
-unsupported: `DrcRule.threshold_max_dbu`, issue #2370, adds an upper size
-bound and gf180mcu's `contact.width.1`/`via1.width.1`-`via4.width.1` now use
-it — see "Fixed-size rules" below. Backfilling these four sky130 rules with
-it is separate, unclaimed work.) Every approximation is called
-out explicitly in its rule's docstring; the threshold *values* used are
-always the real, unmodified source values, with exactly one documented
-exception pattern (the `second_edges` zero floor above) described next.
+makes. `via.width.1`'s max-size half is approximated only for now, and
+deliberately: `DrcRule.threshold_max_dbu` (issue #2370) expresses `via.1a_b`'s
+0.15 um cap exactly, but issue #2388 held the field back because `klt gen
+compose` currently draws that cut oversized — see "Fixed-size rules" above
+and issue #2585. Even once #2585 lands, the rectangularity requirement (the
+cut must be square, not merely bounded in size) stays a residual, documented
+approximation. `met1.enclosing.via.1`/`met2.enclosing.via.1`'s
+periphery-scoped/corner-relaxed refinement (`via.5a`/`m2.5`) remains
+approximated indefinitely — `threshold_max_dbu` only applies to
+`check: "width"` rules, not `"enclosing"`. (`met2.width.1` was previously
+grouped in this list too;
+issue #2388 re-checked it and found its own upstream rule, `m2.1`, is a
+plain minimum-width check with no maximum counterpart in either
+`sky130A_mr.drc` or the resolved `sky130A.lydrc` — confirmed by the #747
+golden-deck cross-check recording no disagreement for it — so it was never
+actually an approximation of a max-bound rule and is not listed here.)
+Every approximation is called out explicitly in its rule's docstring; the
+threshold *values* used are always the real, unmodified source values, with
+exactly one documented exception pattern (the `second_edges` zero floor
+above) described next.
 
 **No deck authors a `"density"` rule, and that is a decision, not an
 unstated gap (issue #1975).** The `"density"` check kind exists (issue #812,
