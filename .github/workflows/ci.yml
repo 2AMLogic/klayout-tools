@@ -147,10 +147,12 @@ jobs:
     # No toolchain-install step: ubuntu-latest images ship a rustup-managed
     # stable Rust, so `cargo` is already on PATH (matching how this repo
     # avoids third-party actions elsewhere).
-    # Heavy jobs run on Blacksmith autoscaled runners (measured 2026-09-21,
-    # run 35661296359: warm parity with the retired ci-heavy pool, wall 370s
-    # vs 561s); fork PRs route back to GitHub-hosted instead of being skipped.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # GitHub-hosted (free on a public repo). These heavy legs ran on
+    # Blacksmith autoscaled runners from 2026-09-24 (#2214) until the
+    # 2026-09-30 org-wide Blacksmith outage; the operator then moved every
+    # public repo to hosted (2AMLogic/2am D5, retiring Blacksmith). Same
+    # runner for same-repo and fork PRs, so there is no fork gate any more.
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       # fail-fast: false so e.g. a congestion regression doesn't cancel the
@@ -868,10 +870,12 @@ jobs:
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
-    # Heavy jobs run on Blacksmith autoscaled runners (measured 2026-09-21,
-    # run 35661296359: warm parity with the retired ci-heavy pool, wall 370s
-    # vs 561s); fork PRs route back to GitHub-hosted instead of being skipped.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # GitHub-hosted (free on a public repo). These heavy legs ran on
+    # Blacksmith autoscaled runners from 2026-09-24 (#2214) until the
+    # 2026-09-30 org-wide Blacksmith outage; the operator then moved every
+    # public repo to hosted (2AMLogic/2am D5, retiring Blacksmith). Same
+    # runner for same-repo and fork PRs, so there is no fork gate any more.
+    runs-on: ubuntu-24.04
     # Explicit bound (issue #1009) so a stuck runner or hung step fails
     # outright instead of silently riding the platform default of 360
     # minutes. A real cold-cache run (Yosys/Icarus Verilog/Verilator all
@@ -1620,10 +1624,10 @@ jobs:
             > /tmp/ci-run.json
 
       - name: Check wall-clock budget
-        # --report-only for fork PRs: ci.yml's runner conditional routes those
-        # to ubuntu-latest, whose per-job timings the budgets -- measured on
-        # the self-hosted pool -- do not describe. A fixed threshold tuned
-        # against self-hosted numbers would otherwise redden every fork PR.
+        # --report-only for fork PRs. Historically forks ran on a different
+        # pool from same-repo runs; since the 2026-09-30 move off Blacksmith
+        # both run on GitHub-hosted, so this carve-out can go once the
+        # budgets are re-measured on hosted (docs/guides/ci-wall-clock-budget.md).
         # Same-repo runs gate for real (exit 1 fails this job).
         #
         # No `uv sync`: the script is standard-library-only on purpose, so the
