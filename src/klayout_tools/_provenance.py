@@ -373,14 +373,32 @@ def _warn_klayout_version_mismatch(actual: str | None, expected: str | None) -> 
 def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
     """Normalise a :func:`klayout_tools.pdk.find_pdk`-style dict into the
     provenance ``pdk`` shape ``{name, source, version}``; ``None`` when no PDK
-    was resolved for the run."""
+    was resolved for the run.
+
+    ``ambiguous_sources`` (issue #2564) is added **only** when ``find_pdk``
+    reported more than one candidate install holding the resolved variant --
+    the search-order labels (``"search root: ~/.volare"``, ...) of the
+    installs the first-match-wins resolution skipped. Present only in that
+    abnormal case, so an unambiguous run's provenance is byte-identical to
+    what it was before this field existed and a ``--rerun`` diff against an
+    older committed report cannot drift on it. Deliberately the path-free
+    ``resolved_via`` labels rather than the absolute roots: this block is
+    committed evidence, and a raw store path carries the resolving machine's
+    home directory (see the ``{path, scope}`` discipline in
+    ``docs/json-contract.md``). The absolute roots are named in the
+    stderr warning instead (:func:`klayout_tools.pdk.ambiguity_warning`).
+    """
     if not pdk:
         return None
-    return {
+    block: dict[str, Any] = {
         "name": pdk.get("variant"),
         "source": pdk.get("resolved_via"),
         "version": pdk.get("version"),
     }
+    ambiguous = pdk.get("ambiguous_roots") or []
+    if ambiguous:
+        block["ambiguous_sources"] = [entry["resolved_via"] for entry in ambiguous]
+    return block
 
 
 #: Bumped whenever :func:`_deck_options_hash`'s canonical serialisation below
