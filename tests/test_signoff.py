@@ -10390,6 +10390,99 @@ def test_item_11_met_when_the_erc_run_checked_the_tie_it_declared(tmp_path):
     assert _item_11(result)["status"] == "met"
 
 
+def test_item_11_met_names_a_disclosed_undeclared_tie_class(tmp_path):
+    """Issue #2623: a *partial* tie declaration -- one `ties[]` entry
+    declared and checked (`tie_count > 0`, item 11 already reaches `"met"`
+    on that alone) plus a second well class named as disclosed-undeclared
+    in `erc_coverage.inapplicable` (issue #2541's channel) -- must carry the
+    disclosed class into the report of record instead of leaving it legible
+    only one layer down, in the cited `klt erc` envelope. The verdict does
+    not change: this is additive detail on an already-`"met"` citation."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_status": "clean_partial",
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": [
+                'erc.missing_tie:["nwell_tie"]',
+                'erc.net_connectivity:["VPWR"]',
+                'erc.net_connectivity:["VGND"]',
+            ],
+            "skipped": [],
+            "inapplicable": [
+                {
+                    "id": 'erc.missing_tie:["p_substrate"]',
+                    "reason": "ties_disclosed_unexpressible",
+                }
+            ],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+            "checked_by_assertion": [],
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    assert item["citation"]["power_delivery"]["disclosed_undeclared_tie_classes"] == [
+        {"class": "p_substrate", "reason": "ties_disclosed_unexpressible"}
+    ]
+
+
+def test_item_11_met_citation_unchanged_without_a_disclosed_undeclared_tie_class(
+    tmp_path,
+):
+    """Regression for #2623: the identical declared-and-checked-tie envelope
+    with no disclosed class in `erc_coverage.inapplicable` must render its
+    citation exactly as it did before this issue -- no
+    `disclosed_undeclared_tie_classes` key at all, not even an empty list."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_status": "clean",
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": [
+                'erc.missing_tie:["nwell_tie"]',
+                'erc.net_connectivity:["VPWR"]',
+            ],
+            "skipped": [],
+            "inapplicable": [],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert "disclosed_undeclared_tie_classes" not in item["citation"]["power_delivery"]
+
+
 def test_item_11_unmet_when_a_strap_layer_is_outside_the_erc_spec_stackup(tmp_path):
     """The ERC run must actually look at the layers the supply is routed on
     -- a "one island" verdict computed over met1 alone says nothing about a

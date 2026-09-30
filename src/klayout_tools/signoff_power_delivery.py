@@ -30,6 +30,7 @@ back-reference into ``extract.py``).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ._provenance import sha256_file
@@ -692,8 +693,12 @@ def _erc_missing_tie_skipped(envelope: dict[str, Any]) -> bool:
     )
 
 
-#: The item-11 reason each of `klt erc`'s *disclosed* zero-ties coverage
-#: reasons renders (issues #2234, #2247). A reason token outside this table
+#: The item-11 reason each of `klt erc`'s *disclosed* ``erc.missing_tie``
+#: coverage reasons renders (issues #2234, #2247) -- consulted by
+#: :func:`_erc_missing_tie_disclosed` for its zero-ties entry
+#: (``erc.missing_tie:[]``) and, as the recognised-reasons set alone (issue
+#: #2623), by :func:`_erc_disclosed_undeclared_tie_classes` for a named-class
+#: entry (``erc.missing_tie:["<class>"]``). A reason token outside this table
 #: -- ``"no_ties_declared"``, or anything a future `klt erc` invents -- is
 #: not a disclosure this build knows how to render, and falls through to the
 #: plain :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`: an unrecognised token must
@@ -709,6 +714,15 @@ def _erc_missing_tie_disclosed(envelope: dict[str, Any]) -> str | None:
     """The item-11 reason constant for a cited `klt erc` run that declares
     zero ``ties[]`` *and* explicitly disclosed why (issues #2234, #2247) --
     ``None`` when it disclosed nothing this build recognises.
+
+    This is the *zero-ties* half of item 11's disclosure surface only --
+    the ``tie_count == 0`` branch of :func:`_resolve_erc_supply_spec`. A
+    *partial* declaration (one or more ``ties[]`` entries declared and
+    checked, plus one or more further classes named in
+    ``ties_disclosure.undeclared_classes`` as inexpressible or
+    tool-limited, issue #2541) is a different, ``tie_count > 0`` shape this
+    function never sees -- see :func:`_erc_disclosed_undeclared_tie_classes`
+    for that half, consulted from item 11's ``"met"`` path instead.
 
     `klt erc` records the undeclared ``erc.missing_tie`` work in
     ``erc_coverage.inapplicable`` with a reason of ``"no_ties_declared"``
@@ -749,6 +763,70 @@ def _erc_missing_tie_disclosed(envelope: dict[str, Any]) -> str | None:
         ):
             return _DISCLOSED_TIE_REASONS[record["reason"]]
     return None
+
+
+def _erc_disclosed_undeclared_tie_classes(
+    envelope: dict[str, Any],
+) -> list[dict[str, str]]:
+    """The *named-class* half of item 11's disclosure surface (issue
+    #2541, consumer-side follow-up #2623): every ``erc.missing_tie:["<class>"]``
+    entry the cited `klt erc` run recorded in ``erc_coverage.inapplicable``
+    with a disclosed reason, as ``[{"class": "<class>", "reason":
+    "ties_disclosed_unexpressible" | "ties_disclosed_tool_limitation"}, ...]``
+    in the order `klt erc` recorded them -- ``[]`` when the cited run
+    disclosed no named class (including every run that declares zero
+    ``ties[]`` and disclosed *that* instead, which
+    :func:`_erc_missing_tie_disclosed` already surfaces on its own,
+    ``tie_count == 0`` path).
+
+    `klt erc` records one ``erc.missing_tie:["<class>"]`` entry per class a
+    spec's top-level ``ties_disclosure.undeclared_classes`` names --
+    distinct from the bare ``erc.missing_tie:[]`` entry
+    :func:`_erc_missing_tie_disclosed` matches, which stands for "no
+    ``ties[]`` at all", not for any one named class (``docs/cli/erc.md`` --
+    "Well/tap connectivity"). This is what lets a block that declares the
+    one well class it *can* express (checked, ``tie_count > 0``, item 11
+    reaches ``"met"`` on its own merits) and discloses the other as
+    inexpressible or tool-limited carry that second class into the report
+    of record instead of it being legible only one layer down, in the cited
+    `klt erc` envelope.
+
+    Purely additive: it never changes item 11's ``status``/``reason`` on the
+    ``tie_count > 0`` path (a disclosure is the caller's word, never a
+    substitute for the computed ``erc.missing_tie`` result the declared
+    ties already supplied -- issues #2234/#2247's invariant, unchanged
+    here), only what a ``"met"`` citation additionally states. Distinguished
+    from the bare zero-ties entry by parsing the work identity's own JSON
+    argument list (:func:`~klayout_tools.coverage.work_id`) rather than by
+    string length or prefix alone, so a future `klt erc` that changes how it
+    spells the class name is still read correctly as long as the one-element
+    list shape holds. An envelope with no ``erc_coverage`` block (every
+    report before #2179) discloses nothing and is graded exactly as it was.
+    """
+    block = envelope.get("erc_coverage")
+    if not isinstance(block, dict):
+        return []
+    classes: list[dict[str, str]] = []
+    for record in block.get("inapplicable") or []:
+        if not (isinstance(record, dict) and isinstance(record.get("id"), str)):
+            continue
+        record_id = record["id"]
+        prefix = "erc.missing_tie:"
+        if not record_id.startswith(prefix):
+            continue
+        reason = record.get("reason")
+        if reason not in _DISCLOSED_TIE_REASONS:
+            continue
+        try:
+            args = json.loads(record_id[len(prefix) :])
+        except (TypeError, ValueError):
+            continue
+        if not (isinstance(args, list) and len(args) == 1 and isinstance(args[0], str)):
+            # The bare zero-ties identity (`[]`) or a shape this build does
+            # not recognise -- not a named class.
+            continue
+        classes.append({"class": args[0], "reason": reason})
+    return classes
 
 
 def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
@@ -1022,7 +1100,16 @@ def _grade_power_delivery(
       states the negative it now rests on in
       ``power_delivery.supply_unlabelled_islands``
       (:func:`_erc_supply_unlabelled_islands`) rather than leaving it
-      implicit in a clean island count that could not have seen it;
+      implicit in a clean island count that could not have seen it. Issue
+      #2623: a spec can declare (and get checked) the one well class it
+      *can* express while disclosing a further class as inexpressible or
+      tool-limited (``ties_disclosure.undeclared_classes``, issue #2541) --
+      this does not change the verdict (the declared, checked tie already
+      carries item 11 to ``"met"`` on its own merits), but a met citation
+      names the disclosed class too, in
+      ``power_delivery.disclosed_undeclared_tie_classes``
+      (:func:`_erc_disclosed_undeclared_tie_classes`), present only when the
+      cited run actually disclosed one;
     - an ``"lvs"`` citation -- the same report item 4 grades, which must
       itself pass (:func:`~klayout_tools.signoff._check_passed`);
     - and, for an RTL-flow digital block, a ``"place-and-route"`` citation
@@ -1184,6 +1271,22 @@ def _grade_power_delivery(
             erc["envelope"], supply_spec["supply_nets"]
         ),
     }
+    # Issue #2623: a *partial* tie declaration (one or more `ties[]` entries
+    # declared and checked -- this is the `tie_count > 0` path, already
+    # `"met"` on those merits -- plus one or more further classes disclosed
+    # as inexpressible/tool-limited via `ties_disclosure.undeclared_classes`,
+    # issue #2541) previously left that disclosure legible only one layer
+    # down, in the cited `klt erc` envelope. Additive only -- present only
+    # when the cited run actually disclosed a named class, so a run that
+    # disclosed nothing renders this citation exactly as it always has; see
+    # `_erc_disclosed_undeclared_tie_classes`.
+    disclosed_undeclared_tie_classes = _erc_disclosed_undeclared_tie_classes(
+        erc["envelope"]
+    )
+    if disclosed_undeclared_tie_classes:
+        citation["power_delivery"]["disclosed_undeclared_tie_classes"] = (
+            disclosed_undeclared_tie_classes
+        )
     return "met", None, citation, {}
 
 

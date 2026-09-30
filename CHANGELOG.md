@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2623, `klt signoff` T1 item 11; additive — `schema_version`
+  unchanged): a `met` item 11 citation now names any `ties_disclosure.
+  undeclared_classes` the cited `klt erc` run disclosed (#2541) even when
+  `ties[]` is non-empty. Previously the item's one disclosure read
+  (`_erc_missing_tie_disclosed`) only ran on the `tie_count == 0` path, so a
+  spec that declared and got checked the one well class it could express
+  while disclosing a second as inexpressible or tool-limited — the shape
+  #2541 was motivated by, a native-substrate block with an n-well tie
+  declared and a disclosed p-substrate class — reached `met` with no trace
+  in the signoff report that a second class was even considered; the
+  disclosure was legible only one layer down, in the cited `klt erc`
+  envelope. `citation.power_delivery` gains
+  `disclosed_undeclared_tie_classes`, `[{"class", "reason"}, …]`, **present
+  only when the cited run disclosed at least one named class** — absent,
+  not an empty list, for every report that discloses none, so existing
+  reports render byte-identical. Purely additive detail: the verdict is
+  unchanged (a declared, checked tie already carries the item to `met` on
+  its own merits, and a disclosure is the caller's word, never a substitute
+  for a computed result — the #2234/#2247 invariant). The `tie_count == 0`
+  disclosure path (`detail.ties_disclosure_reason`) is unaffected.
 - **Added** (#2512, `klt characterize`; additive — `schema_version`
   unchanged): every **input** pin's `capacitance` is now *measured*, not
   echoed. One extra probe instance per input pin joins the same `klt sim`
