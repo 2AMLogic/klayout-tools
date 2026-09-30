@@ -934,9 +934,11 @@ legs run.
 
 The cost is one more matrix leg of CI compute, budgeted explicitly rather
 than absorbed: `.github/ci-wall-clock-budget.json` gains
-`"Tests (Python 3.14)": 420` and raises `total_job_budget_seconds` 2100 →
-2520 for exactly that leg. `run_wall_clock_budget_seconds` is unchanged —
-matrix legs run in parallel, so a fifth leg adds compute, not wall clock.
+`"Tests (Python 3.14)": 700` and raises `total_job_budget_seconds` 3000 →
+3700 for exactly that leg (see the budget file's own `_comment` for how
+those numbers were re-derived from the 2026-09-29 baseline).
+`run_wall_clock_budget_seconds` is unchanged — matrix legs run in parallel,
+so a fifth leg adds compute, not wall clock.
 
 Why that cost is worth paying rather than taking the option-2 fallback:
 `pyproject.toml`'s `requires-python = ">=3.10"` declares **no upper bound**,
