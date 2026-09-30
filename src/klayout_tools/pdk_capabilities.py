@@ -164,7 +164,9 @@ DECISIONS: Mapping[str, Mapping[str, Decision]] = MappingProxyType(
                     "unsupported", "No implemented sg13g2 family corner resolver."
                 ),
                 "remote_ami_transport": Decision(
-                    "unsupported", "No maintained sg13g2 AMI transport."
+                    "supported",
+                    "AMI build recipe registered (#2573); no AMI has been "
+                    "built/published yet -- see #2574.",
                 ),
                 "mos_array_well_taps": Decision(
                     "unsupported",

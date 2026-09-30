@@ -1171,13 +1171,39 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
 #:
 #: Per-family provenance:
 #:
-#: - ``sg13g2`` (issue #1455): ``cap_top_via_metal_min_w_um`` 1.64um --
-#:   `topmetal1.width.1` (`klayout_tools.decks.sg13g2`'s `5_22_topmetal1.drc`
-#:   rule "TM1.a", "Min. TopMetal1 width"), far coarser than sky130's
-#:   `met4.width.1` (0.3um) or gf180mcu's own metal-width rules the generic
-#:   pad size was originally sized against. Without this floor, `cap_array`'s
-#:   default-sized landing pad would violate `klt drc --deck sg13g2` on every
-#:   request.
+#: - ``sg13g2`` (issues #1455/#2576): two floors --
+#:
+#:   - ``cap_top_via_metal_min_w_um`` 1.64um (issue #1455) --
+#:     `topmetal1.width.1` (`klayout_tools.decks.sg13g2`'s
+#:     `5_22_topmetal1.drc` rule "TM1.a", "Min. TopMetal1 width"), far
+#:     coarser than sky130's `met4.width.1` (0.3um) or gf180mcu's own
+#:     metal-width rules the generic pad size was originally sized against.
+#:     Without this floor, `cap_array`'s default-sized landing pad would
+#:     violate `klt drc --deck sg13g2` on every request.
+#:   - ``cap_bottom_plate_margin_min_um`` 0.6um (issue #2576) -- "MIM.c"
+#:     ("Min. Metal5 enclosure of MIM is 0.60 um", IHP-Open-PDK's own
+#:     `libs.tech/klayout/tech/drc/rule_decks/beol/6_11_mim.drc`, value
+#:     `drc_rules['Mim_c']` = 0.6 in that deck's `sg13g2_tech_default.json`).
+#:     This family's plate pair is `MIM` over `Metal5` (see
+#:     :data:`_PDK_ROLE_LAYERS`'s own sg13g2 `cap_top_plate`/
+#:     `cap_bottom_plate` entries), so MIM.c governs exactly this margin, and
+#:     the generic `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) misses it by 0.1um --
+#:     every pre-#2576 sg13g2 `cap_array` stream carried that shortfall at
+#:     any `plate_w_um`/`plate_h_um`. Unlike every other floor in this table,
+#:     it is transcribed from the **PDK's own signoff deck** rather than from
+#:     this repo's curated `klayout_tools.decks.sg13g2` `DECK`, because that
+#:     curated deck carries no `MIM` rule group at all: `klt drc --deck
+#:     sg13g2` could not see the violation (it reported `clean`), and cannot
+#:     see the fix either -- the sg13g2 `MIM` layer pair simply stops being
+#:     an unruled layer nobody margined against. Transcribing that rule group
+#:     into the curated deck is tracked separately (issue #2581); it is not
+#:     what makes the drawn geometry legal, this floor is. The floor *was*
+#:     verified end to end against the PDK's own runset
+#:     (`libs.tech/klayout/tech/drc/ihp-sg13g2.drc`, `tables=main`): 4
+#:     `MIM.c` violations before, 0 violations of any rule after. Unlike
+#:     gf180mcu's 1.06um below,
+#:     no "virtual bottom plate" oversize applies here (sg13g2's bottom plate
+#:     is an ordinary conductor), so the floor is the rule's own minimum.
 #: - ``gf180mcu`` (issue #1555): three floors its MiM stack's own DRM rules
 #:   impose, all transcribed from `klayout_tools.decks.gf180mcu`'s curated
 #:   `DECK` (never re-derived here):
@@ -1207,6 +1233,10 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
 #:     `klt drc --deck gf180mcu`.
 _PDK_CAP_GEOMETRY_MIN_UM: dict[str, dict[str, float]] = {
     "sg13g2": {
+        # MIM.c ("Min. Metal5 enclosure of MIM is 0.60 um") -- the drawn
+        # `Metal5` bottom plate's own enclosure of the `MIM` top plate, which
+        # the generic `CAP_BOTTOM_PLATE_MARGIN_UM` (0.5um) misses by 0.1um:
+        "cap_bottom_plate_margin_min_um": 0.6,
         "cap_top_via_metal_min_w_um": 1.64,  # topmetal1.width.1 (TM1.a)
     },
     "gf180mcu": {
@@ -2003,6 +2033,104 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
     return {key: floors.get(key, 0.0) for key in _METAL_RES_GEOMETRY_MIN_KEYS}
 
 
+#: Per-PDK-family **fixed-size** cut/via layers (issue #2585): a layer whose
+#: upstream foundry rule pins the drawn cut to one exact side -- a minimum
+#: *and* a maximum -- keyed by its ``(layer, datatype)`` pair, valued in um.
+#:
+#: Every ``klt gen`` generator sizes its cuts off the PDK-generic
+#: :data:`~klayout_tools.gen.CONTACT_SIZE_UM` (0.22um), widened per family to
+#: a *minimum* where one binds (``via_min_w_um``/``cap_top_via_min_w_um``/
+#: ``klt gen compose``'s deck-derived via-drop floor). Widening to a minimum is
+#: only safe while every cut rule is a minimum. The layers below are not:
+#: 0.22um is over the upstream maximum, so drawing it is a real DRC violation
+#: whether or not this repo's curated deck can yet see it. Drawn cuts on these
+#: layers are clamped *down* to the fixed size (see
+#: :func:`_cut_fixed_size_um`, :func:`~klayout_tools.gen._clamp_cut_boxes` and
+#: :func:`~klayout_tools.gen._fixed_cut_side_um`).
+#:
+#: This table only carries the fixed-size rules the curated decks do **not**
+#: yet encode as ``DrcRule.threshold_max_dbu`` (issue #2370) -- the six rules
+#: issue #2388 deferred behind this issue. :func:`_cut_fixed_size_um` reads a
+#: deck-declared ``threshold_max_dbu`` directly, so gf180mcu's
+#: ``contact``/``via1``-``via4`` (and any rule a later backfill adds) need no
+#: entry here; ``tests/test_gen.py`` asserts that any layer present in *both*
+#: sources agrees, so an entry can be deleted once its deck rule carries the
+#: bound.
+#:
+#: - ``sky130`` ``via`` (68/44) 0.15um -- ``sky130A_mr.drc`` ``via.1a_b``
+#:   ("maximum length of via : 0.15um"), alongside ``via.1a_a``'s 0.15um
+#:   minimum (this deck's ``via.width.1``).
+#: - ``sg13g2`` ``Cont`` (6/0) 0.16um -- ``5_14_cont.drc`` ``Cnt.a``
+#:   (``cont_sq.without_bbox_width(0.16um)``, "Min. and max. Cont width").
+#: - ``sg13g2`` ``Via1`` (19/0) 0.19um -- ``5_19_via1.drc`` ``V1.a``
+#:   (``without_bbox_min/max(0.19um)``).
+#: - ``sg13g2`` ``Via2``/``Via3``/``Via4`` (29/0, 49/0, 66/0) 0.19um --
+#:   ``5_20_vian.drc`` ``V2.a``/``V3.a``/``V4.a`` (the templated ``Vn.a``).
+_PDK_CUT_FIXED_SIZE_UM: dict[str, dict[tuple[int, int], float]] = {
+    "sky130": {
+        (68, 44): 0.15,  # via.drawing -- via.1a_a/via.1a_b
+    },
+    "sg13g2": {
+        (6, 0): 0.16,  # Cont.drawing -- Cnt.a
+        (19, 0): 0.19,  # Via1.drawing -- V1.a
+        (29, 0): 0.19,  # Via2.drawing -- V2.a (Vn.a)
+        (49, 0): 0.19,  # Via3.drawing -- V3.a (Vn.a)
+        (66, 0): 0.19,  # Via4.drawing -- V4.a (Vn.a)
+    },
+}
+
+
+def _deck_cut_max_size_um(family: str, layer: tuple[int, int]) -> float | None:
+    """The tightest ``DrcRule.threshold_max_dbu`` (issue #2370) any plain
+    ``"width"`` rule in ``family``'s curated deck declares for ``layer``, in
+    um -- or ``None`` when the deck declares no upper size bound there (or
+    ``family`` has no registered deck at all)."""
+    from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+
+    try:
+        rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except UnknownDeckError:
+        return None
+    bounds = [
+        rule.threshold_max_dbu * nominal_dbu_um
+        for rule in rules
+        if rule.check == "width"
+        and rule.layer == layer
+        and rule.other_layer is None
+        and rule.derived_layer is None
+        and rule.threshold_max_dbu is not None
+    ]
+    return round(min(bounds), 6) if bounds else None
+
+
+def _cut_fixed_size_um(family: str, layer: Any) -> float:
+    """The fixed drawn side (um) a cut on ``layer`` must be clamped to on
+    ``family`` (issue #2585), or ``0.0`` -- "no upper bound, draw the
+    generator's own size unchanged" -- when neither the curated deck
+    (``threshold_max_dbu``) nor :data:`_PDK_CUT_FIXED_SIZE_UM` declares one.
+
+    ``layer`` is a ``(layer, datatype)`` pair or a ``kdb.LayerInfo`` (the form
+    every ``*_layer_params`` resolver below already holds). When both sources
+    declare a bound the tighter one wins; a test keeps them equal."""
+    if layer is None:
+        return 0.0
+    pair = (
+        (layer.layer, layer.datatype)
+        if hasattr(layer, "datatype")
+        else (int(layer[0]), int(layer[1]))
+    )
+    bounds = [
+        bound
+        for bound in (
+            _deck_cut_max_size_um(family, pair),
+            _PDK_CUT_FIXED_SIZE_UM.get(family, {}).get(pair),
+        )
+        if bound is not None
+    ]
+    return min(bounds) if bounds else 0.0
+
+
 #: Per-PDK-family ``res_array`` ``metal_level`` -> the exact ``klt extract``
 #: device-class name that level draws (issue #1731) -- the class-*name*
 #: sibling of :data:`_PDK_METAL_RES_LEVELS` (which resolves the same
@@ -2422,6 +2550,9 @@ def _device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "contact_fixed_size_um": _cut_fixed_size_um(
+            family, _PDK_ROLE_LAYERS[family].get("contact")
+        ),
         "metal_layer": _role_layer_info(family, "metal"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
@@ -2528,6 +2659,7 @@ def _resistor_layer_params(
         resolved: dict[str, Any] = {
             "poly_layer": kdb.LayerInfo(*levels["body"]),
             "contact_layer": kdb.LayerInfo(*levels["via"]),
+            "contact_fixed_size_um": _cut_fixed_size_um(family, levels["via"]),
             "metal_layer": kdb.LayerInfo(*levels["landing"]),
             "res_mark_layer": kdb.LayerInfo(*levels["marker"]),
             "res_mark_present": True,
@@ -2556,6 +2688,9 @@ def _resistor_layer_params(
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "contact_fixed_size_um": _cut_fixed_size_um(
+            family, _PDK_ROLE_LAYERS[family].get("contact")
+        ),
         "metal_layer": _role_layer_info(family, "metal"),
         "res_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "res_mark_present": mark is not None,
@@ -2656,6 +2791,7 @@ def _cap_array_layer_params(
             kdb.LayerInfo(*top_via) if top_via is not None else kdb.LayerInfo(0, 0)
         ),
         "cap_top_via_present": top_via is not None,
+        "cap_top_via_fixed_size_um": _cut_fixed_size_um(family, top_via),
         "cap_top_via_metal_layer": (
             kdb.LayerInfo(*top_via_metal)
             if top_via_metal is not None
@@ -2771,6 +2907,9 @@ def _ring_layer_params(
     return {
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "contact_fixed_size_um": _cut_fixed_size_um(
+            family, _PDK_ROLE_LAYERS[family].get("contact")
+        ),
         "metal_layer": _role_layer_info(family, "metal"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
@@ -2892,6 +3031,9 @@ def _bjt_layer_params(
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "contact_fixed_size_um": _cut_fixed_size_um(
+            family, _PDK_ROLE_LAYERS[family].get("contact")
+        ),
         "metal_layer": _role_layer_info(family, "metal"),
         "tap_layer": _role_layer_info(family, "tap"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
@@ -3007,6 +3149,9 @@ def _esd_device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "contact_fixed_size_um": _cut_fixed_size_um(
+            family, _PDK_ROLE_LAYERS[family].get("contact")
+        ),
         "metal_layer": _role_layer_info(family, "metal"),
         "tap_layer": _role_layer_info(family, "tap"),
         "esd_mark_layer": esd_mark if esd_mark is not None else kdb.LayerInfo(0, 0),

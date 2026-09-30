@@ -4,7 +4,9 @@
 #
 # Resolves the "AMI build/refresh pipeline mechanics" open question the
 # design note explicitly leaves to Phase 2 (issue #264): bakes ngspice + one
-# PDK's curated ngspice model decks onto a fresh Ubuntu build instance, plus
+# PDK's curated ngspice model decks onto a fresh Ubuntu build instance --
+# for SG13G2 (issue #2573) also a compiled OSDI toolchain output, since a
+# PDK-only install cannot simulate a single SG13G2 device -- plus
 # the idle-shutdown guard src/klayout_tools/remote_launcher.py's
 # `idle_guard_install_script()` generates (single source of truth — this
 # script calls that Python function via `python3 -c ...` rather than
@@ -59,6 +61,12 @@
 #       [--copy-to-region us-west-2 ...] \
 #       [--klt-ref <git-ref>] [--manifest <path>] [--yes]
 #
+#   --pdk accepts sky130A, gf180mcu, or sg13g2 (remote_launcher.SUPPORTED_PDKS
+#   -- keep both lists in sync). sg13g2's recipe fetches via a `--klt-ref`
+#   pinned checkout of THIS repo rather than volare (see the PDK_FETCH_CMDS
+#   case below) -- IHP-Open-PDK is not on volare's feed, and the
+#   compiled-OSDI step has no volare equivalent at all.
+#
 #   Without --yes: prints the resolved build plan (PDK, region, base AMI,
 #   instance type, estimated one-time build cost) and exits — nothing is
 #   created. Mirrors repo-remote.sh's own "plan shown before money is spent"
@@ -94,6 +102,28 @@ YES=false
 #: AND extracted. Sized generously on purpose: this volume lives for the few
 #: minutes of the build, and it does not inflate the AMI's ongoing cost
 #: because EBS snapshots bill used, compressed blocks -- not provisioned size.
+#:
+#: SG13G2 provisional sizing decision (issue #2573, documented not measured
+#: -- no AWS spend available while authoring this recipe, same constraint
+#: #612's own gf180mcu fix was written under before its first real build):
+#: this shared 60 GB default is kept for the sg13g2 branch too rather than
+#: given its own number. Reasoning: `scripts/fetch-ihp-sg13g2.sh` downloads
+#: one ~350 MB tarball (a single IHP-Open-PDK release, not gf180mcu's four
+#: separate per-library tarballs) plus its own extracted tree;
+#: `scripts/fetch-sg13g2-sim-toolchain.sh` adds one openvaf-r binary
+#: (tens of MB) and per-device `.osdi` outputs (KB-MB each) -- all
+#: substantially smaller than gf180mcu's combined library set that already
+#: fits in 60 GB with headroom to spare (#612's own comment: "a single
+#: family is 7-9 GB" per docker/eda-sim/pdk-versions.json). The one added
+#: cost sg13g2 pays that gf180mcu/sky130A do not is a from-source ngspice
+#: build (see NGSPICE_INSTALL_CMDS below) plus its `build-essential`
+#: toolchain -- generously budgeted at low single-digit GB, well inside the
+#: margin 60 GB already carries over gf180mcu's measured need. An operator
+#: running the real sg13g2 build (the operator-only follow-up, #2574) should
+#: confirm this with `df -h` (the build script already brackets every PDK
+#: install with it, see PDK_FETCH_CMDS below) and revise this constant from
+#: a measured number if it turns out to be wrong, rather than trusting this
+#: estimate indefinitely.
 ROOT_GB="60"
 #: Pinned to the commit this script itself is run from by default --
 #: reproducible, matches whatever `remote_launcher`/`sim.py`/`remote_transport`
@@ -107,14 +137,34 @@ PDK_ROOT="/opt/pdk"
 #: Pinned open_pdks build the AMI bakes -- the same snapshot the local
 #: ~/.volare installs and the canary block repos pin (decision 4:
 #: reproducible, never "whatever volare's latest is at build time").
-#: Override with --pdk-version for a deliberate refresh.
+#: Override with --pdk-version for a deliberate refresh. Used by the
+#: sky130A/gf180mcu branches of PDK_FETCH_CMDS only -- SG13G2 is not on
+#: volare's feed at all (see SG13G2_PDK_SNAPSHOT_PREFIX below), so it never
+#: reads this variable.
 PDK_VERSION="c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+#: SG13G2 snapshot-pinning decision (issue #2573, acceptance criterion 4):
+#: unlike PDK_VERSION above, SG13G2 has no single upstream commit/tag this
+#: script pins directly. Its recipe (the sg13g2 PDK_FETCH_CMDS branch below)
+#: instead clones THIS repo at `--klt-ref` and runs that checkout's own
+#: `scripts/fetch-ihp-sg13g2.sh` (pins `IHP_OPEN_PDK_VERSION`, an
+#: IHP-Open-PDK release tag) and `scripts/fetch-sg13g2-sim-toolchain.sh`
+#: (pins `OPENVAF_R_TAG`, an OpenVAF-Reloaded compiler release) -- so
+#: SG13G2's snapshot identity is the *pair* (KLT_REF, whatever those two
+#: scripts pin at that ref), not a value this script owns independently.
+#: Documented here as a named constant rather than left implicit, so a
+#: reader looking for "SG13G2's PDK_VERSION equivalent" finds an explicit
+#: answer instead of a silent gap: this script does not need its own copy
+#: of those two upstream pins (a second copy could drift from the first),
+#: it only needs to record which KLT_REF resolves them, which the
+#: manifest's `pdk_snapshot` field does via SG13G2_PDK_SNAPSHOT_PREFIX
+#: below.
+SG13G2_PDK_SNAPSHOT_PREFIX="sg13g2-klt"
 
 log() { echo "[build-remote-sim-ami] $*" >&2; }
 die() { local code="$1"; shift; log "error: $*"; exit "$code"; }
 
 usage() {
-  sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,78p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -137,10 +187,10 @@ done
 # loudly on missing config, never a silent default (repo#52's discipline,
 # reused deliberately here per the design note's own instruction to reuse
 # repo-remote.sh's *patterns*, not its code). ─────────────────────────────
-[[ -n "$PDK" ]] || die 2 "--pdk is required (sky130A|gf180mcu)"
+[[ -n "$PDK" ]] || die 2 "--pdk is required (sky130A|gf180mcu|sg13g2)"
 case "$PDK" in
-  sky130A|gf180mcu) : ;;
-  *) die 2 "unsupported --pdk '$PDK' (must match remote_launcher.SUPPORTED_PDKS: sky130A, gf180mcu)" ;;
+  sky130A|gf180mcu|sg13g2) : ;;
+  *) die 2 "unsupported --pdk '$PDK' (must match remote_launcher.SUPPORTED_PDKS: sky130A, gf180mcu, sg13g2)" ;;
 esac
 [[ -n "$REGION" ]] || die 2 "--region (or AWS_REGION/AWS_DEFAULT_REGION) is required"
 command -v aws >/dev/null 2>&1 || die 2 "the 'aws' CLI is required on PATH"
@@ -148,7 +198,15 @@ command -v jq  >/dev/null 2>&1 || die 2 "'jq' is required on PATH (manifest upda
 command -v uv  >/dev/null 2>&1 || die 2 "'uv' is required on PATH (idle-guard script generation via 'uv run python3')"
 
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-NGSPICE_VERSION_HINT="46"  # the version this repo's own test matrix pins against; verified post-install below
+# sky130A/gf180mcu apt-install Ubuntu 22.04's packaged ngspice; sg13g2
+# instead builds ngspice from source (NGSPICE_INSTALL_CMDS below) because
+# apt's version is below the OSDI ABI floor
+# scripts/fetch-sg13g2-sim-toolchain.sh's own preflight enforces -- see that
+# script's header comment. Both hints are verified post-install below.
+case "$PDK" in
+  sg13g2) NGSPICE_VERSION_HINT="47" ;;  # matches docker/eda-sim/pdk-versions.json's tools.ngspice pin
+  *) NGSPICE_VERSION_HINT="46" ;;  # the version this repo's own test matrix pins against
+esac
 
 log "plan: build a ${PDK} AMI in ${REGION} (build instance type ${INSTANCE_TYPE}, root ${ROOT_GB}GB gp3, klt-ref ${KLT_REF}); copy-to: ${COPY_TO_REGIONS[*]:-<none>}"
 
@@ -182,12 +240,49 @@ ROOT_DEVICE="$(aws ec2 describe-images --region "$REGION" --image-ids "$BASE_AMI
 IDLE_GUARD_SCRIPT="$(cd "$REPO_ROOT" && uv run python3 -c \
   "from klayout_tools.remote_launcher import idle_guard_install_script as f; print(f())")"
 
+# ── ngspice install recipe. sky130A/gf180mcu apt-install Ubuntu 22.04's
+# packaged ngspice (unchanged from before #2573); sg13g2 instead builds
+# ngspice from source, because that apt package is below the OSDI ABI floor
+# scripts/fetch-sg13g2-sim-toolchain.sh's own preflight enforces (see that
+# script's header comment for the ngspice-43-vs-44 osdiregistry.c citation).
+# Reuses docker/eda-sim/pdk-versions.json's already-pinned from-source
+# ngspice recipe (version/sha256/configure-flags) via `jq` rather than
+# restating those as a second, independently-driftable literal here --
+# that file is itself the single source of truth `tests/test_eda_sim_image.py`
+# enforces has no duplicate. ────────────────────────────────────────────────
+case "$PDK" in
+  sg13g2)
+    NGSPICE_PIN_FILE="${REPO_ROOT}/docker/eda-sim/pdk-versions.json"
+    [[ -f "$NGSPICE_PIN_FILE" ]] || die 2 "expected ngspice pin file missing: $NGSPICE_PIN_FILE"
+    NGSPICE_SRC_VERSION="$(jq -r '.tools.ngspice.version' "$NGSPICE_PIN_FILE")"
+    NGSPICE_SRC_SHA256="$(jq -r '.tools.ngspice.sha256' "$NGSPICE_PIN_FILE")"
+    NGSPICE_SRC_URL="$(jq -r '.tools.ngspice.url_template' "$NGSPICE_PIN_FILE" | sed "s/{version}/${NGSPICE_SRC_VERSION}/g")"
+    NGSPICE_SRC_FLAGS="$(jq -r '.tools.ngspice.configure_flags | join(" ")' "$NGSPICE_PIN_FILE")"
+    [[ "$NGSPICE_SRC_VERSION" == "$NGSPICE_VERSION_HINT" ]] \
+      || die 2 "docker/eda-sim/pdk-versions.json's tools.ngspice.version ($NGSPICE_SRC_VERSION) no longer matches this script's NGSPICE_VERSION_HINT ($NGSPICE_VERSION_HINT) -- update NGSPICE_VERSION_HINT's sg13g2 case above in the same change that bumps the pin file"
+    # shellcheck disable=SC2016  # intentional: $(...) expands later, inside
+    # the build instance's own user-data shell (BUILD_USERDATA below).
+    NGSPICE_INSTALL_CMDS='apt-get install -y build-essential bison flex autoconf automake libtool m4 && curl -fL --retry 3 -o /tmp/ngspice.tar.gz "'"${NGSPICE_SRC_URL}"'" && echo "'"${NGSPICE_SRC_SHA256}"'  /tmp/ngspice.tar.gz" | sha256sum -c - && mkdir -p /tmp/ngspice-src && tar -xzf /tmp/ngspice.tar.gz -C /tmp/ngspice-src --strip-components=1 && (cd /tmp/ngspice-src && ./configure '"${NGSPICE_SRC_FLAGS}"' && make -j"$(nproc)" && make install && ldconfig) && rm -rf /tmp/ngspice.tar.gz /tmp/ngspice-src'
+    ;;
+  *)
+    NGSPICE_INSTALL_CMDS='apt-get install -y ngspice'
+    ;;
+esac
+
 # ── per-PDK install recipe. Fetches the same curated open-PDK ngspice model
 # decks klt's own docs/design/remote-sim-backend-spike.md decision 4 scopes
-# this AMI to (sky130A, gf180mcu) -- via the PDK's own published release
-# artifact, never an ad hoc mirror. Installed under the fixed $PDK_ROOT this
-# script bakes into /etc/environment below, so `pdk.find_pdk` resolves it
-# identically to a local install (see #265's header comment). ──────────────
+# this AMI to (sky130A, gf180mcu, sg13g2) -- via the PDK's own published
+# release artifact, never an ad hoc mirror. Installed under the fixed
+# $PDK_ROOT this script bakes into /etc/environment below, so `pdk.find_pdk`
+# resolves it identically to a local install (see #265's header comment).
+# sg13g2 (#2573) is not on volare's feed at all -- IHP-Open-PDK is a
+# different upstream project -- so that branch drives this repo's own
+# scripts/fetch-ihp-sg13g2.sh + scripts/fetch-sg13g2-sim-toolchain.sh from a
+# --klt-ref pinned checkout instead (see SG13G2_PDK_SNAPSHOT_PREFIX above for
+# why KLT_REF is that recipe's snapshot-identity anchor), and additionally
+# needs ngspice already on PATH -- guaranteed by NGSPICE_INSTALL_CMDS running
+# first in BUILD_USERDATA below, since fetch-sg13g2-sim-toolchain.sh
+# preflights and load-verifies its compiled OSDI models against it. ────────
 # shellcheck disable=SC2016  # intentional: $(...) expands later, inside the
 # build instance's own user-data shell (BUILD_USERDATA below), not here.
 case "$PDK" in
@@ -196,6 +291,16 @@ case "$PDK" in
     ;;
   gf180mcu)
     PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk gf180mcu '"${PDK_VERSION}"''
+    ;;
+  sg13g2)
+    # A second, independent `git clone` of this repo (distinct from the
+    # `pip install klayout-tools @ git+...` clone further down in
+    # BUILD_USERDATA) -- deliberately not shared: this one needs the repo's
+    # `scripts/`/`pdks/` tree on disk to run shell scripts from, the pip
+    # install needs only the installed Python package. Both are pinned to
+    # the same $KLT_REF, so they never disagree about which commit's fetch
+    # scripts (and therefore which IHP-Open-PDK/openvaf-r pins) get baked.
+    PDK_FETCH_CMDS='git clone https://github.com/2AMLogic/klayout-tools.git /tmp/klt-src && (cd /tmp/klt-src && git checkout '"${KLT_REF}"') && /tmp/klt-src/scripts/fetch-ihp-sg13g2.sh && /tmp/klt-src/scripts/fetch-sg13g2-sim-toolchain.sh && mkdir -p "'"${PDK_ROOT}"'" && cp -a /tmp/klt-src/pdks/ihp-open-pdk/. "'"${PDK_ROOT}"'/" && rm -rf /tmp/klt-src'
     ;;
 esac
 
@@ -210,7 +315,8 @@ cat > "$BUILD_USERDATA" <<USERDATA
 #!/bin/bash
 set -euxo pipefail
 apt-get update
-apt-get install -y ngspice python3-pip python3-venv git
+apt-get install -y python3-pip python3-venv git curl
+${NGSPICE_INSTALL_CMDS}
 mkdir -p ${PDK_ROOT}
 echo "PDK_ROOT=${PDK_ROOT}" >> /etc/environment
 ${PDK_FETCH_CMDS}
@@ -299,7 +405,15 @@ aws ec2 wait image-available --region "$REGION" --image-ids "$NEW_AMI"
 log "terminating build instance ${BUILD_ID} ..."
 aws ec2 terminate-instances --region "$REGION" --instance-ids "$BUILD_ID" >/dev/null
 
-PDK_SNAPSHOT="${PDK}-$(date -u +%Y.%m.%d)"
+if [[ "$PDK" == "sg13g2" ]]; then
+  # Names the (KLT_REF, date) pair rather than a bare date stamp -- per
+  # SG13G2_PDK_SNAPSHOT_PREFIX's decision above, KLT_REF is what pins the
+  # actual IHP-Open-PDK/openvaf-r versions this build baked, so it belongs
+  # in the manifest's own snapshot identity, not just this script's log.
+  PDK_SNAPSHOT="${SG13G2_PDK_SNAPSHOT_PREFIX}-${KLT_REF:0:12}-$(date -u +%Y.%m.%d)"
+else
+  PDK_SNAPSHOT="${PDK}-$(date -u +%Y.%m.%d)"
+fi
 
 # ── manifest update (append; resolve_ami() picks the latest built_at for a
 # (pdk, region) pair, so old entries are kept as an audit trail). Writes

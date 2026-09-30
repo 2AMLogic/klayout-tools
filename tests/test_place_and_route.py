@@ -1521,6 +1521,13 @@ def test_power_connects_entry_omitting_all_tuning_normalizes_to_none_fields():
 #   gf180mcu_9t_6M -> flow/platforms/gf180/openROAD/pdn/
 #                     pdn_grid_strategy_9t_6M.cfg
 #   sky130hd       -> flow/platforms/sky130hd/pdn.tcl
+#
+# `sg13g2` (issue #2447) is the exception: IHP-Open-PDK ships no ORFS
+# platform, so that recipe is transcribed from IHP's own LibreLane config
+# (`libs.tech/librelane/{,sg13g2_stdcell/}config.tcl` @ IHP-Open-PDK
+# v0.3.0) instead -- and one of its numbers, the `Metal1` rail pitch, is
+# not a transcription at all but this repo's own derivation (see
+# `_EXPECTED_PRESET_STRAPS` below and the entry's own `source` string).
 # --------------------------------------------------------------------------- #
 
 
@@ -1588,6 +1595,41 @@ _EXPECTED_PRESET_STRAPS: dict[str, list[dict[str, object]]] = {
             "followpins": False,
         },
     ],
+    "sg13g2": [
+        # set ::env(PDN_RAIL_LAYER) Metal1 / PDN_RAIL_OFFSET 0, plus
+        # sg13g2_stdcell/config.tcl's own PDN_RAIL_WIDTH 0.44. The pitch is
+        # the one derived number in this recipe -- LibreLane states none
+        # (`-followpins` places off the rows), so it is 2x the 3.78 um
+        # `CoreSite` row height, i.e. one VDD/VSS rail pair.
+        {
+            "layer": "Metal1",
+            "width_um": 0.44,
+            "pitch_um": 7.56,
+            "offset_um": 0.0,
+            "spacing_um": None,
+            "followpins": True,
+        },
+        # set ::env(PDN_VERTICAL_LAYER) TopMetal1 / PDN_VWIDTH 2.2 /
+        # PDN_VSPACING 4.0 / PDN_VPITCH 75.6 / PDN_VOFFSET 13.6
+        {
+            "layer": "TopMetal1",
+            "width_um": 2.2,
+            "pitch_um": 75.6,
+            "offset_um": 13.6,
+            "spacing_um": 4.0,
+            "followpins": False,
+        },
+        # set ::env(PDN_HORIZONTAL_LAYER) TopMetal2 / PDN_HWIDTH 2.2 /
+        # PDN_HSPACING 4.0 / PDN_HPITCH 75.6 / PDN_HOFFSET 13.6
+        {
+            "layer": "TopMetal2",
+            "width_um": 2.2,
+            "pitch_um": 75.6,
+            "offset_um": 13.6,
+            "spacing_um": 4.0,
+            "followpins": False,
+        },
+    ],
     "sky130hd": [
         # add_pdn_stripe -grid {grid} -layer {met1} -width {0.48}
         #     -pitch {5.44} -offset {0} -followpins
@@ -1626,7 +1668,8 @@ _EXPECTED_PRESET_STRAPS: dict[str, list[dict[str, object]]] = {
 #: carry `add_pdn_connect -grid {block} -layers {Metal1 Metal4}
 #: -max_columns {5} -ongrid {Metal2 Metal3 Metal4} -split_cuts {Metal3
 #: 0.128}` plus a bare `{Metal4 Metal5}` pair; sky130hd's `pdn.tcl` carries
-#: two bare pairs and therefore no tuning at all.
+#: two bare pairs and therefore no tuning at all, and IHP's LibreLane
+#: config names no via-stack tuning for `sg13g2` either.
 _GF180MCU_PRESET_CONNECTS = [
     {
         "layers": ["Metal1", "Metal4"],
@@ -1638,6 +1681,7 @@ _GF180MCU_PRESET_CONNECTS = [
 _EXPECTED_PRESET_CONNECTS: dict[str, list[dict[str, object]]] = {
     "gf180mcu_7t_6M": _GF180MCU_PRESET_CONNECTS,
     "gf180mcu_9t_6M": _GF180MCU_PRESET_CONNECTS,
+    "sg13g2": [],
     "sky130hd": [],
 }
 
@@ -1645,7 +1689,18 @@ _EXPECTED_PRESET_CONNECTS: dict[str, list[dict[str, object]]] = {
 _PRESET_CELL_LIBRARIES = {
     "gf180mcu_7t_6M": "gf180mcu_fd_sc_mcu7t5v0",
     "gf180mcu_9t_6M": "gf180mcu_fd_sc_mcu9t5v0",
+    "sg13g2": "sg13g2_stdcell",
     "sky130hd": "sky130_fd_sc_hd",
+}
+
+#: The provenance prefix each preset's `source` string must carry: the ORFS
+#: commit the three ORFS-derived recipes were read at, and IHP-Open-PDK's
+#: own release tag for the one that has no ORFS platform to read.
+_PRESET_SOURCE_PREFIXES = {
+    "gf180mcu_7t_6M": "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:",
+    "gf180mcu_9t_6M": "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:",
+    "sg13g2": "IHP-Open-PDK@v0.3.0:",
+    "sky130hd": "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:",
 }
 
 
@@ -1657,15 +1712,28 @@ def test_pdn_presets_cover_exactly_the_documented_set():
 
 
 @pytest.mark.parametrize("preset_name", sorted(_PRESET_CELL_LIBRARIES))
-def test_pdn_preset_entry_cites_its_orfs_source_file_and_commit(preset_name):
+def test_pdn_preset_entry_cites_its_source_file_and_revision(preset_name):
     """Each entry must carry the "verified live" provenance the existing
-    per-library tables do: the ORFS file it was transcribed from *and* the
-    exact commit it was read at."""
+    per-library tables do: the upstream file it was transcribed from *and*
+    the exact revision it was read at."""
     source = place_and_route._PDN_PRESETS[preset_name]["source"]
-    assert source.startswith(
-        "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
-    )
-    assert source.endswith((".cfg", ".tcl"))
+    assert source.startswith(_PRESET_SOURCE_PREFIXES[preset_name])
+    assert re.search(r"\S+\.(cfg|tcl)\b", source)
+
+
+def test_sg13g2_preset_source_flags_its_one_derived_value():
+    """Issue #2447: the other three presets' `source` strings are
+    line-for-line citations, so `sg13g2`'s must not read like one. Its
+    `Metal1` rail pitch is this repo's own derivation (2x the 3.78 um
+    `CoreSite` row height) rather than a number IHP's LibreLane config
+    states -- `-followpins` takes its placement from the rows themselves --
+    and the citation has to say so, or a reader re-deriving the recipe from
+    the cited file will not find 7.56 in it."""
+    source = place_and_route._PDN_PRESETS["sg13g2"]["source"]
+    assert "libs.tech/librelane/config.tcl" in source
+    assert "7.56" in source
+    assert "NOT from" in source
+    assert "3.78" in source
 
 
 @pytest.mark.parametrize("preset_name", sorted(_PRESET_CELL_LIBRARIES))
@@ -1709,7 +1777,7 @@ def test_power_preset_unknown_name_lists_the_supported_set():
         PlaceAndRouteError,
         match=(
             r"unknown request\.power\.preset 'gf180mcu_5t_6M' \(supported: "
-            r"gf180mcu_7t_6M, gf180mcu_9t_6M, sky130hd\)"
+            r"gf180mcu_7t_6M, gf180mcu_9t_6M, sg13g2, sky130hd\)"
         ),
     ):
         place_and_route._validate_power({"preset": "gf180mcu_5t_6M"})
@@ -6604,22 +6672,17 @@ def test_sg13g2_cts_and_route_scripts_carry_verified_reference_data(
 #: `openroad/orfs` run against a real IHP-Open-PDK v0.3.0 install (issue
 #: #2441) -- see `docs/cli/place-and-route.md`'s "Live verification"
 #: section for that run's own numbers.
+#:
+#: Read out of the shipped `"sg13g2"` preset (issue #2447) rather than
+#: transcribed a second time: these tests drive it as an *explicit*
+#: `request.power.straps` block (the pre-preset path, which must keep
+#: working), so duplicating the numbers here would let the two copies drift
+#: silently -- the one thing presets exist to prevent. The literal,
+#: independently-transcribed copy that guards against a typo in the table
+#: itself lives in `_EXPECTED_PRESET_STRAPS["sg13g2"]` above, which is
+#: where that assertion belongs.
 _SG13G2_STRAPS = [
-    {"layer": "Metal1", "width_um": 0.44, "pitch_um": 7.56, "followpins": True},
-    {
-        "layer": "TopMetal1",
-        "width_um": 2.2,
-        "pitch_um": 75.6,
-        "offset_um": 13.6,
-        "spacing_um": 4.0,
-    },
-    {
-        "layer": "TopMetal2",
-        "width_um": 2.2,
-        "pitch_um": 75.6,
-        "offset_um": 13.6,
-        "spacing_um": 4.0,
-    },
+    dict(strap) for strap in place_and_route._PDN_PRESETS["sg13g2"]["straps"]
 ]
 
 
@@ -10115,6 +10178,62 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_7t(tmp_path, monkeypatch)
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
     assert report["warnings"] == []
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SG13G2_PNR_VARIANT is None,
+    reason=(
+        "no real sg13g2_stdcell LEF/liberty/GDS set resolves via "
+        "_find_real_ihp_pnr_variant()"
+    ),
+)
+def test_integration_real_openroad_preset_pdn_sg13g2(tmp_path, monkeypatch):
+    """`"power": {"preset": "sg13g2"}` end to end against a real `openroad`
+    + a real IHP-Open-PDK install (issue #2447).
+
+    The same guarantee the three siblings above make, for the fourth
+    supported library -- and the specific claim this issue turns on: the
+    preset table's own copy of IHP's LibreLane PDN geometry drives a real
+    run to a complete, warning-free PDN, so an IHP caller never has to
+    hand-transcribe it. `test_integration_real_openroad_power_pdn_sg13g2`
+    above is the explicit-`straps` counterpart of this run (issue #2441);
+    the two now read their geometry from the same table, so a drift between
+    them is impossible rather than merely unlikely.
+
+    Every non-`power` setting reproduces that run's own request verbatim,
+    including `core_margin_um: 4.0` and the `"CoreSite"` site name -- IHP's
+    own LibreLane `PLACE_SITE`, which is not derivable by analogy from the
+    sky130/gf180mcu site names.
+    """
+    report = _run_preset_pdn_integration(
+        tmp_path,
+        monkeypatch,
+        variant_gate=_REAL_SG13G2_PNR_VARIANT,
+        cell_library=_SG13G2_CELL_LIBRARY,
+        preset="sg13g2",
+        floorplan={
+            "method": "utilization",
+            "utilization_pct": 38,
+            "aspect_ratio": 1.0,
+            "core_margin_um": 4.0,
+            "site": "CoreSite",
+        },
+        io={"layer_h": "Metal3", "layer_v": "Metal2"},
+        clock_period_ns=10.0,
+    )
+    assert report["power"]["placed"]["status"] == "complete"
+    assert report["power"]["placed"]["missing"] == []
+    assert report["warnings"] == []
+    # This library places no tapcells/endcaps at all (issue #2441), so
+    # "complete" here means exactly that the checks which *can* apply
+    # passed -- not that the two inapplicable ones were quietly skipped
+    # into a pass.
+    assert report["power"]["placed"]["tapcells"] == 0
+    assert report["power"]["placed"]["endcaps"] == 0
+    assert report["power"]["placed"]["fillers"] > 0
 
 
 @pytest.mark.skipif(

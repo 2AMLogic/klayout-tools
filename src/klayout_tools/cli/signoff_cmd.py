@@ -452,9 +452,16 @@ def _print_power_delivery(citation: dict) -> None:
         )
     well_asserted = power_delivery.get("ties_checked_by_well_assertion") or []
     if well_asserted:
+        # Issue #2540 widened this list from "the substrate region was
+        # asserted" (no drawn well at all) to "the well side rested on
+        # caller-named coordinates", which now also covers a *drawn* well
+        # whose bias class was selected by boxes. The line names both rather
+        # than only the older form, so the count can never read as a claim
+        # the spec did not make.
         print(
-            "        substrate regions asserted by the caller (no drawn "
-            f"well): {len(well_asserted)} ({', '.join(well_asserted)})"
+            "        well side rested on the caller's word (asserted region, "
+            f"or a box-selected class): {len(well_asserted)} "
+            f"({', '.join(well_asserted)})"
         )
 
 

@@ -526,6 +526,29 @@ def _resolve_family(variant: str) -> dict[str, Any]:
     )
 
 
+def substrate(variant: str) -> dict[str, Any]:
+    """The curated substrate entry for ``variant``'s PDK family, plus the
+    ``family`` name it was resolved from (issue #2561).
+
+    Exactly the ``substrate`` block :func:`stackup` reports, reachable
+    **without a PDK install**: every field in it (resistivity, elevation,
+    permittivity, and the ``source`` prose that qualifies each) is curated
+    in this module, none is measured from tech LEFs, so a caller that needs
+    only the substrate -- e.g.
+    :mod:`klayout_tools.substrate_resistance`'s closed-form spreading
+    estimate, which needs ``resistivity_ohm_cm`` and the wafer thickness but
+    no BEOL geometry at all -- must not be forced to resolve a ``PDK_ROOT``
+    and re-measure the whole stack to get it.
+
+    ``variant`` may be a full variant name (``"sky130A"``) or a bare family
+    name (``"sky130"``); both resolve through the same documented
+    variant-prefix matching :func:`_resolve_family` applies, and an
+    uncurated family raises the same :class:`PdkStackupError`.
+    """
+    table = _resolve_family(variant)
+    return {"family": table["family"], **table["substrate"]}
+
+
 def _measure_tech_lefs(
     sources: list[dict[str, str]],
 ) -> dict[str, list[dict[str, Any]]]:

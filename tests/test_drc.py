@@ -7116,10 +7116,42 @@ def test_run_drc_sg13g2_metal2_enclosing_via2_clean(tmp_path):
 # identical "cut shape hangs off its landing conductor's edge" failure mode
 # `metal1.enclosing.via1.1`/`metal2.enclosing.via2.1` above already exercise
 # individually. Entry shape: (rule id, conductor layer, conductor name, cut
-# layer, cut name, threshold_dbu).
+# layer, cut name, threshold_dbu, cut_max_size_dbu, conductor_min_width_dbu).
+# `cut_max_size_dbu` is the cut layer's own `<cut>.width.1` size (Via3/Via4
+# 190 dbu, TopVia1 420 dbu, TopVia2 900 dbu) -- issue #2388 made TopVia1/
+# TopVia2 a fixed min=max size, so the cut box below must be drawn as an
+# exact `cut_max_size_dbu` square or those two cases would also trip the
+# cut's own `width.1` rule alongside the enclosure rule under test. Via3/
+# Via4 are only min-bounded today (their max half is deferred behind issue
+# #2585), but they are drawn the same exact-size way here so the whole
+# family stays one uniform fixture -- and so they need no further change
+# when #2585 unblocks them.
+# `conductor_min_width_dbu` is the conductor's own `<conductor>.width.1`
+# minimum (Metal3/Metal4/Metal5 200 dbu, TopMetal1 1640 dbu, TopMetal2
+# 2000 dbu) -- the conductor box must stay at or above it too, independent
+# of and unrelated to issue #2388 but easy to undershoot once the cut-driven
+# box size above shrinks well below the old, much larger hand-picked values.
 _SG13G2_METAL_STACK_ENCLOSURE_RULES = [
-    ("metal3.enclosing.via3.1", (30, 0), "Metal3.drawing", (49, 0), "Via3.drawing", 5),
-    ("metal4.enclosing.via4.1", (50, 0), "Metal4.drawing", (66, 0), "Via4.drawing", 5),
+    (
+        "metal3.enclosing.via3.1",
+        (30, 0),
+        "Metal3.drawing",
+        (49, 0),
+        "Via3.drawing",
+        5,
+        190,
+        200,
+    ),
+    (
+        "metal4.enclosing.via4.1",
+        (50, 0),
+        "Metal4.drawing",
+        (66, 0),
+        "Via4.drawing",
+        5,
+        190,
+        200,
+    ),
     (
         "metal5.enclosing.topvia1.1",
         (67, 0),
@@ -7127,6 +7159,8 @@ _SG13G2_METAL_STACK_ENCLOSURE_RULES = [
         (125, 0),
         "TopVia1.drawing",
         100,
+        420,
+        200,
     ),
     (
         "topmetal1.enclosing.topvia1.1",
@@ -7135,6 +7169,8 @@ _SG13G2_METAL_STACK_ENCLOSURE_RULES = [
         (125, 0),
         "TopVia1.drawing",
         420,
+        420,
+        1640,
     ),
     (
         "topmetal1.enclosing.topvia2.1",
@@ -7143,6 +7179,8 @@ _SG13G2_METAL_STACK_ENCLOSURE_RULES = [
         (133, 0),
         "TopVia2.drawing",
         500,
+        900,
+        1640,
     ),
     (
         "topmetal2.enclosing.topvia2.1",
@@ -7151,6 +7189,8 @@ _SG13G2_METAL_STACK_ENCLOSURE_RULES = [
         (133, 0),
         "TopVia2.drawing",
         500,
+        900,
+        2000,
     ),
 ]
 
@@ -7176,19 +7216,41 @@ def _sg13g2_cut_stack(
 
 
 @pytest.mark.parametrize(
-    "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu",
+    "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu,"
+    "cut_max_size_dbu,conductor_min_width_dbu",
     _SG13G2_METAL_STACK_ENCLOSURE_RULES,
     ids=[entry[0] for entry in _SG13G2_METAL_STACK_ENCLOSURE_RULES],
 )
 def test_run_drc_sg13g2_metal_stack_enclosure_violation(
-    rule_id, conductor, conductor_name, cut, cut_name, threshold_dbu, tmp_path
+    rule_id,
+    conductor,
+    conductor_name,
+    cut,
+    cut_name,
+    threshold_dbu,
+    cut_max_size_dbu,
+    conductor_min_width_dbu,
+    tmp_path,
 ):
     """A via/cut shape hanging off the edge of its landing conductor by one
     dbu less than the rule's own threshold trips exactly one violation --
     the same failure mode `metal1.enclosing.via1.1`/`metal2.enclosing.via2.1`
     above exercise individually, parametrized across the six new
-    Metal3-TopMetal2 enclosure rules issue #1243 adds."""
-    margin = threshold_dbu - 1
+    Metal3-TopMetal2 enclosure rules issue #1243 adds.
+
+    The cut is drawn as an exact `cut_max_size_dbu` square (comfortable
+    1000 dbu margin on three sides, `threshold_dbu - 1` on the fourth) so it
+    never also trips its own `width.1` rule's max half (issue #2388). The
+    1000 dbu margins keep the conductor box well above
+    `conductor_min_width_dbu` (up to 2000 dbu for TopMetal2) too, so this
+    box needs no separate clamp the way the clean variant below does."""
+    right_margin = threshold_dbu - 1
+    cut_box = kdb.Box(1000, 1000, 1000 + cut_max_size_dbu, 1000 + cut_max_size_dbu)
+    conductor_box = kdb.Box(
+        0, 0, 1000 + cut_max_size_dbu + right_margin, 1000 + cut_max_size_dbu + 1000
+    )
+    assert conductor_box.width() >= conductor_min_width_dbu
+    assert conductor_box.height() >= conductor_min_width_dbu
     path = _sg13g2_cut_stack(
         tmp_path,
         f"{rule_id}_violation",
@@ -7196,8 +7258,8 @@ def test_run_drc_sg13g2_metal_stack_enclosure_violation(
         conductor_name,
         cut,
         cut_name,
-        kdb.Box(0, 0, 4000 - margin, 2000),
-        kdb.Box(1000, 500, 4000, 1500),
+        conductor_box,
+        cut_box,
     )
 
     report = run_drc(str(path), "sg13g2")
@@ -7211,15 +7273,43 @@ def test_run_drc_sg13g2_metal_stack_enclosure_violation(
 
 
 @pytest.mark.parametrize(
-    "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu",
+    "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu,"
+    "cut_max_size_dbu,conductor_min_width_dbu",
     _SG13G2_METAL_STACK_ENCLOSURE_RULES,
     ids=[entry[0] for entry in _SG13G2_METAL_STACK_ENCLOSURE_RULES],
 )
 def test_run_drc_sg13g2_metal_stack_enclosure_clean(
-    rule_id, conductor, conductor_name, cut, cut_name, threshold_dbu, tmp_path
+    rule_id,
+    conductor,
+    conductor_name,
+    cut,
+    cut_name,
+    threshold_dbu,
+    cut_max_size_dbu,
+    conductor_min_width_dbu,
+    tmp_path,
 ):
     """A cut shape enclosed by its landing conductor with a margin well above
-    every threshold in this family (max 500 dbu) reports clean."""
+    every threshold in this family (max 500 dbu) reports clean.
+
+    The cut is drawn as an exact `cut_max_size_dbu` square: see
+    `test_run_drc_sg13g2_metal_stack_enclosure_violation` for why (issue
+    #2388). The conductor box side is clamped up to
+    `conductor_min_width_dbu` where that exceeds the cut-driven size (e.g.
+    TopMetal1/TopMetal2's own 1640/2000 dbu `width.1` minimum, unrelated to
+    #2388 but easy to undershoot with the cut-driven margin alone), keeping
+    the cut centered so its own margin to every conductor edge stays
+    `>= threshold_dbu`."""
+    cut_margin = threshold_dbu + 50
+    side = max(
+        cut_margin * 2 + cut_max_size_dbu, conductor_min_width_dbu + 2 * cut_margin
+    )
+    offset = (side - cut_max_size_dbu) // 2
+    assert offset >= threshold_dbu
+    cut_box = kdb.Box(
+        offset, offset, offset + cut_max_size_dbu, offset + cut_max_size_dbu
+    )
+    conductor_box = kdb.Box(0, 0, side, side)
     path = _sg13g2_cut_stack(
         tmp_path,
         f"{rule_id}_clean",
@@ -7227,14 +7317,191 @@ def test_run_drc_sg13g2_metal_stack_enclosure_clean(
         conductor_name,
         cut,
         cut_name,
-        kdb.Box(0, 0, 6000, 3000),
-        kdb.Box(1000, 1000, 5000, 2000),
+        conductor_box,
+        cut_box,
     )
 
     report = run_drc(str(path), "sg13g2")
 
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
+
+
+# --- topvia1.width.1/topvia2.width.1 fixed-size maximum
+# (threshold_max_dbu, issue #2388) -----------------------------------------
+#
+# Issue #2370 added `DrcRule.threshold_max_dbu` and used it to close
+# gf180mcu's `CO.1`/`Vn.1` min-only gap (see
+# `test_run_drc_gf180mcu_contact_fixed_size_boundaries` above). Issue #2388
+# backfills the identical treatment onto sg13g2 -- but only onto these two
+# rules for now. sg13g2's five *other* fixed-size cut rules
+# (`cont.width.1`, `via1.width.1`-`via4.width.1`) have the same
+# `without_bbox_min/max` upstream shape and belong here too, but are
+# deferred behind issue #2585: every `klt gen` sg13g2 generator currently
+# draws those cuts at the PDK-generic `gen.CONTACT_SIZE_UM` (0.22um), over
+# the foundry maximum, so enforcing the max half would (correctly) fail
+# twenty generator tests. TopVia1/TopVia2 have no such blocker -- their
+# per-family via floor already equals the fixed size. See each rule's own
+# note in `decks/sg13g2.py`. (rule id, layer, layer name, fixed size in
+# dbu.)
+_SG13G2_FIXED_SIZE_CUT_RULES = [
+    ("topvia1.width.1", (125, 0), "TopVia1.drawing", 420),
+    ("topvia2.width.1", (133, 0), "TopVia2.drawing", 900),
+]
+
+
+def _fixed_size_cut_boundary_cases(size_dbu):
+    """(case_id, cut box, expected violation count) boundary ladder for a
+    fixed-size cut/via layer whose `threshold_max_dbu == threshold_dbu ==
+    size_dbu` -- generalizes gf180mcu's own `_GF180MCU_CONTACT_SIZE_CASES`
+    (issue #2370) to an arbitrary fixed size, for issue #2388's sg13g2/
+    sg13cmos5l/sky130 backfill:
+
+    - a uniformly-undersized square (both directions below the minimum)
+      trips `width_check` once per direction -- 2, not 1;
+    - a cut drawn at exactly the fixed size stays clean (the false-positive
+      guard for the maximum);
+    - an oversized square is newly flagged by the maximum;
+    - an elongated bar (legal facing-edge width, illegal bounding-box size)
+      is newly flagged too -- the case no width-based upper bound could
+      catch (see `_run_width_max_check`'s own docstring in `drc.py`).
+    """
+    return [
+        ("below_min", kdb.Box(0, 0, size_dbu - 20, size_dbu - 20), 2),
+        ("at_min_and_max", kdb.Box(0, 0, size_dbu, size_dbu), 0),
+        ("above_max_square", kdb.Box(0, 0, size_dbu + 80, size_dbu + 80), 1),
+        ("above_max_bar", kdb.Box(0, 0, size_dbu, size_dbu + 2000), 1),
+    ]
+
+
+_SG13G2_FIXED_SIZE_CUT_BOUNDARY_CASES = [
+    (rule_id, layer, layer_name, case_id, box, expected)
+    for rule_id, layer, layer_name, size_dbu in _SG13G2_FIXED_SIZE_CUT_RULES
+    for case_id, box, expected in _fixed_size_cut_boundary_cases(size_dbu)
+]
+
+
+@pytest.mark.parametrize(
+    "rule_id,layer,layer_name,case_id,cut_box,expected_count",
+    _SG13G2_FIXED_SIZE_CUT_BOUNDARY_CASES,
+    ids=[f"{entry[0]}-{entry[3]}" for entry in _SG13G2_FIXED_SIZE_CUT_BOUNDARY_CASES],
+)
+def test_run_drc_sg13g2_fixed_size_cut_boundaries(
+    rule_id, layer, layer_name, case_id, cut_box, expected_count, tmp_path
+):
+    """Each of sg13g2's two newly-max-bounded top-via rules is checked as a
+    fixed size, mirroring `test_run_drc_gf180mcu_contact_fixed_size_boundaries`
+    (issue #2388)."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    cut = layout.layer(*layer)
+    layout.set_info(cut, kdb.LayerInfo(layer[0], layer[1], layer_name))
+    top.shapes(cut).insert(cut_box)
+    path = tmp_path / f"{rule_id}_{case_id}.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["rule_counts"].get(rule_id, 0) == expected_count
+    if expected_count == 0:
+        assert report["status"] == "clean"
+        return
+    assert report["status"] == "violations"
+    reported = [v for v in report["violations"] if v["rule"] == rule_id]
+    for violation in reported:
+        assert violation["check"] == "width"
+        assert violation["layer"] == layer_name
+
+
+def test_run_drc_sg13g2_fixed_size_cut_rules_declare_both_bounds():
+    """Structural half of the above: each of the two sg13g2 rules #2388
+    covers carries a `threshold_max_dbu` equal to its own `threshold_dbu` --
+    a *fixed* size, not a range."""
+    deck = get_deck("sg13g2")
+    fixed_size_rule_ids = {entry[0] for entry in _SG13G2_FIXED_SIZE_CUT_RULES}
+    seen = set()
+    for rule in deck:
+        if rule.id not in fixed_size_rule_ids:
+            continue
+        seen.add(rule.id)
+        assert rule.check == "width"
+        assert rule.threshold_max_dbu == rule.threshold_dbu, rule.id
+    assert seen == fixed_size_rule_ids
+
+
+# --------------------------------------------------------------------------- #
+# sg13cmos5l fixed-size cut/via rules (threshold_max_dbu, issue #2388)
+# --------------------------------------------------------------------------- #
+#
+# Deck-specific sg13cmos5l tests otherwise live in `test_sg13cmos5l_deck.py`
+# -- these four are hand-authored here instead (per issue #2388's own
+# Curator Enhancement), mirroring sg13g2's identical fixed-size treatment
+# just above rather than creating a new deck-specific test module.
+_SG13CMOS5L_FIXED_SIZE_CUT_RULES = [
+    ("via1.width.1", (19, 0), "Via1.drawing", 190),
+    ("via2.width.1", (29, 0), "Via2.drawing", 190),
+    ("via3.width.1", (49, 0), "Via3.drawing", 190),
+    ("topvia1.width.1", (125, 0), "TopVia1.drawing", 420),
+]
+
+_SG13CMOS5L_FIXED_SIZE_CUT_BOUNDARY_CASES = [
+    (rule_id, layer, layer_name, case_id, box, expected)
+    for rule_id, layer, layer_name, size_dbu in _SG13CMOS5L_FIXED_SIZE_CUT_RULES
+    for case_id, box, expected in _fixed_size_cut_boundary_cases(size_dbu)
+]
+
+
+@pytest.mark.parametrize(
+    "rule_id,layer,layer_name,case_id,cut_box,expected_count",
+    _SG13CMOS5L_FIXED_SIZE_CUT_BOUNDARY_CASES,
+    ids=[
+        f"{entry[0]}-{entry[3]}" for entry in _SG13CMOS5L_FIXED_SIZE_CUT_BOUNDARY_CASES
+    ],
+)
+def test_run_drc_sg13cmos5l_fixed_size_cut_boundaries(
+    rule_id, layer, layer_name, case_id, cut_box, expected_count, tmp_path
+):
+    """Each of sg13cmos5l's four newly-max-bounded cut/via rules is checked
+    as a fixed size, mirroring
+    `test_run_drc_gf180mcu_contact_fixed_size_boundaries`/
+    `test_run_drc_sg13g2_fixed_size_cut_boundaries` (issue #2388). Unlike
+    sg13g2's cont/via1-4, none of these needed the issue #2585 deferral --
+    no sg13cmos5l generator draws these cuts."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    cut = layout.layer(*layer)
+    layout.set_info(cut, kdb.LayerInfo(layer[0], layer[1], layer_name))
+    top.shapes(cut).insert(cut_box)
+    path = tmp_path / f"{rule_id}_{case_id}.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13cmos5l")
+
+    assert report["rule_counts"].get(rule_id, 0) == expected_count
+    if expected_count == 0:
+        assert report["status"] == "clean"
+        return
+    assert report["status"] == "violations"
+    reported = [v for v in report["violations"] if v["rule"] == rule_id]
+    for violation in reported:
+        assert violation["check"] == "width"
+        assert violation["layer"] == layer_name
+
+
+def test_run_drc_sg13cmos5l_fixed_size_cut_rules_declare_both_bounds():
+    """Structural half of the above: each of the four rules #2388 covers
+    carries a `threshold_max_dbu` equal to its own `threshold_dbu` -- a
+    *fixed* size, not a range."""
+    deck = get_deck("sg13cmos5l")
+    fixed_size_rule_ids = {entry[0] for entry in _SG13CMOS5L_FIXED_SIZE_CUT_RULES}
+    seen = set()
+    for rule in deck:
+        if rule.id not in fixed_size_rule_ids:
+            continue
+        seen.add(rule.id)
+        assert rule.check == "width"
+        assert rule.threshold_max_dbu == rule.threshold_dbu, rule.id
+    assert seen == fixed_size_rule_ids
 
 
 def test_run_drc_sg13g2_coverage_deck_scope_matches_rule_scopes(tmp_path):

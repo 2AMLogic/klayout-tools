@@ -2913,6 +2913,7 @@ def _resolve_layout(
                 _net_label_positions,
                 _device_instance_paths,
                 _def_pin_promotion,
+                _substrate_spreading,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,
