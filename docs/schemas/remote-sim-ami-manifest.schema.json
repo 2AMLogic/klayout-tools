@@ -22,7 +22,7 @@
         "properties": {
           "pdk": {
             "type": "string",
-            "enum": ["sky130A", "gf180mcu"],
+            "enum": ["sky130A", "gf180mcu", "sg13g2"],
             "description": "PDK combination this AMI's baked model decks cover. Must match src/klayout_tools/remote_launcher.py's SUPPORTED_PDKS."
           },
           "region": {

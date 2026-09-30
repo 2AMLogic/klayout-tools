@@ -782,20 +782,28 @@ def test_unsupported_pdk_raises_before_any_s3_write(tmp_path, monkeypatch):
 def test_unsupported_pdk_is_refused_even_when_the_fleet_is_unconfigured(tmp_path):
     """The PDK is a property of the *request*, not of this host's fleet
     configuration, so it is reported first -- an operator with no provision
-    script yet still learns the request could never have run."""
-    with pytest.raises(sim.SimError, match="unsupported PDK 'ihp-sg13g2'"):
+    script yet still learns the request could never have run.
+
+    `ihp-sg13cmos5l` (not `ihp-sg13g2`, registered by #2573) is used here:
+    its family classifies (via `pdk_families.pdk_variant_family`) but is not
+    a member of `_AMI_PDK_FAMILIES`, so it is still refused."""
+    with pytest.raises(sim.SimError, match="unsupported PDK 'ihp-sg13cmos5l'"):
         sb._resolve_batch_config(
-            {"models": {"pdk": "ihp-sg13g2"}}, corner_count=1, timeout_s=30.0
+            {"models": {"pdk": "ihp-sg13cmos5l"}}, corner_count=1, timeout_s=30.0
         )
 
 
-@pytest.mark.parametrize("variant", ["gf180mcuA", "gf180mcuC", "gf180mcu", "sky130A"])
+@pytest.mark.parametrize(
+    "variant",
+    ["gf180mcuA", "gf180mcuC", "gf180mcu", "sky130A", "ihp-sg13g2", "sg13g2"],
+)
 def test_a_variant_reducible_to_a_published_family_is_accepted(
     tmp_path, monkeypatch, variant
 ):
     """`ami_pdk_key`'s family reduction applies here verbatim: `gf180mcuC` ->
     `gf180mcu` is supported, so the submit proceeds (and `job.json` keeps the
-    *variant*, which the job instance resolves locally)."""
+    *variant*, which the job instance resolves locally). `ihp-sg13g2` ->
+    `sg13g2` (#2573) is the same shape."""
     monkeypatch.delenv(sb.BUCKET_ENV, raising=False)
     script = _provision_script(tmp_path)
     config = sb._resolve_batch_config(
@@ -822,7 +830,7 @@ def test_a_request_naming_no_pdk_at_all_is_not_refused(tmp_path, monkeypatch):
     ).bucket
 
 
-@pytest.mark.parametrize("unsupported", ["sky130B", "ihp-sg13g2", "not-a-pdk"])
+@pytest.mark.parametrize("unsupported", ["sky130B", "ihp-sg13cmos5l", "not-a-pdk"])
 def test_remote_and_batch_reject_the_same_unsupported_pdk_identically(
     tmp_path, unsupported
 ):

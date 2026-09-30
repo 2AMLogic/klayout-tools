@@ -296,6 +296,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   declaring neither key produces byte-identical output. The rejection message
   for `well_boxes` beside a drawn `well_layer` now names these keys, so it
   points at a route a marker-free stream can actually take.
+- **Added** (#2573, `klt sim`; additive — `schema_version` unchanged): the
+  `remote`/`batch` backends' AMI pipeline now recognizes `sg13g2`
+  (`models.pdk: "ihp-sg13g2"` or the bare `"sg13g2"` manifest key) in
+  `remote_launcher.SUPPORTED_PDKS`/`_AMI_PDK_FAMILIES`, and
+  `scripts/aws/build-remote-sim-ami.sh --pdk sg13g2` has a build recipe that
+  drives `scripts/fetch-ihp-sg13g2.sh` + `scripts/fetch-sg13g2-sim-toolchain.sh`
+  (a from-source ngspice plus a compiled OSDI toolchain, since SG13G2's PDK
+  is not on volare's feed and a PDK-only install cannot simulate a single
+  SG13G2 device) instead of `volare`. No AMI has actually been built/published
+  for `sg13g2` yet — that is a separate, operator-only follow-up (#2574) that
+  needs real AWS access; until it lands, an `sg13g2` off-host request fails
+  with a region-aware "no published AMI" error rather than the previous
+  generic "unsupported PDK" one. See
+  [`docs/cli/sim.md`](docs/cli/sim.md)'s "Both off-host backends validate
+  `models.pdk` up front" section.
 
 - **Fixed** (#2517, `klt yield-campaign`; no schema change — **no**
   `schema_version` bump): every campaign run reported

@@ -171,6 +171,13 @@ def test_resolve_ami_rejects_unsupported_pdk(tmp_path):
         ("gf180mcuD", "gf180mcu"),
         ("gf180mcu", "gf180mcu"),  # explicit manifest key still accepted
         ("sky130A", "sky130A"),  # exact match wins over family reduction
+        # #2573: ihp-sg13g2 is the gf180mcu shape, not sky130's -- its one
+        # real local variant name ("ihp-sg13g2") never equals the manifest
+        # key ("sg13g2"), so it always goes through family reduction (via
+        # pdk_families.PDK_VARIANT_FAMILY_ALIASES's alias, not a prefix
+        # match) -- mirrors "gf180mcuC" -> "gf180mcu" above.
+        ("ihp-sg13g2", "sg13g2"),
+        ("sg13g2", "sg13g2"),  # explicit manifest key still accepted
     ],
 )
 def test_ami_pdk_key_maps_variant_to_manifest_key(requested, expected_key):
@@ -185,13 +192,16 @@ def test_ami_pdk_key_rejects_family_without_published_ami():
         rl.ami_pdk_key("sky130B")
 
 
-@pytest.mark.parametrize("requested", ["ihp-sg13g2", "ihp-sg13cmos5l"])
+@pytest.mark.parametrize("requested", ["ihp-sg13cmos5l"])
 def test_ami_pdk_key_rejects_a_family_the_remote_backend_does_not_cover(requested):
     """Issue #2026: classification is delegated to
-    `pdk_families.pdk_variant_family`, so `ihp-sg13g2` now *classifies*
-    (to `sg13g2`) where the old local prefix scan simply failed to match --
+    `pdk_families.pdk_variant_family`, so `ihp-sg13cmos5l` now *classifies*
+    (to `sg13cmos5l`) where the old local prefix scan simply failed to match --
     but `_AMI_PDK_FAMILIES` is a declared narrowing that does not include it,
-    so the answer is still a named refusal, never a guessed AMI."""
+    so the answer is still a named refusal, never a guessed AMI. `ihp-sg13g2`
+    was in this same list before #2573 registered SG13G2 with the remote
+    backend -- see `test_ami_pdk_key_maps_variant_to_manifest_key` for its
+    (now-accepted) mapping."""
     with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
         rl.ami_pdk_key(requested)
 
@@ -239,6 +249,58 @@ def test_resolve_ami_accepts_gf180mcu_variant(tmp_path):
     )
     resolved = rl.resolve_ami("gf180mcuC", "us-west-2", manifest)
     assert resolved["ami_id"] == "ami-0d29920f74c634d07"
+
+
+def test_resolve_ami_accepts_sg13g2_variant(tmp_path):
+    """#2573, the gf180mcu-shaped case (#615) applied to SG13G2: `ihp-sg13g2`
+    is the only real local variant name, and it must resolve to the `sg13g2`
+    manifest key end to end through `resolve_ami`."""
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "pdk": "sg13g2",
+                "region": "us-west-2",
+                "ami_id": "ami-0e5c6b1f2a7d34901",
+                "pdk_snapshot": "sg13g2-2026.09.27",
+                "ngspice_version": "47",
+                "built_at": "2026-09-27T00:00:00Z",
+            }
+        ],
+    )
+    resolved = rl.resolve_ami("ihp-sg13g2", "us-west-2", manifest)
+    assert resolved["ami_id"] == "ami-0e5c6b1f2a7d34901"
+
+
+def test_resolve_ami_sg13g2_names_region_when_no_published_ami(tmp_path):
+    """Acceptance criterion 5 (#2573): once SG13G2 is registered in
+    `SUPPORTED_PDKS`/`_AMI_PDK_FAMILIES`, a region with no published SG13G2
+    manifest entry already gets the region-aware "no published AMI for
+    pdk=... region=..." message with no new error-handling code -- this is a
+    regression test for that claim, not new behavior. Mirrors
+    `test_resolve_ami_missing_entry_names_both_variant_and_key`'s gf180mcu
+    case."""
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "pdk": "sg13g2",
+                "region": "us-west-2",
+                "ami_id": "ami-0e5c6b1f2a7d34901",
+                "pdk_snapshot": "sg13g2-2026.09.27",
+                "ngspice_version": "47",
+                "built_at": "2026-09-27T00:00:00Z",
+            }
+        ],
+    )
+    with pytest.raises(rl.RemoteLaunchError) as excinfo:
+        rl.resolve_ami("ihp-sg13g2", "eu-west-1", manifest)
+    message = str(excinfo.value)
+    assert "ihp-sg13g2" in message
+    assert "sg13g2" in message
+    assert "eu-west-1" in message
+    assert "no published AMI" in message
+    assert "build-remote-sim-ami.sh" in message
 
 
 def test_resolve_ami_missing_entry_names_both_variant_and_key(tmp_path):

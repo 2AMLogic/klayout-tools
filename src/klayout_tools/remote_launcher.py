@@ -122,10 +122,19 @@ DEFAULT_MANIFEST_PATH: Path = (
 )
 
 #: PDK combinations the AMI build pipeline maintains (per #264's acceptance
-#: criteria). Not every historical PDK klt supports -- only the ones the
-#: remote backend's baked-AMI transport is scoped to, per the design note's
-#: decision 4.
-SUPPORTED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu")
+#: criteria, extended to SG13G2 by #2573). Not every historical PDK klt
+#: supports -- only the ones the remote backend's baked-AMI transport is
+#: scoped to, per the design note's decision 4.
+#:
+#: ``"sg13g2"`` is the bare family, mirroring ``"gf180mcu"`` rather than
+#: ``"sky130A"``: SG13G2's one real local variant directory is
+#: ``"ihp-sg13g2"`` (see ``pdk_families.PDK_VARIANT_FAMILY_ALIASES``), which
+#: never equals its manifest key, so it always goes through
+#: :func:`ami_pdk_key`'s family-reduction path -- the same shape as
+#: ``"gf180mcuC"`` -> ``"gf180mcu"``, not sky130's variant/key coincidence.
+#: ``scripts/aws/build-remote-sim-ami.sh --pdk sg13g2`` is the matching build
+#: invocation.
+SUPPORTED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu", "sg13g2")
 
 #: The PDK **families** the remote backend's baked-AMI transport covers, used
 #: to map a request's ``models.pdk`` -- which is a local *variant* name -- onto
@@ -147,7 +156,7 @@ SUPPORTED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu")
 #: dependency. Ordering is no longer load-bearing either: :func:`ami_pdk_key`
 #: classifies via :func:`~klayout_tools.pdk_families.pdk_variant_family` and
 #: then tests membership, so there is no longest-prefix-first requirement.
-_AMI_PDK_FAMILIES: frozenset[str] = family_subset("gf180mcu", "sky130")
+_AMI_PDK_FAMILIES: frozenset[str] = family_subset("gf180mcu", "sky130", "sg13g2")
 
 #: ``c7i`` instance-family sizing ladder: (name, vcpu count), ascending.
 #: Compute-optimized, per the design note's sizing recipe: "ngspice is
@@ -539,7 +548,11 @@ def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
     Epic #253's validation. gf180mcu cannot coincide: its variants are
     ``gf180mcuA``-``D`` and its manifest key is ``gf180mcu``, so before this
     mapping existed there was no value of ``models.pdk`` that both resolved
-    locally *and* found an AMI.
+    locally *and* found an AMI. SG13G2 (#2573) is the gf180mcu shape, not
+    sky130's: its one real local variant directory is ``ihp-sg13g2`` (see
+    ``pdk_families.PDK_VARIANT_FAMILY_ALIASES``), while the manifest key is
+    the bare family ``sg13g2``, so ``ihp-sg13g2`` always goes through the
+    family-reduction path below.
 
     Exact matches win, so an explicit manifest key still works; otherwise the
     variant is reduced to its family by
