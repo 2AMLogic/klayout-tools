@@ -46,10 +46,15 @@ already-tested implementation rather than reimplementing any of it:
    of its own.
 3. **Collection.** :func:`sim.run_sim`'s own report -- already shaped
    exactly like any other `klt sim` Monte Carlo report -- is written to a
-   sample-set file and handed to :func:`yield_analysis.run_yield`
-   unmodified: the same reader (``yield_analysis._measurements_from_sim_report``)
-   and the same fit/CI/Cpk/negative-control/analytic-cross-check pipeline
-   (Phase 1) that already runs against a pre-run `klt sim` report.
+   sample-set file and handed to :func:`yield_analysis.run_yield`: the same
+   reader (``yield_analysis._measurements_from_sim_report``) and the same
+   fit/CI/Cpk/negative-control/analytic-cross-check pipeline (Phase 1) that
+   already runs against a pre-run `klt sim` report. The only thing this
+   module puts back on that report is the spec's own yield-only limit keys
+   (:data:`_YIELD_ONLY_LIMIT_KEYS`), which were held out of the dispatched
+   request so `klt sim` would not grade its measurement coverage against a
+   bound that was never its to apply -- see
+   :func:`_restore_yield_only_limits`.
 
 Pure library: :func:`run_campaign` returns plain Python data and never
 prints -- serialisation and human-readable formatting live in
@@ -81,6 +86,26 @@ _REQUIRED_SPEC_FIELDS = ("netlist", "analysis")
 #: they are always popped off before the spec is dispatched as a sim
 #: request.
 _YIELD_ONLY_FIELDS = ("confidence", "target_ci_halfwidth", "min_samples")
+
+#: Per-measurement ``limits`` keys that are `klt yield`'s own bound, never a
+#: bound `klt sim` was ever meant to apply (issue #2517). `klt sim`'s
+#: ``_RECOGNISED_LIMIT_KEYS`` is ``("min", "max")``, and since issue #2109's
+#: common rollup rule a limit key it does not recognise lands in the
+#: measurement-coverage *skip* list (reason ``unrecognized_limit_key``),
+#: which downgrades an otherwise-clean check to ``"pass_partial"``. A
+#: campaign spec declares its limits exactly once, in the shape *both* verbs
+#: read (``{"min": ..., "max": ..., "target_yield": ...}``), so these keys
+#: are stripped from the dispatched `klt sim` request
+#: (:func:`_strip_yield_only_limits`) and put back on the report handed to
+#: `klt yield` (:func:`_restore_yield_only_limits`) -- the campaign path's
+#: own concern, leaving `klt sim`'s coverage contract untouched for every
+#: other caller.
+#:
+#: Deliberately a *closed* list of known yield-only keys rather than
+#: "anything besides ``min``/``max``": a genuinely unrecognised key in a
+#: campaign spec's limits is a real spec bug, and `klt sim`'s coverage skip
+#: is exactly the report that should surface it.
+_YIELD_ONLY_LIMIT_KEYS = ("target_yield",)
 
 
 class CampaignError(Exception):
@@ -180,16 +205,88 @@ def _absolutize_paths(request: dict[str, Any], spec_dir: str) -> dict[str, Any]:
     return request
 
 
+def _strip_yield_only_limits(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Pop :data:`_YIELD_ONLY_LIMIT_KEYS` off every ``measurements[].limits``
+    dict in ``request`` (mutated in place), returning what was removed keyed
+    by measurement name -- :func:`_restore_yield_only_limits`'s input.
+
+    Only *named* measurements are stripped: the name is the only handle the
+    report side has to put the key back on, and a measurement without one is
+    a spec `klt sim` itself rejects.
+    """
+    carried: dict[str, dict[str, Any]] = {}
+    measurements = request.get("measurements")
+    if not isinstance(measurements, list):
+        return carried
+
+    for measurement in measurements:
+        if not isinstance(measurement, dict):
+            continue
+        name = measurement.get("name")
+        limits = measurement.get("limits")
+        if not isinstance(name, str) or not isinstance(limits, dict):
+            continue
+        removed = {
+            key: limits.pop(key) for key in _YIELD_ONLY_LIMIT_KEYS if key in limits
+        }
+        if removed:
+            carried.setdefault(name, {}).update(removed)
+    return carried
+
+
+def _restore_yield_only_limits(
+    report: dict[str, Any], carried: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Put the keys :func:`_strip_yield_only_limits` removed back onto a
+    `klt sim` report's ``measurements[]`` rollup, returning a new report
+    (the input is never mutated).
+
+    This is what keeps the strip scoped to the *dispatch*: a `klt sim`
+    report echoes each measurement's declared ``limits`` verbatim, and in
+    this flow that report **is** the document `klt yield` reads its limits
+    from (:func:`yield_analysis._measurements_from_sim_report`, with no
+    separate ``--limits`` file). Without this restore, stripping
+    ``target_yield`` before dispatch would silently delete the campaign's
+    own yield claim -- every measurement would come back ungraded
+    (``status: "reported"``) instead of pass/fail.
+    """
+    if not carried:
+        return report
+    entries = report.get("measurements")
+    if not isinstance(entries, list):
+        return report
+
+    rebuilt: list[Any] = []
+    for entry in entries:
+        extra = (
+            carried.get(entry["name"])
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+            else None
+        )
+        if not extra:
+            rebuilt.append(entry)
+            continue
+        limits = entry.get("limits")
+        limits = dict(limits) if isinstance(limits, dict) else {}
+        limits.update(extra)
+        rebuilt.append({**entry, "limits": limits})
+    return {**report, "measurements": rebuilt}
+
+
 def _resolve_request(
     spec: dict[str, Any], *, spec_dir: str, seed_override: int | None
-) -> tuple[dict[str, Any], dict[str, Any], int, str]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]], int, str]:
     """Build the `klt sim` request to dispatch: ``spec`` with its
     `monte_carlo.seed` resolved (CLI override > spec's own > derived
     default), its `netlist`/`models.lib` paths absolutized against
-    ``spec_dir`` (:func:`_absolutize_paths`), and `klt yield`'s own
-    run-level fields stripped off.
+    ``spec_dir`` (:func:`_absolutize_paths`), `klt yield`'s own run-level
+    fields stripped off, and its yield-only per-measurement limit keys
+    stripped off too (:func:`_strip_yield_only_limits`, issue #2517).
 
-    Returns ``(request, yield_defaults, resolved_seed, seed_source)``.
+    Returns ``(request, yield_defaults, yield_limits, resolved_seed,
+    seed_source)``, where ``yield_limits`` is what was stripped out of
+    ``measurements[].limits`` for :func:`_restore_yield_only_limits` to put
+    back on the dispatched report.
     """
     mc = dict(_require_monte_carlo_block(spec))
 
@@ -208,8 +305,9 @@ def _resolve_request(
     request["monte_carlo"] = mc
 
     yield_defaults = {key: request.pop(key, None) for key in _YIELD_ONLY_FIELDS}
+    yield_limits = _strip_yield_only_limits(request)
 
-    return request, yield_defaults, resolved_seed, seed_source
+    return request, yield_defaults, yield_limits, resolved_seed, seed_source
 
 
 def run_campaign(
@@ -245,8 +343,8 @@ def run_campaign(
     """
     spec = _load_spec(spec_path)
     spec_dir = os.path.dirname(os.path.abspath(spec_path))
-    request, yield_defaults, resolved_seed, seed_source = _resolve_request(
-        spec, spec_dir=spec_dir, seed_override=seed
+    request, yield_defaults, yield_limits, resolved_seed, seed_source = (
+        _resolve_request(spec, spec_dir=spec_dir, seed_override=seed)
     )
     mc = request["monte_carlo"]
 
@@ -268,6 +366,11 @@ def run_campaign(
         )
     except sim.SimError as exc:
         raise CampaignError(f"campaign dispatch failed: {exc}") from exc
+
+    # Issue #2517: `klt sim` never saw (and never had to grade its coverage
+    # against) the spec's yield-only limit keys -- put them back before the
+    # report becomes the document `klt yield` reads its limits from.
+    sim_report = _restore_yield_only_limits(sim_report, yield_limits)
 
     sample_set_path = os.path.join(out_dir, "sample-set.json")
     with open(sample_set_path, "w", encoding="utf-8") as handle:
