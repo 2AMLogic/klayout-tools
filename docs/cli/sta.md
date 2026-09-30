@@ -675,6 +675,19 @@ the invoking repository root. For withheld `external` paths, find
 Engine and missing-metrics errors retain their original diagnosis and append
 ` -- openroad invocation: <JSON entry>` to `error.message`. Retention
 failures are secondary diagnostics and do not mask the engine failure.
+
+When the captured output shows that `openroad` never really ran because its
+container runtime was unreachable — the `docker` daemon is not running, or the
+invoking user cannot open its socket, both of which the documented wrapper
+(`scripts/install-openroad-docker.sh`) surfaces as a plain exit code `1`, the
+same code a genuine timing failure uses — `error.message` additionally appends
+a ` -- the openroad wrapper could not reach its container runtime ...` clause
+naming that script and the remedy. This is a wording addition only (no
+`schema_version` change, no new response field): the engine's own captured text
+stays the primary diagnosis, and a genuine OpenROAD/Tcl analysis failure gets
+no such clause. Seeing it in a CI log means the request was never analyzed, so
+starting the runtime and retrying the *same* request is the right response
+rather than changing the design.
 Both captured streams remain separate and unabridged; the raw transcripts
 may contain engine-emitted absolute paths. Log retention does not make a
 partial output into successful timing evidence or isolate other STA artifacts.
