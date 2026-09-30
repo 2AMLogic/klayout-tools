@@ -344,12 +344,29 @@ def collect(client: GhClient, repo: str, run_id: str, opts: dict) -> dict:
 
 
 def budget_options(path: str) -> dict:
+    """Read `rolling_window` overrides, never letting a bad value escape.
+
+    A type mismatch here (e.g. `"baseline_runs": "15"` from a hand-edit typo)
+    must degrade to the safe default for that key alone, exactly like a
+    missing/corrupt budget file degrades to `DEFAULTS` as a whole -- an
+    unvalidated value would otherwise reach `collect()`'s arithmetic
+    (`opts["baseline_runs"] + 5`) as an uncaught `TypeError`, which is the
+    "never fails the build" guarantee this script exists to uphold.
+    """
     opts = dict(DEFAULTS)
     try:
         budget = json.loads(Path(path).read_text())
         rolling = budget.get("rolling_window", {})
         if isinstance(rolling, dict):
-            opts.update({k: v for k, v in rolling.items() if k in DEFAULTS})
+            for key, value in rolling.items():
+                default = DEFAULTS.get(key)
+                if default is None:
+                    continue
+                if isinstance(default, str):
+                    if isinstance(value, str):
+                        opts[key] = value
+                elif isinstance(value, int) and not isinstance(value, bool):
+                    opts[key] = value
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
     return opts

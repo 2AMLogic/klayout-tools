@@ -1351,6 +1351,54 @@ def test_fetcher_never_fails_the_build_when_the_api_is_unreachable(
     assert json.loads(check.stdout)["model"]["kind"] == "fixed"
 
 
+def test_fetcher_never_fails_on_a_malformed_rolling_window_override(
+    tmp_path: Path,
+) -> None:
+    """A hand-edit typo in the committed budget file's `rolling_window` block
+    (e.g. a quoted number) must degrade to the default for that key, not
+    crash with an uncaught `TypeError` -- the same "never fails the build"
+    guarantee `test_fetcher_never_fails_the_build_when_the_api_is_unreachable`
+    covers for an unreachable API, here for a malformed *local* config."""
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "feature/x", "2026-09-29T19:39:56Z", "2026-09-29T20:00:04Z"
+    )
+    responses = {
+        f"repos/{repo}/actions/runs/900": current,
+        f"repos/{repo}/actions/workflows/ci.yml/runs"
+        f"?branch=main&status=completed&per_page=20": {"workflow_runs": []},
+        f"repos/{repo}/actions/workflows/ci.yml/runs?per_page=40": {
+            "workflow_runs": []
+        },
+    }
+    bad_budget = tmp_path / "bad-budget.json"
+    bad_budget.write_text(json.dumps({"rolling_window": {"baseline_runs": "15"}}))
+
+    out = tmp_path / "history.json"
+    result = subprocess.run(
+        [
+            "python3",
+            str(FETCH_SCRIPT),
+            "--repo",
+            repo,
+            "--run-id",
+            "900",
+            "--out",
+            str(out),
+            "--budget",
+            str(bad_budget),
+            "--gh",
+            str(_fake_gh(tmp_path, responses)),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(out.read_text())
+    assert payload["error"] is None
+    assert payload["runs"] == []
+
+
 # --------------------------------------------------------------------------
 # Wiring against this repo's own checked-in files
 # --------------------------------------------------------------------------
