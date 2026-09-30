@@ -651,7 +651,14 @@ def _plan_for(tmp_path: Path, request: dict) -> tuple[dict, dict]:
         options=options,
         arcs=arcs,
     )
-    return plan, {"cell": cell, "grid": grid, "arcs": arcs, "options": options}
+    return plan, {
+        "cell": cell,
+        "corner": corner,
+        "grid": grid,
+        "thresholds": thresholds,
+        "arcs": arcs,
+        "options": options,
+    }
 
 
 def test_stimulus_plan_is_one_deck_covering_the_whole_grid(tmp_path):
@@ -662,24 +669,30 @@ def test_stimulus_plan_is_one_deck_covering_the_whole_grid(tmp_path):
     plan, _ = _plan_for(tmp_path, request)
 
     # 1 arc x 2 slews x 2 loads = 4 grid points: 4 timing cards and 4
-    # supply-charge cards each, plus one leakage card per input state (2).
+    # supply-charge cards each, plus two capacitance cards per input pin (1)
+    # and one leakage card per input state (2).
     assert len(plan["points"]) == 4
-    assert len(plan["measurements"]) == 4 * 4 + 4 * 4 + 2
-    # One cell instance per grid point plus one per leakage state, all in
-    # the one deck.
+    assert len(plan["cap_points"]) == 1
+    assert len(plan["measurements"]) == 4 * 4 + 4 * 4 + 2 * 1 + 2
+    # One cell instance per grid point, one per input pin's capacitance
+    # probe, and one per leakage state -- all in the one deck.
     lines = plan["netlist_text"].splitlines()
     assert sum(1 for line in lines if line.startswith("Xa")) == 4
+    assert sum(1 for line in lines if line.startswith("Xcp")) == 1
     assert sum(1 for line in lines if line.startswith("Xlk")) == 2
-    assert sum(1 for line in lines if line.startswith("C")) == 4  # private load
-    # One private ramp source per point, a vdd/gnd ammeter pair per point, a
-    # supply ammeter per leakage state, and the single shared supply.
+    # Private load: one per grid point plus one per capacitance probe.
+    assert sum(1 for line in lines if line.startswith("C")) == 4 + 1
+    # One private ramp source per point and per capacitance probe, a vdd/gnd
+    # ammeter pair per point, a pin ammeter per capacitance probe, a supply
+    # ammeter per leakage state, and the single shared supply.
     sources = [line for line in lines if line.startswith("V")]
     assert sum(1 for line in sources if line.startswith("Vdd ")) == 1
-    assert sum(1 for line in sources if "PWL(" in line) == 4
+    assert sum(1 for line in sources if "PWL(" in line) == 4 + 1
     assert sum(1 for line in sources if line.startswith("Vpd")) == 4
     assert sum(1 for line in sources if line.startswith("Vpg")) == 4
+    assert sum(1 for line in sources if line.startswith("Vcm")) == 1
     assert sum(1 for line in sources if line.startswith("Vpl")) == 2
-    assert len(sources) == 1 + 4 + 8 + 2
+    assert len(sources) == 1 + 4 + 8 + 2 + 2
 
 
 def test_stimulus_plan_binds_subcircuit_terminals_positionally(tmp_path):
@@ -1115,6 +1128,88 @@ def test_example_response_matches_the_documented_envelope(example_run):
 
 
 @_SKIP_NO_NGSPICE
+def test_example_measures_pin_capacitance_for_every_input(example_run):
+    """Issue #2512's headline: the worked example declares no
+    `capacitance_pf`, and the emitted `.lib` still carries a `capacitance`
+    for each input pin -- measured, not fabricated and not omitted."""
+    report, _ = example_run
+
+    pins = {pin["name"]: pin for pin in report["cell"]["pins"]}
+    for name in ("A", "B"):
+        pin = pins[name]
+        assert pin["capacitance_source"] == "measured"
+        assert pin["declared_capacitance_pf"] is None
+        measured = pin["measured_capacitance_pf"]
+        rise = pin["measured_rise_capacitance_pf"]
+        fall = pin["measured_fall_capacitance_pf"]
+        # A real gate capacitance: strictly positive, femtofarad-scale for a
+        # two-transistor-per-input synthetic cell, never a fabricated zero.
+        assert 0.0 < measured < 0.1, measured
+        assert pin["capacitance_pf"] == pytest.approx(measured)
+        # `capacitance` is the mean of the split, as in the vendor library.
+        assert measured == pytest.approx((rise + fall) / 2)
+        # The two edges see the same structure, so they track each other.
+        assert rise == pytest.approx(fall, rel=0.5)
+    # Output pins have none of it.
+    assert pins["Y"]["capacitance_source"] is None
+    assert pins["Y"]["capacitance_pf"] is None
+
+    text = Path(report["liberty"]["path"]).read_text()
+    # The bare attribute, not `rise_`/`fall_`/`max_capacitance`.
+    assert text.count("\n      capacitance : ") == 2  # one per input pin
+    assert text.count("\n      rise_capacitance : ") == 2
+    assert text.count("\n      fall_capacitance : ") == 2
+
+
+@_SKIP_NO_NGSPICE
+def test_example_lib_capacitance_matches_the_response(example_run):
+    """The `.lib` and the JSON never disagree about a pin's capacitance."""
+    report, _ = example_run
+    text = Path(report["liberty"]["path"]).read_text()
+
+    for pin in report["cell"]["pins"]:
+        if pin["capacitance_source"] is None:
+            continue
+        for attribute, key in (
+            ("capacitance", "capacitance_pf"),
+            ("rise_capacitance", "measured_rise_capacitance_pf"),
+            ("fall_capacitance", "measured_fall_capacitance_pf"),
+        ):
+            rendered = liberty_writer.format_number(pin[key])
+            assert f"{attribute} : {rendered};" in text, (pin["name"], attribute)
+
+
+@_SKIP_NO_NGSPICE
+def test_declared_capacitance_wins_end_to_end(tmp_path):
+    """The override path, through a real run: declaring `capacitance_pf`
+    replaces the measured value in the `.lib`, and the split is dropped so
+    `native/statime`'s reader (which prefers a rise/fall pair) still sees the
+    override."""
+    workdir = tmp_path / "characterize"
+    shutil.copytree(EXAMPLES_DIR, workdir)
+    request_path = workdir / "request.json"
+    request = json.loads(request_path.read_text())
+    request["cell"]["pins"][0]["capacitance_pf"] = 0.0125
+    request_path.write_text(json.dumps(request))
+
+    report = characterize.run_characterize(str(request_path))
+
+    pins = {pin["name"]: pin for pin in report["cell"]["pins"]}
+    assert pins["A"]["capacitance_source"] == "declared"
+    assert pins["A"]["capacitance_pf"] == pytest.approx(0.0125)
+    assert pins["A"]["measured_capacitance_pf"] > 0
+    assert pins["A"]["measured_capacitance_pf"] != pytest.approx(0.0125)
+    assert pins["B"]["capacitance_source"] == "measured"
+
+    text = Path(report["liberty"]["path"]).read_text()
+    assert "\n      capacitance : 0.0125;" in text
+    # Only `B` keeps a split; `A`'s declared scalar stands alone.
+    assert text.count("\n      rise_capacitance : ") == 1
+    assert text.count("\n      fall_capacitance : ") == 1
+    assert report["liberty"]["roundtrip"]["status"] != "fail"
+
+
+@_SKIP_NO_NGSPICE
 def test_example_reports_both_derived_arcs_with_their_side_state(example_run):
     report, _ = example_run
 
@@ -1213,14 +1308,17 @@ def test_example_writes_its_artifacts_next_to_the_request(example_run):
     grid = report["grid"]
     assert len(sim_request["measurements"]) == grid["total_measurement_count"]
     # `measurement_count` keeps its #2502 meaning (timing cards only); the
-    # power and leakage cards are counted beside it, not folded into it.
+    # power, leakage, and capacitance cards are counted beside it, not folded
+    # into it.
     assert grid["measurement_count"] == grid["points"] * grid["arc_count"] * 4
     assert grid["power_measurement_count"] == grid["points"] * grid["arc_count"] * 4
     assert grid["leakage_measurement_count"] == 4  # 2**2 input states
+    assert grid["capacitance_measurement_count"] == 4  # 2 inputs x 2 edges
     assert grid["total_measurement_count"] == (
         grid["measurement_count"]
         + grid["power_measurement_count"]
         + grid["leakage_measurement_count"]
+        + grid["capacitance_measurement_count"]
     )
 
 
@@ -1574,6 +1672,343 @@ def test_render_library_rejects_a_ragged_power_table():
     )
     with pytest.raises(liberty_writer.LibertyWriteError, match="fall_power"):
         liberty_writer.render_library(library)
+
+
+# --------------------------------------------------------------------------- #
+# Measured pin capacitance (issue #2512; no simulator required)
+# --------------------------------------------------------------------------- #
+
+
+def _cap_cards(plan: dict) -> dict[str, str]:
+    return {
+        entry["name"]: entry["spice"]
+        for entry in plan["measurements"]
+        if entry["name"].startswith("cp")
+    }
+
+
+def test_capacitance_probe_exists_for_every_input_pin(tmp_path):
+    """One probe instance per *input* pin -- never for an output, and never
+    folded into the grid instances (whose input node is shared with the arc
+    stimulus)."""
+    request = _inverter_request(tmp_path)
+    request["cell"].update(
+        {
+            "name": "nand2_demo",
+            "pins": [
+                {"name": "A", "direction": "input"},
+                {"name": "B", "direction": "input"},
+                {"name": "Y", "direction": "output", "function": "!(A*B)"},
+            ],
+        }
+    )
+    plan, _ = _plan_for(tmp_path, request)
+
+    assert [point["pin"] for point in plan["cap_points"]] == ["A", "B"]
+    assert sorted(_cap_cards(plan)) == [
+        "cp0_qcf",
+        "cp0_qcr",
+        "cp1_qcf",
+        "cp1_qcr",
+    ]
+    text = plan["netlist_text"]
+    # Each probe drives its pin through its own 0 V ammeter, off its own ramp.
+    cards = _cap_cards(plan)
+    for index, tag in enumerate(("cp0", "cp1")):
+        assert f"Vcm{tag} cs_{tag} ci_{tag} DC 0" in text
+        assert f"Vc{tag} cs_{tag} 0 PWL(" in text
+        assert f"INTEG i(Vcm{tag})" in cards[f"cp{index}_qcr"]
+
+
+def test_capacitance_probe_holds_the_arcs_own_side_inputs(tmp_path):
+    """The acceptance bar: the other inputs sit at the *timing arc's* state.
+
+    Held at the controlling value instead, a NAND input would see no output
+    movement and report a capacitance with no Miller contribution at all.
+    """
+    request = _inverter_request(tmp_path)
+    request["cell"].update(
+        {
+            "name": "nand2_demo",
+            "pins": [
+                {"name": "A", "direction": "input"},
+                {"name": "B", "direction": "input"},
+                {"name": "Y", "direction": "output", "function": "!(A*B)"},
+            ],
+        }
+    )
+    plan, _ = _plan_for(tmp_path, request)
+
+    by_pin = {point["pin"]: point for point in plan["cap_points"]}
+    assert by_pin["A"]["side_inputs"] == {"B": True}
+    assert by_pin["B"]["side_inputs"] == {"A": True}
+    # `.subckt nand2_demo Y A B VDD VSS` -- the held pin is tied to `vdd`.
+    instances = {
+        line.split()[0]: line.split()
+        for line in plan["netlist_text"].splitlines()
+        if line.startswith("Xcp")
+    }
+    assert instances["Xcp0"][2:4] == ["ci_cp0", "vdd"]
+    assert instances["Xcp1"][2:4] == ["vdd", "ci_cp1"]
+
+
+def test_capacitance_probe_side_state_falls_back_to_low_for_an_unused_pin(tmp_path):
+    """An input no arc names (a second output's input, an unused pin) has no
+    arc state to borrow -- its neighbours are held low, never left floating."""
+    request = _inverter_request(tmp_path)
+    request["cell"].update(
+        {
+            "name": "nand2_demo",
+            "pins": [
+                {"name": "A", "direction": "input"},
+                {"name": "B", "direction": "input"},
+                {"name": "Y", "direction": "output", "function": "!A"},
+            ],
+        }
+    )
+    plan, resolved = _plan_for(tmp_path, request)
+
+    assert [arc.related_pin for arc in resolved["arcs"]] == ["A"]
+    by_pin = {point["pin"]: point for point in plan["cap_points"]}
+    assert by_pin["B"]["side_inputs"] == {"A": False}
+
+
+def test_capacitance_cards_integrate_the_slew_threshold_region(tmp_path):
+    """The charge window is the library's own slew-threshold region of the
+    applied ramp, not the whole rail-to-rail edge -- exact arithmetic on a
+    known linear ramp, so no `WHEN` trigger is needed."""
+    request = _inverter_request(tmp_path)
+    plan, _ = _plan_for(tmp_path, request)
+
+    point = plan["cap_points"][0]
+    ramp = point["ramp_ns"]
+    window = plan["window"]
+    # Defaults: 20% -> 80%, i.e. 0.6 of the ramp in the middle of each edge.
+    assert point["rise_span"] == pytest.approx(0.6)
+    assert point["fall_span"] == pytest.approx(0.6)
+    # The probe is driven at the grid's FASTEST transition and lightest load.
+    assert ramp == pytest.approx(
+        min(
+            characterize._ramp_ns(t, liberty_writer.Thresholds())
+            for t in request["grid"]["input_transition_ns"]
+        )
+    )
+    assert point["output_load_pf"] == min(request["grid"]["output_load_pf"])
+
+    cards = _cap_cards(plan)
+    rise_from = window["rise_start_ns"] + 0.2 * ramp
+    rise_to = window["rise_start_ns"] + 0.8 * ramp
+    assert f"FROM={characterize._spice_number(rise_from)}n" in cards["cp0_qcr"]
+    assert f"TO={characterize._spice_number(rise_to)}n" in cards["cp0_qcr"]
+    fall_from = window["fall_start_ns"] + 0.2 * ramp
+    fall_to = window["fall_start_ns"] + 0.8 * ramp
+    assert f"FROM={characterize._spice_number(fall_from)}n" in cards["cp0_qcf"]
+    assert f"TO={characterize._spice_number(fall_to)}n" in cards["cp0_qcf"]
+
+
+def test_capacitance_cards_follow_custom_slew_thresholds(tmp_path):
+    """A library declaring 30/70% thresholds integrates over 30->70% of the
+    ramp and normalises by that 0.4 span -- the emitted number always means
+    what the emitted header says it means."""
+    request = _inverter_request(tmp_path)
+    request["thresholds"] = {
+        "slew_lower_threshold_pct_rise": 30.0,
+        "slew_upper_threshold_pct_rise": 70.0,
+        "slew_lower_threshold_pct_fall": 30.0,
+        "slew_upper_threshold_pct_fall": 70.0,
+    }
+    plan, _ = _plan_for(tmp_path, request)
+
+    point = plan["cap_points"][0]
+    assert point["rise_span"] == pytest.approx(0.4)
+    assert point["fall_span"] == pytest.approx(0.4)
+    rise_from = point["ramp_ns"] * 0.3 + plan["window"]["rise_start_ns"]
+    assert (
+        f"FROM={characterize._spice_number(rise_from)}n" in _cap_cards(plan)["cp0_qcr"]
+    )
+
+
+def test_build_pin_capacitance_is_charge_over_the_threshold_span(tmp_path):
+    """Q / (V * span), with the falling edge's negative integral flipped, and
+    `capacitance` the mean of the two -- the convention the vendor library
+    uses (`sg13g2_inv_1`'s `capacitance` is exactly the mean of its
+    `rise_capacitance`/`fall_capacitance`)."""
+    request = _inverter_request(tmp_path)
+    plan, resolved = _plan_for(tmp_path, request)
+    corner = resolved["corner"]
+    span = plan["cap_points"][0]["rise_span"]
+    # 3 fF on the rise, 2.5 fF on the fall.
+    values = {
+        "cp0_qcr": 0.003e-12 * corner["supply_v"] * span,
+        "cp0_qcf": -0.0025e-12 * corner["supply_v"] * span,
+    }
+
+    measured = characterize._build_pin_capacitance(plan, values, corner)
+
+    assert measured["A"]["rise_capacitance_pf"] == pytest.approx(0.003)
+    assert measured["A"]["fall_capacitance_pf"] == pytest.approx(0.0025)
+    assert measured["A"]["capacitance_pf"] == pytest.approx(0.00275)
+
+
+def test_build_pin_capacitance_refuses_a_missing_probe(tmp_path):
+    request = _inverter_request(tmp_path)
+    plan, resolved = _plan_for(tmp_path, request)
+
+    with pytest.raises(characterize.CharacterizeError, match="capacitance probe"):
+        characterize._build_pin_capacitance(
+            plan, {"cp0_qcr": 1e-15}, resolved["corner"]
+        )
+
+
+def test_measured_capacitance_is_emitted_with_its_rise_fall_split(tmp_path):
+    """No declared value: the `.lib` carries the measured `capacitance` plus
+    the split, and the response says the source was the measurement."""
+    request = _inverter_request(tmp_path)
+    del request["cell"]["pins"][0]["capacitance_pf"]
+    result = _fake_result(tmp_path, request, measured={"A": (0.0031, 0.0029)})
+
+    pin = characterize._build_liberty_cell(
+        result=result, grid={"output_load_pf": (0.005, 0.03)}
+    ).pins[0]
+    assert pin.capacitance_pf == pytest.approx(0.0030)
+    assert pin.rise_capacitance_pf == pytest.approx(0.0031)
+    assert pin.fall_capacitance_pf == pytest.approx(0.0029)
+
+    entry = characterize._resolve_pin_capacitance(
+        result["cell"]["pins"][0], result["pin_capacitance"]
+    )
+    assert entry["capacitance_source"] == "measured"
+    assert entry["declared_capacitance_pf"] is None
+    assert entry["measured_capacitance_pf"] == pytest.approx(0.0030)
+
+
+def test_declared_capacitance_overrides_the_measurement_and_stands_alone(tmp_path):
+    """A caller-declared value wins -- and is emitted *without* the measured
+    split, because `native/statime`'s reader prefers a rise/fall pair over
+    the bare attribute and would otherwise discard the override."""
+    request = _inverter_request(tmp_path)  # declares A at 0.002 pF
+    result = _fake_result(tmp_path, request, measured={"A": (0.0031, 0.0029)})
+
+    pin = characterize._build_liberty_cell(
+        result=result, grid={"output_load_pf": (0.005, 0.03)}
+    ).pins[0]
+    assert pin.capacitance_pf == pytest.approx(0.002)
+    assert pin.rise_capacitance_pf is None
+    assert pin.fall_capacitance_pf is None
+
+    entry = characterize._resolve_pin_capacitance(
+        result["cell"]["pins"][0], result["pin_capacitance"]
+    )
+    assert entry["capacitance_source"] == "declared"
+    assert entry["capacitance_pf"] == pytest.approx(0.002)
+    # Both numbers stay visible, so the override is auditable.
+    assert entry["declared_capacitance_pf"] == pytest.approx(0.002)
+    assert entry["measured_capacitance_pf"] == pytest.approx(0.0030)
+
+
+def test_output_pins_carry_no_capacitance(tmp_path):
+    request = _inverter_request(tmp_path)
+    result = _fake_result(tmp_path, request, measured={"A": (0.0031, 0.0029)})
+
+    entry = characterize._resolve_pin_capacitance(
+        result["cell"]["pins"][1], result["pin_capacitance"]
+    )
+    assert entry == {
+        "capacitance_pf": None,
+        "capacitance_source": None,
+        "declared_capacitance_pf": None,
+        "measured_capacitance_pf": None,
+        "measured_rise_capacitance_pf": None,
+        "measured_fall_capacitance_pf": None,
+    }
+
+
+def _fake_result(tmp_path: Path, request: dict, *, measured: dict) -> dict:
+    """A `_characterize_cell`-shaped result with hand-set tables, so the
+    emission-side precedence rule can be tested without a simulator."""
+    plan, resolved = _plan_for(tmp_path, request)
+    tables = {
+        index: dict.fromkeys(_TABLES, _table())
+        for index in range(len(resolved["arcs"]))
+    }
+    return {
+        "cell": resolved["cell"],
+        "arcs": resolved["arcs"],
+        "plan": plan,
+        "tables": tables,
+        "power_tables": {
+            index: {name: _table() for name in _POWER_TABLES}
+            for index in range(len(resolved["arcs"]))
+        },
+        "leakage": {"cell_leakage_power_pw": 1.0, "states": []},
+        "pin_capacitance": {
+            pin: {
+                "rise_capacitance_pf": rise,
+                "fall_capacitance_pf": fall,
+                "capacitance_pf": (rise + fall) / 2,
+                "side_inputs": {},
+                "output_load_pf": 0.005,
+                "input_transition_ramp_ns": 0.03,
+            }
+            for pin, (rise, fall) in measured.items()
+        },
+    }
+
+
+def test_render_library_refuses_a_half_capacitance_split():
+    """`native/statime` averages a rise/fall pair, so a lone half would be
+    read as the whole pin capacitance -- refuse rather than mislead."""
+    base = _library()
+    pin = base.cells[0].pins[0]
+    library = _library(
+        cells=(
+            liberty_writer.Cell(
+                name="inv_demo",
+                pins=(
+                    liberty_writer.Pin(
+                        name=pin.name,
+                        direction=pin.direction,
+                        capacitance_pf=0.002,
+                        rise_capacitance_pf=0.0021,
+                    ),
+                    base.cells[0].pins[1],
+                ),
+            ),
+        )
+    )
+    with pytest.raises(
+        liberty_writer.LibertyWriteError, match="must be emitted as a pair"
+    ):
+        liberty_writer.render_library(library)
+
+
+def test_render_library_emits_the_capacitance_split_in_vendor_order():
+    base = _library()
+    pin = base.cells[0].pins[0]
+    library = _library(
+        cells=(
+            liberty_writer.Cell(
+                name="inv_demo",
+                pins=(
+                    liberty_writer.Pin(
+                        name=pin.name,
+                        direction=pin.direction,
+                        capacitance_pf=0.002,
+                        rise_capacitance_pf=0.0021,
+                        fall_capacitance_pf=0.0019,
+                    ),
+                    base.cells[0].pins[1],
+                ),
+            ),
+        )
+    )
+    text = liberty_writer.render_library(library)
+
+    assert "      capacitance : 0.002;" in text
+    assert "      rise_capacitance : 0.0021;" in text
+    assert "      fall_capacitance : 0.0019;" in text
+    assert text.index("capacitance :") < text.index("rise_capacitance :")
+    assert text.index("rise_capacitance :") < text.index("fall_capacitance :")
 
 
 # --------------------------------------------------------------------------- #

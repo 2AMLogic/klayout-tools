@@ -552,6 +552,73 @@ def test_vendor_comparison_is_within_the_documented_tolerance(vendor_run, field)
     )
 
 
+#: Rough-check bounds on measured-vs-vendor **pin capacitance** (issue
+#: #2512). Deliberately much looser than `liberty_compare.DEFAULT_TOLERANCES`:
+#: unlike a delay table, a Liberty `capacitance` has no single normative
+#: definition -- the number depends on the voltage window the pin charge is
+#: integrated over and the input slew it is measured at, and IHP does not
+#: document either choice. `klt characterize` integrates over the library's
+#: own slew-threshold region at the grid's fastest transition, which lands at
+#: 0.84-0.98x of IHP's own numbers across these eight pins (measured
+#: 2026-09-27 on the typ 1.20 V / 25 C corner). The band below brackets that
+#: with margin: it is a "same quantity, same order, same ranking" check, in
+#: the same rough-check spirit #2502 used for its first delay tables -- not a
+#: claim of numerical agreement. See docs/cli/characterize.md's "Pin
+#: capacitance" section.
+VENDOR_CAPACITANCE_BAND = (0.7, 1.3)
+
+
+@_SKIP_NO_VENDOR
+def test_vendor_pin_capacitance_is_in_the_right_ballpark(vendor_run):
+    """Every measured input-pin capacitance sits within a rough factor of
+    IHP's own `sg13g2_stdcell` value for the same pin, and the two edges of
+    the split track each other as the vendor's do."""
+    report, _, reference = vendor_run
+    vendor = _vendor_pin_capacitances(reference)
+
+    checked = 0
+    for cell in report["cells"]:
+        name = cell["cell"]["name"]
+        for pin in cell["cell"]["pins"]:
+            if pin["direction"] != "input":
+                continue
+            assert pin["capacitance_source"] == "measured", pin
+            measured = pin["measured_capacitance_pf"]
+            expected = vendor[(name, pin["name"])]
+            ratio = measured / expected
+            low, high = VENDOR_CAPACITANCE_BAND
+            assert low <= ratio <= high, (
+                f"{name}/{pin['name']}: measured {measured:.6g} pF vs vendor "
+                f"{expected:.6g} pF (ratio {ratio:.2f}, band {low}-{high})"
+            )
+            # The vendor's own rise/fall split is within a few percent of
+            # itself on these cells; so is ours.
+            assert pin["measured_rise_capacitance_pf"] == pytest.approx(
+                pin["measured_fall_capacitance_pf"], rel=0.15
+            )
+            checked += 1
+    assert checked == sum(len(inputs) for _, inputs, _ in VENDOR_CELLS)
+
+
+def _vendor_pin_capacitances(reference: Path) -> dict[tuple[str, str], float]:
+    """`{(cell, pin): capacitance}` for every input pin of `VENDOR_CELLS`,
+    read out of the vendor `.lib` with the comparison module's own reader."""
+    library = liberty_compare.parse_liberty(str(reference))
+    wanted = {name for name, _, _ in VENDOR_CELLS}
+    found: dict[tuple[str, str], float] = {}
+    for cell in library.children("cell"):
+        if not cell.args or cell.args[0] not in wanted:
+            continue
+        for pin in cell.children("pin"):
+            value = pin.attributes.get("capacitance")
+            if value is None or not pin.args:
+                continue
+            if pin.attributes.get("direction") != "input":
+                continue
+            found[(cell.args[0], pin.args[0])] = float(value)
+    return found
+
+
 @_SKIP_NO_VENDOR
 def test_vendor_batch_lib_round_trips_through_statime(vendor_run):
     report, _, _ = vendor_run
