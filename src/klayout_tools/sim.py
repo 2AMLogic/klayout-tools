@@ -107,6 +107,7 @@ from .coverage import (
 )
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk
+from .pdk import ambiguity_warning as pdk_ambiguity_warning
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -1180,6 +1181,7 @@ def run_sim(
             )
         except PdkNotFoundError:
             provenance_pdk = None
+        _warn_pdk_ambiguity(provenance_pdk)
 
     analysis = request.get("analysis") or {}
     if "kind" not in analysis or "args" not in analysis:
@@ -1987,6 +1989,23 @@ def run_sim(
 # --------------------------------------------------------------------------- #
 # Model/netlist path resolution
 # --------------------------------------------------------------------------- #
+
+
+def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
+    """Print :func:`klayout_tools.pdk.ambiguity_warning` to stderr when the
+    run's PDK root was resolved by *search* and more than one install on this
+    host holds the requested variant (issue #2564).
+
+    The run is still well-defined -- resolution is first-match-wins -- but a
+    record can name a pinned ``open_pdks`` commit that a *different* build
+    actually produced, and nothing else says so up front: the JSON's
+    ``provenance.pdk.source`` is correct but purely after-the-fact, and a
+    caller only finds it by inspecting provenance it had no reason to
+    suspect. No-op for an unresolved PDK or an unambiguous one.
+    """
+    warning = pdk_ambiguity_warning(resolution) if resolution else None
+    if warning is not None:
+        print(warning, file=sys.stderr)
 
 
 def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
