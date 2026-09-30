@@ -14,6 +14,37 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2512, `klt characterize`; additive — `schema_version`
+  unchanged): every **input** pin's `capacitance` is now *measured*, not
+  echoed. One extra probe instance per input pin joins the same `klt sim`
+  deck (no second simulator run): the pin is driven through its own 0 V
+  ammeter, the cell's other inputs are held at that pin's own timing-arc
+  side-input state (the same state its `cell_rise`/`cell_fall` tables were
+  measured at, so the Miller contribution the pin actually presents is
+  captured — a NAND input held at its *controlling* value would see no
+  output movement and report a hollow number), and two `INTEG` cards
+  integrate the pin current over the library's own slew-threshold region of
+  each edge to give `rise_capacitance`/`fall_capacitance`; their mean is
+  `capacitance`, the vendor convention (IHP's `sg13g2_inv_1` pin `A` reports
+  `capacitance` as exactly the mean of its own rise/fall pair). A
+  caller-declared `pins[].capacitance_pf` still **overrides** the
+  measurement — the `.lib` then carries that value as `capacitance` alone,
+  with no rise/fall split, matching how `native/statime`'s reader resolves
+  the pair before the bare attribute. Each response `pins[]` entry gains
+  `capacitance_source` (`"measured"` / `"declared"` / `null` for an output),
+  `declared_capacitance_pf`, `measured_capacitance_pf`, and
+  `measured_rise_capacitance_pf`/`measured_fall_capacitance_pf`, so a reader
+  can always tell which source won and what the other would have been; the
+  `grid` object gains `capacitance_measurement_count` (two per input pin per
+  cell). `capacitance_pf` itself keeps its #2502/#2503 shape (`number |
+  null`) but is now populated from the measurement when the request
+  declares nothing, where it previously stayed `null`. `liberty_compare.py`
+  deliberately excludes pin `capacitance` from its normative tolerance
+  checks — unlike a delay table, Liberty `capacitance` has no single
+  definition independent of the integration window and input slew it was
+  measured at, and IHP documents neither choice for its own library. See
+  [`docs/cli/characterize.md`](docs/cli/characterize.md)'s "Pin capacitance"
+  section.
 - **Fixed** (#2608, `klt signoff` T1 item 11; additive — **no**
   `schema_version` bump, and no new reason string: a citation that previously
   rendered `supply_spec_incomplete` for a spec document that could not be
@@ -219,6 +250,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   case-folded). See [`docs/cli/sim.md`](docs/cli/sim.md)'s "Failure
   classification" section.
 
+- **Changed** (#2526, `klt signoff --manifest/--fleet --check`; additive
+  payload change — `schema_version` unchanged): `--check` no longer reports
+  `status: "drifted"` when the only difference between the committed and the
+  freshly-graded report is the checklist doc's own **wording** — each
+  `items[]` entry's `title`/`text`/`notes` (which a tier report inlines
+  verbatim from `design-evidence-tiers.md`), `source_doc_content_hash`, and,
+  in `--fleet` mode, the per-block copies of the same. A `klt` version pin
+  does not pin the doc, so an upstream rewording alone used to turn a
+  consumer's committed verdict of record red, indistinguishable from a real
+  grading change. **The exclusion is from the verdict, not from the
+  report**: the response gains `doc_drift` (bool) and `doc_drift_fields`
+  (the excluded `{field, committed, fresh}` entries that moved), so a gate
+  can warn on "the yardstick was reworded" while still failing only on "the
+  evidence moved". Any change to an item's `id`/`status`/`reason`/
+  `citation`/`tier`, to `t1_item_count`/`build_t1_item_count`/
+  `t1_met_count`, or to `source_doc` still reports `"drifted"` and exits
+  `3` — including when it co-occurs with a prose change on the same item.
+  `--describe-grader` and `grading_ruleset_id` are unaffected.
 - **Added** (#2522, `klt sim`; additive — `schema_version` unchanged): a
   `corners.process` bundle's `sections[]` entries may now name their **own**
   model library — `{"lib": str, "section": str}` alongside today's bare

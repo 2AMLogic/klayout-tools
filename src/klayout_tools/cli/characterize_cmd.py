@@ -110,6 +110,25 @@ def _print_cell(entry: dict) -> None:
             print(
                 f"    {table}: min {min(flat):.5g} {unit}, max {max(flat):.5g} {unit}"
             )
+    for pin in cell["pins"]:
+        source = pin.get("capacitance_source")
+        if source is None:
+            continue
+        line = f"  pin {pin['name']} capacitance: {pin['capacitance_pf']:.5g} pF"
+        if source == "measured":
+            print(
+                line + " (measured; rise "
+                f"{pin['measured_rise_capacitance_pf']:.5g}, fall "
+                f"{pin['measured_fall_capacitance_pf']:.5g})"
+            )
+        else:
+            measured = pin.get("measured_capacitance_pf")
+            print(
+                line
+                + " (declared, overriding measured "
+                + (f"{measured:.5g}" if measured is not None else "n/a")
+                + " pF)"
+            )
     leakage = entry["leakage"]
     print(f"  cell_leakage_power: {leakage['cell_leakage_power_pw']:.5g} pW")
     for state in leakage["states"]:
