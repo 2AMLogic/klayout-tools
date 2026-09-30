@@ -14,6 +14,239 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2512, `klt characterize`; additive — `schema_version`
+  unchanged): every **input** pin's `capacitance` is now *measured*, not
+  echoed. One extra probe instance per input pin joins the same `klt sim`
+  deck (no second simulator run): the pin is driven through its own 0 V
+  ammeter, the cell's other inputs are held at that pin's own timing-arc
+  side-input state (the same state its `cell_rise`/`cell_fall` tables were
+  measured at, so the Miller contribution the pin actually presents is
+  captured — a NAND input held at its *controlling* value would see no
+  output movement and report a hollow number), and two `INTEG` cards
+  integrate the pin current over the library's own slew-threshold region of
+  each edge to give `rise_capacitance`/`fall_capacitance`; their mean is
+  `capacitance`, the vendor convention (IHP's `sg13g2_inv_1` pin `A` reports
+  `capacitance` as exactly the mean of its own rise/fall pair). A
+  caller-declared `pins[].capacitance_pf` still **overrides** the
+  measurement — the `.lib` then carries that value as `capacitance` alone,
+  with no rise/fall split, matching how `native/statime`'s reader resolves
+  the pair before the bare attribute. Each response `pins[]` entry gains
+  `capacitance_source` (`"measured"` / `"declared"` / `null` for an output),
+  `declared_capacitance_pf`, `measured_capacitance_pf`, and
+  `measured_rise_capacitance_pf`/`measured_fall_capacitance_pf`, so a reader
+  can always tell which source won and what the other would have been; the
+  `grid` object gains `capacitance_measurement_count` (two per input pin per
+  cell). `capacitance_pf` itself keeps its #2502/#2503 shape (`number |
+  null`) but is now populated from the measurement when the request
+  declares nothing, where it previously stayed `null`. `liberty_compare.py`
+  deliberately excludes pin `capacitance` from its normative tolerance
+  checks — unlike a delay table, Liberty `capacitance` has no single
+  definition independent of the integration window and input slew it was
+  measured at, and IHP documents neither choice for its own library. See
+  [`docs/cli/characterize.md`](docs/cli/characterize.md)'s "Pin capacitance"
+  section.
+- **Fixed** (#2608, `klt signoff` T1 item 11; additive — **no**
+  `schema_version` bump, and no new reason string: a citation that previously
+  rendered `supply_spec_incomplete` for a spec document that could not be
+  found now grades on that document's real declarations): the `klt erc`
+  envelope item 11 cites echoes its spec document's *path*, and `klt signoff`
+  re-reads that document to recover the declarations the envelope does not
+  carry (declared supplies, stackup, ties). That path was resolved from one
+  directory only — `spec["cwd"]` for a command-backed manifest entry, the
+  grading process's own cwd otherwise — so an ERC run made from the layout
+  directory, which records a bare `"spec": "erc_supply_spec.json"`, was
+  unreadable from a repo-root `klt signoff --manifest`. It is now resolved
+  the same two-candidate way issue #2197 resolves `klt yield`'s samples
+  document: **relative to the ERC report's own directory first**, then
+  relative to the producing run's directory as the previous, compatibility
+  fallback. Where both candidates hold a same-named document the envelope's
+  own `provenance.spec.content_hash` (issue #2049) decides which is the cited
+  spec, so a coincidentally-named neighbour beside the evidence can never
+  turn a fresh citation into a reported `stale_evidence`; a genuinely edited
+  or unpinned spec still renders `stale_evidence`/`unverifiable_provenance`
+  exactly as issue #2496 made it. A spec found at neither candidate still
+  renders `supply_spec_incomplete` — unprovable, never assumed. No `klt erc`
+  output changed, and no manifest needs editing.
+- **Fixed** (#2602, `klt gen` / `klt extract` / `klt lvs` on `sg13cmos5l`;
+  additive — **no** `schema_version` bump, but user-visible: the
+  `sg13cmos5l` deck's `provenance.deck` sha256 changes, a `dummy > 0`
+  generated stream carries one new layer, and a `res_array` that previously
+  extracted `2 * rows * dummy` extra devices now does not): `klt gen
+  res_array` (the only dummy-drawing generator this family's
+  `_GENERATOR_FAMILY_DEFERRED` table lets run on `sg13cmos5l`) accepts a
+  `"dummy": N` param on `sg13cmos5l`, but that family's curated extraction
+  deck declared no `dummy` marker layer — so the tool's own generator drew
+  edge-fill resistor units the tool's own `klt lvs` could only report as
+  `device.unmatched`. `decks/sg13cmos5l.py`'s `EXTRACTION_DECK` now
+  declares `dummy=(100, 50)` — a deck-local convention layer on a layer
+  number this family's own transcribed `.lyp`/DRC/LVS layer tables assign
+  no purpose to at all (sg13cmos5l has no native per-device dummy mark; see
+  that deck's own comment for the provenance and the non-collision
+  verification), and `res_array` draws it over each dummy unit's
+  recognised body-segment footprint, so the extractor-side
+  dummy-suppression machinery that shipped in #295/#462 fires on this
+  family too. This is the `sg13cmos5l` counterpart of sky130's own
+  `(83, 20)` declaration (#491) and gf180mcu's own `(100, 50)` declaration
+  (#2599). `sg13g2` still declares no `dummy` layer and is unaffected
+  (tracked separately, #2590). A `dummy: 0` request on `sg13cmos5l` draws
+  no marker shape and extracts exactly as before.
+- **Fixed** (#2595, `klt lvs --check`; additive — **no** `schema_version`
+  bump, and no change to where an input path is resolved): `--check` resolves
+  the `layout`/`reference` paths a committed report echoes back relative to
+  the **current working directory**, so a committed request/report pair whose
+  paths are relative to the request *file's own* directory only verified when
+  `--check` ran from that directory. Hitting it rendered as `status:
+  drifted` with `actual: null` — indistinguishable from "the recorded hash no
+  longer matches", so a reader who knew the inputs were untouched was told
+  the report had lost its hash rather than that the file was not found. The
+  CWD anchoring is deliberate and unchanged (`klt drc --check` resolves its
+  own `provenance.input` path the same way; re-anchoring one verb and not the
+  other would leave the two silently disagreeing about what a committed
+  relative path means) — but an echoed path that names no existing file now
+  gets an additional, optional `input_not_found` block on its `checks[]`
+  entry: `path` (the echoed path verbatim), `resolved` (the absolute path
+  actually looked for), and `found_relative_to_report` (the absolute path the
+  input *does* occupy relative to the committed report's own directory when
+  it is there, else `null` — the tell that the pair is intact and `--check`
+  was merely invoked from elsewhere). `expected`/`actual`/`match`/`status`
+  and the exit code are unchanged, the key is absent on a genuine content
+  mismatch, and text output prints `actual: None (input not found: …)` plus
+  the report-relative hint in place of the bare `None`. `klt drc --check` is
+  untouched.
+- **Fixed** (#2592, `klt functional-verification`; additive — **no**
+  `schema_version` bump, but user-visible: a per-test `sim_time_ns` that
+  reported `null` on every run now carries a real number again): cocotb 2.1.0
+  restructured its JUnit XML writer and moved the per-test timing facts off
+  the `<testcase>` element's own `sim_time_ns` attribute into a child
+  `<properties>` block (`sim_time_duration` plus a separately-reported
+  `sim_time_unit`). `_parse_results_xml` only ever read the attribute, so
+  with the repo's own `cocotb>=2.1.0` pin every `tests[].sim_time_ns` in the
+  response silently degraded to `null` — contract-legal (the field is
+  documented as `null` when the simulator did not report it) and therefore
+  invisible to CI, whose only non-null assertions ran against synthetic
+  2.0.x-shaped fixtures. The attribute is still read **first** and used
+  unchanged, so stored historical `results.xml` evidence parses exactly as
+  before; only when it is absent is `sim_time_duration` read and scaled by
+  the reported unit (never assumed to be `ns`). A `<testcase>` carrying
+  neither shape — a test that never ran — still resolves to `null` rather
+  than raising. The real-toolchain Icarus integration test now asserts every
+  executed test reports a non-null `sim_time_ns`, so the next upstream JUnit
+  reshuffle fails loudly instead of silently nulling the field again.
+- **Fixed** (#2599, `klt gen` / `klt extract` / `klt lvs` on `gf180mcu`;
+  additive — **no** `schema_version` bump, but user-visible: the `gf180mcu`
+  deck's `provenance.deck` sha256 changes, a `dummy > 0` generated stream
+  carries one new layer, and an array that previously extracted
+  `2 * rows * dummy` extra devices now does not): `klt gen mos_array`/
+  `res_array`/`bjt_array` accept a `"dummy": N` param on `gf180mcu`, but
+  that family's curated extraction deck declared no `dummy` marker layer —
+  so the tool's own generator drew edge-fill devices the tool's own
+  `klt lvs` could only report as `device.unmatched`, with knock-on
+  `topology` conflicts on whichever supply rail the dummies tie to, and no
+  option, hint or deck field to say "these are dummies."
+  `decks/gf180mcu.py`'s `EXTRACTION_DECK` now declares `dummy=(100, 50)` —
+  a deck-local convention layer reusing gf180mcu's own `LVS_*`
+  extraction-annotation layer number on a datatype the PDK assigns no
+  purpose to (gf180mcu has no native per-device dummy mark; see that deck's
+  own comment for the provenance and the non-collision verification) — and
+  the generators draw it over each dummy unit's gate/body/device-mark
+  footprint, so the extractor-side dummy-suppression machinery that shipped
+  in #295/#462 fires on this family too. This is the `gf180mcu` counterpart
+  of sky130's own `(83, 20)` declaration (#491). `sg13g2` and `sg13cmos5l`
+  still declare no `dummy` layer and are unaffected (tracked separately).
+  A `dummy: 0` request on `gf180mcu` draws no marker shape and extracts
+  exactly as before.
+- **Fixed** (#2591, `klt extract`/`klt lvs` on `sg13g2`; additive — **no**
+  `schema_version` bump, but `provenance.deck.content_hash` for `sg13g2`
+  changes): the curated `sg13g2` extraction deck only recognised a well tie
+  painted with `nSD.drawing` (7/0), while upstream IHP SG13G2's own LVS deck
+  (`general_derivations.lvs`) derives `ntap` from the *absence* of `pSD`
+  and never requires 7/0 — so a layout drawn the foundry way got no well tie
+  and reported `device.body_unverified` on every tied PMOS. A new optional
+  `ExtractionDeck.tap_nplus_complement` field derives a well tie from
+  `(active & nwell) - <p+ implant> - poly` (minus any piece touching a gate,
+  so a `pSD`-less PMOS is never swallowed as a tie); `sg13g2` sets it to
+  `pSD` (14/0) and keeps `tap_nplus = (7, 0)`, so either convention extracts
+  the same tie. The deck's comment no longer claims full `ntap` parity with
+  upstream. Substrate-tie behaviour and every other deck are unchanged.
+- **Fixed** (#2580, `klt gen`; additive — **no** `schema_version` bump, but
+  user-visible: a `mos_array` request that previously returned an empty
+  `drc_hints.notes` can now carry an entry): `klt gen mos_array` draws a
+  real source/drain implant on `gf180mcu` only (issue #1577) — every other
+  supported family (`sky130`, `sg13g2`, `sg13cmos5l`) has no `"nplus"`/
+  `"pplus"` entry in its role-layer table, so the S/D diffusion landed
+  un-implanted with **no signal at all**: the curated DRC decks recognise a
+  MOS device from `Activ`/`GatPoly`/well alone and report such a stream
+  clean, and `drc_hints.notes` said nothing about the missing mask. A
+  request on one of those families now reports the omission — a
+  `drc_hints.notes` entry naming the family, the flavor-selected role and
+  the absent mask, plus a machine-readable `drc_hints.sd_implant_present`
+  (`false` there, `true` on `gf180mcu`), mirroring the contract an
+  unrecognised `voltage_flavor` already follows — while drawn geometry
+  stays byte-for-byte unchanged. Actually drawing a correctly-enclosed
+  implant on those families needs a real PDK enclosure rule the curated
+  decks do not carry (sg13g2's, for one, transcribes no implant rule of any
+  kind) and is left as separately-filed follow-up work.
+- **Fixed** (#2517, `klt yield-campaign`; no schema change — **no**
+  `schema_version` bump): every campaign run reported
+  `campaign.sim_status: "pass_partial"`, even a completely clean one. A
+  campaign spec declares each measurement's limits once, in the shape both
+  verbs read (`{"min": …, "max": …, "target_yield": …}`), and the spec was
+  handed straight to `klt sim` — whose recognised limit keys are `min`/`max`
+  only, so `target_yield` was filed into the measurement-coverage **skip**
+  list as `unrecognized_limit_key`, and a non-empty skip list downgrades an
+  otherwise-passing check to `"pass_partial"` (#2109's rollup rule). The
+  campaign path now holds a measurement's `limits.target_yield` out of the
+  dispatched request — exactly as it already held out the run-level
+  `confidence`/`target_ci_halfwidth`/`min_samples` fields — and restores it
+  on the collected report before that report becomes the sample set `klt
+  yield` reads. The restore matters: with no separate `--limits` file in
+  this flow, the sim report *is* where `klt yield` gets its limits, so a bare
+  strip would have deleted the campaign's own yield claim and left every
+  measurement ungraded (`status: "reported"`) instead of pass/fail. The
+  strip is a closed list of known yield-only keys, not "anything besides
+  `min`/`max`" — any *other* unrecognised limit key still reaches `klt sim`
+  and still shows up in its coverage report, which is where a real spec bug
+  belongs. `klt sim`'s own coverage contract is untouched for every other
+  caller. See [`docs/cli/yield.md`](docs/cli/yield.md)'s "Campaign
+  orchestration → Dispatch" section.
+
+- **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
+  user-visible: a corner that previously reported `status: "error"` can now
+  report a real grade): a `spice`-form `measurements[].name` was looked up
+  in ngspice's own log report **verbatim**, but ngspice lower-cases a
+  `.meas`/`.measure` card's name in its report output regardless of how the
+  request spelled it (`.meas tran Vout FIND v(out) AT=1u` prints back as
+  `vout = ...`, verified against ngspice 46). An upper/mixed-case
+  `measurements[].name` (e.g. `"Vout"`) therefore never matched, and a
+  perfectly good measurement was reported `status: "error"` /
+  `measurement 'Vout' produced no value` purely on casing — the Xyce engine
+  path already folded case the other direction (Xyce upper-cases; the
+  parser lower-cases both its keys and the lookup), so only ngspice's
+  `spice`-form lookup had this gap. `_run_corner` now folds the requested
+  `name` to lower-case for both engines before looking it up in the parsed
+  measurement map; the response's `measurements[].name` field still echoes
+  the caller's own original spelling (only the internal lookup is
+  case-folded). See [`docs/cli/sim.md`](docs/cli/sim.md)'s "Failure
+  classification" section.
+
+- **Changed** (#2526, `klt signoff --manifest/--fleet --check`; additive
+  payload change — `schema_version` unchanged): `--check` no longer reports
+  `status: "drifted"` when the only difference between the committed and the
+  freshly-graded report is the checklist doc's own **wording** — each
+  `items[]` entry's `title`/`text`/`notes` (which a tier report inlines
+  verbatim from `design-evidence-tiers.md`), `source_doc_content_hash`, and,
+  in `--fleet` mode, the per-block copies of the same. A `klt` version pin
+  does not pin the doc, so an upstream rewording alone used to turn a
+  consumer's committed verdict of record red, indistinguishable from a real
+  grading change. **The exclusion is from the verdict, not from the
+  report**: the response gains `doc_drift` (bool) and `doc_drift_fields`
+  (the excluded `{field, committed, fresh}` entries that moved), so a gate
+  can warn on "the yardstick was reworded" while still failing only on "the
+  evidence moved". Any change to an item's `id`/`status`/`reason`/
+  `citation`/`tier`, to `t1_item_count`/`build_t1_item_count`/
+  `t1_met_count`, or to `source_doc` still reports `"drifted"` and exits
+  `3` — including when it co-occurs with a prose change on the same item.
+  `--describe-grader` and `grading_ruleset_id` are unaffected.
 - **Added** (#2522, `klt sim`; additive — `schema_version` unchanged): a
   `corners.process` bundle's `sections[]` entries may now name their **own**
   model library — `{"lib": str, "section": str}` alongside today's bare

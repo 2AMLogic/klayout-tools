@@ -152,8 +152,10 @@ Related consequences:
   tests alone does not verify a design.
 
 A mixed passing/skipped regression still passes when at least one test
-executed and none failed. Test filters may intentionally leave skipped
-entries in the report; this command does not infer which named tests a
+executed and none failed. Test filters narrow the run (under cocotb ≥ 2.1,
+deselected tests are absent from the report entirely — see
+`testbench.testcase`); skipped entries come from tests that ran and skipped
+themselves, and this command does not infer which named tests a
 design must run. Detecting zero executed tests uses the testcase outcomes,
 not optional Verilator code-coverage collection. Signoff also validates
 these counts against the individual outcomes when reading saved evidence,
@@ -1020,7 +1022,7 @@ exactly.
 | `hdl_toplevel` | string | The DUT module name. Required. |
 | `testbench.module` | string | The Python test module **name** (`"test_gcd"`, not `"test_gcd.py"`), resolved as `<search dir>/<module>.py` where `<search dir>` is `testbench.search_path` if given, else the request's own directory. Required — this verb does not synthesize testbenches; the module is human- or generator-authored. |
 | `testbench.search_path` | string | Optional. Directory to resolve `testbench.module` against, instead of the request's own directory — absolute, or relative to the request (the same convention `sources` entries already use). Lets one unmodified testbench module be shared by several requests (e.g. RTL, gate-level netlist, and layout-extracted views of the same design) that live in different directories. Omitted: unchanged default behavior — the module is resolved next to the request. |
-| `testbench.testcase` | string \| array\<string\> \| null | Optional testcase-name filter; `null`/omitted runs every `@cocotb.test()` in the module. Filtered-out tests still appear in the report as `skipped`. |
+| `testbench.testcase` | string \| array\<string\> \| null | Optional testcase-name filter; `null`/omitted runs every `@cocotb.test()` in the module. Under cocotb ≥ 2.1 (the pinned line, issue #2583) filtered-out tests are **deselected, not skipped** — the runner compiles the names into a `COCOTB_TEST_FILTER` regex, and a deselected test does not appear in the report at all (`test_count` counts only selected tests). Cocotb 2.0.x instead recorded each filtered-out test as a `skipped` entry; `skipped_count` remains live for tests that *ran* and skipped themselves. |
 | `options.coverage` | boolean | Defaults to `false`. `true` requires `engine: "verilator"` (see "Coverage"). |
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
 | `options.random_seed` | integer \| null | Optional. Pinned to `Runner.test()`'s own `seed` parameter (`COCOTB_RANDOM_SEED`) when given; omitted/`null` lets cocotb generate its own. Either way the seed actually used is echoed in `environment.random_seed` (see "Reproducibility: `random_seed`"). |
@@ -1063,7 +1065,7 @@ exactly.
   "environment": {
     "engine": "icarus",
     "engine_version": "13.0",
-    "cocotb_version": "2.0.1",
+    "cocotb_version": "2.1.0",
     "results_xml": "/abs/path/.klt/functional-verification/results_icarus.xml",
     "random_seed": 1785780800,
     "sdf": null
@@ -1092,7 +1094,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `hdl_toplevel` / `testbench` | string | Echo of the request's DUT / testbench-module identifiers. |
 | `status` | string | `"pass"` (`passed_count > 0` and `failed_count == 0`) or `"fail"` (`failed_count > 0`). Skips alongside executed tests are allowed. Never `"error"` in-band — a run that failed to *run*, including zero executed tests, emits no envelope at all (see "Exit codes"). |
 | `test_count` / `passed_count` / `failed_count` / `skipped_count` | integer | Nonnegative counts derived from `results.xml`'s own `<testcase>`/`<failure>`/`<skipped>` structure, matching the individual `tests` records. `test_count` includes skipped tests, so `passed + failed + skipped == test_count == len(tests)`. |
-| `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
+| `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `sim_time_ns` is read from whichever shape the installed cocotb writes into `results.xml` — the `<testcase sim_time_ns="...">` attribute cocotb 2.0.x emitted, or the `<properties>` block (`sim_time_duration` scaled by the reported `sim_time_unit`, never assumed to be `ns`) cocotb 2.1.0 replaced it with (issue #2592) — so the field carries the same nanosecond value either way. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
 | `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363), and `dropped` names each such class with `{count, reason}`; no class can change a simulated delay. See "SDF back-annotation" for the full shape. |

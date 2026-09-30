@@ -201,14 +201,43 @@ _SKY130_STACKUP: dict[str, Any] = {
     "substrate": {
         "name": "substrate",
         "material": "silicon",
+        "z0_um": -725.0,
         "z1_um": 0.0,
+        "resistivity_ohm_cm": 10.0,
         "permittivity": 11.9,
         "loss_tangent": None,
         "source": (
-            "relative permittivity of crystalline silicon at 300 K (textbook"
-            " value, not sky130-specific); z = 0 is this module's elevation"
-            " origin, the top of the substrate, matching the origin"
-            " open_pdks' magic tech file uses for its BEOL `height` entries"
+            "permittivity: relative permittivity of crystalline silicon at"
+            " 300 K (textbook value, not sky130-specific). z1_um = 0 is this"
+            " module's elevation origin, the top of the substrate, matching"
+            " the origin open_pdks' magic tech file uses for its BEOL"
+            " `height` entries. resistivity_ohm_cm: no open sky130 source"
+            " states a doping or resistivity figure -- this repo's cached"
+            " open_pdks c6d73a3 `libs.tech` tree (SPICE models, the magic"
+            " tech file, the KLayout XSection script) was searched"
+            " exhaustively and states none; the `*psubjunction*` SPICE"
+            " parameters near the substrate-diode models are"
+            " junction-capacitance coefficients, not resistivity. 10 ohm-cm"
+            " is therefore a textbook typical value for the lightly-doped"
+            " p-type epitaxial layer of a modern bulk CMOS process (sky130"
+            " is publicly documented as a p-substrate/p-epi process, and"
+            " such epi layers are commonly quoted in the 1-20 ohm-cm range"
+            " depending on epi recipe); NOT sky130-specific. It does not"
+            " represent the heavily-doped P+ handle wafer beneath the epi"
+            " (commonly ~0.01-0.02 ohm-cm, for latch-up immunity), a"
+            " different, more heavily-doped region this single figure"
+            " leaves unmodeled. z0_um: -725 is the SEMI M1 nominal thickness"
+            " of a 200 mm silicon wafer (725 +/- 20 um) -- the wafer size"
+            " 130 nm-class nodes predominantly used before the industry's"
+            " shift to 300 mm. This is the *physical* wafer thickness, not a"
+            " spreading-resistance model's 'effective' depth: for die-scale"
+            " tap spacings (tens to hundreds of micrometres) most of this"
+            " depth carries negligible current, so a future closed-form"
+            " estimator or field solver should treat this figure as an"
+            " upper bound and pick its own effective depth, not consume it"
+            " directly -- deliberately left as an open modeling question"
+            " (issue #2560) rather than an invented precise 'effective'"
+            " number"
         ),
     },
     # (name, kind, lef_layer, gds_layer, material, z0_um, thickness_um)
@@ -372,14 +401,37 @@ _GF180MCU_STACKUP: dict[str, Any] = {
     "substrate": {
         "name": "substrate",
         "material": "silicon",
+        "z0_um": -725.0,
         "z1_um": 0.0,
+        "resistivity_ohm_cm": 10.0,
         "permittivity": 11.9,
         "loss_tangent": None,
         "source": (
-            "relative permittivity of crystalline silicon at 300 K (textbook"
-            " value, not gf180mcu-specific); z = 0 is this module's elevation"
-            " origin, the top of the substrate, matching the origin"
-            " open_pdks' magic tech file uses for its BEOL `height` entries"
+            "permittivity: relative permittivity of crystalline silicon at"
+            " 300 K (textbook value, not gf180mcu-specific). z1_um = 0 is"
+            " this module's elevation origin, the top of the substrate,"
+            " matching the origin open_pdks' magic tech file uses for its"
+            " BEOL `height` entries. resistivity_ohm_cm: no open gf180mcu"
+            " source states a doping or resistivity figure -- this repo's"
+            " cached open_pdks gf180mcuD `libs.tech` tree (magic tech file,"
+            " GDS layer map, KLayout LVS docs) was searched and states none."
+            " 10 ohm-cm is therefore a textbook typical value for lightly-"
+            " doped p-type bulk CMOS silicon, the same order of magnitude"
+            " used for _SKY130_STACKUP's entry above; NOT gf180mcu-specific."
+            " Unlike sky130, no public statement of an epi-vs-bulk-only"
+            " wafer structure was found for gf180mcu, so this figure makes"
+            " no epi-specific claim. z0_um: -725 is the SEMI M1 nominal"
+            " thickness of a 200 mm silicon wafer (725 +/- 20 um) -- the"
+            " wafer size 180 nm-class nodes predominantly used before the"
+            " industry's shift to 300 mm. This is the *physical* wafer"
+            " thickness, not a spreading-resistance model's 'effective'"
+            " depth: for die-scale tap spacings (tens to hundreds of"
+            " micrometres) most of this depth carries negligible current,"
+            " so a future closed-form estimator or field solver should"
+            " treat this figure as an upper bound and pick its own"
+            " effective depth, not consume it directly -- deliberately left"
+            " as an open modeling question (issue #2560) rather than an"
+            " invented precise 'effective' number"
         ),
     },
     # (name, kind, lef_layer, gds_layer, material, z0_um, thickness_um)
@@ -575,8 +627,8 @@ def stackup(
             "curated_source": {"description": str, "references": [str, ...]},
             "sources": [{"cell_library", "corner", "tech_lef"}, ...],
             "substrate": {
-                "name", "material", "z1_um", "permittivity", "loss_tangent",
-                "source"
+                "name", "material", "z0_um", "z1_um", "resistivity_ohm_cm",
+                "permittivity", "loss_tangent", "source"
             },
             "conductors": [
                 {

@@ -644,10 +644,15 @@ _PHASE2_GENERATOR_X_DECK = [
 
 #: sky130's curated dummy-device marker layer (issue #491) -- matches
 #: `klayout_tools.decks.sky130.EXTRACTION_DECK.dummy` and
-#: `klayout_tools.gen._PDK_ROLE_LAYERS["sky130"]["dummy"]`. gf180mcu declares
-#: no equivalent (out of scope for #491), so there is no `_GF180_DUMMY_LAYER`
-#: counterpart.
+#: `klayout_tools.gen._PDK_ROLE_LAYERS["sky130"]["dummy"]`.
 _SKY130_DUMMY_LAYER = (83, 20)
+
+#: gf180mcu's curated dummy-device marker layer (issue #2599, the gf180mcu
+#: counterpart of sky130's own #491) -- matches
+#: `klayout_tools.decks.gf180mcu.EXTRACTION_DECK.dummy` and
+#: `klayout_tools.gen._PDK_ROLE_LAYERS["gf180mcu"]["dummy"]`. See that deck's
+#: own comment for the `LVS_*`-family provenance of (100, 50).
+_GF180_DUMMY_LAYER = (100, 50)
 
 
 def test_list_generators_includes_all_four_phase2_families():
@@ -938,6 +943,73 @@ def test_mos_array_sky130_draws_dummy_marker_over_dummy_cells_only(tmp_path, pdk
     assert _SKY130_DUMMY_LAYER not in present_no_dummy
 
 
+def test_mos_array_gf180mcu_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, both_pdk_root
+):
+    """Issue #2599 (the gf180mcu counterpart of sky130's own #491): on
+    gf180mcu, `mos_array` draws the deck's curated `dummy` marker layer
+    (`100, 50`) over each dummy unit's gate footprint -- and *only* the dummy
+    units, never a real cell -- so `klt extract`'s existing dummy-suppression
+    guards (#295/#462) actually fire on this family too. A `dummy: 0` request
+    draws no shapes on that layer at all (the pre-#2599 regression case)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_gf180_dummy_marker.gds"
+    rows, cols, dummy = 1, 2, 2
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"rows": rows, "cols": cols, "dummy": dummy},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_DUMMY_LAYER in present
+
+    dummy_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_GF180_DUMMY_LAYER))
+    )
+    poly_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(30, 0))  # Poly2
+    )
+    # A strict subset of the drawn poly: it covers only the dummy gates'
+    # footprint (gate landing pad included -- see `_mos_unit_layout`'s
+    # `boxes_um["poly"]`), never a real cell's.
+    assert not dummy_region.is_empty()
+    assert (dummy_region - poly_region).is_empty()
+    assert dummy_region.area() < poly_region.area()
+
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))  # Comp
+    )
+    # The channel component `klt extract` recognises as a gate is
+    # poly & active -- one connected component per dummy unit device, the
+    # same count `dummy_devices_dropped` reports for this request.
+    assert (dummy_region & active_region).merged().count() == 2 * dummy * rows
+
+    output_no_dummy = tmp_path / "mos_array_gf180_no_dummy_marker.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"rows": rows, "cols": cols, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    assert _GF180_DUMMY_LAYER not in {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
+
+
 @pytest.mark.parametrize(
     "params",
     [
@@ -1052,7 +1124,14 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
         for i in layout.layer_indexes()
     }
     assert well_pair in present
-    assert report["drc_hints"]["notes"] == []
+    # sky130 declares no S/D implant role (issue #2580), so its row now
+    # carries the reporting-only absence note; gf180mcu (issue #1577) keeps
+    # an empty list -- the note is the only difference.
+    family = gen._pdk_family(variant)
+    expected_notes = (
+        [] if family == "gf180mcu" else [_sd_implant_absence_note(family, "pfet")]
+    )
+    assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -1150,7 +1229,13 @@ def test_mos_array_guard_ring_flavor_pfet_draws_well_and_is_drc_clean(
         for i in layout.layer_indexes()
     }
     assert well_pair in present
-    assert report["drc_hints"]["notes"] == []
+    # Same sky130-vs-gf180mcu split as the no-ring pfet test above (issue
+    # #2580's reporting-only absence note).
+    family = gen._pdk_family(variant)
+    expected_notes = (
+        [] if family == "gf180mcu" else [_sd_implant_absence_note(family, "pfet")]
+    )
+    assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -1409,7 +1494,11 @@ def test_mos_array_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert report["drc_hints"]["voltage_flavor"] is None
     assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    assert report["drc_hints"]["notes"] == []
+    # sky130's S/D-implant absence note (issue #2580) is the one entry this
+    # default sky130 request now carries -- identical for the implicit and
+    # explicit requests compared above, so the default-unchanged contract
+    # holds.
+    assert report["drc_hints"]["notes"] == [_sd_implant_absence_note("sky130", "nfet")]
 
 
 def test_mos_array_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
@@ -1548,7 +1637,9 @@ def test_mos_array_voltage_flavor_hvi_draws_marker_and_is_drc_clean(tmp_path, pd
     assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in present
     assert report["drc_hints"]["voltage_flavor"] == "hvi"
     assert report["drc_hints"]["voltage_flavor_mark_present"] is True
-    assert report["drc_hints"]["notes"] == []
+    # sky130's S/D-implant absence note (issue #2580) is the one entry this
+    # pfet request now carries.
+    assert report["drc_hints"]["notes"] == [_sd_implant_absence_note("sky130", "pfet")]
 
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -2060,7 +2151,12 @@ def test_mos_array_parallel_is_the_default_finger_topology(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert implicit_report["ports"] == explicit_report["ports"]
     assert implicit_report["warnings"] == []
-    assert implicit_report["drc_hints"]["notes"] == []
+    # sky130's S/D-implant absence note (issue #2580) is the one entry this
+    # default-flavour sky130 unit now carries -- identical on both sides, so
+    # the implicit-vs-explicit contract holds.
+    assert implicit_report["drc_hints"]["notes"] == [
+        _sd_implant_absence_note("sky130", "nfet")
+    ]
 
 
 @pytest.mark.parametrize("gate_contact", [False, True])
@@ -3179,6 +3275,65 @@ def test_res_array_sky130_draws_dummy_marker_over_dummy_cells_only(tmp_path, pdk
         for i in layout_no_dummy.layer_indexes()
     }
     assert _SKY130_DUMMY_LAYER not in present_no_dummy
+
+
+def test_res_array_gf180mcu_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, both_pdk_root
+):
+    """Issue #2599 (the gf180mcu counterpart of sky130's own #491): on
+    gf180mcu, `res_array` draws the deck's curated `dummy` marker layer over
+    each dummy unit resistor's recognised body segment -- the same footprint
+    the `RES_MK` marker covers -- and only over the dummy units, never a real
+    cell, so `klt extract`'s existing dummy-suppression guard (#295/#462)
+    actually fires on this family too."""
+    import klayout.db as kdb
+
+    output = tmp_path / "res_array_gf180_dummy_marker.gds"
+    num, dummy = 3, 2
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"num": num, "dummy": dummy},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_DUMMY_LAYER in present
+
+    dummy_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_GF180_DUMMY_LAYER))
+    )
+    mark_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_GF180_RES_MARK_LAYER))
+    )
+    # One dummy-marker shape per dummy unit (2 dummies per end, single row).
+    assert dummy_region.count() == 2 * dummy
+    # It is a strict subset of the RES_MK marker's own footprint -- never
+    # bleeding onto a real unit's body segment.
+    assert (dummy_region - mark_region).is_empty()
+    assert dummy_region.area() < mark_region.area()
+
+    output_no_dummy = tmp_path / "res_array_gf180_no_dummy_marker.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"num": num, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    assert _GF180_DUMMY_LAYER not in {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
 
 
 def test_res_array_gf180_draws_res_mk_marker_and_requires_layers(
@@ -6200,6 +6355,13 @@ _SG13CMOS5L_PSD_LAYER = (14, 0)  # pSD -- rppd/rhigh
 _SG13CMOS5L_NSD_LAYER = (7, 0)  # nSD -- rhigh only (rppd excludes it)
 _SG13CMOS5L_SALBLOCK_LAYER = (28, 0)  # SalBlock -- rppd/rhigh
 
+#: Issue #2602's curated dummy-device marker --
+#: `klayout_tools.decks.sg13cmos5l.EXTRACTION_DECK.dummy` (see that field's
+#: own comment for provenance: layer 100 is wholly unassigned in this
+#: family's own transcribed `.lyp`/DRC/LVS layer tables, unlike gf180mcu's
+#: reused `LVS_*` layer number).
+_SG13CMOS5L_DUMMY_LAYER = (100, 50)
+
 
 @pytest.fixture()
 def sg13cmos5l_pdk_root(tmp_path):
@@ -6490,6 +6652,66 @@ def test_sg13cmos5l_res_array_explicit_rsil_matches_default(
         }
     )
     _assert_gds_geometry_equal(output_default, output_rsil)
+
+
+def test_res_array_sg13cmos5l_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """Issue #2602 (the sg13cmos5l counterpart of sky130's #491 and
+    gf180mcu's #2599): on sg13cmos5l, `res_array` draws the deck's curated
+    `dummy` marker layer over each dummy unit resistor's recognised body
+    segment -- the same footprint the `PolyRes` marker covers -- and only
+    over the dummy units, never a real cell, so `klt extract`'s existing
+    dummy-suppression guard (#295/#462) actually fires on this family too."""
+    import klayout.db as kdb
+
+    output = tmp_path / "res_array_sg13cmos5l_dummy_marker.gds"
+    num, dummy = 3, 2
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"num": num, "dummy": dummy},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SG13CMOS5L_DUMMY_LAYER in present
+
+    dummy_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_SG13CMOS5L_DUMMY_LAYER))
+    )
+    mark_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_SG13CMOS5L_RES_MARK_LAYER))
+    )
+    # One dummy-marker shape per dummy unit (2 dummies per end, single row).
+    assert dummy_region.count() == 2 * dummy
+    # It is a strict subset of the PolyRes marker's own footprint -- never
+    # bleeding onto a real unit's body segment.
+    assert (dummy_region - mark_region).is_empty()
+    assert dummy_region.area() < mark_region.area()
+
+    output_no_dummy = tmp_path / "res_array_sg13cmos5l_no_dummy_marker.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"num": num, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    present_no_dummy = {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
+    assert _SG13CMOS5L_DUMMY_LAYER not in present_no_dummy
 
 
 @pytest.mark.parametrize(
@@ -6906,6 +7128,65 @@ def test_bjt_array_sky130_draws_dummy_marker_over_dummy_cells_only(
         for i in layout_no_dummy.layer_indexes()
     }
     assert _SKY130_DUMMY_LAYER not in present_no_dummy
+
+
+def test_bjt_array_gf180mcu_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, both_pdk_root
+):
+    """Issue #2599 (the gf180mcu counterpart of sky130's own #491): on
+    gf180mcu, `bjt_array` draws the deck's curated `dummy` marker layer over
+    each dummy unit's bipolar device-mark footprint (the same box `DRC_BJT`
+    covers) -- and only over the dummy units, never a real cell -- so
+    `klt extract`'s existing dummy-suppression guard (#295/#462) actually
+    fires on this family too."""
+    import klayout.db as kdb
+
+    output = tmp_path / "bjt_gf180_dummy.gds"
+    params = {"rows": 3, "cols": 3, "dummy": 1}
+    generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _GF180_DUMMY_LAYER in present
+
+    dummy_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_GF180_DUMMY_LAYER))
+    )
+    mark_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_DRC_BJT_LAYER))
+    )
+    # 2 dummy columns x 3 rows, one dummy-marker shape per dummy unit.
+    assert dummy_region.count() == 2 * params["dummy"] * params["rows"]
+    # Strict subset of the DRC_BJT mark's own footprint -- never bleeding
+    # onto a real unit's emitter pad.
+    assert (dummy_region - mark_region).is_empty()
+    assert dummy_region.area() < mark_region.area()
+
+    output_no_dummy = tmp_path / "bjt_gf180_no_dummy.gds"
+    generate(
+        {
+            "generator": "bjt_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"rows": 3, "cols": 3, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    assert _GF180_DUMMY_LAYER not in {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
 
 
 def test_bjt_array_single_device_is_drc_clean(tmp_path, both_pdk_root):
@@ -8462,6 +8743,137 @@ def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
 
     drc_report = run_drc(str(output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def _sd_implant_absence_note(family: str, flavor: str) -> str:
+    """The exact ``drc_hints.notes`` entry ``mos_array`` emits on a family
+    whose role-layer table declares no S/D implant role for ``flavor``
+    (issue #2580) -- the reporting-only mirror of ``voltage_flavor``'s own
+    "unresolved role -> note it, never silently drop it" contract."""
+    role = "nplus" if flavor == "nfet" else "pplus"
+    return (
+        f"family '{family}' declares no S/D implant role ('{role}') for "
+        f"flavor '{flavor}' -- no implant mask was drawn"
+    )
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_mos_array_sd_implant_absence_noted_on_sg13g2(
+    tmp_path, sg13g2_pdk_root, flavor
+):
+    """Issue #2580's own repro: ``mos_array`` on ``ihp-sg13g2`` draws no
+    source/drain implant (``nSD`` 7/0 for an nfet, ``pSD`` 14/0 for a pfet)
+    and nothing DRC-side flags the missing mask -- the family's curated deck
+    recognises a MOS from ``Activ``/``GatPoly``/well alone. The omission must
+    be *reported* via ``drc_hints.notes`` (mirroring the ``voltage_flavor``
+    contract) while the drawn geometry stays byte-for-byte unchanged: the
+    issue's own observed layer set, implant layers absent. The repro's
+    sub-default gate length additionally keeps its own pre-existing note
+    (``l_um`` 0.13), so the implant note is asserted by membership."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"mos_array_sg13g2_sd_implant_{flavor}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {
+                "w_um": 1.6,
+                "l_um": 0.13,
+                "rows": 1,
+                "cols": 4,
+                "topology": "common_centroid",
+                "dummy": 1,
+                "flavor": flavor,
+                "gate_contact": True,
+                "add_guard_ring": True,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["sd_implant_present"] is False
+    assert _sd_implant_absence_note("sg13g2", flavor) in report["drc_hints"]["notes"]
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    # The issue's own observed stream: Activ (1/0), GatPoly (5/0), Cont
+    # (6/0), Metal1 (8/0) -- plus NWell (31/0) for the pfet well -- and no
+    # implant shape on either `nSD` (7/0) or `pSD` (14/0).
+    expected = {(1, 0), (5, 0), (6, 0), (8, 0)}
+    if flavor == "pfet":
+        expected.add((31, 0))
+    assert present == expected
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_mos_array_sd_implant_absence_noted_on_sky130(tmp_path, pdk_root, flavor):
+    """sky130 declares no ``"nplus"``/``"pplus"`` role either -- the same gap
+    as sg13g2, never filed only because sky130's curated deck has no implant
+    rule to make it visible (issue #2580's scope correction). The note must
+    fire there too, naming the flavor-selected role."""
+    output = tmp_path / f"mos_array_sky130_sd_implant_{flavor}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["sd_implant_present"] is False
+    assert _sd_implant_absence_note("sky130", flavor) in report["drc_hints"]["notes"]
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_mos_array_sd_implant_absence_noted_on_sg13cmos5l(
+    tmp_path, sg13cmos5l_pdk_root, flavor
+):
+    """sg13cmos5l -- the third family with no ``"nplus"``/``"pplus"`` role
+    (its curated deck recognises a MOS from ``Activ``/well alone, like
+    sg13g2's). ``flavor="pfet"`` still fires the ``pplus``-flavoured note
+    even though that flavor's well-tie tap pad (#1473) draws its own
+    ``nSD`` implant via the separate ``well_tap_implant`` role -- the note
+    is about the *unit devices'* source/drain implant."""
+    output = tmp_path / f"mos_array_sg13cmos5l_sd_implant_{flavor}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"flavor": flavor},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["sd_implant_present"] is False
+    assert (
+        _sd_implant_absence_note("sg13cmos5l", flavor) in report["drc_hints"]["notes"]
+    )
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_gf180mcu_mos_array_sd_implant_present_no_absence_note(
+    tmp_path, both_pdk_root, flavor
+):
+    """gf180mcu -- the one family that *does* declare ``"nplus"``/``"pplus"``
+    (issue #1577) -- keeps drawing its real S/D implant with no absence
+    note: ``sd_implant_present`` is ``True`` for both flavors and the
+    reporting-only change leaves it untouched."""
+    output = tmp_path / f"mos_array_gf180mcu_sd_implant_{flavor}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"flavor": flavor, "rows": 1, "cols": 1, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["sd_implant_present"] is True
+    assert not any(
+        "no implant mask was drawn" in n for n in report["drc_hints"]["notes"]
+    )
 
 
 def test_gf180mcu_mos_array_voltage_flavor_marker_grows_past_well_margin(

@@ -31,92 +31,166 @@ it.
 
 The per-job `timeout-minutes` values `ci.yml` already had are **not** this
 gate. They are hard ceilings sized for pathological hangs — the `test` matrix
-allows 45 minutes for a job whose median is 3 minutes — so a leg can triple in
+allows 45 minutes for a job whose median is 4 minutes — so a leg can triple in
 cost and stay green. The budget check fires in the band where a real regression
 actually lives.
 
 ## Measured baseline
 
-Sample: the **25 most recent successful `ci.yml` runs**, measured 2026-09-17,
-from each run's own job timings:
+Measured **2026-09-29** (issue #2612), replacing the 2026-09-17 baseline and
+the interim bumps stacked on it. Two runner-pool changes had landed without the
+re-measure this page makes mandatory: the 2026-09-24 migration of the heavy
+jobs to **Blacksmith autoscaled runners** (`c66f18fd`, #2214) and the
+2026-09-28 move of the short and scheduled jobs back to **GitHub-hosted**
+(`6da0c9a4`, #2598).
 
-```bash
-gh api "repos/2AMLogic/klayout-tools/actions/runs/<run-id>/jobs?per_page=100" \
-  --jq '.jobs[] | select(.conclusion=="success")
-        | [.name, ((.completed_at|fromdateiso8601) - (.started_at|fromdateiso8601))]
-        | @tsv'
-```
+Sample: **273 `ci.yml` runs from 2026-09-24 to 2026-09-29** — main pushes *and*
+same-repo PR runs, and deliberately **not** filtered to `--status=success`
+runs (see [Re-measuring](#re-measuring) for why, and for the recipe). Each
+observation is still a job that itself concluded `success`; each job's numbers
+come only from runs where it executed on the runner label `ci.yml` assigns it
+*today*, so the two pool migrations cannot blend into one distribution. Run
+`36003284901` (2026-09-24) is excluded as a bad-node incident: all four `Tests`
+legs spiked together to 724-816 s on a 3,401 s total.
 
-Per job, in seconds:
+Per job, in seconds (`n` = observations on the job's current runner):
 
-| Job | median | p90 | max | budget |
-|---|---:|---:|---:|---:|
-| Tests (Python 3.10) | 180 | 194 | 200 | 360 |
-| Tests (Python 3.12) | 177 | 188 | 198 | 360 |
-| Tests (Python 3.11) | 176 | 188 | 194 | 360 |
-| Tests (Python 3.13) | 172 | 179 | 187 | 360 |
-| Native engines (Rust) | 107 | 113 | 117 | 240 |
-| Native engines (Rust) — yield statistics | 41 | 44 | 45 | 120 |
-| Native engines (Rust) — static timing | 39 | 43 | 46 | 120 |
-| Native engines (Rust) — congestion pre-check | 37 | 38 | 41 | 120 |
-| Native engines (Rust) — waveform build/query | 22 | 28 | 47 | 120 |
-| klt verify Action smoke test | 21 | 26 | 28 | 120 |
-| Native engines (Rust) — technology mapping | 12 | 13 | 14 | 120 |
-| Lint (ruff) | 12 | 14 | 55 | 120 |
-| site/ (tsc + vitest) | 7 | 9 | 10 | 120 |
-| Golden artifacts (hash seed + path varied) | — | — | — | 300 † |
+| Job | runner | n | median | p90 | max | budget |
+|---|---|---:|---:|---:|---:|---:|
+| Tests (Python 3.10) | blacksmith-4vcpu | 188 | 265 | 368 | 996 | 700 |
+| Tests (Python 3.11) | blacksmith-4vcpu | 188 | 252 | 366 | 923 | 700 |
+| Tests (Python 3.12) | blacksmith-4vcpu | 189 | 256 | 365 | 627 | 700 |
+| Tests (Python 3.13) | blacksmith-4vcpu | 190 | 244 | 349 | 824 | 700 |
+| Native engines (Rust) | blacksmith-4vcpu | 206 | 62 | 91 | 136 | 240 |
+| Native engines (Rust) — static timing | ubuntu-24.04 | 45 | 52 | 64 | 89 | 150 |
+| Native engines (Rust) — yield statistics | blacksmith-4vcpu | 205 | 24 | 36 | 84 | 120 |
+| Native engines (Rust) — waveform build/query | ubuntu-24.04 | 45 | 22 | 35 | 62 | 120 |
+| Native engines (Rust) — congestion pre-check | blacksmith-4vcpu | 205 | 20 | 30 | 102 | 120 |
+| Native engines (Rust) — technology mapping | ubuntu-24.04 | 45 | 19 | 30 | 36 | 120 |
+| klt verify Action smoke test | ubuntu-24.04 | 45 | 25 | 27 | 31 | 120 |
+| Tests (numpy cross-check) | ubuntu-latest | 272 | 17 | 20 | 32 | 120 |
+| Golden artifacts (hash seed + path varied) | ubuntu-latest | 272 | 16 | 19 | 54 | 120 |
+| examples/signoff round-trip | ubuntu-24.04 | 45 | 12 | 16 | 21 | 120 |
+| Lint (ruff) | ubuntu-24.04 | 44 | 12 | 16 | 26 | 120 |
+| site/ (tsc + vitest) | ubuntu-24.04 | 45 | 9 | 10 | 34 | 120 |
 
-† Added by issue #2225, after this baseline was measured, so its budget is an
-estimate rather than a derivation: two `actions/checkout` steps, one `uv
-sync`, and ~1.5 s of generators (see
-[`golden-artifact-determinism.md`](golden-artifact-determinism.md)). 300 s is
-deliberately conservative while still half the 600 s an unbudgeted job would
-inherit — re-derive it from real timings at the next re-measure, the same way
-every other row above was derived.
+Every row above is now derived from real timings. The two jobs the previous
+baseline could only estimate at 300 s — `Golden artifacts (hash seed + path
+varied)` (#2225) and `Tests (numpy cross-check)` (#2276) — measure p90 19 s and
+20 s, so both drop to the 120 s floor. `examples/signoff round-trip` (#2163)
+gains its first row; it had been silently inheriting the 600 s
+`default_job_budget_seconds`.
 
-Aggregates, in seconds:
+Aggregates, in seconds, over the **35 runs carrying exactly today's job set on
+today's runner labels** (the composition changed on 2026-09-28, so older runs
+are not comparable totals):
 
 | Aggregate | min | median | p90 | max | budget |
 |---|---:|---:|---:|---:|---:|
-| total job-seconds (compute) | 978 | 1,006 | — | 1,094 | 1,500 |
-| run wall clock (incl. queue) | 363 | 408 | 488 | 782 | 1,800 |
+| total job-seconds (compute) | 1,276 | 1,684 | 2,316 | 2,833 | 3,000 |
+| run wall clock (incl. queue) | 260 | 477 | 820 | 1,006 | 1,800 |
 
 ### What the profile says
 
-**The four `test` matrix legs are the whole story.** They are 705 s of the
-~1,006 s median total — 70% of all compute — and each is individually the
-longest job in the run. The Rust `native` legs are a distant second at ~236 s
-combined across five jobs; everything else put together is under 60 s. Any
-future attempt to make this repo's CI faster starts and very nearly ends with
-the Python test matrix: either it gets faster, or it gets split so the four
-Python versions stop each paying the full suite's cost.
+**The four `test` matrix legs are still the whole story.** At a ~253 s median
+each they are ~1,010 s of the 1,684 s median total — 60% of all compute — and
+each is individually the longest job in the run. Everything else put together
+is under 700 s. Any future attempt to make this repo's CI faster starts and
+very nearly ends with the Python test matrix: either it gets faster, or it gets
+split so the four Python versions stop each paying the full suite's cost.
 
-**The run is not queue-starved and is not badly parallelised.** 1,006 s of
-compute finishing in 408 s of wall clock is ~2.5x overlap, and the 782 s
-worst case is still under the summed compute — the opposite of the
-`sky130-pll` pattern. There is no fast-job-on-a-heavy-runner misrouting to fix
-here.
+**The autoscaled pool is far noisier than the fixed pool it replaced.** On the
+2026-09-17 baseline a `Tests` leg ran 172-200 s — a 16% spread from median to
+max. On Blacksmith the same suite runs a 253 s median with a 361 s p90, a 412 s
+p95, and a 996 s max: the max is ~3.9x the median. The median itself grew by
+~40%, but that is dwarfed by the tail, and the tail is what the gate kept
+firing on — 8 of 72 sampled main-push runs had at least one leg over the old
+420 s budget on diffs that touch nothing about test runtime.
 
-**Short jobs are noisy in relative terms.** `Lint (ruff)` has a 12 s median
-and a 55 s max — a 4.5x spread from runner cold-start variance alone. That is
-why every job under ~60 s gets a flat 120 s floor rather than a proportional
-budget: a tight threshold on a 9-second job measures the runner, not the code.
+**Spikes are single-leg; regressions are not.** The worst sampled runs read
+439/442/459/**996** and 314/317/394/**923** — one leg stalls while its three
+siblings, running the identical suite on the same pool at the same moment, stay
+normal. The excluded 2026-09-24 incident is the opposite shape
+(724/741/810/816: all four together), and so is a genuine code regression. This
+asymmetry is the basis of the design note below.
+
+**The run is not queue-starved, but it queues deeper under burst.** 1,684 s of
+compute finishing in 477 s of wall clock is ~3.5x overlap. The tail is worse
+than before: one sampled PR run waited 33 minutes for two Blacksmith legs to
+get a machine (2,255 s wall on 1,633 s of compute). That is a queue breach, not
+a compute breach — report-only by design, and exactly the signal the wall-clock
+threshold exists to surface.
+
+**Short jobs are noisy in relative terms.** `Golden artifacts` has a 16 s
+median and a 54 s max; `site/ (tsc + vitest)` runs 9 s and spikes to 34 s — a
+3.4x spread from runner cold-start variance alone. That is why every job under
+~60 s gets a flat 120 s floor rather than a proportional budget: a tight
+threshold on a 9-second job measures the runner, not the code.
 
 ## Budget derivation
 
 - **Per job**: roughly `2x p90`, rounded to a clean number, with a **120 s
   floor** for the reason above. The floor means short jobs only trip the gate
   on a large, unambiguous regression.
+- **The four `Tests` legs**: pooled over 755 leg observations they measure
+  median 253 s, p90 361 s, p95 412 s, max 996 s. `2x p90` is 722 s, rounded to
+  **700** (the 2026-09-17 baseline rounded `2x194 = 388` down to 360 the same
+  way), shared by all four because they are one suite differing only by
+  interpreter. 700 is also the knee of the in-sample false-breach curve: every
+  ceiling from 700 to 800 leaves the same 4 of 755 legs over, so another 100 s
+  of laxity buys nothing. It drops the sampled main-push false-breach rate from
+  8 of 72 runs to 2 — one of which is the excluded bad-node incident, leaving a
+  single non-incident residual (run `36611724105`, one leg at 809 s). That
+  residual is what the design note below is about, not an argument for another
+  150 s of laxity. PR #2571's interim 700 s unblock is therefore
+  confirmed by derivation rather than left standing as a placeholder (its
+  companion total of 2,600 s is superseded by the 3,000 s below).
+- **Two rows moved with the pools, not with the code**: `— static timing` goes
+  120 → **150** because `6da0c9a4` moved it to GitHub-hosted (p90 43 s → 64 s,
+  `2x p90` = 128 s), and `Native engines (Rust)` **holds 240** rather than
+  dropping to the 200 its `2x p90` of 182 s suggests — its sibling legs on the
+  same Blacksmith pool show max/p90 ratios up to 3.4x, so a 200 s ceiling would
+  measure the pool. 240 s is still 1.8x its observed 136 s max.
 - **Unbudgeted job**: falls back to `default_job_budget_seconds` (600 s), so a
   newly added job is covered on the day it lands rather than whenever someone
   remembers to add a row. Budget coverage cannot silently drift as jobs are
   added.
-- **Total job-seconds**: 1,500 s, ~37% above the observed 1,094 s max. This is
-  the only threshold that catches death by a thousand cheap jobs, which no
-  per-job budget would ever notice.
-- **Run wall clock**: 1,800 s, ~2.3x the observed 782 s max. Deliberately
-  loose: this is the one number that includes pre-run queue time, which is not
-  a property of the code under test.
+- **Total job-seconds**: 3,000 s — 6% above the observed 2,833 s max and 78%
+  above the median. Deliberately *not* the ~3,460 s that four 700 s legs plus
+  the cheap jobs could reach with every per-job budget still passing: this is
+  the only threshold that catches death by a thousand cheap jobs, so it has to
+  bind somewhere below the sum of the per-job ceilings.
+- **Run wall clock**: **1,800 s, unchanged** — 1.8x the observed 1,006 s max
+  for a comparable run, and still clear of the 2,255 s burst-queue excursion
+  described above only in the sense that such an excursion *should* annotate.
+  It is the one number that includes pre-run queue time, which is not a
+  property of the code under test, and the only threshold whose breach does not
+  fail the build.
+
+### Is a fixed per-job ceiling still the right model?
+
+**Judgment call, recorded per issue #2612: no, but the fix is a better
+statistic rather than a bigger number — and it is out of scope here.** On the
+retired fixed pool a `Tests` leg's max was 1.16x its median, so a `2x p90`
+ceiling sat comfortably between "noise" and "regression". On the autoscaled
+pool the max is 3.9x the median, which puts the noise tail *above* the
+regression signal: 700 s is the loosest useful ceiling, and by construction it
+can no longer notice a 2x slowdown of the 253 s median — the exact class of
+regression #2359/#2392 caught.
+
+The concrete recommendation, if this is ever revisited in
+`scripts/check_ci_wall_clock.py`, is to gate the matrix on the **median of the
+four legs** rather than on each leg independently. The four run the same suite
+on the same pool in the same run, so pool noise moves one leg
+(439/442/459/996) while code moves all four (724/741/810/816). Over the same
+sample the median-of-four statistic runs median 252 s, p90 350 s, p99 510 s,
+**max 564 s** — against a 996 s worst single leg. A ceiling in the 550-600 s
+band would therefore have breached **0 of 188** sampled runs while still
+tripping on the excluded incident (median-of-four 775 s) *and*, unlike the
+700 s per-leg ceiling, on a uniform 2x slowdown of the 253 s median. That is a
+gate that is simultaneously quieter and ~1.2x tighter. A two-consecutive-breach
+rule would also suppress single-run noise, but it costs a run of latency and
+needs cross-run state; the median-of-legs statistic needs neither.
 
 ## Compute breaches vs. queue breaches
 
@@ -140,10 +214,11 @@ line is suppressed so the actionable breach is not buried.
 
 ## Fork PRs are report-only
 
-`ci.yml`'s runner conditional routes fork PRs from `[self-hosted, heavy]` back
-to `ubuntu-latest`, whose per-job timings the budgets above — measured entirely
-on the self-hosted pool — do not describe. A fixed threshold tuned against
-self-hosted numbers would redden every fork PR, so the workflow passes
+`ci.yml`'s runner conditional routes fork PRs from `blacksmith-4vcpu-ubuntu-2404`
+back to `ubuntu-latest`, whose per-job timings the budgets above — measured on
+whichever pool serves each job for a same-repo run — do not describe. A fixed
+threshold tuned against Blacksmith numbers would redden every fork PR, so the
+workflow passes
 `--report-only` for them: breaches print as `::warning::` annotations and the
 job still exits 0. Same-repo pushes and PRs gate for real.
 
@@ -156,28 +231,70 @@ matrix, moving work between jobs — re-derive the baseline and update both the
 
 ```bash
 REPO=2AMLogic/klayout-tools
-for id in $(gh run list --workflow=ci.yml --status=success --limit=25 \
-              --json databaseId --jq '.[].databaseId'); do
+# NOTE: no --status=success. Sample runs of BOTH conclusions and filter at the
+# JOB level instead -- see "sample failures too" below.
+for id in $(gh run list --workflow=ci.yml --limit=50 \
+              --json databaseId,conclusion \
+              --jq '.[] | select(.conclusion=="success" or .conclusion=="failure")
+                    | .databaseId'); do
   gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
     --jq '.jobs[] | select(.conclusion=="success")
-          | [.name, ((.completed_at|fromdateiso8601) - (.started_at|fromdateiso8601))]
+          | [.name, ((.labels // []) | join(",")),
+             ((.completed_at|fromdateiso8601) - (.started_at|fromdateiso8601))]
           | @tsv'
 done
 ```
+
+Three rules make the resulting numbers trustworthy (all three learned the hard
+way in issue #2612):
+
+1. **Sample failures too.** Filtering runs to `--status=success` drops every
+   run the budget check itself reddened — i.e. precisely the tail that decides
+   whether the budget holds. Filter at the *job* level (`select(.conclusion ==
+   "success")`, as above) so a job's own timing is still a clean measurement,
+   but let the run's overall conclusion be anything.
+2. **Group by runner label, not just by job name.** The `.labels` field above
+   records which pool actually served the job. A job that moved pools has two
+   distributions in the same name; only the observations on the label `ci.yml`
+   assigns it *today* describe the budget you are about to write.
+3. **Take aggregates only from runs with today's job set.** `total
+   job-seconds` and run wall clock are properties of the whole run, so a run
+   from before a job was added (or from a branch that adds one) is not a
+   comparable total. Per-job rows have no such constraint and can use the
+   wider sample.
+
+Exclude a run only when it is a *distinguishable incident* rather than the
+noise the budget exists to tolerate — e.g. `36003284901`, whose four `Tests`
+legs spiked together to 724-816 s. Say so in the `baseline.sample` string, and
+sanity-check that the excluded run would still breach the budget you derived.
 
 `tests/test_ci_wall_clock.py::test_repo_budgets_leave_headroom_over_the_measured_baseline`
 asserts the recorded baseline sits below the budgets, so a transcription slip
 cannot ship a budget that is already breached on a green run.
 
-**Re-measurement is also mandatory after any runner-pool change** — adding or
-removing self-hosted runners, resizing them, or otherwise changing what
-`[self-hosted, heavy]` resolves to — even when nothing in `ci.yml` itself
-changes. Every number on this page (the per-job budgets, the total-compute
-budget, and especially the wall-clock budget, which is queue time plus
-compute) is calibrated against *this* pool's contention and hardware. A pool
-change invalidates that calibration exactly like a job-cost change does, and a
-stale budget is either a spurious compute breach (pool got slower) or a gate
-that no longer catches a real regression (pool got faster).
+**Re-measurement is also mandatory after any runner-pool change** — moving a
+job between pools, resizing runners, or otherwise changing what a `runs-on`
+label resolves to — even when nothing else in `ci.yml` changes. Every number on
+this page (the per-job budgets, the total-compute budget, and especially the
+wall-clock budget, which is queue time plus compute) is calibrated against
+*these* pools' contention and hardware. A pool change invalidates that
+calibration exactly like a job-cost change does, and a stale budget is either a
+spurious compute breach (pool got slower) or a gate that no longer catches a
+real regression (pool got faster).
+
+This is not hypothetical: the 2026-09-24 Blacksmith migration and the
+2026-09-28 partial move back to GitHub-hosted both shipped without it, and the
+resulting stale budget failed `main` on 8 of 72 sampled runs whose diffs did
+not touch test runtime (issue #2612). **A PR that changes a `runs-on:` value
+should re-derive the affected rows in the same PR**, exactly as a PR that adds
+compute is expected to.
+
+That applies to the next one already in the plan: `6da0c9a4` was explicitly
+"the first half" of retiring Blacksmith across 2AM Logic. The four `Tests`
+legs and the three `native` matrix legs are the half still on
+`blacksmith-4vcpu-ubuntu-2404`, and they are the rows whose numbers this page
+is least confident about — moving them is the moment to redo the table above,
+not a moment to reuse it.
 
 ## Running the check locally
 

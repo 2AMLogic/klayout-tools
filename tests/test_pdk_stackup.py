@@ -23,6 +23,7 @@ derived split, for each curated family:
 """
 
 import json
+import math
 
 import pytest
 
@@ -125,6 +126,68 @@ def test_emitted_dielectrics_carry_permittivity_and_null_loss_tangent(tmp_path):
     # ... and the slab that met1 sits inside is exactly this one.
     met1 = _conductor(report, "met1")
     assert ild3["z0_um"] <= met1["z0_um"] and met1["z1_um"] <= ild3["z1_um"]
+
+
+def test_emitted_substrate_carries_resistivity_and_effective_thickness(tmp_path):
+    """Issue #2560: the substrate entry gains a resistivity/conductivity
+    field and an effective-thickness field (`z0_um`), following the same
+    sign convention every conductor entry uses -- `z1_um` is the elevation
+    origin (0.0), so `z0_um` is a negative depth below it."""
+    root = tmp_path / "install"
+    _sky130_install(root)
+
+    report = pdk_stackup.stackup(root=str(root))
+
+    substrate = report["substrate"]
+    assert substrate["z1_um"] == 0.0
+    assert substrate["z0_um"] < 0.0
+    assert math.isfinite(substrate["z0_um"])
+    assert substrate["resistivity_ohm_cm"] > 0.0
+    assert math.isfinite(substrate["resistivity_ohm_cm"])
+    # Neither existing field's value moved (issue #2560's "additive only"
+    # acceptance criterion).
+    assert substrate["name"] == "substrate"
+    assert substrate["material"] == "silicon"
+    assert substrate["permittivity"] == 11.9
+    assert substrate["loss_tangent"] is None
+    assert substrate["source"]
+
+
+@pytest.mark.parametrize(
+    "table_name",
+    ["_SKY130_STACKUP", "_GF180MCU_STACKUP"],
+)
+def test_curated_substrate_resistivity_and_thickness_are_finite_and_positive(
+    table_name,
+):
+    """Both curated families carry the same new-field invariants: a positive,
+    finite resistivity and a negative, finite effective depth -- and each is
+    named explicitly in the shared `source` citation (issue #2560)."""
+    substrate = getattr(pdk_stackup, table_name)["substrate"]
+
+    assert math.isfinite(substrate["resistivity_ohm_cm"])
+    assert substrate["resistivity_ohm_cm"] > 0.0
+    assert math.isfinite(substrate["z0_um"])
+    assert substrate["z0_um"] < 0.0
+    assert substrate["z1_um"] == 0.0
+    assert "resistivity_ohm_cm" in substrate["source"]
+    assert "z0_um" in substrate["source"]
+
+
+@pytest.mark.parametrize(
+    "table_name",
+    ["_SKY130_STACKUP", "_GF180MCU_STACKUP"],
+)
+def test_curated_substrate_other_fields_are_unchanged(table_name):
+    """Additive-only regression check (issue #2560's own acceptance
+    criterion): the pre-existing fields' values did not move when the new
+    ones were added."""
+    substrate = getattr(pdk_stackup, table_name)["substrate"]
+
+    assert substrate["name"] == "substrate"
+    assert substrate["material"] == "silicon"
+    assert substrate["permittivity"] == 11.9
+    assert substrate["loss_tangent"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -680,6 +743,8 @@ def test_cli_json_payload_on_stdout(tmp_path, capsys):
     assert met1["z0_um"] == 1.3761
     assert met1["sheet_resistance_ohm_per_sq"] == 0.125
     assert {d["name"] for d in payload["dielectrics"]} >= {"pmd", "ild2", "ild6"}
+    assert payload["substrate"]["z0_um"] < 0.0
+    assert payload["substrate"]["resistivity_ohm_cm"] > 0.0
 
 
 def test_cli_json_payload_for_gf180mcu(tmp_path, capsys):
@@ -722,6 +787,8 @@ def test_cli_json_payload_for_gf180mcu(tmp_path, capsys):
         "ild5",
         "ild6",
     }
+    assert payload["substrate"]["z0_um"] < 0.0
+    assert payload["substrate"]["resistivity_ohm_cm"] > 0.0
 
 
 def test_cli_corner_flag_is_threaded_through(tmp_path, capsys):

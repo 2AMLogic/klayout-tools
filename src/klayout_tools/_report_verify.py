@@ -27,7 +27,8 @@ Both modes report the same two-value ``status``:
 each supply the verb-specific pieces (which hashes to re-derive, how to re-run
 the analysis) via the small building blocks below; this module owns only the
 shape-agnostic mechanics (loading a committed report, comparing one hash,
-diffing two report dicts, dropping run-scoped bookkeeping keys before that
+diffing two report dicts, dropping run-scoped bookkeeping keys -- by name
+(:func:`strip_keys`) or by path (:func:`strip_path_patterns`) -- before that
 diff).
 
 **Flow verbs need the request back (issue #2224).** ``klt drc``/``klt lvs``/
@@ -238,6 +239,56 @@ def strip_keys(value: Any, keys: frozenset[str]) -> Any:
         }
     if isinstance(value, list):
         return [strip_keys(item, keys) for item in value]
+    return value
+
+
+#: The path component standing for "any list index" in a
+#: :func:`strip_path_patterns` pattern (issue #2526). Spelled as a literal
+#: ``"*"`` so a pattern reads the way the dotted field name it targets does
+#: (``("items", "*", "text")`` for ``items.2.text``); no report shape any
+#: caller passes has a mapping key literally named ``*``, so the wildcard can
+#: never collide with a real key.
+LIST_ITEM = "*"
+
+
+def strip_path_patterns(value: Any, patterns: frozenset[tuple[str, ...]]) -> Any:
+    """``value`` with every mapping entry whose *path* matches an entry in
+    ``patterns`` removed, recursively (issue #2526) -- the path-keyed sibling
+    of :func:`strip_keys`, for :func:`build_rerun_result`'s
+    ``committed_for_diff``/``fresh_for_diff``.
+
+    A path is the tuple of mapping keys walked to reach the entry, with
+    :data:`LIST_ITEM` standing in for every list index along the way -- so
+    ``("items", LIST_ITEM, "text")`` drops ``text`` from every element of
+    ``items`` and from nowhere else.
+
+    **Why both this and :func:`strip_keys` exist.** ``strip_keys`` drops a
+    key *wherever it appears*, which is right for a bookkeeping key that
+    recurs at several nesting depths under names a caller cannot enumerate
+    (``run_id``, ``netlist_path``). It is wrong for a field name that is
+    verdict-bearing in one place and incidental in another: a name-keyed drop
+    cannot tell the two apart, and silently widening the unchecked set is the
+    one failure mode a verification mode must not have. This helper is for
+    that case -- the excluded field is named by *where* it is, so a same-named
+    field that appears somewhere else (now or after a future schema addition)
+    keeps being compared.
+    """
+    return _strip_path_patterns(value, patterns, ())
+
+
+def _strip_path_patterns(
+    value: Any, patterns: frozenset[tuple[str, ...]], path: tuple[str, ...]
+) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _strip_path_patterns(item, patterns, path + (key,))
+            for key, item in value.items()
+            if path + (key,) not in patterns
+        }
+    if isinstance(value, list):
+        return [
+            _strip_path_patterns(item, patterns, path + (LIST_ITEM,)) for item in value
+        ]
     return value
 
 

@@ -738,6 +738,18 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # already cite -- never new, private numbers.
         "nplus": (32, 0),  # Nplus -- n+ source/drain implant (nfet flavor)
         "pplus": (31, 0),  # Pplus -- p+ source/drain implant (pfet flavor)
+        "dummy": (100, 50),  # curated marker, matches
+        # `klayout_tools.decks.gf180mcu.EXTRACTION_DECK.dummy` -- see that
+        # deck's own comment for why gf180mcu has no native dummy-device GDS
+        # layer and why (100, 50) was chosen (issue #2599, the gf180mcu
+        # counterpart of sky130's own #491). Drawn per dummy unit device by
+        # `mos_array`/`res_array`/`bjt_array` (never over a real, non-dummy
+        # unit) so `klt extract`'s existing dummy-suppression guards (issue
+        # #295/#462) actually fire on this family too -- without it, `klt gen
+        # mos_array`'s own `dummy` param produced geometry `klt lvs` on the
+        # same family could only report as `device.unmatched`. No curated
+        # *DRC* rule in this deck checks layer 100, so drawing it never
+        # affects `klt drc --deck gf180mcu` status.
         # Bond-pad roles (issue #568, same rationale as sky130's pair above).
         # `pad` matches `decks/gf180mcu.py`'s `pad.enclosing.metal5.1` (PAD.4)
         # `other_layer`; `top_metal` matches that same rule's `layer` --
@@ -1114,6 +1126,16 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # by `MIN_SAME_LAYER_SPACING_UM` (well inside this deck's own
         # `activ.space.1` floor, 0.21um) -- see `_mos_array_well_tap_layout`.
         "well_tap_implant": (7, 0),  # nSD.drawing -- EXTRACTION_DECK.tap_nplus
+        "dummy": (100, 50),  # curated marker, matches
+        # `klayout_tools.decks.sg13cmos5l.EXTRACTION_DECK.dummy` -- see that
+        # deck's own comment (issue #2602) for why sg13cmos5l has no native
+        # dummy-device GDS layer and why layer 100 (wholly unassigned in
+        # this family's own transcribed `.lyp`/DRC/LVS layer tables, unlike
+        # gf180mcu's reused `LVS_*` layer number) was picked. `res_array` is
+        # the only generator this role currently drives for this family
+        # (`_GENERATOR_FAMILY_DEFERRED` above rejects `mos_array`/
+        # `diff_pair`/`guard_ring`/`bjt_array`/`esd_device`/`well_island` on
+        # `sg13cmos5l`).
     },
 }
 
@@ -2302,14 +2324,16 @@ def _device_layer_params(
     can enclose the unit device's active region in a well on PDK families
     whose curated deck checks one.
 
-    Also resolves ``dummy_layer``/``dummy_present`` (issue #491) -- the
-    optional PDK dummy-device marker (see :data:`_PDK_ROLE_LAYERS`'s
-    ``"dummy"`` role and ``klayout_tools.decks.sky130``'s
+    Also resolves ``dummy_layer``/``dummy_present`` (issue #491, extended to
+    gf180mcu by #2599) -- the optional PDK dummy-device marker (see
+    :data:`_PDK_ROLE_LAYERS`'s ``"dummy"`` role and
+    ``klayout_tools.decks.sky130``/``klayout_tools.decks.gf180mcu``'s
     ``EXTRACTION_DECK.dummy``) that ``mos_array`` draws over its
     ``dummy_cells``' gate footprint so ``klt extract``'s existing
-    dummy-suppression guards (#295/#462) actually fire. ``None`` (e.g.
-    gf180mcu, or ``diff_pair``, which never populates ``dummy_cells``) is a
-    silent no-op, matching every other ``*_present``-gated role here.
+    dummy-suppression guards (#295/#462) actually fire. ``None`` (a family
+    whose curated deck declares no marker, or ``diff_pair``, which never
+    populates ``dummy_cells``) is a silent no-op, matching every other
+    ``*_present``-gated role here.
 
     Also resolves ``voltage_flavor_mark_layer``/``voltage_flavor_mark_present``
     (issue #1054) -- the optional medium-voltage/thick-oxide device-class
