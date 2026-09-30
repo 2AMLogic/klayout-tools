@@ -6606,6 +6606,13 @@ _SG13CMOS5L_PSD_LAYER = (14, 0)  # pSD -- rppd/rhigh
 _SG13CMOS5L_NSD_LAYER = (7, 0)  # nSD -- rhigh only (rppd excludes it)
 _SG13CMOS5L_SALBLOCK_LAYER = (28, 0)  # SalBlock -- rppd/rhigh
 
+#: Issue #2602's curated dummy-device marker --
+#: `klayout_tools.decks.sg13cmos5l.EXTRACTION_DECK.dummy` (see that field's
+#: own comment for provenance: layer 100 is wholly unassigned in this
+#: family's own transcribed `.lyp`/DRC/LVS layer tables, unlike gf180mcu's
+#: reused `LVS_*` layer number).
+_SG13CMOS5L_DUMMY_LAYER = (100, 50)
+
 
 @pytest.fixture()
 def sg13cmos5l_pdk_root(tmp_path):
@@ -6896,6 +6903,66 @@ def test_sg13cmos5l_res_array_explicit_rsil_matches_default(
         }
     )
     _assert_gds_geometry_equal(output_default, output_rsil)
+
+
+def test_res_array_sg13cmos5l_draws_dummy_marker_over_dummy_cells_only(
+    tmp_path, sg13cmos5l_pdk_root
+):
+    """Issue #2602 (the sg13cmos5l counterpart of sky130's #491 and
+    gf180mcu's #2599): on sg13cmos5l, `res_array` draws the deck's curated
+    `dummy` marker layer over each dummy unit resistor's recognised body
+    segment -- the same footprint the `PolyRes` marker covers -- and only
+    over the dummy units, never a real cell, so `klt extract`'s existing
+    dummy-suppression guard (#295/#462) actually fires on this family too."""
+    import klayout.db as kdb
+
+    output = tmp_path / "res_array_sg13cmos5l_dummy_marker.gds"
+    num, dummy = 3, 2
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"num": num, "dummy": dummy},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SG13CMOS5L_DUMMY_LAYER in present
+
+    dummy_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_SG13CMOS5L_DUMMY_LAYER))
+    )
+    mark_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(*_SG13CMOS5L_RES_MARK_LAYER))
+    )
+    # One dummy-marker shape per dummy unit (2 dummies per end, single row).
+    assert dummy_region.count() == 2 * dummy
+    # It is a strict subset of the PolyRes marker's own footprint -- never
+    # bleeding onto a real unit's body segment.
+    assert (dummy_region - mark_region).is_empty()
+    assert dummy_region.area() < mark_region.area()
+
+    output_no_dummy = tmp_path / "res_array_sg13cmos5l_no_dummy_marker.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13CMOS5L_VARIANT, "root": str(sg13cmos5l_pdk_root)},
+            "params": {"num": num, "dummy": 0},
+            "options": {"output": str(output_no_dummy)},
+        }
+    )
+    layout_no_dummy = kdb.Layout()
+    layout_no_dummy.read(str(output_no_dummy))
+    present_no_dummy = {
+        (layout_no_dummy.get_info(i).layer, layout_no_dummy.get_info(i).datatype)
+        for i in layout_no_dummy.layer_indexes()
+    }
+    assert _SG13CMOS5L_DUMMY_LAYER not in present_no_dummy
 
 
 @pytest.mark.parametrize(

@@ -805,13 +805,13 @@ below), so `klt gen res_array`'s output is directly recognised as a resistor
 device by `klt extract --deck <pdk>` rather than being absorbed into ordinary
 poly interconnect as a short (issue #369). Neither curated *DRC* deck checks
 any of these layers, so drawing them never affects `klt drc` status. On
-sky130 (issue #491) and gf180mcu (issue #2599), each *dummy* unit's body
-segment is additionally
+sky130 (issue #491), gf180mcu (issue #2599) and sg13cmos5l (issue #2602),
+each *dummy* unit's body segment is additionally
 covered by the curated `dummy` marker layer, so `klt extract`'s dummy-device
 suppression (see "Dummy devices: the `dummy` marker layer" in
 `docs/cli/extract.md`) drops it from the extracted netlist instead of
-reporting it as a spurious unmatched device under `klt lvs` — sg13g2/sg13cmos5l
-draw no equivalent marker.
+reporting it as a spurious unmatched device under `klt lvs` — sg13g2
+draws no equivalent marker.
 
 `flavor` selects which recognised poly-resistor *device class* the array
 draws, by covering each body segment with the implant/precision-resistor
