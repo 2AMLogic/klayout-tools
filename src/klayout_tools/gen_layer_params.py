@@ -1126,6 +1126,16 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # by `MIN_SAME_LAYER_SPACING_UM` (well inside this deck's own
         # `activ.space.1` floor, 0.21um) -- see `_mos_array_well_tap_layout`.
         "well_tap_implant": (7, 0),  # nSD.drawing -- EXTRACTION_DECK.tap_nplus
+        "dummy": (100, 50),  # curated marker, matches
+        # `klayout_tools.decks.sg13cmos5l.EXTRACTION_DECK.dummy` -- see that
+        # deck's own comment (issue #2602) for why sg13cmos5l has no native
+        # dummy-device GDS layer and why layer 100 (wholly unassigned in
+        # this family's own transcribed `.lyp`/DRC/LVS layer tables, unlike
+        # gf180mcu's reused `LVS_*` layer number) was picked. `res_array` is
+        # the only generator this role currently drives for this family
+        # (`_GENERATOR_FAMILY_DEFERRED` above rejects `mos_array`/
+        # `diff_pair`/`guard_ring`/`bjt_array`/`esd_device`/`well_island` on
+        # `sg13cmos5l`).
     },
 }
 
