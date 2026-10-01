@@ -33,6 +33,7 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import pdk as pdk_module
 from klayout_tools import post_route_sta
+from klayout_tools._openroad_engine import _container_runtime_hint
 from klayout_tools.cli import main
 from klayout_tools.post_route_sta import PostRouteStaError, load_request, run_sta
 
@@ -1965,6 +1966,201 @@ def test_run_sta_missing_openroad_binary_raises(tmp_path, monkeypatch):
 
     with pytest.raises(PostRouteStaError, match="could not launch openroad"):
         run_sta(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# Container-runtime-unreachable diagnosis (issue #2632)
+# --------------------------------------------------------------------------- #
+
+#: What Docker Engine Community 29.8.1 prints when its daemon socket does not
+#: exist -- reproduced live on a dev host (2026-09-30) with the
+#: non-destructive `DOCKER_HOST=unix:///nonexistent-test.sock docker run --rm
+#: hello-world`, which never touches the real daemon. Exit code 1.
+_DOCKER_29_UNREACHABLE = (
+    "failed to connect to the docker API at unix:///nonexistent-test.sock; "
+    "check if the path is correct and if the daemon is running: dial unix "
+    "/nonexistent-test.sock: connect: no such file or directory\n"
+)
+
+#: The long-documented wording from older Docker CLI releases. Shares no
+#: usable literal substring with the 29.x message above -- which is exactly
+#: why the detection keys on the `daemon ... running` shape instead.
+_DOCKER_CLASSIC_UNREACHABLE = (
+    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+    "Is the docker daemon running?\n"
+)
+
+#: Docker's documented output when the invoking user cannot open the daemon
+#: socket. Note it does NOT contain the word "running", so it is a genuinely
+#: separate signature rather than a second spelling of the first one.
+_DOCKER_PERMISSION_DENIED = (
+    "Got permission denied while trying to connect to the Docker daemon "
+    "socket at unix:///var/run/docker.sock: Get "
+    '"http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/json": dial unix '
+    "/var/run/docker.sock: connect: permission denied\n"
+)
+
+#: A genuine OpenROAD/Tcl analysis failure -- the engine really ran, the
+#: design/inputs are the problem. Must never pick up a container hint.
+_GENUINE_STA_FAILURE_STDOUT = "[ERROR STA-1234] something went wrong\n"
+_GENUINE_STA_FAILURE_STDERR = "Error: sta_modexp.tcl, 12 STA-1234\n"
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        pytest.param(_DOCKER_29_UNREACHABLE, id="docker-29"),
+        pytest.param(_DOCKER_CLASSIC_UNREACHABLE, id="docker-classic"),
+    ],
+)
+def test_container_runtime_hint_recognizes_both_daemon_wordings(stderr):
+    """Both known "daemon unreachable" wordings are recognized, and the hint
+    says the request was never analyzed -- the whole point of the
+    distinction, since retrying the same request after starting the runtime
+    is the correct response."""
+    hint = _container_runtime_hint(fake_completed(returncode=1, stderr=stderr))
+
+    assert hint is not None
+    assert "container runtime" in hint
+    assert "scripts/install-openroad-docker.sh" in hint
+    assert "docker info" in hint
+    assert "never analyzed" in hint
+
+
+def test_container_runtime_hint_recognizes_permission_denied():
+    """The socket-permission case gets its own remedy -- starting the daemon
+    would not help; the invoking user needs access to it."""
+    hint = _container_runtime_hint(
+        fake_completed(returncode=1, stderr=_DOCKER_PERMISSION_DENIED)
+    )
+
+    assert hint is not None
+    assert "not permitted" in hint
+    assert "docker" in hint
+    assert "docker info" not in hint
+
+
+def test_container_runtime_hint_reads_stdout_too():
+    """Detection is stream-agnostic: a wrapper that merges docker's message
+    onto stdout is diagnosed the same way."""
+    assert (
+        _container_runtime_hint(
+            fake_completed(returncode=1, stdout=_DOCKER_CLASSIC_UNREACHABLE)
+        )
+        is not None
+    )
+
+
+def test_container_runtime_hint_none_for_genuine_analysis_failure():
+    """A real OpenROAD/Tcl failure gets no hint. A false-positive here would
+    be actively misleading -- it would tell a caller to go restart Docker
+    when the actual problem is their design."""
+    assert (
+        _container_runtime_hint(
+            fake_completed(
+                returncode=1,
+                stdout=_GENUINE_STA_FAILURE_STDOUT,
+                stderr=_GENUINE_STA_FAILURE_STDERR,
+            )
+        )
+        is None
+    )
+
+
+def test_container_runtime_hint_none_for_empty_output():
+    assert _container_runtime_hint(fake_completed(returncode=1)) is None
+
+
+def test_engine_error_message_appends_container_runtime_hint():
+    """The hint is appended to -- never a replacement for -- the engine's own
+    captured output, following `place_and_route.py`'s `_mount_namespace_hint`
+    pattern (issue #1868)."""
+    completed = fake_completed(returncode=1, stderr=_DOCKER_29_UNREACHABLE)
+
+    message = post_route_sta._engine_error_message(completed)
+
+    assert message.startswith("openroad sta run exited with code 1: ")
+    assert "failed to connect to the docker API" in message
+    assert " -- the openroad wrapper could not reach its container runtime" in message
+
+
+def test_engine_error_message_appends_permission_hint_to_bracket_error():
+    """Appending composes with the bracketed-diagnostic branch too, not only
+    with the exit-code fallback."""
+    completed = fake_completed(
+        returncode=1,
+        stdout="[ERROR STA-9999] could not start\n",
+        stderr=_DOCKER_PERMISSION_DENIED,
+    )
+
+    message = post_route_sta._engine_error_message(completed)
+
+    assert message.startswith(
+        "openroad sta run failed: [ERROR STA-9999] could not start -- "
+    )
+    assert "not permitted to reach the container runtime's socket" in message
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        pytest.param(
+            _GENUINE_STA_FAILURE_STDOUT,
+            _GENUINE_STA_FAILURE_STDERR,
+            "openroad sta run failed: [ERROR STA-1234] something went wrong",
+            id="bracket-diagnostic",
+        ),
+        pytest.param(
+            "",
+            _GENUINE_STA_FAILURE_STDERR,
+            "openroad sta run failed: Error: sta_modexp.tcl, 12 STA-1234",
+            id="bare-error-trailer",
+        ),
+        pytest.param(
+            "",
+            "no timing paths found\n",
+            "openroad sta run exited with code 1: no timing paths found",
+            id="exit-code-fallback",
+        ),
+        pytest.param(
+            "",
+            "",
+            "openroad sta run exited with code 1: no output captured",
+            id="no-output",
+        ),
+    ],
+)
+def test_engine_error_message_unchanged_without_container_signature(
+    stdout, stderr, expected
+):
+    """Regression guard: every message shape is byte-identical to its pre-#2632
+    output when neither container signature is present."""
+    completed = fake_completed(returncode=1, stdout=stdout, stderr=stderr)
+
+    assert post_route_sta._engine_error_message(completed) == expected
+
+
+def test_run_sta_unreachable_container_runtime_surfaces_hint(tmp_path, monkeypatch):
+    """End to end through `run_sta`: the raised `PostRouteStaError` -- which is
+    what becomes `error.message` -- carries the hint alongside docker's own
+    captured text and the retained-log trailer."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="26Q3-771-gdeadbeef\n")
+        return fake_completed(returncode=1, stderr=_DOCKER_29_UNREACHABLE)
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+
+    message = str(excinfo.value)
+    assert "failed to connect to the docker API" in message
+    assert "could not reach its container runtime" in message
+    assert "scripts/install-openroad-docker.sh" in message
+    assert "openroad invocation:" in message
 
 
 # --------------------------------------------------------------------------- #

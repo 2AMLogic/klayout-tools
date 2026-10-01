@@ -182,6 +182,7 @@ import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
 from typing import Any
 
 from ._openroad_engine import (
+    _container_runtime_hint,
     _count_violations,
     _openroad_version,
     _OpenRoadResult,
@@ -1609,7 +1610,15 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     over a bare ``Error:`` trailer line, mirroring
     ``place_and_route.py``'s own ``_engine_error_message`` (minus that
     function's route-stage-only ``DRT-0305`` diagnosis, which cannot occur
-    here -- this verb never runs TritonRoute)."""
+    here -- this verb never runs TritonRoute).
+
+    :func:`~klayout_tools._openroad_engine._container_runtime_hint` is
+    appended as a further ``--`` clause when the captured output shows the
+    engine never really ran at all because its container runtime was
+    unreachable (issue #2632) -- the same append-a-recognized-hint structure
+    ``place_and_route.py`` already uses for ``_mount_namespace_hint`` (issue
+    #1868). A failure carrying neither signature keeps exactly its previous
+    message."""
     bracket_lines: list[str] = []
     bare_error_lines: list[str] = []
     for stream in (completed.stdout or "", completed.stderr or ""):
@@ -1621,13 +1630,18 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
                 bare_error_lines.append(stripped)
 
     if bracket_lines:
-        return f"openroad sta run failed: {bracket_lines[0]}"
-    if bare_error_lines:
-        return f"openroad sta run failed: {bare_error_lines[-1]}"
+        message = f"openroad sta run failed: {bracket_lines[0]}"
+    elif bare_error_lines:
+        message = f"openroad sta run failed: {bare_error_lines[-1]}"
+    else:
+        tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
+        snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
+        message = f"openroad sta run exited with code {completed.returncode}: {snippet}"
 
-    tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-    snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
-    return f"openroad sta run exited with code {completed.returncode}: {snippet}"
+    hint = _container_runtime_hint(completed)
+    if hint is not None:
+        message = f"{message} -- {hint}"
+    return message
 
 
 def _read_metrics(metrics_path: str) -> dict[str, Any]:

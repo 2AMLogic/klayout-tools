@@ -104,6 +104,97 @@ class _OpenRoadResult:
             raise error_cls(_log_error_context(str(exc), self.engine_log)) from exc
 
 
+#: The version-independent shape of "the Docker daemon is not reachable"
+#: (issue #2632): the word ``daemon`` followed, later on the same line, by the
+#: word ``running``.
+#:
+#: The exact wording is Docker-CLI-version-specific, so it is deliberately
+#: *not* hardcoded. Docker Engine Community 29.8.1 prints (reproduced live,
+#: 2026-09-30, via a non-destructive ``DOCKER_HOST=unix:///nonexistent.sock``
+#: invocation)::
+#:
+#:     failed to connect to the docker API at unix:///nonexistent.sock; check
+#:     if the path is correct and if the daemon is running: dial unix ...
+#:
+#: while older CLI releases print the long-documented::
+#:
+#:     Cannot connect to the Docker daemon at unix:///var/run/docker.sock.
+#:     Is the docker daemon running?
+#:
+#: Both satisfy this pattern; neither survives a literal string match against
+#: the other.
+_CONTAINER_RUNTIME_UNREACHABLE_RE = re.compile(r"(?i)daemon\b.*\brunning\b")
+
+#: Shared lead-in for both recognized container-runtime failures, naming the
+#: script that generated the wrapper so a reader can see the ``docker run``
+#: line for themselves.
+_CONTAINER_RUNTIME_HINT_PREFIX = (
+    "the openroad wrapper could not reach its container runtime "
+    "(see scripts/install-openroad-docker.sh)"
+)
+
+
+def _container_runtime_hint(completed: _OpenRoadResult) -> str | None:
+    """``None``, or an actionable hint that ``openroad`` never really ran
+    because its container runtime was unreachable (issue #2632).
+
+    Every OpenROAD-driving ``klt`` verb shells out to a bare ``openroad``
+    argv, which -- per this repo's own documented, CI-used install path
+    (``scripts/install-openroad-docker.sh``) -- is very often actually a
+    wrapper script whose last line is ``exec docker run --rm -i ... $IMAGE
+    ...``. Because ``exec`` replaces the wrapper process, whatever ``docker``
+    itself prints when it cannot reach its daemon becomes the captured
+    ``stderr`` of the run *unchanged*: there is no wrapper-added text to
+    strip, and no distinct exit code to key off (``docker`` exits ``1``, the
+    same as a genuine OpenROAD/Tcl failure).
+
+    Read alone, that is indistinguishable from "the engine ran and the design
+    failed analysis" -- yet the two call for opposite responses. A design or
+    input problem is the caller's to fix; an unreachable runtime is an
+    environment problem where starting the runtime and retrying the *same*
+    request is exactly the right move. So when the captured output carries one
+    of two stable signatures, say which one it is:
+
+    - **Runtime unreachable** -- :data:`_CONTAINER_RUNTIME_UNREACHABLE_RE`,
+      matched per line. Matching on the version-independent ``daemon ...
+      running`` shape rather than either release's full sentence is
+      deliberate: the two known wordings share no usable literal substring.
+    - **Runtime socket not permitted** -- a line carrying both ``permission
+      denied`` and ``docker`` (case-insensitively), Docker's behavior when the
+      invoking user lacks access to the daemon socket. Checked first, as the
+      narrower of the two signatures.
+
+    Like ``place_and_route.py``'s :func:`~klayout_tools.place_and_route.
+    _mount_namespace_hint` (issue #1868), this is safe to *append* to an
+    existing engine-error message rather than replace it: the engine's own
+    captured diagnosis is still the primary evidence, the hint only says what
+    that diagnosis means and what to do next. A caller that does not recognize
+    either signature gets today's message byte-for-byte.
+
+    Deliberately **not** classified here: a ``docker`` binary missing from
+    ``$PATH`` after install, which surfaces as the wrapper's own bash
+    ``command not found`` (exit ``127``) -- a separable signature, left to a
+    follow-up rather than folded into an under-tested third branch.
+    """
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in stream.splitlines():
+            lowered = line.lower()
+            if "permission denied" in lowered and "docker" in lowered:
+                return (
+                    f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- this user is not "
+                    "permitted to reach the container runtime's socket; grant "
+                    "it access (e.g. add the user to the 'docker' group, or "
+                    "use a rootless runtime), then retry"
+                )
+            if _CONTAINER_RUNTIME_UNREACHABLE_RE.search(line):
+                return (
+                    f"{_CONTAINER_RUNTIME_HINT_PREFIX} -- verify the runtime "
+                    "is installed and its daemon is running ('docker info'), "
+                    "then retry; the request itself was never analyzed"
+                )
+    return None
+
+
 def _log_error_context(message: str, record: dict[str, Any]) -> str:
     return f"{message} -- openroad invocation: {json.dumps(record, sort_keys=True)}"
 
