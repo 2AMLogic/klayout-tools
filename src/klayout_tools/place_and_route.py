@@ -3366,14 +3366,35 @@ def _validate_macro_halo(halo: Any, *, label: str) -> dict[str, float] | None:
             + ", ".join(_MACRO_HALO_SIDES)
         )
     if isinstance(halo, (int, float)):
-        if halo < 0:
-            raise PlaceAndRouteError(f"{label}.halo must not be negative")
-        return dict.fromkeys(_MACRO_HALO_SIDES, float(halo))
-    if not isinstance(halo, dict):
-        raise PlaceAndRouteError(
-            f"{label}.halo must be a number (uniform, in um) or an object "
-            "naming any of: " + ", ".join(_MACRO_HALO_SIDES)
-        )
+        return _validate_uniform_macro_halo(halo, label=label)
+    if isinstance(halo, dict):
+        return _validate_per_side_macro_halo(halo, label=label)
+    raise PlaceAndRouteError(
+        f"{label}.halo must be a number (uniform, in um) or an object "
+        "naming any of: " + ", ".join(_MACRO_HALO_SIDES)
+    )
+
+
+def _validate_uniform_macro_halo(halo: float, *, label: str) -> dict[str, float]:
+    """The bare-number half of :func:`_validate_macro_halo`: one value applied
+    to all four sides of :data:`_MACRO_HALO_SIDES`.
+    """
+    if halo < 0:
+        raise PlaceAndRouteError(f"{label}.halo must not be negative")
+    return dict.fromkeys(_MACRO_HALO_SIDES, float(halo))
+
+
+def _validate_per_side_macro_halo(
+    halo: dict[str, Any], *, label: str
+) -> dict[str, float]:
+    """The object half of :func:`_validate_macro_halo`: any subset of
+    :data:`_MACRO_HALO_SIDES`, each unnamed side defaulting to ``0``.
+
+    An empty object is rejected rather than silently treated as "omitted",
+    and an unrecognized side name is named back to the caller rather than
+    ignored -- a misspelled side that validated would silently drop the halo
+    the caller asked for.
+    """
     if not halo:
         raise PlaceAndRouteError(
             f"{label}.halo must name at least one of: " + ", ".join(_MACRO_HALO_SIDES)
