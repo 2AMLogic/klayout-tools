@@ -22,6 +22,14 @@ poly/diff/li1/met1/licon1/mcon, wide enough to prove the deck-adapter shape
 (:class:`~klayout_tools.decks.DrcRule`) and produce a non-trivial worked
 example. Coverage is expected to grow incrementally in follow-on issues.
 
+One whole rule *group* of the source deck is now transcribed in full,
+though: its `OFFGRID` manufacturing-grid/corner-angle group (issue #2642),
+which `sky130.lydrc` ships switched **on** and which this deck previously
+had no rule of any kind from -- see the "Manufacturing-grid / corner-angle
+rules" section further down for the per-layer table, the two deliberate
+deviations it records, and `OFFGRID_UNCHECKED_LAYERS` for the layers the
+source group itself declines to check.
+
 Threshold-fidelity exception (issue #551): every rule below transcribes its
 source rule's threshold *value* unmodified, with exactly one deliberate
 exception *pattern* -- transcribing a DRC-DSL ``second_edges``-conditional
@@ -1433,6 +1441,236 @@ DECK: list[DrcRule] = [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# Manufacturing-grid / corner-angle rules -- the source deck's own `OFFGRID`
+# rule group (issue #2642)
+# ---------------------------------------------------------------------------
+#
+# `sky130.lydrc` declares three rule groups it can run, as plain Ruby locals
+# near the top of the script:
+#
+#     FEOL    = false # front-end-of-line checks
+#     BEOL    = true # back-end-of-line checks
+#     OFFGRID = true # manufacturing grid/angle checks
+#
+# -- i.e. the grid/angle group is **on by default** in the deck a foundry
+# signs off against, and (unlike `FEOL`) is not one of the groups that ships
+# switched off. Until this issue the curated deck transcribed nothing from it
+# at all, on any layer: `klt drc`'s "clean" verdict was silent about a defect
+# class the real deck actively flags, and the only way to notice was to
+# cross-check a `klt precheck --grid-um 0.005` census (a separate,
+# deck-independent, caller-supplied check -- see `docs/cli/precheck.md`)
+# against a clean `klt drc` run on the same layout.
+#
+# The group's body is one or two calls per drawn layer:
+#
+#     dnwell.ongrid(0.005).output("dnwell_OFFGRID", "x.1b : OFFGRID vertex on dnwell")
+#     dnwell.with_angle(0 .. 45).output("dnwell_angle",
+#                                    "x.3a : non 45 degree angle dnwell")
+#
+# so the transcription below is a table with one row per source-deck layer,
+# in the source block's own line order, rather than ~75 near-identical
+# `DrcRule(...)` literals: a row-per-source-line table can be diffed directly
+# against that contiguous section of the upstream file, which is the property
+# that makes a transcription of this size reviewable. The rules it builds are
+# ordinary `DrcRule` entries appended to `DECK` (`DECK += ...` below), and
+# they live in *this* module on purpose -- `decks.deck_source_path()` hashes
+# this file as the deck's identity for `provenance.deck.content_hash`, so a
+# rule table moved to a sibling module would be invisible to that hash.
+#
+# Grid: **0.005um for every checked layer**, verbatim -- the source block
+# passes the same literal `0.005` to all 38 `ongrid` calls, with no per-layer
+# variation to get wrong. Expressed as `grid_um` (a real physical distance
+# rescaled against the layout's own dbu), not `threshold_dbu`; see that
+# field's docstring in `decks/rules.py`.
+#
+# Angle: two published limits, per layer, under two official rule ids --
+# `x.3a` ("non 45 degree angle <layer>", `with_angle(0 .. 45)`) on the
+# implant/well/metal layers, and `x.2` ("non 90 degree angle <layer>",
+# `with_angle(0 .. 90)`) on poly, the cut/via layers, and `mf`. What the
+# upstream primitive actually enforces is a *minimum interior corner angle*,
+# not "every edge lies on a multiple of 45 degrees" -- see
+# `DrcRule.angle_limit_deg` and `drc.py`'s `_run_angle_check` for the
+# verified semantics. This deck transcribes the primitive and the value the
+# source deck uses, and documents the gap, rather than "correcting" the rule
+# into something whose verdict is no longer comparable to the PDK deck's own.
+#
+# Two deliberate deviations, both recorded rather than silently defaulted:
+#
+# 1. `diff`/`tap` angle: the source deck does not apply one limit to these
+#    two layers. It splits each by a *three-input derived* layer --
+#
+#        diff.not(areaid_en.and(uhvi)).with_angle(0 .. 90) -> "x.2"
+#        diff.and(areaid_en.and(uhvi)).with_angle(0 .. 45) -> "x.2c"
+#
+#    -- i.e. 90 degrees outside the extended-drain/ultra-high-voltage marker
+#    intersection and 45 degrees inside it. `DerivedLayer` combines exactly
+#    two drawn layers, so neither half is expressible here. Both rows below
+#    therefore transcribe the **45-degree floor** (`x.2c`), the weaker of the
+#    two limits: every corner it flags is also flagged by the official deck
+#    (a corner under 45 degrees is under 90 too), so this can only
+#    under-report, never produce a finding the real deck would not. That is
+#    the same "transcribe the unconditional floor rather than the published
+#    conditional value" pattern this module's own threshold-fidelity note
+#    (see the module docstring, `li1.enclosing.licon1.1`/
+#    `tap.enclosing.licon.1`) already established. These two rules are also
+#    the only ones in this group left `voltage_independent=False`: their
+#    source rule genuinely publishes two columns, so the
+#    `coverage.voltage_domain_warnings` gate's "may have applied the wrong
+#    column" premise does hold for them (issue #552/#2369). Every other row
+#    here publishes a single value for every layer and voltage domain, which
+#    is what `voltage_independent=True` asserts.
+#
+# 2. `areaid_re` (areaid.rfdiode, 81/125) is checked `ongrid` but has **no
+#    `with_angle` call in the OFFGRID block at all** -- the one layer in the
+#    block with a grid check and no angle check. Its angle constraint lives
+#    in the `FEOL` block instead, as a differently-identified rule
+#    (`areaid_re.with_angle(0 .. 90).output("rfdiode.1", ...)`), which this
+#    deck does not transcribe. So its row below carries `None` for the angle
+#    limit and this deck emits no `areaid_re.angle.*` rule: an absence copied
+#    from the source, not an omission by oversight.
+#
+# Layers the OFFGRID block checks *neither* grid nor angle on are recorded in
+# `OFFGRID_UNCHECKED_LAYERS` below rather than left to inference.
+
+#: The manufacturing grid every `ongrid` call in `sky130.lydrc`'s OFFGRID
+#: block passes, in micrometres (`layer.ongrid(0.005)`, 38 call sites, one
+#: literal). Also the grid a caller would pass to `klt precheck --grid-um`
+#: for this PDK.
+OFFGRID_GRID_UM = 0.005
+
+#: One row per layer `sky130.lydrc`'s `if OFFGRID ... end` block checks, in
+#: that block's own line order:
+#: ``(rule-id stem, (layer, datatype), angle limit in degrees or None,
+#: official angle rule id)``. The stem is this deck's own layer naming (so
+#: `m1` -> `met1`, matching `met1.width.1` et al.); the trailing comment on
+#: each row is the source deck's own variable name where it differs. An
+#: angle limit of `None` means the source block emits no `with_angle` call
+#: for that layer (see note 2 above).
+_OFFGRID_ROWS: tuple[tuple[str, tuple[int, int], float | None, str], ...] = (
+    ("dnwell", (64, 18), 45.0, "x.3a"),
+    ("nwell", (64, 20), 45.0, "x.3a"),
+    ("pwbm", (19, 44), 45.0, "x.3a"),
+    ("pwde", (124, 20), 45.0, "x.3a"),
+    ("hvtp", (78, 44), 45.0, "x.3a"),
+    ("hvtr", (18, 20), 45.0, "x.3a"),
+    ("lvtn", (125, 44), 45.0, "x.3a"),
+    ("ncm", (92, 44), 45.0, "x.3a"),
+    # `x.2`/`x.2c` pair, transcribed at the 45-degree floor -- see note 1.
+    ("diff", (65, 20), 45.0, "x.2c"),
+    ("tap", (65, 44), 45.0, "x.2c"),
+    ("tunm", (80, 20), 45.0, "x.3a"),
+    ("poly", (66, 20), 90.0, "x.2"),
+    ("rpm", (86, 20), 45.0, "x.3a"),
+    ("npc", (95, 20), 45.0, "x.3a"),
+    ("nsdm", (93, 44), 45.0, "x.3a"),
+    ("psdm", (94, 20), 45.0, "x.3a"),
+    ("licon1", (66, 44), 90.0, "x.2"),  # source deck: `licon`
+    ("li1", (67, 20), 45.0, "x.3a"),  # source deck: `li`
+    ("mcon", (67, 44), 90.0, "x.2"),
+    ("vpp", (82, 64), 45.0, "x.3a"),  # lyt layer-map: `capacitor.drawing`
+    ("met1", (68, 20), 45.0, "x.3a"),  # source deck: `m1`
+    ("via", (68, 44), 90.0, "x.2"),
+    ("met2", (69, 20), 45.0, "x.3a"),  # source deck: `m2`
+    ("via2", (69, 44), 90.0, "x.2"),
+    ("met3", (70, 20), 45.0, "x.3a"),  # source deck: `m3`
+    ("via3", (70, 44), 90.0, "x.2"),
+    ("nsm", (61, 20), 45.0, "x.3a"),
+    ("met4", (71, 20), 45.0, "x.3a"),  # source deck: `m4`
+    ("via4", (71, 44), 90.0, "x.2"),
+    ("met5", (72, 20), 45.0, "x.3a"),  # source deck: `m5`
+    ("pad", (76, 20), 45.0, "x.3a"),
+    ("mf", (76, 44), 90.0, "x.2"),  # lyt layer-map: `target.drawing`
+    ("hvi", (75, 20), 45.0, "x.3a"),
+    ("hvntm", (125, 20), 45.0, "x.3a"),
+    ("vhvi", (74, 21), 45.0, "x.3a"),
+    ("uhvi", (74, 22), 45.0, "x.3a"),
+    ("pwell_rs", (64, 13), 45.0, "x.3a"),  # lyt layer-map: `pwell.res`
+    # Grid-checked, angle-unchecked in the OFFGRID block -- see note 2.
+    ("areaid_re", (81, 125), None, ""),
+)
+
+#: Layers the source deck defines and this curated deck otherwise models, but
+#: which `sky130.lydrc`'s OFFGRID block checks **neither** grid nor angle on
+#: -- recorded so a reader can tell a transcribed absence from an untranscribed
+#: one (issue #2642's own "never silently default" requirement). Verified by
+#: reading every call in that block: the names below appear nowhere in it.
+#:
+#: The two MiM-capacitor top-plate marks are the interesting case, and exactly
+#: the "a layer is exempted while everything that contacts it is checked"
+#: shape the issue describes: `capm`/`capm2` carry width/space/enclosure rules
+#: in this deck (`capm.width.1`, ...) and sit directly on top of `via3`/`via4`
+#: and `met3`/`met4`, every one of which *is* grid- and angle-checked. So a
+#: layout whose MiM top plate is off-grid stays clean here, not because this
+#: deck declined to transcribe the rule but because the source deck declines
+#: to make it.
+OFFGRID_UNCHECKED_LAYERS: dict[tuple[int, int], str] = {
+    (89, 44): "capm.drawing -- no ongrid/with_angle call in the OFFGRID block",
+    (97, 44): "capm2.drawing (source deck `cap2m`) -- likewise unchecked",
+    (82, 44): "pnp.drawing -- device-recognition mark, not a patterned layer",
+}
+
+
+def _offgrid_rules() -> list[DrcRule]:
+    """Build the `DrcRule` entries for `_OFFGRID_ROWS` (issue #2642).
+
+    One `"ongrid"` rule per row, plus one `"angle"` rule for every row whose
+    source line emits a `with_angle` call. Every value comes from the table
+    above or from `OFFGRID_GRID_UM`; nothing is inferred here.
+    """
+    rules: list[DrcRule] = []
+    for stem, layer, angle_limit_deg, angle_rule_id in _OFFGRID_ROWS:
+        rules.append(
+            DrcRule(
+                id=f"{stem}.ongrid.1",
+                description=(
+                    f"{stem} vertices must be on the "
+                    f"{OFFGRID_GRID_UM}um manufacturing grid"
+                ),
+                layer=layer,
+                check="ongrid",
+                threshold_dbu=0,  # unused by "ongrid" -- see grid_um
+                grid_um=OFFGRID_GRID_UM,
+                # sky130.lydrc OFFGRID block: `<layer>.ongrid(0.005)`
+                # -> "x.1b : OFFGRID vertex on <layer>"
+                scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
+                provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "x.1b"),
+                # One grid for every layer and every voltage domain: the
+                # source block has no second column to have misread (#2369).
+                voltage_independent=True,
+            )
+        )
+        if angle_limit_deg is None:
+            continue
+        rules.append(
+            DrcRule(
+                id=f"{stem}.angle.1",
+                description=(
+                    f"minimum {angle_limit_deg:g}-degree interior corner "
+                    f"angle on {stem}"
+                ),
+                layer=layer,
+                check="angle",
+                threshold_dbu=0,  # unused by "angle" -- see angle_limit_deg
+                angle_limit_deg=angle_limit_deg,
+                # sky130.lydrc OFFGRID block:
+                # `<layer>.with_angle(0 .. <limit>)`
+                # -> "<rule id> : non <limit> degree angle <layer>"
+                scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
+                provenance=_sky130_provenance(
+                    "sky130/klayout/sky130.lydrc", angle_rule_id
+                ),
+                # `x.2c` is the diff/tap floor of a genuinely two-column
+                # source rule (note 1 above) -- the only rows here that keep
+                # the conservative default.
+                voltage_independent=angle_rule_id != "x.2c",
+            )
+        )
+    return rules
+
+
+DECK += _offgrid_rules()
+
 # (layer, datatype) -> "name.purpose" string, from sky130.lyt's layer-map,
 # used only to render violations[].layer as e.g. "poly.drawing" instead of
 # the bare "66/20" fallback.
@@ -1462,6 +1700,35 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     # `UNMODELED_VOLTAGE_MARKERS`/`EXTRACTION_DECK.mos_flavours` notes below
     # for the layer/datatype provenance and what this deck now models with it.
     (75, 20): "hvi.drawing",
+    # Layers this deck first reads for the OFFGRID grid/angle group (issue
+    # #2642, see `_OFFGRID_ROWS` above). Names are `sky130.lyt`'s own
+    # layer-map entries wherever it carries one -- note three that differ
+    # from the source DRC script's variable name (`vpp` is
+    # `capacitor.drawing`, `mf` is `target.drawing`, `pwell_rs` is
+    # `pwell.res`) -- and `<source variable>.drawing` for the three the
+    # sky130A layer-map does not name at all (`pwbm`, `pwde`, `uhvi`),
+    # which would otherwise render as a bare "19/44".
+    (64, 18): "dnwell.drawing",
+    (19, 44): "pwbm.drawing",
+    (124, 20): "pwde.drawing",
+    (78, 44): "hvtp.drawing",
+    (18, 20): "hvtr.drawing",
+    (125, 44): "lvtn.drawing",
+    (92, 44): "ncm.drawing",
+    (80, 20): "tunm.drawing",
+    (86, 20): "rpm.drawing",
+    (95, 20): "npc.drawing",
+    (93, 44): "nsdm.drawing",
+    (94, 20): "psdm.drawing",
+    (82, 64): "capacitor.drawing",
+    (61, 20): "nsm.drawing",
+    (76, 20): "pad.drawing",
+    (76, 44): "target.drawing",
+    (125, 20): "hvntm.drawing",
+    (74, 21): "vhvi.drawing",
+    (74, 22): "uhvi.drawing",
+    (64, 13): "pwell.res",
+    (81, 125): "areaid.rfdiode",
 }
 
 # Voltage-domain marker layer this deck draws but does not *fully* model the

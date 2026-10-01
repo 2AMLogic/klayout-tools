@@ -14,6 +14,39 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2642, `klt drc`; additive — `schema_version` unchanged, but
+  **a layout that reported `clean` before can now report `violations`**):
+  two new `DrcRule` check kinds, `"ongrid"` (manufacturing-grid vertex
+  check, `Region.grid_check`, new `grid_um` field) and `"angle"` (minimum
+  interior corner angle, `Region.with_angle`, new `angle_limit_deg` field),
+  plus the sky130 deck's full transcription of the group they exist for.
+  `sky130.lydrc` ships an on-by-default `OFFGRID = true` rule group
+  ("manufacturing grid/angle checks") emitting `ongrid(0.005)` plus usually
+  `with_angle(0 .. 45|90)` per drawn layer; the curated deck had no rule of
+  either kind on any layer, so a `klt drc` `"clean"` verdict was silent
+  about off-grid vertices the PDK's own deck flags — visible only by
+  cross-checking the separate, deck-independent `klt precheck --grid-um`
+  census. The sky130 deck now carries 38 `<layer>.ongrid.1` rules (0.005 um,
+  official rule `x.1b`) and 37 `<layer>.angle.1` rules
+  (`x.3a`/`x.2`/`x.2c`), each with a `RuleProvenance` citation, taking it
+  from 61 to 136 rules; the three transcribed absences (`areaid_re` angle,
+  the `diff`/`tap` three-input-derived angle pair recorded at its 45-degree
+  floor, `capm`/`capm2` unchecked entirely) are documented rather than
+  inferred. Existing rules, thresholds, and the JSON shape are unchanged;
+  `coverage.deck_layers`/`rules_checked`/`rules_skipped` grow accordingly,
+  and `violations[].polygon` is now `null` (never `[]`) for a fully
+  degenerate single-point marker, matching what the contract already
+  documented. One **new `coverage.skipped[].reason` code**,
+  `grid_not_representable`: an `"ongrid"` rule whose published grid the
+  stream's own database unit cannot express exactly (neither a whole number
+  of units nor a whole divisor of one — e.g. 0.005 um against a 0.006 um
+  dbu) is reported as a skipped *request* (so the run is `clean_partial`)
+  rather than silently rounding the grid or failing the whole run. A reader
+  that branches on the reason code sees a new value; one that only reads
+  "there is a skipped entry" is unaffected. No other deck authors either
+  kind yet. See
+  [`docs/cli/drc.md`](docs/cli/drc.md) → "`"ongrid"` / `"angle"` check
+  kinds" and "Manufacturing grid and corner angle".
 - **Fixed** (#2594, `klt gen`/`klt gen compose`/`klt drc` on `sky130`;
   additive — **no** `schema_version` bump, but user-visible on two axes:
   drawn `licon1`/`mcon` geometry shrinks, and `provenance.deck.content_hash`

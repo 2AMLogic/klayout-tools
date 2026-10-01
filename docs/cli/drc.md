@@ -765,15 +765,91 @@ rule they check — a future golden-pair author authoring a real `"antenna"`
 rule against this primitive must not assume more precision (in particular,
 no per-net isolation) than it actually has.
 
+### `"ongrid"` / `"angle"` check kinds (issue #2642)
+
+Two single-layer **vertex** check kinds, as opposed to the distance checks
+above: they measure where a polygon's corners sit, not how far apart its
+edges are. Both exist because the open PDKs' own shipped KLayout decks
+declare a manufacturing-grid/angle rule group and ship it **switched on** —
+sky130's `sky130.lydrc` sets `OFFGRID = true  # manufacturing grid/angle
+checks` and emits, per drawn layer:
+
+```ruby
+m1.ongrid(0.005).output("m1_OFFGRID", "x.1b : OFFGRID vertex on m1")
+m1.with_angle(0 .. 45).output("m1_angle", "x.3a : non 45 degree angle m1")
+```
+
+Before #2642 the curated decks had no rule of either kind, on any layer or
+any PDK, so a `klt drc` `"clean"` verdict said nothing about a defect class
+the PDK's own deck actively flags. The gap was invisible unless you
+cross-checked `klt precheck --grid-um 0.005` (a separate, deck-independent,
+caller-supplied census — see [`precheck.md`](precheck.md)) against a clean
+`klt drc` run on the same layout and noticed the two disagreed.
+
+**`"ongrid"`** — single-layer, one new field, `grid_um`. Every vertex of the
+checked layer's merged polygons must land on a `grid_um` x `grid_um` grid;
+each vertex that does not is one violation. Driven by
+`klayout.db.Region.grid_check(gx, gy)`, the exact primitive the DRC-DSL's own
+`layer.ongrid(g)` compiles to, so the curated verdict is the native deck's
+verdict on this rule rather than an approximation of it.
+
+`grid_um` is a **real physical distance**, converted against the layout's own
+`dbu` at run time — *not* `threshold_dbu`, which is authored in the deck's
+nominal dbu and rescaled by `dbu_scale` (see [Database units](#database-units-dbu)).
+A manufacturing grid is a property of the process, so 0.005 um stays 0.005 um
+whatever unit the stream is written at. Each violation's marker is a
+degenerate (single-point) edge pair, so `bbox` is a point (`left == right`,
+`bottom == top`) at the offending vertex and `polygon` is `null`.
+
+A stream whose `dbu` is itself a whole multiple of the grid (a 10 nm-dbu
+stream against a 5 nm grid) cannot express an off-grid coordinate at all, so
+the rule reports nothing and still counts as checked — that is the true
+answer, not a silenced one. A `dbu` that is neither a divisor nor a whole
+multiple of the grid (6 nm against 5 nm) *does* have off-grid coordinates but
+no exact integral grid for the primitive to use: that rule is **skipped**,
+with reason `grid_not_representable` in `coverage.skipped` (so the run is
+`clean_partial`, not an unqualified `clean`), rather than silently rounding
+the published grid to a value the deck never declared. Every other rule —
+including the `"angle"` half, which is dimensionless — still runs.
+
+**`"angle"`** — single-layer, one new field, `angle_limit_deg`: the minimum
+*interior* corner angle, in degrees. A corner whose interior angle is
+**strictly less** than the limit is a violation; one exactly at it is legal
+(so a 45-degree limit passes a 45-degree chamfer and flags anything sharper,
+and a 90-degree limit rejects every acute corner). Driven by
+`klayout.db.Region.with_angle(0.0, limit, False)`, which is what the DRC-DSL
+`layer.with_angle(0 .. limit)` evaluates on a polygon layer. Each violation's
+marker holds the two edges forming the offending corner.
+
+**What `"angle"` is not.** The upstream rule descriptions read "non 45 degree
+angle m1", but the primitive they invoke is a *minimum-angle bound*, not an
+"every edge lies on a multiple of 45 degrees" test: two edges meeting at 100
+degrees pass it however far off-axis they are. Verified empirically (KLayout
+0.30): a 30-60-90 triangle reports its 30-degree corner under a 45-degree
+limit and both its 30- and 60-degree corners under a 90-degree one, while a
+rectangle and a 45-degree-chamfered octagon report nothing under either. A
+curated rule transcribed from such a source rule mirrors the primitive and
+the value the source uses, and documents the gap, rather than "correcting"
+the rule into something whose verdict is no longer comparable to the PDK
+deck's own — the same fidelity rule every other transcription here follows.
+
+Neither kind uses `threshold_dbu`, `other_layer`, or `derived_layer`. Both
+are vacuous when their layer is absent (no polygons, so no vertices and no
+corners), so an absent layer classifies as `inapplicable`, like every other
+single-layer kind.
+
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 61
+design rule manual (which spans hundreds of rules). It currently covers 136
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `tap` (issue #2321),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
-`nwell` (issue #1420) layers — transcribed directly from the official
+`nwell` (issue #1420) layers, plus the source deck's entire
+manufacturing-grid/corner-angle (`OFFGRID`) group across 38 layers (issue
+#2642, see "Manufacturing grid and corner angle" below) — transcribed
+directly from the official
 community sky130 KLayout DRC deck
 ([`fossi-foundation/open-pdks`](https://github.com/fossi-foundation/open-pdks),
 `sky130/klayout/sky130.lydrc` and `sky130.lyt`; GPLv3). The `met2`/`via`
@@ -795,12 +871,16 @@ Broken down by check kind:
 | `enclosing`  |    17 |
 | `separation` |     2 |
 | `area`       |    10 |
-| **total**    |**61** |
+| `ongrid`     |    38 |
+| `angle`      |    37 |
+| **total**    |**136**|
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
 `met{1..5}.holes_area.1` holes-area rules, issue #1976 — see the next
-paragraph.)
+paragraph. `ongrid`/`angle` are the `OFFGRID` group, issue #2642 — the
+angle count is one short of the grid count because one layer,
+`areaid.rfdiode`, is grid-checked but not angle-checked by the source deck.)
 
 `nwell.width.1`/`nwell.space.1` (issue #1420) close this deck's original
 gap on the well layer: before these two rules, `DECK` had *zero* rules
@@ -970,6 +1050,62 @@ density in particular stays a separate follow-on, since a real density
 check scopes to a floorplan boundary this engine's windowed `"density"`
 implementation has no concept of (see "`"area"`/`"density"`/`"antenna"`
 check kinds" above).
+
+### Manufacturing grid and corner angle (the `OFFGRID` group, issue #2642)
+
+Unlike every other rule family above, this one is transcribed from its source
+block **in full**: all 38 layers `sky130.lydrc`'s `if OFFGRID ... end` block
+checks get an `<layer>.ongrid.1` rule at the single published grid, 0.005 um
+(`x.1b`), and all but one get an `<layer>.angle.1` rule at that layer's
+published limit (`x.3a`, 45 degrees, on the implant/well/metal layers; `x.2`,
+90 degrees, on `poly`, the cut/via layers, and `mf`). The per-layer table
+lives in `_OFFGRID_ROWS` in `src/klayout_tools/decks/sky130.py`, in the source
+block's own line order so it can be diffed against the upstream file directly.
+
+Layers covered (deck naming; the source script's own variable name in
+parentheses where it differs): `dnwell`, `nwell`, `pwbm`, `pwde`, `hvtp`,
+`hvtr`, `lvtn`, `ncm`, `diff`, `tap`, `tunm`, `poly`, `rpm`, `npc`, `nsdm`,
+`psdm`, `licon1` (`licon`), `li1` (`li`), `mcon`, `vpp`, `met1` (`m1`), `via`,
+`met2` (`m2`), `via2`, `met3` (`m3`), `via3`, `nsm`, `met4` (`m4`), `via4`,
+`met5` (`m5`), `pad`, `mf`, `hvi`, `hvntm`, `vhvi`, `uhvi`, `pwell_rs`,
+`areaid_re`.
+
+Three transcribed absences, recorded rather than inferred — the issue's own
+"never silently default" requirement:
+
+- **`areaid_re` (areaid.rfdiode, 81/125) is grid-checked but not
+  angle-checked.** It is the one layer in the OFFGRID block with an `ongrid`
+  call and no `with_angle` call; its angle constraint lives in the `FEOL`
+  block instead, under a different rule id (`rfdiode.1`), which this deck
+  does not transcribe. Hence 38 `ongrid` rules and 37 `angle` rules.
+- **`diff`/`tap` angle is transcribed at its 45-degree floor, not its
+  90-degree headline value.** The source block splits each of those two
+  layers by a *three-input* derived layer —
+  `diff.not(areaid_en.and(uhvi)).with_angle(0 .. 90)` (`x.2`) versus
+  `diff.and(areaid_en.and(uhvi)).with_angle(0 .. 45)` (`x.2c`) — and
+  `DerivedLayer` combines exactly two drawn layers, so neither half is
+  expressible. Both rules therefore carry the *weaker* of the two limits: a
+  corner under 45 degrees is under 90 too, so this can only under-report,
+  never flag geometry the official deck would pass. Same "transcribe the
+  unconditional floor" pattern as `li1.enclosing.licon1.1`/
+  `tap.enclosing.licon.1` above. These two are also the only rules in the
+  group left voltage-*dependent* (they genuinely have a second published
+  column, so the `coverage.voltage_domain_warnings` gate's premise holds for
+  them); every other rule in the group is `voltage_independent`.
+- **`capm`/`capm2` (MiM-cap top plates) get no grid or angle rule at all,**
+  because the source OFFGRID block checks neither — even though both carry
+  width/space/enclosure rules here and sit directly on `via3`/`via4` and
+  `met3`/`met4`, every one of which *is* checked. An off-grid MiM top plate
+  therefore still reads clean, by transcription rather than by oversight. The
+  full list of modelled-but-unchecked layers, with reasons, is
+  `OFFGRID_UNCHECKED_LAYERS` in `sky130.py`, and
+  `tests/test_drc_offgrid.py` fails if a future layer joins the deck without
+  landing in one list or the other.
+
+**Other decks remain uncovered.** `gf180mcu`, `sg13g2`, and `sg13cmos5l`
+author no `"ongrid"`/`"angle"` rule yet: the check kinds are PDK-agnostic, but
+each deck's grid/angle values have to be transcribed from *its own* signoff
+deck, which is separate work per PDK and is not done here.
 
 Antenna coverage, unlike density, is **not** a gap in the toolset — it is
 simply a different verb. `klt erc` (issue #860) produces a per-gate
@@ -1668,6 +1804,16 @@ concerned. The common block splits them by a single, auditable question:
 | No — the check is a provable no-op | `inapplicable` | `no_applicable_geometry` | None. Inapplicable work never makes an otherwise complete run partial, so a small block that draws four of a PDK deck's seventeen layers still earns an unconditional `clean`. |
 | Yes — the skip hides a possible finding | `skipped` | `absent_input_layer` | The run is `clean_partial` (exit 0) and is **not** an unconditional success; `klt signoff` refuses to count it as a passing check and reports `partial_coverage`. |
 
+One skipped rule is not an absent-layer skip at all (issue #2642), so it is
+classified directly rather than through that question: an `"ongrid"` rule
+whose published manufacturing grid this stream's own database unit cannot
+express exactly reports `reason: "grid_not_representable"` under `skipped`,
+with the same `clean_partial` effect. Its layer *is* drawn and off-grid
+geometry *can* exist there — the engine simply has no integral grid to
+measure it with (see the check kind's own section above). Tested after the
+vacuity question, so a rule whose layer is also absent stays `inapplicable`:
+with no geometry at all, the absent layer is the more informative reason.
+
 Every check kind this engine dispatches measures drawn geometry and reports
 nothing when the geometry it measures is empty: `width`/`space`/`notch`/
 `isolated` find no edge pair, `area`'s `Region.with_area(..., inverse=True)`
@@ -1871,8 +2017,10 @@ carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 `met{1..5}.holes_area.1` rules (issue #1976) likewise cite `m1.7`/`m2.7`/
 `m3.7`/`m4.7`/`m5.7`, and issue #2321's `tap.width.1` cites the same
 `difftap.1` source id `diff.width.1` already carries (both halve the same
-compound rule), and issue #2594's `licon1.width.1`/`mcon.width.1` cite
-`licon.1`/`ct.1`, so 42 of its 61 rules are covered.
+compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
+`licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
+(38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
+so 117 of its 136 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 

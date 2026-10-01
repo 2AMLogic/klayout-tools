@@ -317,14 +317,19 @@ could re-check mechanically.
   [`drc.md`](drc.md)'s note that rule ids are a stable public contract).
 - `value_um` / `value_dbu` — the rule's distance threshold, in micrometres and
   in the deck's nominal database units. Both are `null` for the check kinds
-  that do not use a distance threshold (`area`, `density`, `antenna`) rather
+  that do not use a distance threshold (`area`, `density`, `antenna`,
+  `ongrid`, `angle`) rather
   than reporting the unused `0` those rules author as a placeholder — "this
   rule publishes no distance" is a machine-readable answer, not a fabricated
   `0.0`.
 - `limits` — the kind-specific numerics for exactly those kinds:
   `area_min_um2`/`area_max_um2`, `density_window_um`/`density_min`/
-  `density_max`, or `antenna_ratio_max`. Always present; `{}` for a plain
+  `density_max`, `antenna_ratio_max`, `grid_um` (`ongrid`), or
+  `angle_limit_deg` (`angle`). Always present; `{}` for a plain
   distance check, whose one number is `value_um`. Unset bounds are `null`.
+  `grid_um` is already a physical micrometre distance on the rule (a
+  manufacturing grid, not a deck-nominal-dbu count), so unlike every other
+  entry here it is reported unconverted.
 - `layers` — the drawn layer name(s) the rule reads, in `layer`/`other_layer`
   order (`"poly.drawing"`; the raw `"<layer>/<datatype>"` pair when the deck
   publishes no name for it).
