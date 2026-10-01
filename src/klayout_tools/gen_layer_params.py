@@ -2057,6 +2057,31 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #: sources agrees, so an entry can be deleted once its deck rule carries the
 #: bound.
 #:
+#: - ``sky130`` ``licon1`` (66/44) 0.17um -- ``sky130A_mr.drc`` ``licon.1``
+#:   ("min/max. licon length : 0.17um",
+#:   ``licon.not(prec_resistor).drc(length != 0.17)``), identical to
+#:   ``sky130.lydrc``'s own ``licon.1``
+#:   (``licon.not(...).edges.without_length(0.17)``, "minimum/maximum width of
+#:   licon : 0.17um"); this deck's ``licon1.width.1`` carries the minimum half
+#:   (issue #2594). The one upstream exemption is a licon on a **precision
+#:   poly resistor** (``prec_resistor = (rpm | urpm) & psdm &
+#:   poly.interacting(poly_rs)``), whose cuts are instead held to 0.19um/2.0um
+#:   edges by ``licon.1b/c``. ``res_array``'s ``flavor="high"``/``"xhigh"``
+#:   are the only requests that draw ``rpm``/``urpm`` at all
+#:   (:data:`_PDK_RES_FLAVOR_LAYERS`), and their end contacts were already
+#:   drawn at neither exempt size (0.22um) before this entry, so clamping to
+#:   0.17um neither introduces nor fixes that case -- it is a context-
+#:   dependent size this layer-keyed table structurally cannot express, left
+#:   to the broader tracking issue #2449.
+#: - ``sky130`` ``mcon`` (67/44) 0.17um -- ``sky130.lydrc`` ``ct.1``
+#:   (``mcon.edges.without_length(0.17)``, "minimum/maximum width of mcon :
+#:   0.17um"), split in ``sky130A_mr.drc`` into ``ct.1_a`` ("minimum width of
+#:   mcon : 0.17um") and ``ct.1_b`` ("maximum length of mcon : 0.17um"); this
+#:   deck's ``mcon.width.1`` carries the minimum half (issue #2594).
+#:   ``sky130A_mr.drc`` narrows its halves to mcon outside ``areaid:ce`` and
+#:   handles ring-shaped mcon separately (``ct.3``/``ct.3_a``); ``sky130.lydrc``
+#:   applies the same 0.17um unconditionally, and no generator draws an
+#:   ``areaid`` layer or a ring-shaped cut, so the clamp is unconditional here.
 #: - ``sky130`` ``via`` (68/44) 0.15um -- ``sky130A_mr.drc`` ``via.1a_b``
 #:   ("maximum length of via : 0.15um"), alongside ``via.1a_a``'s 0.15um
 #:   minimum (this deck's ``via.width.1``).
@@ -2068,6 +2093,8 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #:   ``5_20_vian.drc`` ``V2.a``/``V3.a``/``V4.a`` (the templated ``Vn.a``).
 _PDK_CUT_FIXED_SIZE_UM: dict[str, dict[tuple[int, int], float]] = {
     "sky130": {
+        (66, 44): 0.17,  # licon1.drawing -- licon.1 (issue #2594)
+        (67, 44): 0.17,  # mcon.drawing -- ct.1 / ct.1_a+ct.1_b (issue #2594)
         (68, 44): 0.15,  # via.drawing -- via.1a_a/via.1a_b
     },
     "sg13g2": {

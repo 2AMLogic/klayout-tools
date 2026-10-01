@@ -515,9 +515,26 @@ maximum on:
 
 | Family | Cut layer | Fixed size | Upstream rule |
 |---|---|---|---|
+| `sky130` | `licon1` (66/44) | 0.17 µm | `licon.1` (issue #2594) |
+| `sky130` | `mcon` (67/44) | 0.17 µm | `ct.1` / `ct.1_a` + `ct.1_b` (issue #2594) |
 | `sky130` | `via` (68/44) | 0.15 µm | `via.1a_a` + `via.1a_b` |
 | `sg13g2` | `Cont` (6/0) | 0.16 µm | `Cnt.a` |
 | `sg13g2` | `Via1`–`Via4` (19/0, 29/0, 49/0, 66/0) | 0.19 µm | `V1.a`, `Vn.a` |
+
+Sky130's two lowest cut layers (issue #2594) were in the same class as its
+`via` all along and were missed by #2585's own scope: `licon.1` is
+`licon.not(prec_resistor).drc(length != 0.17)` ("min/max. licon length :
+0.17um") and `ct.1` is `mcon.edges.without_length(0.17)`
+("minimum/maximum width of mcon : 0.17um"), both verified against
+`sky130A_mr.drc` and `sky130.lydrc` at this repo's pinned open_pdks commit.
+So before #2594 *every* sky130 generator output — every unit-device and ring
+contact, and every `klt gen compose` li1↔met1 via drop — drew an oversized
+cut. One upstream exemption is worth knowing because this per-layer clamp
+cannot express it: a licon on a **precision poly resistor** (`rpm`/`urpm`,
+i.e. `res_array`'s `flavor: "high"`/`"xhigh"`) is instead held to 0.19 µm /
+2.0 µm edges by `licon.1b/c`, which neither the pre-#2594 0.22 µm cut nor the
+clamped 0.17 µm one satisfies; that context-dependent case is tracked
+separately (issue #2449).
 
 On those layers every drawn cut is clamped **down** to the fixed size, about
 its own centre, *inside* the unchanged 0.22 µm-derived contact region —

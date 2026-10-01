@@ -2952,7 +2952,13 @@ def test_res_array_half_dbu_tie_length_draws_full_contact_and_is_drc_clean(
     219nm end contact, tripping gf180mcu's 220nm `contact.width.1` minimum.
     The same 1dbu-short box was drawn on sky130 too (the mechanism is
     PDK-agnostic) -- assert the drawn size directly, not just DRC status,
-    since a looser deck rule can mask it."""
+    since a looser deck rule can mask it.
+
+    The expected side is the generic contact budget *after* the fixed-size
+    clamp (issues #2585/#2594), not the raw budget: sky130's `licon1` is a
+    fixed-size cut (`licon.1`, 0.17um), so the full-size box there is 170dbu
+    while gf180mcu's `Contact` keeps its 220dbu. What this test guards is
+    unchanged either way -- a full-size box, never one 1dbu short of it."""
     output = tmp_path / f"res_array_tie_{deck}.gds"
     generate(
         {
@@ -2962,7 +2968,10 @@ def test_res_array_half_dbu_tie_length_draws_full_contact_and_is_drc_clean(
             "options": {"cell_name": "r1", "output": str(output)},
         }
     )
-    expected_dbu = int(round(gen.CONTACT_SIZE_UM / gen._GRID_DBU_UM))
+    expected_um = gen._fixed_cut_side_um(
+        gen.CONTACT_SIZE_UM, gen._cut_fixed_size_um(deck, (layer, datatype))
+    )
+    expected_dbu = int(round(expected_um / gen._GRID_DBU_UM))
     boxes = _res_contact_boxes_dbu(output, layer, datatype)
     assert len(boxes) == 2
     for x0, y0, x1, y1 in boxes:
@@ -6096,8 +6105,9 @@ def test_cut_fixed_size_table_agrees_with_every_curated_deck():
     ("family", "layer", "expected_um"),
     [
         ("sky130", (68, 44), 0.15),  # via -- table (via.1a_b)
-        ("sky130", (66, 44), 0.0),  # licon1 -- no curated size bound
-        ("sky130", (67, 44), 0.0),  # mcon -- minimum-only here
+        ("sky130", (66, 44), 0.17),  # licon1 -- table (licon.1), issue #2594
+        ("sky130", (67, 44), 0.17),  # mcon -- table (ct.1_b), issue #2594
+        ("sky130", (69, 44), 0.0),  # via2 -- no curated size bound (#2449)
         ("sg13g2", (6, 0), 0.16),  # Cont -- Cnt.a
         ("sg13g2", (19, 0), 0.19),  # Via1 -- V1.a
         ("sg13g2", (66, 0), 0.19),  # Via4 -- V4.a
@@ -6276,21 +6286,87 @@ def test_sky130_res_array_metal_level_2_draws_via_at_its_fixed_size(tmp_path, pd
     assert sides == {(0.15, 0.15)}
 
 
-def test_sky130_minimum_only_contact_keeps_the_generic_size(tmp_path, pdk_root):
-    """sky130's `licon1` carries no curated upper size bound, so its cuts
-    stay at the generic 0.22um budget -- issue #2585 only moves fixed-size
-    layers."""
-    output = tmp_path / "mos_array_sky130_licon.gds"
-    generate(
-        {
-            "generator": "mos_array",
-            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-            "options": {"output": str(output)},
-        }
-    )
-    sides, count = _drawn_box_sides_um(output, (66, 44))
+@pytest.mark.parametrize(
+    ("generator_name", "params"),
+    [
+        ("mos_array", {}),
+        ("mos_array", {"gate_contact": True, "add_guard_ring": True}),
+        ("guard_ring", {}),
+    ],
+)
+def test_sky130_generators_draw_licon1_at_its_fixed_size(
+    generator_name, params, tmp_path, pdk_root, monkeypatch
+):
+    """sky130's `licon1` is a fixed-size cut too (issue #2594): `licon.1` is
+    one predicate, `licon.not(prec_resistor).drc(length != 0.17)` -- a
+    minimum *and* a maximum of 0.17um -- so every contact a generator draws
+    there is exactly 0.17um square, not the PDK-generic 0.22um budget that
+    overshoots the upstream maximum.
+
+    Same design choice issue #2585 made for sg13g2's `Cont` (see
+    `test_sg13g2_generators_draw_cont_at_its_fixed_size`): the cut shrinks
+    *inside* its unchanged 0.22um-derived contact region, so compared with
+    the same request drawn with the clamp disabled every other layer is
+    identical, every cut keeps its centre, and the reported ports do not
+    move."""
+    import klayout.db as kdb
+
+    from klayout_tools import gen_describe, gen_layer_params
+
+    def _generate(name):
+        output = tmp_path / f"{generator_name}_sky130_{name}.gds"
+        report = generate(
+            {
+                "generator": generator_name,
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": params,
+                "options": {"output": str(output)},
+            }
+        )
+        return output, report
+
+    fixed_output, fixed_report = _generate("fixed")
+    sides, count = _drawn_box_sides_um(fixed_output, (66, 44))
     assert count > 0
-    assert sides == {(0.22, 0.22)}
+    assert sides == {(0.17, 0.17)}
+
+    monkeypatch.setattr(gen_layer_params, "_cut_fixed_size_um", lambda *a: 0.0)
+    monkeypatch.setattr(gen_describe, "_cut_fixed_size_um", lambda *a: 0.0)
+    generic_output, generic_report = _generate("generic")
+    assert _drawn_box_sides_um(generic_output, (66, 44))[0] == {(0.22, 0.22)}
+
+    assert fixed_report["ports"] == generic_report["ports"]
+    assert fixed_report["bbox_um"] == generic_report["bbox_um"]
+
+    def _flat_regions(path):
+        layout = kdb.Layout()
+        layout.read(str(path))
+        top = layout.top_cell()
+        top.flatten(True)
+        return {
+            (info.layer, info.datatype): kdb.Region(top.begin_shapes_rec(li))
+            for li, info in zip(
+                layout.layer_indexes(), layout.layer_infos(), strict=True
+            )
+        }
+
+    fixed_regions = _flat_regions(fixed_output)
+    generic_regions = _flat_regions(generic_output)
+    assert fixed_regions.keys() == generic_regions.keys()
+    for layer, region in fixed_regions.items():
+        if layer == (66, 44):
+            continue
+        assert (region ^ generic_regions[layer]).is_empty(), layer
+
+    def _centres(region):
+        return sorted((p.bbox().center().x, p.bbox().center().y) for p in region.each())
+
+    assert _centres(fixed_regions[(66, 44)]) == _centres(generic_regions[(66, 44)])
+    # Enclosure only grows: every 0.17um cut sits inside the 0.22um one.
+    assert (fixed_regions[(66, 44)] - generic_regions[(66, 44)]).is_empty()
+
+    drc_report = run_drc(str(fixed_output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged(

@@ -649,6 +649,21 @@ which a bounding-box bound cannot express — an L-shaped or cross-shaped cut
 fitting inside a 0.15 um box would pass. See that rule's own docstring in
 `sky130.py`.
 
+**Two more rules joined this deferral list in issue #2594**, which found
+sky130's two *lowest* cut layers to be fixed-size as well — `licon.1`
+(`licon.not(prec_resistor).drc(length != 0.17)`, "min/max. licon length :
+0.17um") and `ct.1` (`mcon.edges.without_length(0.17)`, split in
+`sky130A_mr.drc` into `ct.1_a`/`ct.1_b`). Before #2594 the curated deck had
+no width rule of **any** kind on `licon1` (66/44) or `mcon` (67/44), so the
+0.22 µm cut the generators drew there was invisible to `klt drc --deck
+sky130` even in principle. That issue adds the minimum halves
+(`licon1.width.1`/`mcon.width.1`, both 0.17 µm) and clamps the generator side
+via `_PDK_CUT_FIXED_SIZE_UM` — the maximum halves stay deferred to #2388
+exactly like `via.width.1`'s, and are additionally gated on the compound-layer
+narrowings this engine cannot evaluate (`licon.1`'s precision-poly-resistor
+exemption, whose licons are 0.19/2.0 µm per `licon.1b/c`; `ct.1_a`/`ct.1_b`'s
+`areaid:ce` scoping and separate ring-shaped-mcon rules `ct.3`/`ct.3_a`).
+
 `met2.width.1` was considered for the same backfill and found *not* to need
 it: its own upstream rule (`m2.1`, in both `sky130A_mr.drc` and the resolved
 `sky130A.lydrc`) is `m2.width(0.14, euclidian)` — a plain minimum-width check
@@ -753,7 +768,7 @@ no per-net isolation) than it actually has.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 59
+design rule manual (which spans hundreds of rules). It currently covers 61
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `tap` (issue #2321),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
@@ -774,13 +789,13 @@ Broken down by check kind:
 
 | kind         | count |
 | ------------ | ----: |
-| `width`      |    16 |
+| `width`      |    18 |
 | `space`      |    13 |
 | `isolated`   |     1 |
 | `enclosing`  |    17 |
 | `separation` |     2 |
 | `area`       |    10 |
-| **total**    |**59** |
+| **total**    |**61** |
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
@@ -803,7 +818,7 @@ boolean expression no `klt gen` generator draws today) — are deliberately
 **not** transcribed; see the "nwell (well-layer) rule coverage" note in
 `sky130.py`'s own module docstring for the full reasoning.
 
-Four of these rules approximate official rules our engine cannot transcribe
+Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
 curated halves of one rule defined on a *compound* layer expression (a
 boolean union of two mask layers — `difftap.1`'s `diff.or(tap)`), each
@@ -814,7 +829,17 @@ the DRC-DSL script runner does. `li1.enclosing.licon1.1` and
 `tap.enclosing.licon.1` (issue #2321) approximate `second_edges`-conditional
 enclosure rules (`li.5`, `licon.7`) at their unconditional zero-margin
 floor, the one positive-margin transcription that provably flags no
-correct-by-construction geometry. Three more (`via.width.1`,
+correct-by-construction geometry. `licon1.width.1` and `mcon.width.1` (issue
+#2594) carry only the *minimum* half of the two fixed-size cut rules
+`licon.1` ("min/max. licon length : 0.17um") and `ct.1`
+("minimum/maximum width of mcon : 0.17um") — the same deliberate, temporary
+`threshold_max_dbu` deferral `via.width.1` documents below, plus the same
+permanent rectangularity residue (`licon.1_c`, `ct.1`'s own "non-ring mcon
+should be rectangular"); `licon.1`'s precision-poly-resistor exemption
+(`licon.1b/c`, 0.19/2.0 µm edges) and `ct.1_a`/`ct.1_b`'s `areaid:ce`
+narrowing are compound-layer expressions this engine does not evaluate,
+harmless for a minimum of 0.17 µm since every exempt size exceeds it. Three
+more (`via.width.1`,
 `met1.enclosing.via.1`, `met2.enclosing.via.1`) approximate an official rule
 that additionally bounds a max length/rectangularity or a periphery-scoped/
 corner-relaxed refinement our single-layer/two-layer check primitives don't
@@ -1846,7 +1871,8 @@ carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 `met{1..5}.holes_area.1` rules (issue #1976) likewise cite `m1.7`/`m2.7`/
 `m3.7`/`m4.7`/`m5.7`, and issue #2321's `tap.width.1` cites the same
 `difftap.1` source id `diff.width.1` already carries (both halve the same
-compound rule), so 40 of its 59 rules are covered.
+compound rule), and issue #2594's `licon1.width.1`/`mcon.width.1` cite
+`licon.1`/`ct.1`, so 42 of its 61 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 

@@ -586,6 +586,48 @@ DECK: list[DrcRule] = [
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m1.7"),
     ),
     DrcRule(
+        id="licon1.width.1",
+        description=(
+            "minimum licon1 size (approximates the official fixed-size "
+            "min/max-length rule as a minimum-width check)"
+        ),
+        layer=(66, 44),  # licon1.drawing
+        check="width",
+        threshold_dbu=170,  # 0.17 um
+        # sky130.lydrc rule "licon.1":
+        #   licon.not(poly.interacting(poly_rs).and(rpm)).edges
+        #     .without_length(0.17)
+        # -> "licon.1 : minimum/maximum width of licon : 0.17um"
+        # The same rule in sky130A_mr.drc (issue #2594), which states the
+        # min-and-max nature in one predicate rather than two halves:
+        #   prec_resistor = (rpm | urpm) & psdm & (poly.interacting(poly_rs))
+        #   licon.not(prec_resistor).drc(length != 0.17)
+        # -> "licon.1: min/max. licon length : 0.17um"
+        # So licon1 is a *fixed*-size cut, 0.17um on every edge -- which is
+        # why (66, 44) is an entry in `gen_layer_params`'
+        # `_PDK_CUT_FIXED_SIZE_UM` (issue #2594): before that, every `klt gen`
+        # generator drew its licon1 cuts at the PDK-generic 0.22um contact
+        # budget, over the upstream *maximum*. This rule exists so the deck
+        # carries the minimum half of that rule at all (before #2594 licon1
+        # had no width rule of any kind here, only enclosure rules), and so
+        # the fixed-size table has a deck minimum to agree with.
+        #
+        # No `threshold_max_dbu`, for the same reason via.width.1 below
+        # states (issue #2388's deferral): the max half is expressible, but
+        # backfilling it across this deck is that issue's scope, not #2594's.
+        # Two approximations stay even once it lands, both the same shape
+        # via.width.1 already documents: the *rectangularity* half
+        # ("licon.1_c", "licon should be rectangle") cannot be expressed as a
+        # bounding-box bound, and the precision-poly-resistor exemption above
+        # (`prec_resistor`, whose licons are 0.19um/2.0um per "licon.1b/c")
+        # is a compound-layer narrowing this engine does not evaluate --
+        # harmless for a *minimum* of 0.17um, since both exempt sizes exceed
+        # it, but a reason a future `threshold_max_dbu` here would need the
+        # narrowing first. See docs/cli/drc.md's "sky130" approximation notes.
+        scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "licon.1"),
+    ),
+    DrcRule(
         id="diff.enclosing.licon.1",
         description="minimum diff enclosure of licon1",
         layer=(65, 20),  # diff.drawing
@@ -688,6 +730,43 @@ DECK: list[DrcRule] = [
         # publishes as literally 0.0um. This closes the asymmetry issue #551
         # reports (`diff`/`poly` -- the layers *below* licon1 -- were checked,
         # the conductor *above* it was not) without the false positives.
+    ),
+    DrcRule(
+        id="mcon.width.1",
+        description=(
+            "minimum mcon (li1<->met1 via) size (approximates the official "
+            "fixed-size min/max-length rule as a minimum-width check)"
+        ),
+        layer=(67, 44),  # mcon.drawing
+        check="width",
+        threshold_dbu=170,  # 0.17 um
+        # sky130.lydrc rule "ct.1": mcon.edges.without_length(0.17)
+        # -> "ct.1 : minimum/maximum width of mcon : 0.17um"
+        # The same rule in sky130A_mr.drc (issue #2594) splits into the two
+        # halves and narrows them to mcon outside areaid:ce:
+        #   rectMCON_peri = mcon.not(ring-shaped mcon).outside(areaid_ce)
+        #   rectMCON_peri.drc(width < 0.17)  -> "ct.1_a : minimum width of
+        #     mcon : 0.17um"
+        #   rectMCON_peri.drc(length > 0.17) -> "ct.1_b : maximum length of
+        #     mcon : 0.17um"
+        # So mcon is a *fixed*-size cut, 0.17um -- hence (67, 44)'s entry in
+        # `gen_layer_params`' `_PDK_CUT_FIXED_SIZE_UM` (issue #2594); before
+        # that, `klt gen compose`'s li1<->met1 via drops were drawn at the
+        # PDK-generic 0.22um contact budget, over the upstream maximum, and
+        # this deck had no mcon width rule of any kind to notice.
+        #
+        # No `threshold_max_dbu`, same #2388 deferral as via.width.1 below.
+        # Approximations that stay regardless, both mirroring via.width.1's:
+        # the rectangularity half ("ct.1 : non-ring mcon should be
+        # rectangular") is not a bounding-box bound, and sky130A_mr.drc's
+        # areaid:ce / ring-shaped-mcon narrowings ("ct.3"/"ct.3_a" cover
+        # ring-shaped mcon separately, at 0.17-0.175um) are compound-layer
+        # expressions this engine does not evaluate -- note sky130.lydrc's own
+        # "ct.1" applies the same 0.17um unconditionally, and this curated
+        # deck models no areaid.* layer anywhere (see met2.enclosing.via.1's
+        # own note on "m2.4_b").
+        scope="ct",  # sky130.lydrc "ct.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "ct.1"),
     ),
     DrcRule(
         id="mcon.space.1",
