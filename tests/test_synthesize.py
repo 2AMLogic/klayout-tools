@@ -5304,3 +5304,412 @@ def test_synthesize_report_survives_the_envelope_lint(tmp_path, monkeypatch):
     report = run_synthesize(request_path)
 
     assert env_provenance.find_absolute_path_fields(report) == []
+
+
+# --------------------------------------------------------------------------- #
+# `request.macros` -- the shared hard-macro declaration (issue #2635)
+# --------------------------------------------------------------------------- #
+
+
+_MACRO_LEF = (
+    "VERSION 5.7 ;\n"
+    "MACRO sram_8x8\n"
+    "  CLASS BLOCK ;\n"
+    "  SIZE 20.0 BY 10.0 ;\n"
+    "  PIN D\n"
+    "    DIRECTION INPUT ;\n"
+    "    USE SIGNAL ;\n"
+    "    PORT\n"
+    "      LAYER met2 ;\n"
+    "        RECT 1.0 1.0 1.5 1.5 ;\n"
+    "    END\n"
+    "  END D\n"
+    "  PIN Q\n"
+    "    DIRECTION OUTPUT ;\n"
+    "    USE SIGNAL ;\n"
+    "    PORT\n"
+    "      LAYER met2 ;\n"
+    "        RECT 2.0 1.0 2.5 1.5 ;\n"
+    "    END\n"
+    "  END Q\n"
+    "END sram_8x8\n"
+    "END LIBRARY\n"
+)
+
+_MACRO_LIB = (
+    "library (sram_8x8) {\n"
+    "  cell (sram_8x8) {\n"
+    "    area : 400.0 ;\n"
+    "    pin (D) { direction : input; }\n"
+    "    pin (Q) { direction : output; }\n"
+    "  }\n"
+    "}\n"
+)
+
+#: `_GCD_MODULE_STATS` plus one instance of the declared macro -- what
+#: Yosys's own `stat -json` reports once the macro survives as a blackbox
+#: (live-verified against Yosys 0.69: a blackboxed macro appears in
+#: `num_cells_by_type` and contributes nothing to `area`).
+_MACRO_MODULE_STATS = {
+    **_GCD_MODULE_STATS,
+    "num_cells": _GCD_MODULE_STATS["num_cells"] + 1,
+    "num_cells_by_type": {**_GCD_MODULE_STATS["num_cells_by_type"], "sram_8x8": 1},
+}
+
+
+def _macro_success_env(tmp_path, monkeypatch, *, macros, liberty_cells=None) -> str:
+    """`_setup_success_env`, plus a macro LEF/liberty on disk and a
+    `request.macros` array. ``liberty_cells`` (a ``{cell: area or None}``
+    map) appends real `cell (...)` groups to the fabricated standard-cell
+    liberty, which `_cells_without_area` needs to say anything at all."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    _write(tmp_path / "sram_8x8.lef", _MACRO_LEF)
+    _write(tmp_path / "sram_8x8_tt.lib", _MACRO_LIB)
+    if liberty_cells is not None:
+        liberty_path = (
+            install_root
+            / "sky130A"
+            / "libs.ref"
+            / "sky130_fd_sc_hd"
+            / "lib"
+            / "sky130_fd_sc_hd__tt_025C_1v80.lib"
+        )
+        blocks = "".join(
+            f"  cell ({cell}) {{\n"
+            + (f"    area : {area} ;\n" if area is not None else "")
+            + "  }\n"
+            for cell, area in liberty_cells.items()
+        )
+        liberty_path.write_text(
+            liberty_path.read_text(encoding="utf-8") + blocks, encoding="utf-8"
+        )
+    return _write_request(tmp_path / "request.json", _base_request(macros=macros))
+
+
+def _main_script_path(request_path: str, hdl_toplevel: str = "gcd") -> str:
+    """The retained `synth_<top>.ys` artifact for the one run under
+    `.klt/synthesize/` -- the run directory name is a random `run_id`."""
+    runs_dir = os.path.join(os.path.dirname(request_path), ".klt", "synthesize")
+    (run_dir,) = [
+        os.path.join(runs_dir, name)
+        for name in os.listdir(runs_dir)
+        if os.path.isdir(os.path.join(runs_dir, name))
+    ]
+    return os.path.join(run_dir, f"synth_{hdl_toplevel}.ys")
+
+
+def test_macro_with_liberty_emits_read_liberty_lib_before_hierarchy(
+    tmp_path, monkeypatch
+):
+    """Issue #2635 AC1: the macro's liberty is loaded with `read_liberty
+    -lib` *before* `hierarchy`, which is the pass that would otherwise
+    abort with "is not part of the design"."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "cell": "sram_8x8",
+                "lef": "sram_8x8.lef",
+                "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"},
+            }
+        ],
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    lines = _script_lines(_main_script_path(request_path))
+    macro_line = next(line for line in lines if line.startswith("read_liberty -lib "))
+    assert macro_line.endswith("sram_8x8_tt.lib")
+    hierarchy_index = next(
+        i for i, line in enumerate(lines) if line.startswith("hierarchy ")
+    )
+    assert lines.index(macro_line) < hierarchy_index
+    # The standard-cell liberty is still loaded the way it always was --
+    # via `dfflibmap -liberty`/`abc -liberty`. The only `read_liberty` in
+    # the script is the macro's, and it always carries `-lib`.
+    assert [line for line in lines if line.startswith("read_liberty")] == [macro_line]
+
+    assert report["macros"][0]["cell"] == "sram_8x8"
+    assert report["macros"][0]["blackbox_source"] == "liberty"
+
+
+def test_macro_without_liberty_generates_a_blackbox_from_its_lef(tmp_path, monkeypatch):
+    """Issue #2635 AC1's "or synthesizes a blackbox from the LEF" half: a
+    caller with only a LEF never has to hand-write (or hand-maintain) a
+    stub. The generated file is a retained run artifact."""
+    request_path = _macro_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "sram_8x8.lef"}]
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert report["macros"][0]["blackbox_source"] == "lef"
+    generated = os.path.join(
+        os.path.dirname(_main_script_path(request_path)), "sram_8x8_blackbox.v"
+    )
+    assert os.path.isfile(generated)
+    with open(generated, encoding="utf-8") as handle:
+        text = handle.read()
+    assert "(* blackbox *)" in text
+    assert "module sram_8x8 (D, Q);" in text
+
+    lines = _script_lines(_main_script_path(request_path))
+    macro_line = next(line for line in lines if line.startswith("read_verilog -lib "))
+    assert macro_line.endswith("sram_8x8_blackbox.v")
+    hierarchy_index = next(
+        i for i, line in enumerate(lines) if line.startswith("hierarchy ")
+    )
+    assert lines.index(macro_line) < hierarchy_index
+
+
+def test_macro_with_a_caller_supplied_verilog_blackbox_is_read_as_lib(
+    tmp_path, monkeypatch
+):
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef", "verilog_blackbox": "sram_bb.v"}],
+    )
+    _write(
+        tmp_path / "sram_bb.v",
+        "(* blackbox *)\nmodule sram_8x8 (D, Q);\ninput D;\noutput Q;\nendmodule\n",
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert report["macros"][0]["blackbox_source"] == "verilog_blackbox"
+    lines = _script_lines(_main_script_path(request_path))
+    assert any(line.endswith("sram_bb.v") for line in lines)
+    # No stub was generated: the caller supplied one.
+    assert not os.path.isfile(
+        os.path.join(
+            os.path.dirname(_main_script_path(request_path)), "sram_8x8_blackbox.v"
+        )
+    )
+
+
+def test_no_macros_field_emits_no_macro_lines(tmp_path, monkeypatch):
+    """Purely additive: a request written before this field existed produces
+    the same script it always did."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["macros"] == []
+    assert report["macro_instance_count"] == 0
+    assert report["macro_instance_counts_by_type"] == {}
+    lines = _script_lines(_main_script_path(request_path))
+    assert not any("-lib " in line for line in lines)
+
+
+def test_macro_rejected_when_its_lef_is_missing(tmp_path, monkeypatch):
+    request_path = _macro_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "nope.lef"}]
+    )
+    with pytest.raises(SynthesizeError, match=r"macros\[0\]\.lef not found"):
+        run_synthesize(request_path)
+
+
+def test_macro_rejected_when_the_field_is_malformed(tmp_path, monkeypatch):
+    request_path = _macro_success_env(tmp_path, monkeypatch, macros="not a list")
+    with pytest.raises(SynthesizeError, match="request.macros must be a list"):
+        run_synthesize(request_path)
+
+
+def test_duplicate_macro_cells_rejected(tmp_path, monkeypatch):
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef"}, {"lef": "sram_8x8.lef"}],
+    )
+    with pytest.raises(SynthesizeError, match="cell values must be unique"):
+        run_synthesize(request_path)
+
+
+def test_macro_liberty_with_no_entry_for_the_resolved_corner_is_rejected(
+    tmp_path, monkeypatch
+):
+    """Issue #2635's edge case, on the synthesize side: a macro that
+    declared a liberty map must never be silently synthesized against
+    another corner's timing."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef", "lib": {"ss_100C_1v60": "sram_8x8_tt.lib"}}],
+    )
+    with pytest.raises(SynthesizeError) as excinfo:
+        run_synthesize(request_path)
+    message = str(excinfo.value)
+    assert "sram_8x8" in message
+    assert "tt_025C_1v80" in message
+
+
+def test_response_splits_macro_instances_from_standard_cells(tmp_path, monkeypatch):
+    """Issue #2635 AC2: macro instances are reported separately.
+    `instance_counts_by_type` deliberately still counts every type --
+    removing the macro from it would be a breaking change."""
+    request_path = _macro_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "sram_8x8.lef"}]
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert report["instance_count"] == 336
+    assert report["instance_counts_by_type"]["sram_8x8"] == 1
+    assert report["macro_instance_counts_by_type"] == {"sram_8x8": 1}
+    assert report["macro_instance_count"] == 1
+
+
+def test_response_flags_a_macro_whose_area_is_not_in_area_um2(tmp_path, monkeypatch):
+    """The other half of AC2. A blackboxed macro contributes exactly `0` to
+    `area_um2` -- that used to be silent, so a caller comparing `area_um2`
+    against an area budget was wrong by the macro's whole footprint."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef"}],
+        liberty_cells={
+            "sky130_fd_sc_hd__xor2_1": 7.5,
+            "sky130_fd_sc_hd__a211o_1": 8.75,
+            "sky130_fd_sc_hd__dfrtp_1": 25.0,
+        },
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert report["cells_without_area"] == ["sram_8x8"]
+    assert report["warnings"]["by_category"]["macro_area_excluded"] == 1
+    representative = next(
+        entry
+        for entry in report["warnings"]["representatives"]
+        if entry["category"] == "macro_area_excluded"
+    )
+    assert "sram_8x8" in representative["text"]
+
+
+def test_response_flags_a_non_macro_cell_with_no_liberty_area(tmp_path, monkeypatch):
+    """The same disclosure covers a `-dont_use`d/unmapped standard cell --
+    which is why the response field is a *cell* list, not a macro list --
+    under its own warning category, since the disposition differs."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[],
+        liberty_cells={
+            "sky130_fd_sc_hd__xor2_1": 7.5,
+            "sky130_fd_sc_hd__a211o_1": 8.75,
+            "sky130_fd_sc_hd__dfrtp_1": None,
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["cells_without_area"] == ["sky130_fd_sc_hd__dfrtp_1"]
+    assert "cells_without_liberty_area" in report["warnings"]["by_category"]
+    assert "macro_area_excluded" not in report["warnings"]["by_category"]
+
+
+def test_cells_without_area_is_null_when_the_liberty_declares_no_cells(
+    tmp_path, monkeypatch
+):
+    """ "Not establishable", never a fabricated empty list -- the fabricated
+    test liberty has no `cell (...)` group at all, exactly the case
+    `_liberty_cell_names` already takes the same posture on."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    assert run_synthesize(request_path)["cells_without_area"] is None
+
+
+def test_instance_counts_for_a_netlist_that_is_only_macros(tmp_path, monkeypatch):
+    """Issue #2635's third edge case: a design whose every instance is a
+    hard macro. `area_um2` is a real `0.0` and every instantiated type is
+    disclosed as unaccounted-for, rather than `0.0` passing for an answer."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef"}],
+        liberty_cells={"sky130_fd_sc_hd__xor2_1": 7.5},
+    )
+    _stub_yosys_success(
+        monkeypatch,
+        module_stats={
+            "num_wires": 4,
+            "num_cells": 2,
+            "area": 0.0,
+            "sequential_area": 0.0,
+            "num_cells_by_type": {"sram_8x8": 2},
+        },
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["instance_count"] == 2
+    assert report["area_um2"] == 0.0
+    assert report["instance_counts_by_type"] == {"sram_8x8": 2}
+    assert report["macro_instance_counts_by_type"] == {"sram_8x8": 2}
+    assert report["macro_instance_count"] == 2
+    assert report["cells_without_area"] == ["sram_8x8"]
+
+
+def test_macro_bearing_report_carries_no_absolute_paths(tmp_path, monkeypatch):
+    """`macros[]`'s own paths follow this verb's `{path, scope}` convention
+    (issue #1844) like every other path in its response -- a committed
+    report is evidence and must survive the envelope lint."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "lef": "sram_8x8.lef",
+                "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"},
+            }
+        ],
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert env_provenance.find_absolute_path_fields(report) == []
+    assert report["macros"][0]["lef"]["path"].endswith("sram_8x8.lef")
+
+
+def test_undeclared_module_error_points_at_request_macros(tmp_path, monkeypatch):
+    """A macro instantiated by the RTL but absent from `request.macros`
+    must produce a clear, named error -- not a bare Yosys crash line that
+    says nothing about which request field fixes it."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-V"]:
+            return fake_completed(stdout="Yosys 0.69 (git sha1 deadbeef, Release)\n")
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
+        return fake_completed(
+            returncode=1,
+            stderr=(
+                "ERROR: Module `\\sram_8x8' referenced in module `\\gcd' in "
+                "cell `\\u_sram' is not part of the design.\n"
+            ),
+        )
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+
+    with pytest.raises(SynthesizeError) as excinfo:
+        run_synthesize(request_path)
+    message = str(excinfo.value)
+    assert "is not part of the design" in message
+    assert "request.macros" in message
+    assert "sram_8x8" in message

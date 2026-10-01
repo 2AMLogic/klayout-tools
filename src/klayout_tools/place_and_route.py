@@ -207,6 +207,18 @@ cell being empty (a caller using this field purely for the DEF-level
 placement/obstruction verification this issue's acceptance criteria call
 for does not need to supply one).
 
+Issue #2635 made the non-placement half of this entry shape a **shared**
+concept: ``cell``/``lef``/``lib``/``gds`` mean the same thing, spelled the
+same way, in ``klt synthesize``'s and ``klt sta``'s own ``request.macros``
+arrays, and are validated by one module (:mod:`klayout_tools.macros`)
+rather than three private copies. It also added the two fields that were
+genuinely missing here: ``lib`` (a per-corner liberty map, so this verb's
+own timing-driven steps see the macro's real arcs instead of an untimed
+blackbox) and ``halo`` (see "Power delivery" below). ``instance`` stays
+required and is deliberately *not* merged with ``cell`` -- an instance path
+and a master name are different things, and a design may place several
+instances of one master.
+
 Macro-pin routability cross-check (issue #464)
 -------------------------------------------------
 
@@ -489,15 +501,21 @@ step. ``sg13g2_stdcell`` is its only member today; its response's
 ``power.tapcell_master``/``endcap_master`` are ``null`` even though
 ``power.pdn``/``global_connect`` are ``true``.
 
-**Scope deliberately excluded from this v1 of ``request.power``:**
-macro-specific PDN grids (``define_pdn_grid -macro``, with their own
-halo/orientation config) -- a design with hard macros needs a caller-supplied
-macro halo/grid spec this field does not yet expose, so ``pdngen`` here
-builds only the flat standard-cell grid (:func:`_power_delivery_lines`).
-This exclusion changes no existing field's behaviour, and can be added later
-as an additive request/response field without a contract-shape change --
-the same precedent every other v1 exclusion in this module's docstring
-already follows.
+**The v1 of ``request.power`` deliberately excluded macro-specific PDN
+grids** (``define_pdn_grid -macro``, with their own halo config): a design
+with hard macros needed a caller-supplied macro halo/grid spec no request
+field exposed, so ``pdngen`` built only the flat standard-cell grid.
+``request.macros[].halo`` (issue #2635) is the additive field that closes
+that gap, exactly per this same note's own precedent: when a halo'd macro
+and ``request.power`` appear in the same request,
+:func:`_power_delivery_lines` now also emits a ``define_pdn_grid -macro
+... -halo``/``add_pdn_connect`` pair per macro
+(:func:`_macro_pdn_grid_lines`), and the ``"floorplan"`` stage emits a
+``create_blockage`` over the macro's footprint plus its halo
+(:func:`_macro_blockage_lines`) so the placer honors the same margin.
+Both are live-verified against OpenROAD 26Q3 on a real sky130A floorplan;
+see those functions' own docstrings for the citations. A request that
+declares no ``halo`` emits neither, byte for byte as before.
 
 Real per-instance tapcell/endcap/filler *placement counts* were originally
 excluded here too, on the grounds that OpenROAD reports them only via
@@ -593,6 +611,7 @@ import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
 from typing import Any
 
+from . import macros as macro_spec
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -623,7 +642,8 @@ from ._report_verify import (
     load_committed_report,
     strip_keys,
 )
-from .lef_header import read_lef_header
+from .lef_header import read_lef_header as read_lef_header
+from .lef_header import read_lef_macro_pin_ports
 from .pdk import lef_files
 from .pdk_cells import list_lib_corners, resolve_liberty_for_cell_library
 
@@ -2000,6 +2020,24 @@ def run_place_and_route(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+    # Issue #2635: which of each macro's per-corner liberties applies to
+    # *this* run, resolvable only now that `_resolve_liberty` has named the
+    # corner. A macro that declared a `lib` map with no entry for this
+    # corner (and no `"default"`) is rejected here with a named error rather
+    # than silently timed at some other corner -- see
+    # `klayout_tools.macros.macro_lib_for_corner`.
+    macro_liberty_paths = [
+        path
+        for path in (
+            macro_spec.macro_lib_for_corner(
+                {**macro, "cell": macro["cell_name"]},
+                corner,
+                error_cls=PlaceAndRouteError,
+            )
+            for macro in macros
+        )
+        if path is not None
+    ]
 
     # Issue #2170: the joint floorplan/PDN pre-flight -- see
     # `_validate_pdn_core_fit`'s own docstring for why it lives outside this
@@ -2159,6 +2197,7 @@ def run_place_and_route(
             output_dir=output_dir,
             route_critical_nets_percentage=route_critical_nets_percentage,
             max_antenna_repair_iterations=max_antenna_repair_iterations,
+            macro_liberty_paths=macro_liberty_paths,
         )
         _write_script(script_path, lines)
 
@@ -2599,6 +2638,14 @@ def run_place_and_route(
                 "x_um": macro["x_um"],
                 "y_um": macro["y_um"],
                 "orientation": macro["orientation"],
+                # Additive per-entry fields (issue #2635): the macro's
+                # master name (shared with `klt synthesize`/`klt sta`'s own
+                # `macros[].cell`), the per-corner liberty map as resolved,
+                # and the halo actually honored -- `null` when the request
+                # declared no `halo`/`lib`.
+                "cell": macro["cell_name"],
+                "lib": macro["lib"],
+                "halo": macro["halo"],
             }
             for macro in macros
         ],
@@ -3158,7 +3205,38 @@ def _validate_macros(
     ``None`` (the default, used by this module's own direct unit tests below
     that exercise validation in isolation, with no netlist in hand) skips
     that cross-check entirely -- it is purely additive to the pre-existing
-    validation this function already performed."""
+    validation this function already performed.
+
+    Issue #2635 made the non-placement half of this entry shape a **shared**
+    concept across ``klt synthesize``/``klt sta``/``klt place-and-route``
+    (:mod:`klayout_tools.macros`), and this function now composes that
+    module's helpers for ``lef``/``cell``/``gds`` rather than keeping a
+    fourth private copy of the same checks -- every pre-existing error
+    message is preserved verbatim. It also adds the two fields that issue
+    identified as genuinely missing here:
+
+    ``halo``
+        A keep-out margin around the macro, in microns: either one
+        non-negative number (uniform on all four sides) or an object with
+        any of ``left``/``right``/``top``/``bottom`` (each defaulting to
+        ``0``). Honored in the ``"floorplan"`` stage as a ``create_blockage``
+        placement blockage over the macro's own footprint expanded by the
+        halo, and -- when ``request.power`` is also given -- as a
+        ``define_pdn_grid -macro ... -halo`` macro PDN grid. See
+        :func:`_macro_blockage_lines` / :func:`_macro_pdn_grid_lines`, and
+        this module's docstring "Power delivery" section (whose v1 exclusion
+        of macro PDN grids this closes).
+    ``lib`` (alias ``liberty``)
+        The macro's per-corner liberty map, exactly as ``klt synthesize``/
+        ``klt sta`` take it. Read alongside the standard-cell liberty in
+        every stage, so this verb's own timing-driven steps and ``-metrics``
+        report see the macro's real arcs instead of an untimed blackbox.
+        Omitted leaves every stage script byte-identical to before.
+
+    ``cell`` is also accepted (and cross-checked against the LEF's own
+    ``MACRO`` name) for shape-compatibility with the other two verbs;
+    ``instance`` remains required and is a different thing -- the instance
+    *path* to fix, versus ``cell``, the *master* name."""
     if macros is None:
         return []
     if not isinstance(macros, list):
@@ -3166,40 +3244,38 @@ def _validate_macros(
 
     validated: list[dict[str, Any]] = []
     for i, macro in enumerate(macros):
+        label = f"request.macros[{i}]"
         if not isinstance(macro, dict):
-            raise PlaceAndRouteError(f"request.macros[{i}] must be an object")
+            raise PlaceAndRouteError(f"{label} must be an object")
 
         instance = macro.get("instance")
         if not isinstance(instance, str) or not instance:
             raise PlaceAndRouteError(
-                f"request.macros[{i}].instance is required and must be a "
-                "non-empty string"
+                f"{label}.instance is required and must be a non-empty string"
             )
 
-        lef = macro.get("lef")
-        if not isinstance(lef, str) or not lef:
-            raise PlaceAndRouteError(
-                f"request.macros[{i}].lef is required and must be a non-empty string"
-            )
-        lef_path = lef if os.path.isabs(lef) else os.path.join(request_dir, lef)
-        if not os.path.isfile(lef_path):
-            raise PlaceAndRouteError(f"request.macros[{i}].lef not found: {lef}")
-        macro_cells = read_lef_header(lef_path)["macros"]
-        if len(macro_cells) != 1:
-            raise PlaceAndRouteError(
-                f"request.macros[{i}].lef '{lef}' must declare exactly one MACRO "
-                f"(found {len(macro_cells)})"
-            )
-        macro_cell_name = macro_cells[0]["name"]
+        lef = macro["lef"] if isinstance(macro.get("lef"), str) else None
+        lef_path, macro_record = macro_spec.resolve_macro_lef(
+            macro,
+            label=label,
+            request_dir=request_dir,
+            error_cls=PlaceAndRouteError,
+        )
+        macro_cell_name = macro_spec.resolve_macro_cell_name(
+            macro,
+            label=label,
+            lef_cell_name=macro_record["name"],
+            error_cls=PlaceAndRouteError,
+        )
 
         no_port_pin_names = sorted(
-            pin["name"] for pin in macro_cells[0]["pins"] if not pin["has_port"]
+            pin["name"] for pin in macro_record["pins"] if not pin["has_port"]
         )
         if no_port_pin_names and netlist_path is not None:
             _reject_wired_port_less_pins(
                 index=i,
                 instance=instance,
-                lef=lef,
+                lef=lef if lef is not None else lef_path,
                 macro_cell_name=macro_cell_name,
                 no_port_pin_names=no_port_pin_names,
                 netlist_path=netlist_path,
@@ -3210,36 +3286,44 @@ def _validate_macros(
                 macro.get(key), bool
             ):
                 raise PlaceAndRouteError(
-                    f"request.macros[{i}].{key} is required and must be a number"
+                    f"{label}.{key} is required and must be a number"
                 )
 
         orientation = macro.get("orientation", "R0")
         if orientation not in _MACRO_ORIENTATIONS:
             raise PlaceAndRouteError(
-                f"request.macros[{i}].orientation must be one of: "
+                f"{label}.orientation must be one of: "
                 + ", ".join(sorted(_MACRO_ORIENTATIONS))
             )
-
-        gds = macro.get("gds")
-        gds_path: str | None = None
-        if gds is not None:
-            if not isinstance(gds, str) or not gds:
-                raise PlaceAndRouteError(
-                    f"request.macros[{i}].gds must be a non-empty string when given"
-                )
-            gds_path = gds if os.path.isabs(gds) else os.path.join(request_dir, gds)
-            if not os.path.isfile(gds_path):
-                raise PlaceAndRouteError(f"request.macros[{i}].gds not found: {gds}")
 
         validated.append(
             {
                 "instance": instance,
-                "lef": os.path.abspath(lef_path),
+                "lef": lef_path,
                 "cell_name": macro_cell_name,
                 "x_um": float(macro["x_um"]),
                 "y_um": float(macro["y_um"]),
                 "orientation": orientation,
-                "gds": gds_path,
+                "gds": macro_spec.resolve_optional_macro_file(
+                    macro,
+                    "gds",
+                    label=label,
+                    request_dir=request_dir,
+                    error_cls=PlaceAndRouteError,
+                ),
+                # Issue #2635.
+                "lib": macro_spec.resolve_macro_lib(
+                    macro,
+                    label=label,
+                    request_dir=request_dir,
+                    error_cls=PlaceAndRouteError,
+                ),
+                "halo": _validate_macro_halo(macro.get("halo"), label=label),
+                "width_um": macro_record.get("width_um"),
+                "height_um": macro_record.get("height_um"),
+                "power_ground_layers": _macro_power_ground_layers(
+                    lef_path, macro_cell_name, macro_record["pins"]
+                ),
             }
         )
 
@@ -3248,6 +3332,106 @@ def _validate_macros(
         raise PlaceAndRouteError("request.macros[].instance values must be unique")
 
     return validated
+
+
+#: The four sides a ``request.macros[].halo`` object may name, in the order
+#: OpenROAD's own ``define_pdn_grid -halo`` list takes them (verified live
+#: against OpenROAD 26Q3: ``PDN-0008``'s own "reduce the halo to at most
+#: ``<left> <bottom> <right> <top>``" diagnostic restates a rejected halo in
+#: exactly this order).
+_MACRO_HALO_SIDES = ("left", "bottom", "right", "top")
+
+
+def _validate_macro_halo(halo: Any, *, label: str) -> dict[str, float] | None:
+    """Validate one ``request.macros[].halo`` value (issue #2635), returning
+    ``{"left": f, "bottom": f, "right": f, "top": f}`` or ``None`` when the
+    field is omitted.
+
+    Accepts a bare number (uniform on all four sides -- the overwhelmingly
+    common case, and the shape every ORFS platform config uses) or an object
+    naming any subset of :data:`_MACRO_HALO_SIDES`, each side defaulting to
+    ``0``. An empty object is rejected rather than silently treated as
+    "omitted": a caller who wrote ``"halo": {}`` meant something, and
+    guessing which is worse than asking.
+
+    Negative values are rejected -- a "negative halo" would mean letting
+    standard cells *overlap* the macro, which no caller means and which
+    ``create_blockage`` has no way to express anyway.
+    """
+    if halo is None:
+        return None
+    if isinstance(halo, bool):
+        raise PlaceAndRouteError(
+            f"{label}.halo must be a number or an object naming any of: "
+            + ", ".join(_MACRO_HALO_SIDES)
+        )
+    if isinstance(halo, (int, float)):
+        if halo < 0:
+            raise PlaceAndRouteError(f"{label}.halo must not be negative")
+        return dict.fromkeys(_MACRO_HALO_SIDES, float(halo))
+    if not isinstance(halo, dict):
+        raise PlaceAndRouteError(
+            f"{label}.halo must be a number (uniform, in um) or an object "
+            "naming any of: " + ", ".join(_MACRO_HALO_SIDES)
+        )
+    if not halo:
+        raise PlaceAndRouteError(
+            f"{label}.halo must name at least one of: " + ", ".join(_MACRO_HALO_SIDES)
+        )
+    unknown = sorted(set(halo) - set(_MACRO_HALO_SIDES))
+    if unknown:
+        raise PlaceAndRouteError(
+            f"{label}.halo has unknown side(s) {', '.join(unknown)} -- "
+            "valid sides are: " + ", ".join(_MACRO_HALO_SIDES)
+        )
+    resolved: dict[str, float] = {}
+    for side in _MACRO_HALO_SIDES:
+        value = halo.get(side, 0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PlaceAndRouteError(f"{label}.halo.{side} must be a number")
+        if value < 0:
+            raise PlaceAndRouteError(f"{label}.halo.{side} must not be negative")
+        resolved[side] = float(value)
+    return resolved
+
+
+def _macro_power_ground_layers(
+    lef_path: str, macro_cell_name: str, pins: list[dict[str, Any]]
+) -> list[str]:
+    """Every routing layer the macro's ``USE POWER``/``USE GROUND`` pins
+    actually have ``PORT`` geometry on, in LEF declaration order (issue
+    #2635).
+
+    This is what :func:`_macro_pdn_grid_lines` needs to emit an
+    ``add_pdn_connect`` for a macro PDN grid: pdngen rejects a macro grid
+    that produces no shapes or vias at all (live-verified against OpenROAD
+    26Q3: ``[WARNING PDN-0232] The grid "..." does not contain any shapes or
+    vias`` followed by ``[ERROR PDN-0233] Failed to generate full power
+    grid``), and the connection's lower layer is by definition the layer the
+    macro exposes its own P/G pins on. Derived from the LEF rather than
+    asked for in the request because the LEF is the authority on it and a
+    caller restating it is a chance to restate it wrong.
+
+    ``[]`` when the macro declares no P/G pin with a ``PORT`` at all -- a
+    legitimate state (an analog block whose supplies are routed as ordinary
+    signals), handled by the caller rather than treated as an error here.
+    """
+    pg_pin_names = {
+        pin["name"]
+        for pin in pins
+        if (pin.get("use") or "").upper() in ("POWER", "GROUND")
+    }
+    if not pg_pin_names:
+        return []
+    ports = read_lef_macro_pin_ports(lef_path).get(macro_cell_name, {})
+    layers: list[str] = []
+    for pin_name, port_list in ports.items():
+        if pin_name not in pg_pin_names:
+            continue
+        for port in port_list:
+            if port["layer"] not in layers:
+                layers.append(port["layer"])
+    return layers
 
 
 #: A structural-Verilog module instantiation with **named** port
@@ -4263,7 +4447,11 @@ def _power_physical_only_masters(cell_library: str) -> list[str]:
     return masters + list(_FILLER_CELLS[cell_library])
 
 
-def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]:
+def _power_delivery_lines(
+    power: dict[str, Any],
+    cell_library: str,
+    macros: list[dict[str, Any]] | None = None,
+) -> list[str]:
     """Tcl for the optional ``request.power`` PDN stage (issue #1091):
     ``tapcell`` well/substrate ties, ``add_global_connection``/
     ``global_connect`` power-pin wiring, and ``pdngen``'s strap grid -- all
@@ -4274,6 +4462,12 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
     (immediately after ``place_macro``/``make_tracks``, before that stage's
     own ``write_db``) -- see :func:`_stage_script_lines`'s own ``"floorplan"``
     branch.
+
+    ``macros`` (issue #2635, the validated ``request.macros`` array) adds a
+    ``define_pdn_grid -macro``/``add_pdn_connect`` pair for every macro that
+    declared a ``halo`` -- see :func:`_macro_pdn_grid_lines`. ``None``/``[]``
+    (every pre-#2635 caller, and any request whose macros declare no halo)
+    emits nothing extra and leaves this function's output byte-identical.
 
     The ``tapcell`` line is the one conditional piece: a ``cell_library``
     listed in :data:`_NO_TAPCELL_LIBRARIES` (issue #2441) ships no
@@ -4359,7 +4553,164 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
                 f" -split_cuts {{{split_cuts['layer']} {split_cuts['width_um']}}}"
             )
         lines.append(connect_call)
+    # Issue #2635: one macro PDN grid per halo'd macro, after the flat
+    # standard-cell grid is fully declared and before `pdngen` runs -- the
+    # same ordering every real ORFS `pdn.tcl` uses for its own "macro grids"
+    # section. Closes the "macro-specific PDN grids (`define_pdn_grid
+    # -macro`, with their own halo/orientation config)" exclusion this
+    # module's docstring has carried since issue #1091.
+    lines += _macro_pdn_grid_lines(macros or [], power)
     lines.append("pdngen")
+    return lines
+
+
+#: ``request.macros[].orientation`` values that rotate the macro's own LEF
+#: ``SIZE`` by 90 degrees, so its placed footprint is ``height x width``
+#: rather than ``width x height`` -- what :func:`_macro_footprint` needs to
+#: get a halo blockage's rectangle right for a sideways-placed macro.
+_ROTATED_MACRO_ORIENTATIONS = frozenset({"R90", "R270", "MXR90", "MYR90"})
+
+
+def _macro_footprint(macro: dict[str, Any]) -> tuple[float, float, float, float]:
+    """The macro's placed footprint as ``(x1, y1, x2, y2)`` in microns.
+
+    ``x_um``/``y_um`` is the placed macro's **lower-left** corner -- live-
+    verified against OpenROAD 26Q3: ``place_macro -macro_name u_sram
+    -location {10 10} -orientation R0`` on a ``SIZE 20.0 BY 20.0`` macro
+    reports ``[INFO MPL-0035] Macro u_sram placed. Bounding box (10.000um,
+    10.000um), (30.000um, 30.000um)``. The width/height come from the
+    macro's own LEF ``SIZE``, swapped for the rotated orientations
+    (:data:`_ROTATED_MACRO_ORIENTATIONS`).
+    """
+    width = macro["width_um"]
+    height = macro["height_um"]
+    if macro["orientation"] in _ROTATED_MACRO_ORIENTATIONS:
+        width, height = height, width
+    return (
+        macro["x_um"],
+        macro["y_um"],
+        macro["x_um"] + width,
+        macro["y_um"] + height,
+    )
+
+
+def _macro_blockage_lines(macros: list[dict[str, Any]]) -> list[str]:
+    """``create_blockage`` Tcl for every macro that declared a ``halo``
+    (issue #2635) -- one hard placement blockage per macro, covering its own
+    footprint expanded by the halo.
+
+    This is the *placement* half of a macro halo, and the half that means
+    what a caller means by the word: standard cells (and therefore the
+    detailed placer's legalization) are kept out of the ring around the
+    macro, so the macro's own pins stay reachable and its edges do not end
+    up abutted by logic. ``create_blockage -region {x1 y1 x2 y2}`` takes
+    microns and was live-verified against OpenROAD 26Q3 on a real sky130A
+    floorplan with a placed macro.
+
+    Covering the macro's own footprint as well as the ring (rather than
+    emitting four thin ring rectangles) is deliberate: a blockage only
+    constrains *movable* instance placement, so overlapping the already-
+    fixed macro costs nothing and one rectangle is far easier to read in the
+    generated Tcl than four.
+
+    Raises :class:`PlaceAndRouteError` when the macro's LEF declared no
+    ``SIZE`` -- there is no footprint to expand, and silently skipping the
+    blockage would honor the halo in the response and not in the run.
+    """
+    lines: list[str] = []
+    for macro in macros:
+        halo = macro["halo"]
+        if halo is None:
+            continue
+        if macro["width_um"] is None or macro["height_um"] is None:
+            raise PlaceAndRouteError(
+                f"request.macros[].halo for instance '{macro['instance']}' "
+                f"needs the macro's footprint, but its lef ({macro['lef']}) "
+                f"declares no SIZE for MACRO '{macro['cell_name']}'"
+            )
+        x1, y1, x2, y2 = _macro_footprint(macro)
+        lines.append(
+            "create_blockage -region "
+            f"{{{x1 - halo['left']} {y1 - halo['bottom']} "
+            f"{x2 + halo['right']} {y2 + halo['top']}}}"
+        )
+    return lines
+
+
+def _macro_pdn_grid_lines(
+    macros: list[dict[str, Any]], power: dict[str, Any]
+) -> list[str]:
+    """``define_pdn_grid -macro``/``add_pdn_connect`` Tcl for every macro
+    that declared a ``halo`` (issue #2635) -- the *power-delivery* half of a
+    macro halo.
+
+    What the halo does here is tell ``pdngen`` to keep the flat
+    standard-cell grid off the macro and its margin, and to connect the
+    macro's own P/G pins into that grid instead. Live-verified against
+    OpenROAD 26Q3 on a real sky130A floorplan (macro ``SIZE 20x20``, met1
+    P/G pins, met1-followpins/met4/met5 core straps): the pair below is
+    exactly what makes ``pdngen`` report ``Inserting grid: macro_... -
+    u_sram`` and succeed. Both halves are required -- a macro grid with no
+    ``add_pdn_connect`` at all fails ``[WARNING PDN-0232] ... does not
+    contain any shapes or vias`` / ``[ERROR PDN-0233] Failed to generate
+    full power grid``.
+
+    The connection's **lower** layer is the macro's own P/G ``PORT`` layer,
+    read from its LEF (:func:`_macro_power_ground_layers`) rather than asked
+    for in the request -- the LEF is the authority on it. The **upper**
+    layer is the next strap layer above it in ``power.straps`` (which every
+    real platform config lists bottom-to-top, the same assumption the core
+    grid's own consecutive-pair ``add_pdn_connect`` loop above already
+    makes). When neither can be established the request is **rejected with a
+    named error**, never silently degraded: a halo a caller asked for and
+    this function quietly skipped would be a wrong answer reported as a
+    right one.
+
+    ``-grid_over_boundary`` lets the core grid's straps continue over the
+    macro's boundary (stopping only at the halo), matching ORFS's own macro
+    grids. Emits nothing at all when no macro declares a halo, leaving every
+    pre-#2635 ``request.power`` script byte-identical.
+    """
+    strap_layers = [strap["layer"] for strap in power["straps"]]
+    lines: list[str] = []
+    for macro in macros:
+        halo = macro["halo"]
+        if halo is None:
+            continue
+        pg_layers = macro["power_ground_layers"]
+        if not pg_layers:
+            raise PlaceAndRouteError(
+                f"request.macros[].halo for instance '{macro['instance']}' "
+                "cannot be honored by pdngen: its lef declares no POWER/GROUND "
+                "pin with PORT geometry, so there is no layer to connect the "
+                "macro's supplies to the grid on -- drop the halo, or drop "
+                "request.power"
+            )
+        lower = pg_layers[0]
+        if lower not in strap_layers:
+            raise PlaceAndRouteError(
+                f"request.macros[].halo for instance '{macro['instance']}' "
+                "needs a request.power strap on the macro's own P/G layer "
+                f"'{lower}' to connect to; request.power.straps declares "
+                + ", ".join(strap_layers)
+            )
+        index = strap_layers.index(lower)
+        if index + 1 >= len(strap_layers):
+            raise PlaceAndRouteError(
+                f"request.macros[].halo for instance '{macro['instance']}' "
+                "needs a request.power strap *above* the macro's own P/G "
+                f"layer '{lower}' to connect up to, but '{lower}' is the "
+                "topmost strap declared"
+            )
+        upper = strap_layers[index + 1]
+        name = f"macro_{macro['instance']}"
+        lines.append(
+            f"define_pdn_grid -macro -name {{{name}}} -voltage_domains {{CORE}} "
+            f"-instances {{{macro['instance']}}} -halo "
+            f"{{{halo['left']} {halo['bottom']} {halo['right']} {halo['top']}}} "
+            "-grid_over_boundary"
+        )
+        lines.append(f"add_pdn_connect -grid {{{name}}} -layers {{{lower} {upper}}}")
     return lines
 
 
@@ -4485,7 +4836,16 @@ def _stage_script_lines(
     output_dir: str,
     route_critical_nets_percentage: int,
     max_antenna_repair_iterations: int,
+    macro_liberty_paths: list[str] | None = None,
 ) -> list[str]:
+    # Issue #2635: `request.macros[].lib`, resolved to this run's own
+    # corner. Read immediately after the standard-cell `read_liberty` in
+    # *every* stage (the floorplan stage's own load, and every later stage's
+    # post-`read_db` reload) -- a macro whose timing is only loaded in some
+    # stages would make this verb's own `-metrics`/repair steps see a
+    # different design than the floorplan did. Empty for every pre-#2635
+    # request, leaving each stage script byte-identical.
+    macro_liberty_lines = [f"read_liberty {path}" for path in macro_liberty_paths or []]
     if stage == "floorplan":
         # `create_clock` (`_clock_lines`) must come after `link_design` --
         # see that helper's own docstring; `read_liberty` itself is read
@@ -4494,8 +4854,9 @@ def _stage_script_lines(
         # LEFs (issue #438) are read alongside the tech/cell LEF, before
         # `read_verilog` -- `link_design` needs every macro's physical view
         # already loaded to resolve the netlist's own macro instances.
-        lines = [
-            f"read_liberty {liberty_path}",
+        lines = [f"read_liberty {liberty_path}"]
+        lines += macro_liberty_lines
+        lines += [
             f"read_lef {tech_lef}",
             f"read_lef {cell_lef}",
         ]
@@ -4523,6 +4884,12 @@ def _stage_script_lines(
             f"-orientation {macro['orientation']} -exact"
             for macro in macros
         ]
+        # Issue #2635: `request.macros[].halo` -- a hard placement blockage
+        # over each halo'd macro's footprint plus its margin. After
+        # `place_macro` (the footprint is only meaningful once the macro has
+        # a location) and before `make_tracks`/the PDN, so every later
+        # placement step sees it.
+        lines += _macro_blockage_lines(macros)
         lines += ["make_tracks"]
         # `request.power` (issue #1091): tapcell + PDN Tcl, right after
         # `place_macro`/`make_tracks` and before this stage's own
@@ -4530,7 +4897,7 @@ def _stage_script_lines(
         # itself uses (see this module's own docstring "Power delivery"
         # section for the live-verified citation).
         if power is not None:
-            lines += _power_delivery_lines(power, cell_library)
+            lines += _power_delivery_lines(power, cell_library, macros)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
         lines += [f"write_db {checkpoint_out}"]
         return lines
@@ -4540,6 +4907,7 @@ def _stage_script_lines(
     # stage's own `link_design`), so `create_clock` may safely follow
     # `read_liberty` directly here -- unlike the floorplan stage above.
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    lines += macro_liberty_lines
     # Issue #2378: `set_dont_use` must come after liberty is loaded and before
     # the first resizer-driven step (`global_placement -timing_driven`,
     # `repair_*`, CTS, hold repair), and is re-emitted in every fresh OpenROAD
@@ -4961,6 +5329,16 @@ def _engine_error_message(
     hint = _mount_namespace_hint(completed, pdk_info)
     if hint is not None:
         message = f"{message} -- {hint}"
+    # Issue #2635: `ORD-2013` is what a hard macro with no `request.macros`
+    # entry looks like, and the raw diagnostic says nothing about which
+    # request field would have supplied its physical view. Appended as a
+    # further `--` clause, the same recognized-hint structure
+    # `_mount_namespace_hint` above already uses.
+    macro_hint = macro_spec.missing_lef_master_hint(
+        (completed.stdout or "") + "\n" + (completed.stderr or "")
+    )
+    if macro_hint is not None:
+        message = f"{message} -- {macro_hint}"
     return message
 
 

@@ -1189,7 +1189,10 @@ separately if it turns out to matter for evidence-record committing.
     "cell_library": "sky130_fd_sc_hd",
     "corner": "tt_025C_1v80"
   },
-  "constraints": { "clock_period_ns": null }
+  "constraints": { "clock_period_ns": null },
+  "macros": [
+    { "lef": "sram_8x8.lef", "lib": { "tt_025C_1v80": "sram_8x8_tt.lib" } }
+  ]
 }
 ```
 
@@ -1202,6 +1205,7 @@ separately if it turns out to matter for evidence-record committing.
 | `run_id` | string \| omitted | Optional safe identifier for an exclusively created invocation directory; see "Artifacts". Omit to allocate a new ID automatically. Reusing an existing ID fails. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
+| `macros` | array\<object\> \| omitted | Hard-macro declarations (issue #2635) — pre-characterized blocks this design instantiates but carries no RTL for. See "Hard macros" below for the shared shape and per-verb behaviour. `[]`/omitted (the default) leaves every pre-#2635 request byte-identical. |
 | `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
 | `constraints.dont_use` | array\<string\> \| omitted | Standard cells this run must not map to, as ABC `-dont_use` cell names/globs (issue #2382) — **merged with** the built-in per-library exclusion table by default, see "ABC constraints, delay target, and cell exclusions" above for the merge semantics and `constraints.dont_use_mode`. Each entry must be a non-empty string of cell-name/glob characters (`[A-Za-z0-9_.*?!\[\]-]`) and must match **at least one** cell in the resolved liberty — a pattern matching nothing is an error, never a silent no-op. The fully-resolved list is echoed back as the response's `cell_exclusions.effective`. |
 | `constraints.dont_use_mode` | string \| omitted | How `constraints.dont_use` combines with the built-in per-library table: `"additive"` (default — both), `"replace"` (only the request's, requires a non-empty `dont_use`), `"none"` (no exclusion at all, rejects a non-empty `dont_use`). An unknown value is an error. |
@@ -1242,6 +1246,20 @@ caller decision rather than something this command should pick.
     "sky130_fd_sc_hd__a211o_1": 1,
     "sky130_fd_sc_hd__dfrtp_1": 50
   },
+  "macros": [
+    {
+      "cell": "sram_8x8",
+      "lef": { "path": "sram_8x8.lef", "scope": "repo" },
+      "lib": { "tt_025C_1v80": { "path": "sram_8x8_tt.lib", "scope": "repo" } },
+      "gds": null,
+      "verilog_blackbox": null,
+      "blackbox_source": "liberty",
+      "blackbox_path": { "path": "sram_8x8_tt.lib", "scope": "repo" }
+    }
+  ],
+  "macro_instance_counts_by_type": { "sram_8x8": 1 },
+  "macro_instance_count": 1,
+  "cells_without_area": [],
   "leakage_power_nw": 5.7321,
   "leakage_by_type_nw": {
     "sky130_fd_sc_hd__a211o_1": 0.00199315,
@@ -1312,7 +1330,10 @@ caller decision rather than something this command should pick.
 | `instance_count` | integer | Total standard-cell instances after liberty mapping, rolled up over the **whole design hierarchy** — `stat -json`'s per-module `num_cells` aggregated recursively across every sub-module Yosys left un-flattened, each level scaled by its instance count (issue #821; the top module's own `num_cells` alone is `0` for a design whose top is a pure wrapper). Matches `stat -json`'s own `design.num_cells` rollup. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |
 | `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). `0.0` for a design whose only cells are internal, non-liberty primitives (e.g. an inferred latch — Yosys's own `stat -liberty ... -json` omits the `area` key entirely in that case; verified live, issue #1588). |
 | `sequential_area_um2` | number \| null | `stat -json`'s `sequential_area` — a floorplan hint for a future P&R step. `null` when the resolved Yosys build's `stat -json` output omits the field (distro-packaged Yosys < ~0.67, e.g. Ubuntu 24.04's 0.33 — see #560); present as a number on Yosys 0.67+. |
-| `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, rolled up over the whole hierarchy the same way `instance_count` is, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. Keys are always real leaf standard-cell types; a sub-module *name* (which `stat -json` reports as a pseudo cell type in the parent module's own block) is never reported as one, it is expanded into the cells it instantiates (issue #821). |
+| `instance_counts_by_type` | object\<string, int\> | `stat -json`'s `num_cells_by_type`, rolled up over the whole hierarchy the same way `instance_count` is, keys sorted for determinism — the synthesis analogue of `klt drc`'s `rule_counts` / `klt extract`'s `device_counts`. Keys are always real leaf standard-cell types; a sub-module *name* (which `stat -json` reports as a pseudo cell type in the parent module's own block) is never reported as one, it is expanded into the cells it instantiates (issue #821). Includes every declared macro's own cell type — see `macro_instance_counts_by_type`/`macro_instance_count` below for the split-out view. |
+| `macros` | array\<object\> | **Always present** (issue #2635) — echo of `request.macros`, each entry's `lef`/`lib`/`gds`/`verilog_blackbox` paths in the `{path, scope}` shape (same convention as `netlist_path`), plus `blackbox_source` (`"liberty"` \| `"verilog_blackbox"` \| `"lef"` — which of the three ways this run made the macro visible to Yosys, see "Hard macros" below) and `blackbox_path` (the file actually `read_liberty -lib`/`read_verilog -lib`'d, including a `"lef"`-sourced run's generated stub). `[]` when the request declared none. |
+| `macro_instance_counts_by_type` / `macro_instance_count` | object\<string, int\> / integer | **Always present** (issue #2635). The subset of `instance_counts_by_type` whose cell type is one of `request.macros[].cell` — macro instances reported *separately* from standard cells, so a caller can compare a standard-cell count/budget without first subtracting out the macros by hand. `{}`/`0` when the request declared no macros. |
+| `cells_without_area` | array\<string\> \| null | **Always present** (issue #2635). Every instantiated cell type (standard cell or macro) for which the resolved standard-cell liberty reports no `area` — i.e. every type whose instances contribute a silent `0` to `area_um2`. A blackboxed hard macro is always in this list (its real area lives in its own macro liberty/LEF, never in the standard-cell liberty); see `macros_response`'s `cells_without_area` note in `warnings` below. `[]` when every instantiated type does have an area (or the design instantiates nothing); `null` when this cannot be established from the resolved liberty at all. |
 | `leakage_power_nw` | number \| null | Static leakage power, in nanowatts — issue #1626. `sum(cell_leakage_power[cell_type] * instance_count[cell_type])` over `instance_counts_by_type`, read from the same resolved liberty already loaded for `dfflibmap`/`abc -liberty` (no second liberty fetch). **Not** switching/dynamic power — that needs an activity factor this command has no vectors to supply, and is out of scope. `null` when the resolved liberty reports no `cell_leakage_power` for *any* instantiated cell type — see "`leakage_power_nw`/`leakage_by_type_nw`" below. |
 | `leakage_by_type_nw` | object\<string, number\> \| null | Per-cell-type leakage, in nanowatts — the liberty `cell_leakage_power` entry `leakage_power_nw` was summed from, one entry per instantiated cell type that had one. Keys sorted for determinism. A caller can diff this object's keys against `instance_counts_by_type`'s to spot an instantiated cell type with no leakage data (e.g. a `-dont_use`d or otherwise-unmapped type) for free. `null` exactly when `leakage_power_nw` is `null`. |
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. **`critical_path_ps` contains no register content at all**: no clk-to-Q launch and no setup/hold — `dfflibmap` maps every flip-flop to a liberty cell *before* `abc` runs, so registers bound the cone ABC times rather than appearing in it. See "Registers, clk-to-Q, and setup/hold" above. |
@@ -1373,6 +1394,66 @@ heuristic and Yosys's own optimization already resolve these structurally
 (the loop no longer exists in the mapped netlist by the time `write_verilog`
 runs) — `structural` only *reports* that the design carried the condition,
 it does not gate netlist production.
+
+## Hard macros (`request.macros`)
+
+Issue #2635 adds an optional `macros` array — a **shared shape**, accepted
+identically by `klt synthesize`, `klt sta`, and (plus its own
+placement-specific fields) `klt place-and-route`, documented once in
+`klayout_tools.macros` rather than three times. A hard macro is a
+pre-characterized block the design instantiates but carries no RTL for: a
+compiled SRAM, an analog block `klt lef-abstract` emitted, a third-party IP
+core shipped as LEF + liberty + GDS.
+
+| `macros[]` field | Type | Description |
+| --- | --- | --- |
+| `lef` | string | Path to the macro's LEF abstract. Required; must declare exactly one `MACRO`. Resolved relative to the request file's own directory. |
+| `cell` | string \| omitted | The macro's cell/master name. Derived from the LEF's own `MACRO` name when omitted; when given, must match it exactly — a `cell` that disagrees with its own `lef` is always a mistake and is rejected rather than silently reconciled. |
+| `lib` (alias `liberty`) | object\<string, string\> \| omitted | A **per-corner** liberty map, `{"<corner>": "<path>"}`, keyed the same way `pdk.corner` names a corner. The reserved key `"default"` applies to any corner with no exact entry. Give at most one of `lib`/`liberty` — they are two spellings of the same field, never two independent values. Omitted means a LEF-only macro: legal, and handled as an untimed blackbox. |
+| `gds` | string \| omitted | The macro's GDS view. Unused by `klt synthesize` itself (no layout step here); accepted so one declaration serves all three verbs without per-verb pruning. |
+| `verilog_blackbox` | string \| omitted | A hand-written `(* blackbox *)` Verilog module declaration. Only `klt synthesize` consumes this field — see "Making the macro visible to Yosys" below. |
+
+**Making the macro visible to Yosys.** Before `hierarchy -check -top`, this
+command emits one line per declared macro, in precedence order:
+
+1. A `lib` entry matching this run's resolved corner (falling back to
+   `"default"`) → `read_liberty -lib <macro liberty>`. Preferred: it carries
+   the macro's real timing *and* area, so a later `klt sta`/
+   `klt place-and-route` run on the same declaration sees the same numbers.
+2. `verilog_blackbox`, when given → `read_verilog -lib <blackbox>`.
+3. Neither → a `(* blackbox *)` module is **generated** from the macro's own
+   LEF `PIN DIRECTION`s and written into the run directory as
+   `<cell>_blackbox.v`, then loaded the same way. A caller with only a LEF
+   never has to hand-write (or hand-maintain, against a vendor's own port
+   list) a stub.
+
+Every disposition has the same effect: the macro survives
+`hierarchy`/`synth`/`abc`/`clean` as one opaque instance in
+`write_verilog`'s netlist and in `stat`'s own `num_cells_by_type`, instead of
+being implemented out of standard cells — the entire point of a hard macro,
+and the opposite of what feeding the vendor's behavioural Verilog through
+`sources` does. **A macro referenced by the netlist but absent from
+`request.macros`** fails `hierarchy -check -top` with Yosys's own `Module
+`\<cell>' referenced in module `\<top>' in cell `\<inst>' is not part of the
+design` — this command's own error message appends a hint naming the
+`request.macros` entry that would fix it, rather than leaving a caller to
+guess between "missing RTL source" and "undeclared hard macro".
+
+**A macro `lib` map with no entry for the run's corner (and no `"default"`)
+is a request error**, naming the macro, the corner, and the keys that are
+available — never a silent fallback to another corner's timing.
+
+**Area accounting.** `stat -liberty`'s `area_um2` sums only the one
+standard-cell liberty this run loaded — a blackboxed macro contributes a
+silent `0` unless its own `lib` was also given (in which case its area is
+included, like any other liberty-backed cell). `cells_without_area` above
+names every instantiated type (macro or otherwise) `area_um2` does not
+account for, and a non-empty result also surfaces as a `macro_area_excluded`
+/ `cells_without_liberty_area` entry in `warnings` — see "`warnings`" below.
+
+See `docs/cli/sta.md`'s and `docs/cli/place-and-route.md`'s own "Hard
+macros"/"Hard-macro placement" sections for how the other two verbs consume
+the same declaration.
 
 ## `warnings`: engine diagnostics and missing library capabilities
 

@@ -2331,3 +2331,284 @@ def test_cli_missing_request_arg_is_usage_error():
     with pytest.raises(SystemExit) as exc_info:
         main(["sta"])
     assert exc_info.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# `request.macros` -- the shared hard-macro declaration (issue #2635)
+# --------------------------------------------------------------------------- #
+
+
+_MACRO_LEF = (
+    "VERSION 5.7 ;\n"
+    "MACRO sram_8x8\n"
+    "  CLASS BLOCK ;\n"
+    "  SIZE 20.0 BY 10.0 ;\n"
+    "  PIN D\n"
+    "    DIRECTION INPUT ;\n"
+    "    USE SIGNAL ;\n"
+    "    PORT\n"
+    "      LAYER met2 ;\n"
+    "        RECT 1.0 1.0 1.5 1.5 ;\n"
+    "    END\n"
+    "  END D\n"
+    "END sram_8x8\n"
+    "END LIBRARY\n"
+)
+
+_MACRO_LIB = (
+    "library (sram_8x8) {\n"
+    "  cell (sram_8x8) {\n"
+    "    area : 400.0 ;\n"
+    "    pin (D) { direction : input; }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+def _write_macro_files(tmp_path, *corners: str) -> None:
+    _write(tmp_path / "sram_8x8.lef", _MACRO_LEF)
+    for corner in corners or ("tt",):
+        _write(tmp_path / f"sram_8x8_{corner}.lib", _MACRO_LIB)
+
+
+def test_macro_lef_is_read_before_read_def(tmp_path, monkeypatch):
+    """Issue #2635 AC3: the macro's LEF must be loaded before `read_def`,
+    which is exactly what turns `[ERROR ORD-2013] instance <inst> LEF
+    master <cell> not found` into a successful load."""
+    _write_macro_files(tmp_path, "tt")
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "cell": "sram_8x8",
+                "lef": "sram_8x8.lef",
+                "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"},
+            }
+        ],
+    )
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    lines = _sta_script_text(tmp_path).splitlines()
+    macro_lef_index = next(
+        i for i, line in enumerate(lines) if line.endswith("sram_8x8.lef")
+    )
+    read_def_index = next(
+        i for i, line in enumerate(lines) if line.startswith("read_def ")
+    )
+    assert macro_lef_index < read_def_index
+    # ...and it comes *after* the two standard-cell LEFs, not instead of
+    # them.
+    assert lines[:2] == [lines[0], lines[1]]
+    assert lines[0].startswith("read_lef ") and lines[1].startswith("read_lef ")
+    assert macro_lef_index == 2
+
+    # The macro liberty follows the standard-cell liberty.
+    cell_liberty_index = next(
+        i
+        for i, line in enumerate(lines)
+        if line.startswith("read_liberty ") and "sky130_fd_sc_hd__" in line
+    )
+    macro_liberty_index = next(
+        i for i, line in enumerate(lines) if line.endswith("sram_8x8_tt.lib")
+    )
+    assert cell_liberty_index < macro_liberty_index
+
+    assert report["macros"][0]["cell"] == "sram_8x8"
+    assert report["macros"][0]["lef"].endswith("sram_8x8.lef")
+    assert report["macros"][0]["lib"]["tt_025C_1v80"].endswith("sram_8x8_tt.lib")
+
+
+def test_macro_lines_in_netlist_mode_precede_link_design(tmp_path, monkeypatch):
+    """`request.verilog` mode (issue #1825) loads the same macro views, in
+    the same relative order, before `read_verilog`/`link_design`."""
+    _write_macro_files(tmp_path, "tt")
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "top.v", "// fake gate-level netlist\n")
+    request = _base_request(
+        verilog="top.v",
+        hdl_toplevel="top",
+        macros=[{"lef": "sram_8x8.lef", "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"}}],
+    )
+    del request["def"]
+    request_path = _write_request(tmp_path / "request.json", request)
+    _stub_openroad_success(monkeypatch)
+
+    run_sta(request_path)
+
+    lines = _sta_script_text(tmp_path, "sta_top.tcl").splitlines()
+    macro_lef_index = next(
+        i for i, line in enumerate(lines) if line.endswith("sram_8x8.lef")
+    )
+    macro_lib_index = next(
+        i for i, line in enumerate(lines) if line.endswith("sram_8x8_tt.lib")
+    )
+    link_index = next(
+        i for i, line in enumerate(lines) if line.startswith("link_design ")
+    )
+    read_verilog_index = next(
+        i for i, line in enumerate(lines) if line.startswith("read_verilog ")
+    )
+    assert macro_lib_index == 1  # right after the standard-cell liberty
+    assert macro_lef_index < read_verilog_index < link_index
+
+
+def test_macro_without_a_liberty_still_reads_its_lef(tmp_path, monkeypatch):
+    """A LEF-only macro is legal: the LEF alone fixes `ORD-2013`, and
+    OpenSTA then times the instance as an untimed blackbox."""
+    _write_macro_files(tmp_path)
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "sram_8x8.lef"}]
+    )
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    lines = _sta_script_text(tmp_path).splitlines()
+    assert any(line.endswith("sram_8x8.lef") for line in lines)
+    assert len([line for line in lines if line.startswith("read_liberty ")]) == 1
+    assert report["macros"][0]["lib"] is None
+
+
+def test_no_macros_field_emits_no_macro_lines(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["macros"] == []
+    lines = _sta_script_text(tmp_path).splitlines()
+    assert len([line for line in lines if line.startswith("read_lef ")]) == 2
+    assert len([line for line in lines if line.startswith("read_liberty ")]) == 1
+
+
+def test_macro_rejected_when_its_lef_is_missing(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "nope.lef"}]
+    )
+    with pytest.raises(PostRouteStaError, match=r"macros\[0\]\.lef not found"):
+        run_sta(request_path)
+
+
+def test_macro_rejected_when_the_field_is_malformed(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, macros={"not": "a list"})
+    with pytest.raises(PostRouteStaError, match="request.macros must be a list"):
+        run_sta(request_path)
+
+
+def test_duplicate_macro_cells_rejected(tmp_path, monkeypatch):
+    _write_macro_files(tmp_path)
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef"}, {"lef": "sram_8x8.lef"}],
+    )
+    with pytest.raises(PostRouteStaError, match="cell values must be unique"):
+        run_sta(request_path)
+
+
+def test_multi_corner_loads_each_corners_own_macro_liberty(tmp_path, monkeypatch):
+    """One declaration, two corners: each corner's own session loads that
+    corner's macro liberty, never the other's."""
+    _write_macro_files(tmp_path, "tt", "ss")
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "lef": "sram_8x8.lef",
+                "lib": {
+                    "tt_025C_1v80": "sram_8x8_tt.lib",
+                    "ss_100C_1v60": "sram_8x8_ss.lib",
+                },
+            }
+        ],
+    )
+    _stub_openroad_multi_corner(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert [entry["corner"] for entry in report["corners"]] == [
+        "tt_025C_1v80",
+        "ss_100C_1v60",
+    ]
+    # `macros` is hoisted to the top level: the declaration is shared, only
+    # which liberty each corner loaded varies.
+    assert report["macros"][0]["cell"] == "sram_8x8"
+    tt_lines = _sta_script_text(tmp_path, "sta_top__tt_025C_1v80.tcl")
+    ss_lines = _sta_script_text(tmp_path, "sta_top__ss_100C_1v60.tcl")
+    assert "sram_8x8_tt.lib" in tt_lines and "sram_8x8_ss.lib" not in tt_lines
+    assert "sram_8x8_ss.lib" in ss_lines and "sram_8x8_tt.lib" not in ss_lines
+
+
+def test_multi_corner_macro_liberty_with_a_missing_corner_is_a_named_error(
+    tmp_path, monkeypatch
+):
+    """Issue #2635's named edge case: a macro liberty with no entry for one
+    of the requested corners must fail loudly, naming the macro and the
+    corner -- never silently characterize that corner against another
+    corner's macro timing."""
+    _write_macro_files(tmp_path, "tt")
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef", "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"}}],
+    )
+    _stub_openroad_multi_corner(monkeypatch)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert "sram_8x8" in message
+    assert "ss_100C_1v60" in message
+    assert "tt_025C_1v80" in message
+
+
+def test_macro_liberty_keyed_default_applies_to_every_corner(tmp_path, monkeypatch):
+    """The documented escape hatch for a macro shipped with one
+    corner-independent liberty -- keeps the field a plain `dict[str, str]`
+    rather than a union type."""
+    _write_macro_files(tmp_path, "any")
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef", "lib": {"default": "sram_8x8_any.lib"}}],
+    )
+    _stub_openroad_multi_corner(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert len(report["corners"]) == 2
+    for name in ("sta_top__tt_025C_1v80.tcl", "sta_top__ss_100C_1v60.tcl"):
+        assert "sram_8x8_any.lib" in _sta_script_text(tmp_path, name)
+
+
+def test_ord_2013_failure_names_request_macros(tmp_path, monkeypatch):
+    """A macro referenced by the DEF but absent from `request.macros` must
+    produce a clear, named error -- not a bare `ORD-2013` line that says
+    nothing about which request field supplies a LEF master."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="26Q3-771-gdeadbeef \n")
+        return fake_completed(
+            returncode=1,
+            stdout=(
+                "[ERROR ORD-2013] instance u_sram LEF master sram_8x8 not found.\n"
+            ),
+        )
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert "ORD-2013" in message
+    assert "request.macros" in message
+    assert "sram_8x8" in message
