@@ -10184,6 +10184,411 @@ def test_reference_device_bulk_net_must_be_a_string(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# hints.short_nets: mask-option reference resolution (issue #2653)
+# --------------------------------------------------------------------------- #
+
+# A mask-option (e-fuse/probe-pad/metal-option) mux block: OUT is wired by
+# drawn metal to exactly one of P0/P1/P2, stated *behaviourally* in the
+# schematic as one resistor per candidate pad -- a near-zero "drawn/shorted"
+# value when that pad is selected, a near-infinite "cut/absent" value
+# otherwise (the issue's own `floor(code/...)`-style expression, evaluated by
+# hand here rather than at `klt lvs` runtime -- see the option-1-vs-option-2
+# discussion this issue's body carries for why). Code 0 selects P0: `RS0` is
+# the drawn link, `RS1`/`RS2` are cut. `NetlistSpiceReader` strips the `R`
+# element-type prefix from each instance name, so `RS0`/`RS1`/`RS2` read back
+# as devices `S0`/`S1`/`S2`.
+_OPTION_LADDER_REFERENCE_SPICE = """
+.SUBCKT opt_mux OUT P0 P1 P2
+RS0 OUT P0 1e-3
+RS1 OUT P1 1e12
+RS2 OUT P2 1e12
+.ENDS opt_mux
+"""
+
+# A correctly-drawn layout for option code 0: P0 is real metal tied directly
+# to OUT (one net, with no fabricated device at all for *either* state of a
+# mask-option link -- the drawn layout never instantiates a resistor here),
+# and P1/P2 are simply not connected to anything.
+_OPTION_LADDER_LAYOUT_CODE0_SPICE = """
+.SUBCKT opt_mux OUT P1 P2
+.ENDS opt_mux
+"""
+
+# A miswired layout for the same code: P1 is accidentally also shorted to
+# OUT (a real fabrication defect this compare must still catch).
+_OPTION_LADDER_LAYOUT_MISWIRED_SPICE = """
+.SUBCKT opt_mux OUT P1 P2
+RBAD OUT P1 1
+.ENDS opt_mux
+"""
+
+#: The `hints.short_nets` declaration resolving the reference above to
+#: option code 0: merge `OUT`/`P0` into one net (the drawn link), and drop
+#: every link device -- both the drawn and the cut ones have no fabricated
+#: counterpart in a correctly drawn layout.
+_OPTION_LADDER_CODE0_HINT = {
+    "nets": [["OUT", "P0"]],
+    "devices": ["S0", "S1", "S2"],
+}
+
+
+def _option_ladder_request(
+    tmp_path: Path, layout_spice: str, *, hints: dict | None = None, name="request"
+) -> str:
+    layout_path = _write(tmp_path / f"{name}_layout.spice", layout_spice)
+    reference_path = _write(
+        tmp_path / f"{name}_ref.spice", _OPTION_LADDER_REFERENCE_SPICE
+    )
+    request: dict = {
+        "layout": {"netlist": layout_path, "top": "opt_mux"},
+        "reference": {"netlist": reference_path, "top": "opt_mux"},
+    }
+    if hints is not None:
+        request["hints"] = hints
+    return _write_request(tmp_path / f"{name}.json", request)
+
+
+def test_short_nets_hint_resolves_mask_option_reference_to_clean_match(tmp_path):
+    """The issue's own acceptance criterion: a correctly-drawn mask-option
+    layout compares clean against the behavioural reference once
+    `hints.short_nets` resolves it to one concrete code, with the resolution
+    disclosed as a `hints.short_nets_applied`/`warning` finding naming
+    exactly what was merged and dropped -- never silent."""
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": _OPTION_LADDER_CODE0_HINT},
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 0, "reference": 0, "matched": 0}
+    assert report["counts"]["nets"] == {"layout": 3, "reference": 3, "matched": 3}
+    assert report["counts"]["pins"] == {"layout": 3, "reference": 3, "matched": 3}
+    assert report["category_counts"] == {
+        lvs.CATEGORY_HINTS_SHORT_NETS_APPLIED: 1,
+        # Pre-existing, unrelated convention (issue #2461-adjacent): a
+        # device class with zero instances on *both* sides after resolution
+        # reports as a harmless warning, not a real topology defect.
+        lvs.CATEGORY_TOPOLOGY: 1,
+    }
+    disclosures = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_HINTS_SHORT_NETS_APPLIED
+    ]
+    assert len(disclosures) == 1
+    (entry,) = disclosures
+    assert entry["severity"] == "warning"
+    assert entry["side"] == "reference"
+    assert entry["net"] is None
+    assert entry["device"] is None
+    assert entry["details"] == {
+        "merged_nets": [{"members": ["OUT", "P0"], "merged_net": "OUT|P0"}],
+        "dropped_devices": [
+            {"name": "S0", "class": "RES"},
+            {"name": "S1", "class": "RES"},
+            {"name": "S2", "class": "RES"},
+        ],
+    }
+    # The merged net's spelling matches `klt extract`'s own
+    # `merged_net_labels` pipe-joined convention, reused rather than
+    # re-derived (see `_apply_short_nets_hint`'s docstring).
+    assert {"layout": "OUT", "reference": "OUT|P0", "pin": True} in report[
+        "net_correspondence"
+    ]
+
+
+def test_short_nets_hint_catches_a_miswired_layout(tmp_path):
+    """The resolved compare still catches a real defect: a layout that
+    accidentally shorts a *cut* pad (`P1`) to `OUT` reports a mismatch, not a
+    false "match" -- the hook only resolves the reference's own ambiguity, it
+    never loosens the layout-side check."""
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_MISWIRED_SPICE,
+        hints={"short_nets": _OPTION_LADDER_CODE0_HINT},
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+
+
+def test_short_nets_hint_absent_leaves_mask_option_reference_unresolved(tmp_path):
+    """Regression/gap control: with no `hints.short_nets` at all, the same
+    correctly-drawn layout against the same behavioural reference reports
+    the pre-existing gap this issue closes -- every link resistor is an
+    unmatched reference device, never a silent `status: "match"`. Proves the
+    hook is opt-in: omitting it changes nothing about today's behaviour."""
+    path = _option_ladder_request(tmp_path, _OPTION_LADDER_LAYOUT_CODE0_SPICE)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"].get(lvs.CATEGORY_HINTS_SHORT_NETS_APPLIED) is None
+    unmatched = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_UNMATCHED
+    ]
+    assert len(unmatched) == 3
+
+
+def test_short_nets_hint_devices_match_case_insensitively(tmp_path):
+    """Issue #2653: device name/glob matching is case-insensitive against
+    the reference netlist's own `expanded_name()` spelling (consistent with
+    this module's other name-matching hooks, e.g. `reference.device_bulk`'s
+    class-name lookup)."""
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": {"nets": [["OUT", "P0"]], "devices": ["s0", "s1", "s2"]}},
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+
+
+def test_short_nets_hint_devices_glob_matches_multiple(tmp_path):
+    """A single glob pattern may name every link device at once, rather than
+    requiring one entry per bit."""
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": {"nets": [["OUT", "P0"]], "devices": ["S*"]}},
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+
+
+def test_short_nets_hint_must_be_an_object(tmp_path):
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": ["OUT", "P0"]},
+    )
+
+    with pytest.raises(LvsError, match="must be a JSON object"):
+        run_lvs(path)
+
+
+def test_short_nets_hint_empty_object_raises(tmp_path):
+    """Issue #2653: looked up by key presence, not truthiness (matching
+    `options.combine_devices_per_circuit`'s own convention) -- a *present*
+    but empty `{}` is a request error, not a silent no-op."""
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": {}},
+    )
+
+    with pytest.raises(LvsError, match="must declare at least one of"):
+        run_lvs(path)
+
+
+def test_short_nets_hint_unknown_net_raises(tmp_path):
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": {"nets": [["OUT", "NOPE"]]}},
+    )
+
+    with pytest.raises(LvsError, match="reference net 'NOPE' not found"):
+        run_lvs(path)
+
+
+def test_short_nets_hint_net_group_needs_at_least_two_names(tmp_path):
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": {"nets": [["OUT"]]}},
+    )
+
+    with pytest.raises(LvsError, match="two or more reference net names"):
+        run_lvs(path)
+
+
+def test_short_nets_hint_unresolvable_device_glob_raises(tmp_path):
+    """Issue #2653's own acceptance criterion: an unresolvable glob is a
+    clean application error naming the pattern and what is actually
+    present, never a silent no-op."""
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": {"devices": ["ZZZ*"]}},
+    )
+
+    with pytest.raises(LvsError, match="matched no device"):
+        run_lvs(path)
+
+
+def test_short_nets_hint_devices_must_be_non_empty_strings(tmp_path):
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": {"devices": ["S0", ""]}},
+    )
+
+    with pytest.raises(LvsError, match="non-empty list of"):
+        run_lvs(path)
+
+
+def test_short_nets_hint_nets_must_be_a_list(tmp_path):
+    path = _option_ladder_request(
+        tmp_path,
+        _OPTION_LADDER_LAYOUT_CODE0_SPICE,
+        hints={"short_nets": {"nets": "OUT,P0"}},
+    )
+
+    with pytest.raises(LvsError, match="list of reference net-name groups"):
+        run_lvs(path)
+
+
+def _trim_ladder_reference_spice(units: int, code: int) -> str:
+    """A trim-ladder mask-option reference in the issue's own idiom: `units`
+    series unit resistors, plus one behavioural option link per unit that
+    shorts it out when its code bit is set.
+
+    The link values are what the issue's `{1e-3 + 1e12*(floor(code/2**b) -
+    2*floor(code/2**(b+1)))}` expression evaluates to at this `code` --
+    `1e-3` ("link drawn, that unit shorted out") or `1e12` ("link cut"). We
+    write the already-evaluated value rather than the expression because
+    `hints.short_nets` is deliberately *not* option-aware (see
+    `_apply_short_nets_hint`): the caller decodes the option and states the
+    resulting short/drop set in the request.
+    """
+    nodes = ["IN"] + [f"N{i:03d}" for i in range(1, units)] + ["OUT"]
+    cards = [f"RU{i} {nodes[i]} {nodes[i + 1]} 1k" for i in range(units)]
+    cards += [
+        f"RS{i} {nodes[i]} {nodes[i + 1]} {'1e-3' if code >> i & 1 else '1e12'}"
+        for i in range(units)
+    ]
+    return ".SUBCKT ladder IN OUT\n" + "\n".join(cards) + "\n.ENDS ladder\n"
+
+
+def _trim_ladder_layout_spice(units: int, code: int) -> str:
+    """The layout a correct tapeout of `_trim_ladder_reference_spice` at this
+    `code` extracts to: every unit resistor is still fabricated (a shorted-out
+    unit is real silicon with drawn metal across it, not an absent device),
+    no link is ever a device, and each drawn link's two nodes are one net.
+    """
+    nodes = ["IN"] + [f"N{i:03d}" for i in range(1, units)] + ["OUT"]
+    # Union-find the drawn links' node pairs, exactly as the physical metal
+    # does; a node's representative is the lowest-indexed node tied to it.
+    rep = list(range(units + 1))
+
+    def find(i: int) -> int:
+        while rep[i] != i:
+            i = rep[i]
+        return i
+
+    for i in range(units):
+        if code >> i & 1:
+            a, b = find(i), find(i + 1)
+            rep[max(a, b)] = min(a, b)
+    cards = [f"RU{i} {nodes[find(i)]} {nodes[find(i + 1)]} 1k" for i in range(units)]
+    return ".SUBCKT ladder IN OUT\n" + "\n".join(cards) + "\n.ENDS ladder\n"
+
+
+def test_short_nets_hint_resolves_a_trim_ladder_with_real_unit_devices(tmp_path):
+    """Issue #2653's headline scenario, at ladder scale: a series trim ladder
+    whose schematic carries one behavioural option link per unit device.
+
+    This is the case the smaller `opt_mux` fixtures above cannot reach --
+    there, *every* reference device is a link, so a passing compare is
+    0-devices-vs-0-devices and says nothing about whether resolution leaves
+    the real devices alone. Here the ladder's `units` unit resistors must
+    still match 1:1 *through* the merge (including the two whose terminals
+    both land on a merged net, i.e. the units this code shorts out), while
+    only the links are dropped -- the filer's own "263/263 devices, clean"
+    shape.
+    """
+    units, code = 8, 0b00000101  # bits 0 and 2 set: units 0 and 2 shorted out
+    layout_path = _write(
+        tmp_path / "ladder_layout.spice", _trim_ladder_layout_spice(units, code)
+    )
+    reference_path = _write(
+        tmp_path / "ladder_ref.spice", _trim_ladder_reference_spice(units, code)
+    )
+    path = _write_request(
+        tmp_path / "ladder.json",
+        {
+            "layout": {"netlist": layout_path, "top": "ladder"},
+            "reference": {"netlist": reference_path, "top": "ladder"},
+            "hints": {
+                "short_nets": {
+                    # The two drawn links, decoded from `code` by the caller.
+                    "nets": [["IN", "N001"], ["N002", "N003"]],
+                    # Every link device, drawn or cut -- neither is fabricated.
+                    "devices": ["S*"],
+                }
+            },
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    # All 8 unit resistors survive resolution and match 1:1; only the 8 link
+    # devices were dropped.
+    assert report["counts"]["devices"] == {
+        "layout": units,
+        "reference": units,
+        "matched": units,
+    }
+    # 9 ladder nodes minus the 2 collapsed by the drawn links = 7, on both
+    # sides -- the net correspondence the unresolved reference cannot reach.
+    assert report["counts"]["nets"] == {"layout": 7, "reference": 7, "matched": 7}
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_HINTS_SHORT_NETS_APPLIED
+    ]
+    assert entry["severity"] == "warning"
+    assert entry["details"]["merged_nets"] == [
+        {"members": ["IN", "N001"], "merged_net": "IN|N001"},
+        {"members": ["N002", "N003"], "merged_net": "N002|N003"},
+    ]
+    assert [d["name"] for d in entry["details"]["dropped_devices"]] == [
+        f"S{i}" for i in range(units)
+    ]
+
+
+def test_trim_ladder_without_the_hint_reports_the_unresolved_option_gap(tmp_path):
+    """The same ladder, same request, minus `hints.short_nets`: the
+    pre-change behaviour this issue describes -- every link is an unmatched
+    reference device and the net correspondence fails -- confirming the
+    ladder fixture above really is exercising the hook and not just passing
+    for unrelated reasons.
+    """
+    units, code = 8, 0b00000101
+    layout_path = _write(
+        tmp_path / "ladder_layout.spice", _trim_ladder_layout_spice(units, code)
+    )
+    reference_path = _write(
+        tmp_path / "ladder_ref.spice", _trim_ladder_reference_spice(units, code)
+    )
+    path = _write_request(
+        tmp_path / "ladder.json",
+        {
+            "layout": {"netlist": layout_path, "top": "ladder"},
+            "reference": {"netlist": reference_path, "top": "ladder"},
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["counts"]["devices"]["reference"] == 2 * units
+    assert report["counts"]["nets"]["reference"] == units + 1
+
+
+# --------------------------------------------------------------------------- #
 # CLI: exit codes, --format text/json
 # --------------------------------------------------------------------------- #
 
@@ -13373,6 +13778,19 @@ def test_netgen_engine_no_verdict_in_log_or_stdout_still_raises(tmp_path, monkey
 def test_netgen_engine_hints_unsupported_raises(tmp_path, monkeypatch):
     _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
     path = _netgen_request(tmp_path, hints={"same_nets": [["VPWR", "VPWR"]]})
+
+    with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
+        run_lvs(path)
+
+
+def test_netgen_engine_short_nets_hint_unsupported_raises(tmp_path, monkeypatch):
+    """Issue #2653: `hints.short_nets` is a `klayout.db`-side reference-netlist
+    transform (`Circuit.join_nets`/`remove_device`), same boundary as every
+    other `hints` key -- the netgen engine has no equivalent hook."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(
+        tmp_path, hints={"short_nets": {"devices": ["DOES_NOT_MATTER"]}}
+    )
 
     with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
         run_lvs(path)

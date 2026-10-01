@@ -349,6 +349,15 @@ CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
 #: .connect_pin`) before comparing, so it is not reported as
 #: `pin.unmatched`/`net.unmatched` -- see `_apply_gate_level_port_aliases`.
 CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_joined"
+#: Issue #2653: `hints.short_nets` resolved a mask-option (metal-option/
+#: probe-pad/e-fuse trim) reference's behavioural option construct to one
+#: concrete drawn state before comparing -- every reference net group the
+#: request named was joined into one net (a "drawn/shorted" link), and every
+#: reference device the request named (both "drawn" and "cut" link devices --
+#: neither has a fabricated counterpart in a correctly drawn layout) was
+#: removed, before `NetlistComparer` is constructed. See
+#: `_apply_short_nets_hint`.
+CATEGORY_HINTS_SHORT_NETS_APPLIED = "hints.short_nets_applied"
 
 #: Issue #1952: ``power_connectivity.status`` values. Deliberately a
 #: *separate* verdict from the report's top-level ``status``, which stays
@@ -1561,6 +1570,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
 
     bulk_warnings: list[dict[str, Any]] = []
+    short_nets_warnings: list[dict[str, Any]] = []
     placeholder_warnings: list[dict[str, Any]] = []
     tolerance_warnings: list[dict[str, Any]] = []
     compare_parameter_warnings: list[dict[str, Any]] = []
@@ -1584,6 +1594,23 @@ def run_lvs(request: str) -> dict[str, Any]:
     equivalent_pins_applied: dict[str, list[list[str]]] = {}
 
     if engine == "klayout":
+        # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
+        # trim) reference's behavioural option construct to one concrete
+        # drawn state *before* anything else below -- every other reference-
+        # side normalisation in this block (`device_bulk`, placeholder
+        # values, `compare_parameters`, the parameter-coverage summary)
+        # should see the already-resolved device/net set, exactly as it
+        # would for a reference hand-authored at that one option code to
+        # begin with. Opt-in via `hints.short_nets`; a no-op (returns `[]`
+        # immediately) for every request that does not declare it, so a
+        # reference with no option construct present stays byte-identical to
+        # before this hook existed.
+        short_nets_warnings = _apply_short_nets_hint(
+            request.get("hints") or {},
+            reference_netlist,
+            reference_circuit,
+        )
+
         # Issue #506: normalise the reference side's device classes up to the
         # layout side's terminal list *before* the comparer is constructed, so
         # a deck's bulk-terminal device flavour (e.g. a `bulk_to_substrate`
@@ -1759,16 +1786,16 @@ def run_lvs(request: str) -> dict[str, Any]:
         # `engine == "netgen"` -- the only other `SUPPORTED_ENGINES` member.
         # Netlist-vs-netlist only (see this module's docstring): no magic
         # extraction backend, no per-net/per-device `hints` hook (netgen has
-        # no equivalent to `same_nets`/`equivalent_pins` in this scope), and
-        # -- unlike the `klayout` engine's in-process compare -- an external
-        # subprocess whose own exit code is not trustworthy on its own (see
-        # `_run_netgen_lvs`).
+        # no equivalent to `same_nets`/`equivalent_pins`/`short_nets` in this
+        # scope), and -- unlike the `klayout` engine's in-process compare --
+        # an external subprocess whose own exit code is not trustworthy on
+        # its own (see `_run_netgen_lvs`).
         if request.get("hints"):
             raise LvsError(
-                "request.hints (same_nets/equivalent_pins) is only supported "
-                "for engine 'klayout' -- the netgen engine has no equivalent "
-                "hook in this issue's netlist-vs-netlist scope (see "
-                'docs/cli/lvs.md, "Engine")'
+                "request.hints (same_nets/equivalent_pins/short_nets) is "
+                "only supported for engine 'klayout' -- the netgen engine "
+                "has no equivalent hook in this issue's netlist-vs-netlist "
+                'scope (see docs/cli/lvs.md, "Engine")'
             )
         if reference_device_bulk:
             # Issue #506: same boundary as `hints` above -- the reconciliation
@@ -1927,6 +1954,19 @@ def run_lvs(request: str) -> dict[str, Any]:
         # even, so these are request-side transforms too, not
         # `NetlistComparer` events.
         mismatches.extend(combine_per_circuit_warnings)
+
+    # Issue #2653: same rationale as `bulk_warnings` below -- a
+    # `hints.short_nets` disclosure records a *request-side* reference
+    # transform (device drops / net merges) applied before the compare, not a
+    # `NetlistComparer` event, so it is appended here rather than folded into
+    # `_build_mismatches`. Always `severity: "warning"`: it never changes
+    # `status`, it only keeps a match reached through the resolved option
+    # construct from being indistinguishable from a fully independent one.
+    # Extended unconditionally (an empty list is a no-op) rather than behind
+    # an `if` like its neighbours, so this hook adds no branch to `run_lvs`'s
+    # already-baselined cyclomatic complexity -- see
+    # `scripts/check_complexity_baseline.py`.
+    mismatches.extend(short_nets_warnings)
 
     if bulk_warnings:
         # Issue #506: same rationale again -- a `reference.device_bulk`
@@ -4804,6 +4844,278 @@ def _apply_reference_device_bulk(
         )
 
     return entries
+
+
+# --------------------------------------------------------------------------- #
+# Mask-option reference resolution: hints.short_nets (issue #2653)
+# --------------------------------------------------------------------------- #
+
+
+def _apply_short_nets_hint(
+    hints: dict[str, Any],
+    reference_netlist: Any,
+    reference_circuit: Any,
+) -> list[dict[str, Any]]:
+    """Resolve a mask-option (metal-option/probe-pad/e-fuse trim) reference
+    netlist's behavioural option construct to one concrete drawn state before
+    the comparer is built (issue #2653).
+
+    **The gap this closes.** A mask-option block's schematic states every
+    option behaviourally in one netlist -- each link is a resistor whose
+    value is an expression over a code parameter, evaluating to a "drawn/
+    shorted" sentinel (a near-zero resistance) or a "cut/absent" sentinel (a
+    near-infinite resistance). The drawn layout realises exactly one option:
+    a shorted link is real metal with no fabricated device at all, and a cut
+    link is simply absent -- never a resistor either way. Without this hook,
+    every link resistor the reference declares is an unmatched
+    ``device.unmatched`` device (the layout has none), and a shorted link's
+    two reference nodes stay distinct while the layout has them tied into one
+    net, so net correspondence fails too. There is no way to express "compare
+    against option code 128" at all.
+
+    ``hints.short_nets`` is the dual of ``hints.same_nets`` (a cross-side net
+    *pairing* assertion): a unilateral, reference-only declaration of which
+    reference nets to merge and which reference devices to drop, applied
+    directly to ``reference_circuit`` -- the *selected* top circuit being
+    compared (the same circuit ``hints.same_nets``/``hints.equivalent_pins``
+    scope their own net/pin lookups to), not every circuit in
+    ``reference_netlist``. ``spec`` is ``hints["short_nets"]``:
+
+    - ``"nets"``: ``[[net_a, net_b, ...], ...]`` -- each inner list names two
+      or more reference net names (resolved via
+      ``Circuit.net_by_name()``, exact match only -- a mask-option block's own
+      node names are caller-authored, unlike a device-class/model name, so
+      there is no SPICE-reader-upper-casing ambiguity to paper over here) to
+      join into a single net via ``Circuit.join_nets()``, modelling a
+      "drawn/shorted" link's real metal connection. The merged net's own
+      ``expanded_name()`` becomes the comma-joined label KLayout always
+      produces for a merge (``"A,B"``) -- the same spelling
+      :func:`~klayout_tools.extract.spice_safe_net_name` already normalises
+      to the pipe-joined form (``"A|B"``) `klt extract`'s own
+      ``merged_net_labels`` reports use, reused here rather than re-derived.
+    - ``"devices"``: ``[name_or_glob, ...]`` -- reference device instance
+      names (as read back by ``NetlistSpiceReader`` -- note that reader
+      strips a SPICE element-type prefix letter and upper-cases the rest, so
+      a ``.subckt`` card written ``rs1 ...`` reads back as device ``"S1"``,
+      the same spelling every other ``mismatches[].device.reference`` field
+      in this report already uses) or ``fnmatch.fnmatchcase`` glob patterns
+      (matched case-insensitively against each device's own
+      ``expanded_name()``) naming every link device -- both "drawn" and
+      "cut" -- to remove from ``reference_circuit`` via
+      ``Circuit.remove_device()``, since neither has a fabricated counterpart
+      in a correctly drawn layout.
+
+    A net name that does not resolve, a device pattern that matches nothing,
+    or a malformed entry is an :class:`LvsError`, never a silent no-op --
+    the same "a typo'd hint should be visible" discipline ``hints.same_nets``
+    applies. Returns ``[]`` immediately when ``hints`` carries no
+    ``short_nets`` key at all (the overwhelmingly common case), so a request
+    that does not use this hook is completely unaffected -- opt-in only, no
+    behavior change to any existing reference path.
+
+    Returns one ``severity: "warning"`` :data:`CATEGORY_HINTS_SHORT_NETS_APPLIED`
+    entry naming every merged net group and dropped device, which ``run_lvs``
+    appends to ``mismatches[]``. The disclosure is the point, exactly as for
+    :func:`_apply_reference_device_bulk`: resolving the reference to one
+    option code is a caller assertion, not something the compare verifies
+    independently, so a ``"match"`` reached this way is never silently
+    indistinguishable from a fully independent one.
+
+    ``hints.short_nets`` is looked up by **key presence**, not truthiness
+    (matching :func:`_parse_combine_devices_per_circuit`'s own convention):
+    an absent key is a clean no-op (returns ``[]`` immediately, the
+    overwhelmingly common case -- opt-in only, no behavior change to any
+    existing reference path), while a *present* key that is not a non-empty
+    JSON object naming at least one of ``"nets"``/``"devices"`` is a request
+    error, not a silent no-op -- an empty ``{}`` almost always means the
+    caller forgot to fill in the hint, not that they meant nothing to apply.
+    """
+    if "short_nets" not in hints:
+        return []
+    spec = hints["short_nets"]
+    if not isinstance(spec, dict):
+        raise LvsError(
+            "hints.short_nets must be a JSON object with 'nets' and/or 'devices' keys"
+        )
+
+    net_groups = spec.get("nets") or []
+    device_patterns = spec.get("devices") or []
+    if not net_groups and not device_patterns:
+        raise LvsError(
+            "hints.short_nets must declare at least one of 'nets' (reference "
+            "net groups to merge) or 'devices' (reference devices to drop)"
+        )
+
+    dropped = _short_nets_drop_devices(reference_circuit, device_patterns)
+    merged = _short_nets_merge_nets(reference_circuit, net_groups)
+    if not dropped and not merged:
+        return []
+
+    # Issue #2653: emptied interior nodes (a dropped link device's own net,
+    # now with zero terminals/pins/subcircuit-pins) are purged the same way
+    # `options.combine_devices` already cleans up its own interior nodes --
+    # left in place they would inflate `counts.nets.reference` and surface as
+    # spurious `net.unmatched` findings no caller could act on.
+    _purge_emptied_nets(reference_netlist)
+
+    return [_short_nets_disclosure(merged, dropped)]
+
+
+def _short_nets_drop_devices(
+    reference_circuit: Any,
+    device_patterns: Any,
+) -> list[dict[str, str]]:
+    """Remove every ``hints.short_nets.devices`` match from
+    ``reference_circuit``, returning one ``{"name", "class"}`` record per
+    dropped device for the disclosure entry (issue #2653).
+
+    Split out of :func:`_apply_short_nets_hint` purely to keep each half of
+    the hint's apply step under the repo's cyclomatic-complexity ratchet
+    (`scripts/check_complexity_baseline.py`); it has no independent caller.
+    See that function's docstring for the device-name spelling (the
+    reader-stripped, upper-cased ``expanded_name()`` form) and for why a
+    pattern that matches nothing is an error rather than a no-op.
+    """
+    if not device_patterns:
+        return []
+    if not isinstance(device_patterns, list) or not all(
+        isinstance(pattern, str) and pattern for pattern in device_patterns
+    ):
+        raise LvsError(
+            "hints.short_nets.devices must be a non-empty list of "
+            "reference device names or glob patterns"
+        )
+    all_devices = list(reference_circuit.each_device())
+    dropped: list[dict[str, str]] = []
+    for pattern in device_patterns:
+        matched = [
+            device
+            for device in all_devices
+            if fnmatch.fnmatchcase(device.expanded_name().upper(), pattern.upper())
+        ]
+        if not matched:
+            present = sorted({device.expanded_name() for device in all_devices}) or [
+                "none"
+            ]
+            raise LvsError(
+                f"hints.short_nets.devices: pattern {pattern!r} matched "
+                f"no device on reference circuit "
+                f"'{reference_circuit.name}' (devices present: "
+                f"{', '.join(present)})"
+            )
+        for device in matched:
+            dropped.append(
+                {
+                    "name": device.expanded_name(),
+                    "class": device.device_class().name,
+                }
+            )
+            reference_circuit.remove_device(device)
+    return dropped
+
+
+def _short_nets_merge_nets(
+    reference_circuit: Any,
+    net_groups: Any,
+) -> list[dict[str, Any]]:
+    """Join every ``hints.short_nets.nets`` group into one net on
+    ``reference_circuit``, returning one ``{"members", "merged_net"}`` record
+    per group for the disclosure entry (issue #2653).
+
+    Split out of :func:`_apply_short_nets_hint` for the same
+    complexity-ratchet reason as :func:`_short_nets_drop_devices`; no
+    independent caller. See that function's docstring for the merged-name
+    spelling (``klt extract``'s own pipe-joined ``merged_net_labels`` form)
+    and for why an unresolvable net name is an error.
+    """
+    if not net_groups:
+        return []
+    if not isinstance(net_groups, list):
+        raise LvsError(
+            "hints.short_nets.nets must be a list of reference net-name "
+            "groups, each with two or more entries"
+        )
+    merged: list[dict[str, Any]] = []
+    for group in net_groups:
+        if (
+            not isinstance(group, list)
+            or len(group) < 2
+            or not all(isinstance(name, str) and name for name in group)
+        ):
+            raise LvsError(
+                "hints.short_nets.nets entries must be a list of two or "
+                "more reference net names to merge into one net -- got "
+                f"{group!r}"
+            )
+        nets = []
+        for name in group:
+            net = reference_circuit.net_by_name(name)
+            if net is None:
+                raise LvsError(
+                    f"hints.short_nets.nets: reference net '{name}' not "
+                    f"found on circuit '{reference_circuit.name}'"
+                )
+            nets.append(net)
+        primary = nets[0]
+        for other in nets[1:]:
+            # Issue #2653: a group naming the same already-merged net twice
+            # (e.g. a later group's own join already folded it in) is a
+            # harmless no-op, not a double-join error.
+            if other is not primary:
+                reference_circuit.join_nets(primary, other)
+        merged.append(
+            {
+                "members": list(group),
+                "merged_net": spice_safe_net_name(primary.expanded_name()),
+            }
+        )
+    return merged
+
+
+def _short_nets_disclosure(
+    merged: list[dict[str, Any]],
+    dropped: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Build the single :data:`CATEGORY_HINTS_SHORT_NETS_APPLIED` entry
+    disclosing what ``hints.short_nets`` resolved (issue #2653).
+
+    Split out of :func:`_apply_short_nets_hint` for the same
+    complexity-ratchet reason as the two apply helpers above; no independent
+    caller. Always ``severity: "warning"`` -- see :func:`_apply_short_nets_hint`
+    for why the disclosure, not the transform, is the point.
+    """
+    description_parts = []
+    if merged:
+        groups_text = "; ".join(
+            f"{entry['members']} -> '{entry['merged_net']}'" for entry in merged
+        )
+        description_parts.append(
+            f"merged {len(merged)} reference net group(s) ({groups_text})"
+        )
+    if dropped:
+        names_text = ", ".join(f"'{entry['name']}'" for entry in dropped)
+        description_parts.append(
+            f"dropped {len(dropped)} reference device(s) ({names_text})"
+        )
+
+    return _mismatch(
+        CATEGORY_HINTS_SHORT_NETS_APPLIED,
+        "warning",
+        "request.hints.short_nets resolved the reference to one concrete "
+        "mask-option state before comparing: "
+        + " and ".join(description_parts)
+        + " -- this resolution was asserted by the request, not read "
+        "from the reference netlist's own device values, so this "
+        "dimension of the compare is not independently verified (see "
+        "docs/cli/lvs.md, 'hints.short_nets_applied')",
+        "reference",
+        device=None,
+        net=None,
+        details={
+            "merged_nets": merged,
+            "dropped_devices": dropped,
+        },
+    )
 
 
 #: Issue #1907: the *primary* (compared) parameter of each device family whose
