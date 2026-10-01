@@ -1373,6 +1373,394 @@ def test_compose_row_strategy_has_no_clearance_warnings(tmp_path, pdk_root):
 
 
 # --------------------------------------------------------------------------- #
+# #2638: the two legitimate reasons to sit inside a declared minimum --
+# an intra-array pitch reported as a clearance, and an intentional abutment
+# --------------------------------------------------------------------------- #
+
+
+def _wide_pitch_cap_array(tmp_path, pdk_root):
+    """A two-unit `cap_array` with a pitch far wider than any DRC rule --
+    #2638's class-1 repro shape. `num: 2` plus `spacing_um: 20.0` is a caller
+    deliberately opening a 20um span *between* the two units for other blocks
+    to sit in, not a 20um keep-out radius around the array."""
+    caps = _gen_block(
+        tmp_path,
+        pdk_root,
+        "cap_array",
+        "caps",
+        num=2,
+        spacing_um=20.0,
+        plate_w_um=4.0,
+        plate_h_um=4.0,
+    )
+    # The pitch really is what `min_spacing_um` reports (pre-#2638 behaviour,
+    # unchanged -- it is still "the tightest spacing the generator used"), and
+    # the clearance this block needs from foreign geometry really is a
+    # different, far smaller number.
+    assert caps["drc_hints"]["min_spacing_um"] == pytest.approx(20.0)
+    assert caps["drc_hints"]["foreign_clearance_um"] == pytest.approx(0.4)
+    return caps
+
+
+def test_compose_explicit_reads_foreign_clearance_not_intra_array_pitch(
+    tmp_path, pdk_root
+):
+    # #2638 class 1: a block placed 1.0um clear of a wide-pitch cap_array is
+    # inside that array's own reported `min_spacing_um` (20um, an intra-array
+    # pitch) but comfortably outside the clearance the array actually needs
+    # from unrelated geometry (`foreign_clearance_um`, 0.4um). Pre-#2638 this
+    # warned; it must not any more, or a full-custom composition trains its
+    # consumers to ignore the whole warning class.
+    caps = _wide_pitch_cap_array(tmp_path, pdk_root)
+    filler = _gen_block(tmp_path, pdk_root, "resistor_strip", "filler", spacing_um=0.0)
+    output = tmp_path / "wide_pitch_east.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "caps", "generator_report": caps},
+                {"id": "filler", "generator_report": filler},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["caps", "filler"],
+                "origins_um": {
+                    "caps": {"x": 0.0, "y": 0.0},
+                    # 1.0um east of caps' own bbox -- 2.5x its real foreign
+                    # clearance, 1/20th of its reported intra-array pitch.
+                    "filler": {"x": caps["bbox_um"]["x1"] + 1.0, "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "wide_pitch_east_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["warnings"] == []
+    assert report["drc_hints"]["notes"] == []
+
+
+def test_compose_explicit_still_warns_inside_a_generators_foreign_clearance(
+    tmp_path, pdk_root
+):
+    # The other half of the #2638 class-1 change: splitting the hint must not
+    # silence a block placed inside the clearance the array really does need.
+    # 0.1um east of caps' bbox is under its 0.4um `foreign_clearance_um`, so
+    # the advisory still fires -- and now cites the field it compared against.
+    caps = _wide_pitch_cap_array(tmp_path, pdk_root)
+    filler = _gen_block(tmp_path, pdk_root, "resistor_strip", "filler", spacing_um=0.0)
+    output = tmp_path / "wide_pitch_tight.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "caps", "generator_report": caps},
+                {"id": "filler", "generator_report": filler},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["caps", "filler"],
+                "origins_um": {
+                    "caps": {"x": 0.0, "y": 0.0},
+                    "filler": {"x": caps["bbox_um"]["x1"] + 0.1, "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "wide_pitch_tight_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert len(report["warnings"]) == 1
+    warning = report["warnings"][0]
+    assert "drc_hints.foreign_clearance_um" in warning
+    assert "0.40um" in warning
+    assert "0.10um" in warning
+    # The intra-array pitch must not be what the caller is told to clear.
+    assert "20.00um" not in warning
+
+
+def test_compose_explicit_abuts_suppresses_warning_for_block_inside_array_span(
+    tmp_path, pdk_root
+):
+    # #2638 class 1, the in-footprint half: a block dropped *between* the two
+    # units overlaps the array's own union bbox, so its bbox clearance is
+    # 0.00um and no hint value can distinguish it from a mistake. The request
+    # declares the pair instead -- the suppression is reviewable where it was
+    # made, and leaves a drc_hints.notes[] trail rather than going silent.
+    caps = _wide_pitch_cap_array(tmp_path, pdk_root)
+    filler = _gen_block(tmp_path, pdk_root, "resistor_strip", "filler", spacing_um=0.0)
+    output = tmp_path / "wide_pitch_between.gds"
+    request = {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {"id": "caps", "generator_report": caps},
+            {"id": "filler", "generator_report": filler, "abuts": ["caps"]},
+        ],
+        "placement": {
+            "strategy": "explicit",
+            "order": ["caps", "filler"],
+            # Squarely inside the 20um span the pitch opened up (units sit at
+            # x 0..5 and x 25..30), so the two bboxes overlap.
+            "origins_um": {
+                "caps": {"x": 0.0, "y": 0.0},
+                "filler": {"x": 10.0, "y": 2.0},
+            },
+        },
+        "options": {"cell_name": "wide_pitch_between_0", "output": str(output)},
+    }
+    report = compose(request)
+    assert output.is_file()
+    assert report["warnings"] == []
+    assert len(report["drc_hints"]["notes"]) == 1
+    note = report["drc_hints"]["notes"][0]
+    assert "clearance advisory suppressed" in note
+    assert "caps" in note
+    assert "filler" in note
+    assert "blocks[].abuts" in note
+    # The declaration is echoed back, so an accepted advisory is visible in
+    # the response and not only in the request that made it.
+    by_id = {entry["id"]: entry for entry in report["blocks"]}
+    assert by_id["filler"]["abuts"] == ["caps"]
+    assert by_id["caps"]["abuts"] == []
+
+    # Dropping the declaration restores the warning -- the opt-out is the
+    # only thing suppressing it, not a weakened check.
+    undeclared = json.loads(json.dumps(request))
+    del undeclared["blocks"][1]["abuts"]
+    undeclared["options"]["output"] = str(tmp_path / "wide_pitch_between_raw.gds")
+    undeclared["options"]["cell_name"] = "wide_pitch_between_raw_0"
+    raw_report = compose(undeclared)
+    assert len(raw_report["warnings"]) == 1
+    assert "filler" in raw_report["warnings"][0]
+
+
+def test_compose_explicit_abuts_suppresses_warning_for_drawn_contact_cell(
+    tmp_path, pdk_root
+):
+    # #2638 class 2: a hand-drawn cell carrying the contacts that reach a
+    # generated device's own pads has to sit at exactly 0.00um from it. The
+    # `abuts` declaration says so; without it the same placement is
+    # indistinguishable from the mistake #692 added the check for, so the
+    # genuine-violation control below must still warn.
+    from klayout_tools.draw import REQUEST_SCHEMA as DRAW_REQUEST_SCHEMA
+    from klayout_tools.draw import draw
+
+    device = _gen_block(tmp_path, pdk_root, "resistor_strip", "device", spacing_um=1.0)
+    contacts = draw(
+        {
+            "schema": DRAW_REQUEST_SCHEMA,
+            "params": {
+                "shapes": [
+                    {
+                        "layer": [67, 20],
+                        "name": "li1.drawing",
+                        "rect_um": [0, 0, 1.0, 0.5],
+                    }
+                ]
+            },
+            "options": {
+                "cell_name": "contacts",
+                "output": str(tmp_path / "contacts.gds"),
+            },
+        }
+    )
+    abut_x = device["bbox_um"]["x1"]
+
+    def _request(declare_abutment, tag):
+        block = {"id": "contacts", "generator_report": contacts}
+        if declare_abutment:
+            block["abuts"] = ["device"]
+        return {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "device", "generator_report": device},
+                block,
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["device", "contacts"],
+                "origins_um": {
+                    "device": {"x": 0.0, "y": 0.0},
+                    # Flush against the device's own right edge, by
+                    # construction -- the contacts have to land on its pads.
+                    "contacts": {"x": abut_x, "y": 0.0},
+                },
+            },
+            "options": {
+                "cell_name": f"abut_{tag}_0",
+                "output": str(tmp_path / f"abut_{tag}.gds"),
+            },
+        }
+
+    declared = compose(_request(True, "declared"))
+    assert declared["warnings"] == []
+    assert len(declared["drc_hints"]["notes"]) == 1
+    assert "intentional abutment" in declared["drc_hints"]["notes"][0]
+
+    # Regression control for #692: the identical placement with no
+    # declaration still produces the original warning, naming both blocks,
+    # the clearance found and the hint it breached.
+    undeclared = compose(_request(False, "undeclared"))
+    assert len(undeclared["warnings"]) == 1
+    warning = undeclared["warnings"][0]
+    assert "device" in warning
+    assert "contacts" in warning
+    assert "strategy: explicit" in warning
+    assert "0.00um" in warning
+    assert "1.00um" in warning
+    assert undeclared["drc_hints"]["notes"] == []
+
+
+def test_compose_explicit_abuts_is_symmetric(tmp_path, pdk_root):
+    # Either side of the pair may declare it: an abutment is a property of
+    # the pair, not of whichever block the caller happened to annotate, and
+    # the check runs both directions of every pair.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=1.0)
+    r2 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r2", spacing_um=1.0)
+    output = tmp_path / "abut_symmetric.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                # Only b1 declares it -- b2's own min_spacing_um would warn in
+                # the other direction if suppression were one-sided.
+                {"id": "b1", "generator_report": r1, "abuts": ["b2"]},
+                {"id": "b2", "generator_report": r2},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b1", "b2"],
+                "origins_um": {
+                    "b1": {"x": 0.0, "y": 0.0},
+                    "b2": {"x": r1["bbox_um"]["x1"], "y": 0.0},
+                },
+            },
+            "options": {"cell_name": "abut_symmetric_0", "output": str(output)},
+        }
+    )
+    assert output.is_file()
+    assert report["warnings"] == []
+    # One note per direction of the pair, matching the two warnings the same
+    # placement would otherwise have produced.
+    assert len(report["drc_hints"]["notes"]) == 2
+
+
+def test_compose_explicit_abuts_composition_is_drc_clean(tmp_path, pdk_root):
+    # AC4: `klt drc` stays the authority. Both legitimate classes above
+    # compose to geometry `klt drc` itself calls clean -- suppressing the
+    # advisory does not hide a real rule violation, it stops reporting a
+    # placement DRC has no objection to.
+    caps = _wide_pitch_cap_array(tmp_path, pdk_root)
+    filler = _gen_block(tmp_path, pdk_root, "resistor_strip", "filler", spacing_um=0.0)
+    output = tmp_path / "abut_drc.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "caps", "generator_report": caps},
+                {"id": "filler", "generator_report": filler, "abuts": ["caps"]},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["caps", "filler"],
+                "origins_um": {
+                    "caps": {"x": 0.0, "y": 0.0},
+                    "filler": {"x": 10.0, "y": 2.0},
+                },
+            },
+            "options": {"cell_name": "abut_drc_0", "output": str(output)},
+        }
+    )
+    assert report["warnings"] == []
+    drc_report = run_drc(str(output), "sky130", top="abut_drc_0")
+    assert drc_report["violation_count"] == 0
+
+
+def test_compose_abuts_rejects_unknown_block_id(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=1.0)
+    with pytest.raises(GenComposeError) as excinfo:
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [
+                    {"id": "b1", "generator_report": r1, "abuts": ["nope"]},
+                ],
+                "placement": {
+                    "strategy": "explicit",
+                    "order": ["b1"],
+                    "origins_um": {"b1": {"x": 0.0, "y": 0.0}},
+                },
+                "options": {
+                    "cell_name": "abut_bad_0",
+                    "output": str(tmp_path / "abut_bad.gds"),
+                },
+            }
+        )
+    message = str(excinfo.value)
+    assert "unknown block id 'nope'" in message
+    assert "known ids: b1" in message
+
+
+def test_compose_abuts_rejects_self_reference_and_non_list(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=1.0)
+
+    def _compose_with(abuts):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1, "abuts": abuts}],
+                "placement": {
+                    "strategy": "explicit",
+                    "order": ["b1"],
+                    "origins_um": {"b1": {"x": 0.0, "y": 0.0}},
+                },
+                "options": {
+                    "cell_name": "abut_bad_0",
+                    "output": str(tmp_path / "abut_bad.gds"),
+                },
+            }
+        )
+
+    with pytest.raises(GenComposeError, match="names 'b1' itself"):
+        _compose_with(["b1"])
+    with pytest.raises(GenComposeError, match="must be an array of block ids"):
+        _compose_with("b2")
+    with pytest.raises(GenComposeError, match="non-empty block id strings"):
+        _compose_with([""])
+
+
+def test_compose_blocks_abuts_defaults_to_empty_list(tmp_path, pdk_root):
+    # Backward compatibility: a request that never mentions `abuts` reports
+    # an empty list for every block, and behaves exactly as before.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=0.0)
+    output = tmp_path / "abut_absent.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "b1", "generator_report": r1}],
+            "placement": {"strategy": "row", "order": ["b1"], "spacing_um": 1.0},
+            "options": {"cell_name": "abut_absent_0", "output": str(output)},
+        }
+    )
+    assert report["blocks"][0]["abuts"] == []
+
+
+def test_parse_blocks_falls_back_to_min_spacing_without_foreign_clearance(
+    tmp_path, pdk_root
+):
+    # A pre-#2638 report (or any hand-written one) declares no
+    # `foreign_clearance_um` at all -- `_declared_clearance_um` must fall back
+    # to `min_spacing_um` so #692's advisory keeps working on it unchanged.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", spacing_um=1.0)
+    assert "foreign_clearance_um" not in r1["drc_hints"]
+    blocks = _parse_blocks([{"id": "b1", "generator_report": r1}])
+    assert blocks["b1"]["foreign_clearance_um"] is None
+    assert blocks["b1"]["min_spacing_um"] == pytest.approx(1.0)
+    assert gen_compose._declared_clearance_um(blocks["b1"]) == (
+        1.0,
+        "drc_hints.min_spacing_um",
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Declared-bbox-understates-real-geometry overlap advisory (#1679)
 # --------------------------------------------------------------------------- #
 

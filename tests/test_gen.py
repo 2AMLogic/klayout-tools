@@ -4188,6 +4188,60 @@ def test_cap_array_gf180mcu_spacing_is_floored_to_the_mim_space_rule(
     assert not any("widened" in note for note in sky130_report["drc_hints"]["notes"])
 
 
+def test_array_generators_report_foreign_clearance_apart_from_the_pitch(
+    tmp_path, both_pdk_root
+):
+    """`drc_hints.min_spacing_um` and `drc_hints.foreign_clearance_um` are two
+    different quantities on a generator that takes an inter-unit `spacing_um`
+    (issue #2638).
+
+    `min_spacing_um` keeps its documented meaning -- the tightest spacing the
+    generator actually drew, which is the caller's own *intra-array* pitch and
+    may be arbitrarily wide (a `num: 2` request with a 20um pitch is a caller
+    opening a span for other blocks to sit *between* the units). The clearance
+    the block needs from *foreign* geometry is bounded by real rules instead:
+    this family's own spacing floor, under the generic same-layer margin every
+    other generator reports. `klt gen-compose`'s `"explicit"` clearance
+    advisory reads the second, so it stops treating a deliberately wide pitch
+    as a keep-out radius.
+    """
+    wide = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": {"spacing_um": 20.0, "num": 2},
+            "options": {"output": str(tmp_path / "cap_array_wide.gds")},
+        }
+    )
+    assert wide["drc_hints"]["min_spacing_um"] == 20.0
+    assert wide["drc_hints"]["foreign_clearance_um"] == gen.MIN_SAME_LAYER_SPACING_UM
+
+    # The family floor binds above the generic margin where one exists --
+    # gf180mcu's `mim.space.1` (1.2um) is a real clearance, not a pitch, so
+    # the foreign clearance reports it rather than the 0.4um generic.
+    gf180 = generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"spacing_um": 20.0, "num": 2},
+            "options": {"output": str(tmp_path / "cap_array_wide_gf180.gds")},
+        }
+    )
+    assert gf180["drc_hints"]["min_spacing_um"] == 20.0
+    assert gf180["drc_hints"]["foreign_clearance_um"] == 1.2
+
+    res = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": {"spacing_um": 15.0, "num": 2},
+            "options": {"output": str(tmp_path / "res_array_wide.gds")},
+        }
+    )
+    assert res["drc_hints"]["min_spacing_um"] == 15.0
+    assert res["drc_hints"]["foreign_clearance_um"] == gen.MIN_SAME_LAYER_SPACING_UM
+
+
 def test_cap_array_gf180mcu_geometry_floors_leave_sky130_unchanged(
     tmp_path, both_pdk_root
 ):
