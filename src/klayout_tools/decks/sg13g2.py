@@ -73,10 +73,16 @@ thresholds are inline literals (sky130) or a published DRM CSV table
 extended that stack up through Metal3, Metal4, Metal5, TopVia1, TopMetal1,
 TopVia2, and TopMetal2 -- the prerequisite issue #1233 (MIM capacitors) and
 issue #1235 (metal resistors) both independently blocked on (see
-"Device-class coverage" and "MIM capacitors" below). Coverage is expected to
-keep growing incrementally in follow-on issues, exactly as sky130/gf180mcu's
-own coverage did (see e.g. ``sky130.py``'s met2/met3/met4/met5 extension
-notes, each its own numbered issue).
+"Device-class coverage" and "MIM capacitors" below). Issue #2581 then added
+the first non-``5.x`` group, section **6.11 MIM** (``MIM.c``/``MIM.d``) --
+the plate-pair rules that govern the ``cap_cmim``/``rfcmim`` devices
+``EXTRACTION_DECK`` had already recognised and that ``klt gen cap_array``
+draws, and the only reason this deck used to report *any* ``MIM`` geometry
+``clean`` by construction (see that group's own comment in ``DECK`` below,
+and issue #2576 for the concrete generator bug it hid). Coverage is expected
+to keep growing incrementally in follow-on issues, exactly as
+sky130/gf180mcu's own coverage did (see e.g. ``sky130.py``'s
+met2/met3/met4/met5 extension notes, each its own numbered issue).
 
 Not modelled in this increment, for the same "no compound/derived-layer
 evaluation" reason ``sky130.py``'s own docstring documents for its own
@@ -104,6 +110,17 @@ arbitrary boolean/derived expression):
 - No ``"area"``/``"density"``/``"antenna"`` rules (sg13g2's own
   ``density.drc``/``rule_decks/antenna.drc`` files) -- out of this
   DRC-deck-compiler epic's scope, the same carve-out sky130/gf180mcu make.
+  ``MIM.gR`` (issue #2581's own group's third rule) falls here too: a
+  ``RECOMMENDED``-gated *whole-chip* total-``MIM``-area budget, which is a
+  sum over the layout rather than the per-polygon bound ``check="area"``
+  expresses.
+- ``MIM.a``/``MIM.b``/``MIM.e``/``MIM.f`` (issue #2581) -- a different kind
+  of omission from everything above: these are not approximated, they are
+  not in the ``main`` tables at all. Despite reading like siblings of
+  ``MIM.c``/``MIM.d`` in the DRM's rule table, they are defined and executed
+  only in the separate, stricter top-level ``sg13g2_maximal.drc`` runset,
+  which no rule in this module is transcribed from -- see the "6.11 MIM"
+  group's own comment in ``DECK`` below.
 
 ## Device-class coverage (``EXTRACTION_DECK``)
 
@@ -1199,6 +1216,110 @@ DECK: list[DrcRule] = [
         scope="TM2",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_25_topmetal2.drc", "TM2.b"),
     ),
+    # --- 6.11 MIM (beol/6_11_mim.drc) -----------------------------------
+    # The MiM-capacitor plate pair's own rule group (issue #2581), and the
+    # first non-`5.x` section this deck transcribes. Until it landed, `DECK`
+    # carried *no* `MIM` rule at all -- so every stream drawing the `MIM`
+    # (36/0) plate (today: `klt gen cap_array` on this family, plus the
+    # `cap_cmim`/`rfcmim` devices `EXTRACTION_DECK` recognises below) was
+    # reported `status: "clean"` by `klt drc --deck sg13g2` whatever its plate
+    # geometry was, with the bare `36/0` layer pair under
+    # `coverage.layers_in_stream_without_rules` the only signal that anything
+    # was unchecked. Issue #2576 hit exactly that: `cap_array` drew a 0.50um
+    # `Metal5` enclosure against this group's own 0.60um `MIM.c` minimum for
+    # the generator's whole life and this deck could not see it. #2576 fixed
+    # the *generator* (a per-family `cap_bottom_plate_margin_min_um` floor);
+    # these two rules fix the *deck*, which is the only surface that can
+    # catch externally-drawn MiM geometry streamed in by a caller.
+    #
+    # Scope: `6_11_mim.drc` -- the `main`-table group -- defines exactly
+    # `MIM.c`, `MIM.d`, and a `RECOMMENDED`-gated `MIM.gR` total-area check.
+    # Both non-recommended rules are transcribed here. `MIM.gR` is not: it is
+    # a whole-chip *area* budget ("max. recommended total MIM area per chip
+    # is 174800.00 um^2", `drc_rules['Mim_gR']`), which is both
+    # `RECOMMENDED`-gated upstream and a sum over the whole layout rather
+    # than a per-polygon bound -- `check="area"` is per-polygon
+    # (`Region.with_area`), so this engine cannot express it, the same
+    # "no area/density rules" carve-out the module docstring's "Scope guard"
+    # already records.
+    #
+    # `MIM.a` (min. MIM width, 1.14um), `MIM.b` (min. MIM space, 0.6um),
+    # `MIM.e` and `MIM.f` are **deliberately not transcribed**: contrary to
+    # how the DRM's rule table reads, they are not in this group (or any
+    # other `main`-table rule-deck file) at all -- they are defined and
+    # executed only in the separate, stricter top-level `sg13g2_maximal.drc`
+    # runset (e.g. `MIM_Mim_a = MIM.ext_width(1.14.um, ...)` output as
+    # `"MIM.a"`). Every one of this module's other rules cites a numbered
+    # `main`-table FEOL/BEOL file, so transcribing a `maximal`-only rule
+    # would be this deck's first, and is a repo-wide policy question about
+    # whether the curated decks should model the `maximal` runset at all --
+    # not something to decide as a side effect of transcribing one group.
+    DrcRule(
+        id="metal5.enclosing.mim.1",
+        description="minimum Metal5 enclosure of MIM",
+        layer=(67, 0),  # Metal5.drawing
+        other_layer=(36, 0),  # MIM.drawing
+        check="enclosing",
+        threshold_dbu=600,  # 0.60 um
+        # 6_11_mim.drc rule "MIM.c", a *two*-part construct:
+        #   mim_c_p1 = mim_drw.enclosed(metal5_drw, 0.60um, euclidian).polygons
+        #   mim_c_p2 = mim_drw.not(metal5_drw)
+        #   mim_c    = mim_c_p1.join(mim_c_p2)
+        # -> "6.11. MIM.c : Min. Metal5 enclosure of MIM is 0.60 um"
+        # (sg13g2_tech_default.json: drc_rules.Mim_c == 0.6). Threshold value
+        # unmodified.
+        #
+        # The first part is this engine's `"enclosing"` check exactly
+        # (`Region.enclosing_check`, Metal5 enclosing MIM by >= 0.60um). The
+        # second part -- MIM with no Metal5 under it at all -- is covered by
+        # the *same* rule id through `run_drc`'s own zero-overlap-escape term
+        # (#318, see `DrcRule`'s docstring and `docs/cli/drc.md`'s
+        # "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes"):
+        # for an `"enclosing"` rule it reports
+        # `other_region.interacting(region) - region`, i.e. whatever part of
+        # a MIM shape escapes Metal5 entirely. One documented residue: that
+        # term's `.interacting(...)` pre-filter scopes it to MIM shapes that
+        # touch Metal5 *somewhere*, so a MIM polygon with no Metal5 anywhere
+        # near it -- upstream's `mim_drw.not(metal5_drw)` would flag the whole
+        # polygon -- is not reported. That pre-filter is deliberate and
+        # engine-wide (it is what keeps a layer reused as the enclosed side of
+        # two rules for two disjoint sub-populations from permanently
+        # violating whichever rule does not apply to it); narrowing it for
+        # this rule alone would need the compound-layer evaluation this engine
+        # does not have. A MiM capacitor with *no* bottom plate is also not
+        # the realistic failure mode -- a bottom plate sized short of the
+        # 0.60um margin is, and that half is caught exactly.
+        scope="MIM",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.c"),
+    ),
+    DrcRule(
+        id="mim.enclosing.topvia1.1",
+        description="minimum MIM enclosure of TopVia1",
+        layer=(36, 0),  # MIM.drawing
+        other_layer=(125, 0),  # TopVia1.drawing
+        check="enclosing",
+        threshold_dbu=360,  # 0.36 um
+        # 6_11_mim.drc rule "MIM.d":
+        # topvia1_drw.enclosed(mim_drw, 0.36um, euclidian)
+        # -> "6.11. MIM.d : Min. MIM enclosure of TopVia1 is 0.36 um"
+        # (sg13g2_tech_default.json: drc_rules.Mim_d == 0.36). A plain
+        # one-part enclosure check, unlike `MIM.c` above -- transcribed
+        # literally, threshold value unmodified.
+        #
+        # Note which via layer this is: upstream's own `cmim`/`rfcmim`
+        # PyCells land the top plate through `Vmim` (129/0, see
+        # `EXTRACTION_DECK.capacitors`' `top_plate_via` below), *not*
+        # `TopVia1` (125/0) -- and so does `klt gen cap_array`. This rule
+        # therefore does not fire on that generator's output at all; it
+        # covers the hand-drawn `TopVia1`-over-`MIM` case the PDK's own rule
+        # is written against. Ordinary Metal5->TopMetal1 routing vias
+        # elsewhere in a layout are untouched for the same reason the
+        # zero-overlap-escape term above is `.interacting`-scoped: a routing
+        # TopVia1 nowhere near a MIM plate faces no MIM edge to measure
+        # against.
+        scope="MIM",
+        provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
+    ),
 ]
 
 LAYER_NAMES: dict[tuple[int, int], str] = {
@@ -1222,6 +1343,12 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     # `topmetal2_drw = get_polygons(134, 0)`).
     (30, 0): "Metal3.drawing",
     (49, 0): "Via3.drawing",
+    # MIM capacitor top plate (issue #2581, `layers_def.drc`'s `mim_drw =
+    # get_polygons(36, 0)`) -- named here now that `DECK` carries the 6.11
+    # MIM rule group, so its violations report `MIM.drawing` rather than the
+    # bare `36/0` pair. `EXTRACTION_DECK.capacitors` below has referenced the
+    # same layer as `cap_cmim`/`rfcmim`'s `top_plate` since issue #1454.
+    (36, 0): "MIM.drawing",
     (50, 0): "Metal4.drawing",
     (66, 0): "Via4.drawing",
     (67, 0): "Metal5.drawing",

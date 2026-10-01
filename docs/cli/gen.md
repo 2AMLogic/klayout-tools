@@ -120,8 +120,10 @@ concrete instance where curated-deck-clean output has real, reproducible
 violations under gf180mcu's own signoff deck, and the
 `sg13g2`/`cap_array` note after it (issue #2576) for a second instance of
 the same shape — a drawn dimension 0.1µm short of a foundry rule the
-curated `sg13g2` deck transcribes no counterpart of, so `klt drc --deck
-sg13g2` reported `clean` throughout.
+curated `sg13g2` deck transcribed no counterpart of, so `klt drc --deck
+sg13g2` reported `clean` throughout. (That second one has since been closed
+from the deck side too: issue #2581 transcribed `MIM.c`/`MIM.d`, so the
+dimension is now independently checkable — see the note itself.)
 
 | Generator | `sky130` | `gf180mcu` | `sg13g2` | `sg13cmos5l` |
 | --------- | :------: | :--------: | :------: | :----------: |
@@ -274,16 +276,33 @@ local KLayout batch binary against the `ihp-open-pdk` tree
 **0 violations of any rule**, as does `cap_array`'s own documented default
 output (`num: 3`). That run is not reproducible in CI — it needs both a
 fetched multi-hundred-MB PDK tree and the KLayout *application* binary — so
-the committed regression guard is a direct bbox measurement of the two drawn
-plates (`tests/test_gen.py`'s
+#2576's own committed regression guard is therefore a direct bbox measurement
+of the two drawn plates (`tests/test_gen.py`'s
 `test_sg13g2_cap_array_bottom_plate_clears_mim_c_enclosure`), not a
-clean-status assertion: `klt drc --deck sg13g2` can neither confirm nor deny
-this dimension, since the curated deck still carries no `MIM` rule to check. Transcribing sg13g2's full `MIM` rule group into the
-curated deck — which would also clear that layer pair out of
-`coverage.layers_in_stream_without_rules` — is deliberately *not* part of
-this fix: it is a separate, larger change (the whole `MIM.a`–`MIM.f` group,
-not just `MIM.c`), tracked by issue #2581, and the floor above makes the
-drawn geometry foundry-legal regardless of what the curated deck can check.
+clean-status assertion — at the time, `klt drc --deck sg13g2` could neither
+confirm nor deny this dimension, since the curated deck carried no `MIM` rule
+to check.
+
+**The dimension is now independently checkable (issue #2581).** The curated
+`sg13g2` deck transcribes `MIM.c` (`metal5.enclosing.mim.1`, 0.60 µm) and
+`MIM.d` (`mim.enclosing.topvia1.1`, 0.36 µm) from that same
+`6_11_mim.drc` group, so `klt drc --deck sg13g2` now answers this question
+itself: a pre-#2576-shaped stream (0.50 µm margin) reports **4
+`metal5.enclosing.mim.1` violations** — the same count, one per plate edge,
+the PDK's own runset reported above — and `cap_array`'s current output
+reports `clean`, asserted end to end by
+`tests/test_gen.py`'s
+`test_sg13g2_cap_array_output_is_clean_under_the_mim_rules` (the hand-built
+violating reproducer lives in `tests/test_drc.py`). `MIM` (36/0) consequently
+moved from `coverage.layers_in_stream_without_rules` to
+`coverage.layers_checked`; `Vmim` (129/0) legitimately remains uncovered,
+since neither rule reads that layer. The bbox guard is kept as the narrower,
+deck-independent half. The rest of the `MIM` group — `MIM.a`/`MIM.b`/`MIM.e`/
+`MIM.f`, which live only in IHP-Open-PDK's separate `sg13g2_maximal.drc`
+runset, and the `RECOMMENDED`-gated whole-chip `MIM.gR` area budget — stays
+untranscribed; see [`klt drc`](drc.md)'s "Coverage" section for the full
+modeled/unmodeled split and the one documented residue in `MIM.c`'s
+two-term construct.
 
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
@@ -354,7 +373,8 @@ generic default for this family only (see the `cap_array` section above),
 and `MIM.c`'s 0.60µm `Metal5`-enclosure-of-`MIM` minimum widens the drawn
 bottom plate past the generic 0.5µm margin the same way (issue #2576 — see
 the note above the start of this section for why `klt drc --deck sg13g2`
-never caught the original shortfall and cannot verify the fix either).
+never caught the original shortfall, and for how issue #2581 made the same
+dimension independently checkable afterwards).
 
 **sg13cmos5l (IHP-Open-PDK's SG13G2_CMOS5L sibling, issue #1462).** Only
 `mos_array`/`res_array` are wired up against this family's curated deck
