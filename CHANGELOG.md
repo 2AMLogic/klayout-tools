@@ -14,6 +14,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2653, `klt lvs`; additive — `schema_version` unchanged, opt-in
+  only, **no change to any report for a request that does not use it**): a
+  `hints.short_nets` request hint that resolves a **mask-option**
+  (metal-option / probe-pad / e-fuse trim) reference netlist to one concrete
+  drawn state before the comparer is built, plus the new
+  `mismatches[].category` value `hints.short_nets_applied`
+  (`severity: "warning"`, never changes `status`) that discloses it. Such a
+  block has one layout per option but one schematic for all of them, stating
+  the option set *behaviourally* — each link is a resistor whose value is an
+  expression over a code parameter, evaluating to a near-zero "drawn/shorted"
+  or near-infinite "cut/absent" sentinel — while the drawn layout realises
+  exactly one code, where a shorted link is real metal with no fabricated
+  device and a cut link is simply absent. Previously `klt lvs` had no way to
+  express that on either side: every link resistor became an unmatched
+  reference device and each drawn link's two reference nodes stayed distinct
+  against the layout's single net, so a correctly drawn mask-option layout
+  reported as a `mismatch` with nothing pointing at the unresolved option as
+  the cause, and consumers had to pre-mangle the reference SPICE outside
+  `klt` (including reverse-engineering `klt extract`'s own
+  `merged_net_labels` spelling). `hints.short_nets` takes `"nets"`
+  (`array<array<string>>` — reference net groups to join into one net via
+  `Circuit.join_nets()`, reusing the extractor's own pipe-joined merged-name
+  spelling) and/or `"devices"` (`array<string>` — reference device names or
+  globs to drop via `Circuit.remove_device()`), applied to the selected
+  reference top circuit ahead of every other reference-side normalisation.
+  `"engine": "klayout"` only; a malformed block, an unresolvable net name,
+  or a glob matching nothing is an application error (exit 1), never a silent
+  no-op. See [`docs/cli/lvs.md`](docs/cli/lvs.md),
+  "`hints.short_nets_applied`".
 - **Added** (#2642, `klt drc`; additive — `schema_version` unchanged, but
   **a layout that reported `clean` before can now report `violations`**):
   two new `DrcRule` check kinds, `"ongrid"` (manufacturing-grid vertex
