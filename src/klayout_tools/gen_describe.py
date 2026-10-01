@@ -721,11 +721,24 @@ def _res_array_describe(
         dbu, params["length_um"], params["width_um"], effective_spacing_um
     )
 
+    # #2638: `min_spacing_um` above is this array's own *intra-array* pitch --
+    # the inter-unit spacing actually drawn, which the caller chooses and may
+    # deliberately widen far past any DRC rule (e.g. `num: 2` with a wide
+    # pitch, to open a span for other blocks to sit in). That is a different
+    # quantity from the clearance this block needs from *foreign* geometry,
+    # which is bounded by the real rules: `metal_level`'s own minimum
+    # body/end-via spacing, floored under the generic same-layer margin every
+    # other generator reports (`mos_array`, `guard_ring`). Reported
+    # separately so `klt gen-compose`'s "explicit" clearance advisory can read
+    # the clearance rather than misreading the pitch as a keep-out radius.
+    foreign_clearance_um = max(MIN_SAME_LAYER_SPACING_UM, floors["via_space_min_um"])
+
     return {
         "device_count": params["num"],
         "ports": ports,
         "drc_hints": {
             "min_spacing_um": effective_spacing_um,
+            "foreign_clearance_um": foreign_clearance_um,
             "matched_group_id": f"res_array:{params['num']}",
             "snapped_to_grid": snapped,
             "notes": notes,
@@ -885,11 +898,21 @@ def _cap_array_describe(
         dbu, params["plate_w_um"], params["plate_h_um"], params["spacing_um"]
     )
 
+    # #2638: same split as `_res_array_describe`'s own -- `min_spacing_um`
+    # above is the *intra-array* inter-unit pitch actually drawn (caller's
+    # choice, deliberately widened on a `num: 2` request meant to open a span
+    # for other blocks); `foreign_clearance_um` is the clearance this block
+    # needs from *unrelated* geometry, bounded by this family's own MiM
+    # spacing rule (gf180mcu's `mim.space.1`) floored under the generic
+    # same-layer margin every other generator reports.
+    foreign_clearance_um = max(MIN_SAME_LAYER_SPACING_UM, floors["cap_min_spacing_um"])
+
     return {
         "device_count": params["num"],
         "ports": ports,
         "drc_hints": {
             "min_spacing_um": effective_spacing_um,
+            "foreign_clearance_um": foreign_clearance_um,
             "matched_group_id": f"cap_array:{params['num']}",
             "snapped_to_grid": snapped,
             "notes": notes,

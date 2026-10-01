@@ -1904,6 +1904,7 @@ exit codes).
 | `blocks[].cell.bbox_um` | object | Optional. The cell's own (pre-placement) `{x0, y0, x1, y1}` footprint. **When omitted it is read from the stream** — `kdb.Cell.dbbox()`, i.e. the same box [`klt cells`](cells.md) reports under its `{left, bottom, right, top}` field names, translated here so the caller never has to. Declare it explicitly when the placement footprint should differ from the drawn extent (e.g. a standard cell's row-abutment box), or when the cell draws no geometry at all (an empty cell has no readable bbox — that is an application error, exit 1, naming this field as the fix). |
 | `blocks[].generator_report.navigable_regions[]` / `blocks[].cell.navigable_regions[]` | array\<object\> | Optional, defaults to `[]` (issues #1531/#1835). A list of `{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles, in the block's own pre-placement coordinate frame — metal-free space the block's own generator has deliberately reserved for a route (e.g. [`klt gen mos_array`](gen.md)'s `interior_channel_um`). Subtracted from that block's own obstacle bbox before the obstacle-overlap check below runs, so a `waypoints_um` backbone that stays inside a declared region is not rejected as crossing its own block. Absent or empty leaves that check byte-for-byte unchanged — see "A block's own declared interior routing channel is no longer treated as its own obstacle" below. |
 | `blocks[].orientation` | string | Optional, default `"none"` (#1166). `"none"`, `"mirror_x"`, `"mirror_y"`, or `"rotate_180"` — this block's own mirror/rotation, applied about its own local origin *before* placement translates it. See "Block orientation (mirror/rotate, #1166)" below for the exact transform and the same-facing-port case it unblocks. An unrecognised value is an application error (exit 1). |
+| `blocks[].abuts[]` | array\<string\> | Optional, defaults to `[]` (#2638). Other `blocks[].id`s this block is intentionally placed **against, or inside the footprint of** — a declaration that the pair's proximity is by construction, not by mistake. Suppresses the `"explicit"`-placement clearance advisory (#692, below) for each declared pair, and only for that pair: every other pair is still checked. Suppression is **symmetric** (either side may declare it; the pair goes quiet in both directions) and never silent — each suppressed pair is reported as a `drc_hints.notes[]` entry and the declaration itself is echoed back as `blocks[].abuts` in the response. Naming an `id` the request does not declare, or this block's own `id`, is an application error (exit 1) — a typo must not silently suppress nothing. Only read under `strategy: "explicit"` (no other strategy emits that advisory); harmlessly present otherwise. |
 | `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`, spaced by `spacing_um`), `"explicit"` (#321 — each block placed at its own declared `origins_um[id]`), or `"array"` (#1053 — the one `blocks[]` entry named in `order` repeated on a `rows` x `cols` grid). Any other value (e.g. `"grid"`, reserved by the spike for a different, still-unimplemented feature) is an application error (exit 1). |
 | `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. **Under `strategy: "array"`, `blocks[]`/`order` must contain exactly one entry** — the single block repeated at every tile; more than one is an application error. Response `blocks[]` ordering follows `order` under every strategy. |
 | `placement.spacing_um` | number | Fixed gap between adjacent blocks' bounding boxes. Must be `>= 0`. **Only read under `strategy: "row"`** — ignored (not an error) when present alongside `strategy: "explicit"` or `"array"`. |
@@ -2035,7 +2036,7 @@ exit codes).
 | `pins[]` | array\<object\> | One entry per request `pins[]` item (#210), in request order: `net`, `block`, `port` (all echoed) plus `labelled` (boolean — `true` when a label was placed, `false` when the port's layer has no label convention, matching a `drc_hints.notes[]` entry). Always present; **empty when the request supplied no `pins[]`** (backward compatible). |
 | `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Under a declare-only request (#1188), **every** `connectivity[]` net lands here (nothing was routed by request, not by failure — see `nets[].legs[].reason`). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |
-| `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. |
+| `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. **A gateable signal** (#2638): the `"explicit"`-placement clearance advisory below no longer fires on the two placements that violate a declared minimum *legitimately* — an intra-array pitch a generator reported as its own `drc_hints.min_spacing_um`, and a pair the request declares via `blocks[].abuts` — so a downstream flow can assert `warnings[] == []` rather than asserting a count it has to re-baseline every time a block moves. |
 | `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A compose request involves no rule/model deck and no single input layout stream (it composes parameters plus block sub-reports, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |
 
 #### `drc_hints` fields
@@ -2044,7 +2045,7 @@ exit codes).
 | ----- | ---- | ----------- |
 | `min_spacing_um` | number \| null | The tightest spacing actually used across placement and routing (the placement gap when any net was routed) — **`"row"` placement only**. `null` whenever nothing was actually routed — no `connectivity[]` was supplied, `connectivity[]` was supplied but declare-only (`routing` absent/`{}`, #1188), or every net in `connectivity[]` failed to route — since none of those exercises any routing/placement spacing as a clearance (#1198). Also always `null` under `"explicit"` (#321) or `"array"` (#1053) placement — neither has a single shared spacing value to report (`"explicit"`'s per-pair separation is exactly what a caller-declared origin expresses; `"array"` has two independent pitches, `row_pitch_um`/`col_pitch_um`, not one). |
 | `matched_groups[]` | array\<object\> | One entry per distinct `matched_group_id` seen among the input blocks' own `generator_report.drc_hints.matched_group_id` (in first-seen order): `matched_group_id` (echoed), `blocks` (the request-level block `id`s carrying it), and `placement_symmetric` (always `null` this phase — symmetry *verification* against a declared symmetry axis is out of scope). Empty when no input block carries a `matched_group_id`. |
-| `notes[]` | array\<string\> | Free-form composition notes — e.g. why a specific net was left unrouted (narrow channel, a route-vs-route collision with an already-routed net #1057, or, for a bundle net, which pins could not be reached plus the nearest per-leg rejection #1073). Always present, empty when there is nothing to report. |
+| `notes[]` | array\<string\> | Free-form composition notes — e.g. why a specific net was left unrouted (narrow channel, a route-vs-route collision with an already-routed net #1057, or, for a bundle net, which pins could not be reached plus the nearest per-leg rejection #1073), or that a `blocks[].abuts`-declared pair had its clearance advisory suppressed (#2638 — one entry per suppressed direction of the pair, naming both blocks, the clearance found, and the hint it sits inside). Always present, empty when there is nothing to report. |
 
 #### `blocks[]` entries
 
@@ -2059,6 +2060,7 @@ exit codes).
 | `offset_um` | object | `{x, y}` — the translation applied to place this block. Under `"row"`, the first block always has `offset_um: {x: 0.0, y: 0.0}`; every subsequent block is translated along `x` only (row placement never translates `y`) so its bbox sits exactly `placement.spacing_um` past the previous (already translated) block's right edge — regardless of that block's own `bbox_um.x0` (which need not be `0`; a guard-ringed block's bbox can extend to negative coordinates). Under `"explicit"` (#321), `offset_um` is exactly the request's own `placement.origins_um[id]`, verbatim — a block's own `bbox_um` plays no role in computing it (an explicit origin translates a block's bbox by that amount; it does not force the bbox's own `(x0, y0)` corner to land exactly on the declared origin unless that block's own `bbox_um.x0`/`y0` is already `0`). Under `"array"` (#1053), `offset_um` is exactly `placement.origin_um` (the base, row-0/col-0 tile) — every *other* tile's own position is implied by `rows`/`cols`/`row_pitch_um`/`col_pitch_um` rather than reported as a separate `blocks[]` entry (there is still exactly one `blocks[]` entry for an `"array"`-placed block, echoing this base tile). |
 | `bbox_um` | object | That block's own `generator_report.bbox_um`, transformed by `orientation` (#1166, about the block's own local origin) then translated by `offset_um`, in the composed cell's coordinate frame — **except under `"array"`** (#1053), where `bbox_um` is instead the union bounding box of *every* placed tile (all `rows * cols` instances), matching the top-level `bbox_um` field above when this is the only block in the request. |
 | `orientation` | string | Echo of the request's `blocks[].orientation` (#1166), `"none"` when omitted. |
+| `abuts[]` | array\<string\> | Echo of the request's `blocks[].abuts` (#2638), sorted; `[]` when omitted. An accepted clearance advisory must stay visible in the report, not only in the request that declared it — a reviewer reading the response alone can see which pairs were consciously exempted and cross-check them against the `drc_hints.notes[]` entries. |
 
 ### Semantics and guarantees
 
@@ -2113,7 +2115,7 @@ matched_groups:
 | Exit code | Meaning |
 | --------- | ------- |
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
+| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), a `blocks[].abuts` entry that is not an array of non-empty strings, names this block's own `id`, or names an `id` the request never declares (#2638), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 
@@ -2190,13 +2192,16 @@ diagnostic.
 
 To close that gap without turning `"explicit"` placement into a hard
 validator, `gen-compose` adds one advisory check (#692): for every ordered
-pair of distinct blocks `(A, B)` where `A`'s own `generator_report`
-(`drc_hints.min_spacing_um`) declares a positive minimum spacing, the actual
-placed clearance between `A` and `B` is compared against it. If the
+pair of distinct blocks `(A, B)` where `A`'s own `generator_report` declares a
+positive clearance from foreign geometry
+(`drc_hints.foreign_clearance_um`, falling back to
+`drc_hints.min_spacing_um` — see "Which hint the advisory reads" below), the
+actual placed clearance between `A` and `B` is compared against it. If the
 clearance is smaller, the response's top-level `warnings[]` gets one entry
-naming both blocks, the declared minimum, and the clearance actually found —
-composition still succeeds (this never raises, and never blocks output), so
-existing overlapping-origin requests keep working exactly as before:
+naming both blocks, the hint field and value it breached, and the clearance
+actually found — composition still succeeds (this never raises, and never
+blocks output), so existing overlapping-origin requests keep working exactly
+as before:
 
 ```json
 {
@@ -2213,6 +2218,62 @@ as good as the input: a block whose `generator_report` doesn't report a
 `drc_hints.min_spacing_um` (or reports `0`) triggers nothing, so this is a
 courtesy for generators (like `guard_ring`) that do report one, not a
 general-purpose spacing check.
+
+#### Which hint the advisory reads, and the two legitimate violations (#2638)
+
+A full-custom composition has two reasons to place blocks closer than a
+declared minimum **on purpose**. Neither is the mistake this advisory exists
+to surface, and before #2638 neither could be expressed — so the warning fired
+routinely on correct placements, which is how a consumer learns to ignore the
+whole class. Each now has its own mechanism:
+
+**1. An intra-array pitch is not a keep-out radius.** A generator that takes
+an inter-unit `spacing_um` ([`klt gen cap_array`](gen.md), `res_array`)
+reports the pitch it actually drew as its `drc_hints.min_spacing_um` — and a
+caller may deliberately widen that pitch far past any DRC rule (`num: 2` with
+a 20µm `spacing_um` is a caller opening a 20µm span for *other* blocks to sit
+in). Read as a keep-out radius, it warns about every block placed inside the
+very span the pitch was chosen to create. Those generators therefore also
+report **`drc_hints.foreign_clearance_um`** — the clearance the block needs
+from *unrelated* geometry, bounded by real rules (the family's own spacing
+floor, under the generic same-layer margin) rather than by the caller's pitch.
+This advisory prefers it, and falls back to `min_spacing_um` for any report
+that does not declare one: every pre-#2638 report, every hand-written one, and
+every generator whose `min_spacing_um` already *is* a genuine clearance
+(`guard_ring`'s enclosure, `mos_array`'s same-layer margin). The warning
+string names whichever field it compared against, so the number a caller is
+told to clear is always traceable to a field in the block's own report.
+
+**2. An intentional abutment is declared in the request.** A hand-drawn cell
+carrying the contacts that reach a generated device's own pads has to sit at
+exactly `0.00µm` from it; a block dropped *between* two array units overlaps
+that array's own union `bbox_um`, so no hint value can distinguish it from a
+mistake either. Declare the pair with **`blocks[].abuts`** and the advisory
+skips it:
+
+```json
+{
+  "blocks": [
+    { "id": "caps", "generator_report": "caps.json" },
+    { "id": "contacts", "generator_report": "contacts.json", "abuts": ["caps"] }
+  ]
+}
+```
+
+The suppression is scoped to the declared pair (every other pair is still
+checked), symmetric (either side may declare it), and **not silent** — each
+suppressed pair lands in `drc_hints.notes[]` and the declaration is echoed as
+`blocks[].abuts` in the response. Declaring it in the *request* is the point:
+the acceptance is reviewable where the placement was made, rather than being
+applied downstream by a consumer filtering `warnings[]` on a string match.
+
+Together these make `warnings[]` gateable again: a composition whose
+placements are all either clear or declared reports an **empty** `warnings[]`,
+so a downstream flow can assert that rather than asserting a warning count.
+An undeclared placement inside a block's real foreign clearance still warns,
+exactly as #692 intended — and `klt drc` remains the authority on rule
+compliance either way. Suppressing the advisory changes nothing about the
+geometry written, and nothing about what DRC reports on it.
 
 ### A declared `bbox_um` is trusted, not verified (#1679)
 

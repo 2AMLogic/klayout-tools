@@ -640,18 +640,39 @@ def _bbox_clearance_um(bbox_a: dict[str, float], bbox_b: dict[str, float]) -> fl
     return max(gap_x, gap_y)
 
 
+def _declared_clearance_um(block: dict[str, Any]) -> tuple[float, str]:
+    """The clearance a block claims from *foreign* geometry, plus the
+    ``drc_hints`` field name it was read from (#2638).
+
+    Prefers ``drc_hints.foreign_clearance_um`` when the block's own report
+    declares one, falling back to ``drc_hints.min_spacing_um``. The two are
+    the same number for most generators, and deliberately differ for one whose
+    ``min_spacing_um`` reports a caller-chosen *intra-array* inter-unit pitch
+    (``cap_array``, ``res_array``): that pitch is a span the caller opened on
+    purpose, not a keep-out radius around the block, so reading it as one
+    warns about every block placed inside the very span the pitch was widened
+    to create. Returning the field name alongside the value keeps the warning
+    string honest about which hint it actually compared against.
+    """
+    foreign_clearance_um = block.get("foreign_clearance_um")
+    if foreign_clearance_um is not None:
+        return float(foreign_clearance_um), "drc_hints.foreign_clearance_um"
+    return float(block.get("min_spacing_um", 0.0)), "drc_hints.min_spacing_um"
+
+
 def _explicit_placement_clearance_warnings(
     order: list[str],
     blocks: dict[str, dict[str, Any]],
     placed_bboxes_um: dict[str, dict[str, float]],
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Advisory-only clearance check for ``placement.strategy: "explicit"``
-    (#692).
+    (#692, narrowed by #2638).
 
     For every ordered pair of distinct blocks ``(A, B)`` where ``A``'s own
-    ``generator_report.drc_hints.min_spacing_um`` (parsed by
-    :func:`_parse_blocks` into ``blocks[block_id]["min_spacing_um"]``) is
-    greater than zero, compares that declared minimum against the actual
+    report declares a positive foreign clearance
+    (:func:`_declared_clearance_um`, parsed by :func:`_parse_blocks` into
+    ``blocks[block_id]["foreign_clearance_um"]`` /
+    ``["min_spacing_um"]``), compares that declared minimum against the actual
     placed clearance between ``A`` and ``B`` (:func:`_bbox_clearance_um`). A
     caller who places a block flush against (or overlapping) a
     ``guard_ring``-generated neighbour gets a composed GDS that passes `klt
@@ -661,14 +682,30 @@ def _explicit_placement_clearance_warnings(
     `merged_net_labels` diagnostic. This warning surfaces it at compose time
     instead.
 
-    Never raises and never blocks composition -- geometry stays advisory here
-    exactly as :func:`resolve_explicit_offsets`'s docstring describes;
-    ``"row"`` placement is intentionally out of scope (its own uniform
-    ``spacing_um`` does not have the same silently-flush ergonomics trap).
+    Two placements violate a declared minimum *legitimately*, and #2638
+    separates both of them out so the remaining warnings stay worth reading:
+
+    1. An **intra-array pitch misread as a clearance** -- handled at the
+       source by :func:`_declared_clearance_um` preferring the generator's own
+       ``foreign_clearance_um`` over its inter-unit ``min_spacing_um``, so a
+       block placed inside the span a wide ``spacing_um`` opened up no longer
+       warns at all.
+    2. An **intentional abutment** -- a pair the request itself declares via
+       ``blocks[].abuts`` (:func:`_parse_abuts`). Suppression is symmetric
+       (either side may declare it; both directions of the pair go quiet) and
+       is reported back as a ``drc_hints.notes[]`` entry rather than silently,
+       so a reviewer still sees that a check was consciously accepted.
+
+    Returns ``(warnings, notes)``. Never raises and never blocks composition
+    -- geometry stays advisory here exactly as
+    :func:`resolve_explicit_offsets`'s docstring describes; ``"row"``
+    placement is intentionally out of scope (its own uniform ``spacing_um``
+    does not have the same silently-flush ergonomics trap).
     """
     clearance_warnings: list[str] = []
+    abutment_notes: list[str] = []
     for owner_id in order:
-        min_spacing_um = blocks[owner_id].get("min_spacing_um", 0.0)
+        min_spacing_um, hint_field = _declared_clearance_um(blocks[owner_id])
         if not min_spacing_um > 0.0:
             continue
         owner_bbox = placed_bboxes_um[owner_id]
@@ -676,14 +713,26 @@ def _explicit_placement_clearance_warnings(
             if other_id == owner_id:
                 continue
             clearance_um = _bbox_clearance_um(owner_bbox, placed_bboxes_um[other_id])
-            if clearance_um < min_spacing_um:
-                clearance_warnings.append(
-                    f"block '{other_id}' is placed {clearance_um:.2f}um from "
-                    f"block '{owner_id}' (strategy: explicit), closer than "
-                    f"{owner_id}'s own declared drc_hints.min_spacing_um of "
-                    f"{min_spacing_um:.2f}um"
+            if clearance_um >= min_spacing_um:
+                continue
+            if other_id in blocks[owner_id].get("abuts", ()) or owner_id in blocks[
+                other_id
+            ].get("abuts", ()):
+                abutment_notes.append(
+                    f"clearance advisory suppressed for blocks '{owner_id}' and "
+                    f"'{other_id}': placed {clearance_um:.2f}um apart, inside "
+                    f"{owner_id}'s own declared {hint_field} of "
+                    f"{min_spacing_um:.2f}um, but the request declares the pair "
+                    "as an intentional abutment (blocks[].abuts)"
                 )
-    return clearance_warnings
+                continue
+            clearance_warnings.append(
+                f"block '{other_id}' is placed {clearance_um:.2f}um from "
+                f"block '{owner_id}' (strategy: explicit), closer than "
+                f"{owner_id}'s own declared {hint_field} of "
+                f"{min_spacing_um:.2f}um"
+            )
+    return clearance_warnings, abutment_notes
 
 
 # Tolerance (um) for comparing a block's declared ``bbox_um`` against its own
@@ -1354,20 +1403,9 @@ def _parse_blocks(
                 _orient_bbox_um(region, orientation) for region in navigable_regions
             ]
 
-        drc_hints = report.get("drc_hints")
-        matched_group_id = None
-        # The block's own minimum same-layer spacing, used as the clearance a
-        # route must keep from the cut ends of a ring opening (#434). Absent
-        # (or unusable) means "no clearance claimed" rather than an error --
-        # every other consumer of drc_hints treats it as advisory too.
-        min_spacing_um = 0.0
-        if isinstance(drc_hints, dict):
-            candidate = drc_hints.get("matched_group_id")
-            if isinstance(candidate, str) and candidate:
-                matched_group_id = candidate
-            spacing = drc_hints.get("min_spacing_um")
-            if not isinstance(spacing, bool) and isinstance(spacing, (int, float)):
-                min_spacing_um = max(0.0, float(spacing))
+        matched_group_id, min_spacing_um, foreign_clearance_um = _parse_drc_hints(
+            report.get("drc_hints")
+        )
 
         blocks[block_id] = {
             "id": block_id,
@@ -1380,11 +1418,113 @@ def _parse_blocks(
             "ports": ports_by_name,
             "matched_group_id": matched_group_id,
             "min_spacing_um": min_spacing_um,
+            "foreign_clearance_um": foreign_clearance_um,
             "orientation": orientation,
             "navigable_regions": navigable_regions,
+            # blocks[].abuts (#2638) -- parsed below, once every id is known.
+            "abuts": _parse_abuts(raw_block, index, block_id),
         }
 
+    _validate_abuts(blocks)
     return blocks
+
+
+def _parse_drc_hints(drc_hints: Any) -> tuple[str | None, float, float | None]:
+    """The three ``generator_report.drc_hints`` values :func:`_parse_blocks`
+    carries forward: ``(matched_group_id, min_spacing_um,
+    foreign_clearance_um)``.
+
+    ``min_spacing_um`` is the block's own minimum same-layer spacing, used as
+    the clearance a route must keep from the cut ends of a ring opening
+    (#434). ``foreign_clearance_um`` (#2638) is the clearance the block needs
+    from *foreign* geometry, which is a different quantity for a generator
+    taking an inter-unit ``spacing_um`` (``cap_array``, ``res_array``): there
+    ``min_spacing_um`` reports the intra-array pitch actually drawn, a number
+    the caller may deliberately widen far past any DRC rule. ``None`` means
+    the report declares no separate foreign clearance, and
+    :func:`_declared_clearance_um` falls back to ``min_spacing_um`` as before
+    -- every pre-#2638 report, every hand-written one, and every generator
+    whose ``min_spacing_um`` already *is* a genuine clearance
+    (``guard_ring``'s enclosure, ``mos_array``'s same-layer margin).
+
+    Every field is advisory: absent (or unusable) means "nothing claimed"
+    rather than an error, matching how every other consumer of ``drc_hints``
+    treats it.
+    """
+    matched_group_id: str | None = None
+    min_spacing_um = 0.0
+    foreign_clearance_um: float | None = None
+    if not isinstance(drc_hints, dict):
+        return matched_group_id, min_spacing_um, foreign_clearance_um
+
+    candidate = drc_hints.get("matched_group_id")
+    if isinstance(candidate, str) and candidate:
+        matched_group_id = candidate
+    spacing = drc_hints.get("min_spacing_um")
+    if not isinstance(spacing, bool) and isinstance(spacing, (int, float)):
+        min_spacing_um = max(0.0, float(spacing))
+    clearance = drc_hints.get("foreign_clearance_um")
+    if not isinstance(clearance, bool) and isinstance(clearance, (int, float)):
+        foreign_clearance_um = max(0.0, float(clearance))
+    return matched_group_id, min_spacing_um, foreign_clearance_um
+
+
+def _parse_abuts(raw_block: dict[str, Any], index: int, block_id: str) -> set[str]:
+    """Parse one ``blocks[].abuts`` declaration (#2638).
+
+    ``abuts`` names the other block ids this block is placed against **by
+    construction** -- a hand-drawn routing cell whose contacts reach a
+    generated device's own pads has to sit at exactly ``0.00um`` from it, and
+    a block the caller deliberately drops inside an array's own (widened)
+    inter-unit span is equally intentional. Declaring the pair in the request
+    keeps the suppression reviewable in the request itself, rather than
+    leaving a consumer to filter :func:`compose`'s ``warnings[]`` after the
+    fact.
+
+    Returns the declared id set (empty when absent). Cross-block validation
+    (unknown / self-referencing ids) happens in :func:`_validate_abuts`, once
+    every block id in the request is known.
+    """
+    raw_abuts = raw_block.get("abuts")
+    if raw_abuts is None:
+        return set()
+    where = f"request.blocks[{index}] (id '{block_id}').abuts"
+    if not isinstance(raw_abuts, list):
+        raise GenComposeError(
+            f"{where} must be an array of block ids this block is "
+            "intentionally placed against"
+        )
+    declared: set[str] = set()
+    for item in raw_abuts:
+        if not isinstance(item, str) or not item:
+            raise GenComposeError(f"{where} entries must be non-empty block id strings")
+        if item == block_id:
+            raise GenComposeError(
+                f"{where} names '{block_id}' itself -- abuts declares a pair of "
+                "*distinct* blocks (the clearance advisory never compares a "
+                "block against itself)"
+            )
+        declared.add(item)
+    return declared
+
+
+def _validate_abuts(blocks: dict[str, dict[str, Any]]) -> None:
+    """Reject a ``blocks[].abuts`` entry naming a block the request never
+    declares (#2638).
+
+    A typo'd id would otherwise silently suppress nothing at all, which is
+    the worst of both worlds: the caller believes the pair is declared and
+    the warning it was meant to accept keeps firing (or, after the typo is
+    "fixed" by deleting the warning-reading code, stops being read at all).
+    """
+    for block_id, block in blocks.items():
+        for other_id in sorted(block["abuts"]):
+            if other_id not in blocks:
+                known = ", ".join(sorted(blocks))
+                raise GenComposeError(
+                    f"request.blocks (id '{block_id}').abuts names unknown block "
+                    f"id '{other_id}' -- known ids: {known}"
+                )
 
 
 def _parse_explicit_origins(
@@ -2518,10 +2658,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # `klt drc` won't catch (a zero-clearance merge isn't an illegal shape by
     # any spacing rule). Advisory-only, scoped to "explicit" -- "row"
     # placement's own uniform spacing_um does not have this ergonomics trap.
+    # #2638: a declared `blocks[].abuts` pair, and an intra-array pitch a
+    # generator reported as its own `min_spacing_um`, are both legitimate
+    # reasons to sit inside a declared minimum -- neither produces a warning
+    # here any more (the abutment leaves a drc_hints.notes[] trail instead),
+    # so a consumer can gate on `warnings[]` being empty again.
     if strategy == "explicit":
-        warnings.extend(
-            _explicit_placement_clearance_warnings(order, blocks, placed_bboxes_um)
+        clearance_warnings, abutment_notes = _explicit_placement_clearance_warnings(
+            order, blocks, placed_bboxes_um
         )
+        warnings.extend(clearance_warnings)
+        notes.extend(abutment_notes)
 
     # #1679: every check above (and every placement strategy's own math)
     # trusts a block's *declared* bbox_um -- accurate for a `klt gen` block,
@@ -3782,6 +3929,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "offset_um": offsets_um[block_id],
             "bbox_um": placed_bboxes_um[block_id],
             "orientation": blocks[block_id].get("orientation", "none"),
+            # #2638: echo of the request's own blocks[].abuts (sorted for a
+            # stable report; empty when omitted) -- an accepted clearance
+            # advisory must stay visible in the response, not only in the
+            # request that declared it.
+            "abuts": sorted(blocks[block_id]["abuts"]),
         }
         for block_id in order
     ]
