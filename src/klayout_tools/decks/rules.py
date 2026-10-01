@@ -253,6 +253,11 @@ class DrcRule:
     fields below and ``drc.py``'s ``_run_area_check``/``_run_density_check``/
     ``_run_antenna_check`` for why they cannot reuse ``threshold_dbu`` or the
     ``EdgePairs``-shaped result the checks above return.
+    ``"ongrid"`` and ``"angle"`` (issue #2642) are single-layer *vertex*
+    checks rather than distance checks -- they measure where a polygon's
+    corners sit, not how far apart its edges are -- and use
+    ``grid_um``/``angle_limit_deg`` below instead of ``threshold_dbu``; see
+    ``drc.py``'s ``_run_grid_check``/``_run_angle_check``.
     ``"isolated"`` (``Region.isolated_check``, issue #1654) measures spacing
     between *different* polygons of a merged region only -- unlike
     ``"space"`` (``Region.space_check``), it never flags a concave notch
@@ -434,6 +439,48 @@ class DrcRule:
     ``run_drc()`` raises :class:`~klayout_tools.drc.DrcError` for an
     ``"antenna"`` rule that leaves it unset or omits ``other_layer``.
 
+    ``grid_um`` (issue #2642) is the field ``check="ongrid"`` uses: the
+    manufacturing grid, in micrometres, every vertex of ``layer``'s merged
+    polygons must land on. It is a **real physical distance rescaled
+    against the layout's own ``dbu``** at run time -- like
+    ``density_window_um``/:attr:`DerivedLayer.sized_by_um`, and *unlike*
+    ``threshold_dbu``, which is expressed in the deck's nominal dbu and
+    rescaled by ``dbu_scale``: a manufacturing grid is a property of the
+    process, not of the database unit a stream happens to be written at, so
+    0.005um must stay 0.005um whatever ``layout.dbu`` is. Driven by
+    ``klayout.db.Region.grid_check(gx, gy)`` -- the exact primitive the PDK
+    decks' own DRC-DSL ``layer.ongrid(g)`` compiles to -- which returns an
+    ``EdgePairs`` collection holding one degenerate (single-point) edge pair
+    per off-grid vertex, so each off-grid vertex is reported as its own
+    violation through the same edge-pair path every distance check already
+    uses. ``other_layer``/``derived_layer``/``threshold_dbu`` are unused for
+    this check kind (``run_drc()`` raises
+    :class:`~klayout_tools.drc.DrcError` for an ``"ongrid"`` rule that
+    leaves ``grid_um`` unset or sets it non-positive).
+
+    ``angle_limit_deg`` (issue #2642) is the field ``check="angle"`` uses:
+    the minimum *interior* corner angle, in degrees, ``layer``'s merged
+    polygons may have. A corner whose interior angle is **strictly less
+    than** this value is a violation; a corner exactly at it is legal (so
+    ``angle_limit_deg=45.0`` permits a 45-degree chamfer and flags anything
+    sharper, and ``90.0`` permits only right-angle-or-blunter corners, i.e.
+    rejects every acute corner). Driven by
+    ``klayout.db.Region.with_angle(0.0, angle_limit_deg, False)``, which is
+    what the PDK decks' own ``layer.with_angle(0 .. limit)`` on a polygon
+    layer evaluates: a half-open ``[0, limit)`` interior-angle interval,
+    returning an ``EdgePairs`` collection holding the two edges forming each
+    offending corner. Note what this is *not*: it is a minimum-angle bound,
+    not an "every edge must lie on a multiple of 45 degrees" test -- the
+    upstream decks' own rule descriptions say "non 45 degree angle", but the
+    primitive they invoke only rejects corners sharper than the limit (a
+    30-degree-off-axis edge meeting another at 100 degrees passes). Deck
+    authors transcribing such a rule should mirror the source's primitive
+    and value, and document the gap rather than "fixing" it here, so the
+    curated verdict stays comparable to the PDK deck's own. Unused for every
+    other check kind; ``run_drc()`` raises
+    :class:`~klayout_tools.drc.DrcError` for an ``"angle"`` rule that leaves
+    it unset or outside ``(0, 180]``.
+
     ``requires_any_layer`` (issue #2634) skips this rule entirely -- the
     same ``coverage.rules_skipped`` path a missing ``layer``/``other_layer``
     already uses -- unless at least one of the listed ``(layer, datatype)``
@@ -520,6 +567,8 @@ class DrcRule:
     density_min: float | None = None
     density_max: float | None = None
     antenna_ratio_max: float | None = None
+    grid_um: float | None = None
+    angle_limit_deg: float | None = None
     threshold_max_dbu: int | None = None
     voltage_independent: bool = False
     requires_any_layer: tuple[tuple[int, int], ...] | None = None

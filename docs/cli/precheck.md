@@ -75,11 +75,27 @@ both x and y.
 **Skipped when `--grid-um` is omitted.** A layout's own `dbu_um` (the
 database unit every GDSII/OASIS coordinate is already an integer multiple
 of, by construction of the format) is *not* the same thing as the
-manufacturing grid a real foundry flow enforces, which is typically coarser
--- and this repo curates no per-PDK manufacturing-grid table (unlike the DRC
-decks' width/space thresholds, a manufacturing grid isn't transcribed here
-as a discrete, stable rule id the way DRM checks are), so the grid is a
-required, caller-supplied physical value rather than a guessed default.
+manufacturing grid a real foundry flow enforces, which is typically coarser.
+`klt precheck` deliberately knows nothing about decks — it takes no `--deck`
+for this check — so the grid stays a required, caller-supplied physical value
+rather than a guessed default, and this check stays runnable against a layout
+on a PDK this repo ships no deck for at all.
+
+**The deck-side counterpart (issue #2642).** Since #2642 the curated sky130
+DRC deck *does* transcribe its PDK's own grid rule — 38 `<layer>.ongrid.1`
+rules at 0.005 um, from `sky130.lydrc`'s on-by-default `OFFGRID` group (see
+[`drc.md`](drc.md) → "Manufacturing grid and corner angle") — so
+`klt drc --deck sky130` now answers the same question for a sky130 layout,
+per layer and against the PDK's own published grid. The two checks are still
+genuinely different and both worth running: this one is deck-independent,
+whole-stream (**every** layer, including layers no deck models), and needs
+the caller to supply the grid; the DRC rules are per-layer, scoped to exactly
+the layers the PDK's own signoff deck checks, and carry the official rule id
+(`x.1b`) and provenance. A disagreement between them is informative rather
+than a bug: `klt precheck --grid-um 0.005` flagging a layer `klt drc` reports
+clean on means the PDK's own deck does not grid-check that layer (the deck
+records those exemptions explicitly — `OFFGRID_UNCHECKED_LAYERS` in
+`src/klayout_tools/decks/sky130.py`).
 
 ### `zero_area`
 

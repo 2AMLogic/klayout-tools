@@ -118,6 +118,26 @@ _DENSITY_CHECKS = {"density"}
 # antenna check.
 _ANTENNA_CHECKS = {"antenna"}
 
+# Single-layer *vertex* check kinds (issue #2642): where a polygon's corners
+# sit, rather than how far apart its edges are. Both return `EdgePairs` like
+# every distance check above, so `run_drc()` reports them through the same
+# edge-pair path -- but neither reads `threshold_dbu` (see `DrcRule.grid_um`/
+# `angle_limit_deg`), so they are dispatched ahead of `_run_check` rather
+# than inside it.
+#
+# `"ongrid"` is the manufacturing-grid check the open PDKs' own shipped
+# KLayout decks declare as an on-by-default rule group (sky130's
+# `OFFGRID = true`, emitting `layer.ongrid(0.005)` per layer) --
+# `_run_grid_check`. `"angle"` is that group's other half
+# (`layer.with_angle(0 .. limit)`), a minimum interior-corner-angle bound --
+# `_run_angle_check`.
+_GRID_CHECKS = {"ongrid"}
+_ANGLE_CHECKS = {"angle"}
+# Their union, the set `run_drc` actually branches on -- one dispatch site for
+# both kinds (`_run_vertex_check`), so adding a third vertex check kind does
+# not add another branch to `run_drc` itself.
+_VERTEX_CHECKS = _GRID_CHECKS | _ANGLE_CHECKS
+
 # Every `DerivedLayer.mode` `run_drc()` knows how to derive a region for --
 # see that class's docstring for each one's derivation. Validated per rule
 # (rather than assumed) so a deck typo fails loudly with the rule id instead
@@ -237,6 +257,12 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
       the violating polygons of an empty region: none (``_run_area_check``).
     - ``density`` tiles the checked region's own ``bbox()``, which is empty,
       so it tiles no window at all (``_run_density_check``).
+    - ``ongrid``/``angle`` (issue #2642) measure the *vertices* of the
+      checked region's polygons -- an empty region has no polygons, so no
+      corner and no vertex, hence no marker (``_run_grid_check``/
+      ``_run_angle_check``). Both are single-layer kinds that never set
+      ``other_layer``, so the default ``{rule.layer}`` answer below is the
+      whole story for them.
     - ``separation``/``enclosing``/``enclosed``/``overlap`` measure facing
       edge pairs between two regions, and issue #318's extra "escaped the
       enclosing region" term is computed with ``Region.interacting`` -- all
@@ -1039,9 +1065,21 @@ def run_drc(
                     rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
                 continue
 
-            edge_pairs, outside_region = _run_check(
-                region, other_region, rule, dbu_scale
-            )
+            if rule.check in _VERTEX_CHECKS:
+                # Vertex checks (issue #2642). Dispatched here rather than
+                # inside `_run_check` because neither reads `threshold_dbu`
+                # (and `"ongrid"` needs the layout's own `dbu`, which
+                # `_run_check`'s `dbu_scale` has already divided out) -- but
+                # both return the same `EdgePairs` shape, so everything
+                # downstream (bbox/polygon extraction, `rule_counts`,
+                # `violations[]`) is reused verbatim. Neither kind has an
+                # `outside_region` term.
+                edge_pairs = _run_vertex_check(region, rule, layout.dbu)
+                outside_region = None
+            else:
+                edge_pairs, outside_region = _run_check(
+                    region, other_region, rule, dbu_scale
+                )
 
             checked_edge_pairs = (
                 edge_pairs
@@ -1051,11 +1089,7 @@ def run_drc(
 
             for edge_pair in checked_edge_pairs:
                 bbox = edge_pair.bbox()
-                try:
-                    polygon = edge_pair.polygon(0)
-                    points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
-                except Exception:
-                    points = None
+                points = _edge_pair_hull_points(edge_pair)
 
                 source_cell, source_path = _attribute_to_instance(cell, bbox)
                 violations.append(
@@ -1692,6 +1726,157 @@ def _run_width_max_check(region: Any, rule: DrcRule, dbu_scale: float) -> Any | 
         return None
     max_d = round(rule.threshold_max_dbu * dbu_scale)
     return region.merged().with_bbox_max(0, max_d + 1, True)
+
+
+def _edge_pair_hull_points(edge_pair: Any) -> list[list[int]] | None:
+    """``violations[].polygon`` for one ``EdgePair`` violation marker: the
+    hull points of the quadrilateral spanning its two edges, or ``None`` when
+    the marker has no renderable outline.
+
+    Two ways a marker has none, both reported as ``null`` per the contract in
+    ``docs/cli/drc.md``:
+
+    - ``EdgePair.polygon(0)`` raises (a degenerate pair KLayout declines to
+      turn into a polygon at all) -- the long-standing case;
+    - it returns a polygon whose hull is *empty*, which is what a fully
+      degenerate single-point marker yields -- ``"ongrid"``'s per-vertex
+      markers are exactly that (issue #2642). Normalized to ``None`` here
+      rather than emitted as an empty array, which would be a third,
+      undocumented shape for this field.
+    """
+    try:
+        points = [[pt.x, pt.y] for pt in edge_pair.polygon(0).each_point_hull()]
+    except Exception:
+        return None
+    return points or None
+
+
+def _run_vertex_check(region: Any, rule: DrcRule, dbu: float) -> Any:
+    """Dispatch a :data:`_VERTEX_CHECKS` rule to its primitive (issue #2642).
+
+    The single-call analogue of :func:`_run_check` for the vertex check
+    kinds: ``"ongrid"`` -> :func:`_run_grid_check`, ``"angle"`` ->
+    :func:`_run_angle_check`. Both return an ``EdgePairs`` collection, and
+    neither has an ``outside_region``-style supplementary term, so this
+    returns the collection directly rather than ``_run_check``'s tuple.
+
+    ``dbu`` is the *layout's own* database unit in micrometres, which
+    ``"ongrid"`` needs (its grid is a physical distance, not a count of
+    deck-nominal units -- see :func:`_run_grid_check`); ``"angle"`` is
+    dimensionless and ignores it.
+    """
+    if rule.check in _GRID_CHECKS:
+        return _run_grid_check(region, rule, dbu)
+    return _run_angle_check(region, rule)
+
+
+def _run_grid_check(region: Any, rule: DrcRule, dbu: float) -> Any:
+    """``check="ongrid"`` (issue #2642): the off-grid vertices of ``region``,
+    as an ``EdgePairs`` collection of degenerate (single-point) edge pairs --
+    driven by ``klayout.db.Region.grid_check(gx, gy)``, the exact primitive
+    the open PDKs' own DRC-DSL ``layer.ongrid(g)`` compiles to (verified
+    against KLayout's ``_drc_layer.rb``, whose ``ongrid`` is a straight
+    ``grid_check(g, g)`` call).
+
+    ``rule.grid_um`` is a **real physical** micrometre distance, converted
+    here against the *layout's own* ``dbu`` -- not via ``run_drc``'s
+    ``dbu_scale`` the way ``threshold_dbu`` is. A manufacturing grid is a
+    property of the process, so 0.005um is 0.005um whether the stream was
+    written at 1nm or 10nm per unit; routing it through ``dbu_scale`` would
+    instead hold the grid at a fixed *number of database units* and silently
+    change the physical grid with the stream's dbu. (Same reasoning, and the
+    same conversion, as ``density_window_um`` and
+    ``DerivedLayer.sized_by_um``.)
+
+    The region is merged first, for the same reason every other check here
+    merges (#995) and because the DRC-DSL ``ongrid`` applies merged semantics
+    itself: a layer drawn as several abutting shapes is one physical polygon.
+    Merging is safe for a grid check specifically -- a union's vertices are a
+    subset of its inputs' vertices plus intersection points of their edges,
+    and axis-parallel on-grid edges can only intersect on-grid -- so it can
+    only drop the duplicate seam vertices, never invent an off-grid one.
+
+    ``Region.grid_check`` takes a grid in whole database units, so the
+    conversion must come out integral. Three outcomes, in order:
+
+    - ``grid_um`` is a whole number of database units (the ordinary case: a
+      0.005um grid is 5 units at sky130's 1nm dbu, 1 unit at a 5nm one) --
+      check it.
+    - ``grid_um`` is *finer* than one database unit, but the database unit is
+      itself a whole multiple of the grid (a 10nm-dbu stream against a 5nm
+      grid): every representable coordinate is on-grid by construction, so
+      the check is vacuously satisfied and this returns an empty
+      ``EdgePairs``. Reporting nothing here is the true answer, not a
+      silenced one.
+    - anything else (a database unit incommensurate with the grid, e.g. 7nm
+      against 5nm, where real off-grid coordinates exist but no integral
+      ``grid_check`` grid expresses the rule) -- :class:`DrcError` naming the
+      rule, rather than silently rounding the grid and checking a bound the
+      deck never published. An unset ``grid_um`` raises the same way, since a
+      deck author declared an ``"ongrid"`` rule without the one value it
+      needs; both mirror ``_run_area_check``/``_run_antenna_check``'s own
+      fail-loud validation.
+    """
+    if rule.grid_um is None:
+        raise DrcError(f"rule '{rule.id}': check 'ongrid' requires grid_um")
+    units_per_grid = rule.grid_um / dbu
+    if abs(units_per_grid - round(units_per_grid)) <= 1e-9:
+        grid_dbu = round(units_per_grid)
+        return region.merged().grid_check(grid_dbu, grid_dbu)
+    grids_per_unit = dbu / rule.grid_um
+    if grids_per_unit > 1.0 and abs(grids_per_unit - round(grids_per_unit)) <= 1e-9:
+        # Lazily, for the same reason `run_drc` imports it lazily.
+        import klayout.db as kdb
+
+        return kdb.EdgePairs()
+    raise DrcError(
+        f"rule '{rule.id}': grid_um {rule.grid_um} is not a whole number of "
+        f"this layout's database units ({dbu} um), and the database unit is "
+        f"not a whole multiple of the grid either, so no exact grid check is "
+        f"possible"
+    )
+
+
+def _run_angle_check(region: Any, rule: DrcRule) -> Any:
+    """``check="angle"`` (issue #2642): the corners of ``region`` whose
+    *interior* angle is strictly below ``rule.angle_limit_deg``, as an
+    ``EdgePairs`` collection holding the two edges forming each offending
+    corner -- driven by ``klayout.db.Region.with_angle(0.0, limit, False)``,
+    which is what the open PDKs' own DRC-DSL ``layer.with_angle(0 .. limit)``
+    evaluates on a polygon layer.
+
+    The interval is half-open (``[0, limit)``), so a corner exactly at the
+    limit is legal: ``angle_limit_deg=45.0`` passes a 45-degree chamfer and
+    flags anything sharper; ``90.0`` passes a right angle and flags every
+    acute corner. Verified empirically against KLayout 0.30: a 30-60-90
+    triangle reports its 30-degree corner under a 45 limit and both its
+    30- and 60-degree corners under a 90 limit, while a rectangle and a
+    45-degree-chamfered octagon report nothing under either.
+
+    **This is a minimum-angle bound, not an off-axis-edge detector** -- see
+    :attr:`~klayout_tools.decks.rules.DrcRule.angle_limit_deg` for why a
+    curated rule transcribed from an upstream "non 45 degree angle" rule
+    description still only enforces the bound the upstream primitive
+    actually enforces.
+
+    Merged for the same reasons as every other check (#995; the DRC-DSL
+    ``with_angle`` applies merged semantics too) -- the corners of a layer
+    drawn as several abutting shapes are the corners of their union, not of
+    whichever tiling the GDS author happened to write.
+
+    An unset or out-of-range ``angle_limit_deg`` raises :class:`DrcError`
+    naming the rule: ``0`` (or less) can never report anything, and nothing
+    above 180 is a meaningful interior angle, so either is a deck-authoring
+    mistake rather than a stricter check.
+    """
+    if rule.angle_limit_deg is None:
+        raise DrcError(f"rule '{rule.id}': check 'angle' requires angle_limit_deg")
+    if not 0.0 < rule.angle_limit_deg <= 180.0:
+        raise DrcError(
+            f"rule '{rule.id}': angle_limit_deg must be in (0, 180], "
+            f"got {rule.angle_limit_deg}"
+        )
+    return region.merged().with_angle(0.0, rule.angle_limit_deg, False)
 
 
 def _run_area_check(region: Any, rule: DrcRule, dbu_scale: float) -> Any:

@@ -285,7 +285,12 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
 #: these kinds author ``threshold_dbu=0`` as an unused placeholder, so
 #: :func:`deck_rules` must report ``value_um: null`` for them rather than a
 #: fabricated ``0.0`` (issue #2308).
-_NON_DISTANCE_CHECKS = frozenset({"area", "density", "antenna"})
+#: ``"ongrid"``/``"angle"`` (issue #2642) are the vertex check kinds: a grid
+#: in micrometres and a minimum interior corner angle in degrees, neither of
+#: them a ``threshold_dbu`` distance either.
+_NON_DISTANCE_CHECKS = frozenset(
+    {"area", "density", "antenna", "ongrid", "angle"}
+)
 
 
 def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
@@ -834,6 +839,12 @@ def _rule_limits(rule: DrcRule, nominal_dbu: float) -> dict[str, Any]:
         }
     if rule.check == "antenna":
         return {"antenna_ratio_max": rule.antenna_ratio_max}
+    if rule.check == "ongrid":
+        # Already micrometres on the rule (a physical grid, not a
+        # deck-nominal-dbu count), so no conversion -- issue #2642.
+        return {"grid_um": rule.grid_um}
+    if rule.check == "angle":
+        return {"angle_limit_deg": rule.angle_limit_deg}
     return {}
 
 
