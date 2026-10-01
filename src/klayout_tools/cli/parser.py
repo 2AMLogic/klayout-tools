@@ -8,7 +8,7 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 import sys
 
-from .. import arith_gen, pdk_stackup, pex
+from .. import arith_gen, netlist, pdk_stackup, pex
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
@@ -36,6 +36,7 @@ from . import (
     lef_abstract_cmd,
     lvs_cmd,
     mom_cmd,
+    netlist_cmd,
     pdk_cmd,
     pex_cmd,
     place_and_route_cmd,
@@ -235,6 +236,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_extract_parser(subparsers)
     _add_lvs_parser(subparsers)
+
+    _add_netlist_parser(subparsers)
 
     _add_synthesize_parser(subparsers)
 
@@ -4801,6 +4804,94 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(ring_check_parser)
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
+
+
+def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``netlist`` verb: xschem schematic -> SPICE netlist, and
+    the ``--check`` staleness gate over a committed netlist (issue #55)."""
+    netlist_parser = subparsers.add_parser(
+        "netlist",
+        help="export an xschem schematic to a SPICE netlist (headless)",
+        description=(
+            "Export an xschem schematic to a SPICE netlist, headlessly and "
+            "with a real exit status (issue #55). This verb owns the xschem "
+            f"invocation: {' '.join(netlist.FORCED_XSCHEM_FLAGS)} are always "
+            "passed, whatever else is requested, because omitting -x does "
+            "not fail -- xschem initialises its GUI, writes a "
+            "plausible-looking netlist, and then hangs in the Tk event loop "
+            "(and can stop responding to SIGTERM), so the caller sees an "
+            "idle process and a possibly stale artifact instead of an "
+            "error. Every run is bounded by --timeout-s and escalated "
+            "SIGTERM -> SIGKILL across the whole process group if it is "
+            "exceeded. Success is judged by the output netlist existing and "
+            "being freshly written, NOT by xschem's exit status, which is "
+            "non-zero even on a successful batch netlist. See "
+            "docs/cli/netlist.md."
+        ),
+    )
+    netlist_parser.add_argument(
+        "schematic", help="path to the xschem schematic to netlist (.sch)"
+    )
+    netlist_parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help=(
+            "path to write the SPICE netlist to (the committed artifact). "
+            "Under --check this file is read and compared, never written"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--check",
+        action="store_true",
+        default=False,
+        help=(
+            "do not write anything: regenerate the netlist into a temp "
+            "directory and diff it against the committed file at --output, "
+            "reporting status 'match' (exit 0) or 'drifted' (exit 3). This "
+            "is the staleness gate for a committed netlist -- a netlist that "
+            "has silently drifted from its schematics attributes simulation "
+            "results to a schematic that no longer exists. An absent "
+            "--output file is reported as 'drifted', not as an error"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--timeout-s",
+        dest="timeout_s",
+        type=float,
+        default=netlist.DEFAULT_TIMEOUT_S,
+        help=(
+            "wall-clock bound on the xschem run in seconds (default: "
+            f"{netlist.DEFAULT_TIMEOUT_S:g}). A real batch netlist takes "
+            "well under a second; this bound exists for the hang described "
+            "above, and exceeding it is an error (exit 1), never a silent "
+            "empty result"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--rcfile",
+        default=None,
+        help=(
+            "project-local xschemrc to load (symbol search path, PDK root). "
+            "Passed through to xschem as --rcfile; this verb does not yet "
+            "resolve a PDK root itself (issue #55 scoped that to the "
+            "SPICE-side design follow-up), so the xschemrc remains the one "
+            "place that states it"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--xschem-binary",
+        dest="xschem_binary",
+        default=netlist.DEFAULT_XSCHEM_BINARY,
+        help=(
+            "xschem executable to run (default: "
+            f"{netlist.DEFAULT_XSCHEM_BINARY!r}, resolved on PATH) -- for a "
+            "pinned install or a container wrapper. It never changes the "
+            "forced flag set above"
+        ),
+    )
+    _add_format_arg(netlist_parser)
+    netlist_parser.set_defaults(func=netlist_cmd.run)
 
 
 def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:

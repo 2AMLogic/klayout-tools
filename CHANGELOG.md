@@ -14,6 +14,31 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#55, new verb `klt netlist`; `schema_version: 1`): export an
+  xschem schematic to a SPICE netlist headlessly, with a real exit status,
+  plus a `--check` staleness gate over a committed netlist. The verb **owns
+  the xschem invocation** — `-n -s -q -x -r` is always passed, whatever the
+  caller asks for — because omitting `-x` does not fail: xschem initialises
+  its full Tk GUI despite the other batch flags, writes a plausible-looking
+  netlist, and then hangs in the Tk event loop, where a signal arriving
+  during teardown re-enters its own non-async-signal-safe `sig_handler` and
+  stops responding to SIGTERM. Nothing is printed, so a hand-rolled wrapper
+  that drops the flag yields an idle process plus a possibly-stale artifact
+  rather than an error (hit in production twice: gf180-bandgap 2026-07-31,
+  sg13g2-vco 2026-10-01). Every run is therefore bounded by `--timeout-s`
+  (default 120 s) and escalated SIGTERM → **SIGKILL** across the child's whole
+  process group, so a wedged run fails with an actionable message instead of
+  wedging the caller. Success is judged by the output netlist existing and
+  being freshly written, **not** by xschem's exit status — which is non-zero
+  even on a successful batch netlist, and is reported as
+  `xschem.exit_status` alongside `xschem.exit_status_trusted: false`.
+  `--check` regenerates into a temp directory and diffs against the committed
+  file, reporting `status: "match"` (exit 0) or `"drifted"` (exit 3, with a
+  capped unified diff) — the same 0/3 split `klt drc --check` uses — so a
+  committed netlist can no longer drift from its schematics silently. Block-
+  vs-testbench `.subckt` emission and PDK-root unification with `klt pdk` are
+  deliberately out of this first slice (see `docs/cli/netlist.md`, "Not in
+  this slice").
 - **Fixed** (#2654, `klt lvs`; `schema_version` unchanged, no new field — but
   **a request using `options.compare_parameters` can emit fewer
   `device.parameter_excluded` entries and different

@@ -118,6 +118,7 @@ klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base
 klt gen resistor_strip --pdk sky130A     # generate a parametrized cell (headless PCell)
 klt draw --params shapes.json -o out.gds # write a primitive stream (no rule checking)
+klt netlist block.sch -o block.spice     # xschem schematic -> SPICE netlist, headless (always -x, SIGKILL-bounded); --check gates a committed netlist against drift
 klt extract design.gds --deck sky130     # layout -> schematic-equivalent netlist
 klt pex design.gds request.json --deck sky130  # extracted (parasitic-annotated) netlist + schematic-vs-extracted delta report
 klt mom design.gds stackup.json          # quasi-static capacitance matrix (Method of Moments, Rust core)
