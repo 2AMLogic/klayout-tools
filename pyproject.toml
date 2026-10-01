@@ -270,24 +270,26 @@ addopts = "-q"
 [tool.ruff]
 target-version = "py310"
 src = ["src", "tests"]
-
-[tool.ruff.format]
-# ruff formats fenced Python inside Markdown as well as .py files. `.loom/`,
-# `.claude/`, and `.agents/` are vendored agent-tooling trees (Loom + Claude
-# skills + repo-skills' agent-portable mirror, added by repo-skills 0.11.2)
-# that this repo does not own and re-syncs from upstream — formatting them
-# would churn on every upstream bump. No tree contains any first-party Python;
-# scope the formatter to code we own so `ruff format --check .` can gate CI.
-# `_vendor/mutation_variants.py` is a byte-exact third-party port (see the
-# matching `per-file-ignores` entry below) -- excluded here too, so
-# `ruff format` never reflows it away from the origin file it must stay
-# diffable against.
+# `.loom/`, `.claude/`, and `.agents/` are vendored agent-tooling trees (Loom +
+# Claude skills + repo-skills' agent-portable mirror, added by repo-skills
+# 0.11.2) that this repo does not own and re-syncs from upstream -- linting,
+# formatting, or complexity-scanning them would churn (or outright break CI,
+# issue #2663) on every upstream bump. No tree contains any first-party
+# Python. `_vendor/mutation_variants.py` is a byte-exact third-party port (see
+# the matching `per-file-ignores` entry below) -- excluded here too, so `ruff`
+# never reflows it away from the origin file it must stay diffable against.
+# Top-level `exclude` is inherited by both `[tool.ruff.lint]` (including the
+# `scripts/check_complexity_baseline.py` C901 scan, which shells out to plain
+# `ruff check`) and `[tool.ruff.format]` unless a sub-table overrides it, so
+# declaring it once here scopes every ruff-driven gate to code we own.
 exclude = [
     ".loom/**",
     ".claude/**",
     ".agents/**",
     "src/klayout_tools/_vendor/mutation_variants.py",
 ]
+
+[tool.ruff.format]
 
 [tool.ruff.lint]
 select = [
