@@ -236,6 +236,7 @@
       "diff.width.1",
       "licon1.angle.1",
       "licon1.ongrid.1",
+      "licon1.width.1",
       "met1.angle.1",
       "met1.area.1",
       "met1.holes_area.1",
@@ -277,6 +278,7 @@
       "mcon.angle.1",
       "mcon.ongrid.1",
       "mcon.space.1",
+      "mcon.width.1",
       "met1.enclosing.mcon.1",
       "met1.enclosing.via.1",
       "met2.angle.1",
@@ -397,6 +399,7 @@
       "diff.width.1",
       "licon1.angle.1",
       "licon1.ongrid.1",
+      "licon1.width.1",
       "met1.angle.1",
       "met1.area.1",
       "met1.holes_area.1",
@@ -524,6 +527,10 @@
       },
       {
         "id": "mcon.space.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "mcon.width.1",
         "reason": "no_applicable_geometry"
       },
       {

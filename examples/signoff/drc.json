@@ -102,11 +102,13 @@
       "li1.enclosing.licon1.1",
       "licon1.angle.1",
       "licon1.ongrid.1",
+      "licon1.width.1",
       "lvtn.angle.1",
       "lvtn.ongrid.1",
       "mcon.angle.1",
       "mcon.ongrid.1",
       "mcon.space.1",
+      "mcon.width.1",
       "met1.enclosing.mcon.1",
       "met1.enclosing.via.1",
       "met2.angle.1",
@@ -334,6 +336,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "licon1.width.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "lvtn.angle.1",
         "reason": "no_applicable_geometry"
       },
@@ -351,6 +357,10 @@
       },
       {
         "id": "mcon.space.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "mcon.width.1",
         "reason": "no_applicable_geometry"
       },
       {
@@ -724,7 +734,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:26edb024cb683c3ecb2f54e31f78b0976e8870a1abd06bd51f2a1319d3e55e9f",
+      "content_hash": "sha256:ef7800ebbeeeb916dcf56fb87410c1d880e4ae9113d1f1e59dd3c7098bb7cb2d",
       "released": null
     },
     "input": {

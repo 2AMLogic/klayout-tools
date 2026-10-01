@@ -15,6 +15,11 @@ from pathlib import Path
 
 import pytest
 
+from helpers.drc_known_findings import (
+    KNOWN_OFFGRID_GEN_RULES,
+    KNOWN_OFFGRID_LICON1_RULE,
+    assert_drc_clean_except_known_gen_offgrid,
+)
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import run_drc
@@ -701,6 +706,41 @@ def test_list_generators_phase2_params_have_no_hidden_layer_fields(name):
     }
 
 
+def test_known_offgrid_licon1_defect_is_still_present(tmp_path, both_pdk_root):
+    """Tripwire for the `assert_drc_clean_except_known_gen_offgrid` allowances
+    this file now uses in place of a plain `status == "clean"` assertion.
+
+    `klt gen`'s sky130 gate-contact `licon1` cuts are placed off the PDK's
+    0.005um manufacturing grid (`gen.py`'s `_mos_unit_layout` centres the
+    contact on an unsnapped midpoint of the poly comb). Issue #2642 made that
+    visible by transcribing sky130's own `OFFGRID` rule group into the curated
+    deck; **issue #2648 fixes the generator.**
+
+    When #2648 lands, this test fails -- which is the point. The fix is to
+    delete it along with every
+    `assert_drc_clean_except_known_gen_offgrid(...)` call in this file and
+    `tests/test_gen_compose.py`, restoring the plain
+    `assert drc_report["status"] == "clean"` each one replaced.
+    """
+    output = tmp_path / "diff_pair_offgrid_tripwire.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), "sky130")
+
+    assert drc_report["rule_counts"].get(KNOWN_OFFGRID_LICON1_RULE), (
+        "issue #2648 appears to be fixed -- `klt gen`'s sky130 output is now "
+        "on-grid. Delete this test and every "
+        "assert_drc_clean_except_known_gen_offgrid() call, restoring the plain "
+        f"clean assertion. rule_counts: {drc_report['rule_counts']}"
+    )
+
+
 @pytest.mark.parametrize(("generator_name", "deck"), _PHASE2_GENERATOR_X_DECK)
 def test_phase2_generator_default_params_are_drc_clean(
     generator_name, deck, tmp_path, both_pdk_root
@@ -721,7 +761,9 @@ def test_phase2_generator_default_params_are_drc_clean(
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
     # bbox_um and ports[] are populated (acceptance criterion #3).
     bbox = report["bbox_um"]
@@ -1201,7 +1243,9 @@ def test_mos_array_composes_guard_ring_and_reports_tap_ports(tmp_path, pdk_root)
     assert report["device_count"] == 4
 
     drc_report = run_drc(str(output), "sky130")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 @pytest.mark.parametrize(
@@ -1244,7 +1288,9 @@ def test_mos_array_guard_ring_flavor_pfet_draws_well_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 @pytest.mark.parametrize(
@@ -1310,7 +1356,9 @@ def test_mos_array_ring_gap_reports_gap_port_and_stays_drc_clean(tmp_path, pdk_r
     assert any("routing opening" in n for n in report["drc_hints"]["notes"])
 
     drc_report = run_drc(str(output), "sky130")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 def test_mos_array_ring_gap_without_a_ring_is_noted_not_drawn(tmp_path, pdk_root):
@@ -1443,8 +1491,12 @@ def test_diff_pair_minimum_gate_length_is_drc_clean(
     )
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
-    assert drc_report["rule_counts"] == {}
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it) -- the
+    # `rule_counts` assertion below is that same allowance, narrowed from
+    # the `== {}` it replaced.
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
+    assert set(drc_report["rule_counts"]) <= KNOWN_OFFGRID_GEN_RULES
 
 
 def test_mos_array_below_default_gate_length_note_no_longer_claims_spacing_risk(
@@ -1788,7 +1840,9 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
         if v["rule"] in ("poly.enclosing.licon.1", "diff.enclosing.licon.1")
     ]
     assert offending == [], drc_report["violations"]
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 def _merged_polygon_at(gds_path, layer, datatype, x_um, y_um):
@@ -1873,7 +1927,9 @@ def test_mos_gate_contact_reports_metal_port_and_is_drc_clean(
     assert gate_metal != source_metal
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 def test_mos_gate_contact_defaults_off_and_leaves_geometry_unchanged(
@@ -2978,8 +3034,12 @@ def test_res_array_half_dbu_tie_length_draws_full_contact_and_is_drc_clean(
         assert (x1 - x0, y1 - y0) == (expected_dbu, expected_dbu)
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
-    assert drc_report["rule_counts"] == {}
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it) -- the
+    # `rule_counts` assertion below is that same allowance, narrowed from
+    # the `== {}` it replaced.
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
+    assert set(drc_report["rule_counts"]) <= KNOWN_OFFGRID_GEN_RULES
 
 
 @pytest.mark.parametrize("length_um", _ISSUE_1551_NON_TIE_LENGTHS_UM)
@@ -5483,7 +5543,9 @@ def test_diff_pair_flavor_pfet_draws_well_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 def test_diff_pair_flavor_pfet_no_guard_ring_still_draws_device_well(
@@ -5601,7 +5663,9 @@ def test_diff_pair_voltage_flavor_hvi_draws_marker_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), "sky130")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 def test_diff_pair_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
@@ -6366,7 +6430,12 @@ def test_sky130_generators_draw_licon1_at_its_fixed_size(
     assert (fixed_regions[(66, 44)] - generic_regions[(66, 44)]).is_empty()
 
     drc_report = run_drc(str(fixed_output), "sky130")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the known off-grid gate-contact `licon1`
+    # placement findings (#2642 surfaced them, #2648 fixes them): the
+    # `gate_contact=True` parametrization below draws them, and the clamp this
+    # test is about moves a cut's *size*, never its centre, so the allowance is
+    # orthogonal to what is being asserted here.
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 def test_sg13g2_res_array_metal_level_default_zero_is_poly_body_unchanged(
@@ -7958,7 +8027,9 @@ def test_diff_pair_ring_gap_reports_gap_port_and_stays_drc_clean(tmp_path, pdk_r
     assert any("routing opening" in n for n in report["drc_hints"]["notes"])
     assert _merged_polygon_count(output, 67, 20) > 0
     drc_report = run_drc(str(output), "sky130")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 def test_diff_pair_ring_gap_without_a_ring_is_noted_not_drawn(tmp_path, pdk_root):
@@ -8368,7 +8439,9 @@ def test_esd_device_default_params_are_drc_clean(deck, tmp_path, both_pdk_root):
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
     bbox = report["bbox_um"]
     assert bbox["x1"] > bbox["x0"]
@@ -10029,7 +10102,9 @@ def test_sky130_ring_draws_no_implant_geometry_unaffected(
     assert (32, 0) not in present
 
     drc_report = run_drc(str(output), "sky130")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
 
 
 def test_sg13g2_guard_ring_draws_no_ring_implant_despite_tap_active_collision(
@@ -10112,7 +10187,9 @@ def test_sky130_tap_role_generators_stay_drc_clean_under_tap_rules(
 
     drc_report = run_drc(str(output), "sky130")
 
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `status == "clean"` minus the one known off-grid licon1
+    # placement finding (#2642 surfaced it, #2648 fixes it):
+    assert_drc_clean_except_known_gen_offgrid(drc_report)
     # The new rules really ran against each generator's ring (not skipped
     # for want of drawn layers -- a vacuous "clean" proves nothing, the
     # same discipline the #995 enclosing pair applies).

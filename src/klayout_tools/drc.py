@@ -243,6 +243,87 @@ SKIP_REASON_ABSENT_INPUT_LAYER = "absent_input_layer"
 #: than a skipped request; see :func:`_classify_skipped_rules`.
 INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY = "no_applicable_geometry"
 
+#: The curated engine's second ``coverage.skipped[].reason`` (issue #2642):
+#: an ``"ongrid"`` rule whose published grid cannot be expressed exactly in
+#: this stream's database units -- neither a whole number of them nor a whole
+#: divisor of one (e.g. a 0.005um grid against a 0.006um dbu). Real off-grid
+#: coordinates exist in such a stream, so this is a *requested* check that
+#: could not run (making the run partial), not inapplicable work: see
+#: :func:`_grid_is_representable` for why rounding the grid to something
+#: expressible would be worse than reporting the gap.
+SKIP_REASON_GRID_NOT_REPRESENTABLE = "grid_not_representable"
+
+
+def _grid_is_representable(rule: DrcRule, dbu: float) -> bool:
+    """Whether ``rule``'s ``grid_um`` can be checked exactly against a stream
+    whose database unit is ``dbu`` micrometres (issue #2642).
+
+    ``klayout.db.Region.grid_check`` takes a grid in **whole** database units,
+    which admits two cases:
+
+    - ``grid_um`` is a whole number of database units (0.005um at a 1nm dbu is
+      5 units; at a 5nm dbu, 1) -- checkable directly;
+    - ``grid_um`` is finer than one database unit *and* the database unit is a
+      whole multiple of the grid (a 10nm-dbu stream against a 5nm grid) --
+      every representable coordinate is on-grid by construction, so the rule
+      is vacuously satisfied and still counts as checked.
+
+    Anything else is a genuine gap rather than a formality: at a 0.006um dbu,
+    a coordinate of 1 unit is 0.006um, which is **not** on a 0.005um grid, so
+    off-grid geometry does exist -- there is simply no integral grid for the
+    primitive to measure it with. Rounding to the nearest expressible grid
+    would silently check a bound the PDK never published (coarser: flags legal
+    geometry; finer: passes illegal geometry), so ``run_drc`` skips the rule
+    and records :data:`SKIP_REASON_GRID_NOT_REPRESENTABLE`, which makes the
+    run partial rather than an unqualified ``clean``.
+
+    ``True`` for every non-``"ongrid"`` rule and for an ``"ongrid"`` rule with
+    no ``grid_um`` at all -- neither is this predicate's question (the latter
+    is a deck-authoring error :func:`_run_grid_check` raises on).
+    """
+    if rule.check not in _GRID_CHECKS or rule.grid_um is None:
+        return True
+    units_per_grid = rule.grid_um / dbu
+    # `>= 1` as well as integral: `grid_check(0, 0)` is KLayout's own "do not
+    # check this direction", so a grid rounding to zero units would silently
+    # pass everything rather than check anything.
+    if (
+        round(units_per_grid) >= 1
+        and abs(units_per_grid - round(units_per_grid)) <= 1e-9
+    ):
+        return True
+    grids_per_unit = dbu / rule.grid_um
+    return grids_per_unit > 1.0 and abs(grids_per_unit - round(grids_per_unit)) <= 1e-9
+
+
+def _rule_skipped_before_evaluation(rule: DrcRule, layout: Any) -> bool:
+    """Whether ``rule`` is skipped by a gate that applies *before*
+    :func:`run_drc` resolves its input layers at all.
+
+    Two gates, both of which land the rule in ``coverage.rules_skipped``
+    exactly as a missing ``layer``/``other_layer`` does (the reason code each
+    reports is :func:`_classify_skipped_rules`' decision, not this
+    function's):
+
+    - ``requires_any_layer`` (issue #2634): a rule whose official DRM scope
+      only ever applies in the *context* of some other layer (gf180mcu's
+      ``pplus.enclosing.comp.1``, scoped by the real PDK deck to "inside
+      NWELL"/"inside DNWELL" PCOMP -- see :class:`DrcRule`'s docstring) has
+      nothing to check when none of those context layers were drawn anywhere
+      in the stream, regardless of whether its own checked layers are
+      present. These context layers contribute nothing to
+      ``deck_layer_tuples``: they gate the rule, they are never read as
+      checked geometry.
+    - an ``"ongrid"`` rule whose grid this stream's database unit cannot
+      express exactly (issue #2642) -- see :func:`_grid_is_representable`.
+    """
+    if rule.requires_any_layer is not None and not any(
+        layout.find_layer(*context_layer) is not None
+        for context_layer in rule.requires_any_layer
+    ):
+        return True
+    return not _grid_is_representable(rule, layout.dbu)
+
 
 def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     """The ``(layer, datatype)`` pairs whose absence makes ``rule`` provably
@@ -374,6 +455,15 @@ def _classify_skipped_rules(
       :data:`~klayout_tools.coverage.RESULT_PARTIAL` and therefore *not* an
       unconditional success.
 
+    One skip is not about an absent layer at all (issue #2642): an
+    ``"ongrid"`` rule whose published grid this stream's database unit cannot
+    express exactly (:func:`_grid_is_representable`). Its layer is present and
+    off-grid geometry can exist, so it is a requested check that did not run:
+    ``skipped``, reason :data:`SKIP_REASON_GRID_NOT_REPRESENTABLE`. Tested
+    *after* vacuity below, so a rule whose layer is also absent stays
+    inapplicable -- with no geometry at all there is nothing for either
+    answer to be about, and the absent layer is the more informative reason.
+
     Nothing is moved between the two categories to reach a nicer rollup row:
     the line is "would this check have been able to fail?", it is auditable
     against each primitive in this module, and a check kind that can fault on
@@ -418,6 +508,10 @@ def _classify_skipped_rules(
         if vacuous:
             inapplicable.append(
                 {"id": rule.id, "reason": INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY}
+            )
+        elif not _grid_is_representable(rule, layout.dbu):
+            skipped.append(
+                {"id": rule.id, "reason": SKIP_REASON_GRID_NOT_REPRESENTABLE}
             )
         else:
             skipped.append({"id": rule.id, "reason": SKIP_REASON_ABSENT_INPUT_LAYER})
@@ -753,22 +847,12 @@ def run_drc(
         # `_validate_threshold_max`.
         _validate_threshold_max(rule)
 
-        # `requires_any_layer` (issue #2634) gates whether this rule applies
-        # at all, independent of `derived_layer`/`layer` input resolution
-        # below: a rule whose official DRM scope only ever applies in the
-        # context of some *other* layer (e.g. gf180mcu's
-        # `pplus.enclosing.comp.1`, scoped to "inside NWELL" or "inside
-        # DNWELL" PCOMP by the real PDK deck -- see `DrcRule`'s docstring)
-        # has nothing to check when none of those context layers were drawn
-        # anywhere in this stream, regardless of whether its own checked
-        # layer(s) are present. Skipped the same way a missing `layer`/
-        # `other_layer` already is -- see `coverage.rules_skipped` below --
-        # and, like those, contributes nothing to `deck_layer_tuples` (these
-        # layers gate the rule; they are never read as checked geometry).
-        if rule.requires_any_layer is not None and not any(
-            layout.find_layer(*context_layer) is not None
-            for context_layer in rule.requires_any_layer
-        ):
+        # Gates that skip a rule before any layer resolution below -- see
+        # `_rule_skipped_before_evaluation` for each one and why. Like a
+        # missing `layer`/`other_layer`, they land the rule in
+        # `coverage.rules_skipped`; `_classify_skipped_rules` decides which
+        # reason code each one reports.
+        if _rule_skipped_before_evaluation(rule, layout):
             rules_skipped.append(rule.id)
             continue
 
@@ -1797,7 +1881,10 @@ def _run_grid_check(region: Any, rule: DrcRule, dbu: float) -> Any:
     only drop the duplicate seam vertices, never invent an off-grid one.
 
     ``Region.grid_check`` takes a grid in whole database units, so the
-    conversion must come out integral. Three outcomes, in order:
+    conversion must come out integral. Two outcomes reach here, because
+    ``run_drc`` has already skipped (not run) every rule whose grid this
+    stream cannot express -- see :func:`_grid_is_representable` and
+    :data:`SKIP_REASON_GRID_NOT_REPRESENTABLE`:
 
     - ``grid_um`` is a whole number of database units (the ordinary case: a
       0.005um grid is 5 units at sky130's 1nm dbu, 1 unit at a 5nm one) --
@@ -1808,33 +1895,32 @@ def _run_grid_check(region: Any, rule: DrcRule, dbu: float) -> Any:
       the check is vacuously satisfied and this returns an empty
       ``EdgePairs``. Reporting nothing here is the true answer, not a
       silenced one.
-    - anything else (a database unit incommensurate with the grid, e.g. 7nm
-      against 5nm, where real off-grid coordinates exist but no integral
-      ``grid_check`` grid expresses the rule) -- :class:`DrcError` naming the
-      rule, rather than silently rounding the grid and checking a bound the
-      deck never published. An unset ``grid_um`` raises the same way, since a
-      deck author declared an ``"ongrid"`` rule without the one value it
-      needs; both mirror ``_run_area_check``/``_run_antenna_check``'s own
-      fail-loud validation.
+
+    The final :class:`DrcError` is therefore a deck-authoring/programming
+    guard rather than a stream condition: an ``"ongrid"`` rule with no
+    ``grid_um`` at all, or a direct call that bypassed the skip gate. It
+    mirrors ``_run_area_check``/``_run_antenna_check``'s own fail-loud
+    validation.
     """
     if rule.grid_um is None:
         raise DrcError(f"rule '{rule.id}': check 'ongrid' requires grid_um")
+    if not _grid_is_representable(rule, dbu):
+        raise DrcError(
+            f"rule '{rule.id}': grid_um {rule.grid_um} is not a whole number of "
+            f"this layout's database units ({dbu} um), and the database unit is "
+            f"not a whole multiple of the grid either, so no exact grid check "
+            f"is possible (run_drc skips such a rule rather than reaching here)"
+        )
     units_per_grid = rule.grid_um / dbu
-    if abs(units_per_grid - round(units_per_grid)) <= 1e-9:
-        grid_dbu = round(units_per_grid)
+    grid_dbu = round(units_per_grid)
+    if grid_dbu >= 1:
         return region.merged().grid_check(grid_dbu, grid_dbu)
-    grids_per_unit = dbu / rule.grid_um
-    if grids_per_unit > 1.0 and abs(grids_per_unit - round(grids_per_unit)) <= 1e-9:
-        # Lazily, for the same reason `run_drc` imports it lazily.
-        import klayout.db as kdb
+    # Grid finer than one database unit, with the unit a whole multiple of it:
+    # every representable coordinate is on-grid, so there is nothing to report.
+    # Lazily imported for the same reason `run_drc` imports it lazily.
+    import klayout.db as kdb
 
-        return kdb.EdgePairs()
-    raise DrcError(
-        f"rule '{rule.id}': grid_um {rule.grid_um} is not a whole number of "
-        f"this layout's database units ({dbu} um), and the database unit is "
-        f"not a whole multiple of the grid either, so no exact grid check is "
-        f"possible"
-    )
+    return kdb.EdgePairs()
 
 
 def _run_angle_check(region: Any, rule: DrcRule) -> Any:

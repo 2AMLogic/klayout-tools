@@ -805,9 +805,12 @@ A stream whose `dbu` is itself a whole multiple of the grid (a 10 nm-dbu
 stream against a 5 nm grid) cannot express an off-grid coordinate at all, so
 the rule reports nothing and still counts as checked — that is the true
 answer, not a silenced one. A `dbu` that is neither a divisor nor a whole
-multiple of the grid (7 nm against 5 nm) does have off-grid coordinates but
-no exact integral grid for the primitive to use, and raises rather than
-silently rounding the published grid to a value the deck never declared.
+multiple of the grid (6 nm against 5 nm) *does* have off-grid coordinates but
+no exact integral grid for the primitive to use: that rule is **skipped**,
+with reason `grid_not_representable` in `coverage.skipped` (so the run is
+`clean_partial`, not an unqualified `clean`), rather than silently rounding
+the published grid to a value the deck never declared. Every other rule —
+including the `"angle"` half, which is dimensionless — still runs.
 
 **`"angle"`** — single-layer, one new field, `angle_limit_deg`: the minimum
 *interior* corner angle, in degrees. A corner whose interior angle is
@@ -1801,6 +1804,16 @@ concerned. The common block splits them by a single, auditable question:
 | No — the check is a provable no-op | `inapplicable` | `no_applicable_geometry` | None. Inapplicable work never makes an otherwise complete run partial, so a small block that draws four of a PDK deck's seventeen layers still earns an unconditional `clean`. |
 | Yes — the skip hides a possible finding | `skipped` | `absent_input_layer` | The run is `clean_partial` (exit 0) and is **not** an unconditional success; `klt signoff` refuses to count it as a passing check and reports `partial_coverage`. |
 
+One skipped rule is not an absent-layer skip at all (issue #2642), so it is
+classified directly rather than through that question: an `"ongrid"` rule
+whose published manufacturing grid this stream's own database unit cannot
+express exactly reports `reason: "grid_not_representable"` under `skipped`,
+with the same `clean_partial` effect. Its layer *is* drawn and off-grid
+geometry *can* exist there — the engine simply has no integral grid to
+measure it with (see the check kind's own section above). Tested after the
+vacuity question, so a rule whose layer is also absent stays `inapplicable`:
+with no geometry at all, the absent layer is the more informative reason.
+
 Every check kind this engine dispatches measures drawn geometry and reports
 nothing when the geometry it measures is empty: `width`/`space`/`notch`/
 `isolated` find no edge pair, `area`'s `Region.with_area(..., inverse=True)`
@@ -2004,8 +2017,10 @@ carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 `met{1..5}.holes_area.1` rules (issue #1976) likewise cite `m1.7`/`m2.7`/
 `m3.7`/`m4.7`/`m5.7`, and issue #2321's `tap.width.1` cites the same
 `difftap.1` source id `diff.width.1` already carries (both halve the same
-compound rule), and issue #2594's `licon1.width.1`/`mcon.width.1` cite
-`licon.1`/`ct.1`, so 42 of its 61 rules are covered.
+compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
+`licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
+(38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
+so 117 of its 136 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 

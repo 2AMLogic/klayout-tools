@@ -42,7 +42,7 @@ T1: 2/11 items met
         reason: no_evidence
 [MET  ] T1 #3 DRC clean
         cite: examples/signoff/drc.json (kind=drc, status=clean, content_hash=sha256:..., exit_status=0)
-        coverage: layers_in_stream_without_rules=0, rules_skipped=118 (areaid_re.ongrid.1, ...), deck_scope=18 (cap2m, capm, ct, difftap, +14 more)
+        coverage: layers_in_stream_without_rules=0, rules_skipped=120 (areaid_re.ongrid.1, ...), deck_scope=18 (cap2m, capm, ct, difftap, +14 more)
 [MET  ] T1 #4 LVS clean
         cite: examples/signoff/lvs.json (kind=lvs, status=match, content_hash=sha256:..., exit_status=0)
 [UNMET] T1 #5 Full corner verification vs a ratified spec

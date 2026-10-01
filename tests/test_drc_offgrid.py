@@ -20,12 +20,13 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.decks import get_deck
+from klayout_tools.decks.rules import DrcRule
 from klayout_tools.decks.sky130 import (
     _OFFGRID_ROWS,
     OFFGRID_GRID_UM,
     OFFGRID_UNCHECKED_LAYERS,
 )
-from klayout_tools.drc import DrcError, run_drc
+from klayout_tools.drc import DrcError, _run_grid_check, run_drc
 
 
 def _write(path, shapes, dbu: float = 0.001) -> str:
@@ -166,19 +167,54 @@ def test_grid_coarser_than_the_streams_dbu_reports_nothing(tmp_path):
     assert "met1.ongrid.1" in report["coverage"]["rules_checked"]
 
 
-def test_grid_incommensurate_with_the_streams_dbu_fails_loudly(tmp_path):
+def test_grid_incommensurate_with_the_streams_dbu_is_a_reported_skip(tmp_path):
     """A database unit that is neither a divisor nor a whole multiple of the
-    grid (7nm against 5nm) has real off-grid coordinates but no exact
-    integral `grid_check` grid -- so it raises rather than silently rounding
-    the published grid to something else."""
+    grid (6nm against 5nm -- `klt gen`'s own enclosure tests write streams at
+    exactly that dbu) does have real off-grid coordinates, but no exact
+    integral `grid_check` grid expresses the rule.
+
+    That is a requested check that could not run, so it is reported as such
+    rather than silently rounding the published grid (which would check a
+    bound the PDK never declared) or aborting the whole run over one rule: the
+    grid rule lands in `coverage.skipped` with `grid_not_representable`, every
+    other rule still runs, and the verdict is partial rather than an
+    unqualified `clean`.
+    """
     path = _write(
         tmp_path / "odd_dbu.gds",
-        {(68, 20): [kdb.Box(0, 0, 215, 43)]},
-        dbu=0.007,
+        {(68, 20): [kdb.Box(0, 0, 250, 50)]},
+        dbu=0.006,
     )
 
-    with pytest.raises(DrcError, match="met1.ongrid.1"):
-        run_drc(path, "sky130")
+    report = run_drc(path, "sky130")
+
+    coverage = report["coverage"]
+    assert {"id": "met1.ongrid.1", "reason": "grid_not_representable"} in coverage[
+        "skipped"
+    ]
+    assert "met1.ongrid.1" in coverage["rules_skipped"]
+    assert "met1.ongrid.1" not in coverage["rules_checked"]
+    # The angle half is dimensionless, so it is unaffected and still runs.
+    assert "met1.angle.1" in coverage["rules_checked"]
+    # A skipped *request* qualifies the verdict, per the common coverage
+    # contract -- "clean, but one requested check could not run".
+    assert report["status"] == "clean_partial"
+
+
+def test_grid_check_still_raises_if_called_without_a_grid(tmp_path):
+    """Deck-authoring guard: an `"ongrid"` rule with no `grid_um` is a
+    mistake, not a stream condition, and fails loudly naming the rule rather
+    than silently checking nothing."""
+    rule = DrcRule(
+        id="synthetic.ongrid.1",
+        description="synthetic grid rule with no grid",
+        layer=(68, 20),
+        check="ongrid",
+        threshold_dbu=0,
+    )
+
+    with pytest.raises(DrcError, match="synthetic.ongrid.1"):
+        _run_grid_check(kdb.Region(kdb.Box(0, 0, 100, 100)), rule, 0.001)
 
 
 def test_angle_rule_flags_a_corner_sharper_than_the_published_limit(tmp_path):

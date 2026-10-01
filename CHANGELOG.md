@@ -36,7 +36,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   `coverage.deck_layers`/`rules_checked`/`rules_skipped` grow accordingly,
   and `violations[].polygon` is now `null` (never `[]`) for a fully
   degenerate single-point marker, matching what the contract already
-  documented. No other deck authors either kind yet. See
+  documented. One **new `coverage.skipped[].reason` code**,
+  `grid_not_representable`: an `"ongrid"` rule whose published grid the
+  stream's own database unit cannot express exactly (neither a whole number
+  of units nor a whole divisor of one — e.g. 0.005 um against a 0.006 um
+  dbu) is reported as a skipped *request* (so the run is `clean_partial`)
+  rather than silently rounding the grid or failing the whole run. A reader
+  that branches on the reason code sees a new value; one that only reads
+  "there is a skipped entry" is unaffected. No other deck authors either
+  kind yet. See
   [`docs/cli/drc.md`](docs/cli/drc.md) → "`"ongrid"` / `"angle"` check
   kinds" and "Manufacturing grid and corner angle".
 - **Fixed** (#2594, `klt gen`/`klt gen compose`/`klt drc` on `sky130`;
