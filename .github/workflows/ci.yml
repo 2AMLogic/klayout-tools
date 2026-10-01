@@ -31,6 +31,23 @@ concurrency:
 # which is ~99% of this project's uv cache (measured locally: 127 MB -> 0.3 MB),
 # so it would trade away essentially the whole restorable payload to reclaim the
 # ~40 MB a current-generation entry actually occupies (run 36316430288).
+#
+# The 2.57 GB `refs/pull/2384/merge` figure above (and three sibling `setup-uv`
+# entries the `GET .../actions/caches` API reported at 1.6-2.6 GB each,
+# ~8.49 GB combined) turned out not to be real occupied storage -- issue #2567
+# tracked the discrepancy between those API-reported sizes and what CI runs
+# restoring the *same* cache key actually downloaded (~37-42 MB, matching every
+# other key in the same run byte-for-byte). Re-read on 2026-10-01, past the
+# 7-day eviction window named in #2567: all four inflated entries are gone from
+# the API listing, no replacement large entry appeared, and every current
+# `setup-uv` entry agrees with its own run's logged "Cache Size" line. No
+# `Failed to save: cache size exceeds` / eviction warning appeared in any
+# `Post Set up uv` step across the 12 `main` CI runs since #2568 (main-only
+# saves) merged. Conclusion: the inflated sizes were stale/phantom listing
+# data, not a real capacity problem -- #2559's "direction 2" (bounding the
+# Python test matrix's cache footprint) is not needed; the real per-generation
+# `setup-uv` footprint across the full 5-way matrix (3.10-3.14) is ~210 MB
+# (measured 2026-10-01: 21 current entries, 833 MB total, ~40 MB each).
 jobs:
   lint:
     name: Lint (ruff)
