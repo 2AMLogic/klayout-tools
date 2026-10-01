@@ -9258,6 +9258,47 @@ def _parameter_id(device_class: kdb.DeviceClass, name: str) -> int | None:
     return None
 
 
+def _corrected_resistor_r_ohm(
+    r_ohm: float,
+    w_um: float | None,
+    fixed_offset_ohm: float,
+    end_term_ohm_um: float,
+    width_offset_um: float,
+) -> float:
+    """Return ``r_ohm`` with one device's three ``ResistorDevice`` corrections
+    applied, in the order the PDK models compose them (issue #518, #559,
+    #2652).
+
+    Extracted from :func:`apply_resistor_fixed_offset_corrections` purely to
+    keep that function under the repository's cyclomatic-complexity ratchet
+    (C901, max 10) -- the arithmetic and its ordering are unchanged:
+
+    1. ``width_offset_um`` rescales ``R`` by ``w_um / (w_um +
+       width_offset_um)``, i.e. re-evaluates the sheet-resistance term at the
+       PDK's *effective* width without needing ``L`` read back separately.
+       Applied first, so the two additive terms below land on the
+       width-corrected value rather than being rescaled themselves.
+    2. ``end_term_ohm_um`` adds the width-normalized end/contact term
+       ``end_term_ohm_um / w_um``.
+    3. ``fixed_offset_ohm`` adds the width-independent fixed term.
+
+    ``w_um`` is the device's ``W`` parameter (µm), or ``None`` when the class
+    defines no ``W`` -- in which case the two width-dependent corrections are
+    skipped rather than guessed at. A zero ``w_um`` is likewise treated as
+    unusable (same falsy guard), avoiding a divide-by-zero, and a
+    ``width_offset_um`` that cancels ``w_um`` exactly leaves ``R`` untouched.
+    """
+    if width_offset_um and w_um:
+        new_width_um = w_um + width_offset_um
+        if new_width_um:
+            r_ohm = r_ohm * w_um / new_width_um
+    if end_term_ohm_um and w_um:
+        r_ohm += end_term_ohm_um / w_um
+    if fixed_offset_ohm:
+        r_ohm += fixed_offset_ohm
+    return r_ohm
+
+
 def apply_resistor_fixed_offset_corrections(
     netlist: kdb.Netlist, deck: ExtractionDeck
 ) -> None:
@@ -9333,22 +9374,22 @@ def apply_resistor_fixed_offset_corrections(
                 continue
             r_ohm = device.parameter(r_id)
 
-            w_ohm = None
+            w_um = None
             if end_term_ohm_um or width_offset_um:
                 w_id = _parameter_id(device_class, "W")
                 if w_id is not None:
-                    w_ohm = device.parameter(w_id)
+                    w_um = device.parameter(w_id)
 
-            if width_offset_um and w_ohm:
-                new_width_um = w_ohm + width_offset_um
-                if new_width_um:
-                    r_ohm = r_ohm * w_ohm / new_width_um
-            if end_term_ohm_um and w_ohm:
-                r_ohm += end_term_ohm_um / w_ohm
-            if fixed_offset_ohm:
-                r_ohm += fixed_offset_ohm
-
-            device.set_parameter(r_id, r_ohm)
+            device.set_parameter(
+                r_id,
+                _corrected_resistor_r_ohm(
+                    r_ohm,
+                    w_um,
+                    fixed_offset_ohm,
+                    end_term_ohm_um,
+                    width_offset_um,
+                ),
+            )
 
 
 def _apply_device_parameter_corrections(
