@@ -73,13 +73,21 @@ jobs:
         # headless); Tk and m4 are configure-time requirements of the
         # Tcl-enabled build; csh runs magic's own install-time scripts.
         # No X11/OpenGL/Cairo: scripts/install-magic.sh configures
-        # `--without-x`. Same mirror-resilient apt front end, and the same
-        # timeout/retry envelope, ci.yml's package steps use.
+        # `--without-x`. Same mirror-resilient apt front end ci.yml's package
+        # steps use.
+        #
+        # No CI_APT_* budget override (issue #2672): this step used to copy
+        # the Yosys step's pre-#2662 270s/150s pair, which fits only ONE
+        # full-length attempt and made scripts/ci-apt-install.sh WARN on
+        # every run. The override was never earned here -- `tcl-dev tk-dev m4
+        # csh` carries none of the 11.2 MB `cmake` payload that motivated
+        # #1224's wide per-command cap -- so this step takes the script's own
+        # defaults (250s / 90s), which do fit two full-length attempts inside
+        # the 5-minute backstop. Same "no override needed" shape ci.yml's
+        # ngspice / SymbiYosys / Icarus steps use.
         timeout-minutes: 5
         env:
           DEBIAN_FRONTEND: noninteractive
-          CI_APT_DEADLINE: "270"
-          CI_APT_PER_CMD_TIMEOUT: "150"
         run: scripts/ci-apt-install.sh tcl-dev tk-dev m4 csh
 
       - name: Cache pinned magic build
