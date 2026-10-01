@@ -1854,11 +1854,18 @@ EXTRACTION_DECK = ExtractionDeck(
     # - The PDK's own resistance model is more than sheet-rho: `sg13g2_tech
     #   .json`'s `CbResCalc` composes `l/weff*(b+1)*rspec + ... + 2/w*rzspec`
     #   with a per-flavour line-width delta (`*_lwd`) and a width-dependent
-    #   contact/transition term (`*_rzspec`). Neither is expressible in this
-    #   engine's `sheet_rho_ohm_sq` (+ optional fixed `fixed_offset_ohm`,
-    #   which is *not* width-dependent), so `R = L/W * rspec` is a
-    #   first-order transcription of the body term only -- stated here rather
-    #   than silently implied.
+    #   contact/transition term (`*_rzspec`). Issue #2652 closed this gap
+    #   (previously documented here as unmodelled) using the pinned
+    #   IHP-Open-PDK v0.3.0 device symbols' own closed-form `value=`
+    #   expressions (`libs.tech/xschem/sg13g2_pr/<flavour>.sym`, `b=0 m=1`):
+    #   `end_term/w + body_coeff*l/(w +- lwd)`. `end_term_ohm_um` (an
+    #   ohm-micrometre coefficient, applied as `end_term_ohm_um / W`) and
+    #   `width_offset_um` (shifts the body term's denominator from `W` to
+    #   `W + width_offset_um`) on each entry below transcribe this directly;
+    #   see each entry's own provenance comment for the `.sym` constants.
+    #   Before #2652, `R = L/W * rspec` was a first-order transcription of
+    #   the body term only, with neither term expressible via this engine's
+    #   `sheet_rho_ohm_sq` + width-independent `fixed_offset_ohm` alone.
     # - `rhigh` (the third poly-resistor flavour) -- issue #1235 resolved the
     #   ambiguity #1231 originally left this device unrecognised for.
     #   `sg13g2_tech.json` itself is genuinely self-contradictory: PyCell
@@ -1902,6 +1909,15 @@ EXTRACTION_DECK = ExtractionDeck(
                 (44, 0),  # ThickGateOx -/ a transistor, not a resistor)
             ),
             bulk_to_substrate=True,  # upstream connects `rsil_sub` to pwell
+            # Issue #2652: pinned IHP-Open-PDK v0.3.0's device symbol
+            # `libs.tech/xschem/sg13g2_pr/rsil.sym`'s `value=` attribute
+            # (`b=0 m=1`): `9.0e-6/w + 7.0*l/(w + 1.0e-8)` (SI units, w/l in
+            # metres). `end_term_ohm_um` is the `9.0e-6` ohm*m end/contact
+            # coefficient converted to ohm*um (`* 1e6`, since this engine's
+            # `W` device parameter is in micrometres); `width_offset_um` is
+            # the `1.0e-8` m line-width delta converted the same way.
+            end_term_ohm_um=9.0,
+            width_offset_um=0.01,
             provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "rsil"),
         ),
         ResistorDevice(
@@ -1924,6 +1940,16 @@ EXTRACTION_DECK = ExtractionDeck(
                 (44, 0),  # ThickGateOx -/
             ),
             bulk_to_substrate=True,  # upstream connects `rppd_sub` to pwell
+            # Issue #2652: pinned IHP-Open-PDK v0.3.0's device symbol
+            # `libs.tech/xschem/sg13g2_pr/rppd.sym`'s `value=` attribute
+            # (`b=0 m=1`): `70.0e-6/w + 260.0*l/(w + 6.0e-9)` (SI units, w/l
+            # in metres). `end_term_ohm_um` is the `70.0e-6` ohm*m
+            # end/contact coefficient converted to ohm*um (`* 1e6`, since
+            # this engine's `W` device parameter is in micrometres);
+            # `width_offset_um` is the `6.0e-9` m line-width delta converted
+            # the same way.
+            end_term_ohm_um=70.0,
+            width_offset_um=0.006,
             provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "rppd"),
         ),
         ResistorDevice(
@@ -1955,6 +1981,17 @@ EXTRACTION_DECK = ExtractionDeck(
                 (44, 0),  # ThickGateOx -/ above
             ),
             bulk_to_substrate=True,  # upstream connects `rhigh_sub` to pwell
+            # Issue #2652: pinned IHP-Open-PDK v0.3.0's device symbol
+            # `libs.tech/xschem/sg13g2_pr/rhigh.sym`'s `value=` attribute
+            # (`b=0 m=1`): `1.6e-4/w + 1360.0*l/(w - 0.04e-6)` (SI units,
+            # w/l in metres -- note the *subtracted* line-width delta,
+            # unlike rsil/rppd's added one). `end_term_ohm_um` is the
+            # `1.6e-4` ohm*m end/contact coefficient converted to ohm*um
+            # (`* 1e6`, since this engine's `W` device parameter is in
+            # micrometres); `width_offset_um` is the `-0.04e-6` m
+            # (negative) line-width delta converted the same way.
+            end_term_ohm_um=160.0,
+            width_offset_um=-0.04,
             provenance=_sg13g2_lvs_provenance("res_extraction.lvs", "rhigh"),
         ),
         # Drawn metal resistors (issue #1235), transcribed from

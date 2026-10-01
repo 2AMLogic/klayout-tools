@@ -929,8 +929,6 @@ def test_sg13g2_thick_oxide_mos_was_misclassified_before_mos_flavours(
 # Drawn poly resistors (issue #1231)
 # --------------------------------------------------------------------------- #
 
-_RES_SQUARES = 6.0  # 6um marked segment / 1um drawn width
-
 
 def _make_poly_resistor_layout(
     extra_layers: tuple[tuple[int, int], ...],
@@ -987,10 +985,12 @@ def test_golden_pair_sg13g2_poly_resistor_r_ohm_matches_provenance_coefficient(
     tmp_path: Path, name: str, extra_layers: tuple[tuple[int, int], ...]
 ):
     """A drawn 6-square `GatPoly` bar marked `polyres` and narrowed to one
-    flavour extracts as that device class with `R = squares *
-    sheet_rho_ohm_sq`, computed from the deck's own provenance-cited
-    coefficient -- and its two heads resolve to the drawn, labelled Metal1
-    pads (the resistor is not left shorted through the poly bar)."""
+    flavour extracts as that device class with `R = L / (W +
+    width_offset_um) * sheet_rho_ohm_sq + end_term_ohm_um / W` (issue
+    #2652's two-term correction of the deck's own provenance-cited
+    `sheet_rho_ohm_sq` coefficient) -- and its two heads resolve to the
+    drawn, labelled Metal1 pads (the resistor is not left shorted through
+    the poly bar)."""
     resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == name)
 
     path = _write_gds(
@@ -1003,9 +1003,13 @@ def test_golden_pair_sg13g2_poly_resistor_r_ohm_matches_provenance_coefficient(
     assert device["class"] == name
     assert device["params"]["l_um"] == pytest.approx(6.0)
     assert device["params"]["w_um"] == pytest.approx(1.0)
-    assert device["params"]["r_ohm"] == pytest.approx(
-        _RES_SQUARES * resistor.sheet_rho_ohm_sq
+    w_um = 1.0
+    l_um = 6.0
+    expected_r_ohm = (
+        l_um / (w_um + resistor.width_offset_um) * resistor.sheet_rho_ohm_sq
     )
+    expected_r_ohm += resistor.end_term_ohm_um / w_um
+    assert device["params"]["r_ohm"] == pytest.approx(expected_r_ohm)
     assert {device["nets"]["a"], device["nets"]["b"]} == {"RA", "RB"}
 
 

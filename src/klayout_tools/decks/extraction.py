@@ -108,6 +108,50 @@ class ResistorDevice:
     against) its PDK's own composite head-plus-body resistor model should
     set this rather than leave the fixed head/end term silently dropped.
 
+    ``end_term_ohm_um``/``width_offset_um`` (issue #2652) are two more
+    optional coefficients covering a composite PDK resistor model
+    ``fixed_offset_ohm`` cannot express: IHP's sg13g2 ``rsil``/``rppd``/
+    ``rhigh`` poly resistors (``libs.tech/xschem/sg13g2_pr/<flavour>.sym``'s
+    ``value=`` attribute) are each ``end_term / w + body_coeff * l / (w +-
+    lwd)`` -- an end/contact term that, unlike ``res_high_po``'s constant
+    ``rhead``, scales as **1/w** rather than being independent of width, plus
+    a body term whose denominator is the drawn width adjusted by a fixed
+    lithography bias (``lwd``), not the raw drawn width. Neither is
+    expressible as a width-independent additive constant, so they are
+    separate coefficients rather than folding into ``fixed_offset_ohm``:
+
+    - ``end_term_ohm_um`` is an ohm-micrometre coefficient: ``R`` gains
+      ``end_term_ohm_um / W`` (``W`` the already-computed device parameter,
+      in micrometres like every other KLayout device geometry parameter --
+      see ``CapacitorDevice.area_cap_f_um2``/``perim_cap_f_um``'s own units).
+      A PDK model's own coefficient is typically quoted in ohm-*metres*
+      against ``w`` in metres (e.g. sg13g2 rppd's ``70.0e-6 / w``); converting
+      to ohm-micrometres against ``W`` in micrometres is a clean factor of
+      1e6 (``70.0e-6`` ohm*m == ``70.0`` ohm*um), so deck entries transcribe
+      the PDK coefficient directly without an awkward residual scale factor.
+    - ``width_offset_um`` shifts the body term's denominator from ``W`` to
+      ``W + width_offset_um`` (micrometres, so a PDK ``lwd`` quoted in metres
+      is converted the same way): since the already-computed ``R = L / W *
+      sheet_rho_ohm_sq`` is linear in ``L``, rescaling it by ``W / (W +
+      width_offset_um)`` reproduces ``L / (W + width_offset_um) *
+      sheet_rho_ohm_sq`` without needing to read ``L`` back separately. A
+      negative value (sg13g2 rhigh's ``w - 0.04e-6``) narrows the effective
+      width the same way a positive one (rppd's/rsil's ``w + lwd``) widens
+      it.
+
+    Both are applied in the same post-extraction correction (``extract.py``'s
+    ``apply_resistor_fixed_offset_corrections``) and in the same order
+    relative to series ``combine_devices()`` folding as ``fixed_offset_ohm``
+    (applied once per surviving, possibly-combined device, using that
+    device's own already-combined ``R``/``W`` -- correct because a uniform-
+    width series string's combined ``R`` stays linear in the summed ``L``,
+    and only the two true end contacts of the folded string get an end
+    term, not one per drawn primitive). Both default to ``0.0``, the
+    identity: ``end_term_ohm_um=0.0`` adds nothing, and
+    ``width_offset_um=0.0`` leaves ``W / (W + 0.0) == 1.0``, so every deck
+    entry that does not set them extracts ``R`` bit-for-bit as before this
+    field existed.
+
     ``name`` is the extracted device-class name (``devices[].class`` in the
     JSON response, and the model token on the written ``R`` card -- a
     consumer simulating the netlist supplies a matching ``.model``, exactly
@@ -179,6 +223,8 @@ class ResistorDevice:
     terminal: tuple[int, int] | None = None
     bulk_to_substrate: bool = False
     fixed_offset_ohm: float = 0.0
+    end_term_ohm_um: float = 0.0
+    width_offset_um: float = 0.0
     flavour_option: str | None = None
     flavours: tuple[ResistorFlavour, ...] = ()
     provenance: RuleProvenance | None = None
@@ -197,7 +243,8 @@ class ResistorFlavour:
     ``sheet_rho_ohm_sq`` the owning entry is rewritten to when this flavour is
     selected -- everything else about the entry (``body``, ``marker``,
     ``requires``, ``excludes``, ``terminal``, ``bulk_to_substrate``,
-    ``fixed_offset_ohm``) is unchanged, since flavour selection never changes
+    ``fixed_offset_ohm``, ``end_term_ohm_um``, ``width_offset_um``) is
+    unchanged, since flavour selection never changes
     *which* geometry is recognised, only what device it is reported as.
     """
 

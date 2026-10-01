@@ -7723,6 +7723,168 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
     assert device["params"]["r_ohm"] == pytest.approx(_RES_SQUARES * 324.827244)
 
 
+_SG13G2_POLY_RES_LAYERS = {
+    # device_class -> tuple of additional `requires` (layer, datatype) boxes
+    # drawn over the marked segment, mirroring `decks/sg13g2.py`'s own
+    # `requires` lists for each flavour.
+    "rsil": ((24, 0),),  # Res -- the silicided-resistor marker itself
+    "rppd": ((14, 0), (28, 0)),  # pSD, SalBlock
+    "rhigh": ((14, 0), (7, 0), (28, 0)),  # pSD, nSD, SalBlock
+}
+
+
+def _make_sg13g2_poly_resistor_layout(
+    device_class: str, w_um: float, l_um: float, *, head_um: float = 3.0
+) -> kdb.Layout:
+    """A single drawn sg13g2 `rsil`/`rppd`/`rhigh` poly resistor at the given
+    drawn width/length (issue #2652) -- the sg13g2-layer-number, parametrised
+    counterpart of `_make_sky130_res_high_po_layout`, used to exercise the
+    PDK's own closed-form `end_term/w + body_coeff*l/(w +- lwd)` resistance
+    model (`ResistorDevice.end_term_ohm_um`/`width_offset_um`) against drawn
+    geometry rather than the fixed 1um width/6um length
+    `_make_poly_resistor_layout` draws.
+
+    Every flavour shares the same recognition geometry (`GatPoly.drawing`
+    `&` `polyres.drawing` `&` `EXTBlock.drawing`, further disambiguated by
+    the implant/salicide-block layers in `_SG13G2_POLY_RES_LAYERS`) --
+    exactly `decks/sg13g2.py`'s own `body`/`marker`/`requires` for each of
+    the three curated entries.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("RES")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    w_nm = int(round(w_um * 1000))
+    l_nm = int(round(l_um * 1000))
+    head_nm = int(round(head_um * 1000))
+    total_nm = l_nm + 2 * head_nm
+
+    draw(5, 0, kdb.Box(0, 0, total_nm, w_nm))  # GatPoly.drawing
+    marked = kdb.Box(head_nm, 0, head_nm + l_nm, w_nm)
+    draw(128, 0, marked)  # polyres.drawing -- the marker itself
+    draw(111, 0, marked.enlarged(200, 200))  # EXTBlock -- every flavour's head term
+    for layer, datatype in _SG13G2_POLY_RES_LAYERS[device_class]:
+        draw(layer, datatype, marked.enlarged(200, 200))
+
+    for x, name in ((head_nm // 2, "RA"), (total_nm - head_nm // 2, "RB")):
+        draw(6, 0, kdb.Box(x - 100, w_nm // 2 - 100, x + 100, w_nm // 2 + 100))  # Cont
+        draw(8, 0, kdb.Box(x - 400, 0, x + 400, w_nm))  # Metal1
+        label(8, 25, name, x, w_nm // 2)  # Metal1.pin
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    "l_um",
+    [3.43, 37.2, 82.7, 511.0],
+)
+def test_sg13g2_rppd_end_term_and_width_offset_match_pdk_formula(tmp_path, l_um):
+    """Issue #2652: `rppd`'s `r_ohm` at `w=2um` matches the pinned
+    IHP-Open-PDK v0.3.0 device symbol's own closed-form expression
+    (`libs.tech/xschem/sg13g2_pr/rppd.sym`'s `value=` attribute, `b=0 m=1`):
+    ``70.0e-6 / w + 260.0 * l / (w + 6.0e-9)`` -- not the pre-#2652
+    single-term `L / W * sheet_rho_ohm_sq` value (the first row, `l=3.43um`,
+    is the issue's own acceptance criterion: `479.57`, within `rel=1e-4`).
+    """
+    w_um = 2.0
+    path = _write_gds(
+        _make_sg13g2_poly_resistor_layout("rppd", w_um, l_um),
+        tmp_path / f"rppd_{l_um}.gds",
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / f"rppd_{l_um}.spice"))
+
+    assert report["device_counts"] == {"rppd": 1}
+    (device,) = report["devices"]
+    assert device["class"] == "rppd"
+    assert device["params"]["l_um"] == pytest.approx(l_um)
+    assert device["params"]["w_um"] == pytest.approx(w_um)
+
+    # The PDK's own closed-form expression, in micrometre-scaled
+    # coefficients (`end_term_ohm_um=70.0`, `width_offset_um=0.006`) --
+    # algebraically identical to the `.sym` file's SI-unit (metre) form.
+    expected_r_ohm = 70.0 / w_um + 260.0 * l_um / (w_um + 0.006)
+    assert device["params"]["r_ohm"] == pytest.approx(expected_r_ohm, rel=1e-9)
+    # The pre-#2652 single-term value differs from the corrected one -- at
+    # this width the `width_offset_um` denominator correction (which
+    # *shrinks* the body term, since sg13g2's `lwd` is added to `w`) and the
+    # `end_term_ohm_um` addition (which grows it) partially offset, so the
+    # net direction of the difference isn't fixed across `l_um` -- only that
+    # there *is* one.
+    assert device["params"]["r_ohm"] != pytest.approx(l_um / w_um * 260.0)
+
+
+def test_sg13g2_rppd_matches_issue_acceptance_value(tmp_path):
+    """Issue #2652's own stated acceptance criterion, verbatim: a drawn
+    `rppd` at `w=2um`, `l=3.43um` reports `r_ohm = 479.57` within `rel=1e-4`.
+    """
+    path = _write_gds(
+        _make_sg13g2_poly_resistor_layout("rppd", 2.0, 3.43), tmp_path / "rppd.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "rppd.spice"))
+
+    (device,) = report["devices"]
+    assert device["params"]["r_ohm"] == pytest.approx(479.57, rel=1e-4)
+
+
+@pytest.mark.parametrize("device_class", ["rsil", "rppd", "rhigh"])
+def test_sg13g2_poly_resistor_default_end_term_and_width_offset_report_unchanged_r_ohm(
+    tmp_path, device_class
+):
+    """`ResistorDevice.end_term_ohm_um`/`width_offset_um` default to `0.0`
+    (issue #2652): a deck entry that does not set them (mirroring every
+    deck's own fields before this feature existed) still reports `r_ohm`
+    exactly as `L / W * sheet_rho_ohm_sq` -- bit-for-bit what `klt extract`
+    reported before this feature existed, not silently corrected by
+    coefficients the deck never opted into."""
+    deck = get_extraction_deck("sg13g2")
+    (entry,) = [r for r in deck.resistors if r.name == device_class]
+    # The curated deck itself now opts in to both.
+    assert entry.end_term_ohm_um != 0.0
+    assert entry.width_offset_um != 0.0
+
+    uncorrected_deck = dataclasses.replace(
+        deck,
+        resistors=tuple(
+            dataclasses.replace(r, end_term_ohm_um=0.0, width_offset_um=0.0)
+            if r.name == device_class
+            else r
+            for r in deck.resistors
+        ),
+    )
+
+    layout = _make_sg13g2_poly_resistor_layout(device_class, 2.0, 3.43)
+    (
+        netlist,
+        _warnings,
+        _parasitic_nets,
+        _black_box_regions,
+        _dummy_devices_dropped,
+        _unmodelled_poly,
+        _abstracted_cells,
+        _dead_metal,
+        _mom_crosscheck,
+        _net_label_positions,
+        _device_instance_paths,
+        _def_pin_promotion,
+        _substrate_spreading,
+    ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
+    circuit = netlist.circuit_by_name(layout.top_cell().name)
+    devices, _device_counts = _describe_devices(circuit)
+
+    (device,) = devices
+    assert device["class"] == device_class
+    assert device["params"]["r_ohm"] == pytest.approx(
+        3.43 / 2.0 * entry.sheet_rho_ohm_sq
+    )
+
+
 # --------------------------------------------------------------------------- #
 # The deck's two-term corrections reach the *written netlist*, not just the
 # JSON report (issue #521): `klt sim` consumes the `.spice` file
