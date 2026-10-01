@@ -250,6 +250,24 @@ def _write_gds(layout: kdb.Layout, path: Path) -> str:
     return str(path)
 
 
+def _write_gds_without_timestamps(layout: kdb.Layout, path: Path) -> str:
+    """Like :func:`_write_gds`, but with the GDS2 ``BGNLIB``/``BGNSTR`` write
+    timestamps zeroed, so writing equal geometry twice yields byte-identical
+    streams.
+
+    KLayout's zero-arg ``Layout.write(path)`` overload stamps those records
+    with the current wall-clock time at *1-second* granularity, so two
+    back-to-back writes of the same layout are byte-identical only when they
+    land inside the same second -- a latent flake for any test comparing the
+    two streams (issue #2647, same root cause as #229). This mirrors what
+    `klayout_tools._layout.write_layout` does for product output (#320).
+    """
+    options = kdb.SaveLayoutOptions()
+    options.gds2_write_timestamps = False
+    layout.write(str(path), options)
+    return str(path)
+
+
 def _make_floating_gate_nmos_layout(top_name: str = "TOP") -> kdb.Layout:
     """One NMOS whose poly gate carries no label and touches nothing else --
     reproducing issue #596's motivating case: an undriven MOS gate that is
@@ -1787,10 +1805,23 @@ def test_gf180mcu_nmos_body_isolation_scoping_is_opt_in(tmp_path):
 def test_provenance_input_hash_tracks_layout_bytes(tmp_path):
     """Issue #331: `provenance.input.content_hash` identifies the input
     layout *stream* a report was produced from -- byte-identical inputs hash
-    the same, and a real geometry change (which a stale committed report
-    would not otherwise reveal) produces a different hash."""
-    path_a = _write_gds(_make_inverter_layout(), tmp_path / "inv_a.gds")
-    path_b = _write_gds(_make_inverter_layout(), tmp_path / "inv_b.gds")
+    the same (whatever they are named), and a real geometry change (which a
+    stale committed report would not otherwise reveal) produces a different
+    hash.
+
+    The two equal-content inputs are written via
+    :func:`_write_gds_without_timestamps`, not ``_write_gds``: the latter's
+    embedded GDS2 write timestamp made the two streams equal only when both
+    writes landed in the same wall-clock second (issue #2647).
+    """
+    path_a = _write_gds_without_timestamps(
+        _make_inverter_layout(), tmp_path / "inv_a.gds"
+    )
+    path_b = _write_gds_without_timestamps(
+        _make_inverter_layout(), tmp_path / "inv_b.gds"
+    )
+    # Precondition for the equal-hash assertion below: same bytes, two names.
+    assert Path(path_a).read_bytes() == Path(path_b).read_bytes()
 
     report_a = run_extract(path_a, "sky130", output=str(tmp_path / "a.spice"))
     report_b = run_extract(path_b, "sky130", output=str(tmp_path / "b.spice"))

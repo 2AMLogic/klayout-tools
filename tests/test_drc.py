@@ -716,19 +716,47 @@ def test_json_contract(tmp_path, capsys):
     assert coverage["nothing_checked_reasons"] == []
 
 
+def _write_gds_without_timestamps(layout: kdb.Layout, path: Path) -> str:
+    """Write `layout` to `path` with the GDS2 ``BGNLIB``/``BGNSTR`` write
+    timestamps zeroed, so writing equal geometry twice yields byte-identical
+    streams.
+
+    KLayout's zero-arg ``Layout.write(path)`` overload stamps those records
+    with the current wall-clock time at *1-second* granularity, so two
+    back-to-back writes of the same layout are byte-identical only when they
+    land inside the same second -- a latent flake for any test comparing the
+    two streams (issue #2647, same root cause as #229). This mirrors what
+    `klayout_tools._layout.write_layout` does for product output (#320), and
+    the identically-named helper in `tests/test_extract.py`.
+    """
+    options = kdb.SaveLayoutOptions()
+    options.gds2_write_timestamps = False
+    layout.write(str(path), options)
+    return str(path)
+
+
 def test_provenance_input_hash_tracks_layout_bytes(tmp_path):
     """Issue #331: `provenance.input.content_hash` identifies the *stream* a
     report was produced from -- two byte-identical layouts hash the same,
     and a real geometry change (which a stale committed report would
-    otherwise not reveal) produces a different hash."""
+    otherwise not reveal) produces a different hash.
+
+    The two equal-content inputs are written via
+    :func:`_write_gds_without_timestamps`, not the raw ``Layout.write(path)``
+    overload: the latter's embedded GDS2 write timestamp made the two streams
+    equal only when both writes landed in the same wall-clock second
+    (issue #2647).
+    """
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     top.shapes(layout.layer(64, 20)).insert(kdb.Box(0, 0, 1000, 1000))
 
     path_a = tmp_path / "a.gds"
     path_b = tmp_path / "b.gds"
-    layout.write(str(path_a))
-    layout.write(str(path_b))
+    _write_gds_without_timestamps(layout, path_a)
+    _write_gds_without_timestamps(layout, path_b)
+    # Precondition for the equal-hash assertion below: same bytes, two names.
+    assert path_a.read_bytes() == path_b.read_bytes()
 
     report_a = run_drc(str(path_a), "sky130")
     report_b = run_drc(str(path_b), "sky130")
@@ -740,7 +768,7 @@ def test_provenance_input_hash_tracks_layout_bytes(tmp_path):
     # Now mutate one file's geometry and re-run: the hash must change even
     # though the deck/version fields do not.
     top.shapes(layout.layer(64, 20)).insert(kdb.Box(2000, 2000, 3000, 3000))
-    layout.write(str(path_b))
+    _write_gds_without_timestamps(layout, path_b)
     report_b_modified = run_drc(str(path_b), "sky130")
 
     assert (
