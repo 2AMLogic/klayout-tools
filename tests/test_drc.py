@@ -5910,16 +5910,18 @@ def test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc():
 def test_sky130_deck_check_kind_breakdown():
     """Structural regression for the deck's own `docs/cli/drc.md` "Coverage"
     kind-breakdown table (#1976, extending #1955's 52-rule baseline; #2321
-    adds `tap.width.1`/`tap.enclosing.licon.1`): 59 rules total -- 16
+    adds `tap.width.1`/`tap.enclosing.licon.1`; #2594 adds
+    `licon1.width.1`/`mcon.width.1`, the minimum halves of the two fixed-size
+    cut rules `licon.1`/`ct.1`): 61 rules total -- 18
     `width`, 13 `space`, 1 `isolated`, 17 `enclosing`, 2 `separation`,
     10 `area`. Fails loudly (at the exact number that changed) if a future
     rule addition/removal drifts from that table without updating it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 59
+    assert len(deck) == 61
     counts = Counter(rule.check for rule in deck)
     assert counts == {
-        "width": 16,
+        "width": 18,
         "space": 13,
         "isolated": 1,
         "enclosing": 17,

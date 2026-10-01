@@ -1,8 +1,9 @@
 # Golden-pair manifest (`klt drc` rules)
 
 Declarative, rule-id-keyed golden violate/clean fixture manifest for
-`sky130.py`'s width/space `DrcRule` entries (29, +1 for issue #1420's
-`nwell.width.1` and +1 for issue #2321's `tap.width.1`; `nwell.space.1`
+`sky130.py`'s width/space `DrcRule` entries (31, +1 for issue #1420's
+`nwell.width.1`, +1 for issue #2321's `tap.width.1` and +2 for issue #2594's
+`licon1.width.1`/`mcon.width.1`; `nwell.space.1`
 -- issue #1420's other addition -- uses the
 `"isolated"` check kind as of issue #1654, so it no longer falls within this
 manifest's width/space-only scope), `sg13g2.py`'s width/space
@@ -55,9 +56,9 @@ tests/golden_deck/
   __init__.py            # package marker (tests/ import convention, see below)
   manifest.py            # load_manifest() / build_layout() / write_layout()
   generate_golden_deck.py  # regeneration script (see "Regenerating" below)
-  sky130/manifest.json     # 29 entries (11 at issue #747, width/space-only,
-                            # grown since -- latest +1 is issue #2321's
-                            # tap.width.1)
+  sky130/manifest.json     # 31 entries (11 at issue #747, width/space-only,
+                            # grown since -- latest +2 are issue #2594's
+                            # licon1.width.1/mcon.width.1)
   gf180mcu/manifest.json   # 46 entries (full DRC deck, issue #904;
                             # +2 for issue #1110's DF.1a/DF.3a _LV/_MV split,
                             # +2 for issue #1688's metal4.width.1/
@@ -248,14 +249,15 @@ Tier 3 has been run against a real `volare`-fetched sky130A install
 first for issue #747's original 11 width/space rules, then again as the
 manifest grew: PR #782 (`met3-5.*`, `via2-4.*`, `capm.*`, `capm2.*`), issue
 #1420 (`nwell.width.1`), issue #2321 (`tap.width.1`, cross-checked later
-under issue #2343). Manifest counts as of `bdfc4585` (2026-09-23), its most
-recent change:
+under issue #2343), issue #2594 (`licon1.width.1`/`mcon.width.1`,
+cross-checked in the same pass that added them). Manifest counts as of issue
+#2594 (2026-10-01), its most recent change:
 
-**29/29 rules verified against the native deck, 17 documented
-approximations, 0 unexplained disagreements** (58 fixtures: 29 violate + 29
+**31/31 rules verified against the native deck, 19 documented
+approximations, 0 unexplained disagreements** (62 fixtures: 31 violate + 31
 clean).
 
-**Twelve of the 29 agree outright** on both fixtures and carry
+**Twelve of the 31 agree outright** on both fixtures and carry
 `"expected_disagreement": null` -- `li1.width.1`, `li1.space.1`, and the
 `width`/`space` pair for each of `met1` through `met5` (ten rules). Each
 violate fixture trips the corresponding native BEOL rule (e.g.
@@ -264,14 +266,14 @@ violate fixture trips the corresponding native BEOL rule (e.g.
 gf180mcu's `null`s (see below), these sky130 `null`s are *positive*
 cross-check results from real runs, not "not cross-checked".
 
-**The remaining seventeen** genuinely disagree on exactly one of their two
+**The remaining nineteen** genuinely disagree on exactly one of their two
 fixtures, and each carries a non-null `expected_disagreement` in
 `sky130/manifest.json` recording why. These are documented approximations,
 not unexplained failures -- the tier-3 test tolerates exactly these and
 still fails loudly on any *other* disagreement. They fall into two classes,
-and every one of the seventeen belongs to one of them:
+and every one of the nineteen belongs to one of them:
 
-**Class A -- the native rule is FEOL-gated (8 rules).** The `violate`
+**Class A -- the native rule is FEOL-gated (9 rules).** The `violate`
 fixture disagrees: the curated engine reports violations, the native deck
 reports clean. `sky130A.lydrc` hard-codes `FEOL = false` (its own "do not
 change" comment, verified against a real `volare`-fetched install) with no
@@ -280,7 +282,7 @@ sit inside an `if FEOL ... end` block `run_drc_klayout_engine` never
 evaluates *at all*, regardless of the input layout.
 
 **Class B -- an isolated single-layer fixture trips unrelated native rules
-(9 rules).** The `clean` fixture disagrees: the curated engine reports
+(10 rules).** The `clean` fixture disagrees: the curated engine reports
 clean, the native deck reports violations. A bare, isolated shape is the
 only geometry this single-rule, single-layer pilot can build, and it trips
 native rules that have nothing to do with the transcribed width/space
@@ -300,7 +302,9 @@ this pilot's geometry.
 | `capm.space.1` | A | `violate` | violations | clean | Same FEOL-gated CAPM/CAP2M section as `capm.width.1`. |
 | `capm2.width.1` | A | `violate` | violations | clean | Same FEOL-gated CAPM/CAP2M section as `capm.width.1`. |
 | `capm2.space.1` | A | `violate` | violations | clean | Same FEOL-gated CAPM/CAP2M section as `capm.width.1`. |
-| `mcon.space.1` | B | `clean` | clean | violations (`ct.1`, `ct.4`) | A bare, isolated mcon shape trips `ct.1` (mcon edges must be exactly 0.17um -- this deck has no `mcon.width.1` to size a fixture against) and `ct.4` (mcon must be covered by li), neither of which this pilot's geometry can satisfy. |
+| `licon1.width.1` | A | `violate` | violations | clean | Same `FEOL = false` gate (issue #2594) -- the native `licon.1` lives inside the script's `if FEOL ... end` block, so the real deck reports zero rules checked on either fixture. |
+| `mcon.space.1` | B | `clean` | clean | violations (`ct.1`, `ct.4`) | A bare, isolated mcon shape trips `ct.1` (mcon edges must be exactly 0.17um -- a fixed size this deck's own `mcon.width.1` carries only the minimum half of, pending #2388) and `ct.4` (mcon must be covered by li), neither of which this pilot's geometry can satisfy. |
+| `mcon.width.1` | B | `clean` | clean | violations (`ct.1`, `ct.4`) | Same pair as `mcon.space.1` (issue #2594): `ct.1` is an exact min *and* max 0.17um, so any bar wide enough to pass this engine's min-only `width_check` is over the native maximum -- the `via.1a` mismatch one stack level down. |
 | `via.width.1` | B | `clean` | clean | violations (`via.1a`, `m2.via`, `via.4c.5c`) | The native `via.1a` demands an *exact* 0.15um square (`edges.without_length(0.15)`), not a minimum width; any fixture wide enough to pass this engine's min-only `width_check` is by construction wider than the native max. |
 | `via.space.1` | B | `clean` | clean | violations (`m2.5`, `m2.via`, `via.1a`, `via.4c.5c`) | Same exact-size `via.1a` mismatch, plus the native deck's met2-enclosure rules that this single-layer fixture never draws. |
 | `via2.width.1` | B | `clean` | clean | violations (`via2.1a`, `via2`, `m3.via2`, `via2.5`) | Same exact-size mismatch (`via2.1a`), plus met2/met3 enclosure rules and `via2.5`'s 2-adjacent-edges-relaxed refinement this curated deck does not model. |

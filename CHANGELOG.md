@@ -14,6 +14,34 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2594, `klt gen`/`klt gen compose`/`klt drc` on `sky130`;
+  additive — **no** `schema_version` bump, but user-visible on two axes:
+  drawn `licon1`/`mcon` geometry shrinks, and `provenance.deck.content_hash`
+  for `sky130` changes): #2585 clamped every drawn cut on a *fixed-size*
+  cut/via layer (a foundry rule that is a minimum **and** a maximum) down to
+  its exact size, but scoped the sky130 side to `via` (68/44) alone. Sky130's
+  two lowest cut layers are the same class of rule and were missed:
+  `licon.1` is `licon.not(prec_resistor).drc(length != 0.17)` ("min/max.
+  licon length : 0.17um") and `ct.1` is `mcon.edges.without_length(0.17)`
+  ("minimum/maximum width of mcon : 0.17um") — both verified against
+  `sky130A_mr.drc` and `sky130.lydrc` at the pinned open_pdks commit this
+  deck already cites. So *every* sky130 generator output drew an oversized
+  contact (0.22 µm, over the 0.17 µm maximum) on every unit-device/ring
+  contact and every `klt gen compose` li1↔met1 via drop. Both layers now
+  clamp to 0.17 µm, about each cut's own centre, exactly as #2585 does
+  elsewhere — contact regions, landing pads, ports and `bbox_um` are
+  unchanged, so a cut's enclosure only grows. The curated `sky130` DRC deck
+  additionally gains the *minimum* halves of those two rules,
+  `licon1.width.1` and `mcon.width.1` (both 0.17 µm): before this it carried
+  **no** width rule of any kind on either layer, so the oversized cut was
+  invisible to `klt drc --deck sky130` even in principle. Their maximum
+  halves (`DrcRule.threshold_max_dbu`) stay deferred to #2388 alongside
+  `via.width.1`'s. One upstream exemption this per-layer clamp cannot
+  express — a licon on a precision poly resistor (`rpm`/`urpm`, i.e.
+  `res_array`'s `flavor: "high"`/`"xhigh"`) is held to 0.19/2.0 µm edges by
+  `licon.1b/c` instead — is unchanged by this fix (the pre-#2594 0.22 µm cut
+  did not satisfy it either) and stays tracked under #2449. See
+  `docs/cli/gen.md`'s "Fixed-size cut/via layers (issue #2585)" section.
 - **Added** (#2638, `klt gen` + `klt gen-compose`; additive —
   `schema_version` unchanged on both): `gen-compose`'s `"explicit"`-placement
   clearance advisory (#692) no longer fires on the two placements that sit

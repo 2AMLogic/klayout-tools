@@ -8006,8 +8006,9 @@ def test_compose_via_drop_ladder_routes_two_hops_down_to_base_metal(tmp_path, pd
     assert list(top.shapes(via1).each())  # at least one met1<->met2 via drawn
     # Issue #2585: sky130's `via` is a *fixed*-size cut (`via.1a_a`/`via.1a_b`,
     # min and max 0.15um) -- every via-drop cut on it is drawn at exactly
-    # that side, never the generic 0.22um budget, while `mcon` (a minimum-only
-    # cut rule) keeps the generic size.
+    # that side, never the generic 0.22um budget. Issue #2594: so is `mcon`
+    # (`ct.1`/`ct.1_a`+`ct.1_b`, min and max 0.17um), so both hops of this
+    # ladder are now clamped, each to its own layer's fixed size.
     via1_sides = {
         (round(s.box.width() * layout.dbu, 6), round(s.box.height() * layout.dbu, 6))
         for s in top.shapes(via1).each()
@@ -8017,7 +8018,7 @@ def test_compose_via_drop_ladder_routes_two_hops_down_to_base_metal(tmp_path, pd
         (round(s.box.width() * layout.dbu, 6), round(s.box.height() * layout.dbu, 6))
         for s in top.shapes(mcon).each()
     }
-    assert mcon_sides == {(0.22, 0.22)}
+    assert mcon_sides == {(0.17, 0.17)}
     # An intermediate landing pad on met1 (neither the backbone's own layer
     # nor the pin's own layer) is exactly the multi-hop ladder's new shape --
     # a single-hop drop never draws anything on met1 for this request.
