@@ -160,6 +160,28 @@ reports `"unconstrained"` alongside it, and neither command's
 `schema_version` moved. See `docs/cli/place-and-route.md`'s "I/O timing
 constraints ... and `timing_status`" section for the full derivation.
 
+**Disambiguating an overloaded numeric field follows the same rule — add the
+sibling, never retype or redefine the original.** `klt gen`'s
+`drc_hints.min_spacing_um` carries two different quantities depending on the
+generator: a genuine keep-out clearance (`guard_ring`'s enclosure,
+`mos_array`'s same-layer margin) for most, but for a generator taking an
+inter-unit `spacing_um` (`cap_array`, `res_array`) the *intra-array pitch
+actually drawn* — a number the caller chooses and may widen far past any rule.
+A consumer reading it as a keep-out radius (`klt gen-compose`'s
+`"explicit"`-placement clearance advisory did) is wrong on the second kind.
+Issue #2638 resolved that by adding `drc_hints.foreign_clearance_um` on those
+two generators only: `min_spacing_um` keeps its documented meaning, type, and
+value everywhere, and a consumer that needs a clearance reads the new field
+when present and falls back to `min_spacing_um` when absent — which is exactly
+what every pre-#2638 report, every hand-written one, and every generator that
+never grew the field continues to get. Paired with it, `klt gen-compose` gained
+an optional request field (`blocks[].abuts`, a list of block ids a placement is
+intentionally flush with or inside) and echoes it back as `blocks[].abuts`:
+additive on both sides under the request-field rule above — a request valid
+before is still valid and still means what it meant. Neither command's
+`schema_version` moved. See `docs/cli/gen-compose.md`'s "Which hint the
+advisory reads, and the two legitimate violations (#2638)".
+
 **Not every field a verb reports is a cross-build contract at all** — some
 are extractor/engine-internal bookkeeping with no meaning outside the one
 run that produced them (e.g. `klt extract`'s `net_id`/anonymous `$N`

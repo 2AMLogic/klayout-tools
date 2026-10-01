@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2638, `klt gen` + `klt gen-compose`; additive —
+  `schema_version` unchanged on both): `gen-compose`'s `"explicit"`-placement
+  clearance advisory (#692) no longer fires on the two placements that sit
+  inside a declared minimum *legitimately*, so `warnings[]` is gateable
+  again rather than something a consumer has to filter by string match.
+  (1) `klt gen cap_array`/`res_array` now also report
+  `drc_hints.foreign_clearance_um` — the clearance the block needs from
+  *unrelated* geometry, bounded by the family's/metal level's own spacing
+  floor under the generic same-layer margin. Their `drc_hints.min_spacing_um`
+  is unchanged and still reports the caller's own *intra-array* pitch, which
+  a `num: 2` request may deliberately widen far past any rule; the advisory
+  now reads `foreign_clearance_um` when present and falls back to
+  `min_spacing_um` otherwise (every other generator, every pre-#2638 report,
+  every hand-written one), and names in the warning string whichever field it
+  compared against. (2) `gen-compose` requests accept an optional
+  `blocks[].abuts` — other block ids this block is intentionally placed
+  against or inside — which suppresses the advisory for exactly those pairs,
+  symmetrically, leaving one `drc_hints.notes[]` entry per suppressed
+  direction and echoing the declaration back as `blocks[].abuts` in the
+  response. An `abuts` entry naming an unknown id, this block's own id, or a
+  non-string is an application error (exit 1). An undeclared placement inside
+  a block's real foreign clearance still warns exactly as #692 intended, and
+  `klt drc` remains the authority on rule compliance either way.
 - **Added** (#2628, `klt synthesize`; additive — `schema_version`
   unchanged): a `sta_unavailable_reason` field (string | null) says **why**
   the native gate-level `sta` stage produced no number. `null` exactly when
