@@ -12563,13 +12563,107 @@ def test_geometry_disclosure_reflects_compare_parameters_not_class_defaults(tmp_
     ] == ["w_um"]
 
     # And nothing claims `W` went uncompared.
-    assert _geometry_entries(report) == []
     (coverage,) = report["device_parameter_coverage"]
     assert coverage["compared"] == ["R", "W"]
+    # Issue #2654: `L`/`A`/`P` are class-default *secondary* on
+    # `DeviceClassResistor` -- naming `R`/`W` did not take them out of this
+    # compare, KLayout's own class defaults never put them in it. The reason
+    # is therefore `"secondary"`, not `"compare_parameters"`.
     assert coverage["not_compared"] == [
-        {"parameter": "L", "reason": "compare_parameters"},
-        {"parameter": "A", "reason": "compare_parameters"},
-        {"parameter": "P", "reason": "compare_parameters"},
+        {"parameter": "L", "reason": "secondary"},
+        {"parameter": "A", "reason": "secondary"},
+        {"parameter": "P", "reason": "secondary"},
+    ]
+    # ...and because `compare_parameters` is no longer credited with
+    # excluding them, they are back under the one disclosure that *is*
+    # accurate about them (issue #2461's own warning), instead of silently
+    # having none at all.
+    (geometry,) = _geometry_entries(report)
+    assert geometry["details"]["compared_parameters"] == ["R", "W"]
+    assert geometry["details"]["not_compared_parameters"] == ["A", "L", "P"]
+
+
+def test_compare_parameters_does_not_disclose_class_default_secondary_as_excluded(
+    tmp_path,
+):
+    """Issue #2654's reproduction, in its smallest form: *adding* a
+    resistor's `L`/`W` to the compare must not report the class's remaining
+    `A`/`P` as parameters the caller's option excluded.
+
+    `options.compare_parameters` can only narrow, so naming `["R", "L", "W"]`
+    necessarily disables `A`/`P` -- but both were already
+    `is_primary == False` by `DeviceClassResistor`'s own definition, so the
+    option changed nothing about whether they were compared and must not be
+    blamed for it. A caller who asked for *more* coverage used to get two
+    spurious `device.parameter_excluded` warnings for their trouble.
+    """
+    report = run_lvs(
+        _geometry_request(
+            tmp_path,
+            _GEOMETRY_RESISTOR_LAYOUT,
+            _GEOMETRY_RESISTOR_REFERENCE_WIDE,
+            "res_block",
+            options={"compare_parameters": {"RES": ["R", "L", "W"]}},
+        )
+    )
+
+    # `W` is genuinely compared now, so the width difference is a finding.
+    assert report["status"] == "mismatch"
+
+    # Nothing in the report attributes `A`/`P` to the caller's option.
+    assert [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == lvs.CATEGORY_DEVICE_PARAMETER_EXCLUDED
+    ] == []
+
+    (coverage,) = report["device_parameter_coverage"]
+    assert coverage["compared"] == ["R", "L", "W"]
+    assert coverage["not_compared"] == [
+        {"parameter": "A", "reason": "secondary"},
+        {"parameter": "P", "reason": "secondary"},
+    ]
+
+
+def test_compare_parameters_still_discloses_a_narrowed_away_primary(tmp_path):
+    """The genuine narrowing case issue #1928 built the option for, on the
+    same resistor class: `["L", "W"]` drops `R`, the one parameter
+    `DeviceClassResistor` declares primary, so `R` really was taken out of a
+    compare it would otherwise have taken part in.
+
+    That still reports a `device.parameter_excluded` warning and still reads
+    `reason: "compare_parameters"` -- issue #2654 narrows *which* parameters
+    are attributed to the option, never whether a real exclusion is
+    disclosed.
+    """
+    report = run_lvs(
+        _geometry_request(
+            tmp_path,
+            _GEOMETRY_RESISTOR_LAYOUT,
+            _GEOMETRY_RESISTOR_REFERENCE_WIDE,
+            "res_block",
+            options={"compare_parameters": {"RES": ["L", "W"]}},
+        )
+    )
+
+    (excluded,) = [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == lvs.CATEGORY_DEVICE_PARAMETER_EXCLUDED
+    ]
+    assert excluded["severity"] == "warning"
+    assert excluded["side"] == "both"
+    assert excluded["device"]["class"] == "RES"
+    assert excluded["details"]["parameter"] == "R"
+    assert excluded["details"]["compared_parameters"] == ["L", "W"]
+    assert "NOT verified" in excluded["description"]
+
+    (coverage,) = report["device_parameter_coverage"]
+    assert coverage["compared"] == ["L", "W"]
+    assert coverage["not_compared"] == [
+        {"parameter": "R", "reason": "compare_parameters"},
+        {"parameter": "A", "reason": "secondary"},
+        {"parameter": "P", "reason": "secondary"},
     ]
 
 
@@ -12705,7 +12799,12 @@ def test_scoping_a_placeholder_excluded_class_does_not_contradict_itself(tmp_pat
         for entry in report["mismatches"]
         if entry["category"] == "device.parameter_excluded"
     }
-    assert excluded == {"R", "A", "P"}
+    # Issue #2654: only `R` is attributed to the option -- it is the one
+    # parameter of this class that `is_primary` before the option ran, so it
+    # is the one the option genuinely took out of the compare. `A`/`P` are
+    # class-default secondary and are disclosed as such in
+    # `device_parameter_coverage`/`device.geometry_not_compared` instead.
+    assert excluded == {"R"}
 
     properties = [
         entry["property"]["name"]
@@ -12713,7 +12812,11 @@ def test_scoping_a_placeholder_excluded_class_does_not_contradict_itself(tmp_pat
         if entry["category"] == "device.property"
     ]
     # Exactly the scoped-in parameter that genuinely differs -- no `r`, `a`
-    # or `p` finding contradicting the three disclosures above.
+    # or `p` finding contradicting the disclosures above. `A`/`P` losing
+    # their `device.parameter_excluded` entry must NOT put them back in front
+    # of the classification pass: they are still disabled for this run, so
+    # the zero-vs-nonzero difference between the two sides stays out of
+    # `mismatches[]` (issue #2462).
     assert properties == ["w_um"]
 
 

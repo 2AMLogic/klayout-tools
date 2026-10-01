@@ -14,6 +14,33 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2654, `klt lvs`; `schema_version` unchanged, no new field — but
+  **a request using `options.compare_parameters` can emit fewer
+  `device.parameter_excluded` entries and different
+  `device_parameter_coverage[].not_compared[].reason` values than before**):
+  `options.compare_parameters` can only *narrow*, so enabling one parameter
+  of a class ("compare this resistor's `L`/`W`, not just its `R`") also
+  disables every sibling the class declares. Every one of those siblings was
+  reported as a `device.parameter_excluded` warning and as
+  `reason: "compare_parameters"` — including the ones the device class itself
+  declares **secondary** (`is_primary == false`: a resistor's
+  `L`/`W`/`A`/`P`, a MOS class's `AS`/`AD`/`PS`/`PD`), which no default
+  compare ever covered either. A caller scoping `sg13g2`'s `rppd` to
+  `["R", "L", "W"]` to *add* geometry coverage therefore got two warnings
+  saying it had dropped the derived `A`/`P` "from this compare", attributing
+  to the caller's own option an exclusion that was KLayout's class default
+  plus the reference format's inability to state `A`/`P` at all. Only a
+  parameter that was primary — actually being compared — immediately before
+  the option ran now yields a `device.parameter_excluded` entry and
+  `reason: "compare_parameters"`; a class-default-secondary parameter reads
+  `reason: "secondary"` and is disclosed by the
+  `device.geometry_not_compared` warning beside it, so nothing it says goes
+  undisclosed. The genuine narrowing case (issue #1928's own scenario:
+  scoping a MOS class to `["W"]` to drop a mismatched primary `L`) is
+  unchanged, and a disabled parameter is still disabled — it cannot produce a
+  `device.property` error or veto an `options.parameter_tolerance` snap
+  (issue #2462), whichever reason the report gives for it. See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md), "`device.parameter_excluded`".
 - **Added** (#2653, `klt lvs`; additive — `schema_version` unchanged, opt-in
   only, **no change to any report for a request that does not use it**): a
   `hints.short_nets` request hint that resolves a **mask-option**

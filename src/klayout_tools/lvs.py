@@ -1588,6 +1588,16 @@ def run_lvs(request: str) -> dict[str, Any]:
     # which hook excluded each one.
     placeholder_excluded: set[tuple[str, str]] = set()
     compare_scoped_excluded: set[tuple[str, str]] = set()
+    # Issue #2654: the subset of `compare_scoped_excluded` that
+    # `options.compare_parameters` actually took *out of* the compare -- the
+    # parameters that were primary before `enable_parameter` ran. The option
+    # can only narrow, so scoping a class to one subset also disables every
+    # sibling the caller did not name; a sibling the class itself declares
+    # secondary was never compared, so the coverage block must not attribute
+    # its exclusion to the caller's option (see
+    # `_record_excluded_parameters`). The full set above still drives the
+    # classification pass's suppression, unchanged.
+    compare_scoped_narrowed: set[tuple[str, str]] = set()
     # Issue #1998: populated only for `engine == "klayout"` -- the `netgen`
     # branch below rejects any `request.hints` outright (no equivalent hook
     # in that engine's scope), so this stays empty for every netgen run.
@@ -1651,6 +1661,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             layout_netlist,
             reference_netlist,
             compare_scoped_excluded,
+            compare_scoped_narrowed,
         )
 
         # Issue #2461: read the two netlists' device-class state *after* every
@@ -1663,7 +1674,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             layout_netlist,
             reference_netlist,
             placeholder_excluded,
-            compare_scoped_excluded,
+            compare_scoped_narrowed,
         )
         excluded_parameters = placeholder_excluded | compare_scoped_excluded
 
@@ -5381,19 +5392,48 @@ def _record_excluded_parameters(
     device_class: Any,
     wanted_lower: set[str],
     excluded_parameters: set[tuple[str, str]] | None,
+    narrowed_parameters: set[tuple[str, str]] | None = None,
+    primary_before: AbstractSet[str] = frozenset(),
 ) -> None:
     """Note every parameter ``_apply_compare_parameters`` just disabled on
-    ``device_class`` in ``excluded_parameters`` (issue #2461), keyed by that
-    side's own class spelling -- the two sides' spellings can differ, see
-    :func:`_apply_reference_placeholder_values`. A no-op when the caller did
-    not ask for the set."""
-    if excluded_parameters is None:
-        return
-    excluded_parameters.update(
+    ``device_class``, keyed by that side's own class spelling -- the two
+    sides' spellings can differ, see
+    :func:`_apply_reference_placeholder_values`.
+
+    **Two sets, because they answer two different questions** (issue #2654):
+
+    * ``excluded_parameters`` (issue #2461) -- *every* parameter this option
+      just disabled, whatever its state beforehand. This is the set the
+      classification pass downstream reads to keep itself from reporting a
+      ``device.property`` error on, or vetoing an
+      ``options.parameter_tolerance`` snap over, a parameter this run does
+      not compare. It has to stay complete: that pass deliberately walks
+      *secondary* parameters too (see
+      :func:`~klayout_tools.lvs_mismatch._param_pair_is_comparable`), so
+      dropping one from this set would put a difference the engine never
+      looked at back into ``mismatches[]``.
+    * ``narrowed_parameters`` (issue #2654) -- only the parameters this
+      option genuinely *took out of* the compare: the ones whose
+      ``is_primary`` was ``True`` before ``enable_parameter`` ran
+      (``primary_before``, lower-cased). A parameter the device class itself
+      already declared secondary was never going to be compared, so naming a
+      sibling parameter did not exclude it and the report must not say it
+      did -- it is disclosed as ``reason: "secondary"`` instead (see
+      :data:`PARAMETER_NOT_COMPARED_SECONDARY`).
+
+    A no-op for whichever set the caller did not ask for.
+    """
+    excluded = {
         (device_class.name.lower(), param.name.lower())
         for param in device_class.parameter_definitions()
         if param.name.lower() not in wanted_lower
-    )
+    }
+    if excluded_parameters is not None:
+        excluded_parameters.update(excluded)
+    if narrowed_parameters is not None:
+        narrowed_parameters.update(
+            pair for pair in excluded if pair[1] in primary_before
+        )
 
 
 def _apply_compare_parameters(
@@ -5401,6 +5441,7 @@ def _apply_compare_parameters(
     layout_netlist: Any,
     reference_netlist: Any,
     excluded_parameters: set[tuple[str, str]] | None = None,
+    narrowed_parameters: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Enable exactly the requested parameters on each named device class,
     disabling every other declared parameter on **both** sides via
@@ -5440,18 +5481,37 @@ def _apply_compare_parameters(
     hatch for when that narrower fix is not (yet) available.
 
     Returns one ``severity: "warning"`` :data:`CATEGORY_DEVICE_PARAMETER_EXCLUDED`
-    entry per parameter excluded from a named class (one entry regardless of
-    how many sides that class resolves on, ``side: "both"``), which
-    ``run_lvs`` appends to ``mismatches[]``. The disclosure is the point --
-    same discipline as ``device.bulk_reconciled``/``device.placeholder_value``:
-    a ``"match"`` reached with a parameter scoped out is never silently
-    indistinguishable from one where every parameter actually agreed.
+    entry per parameter this option **narrowed away** from a named class (one
+    entry regardless of how many sides that class resolves on, ``side:
+    "both"``), which ``run_lvs`` appends to ``mismatches[]``. The disclosure
+    is the point -- same discipline as ``device.bulk_reconciled``/
+    ``device.placeholder_value``: a ``"match"`` reached with a parameter
+    scoped out is never silently indistinguishable from one where every
+    parameter actually agreed.
 
-    ``excluded_parameters`` (issue #2461), when given, collects every
-    ``(class name, parameter name)`` pair disabled here, lower-cased, under
-    each resolved side's own class spelling -- see
-    :data:`~klayout_tools.lvs_mismatch.ExcludedParameters`. Before that set
-    existed, the classification pass downstream still walked *every* declared
+    **"Narrowed away", not "unnamed"** (issue #2654). Because the option can
+    only narrow, enabling one secondary parameter of a class necessarily
+    disables every other parameter that class declares -- so naming
+    ``["R", "L", "W"]`` on a resistor also disables its ``A``/``P``. Those
+    two were ``is_primary == False`` by ``DeviceClassResistor``'s own
+    definition and therefore never took part in any default compare either:
+    the caller's option changed nothing about them, and crediting it with
+    excluding them attributed to the caller an exclusion that is KLayout's
+    own class default (the caller asked for *more* coverage and the report
+    answered with two warnings saying it dropped two axes). Only a parameter
+    that was primary -- actually being compared -- immediately before this
+    function ran yields an entry; the rest are disclosed, accurately, as
+    ``reason: "secondary"`` by :func:`_device_parameter_coverage` and by the
+    ``device.geometry_not_compared`` warning beside it.
+
+    ``excluded_parameters`` (issue #2461) and ``narrowed_parameters``
+    (issue #2654), when given, collect ``(class name, parameter name)`` pairs
+    disabled here, lower-cased, under each resolved side's own class
+    spelling -- the first every one of them, the second only the ones that
+    were primary beforehand; see :func:`_record_excluded_parameters` for why
+    the two differ, and
+    :data:`~klayout_tools.lvs_mismatch.ExcludedParameters`. Before the first
+    set existed, the classification pass downstream still walked *every* declared
     parameter and reported a ``device.property`` **error** for each one that
     differed, including the very parameters disclosed as excluded right here
     (issue #2462's measurement: a class scoped to ``["L", "W"]`` against a
@@ -5509,15 +5569,50 @@ def _apply_compare_parameters(
         )
         resolved_name = resolved_classes[0].name
 
-        for device_class in resolved_classes:
+        # Issue #2654: which parameters were *actually taking part* in the
+        # compare before this option ran, per resolved side.
+        # `enable_parameter` flips `is_primary` in place, so the snapshot has
+        # to be taken before the loop below -- and only a parameter that was
+        # primary here is one this option genuinely narrowed away (see the
+        # docstring's "Narrowed away, not unnamed").
+        primary_before: list[tuple[Any, frozenset[str]]] = [
+            (
+                device_class,
+                frozenset(
+                    param.name.lower()
+                    for param in device_class.parameter_definitions()
+                    if param.is_primary
+                ),
+            )
+            for device_class in resolved_classes
+        ]
+
+        for device_class, was_primary in primary_before:
             for param in device_class.parameter_definitions():
                 device_class.enable_parameter(
                     param.name, param.name.lower() in wanted_lower
                 )
-            _record_excluded_parameters(device_class, wanted_lower, excluded_parameters)
+            _record_excluded_parameters(
+                device_class,
+                wanted_lower,
+                excluded_parameters,
+                narrowed_parameters,
+                was_primary,
+            )
+
+        # Primary on *either* resolved side is enough to disclose: the two
+        # sides' class objects are distinct (and a class resolving on one side
+        # only is legitimate), while the entry below is a single `side:
+        # "both"` disclosure per parameter.
+        narrowed_lower = {
+            name
+            for _, was_primary in primary_before
+            for name in was_primary
+            if name not in wanted_lower
+        }
 
         for param_lower, param_name in sorted(known_params.items()):
-            if param_lower in wanted_lower:
+            if param_lower in wanted_lower or param_lower not in narrowed_lower:
                 continue
             entries.append(
                 _mismatch(
@@ -5578,13 +5673,22 @@ _GEOMETRY_DISCLOSURE_CLASS_KINDS: tuple[tuple[str, str], ...] = (
 #:   that, so ``kdb.NetlistComparer`` never compares it. This is the case
 #:   issue #2461 was filed about: it has no other disclosure anywhere in the
 #:   report, which is why it also yields a
-#:   :data:`CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED` warning.
+#:   :data:`CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED` warning. Issue #2654: this
+#:   covers a parameter ``options.compare_parameters`` *disabled* while
+#:   scoping a class to a different subset, too -- the option can only
+#:   narrow, so enabling one parameter necessarily disables the siblings the
+#:   caller did not name, and a sibling that was already secondary was never
+#:   in the compare for the option to remove it from.
 #: * ``"placeholder_value"`` -- excluded by
 #:   :func:`_apply_reference_placeholder_values` (issue #1907); already
 #:   disclosed as :data:`CATEGORY_DEVICE_PLACEHOLDER_VALUE`.
-#: * ``"compare_parameters"`` -- excluded by :func:`_apply_compare_parameters`
-#:   (issue #1928); already disclosed as
-#:   :data:`CATEGORY_DEVICE_PARAMETER_EXCLUDED`.
+#: * ``"compare_parameters"`` -- *narrowed away* by
+#:   :func:`_apply_compare_parameters` (issue #1928): it was being compared
+#:   (``is_primary == True``) until that option scoped the class to a subset
+#:   that does not name it. Already disclosed as
+#:   :data:`CATEGORY_DEVICE_PARAMETER_EXCLUDED`. Reserved for exactly that
+#:   case since issue #2654 -- never a parameter the class itself declared
+#:   secondary.
 PARAMETER_NOT_COMPARED_SECONDARY = "secondary"
 PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE = "placeholder_value"
 PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS = "compare_parameters"
@@ -5626,7 +5730,7 @@ def _device_parameter_coverage(
     layout_netlist: Any,
     reference_netlist: Any,
     placeholder_excluded: AbstractSet[tuple[str, str]],
-    compare_scoped_excluded: AbstractSet[tuple[str, str]],
+    compare_scoped_narrowed: AbstractSet[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Which parameters of each participating resistor/capacitor class this
     compare actually covered (issue #2461).
@@ -5661,10 +5765,19 @@ def _device_parameter_coverage(
     comparing it.
 
     **Never duplicates another disclosure.** A parameter in
-    ``placeholder_excluded``/``compare_scoped_excluded`` is already reported
+    ``placeholder_excluded``/``compare_scoped_narrowed`` is already reported
     as ``device.placeholder_value``/``device.parameter_excluded``; it appears
     in the coverage block (with that ``reason``) but never in the warning,
     which is reserved for the case that had no disclosure at all.
+
+    ``compare_scoped_narrowed`` is :func:`_apply_compare_parameters`'
+    *narrowed* set, not its full excluded set (issue #2654): a parameter that
+    option disabled but which the device class already declared secondary was
+    never in any compare to begin with, so it gets no
+    ``device.parameter_excluded`` entry and must not read
+    ``reason: "compare_parameters"`` here either. It falls through to the
+    ``"secondary"`` branch below -- and therefore back into the warning,
+    which is the one disclosure that is accurate about it.
 
     Never raises and never touches the verdict: this is a read-only pass over
     two already-prepared netlists, run after every request-side hook has been
@@ -5694,7 +5807,7 @@ def _device_parameter_coverage(
             pair = (key, param.name.lower())
             if pair in placeholder_excluded:
                 reason = PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE
-            elif pair in compare_scoped_excluded:
+            elif pair in compare_scoped_narrowed:
                 reason = PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS
             elif param.is_primary:
                 compared.append(param.name)
