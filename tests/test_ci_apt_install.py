@@ -20,6 +20,14 @@ One test asserts the workflow wiring itself, so a future edit that
 reintroduces a bare `sudo apt-get update && sudo apt-get install` into
 `.github/workflows/ci.yml` fails here rather than silently re-exposing CI to
 the mirror stall.
+
+A final group asserts the retry *budget arithmetic* for every apt step in
+`ci.yml` (issue #2662). The Yosys-deps step advertised 4 attempts inside a
+270s deadline that could not hold even two of its own 150s apt-get calls, so
+a slow-but-not-dead mirror exhausted it mid-retry and flaked a random `Tests
+(Python 3.x)` matrix leg roughly every other run. Those tests pin the
+relation -- not just the literal numbers -- so a future budget edit that
+re-breaks it fails here instead of weeks later as a red leg.
 """
 
 from __future__ import annotations
@@ -71,6 +79,27 @@ case "$FAKE_APT_MODE" in
     missing_package)
         if [[ "$verb" == "install" ]]; then
             echo "E: Unable to locate package definitely-not-a-real-package" >&2
+            exit 100
+        fi
+        exit 0
+        ;;
+    slow_install)
+        # The issue #2662 signature: `update` is fine and the *install*
+        # is slow-but-not-dead, so it is killed by the per-command cap
+        # rather than erroring. A later attempt succeeds -- which only
+        # happens if the budget still has room for one.
+        if [[ "$verb" == "install" && "$installs" -eq 1 ]]; then
+            echo "Get:3 .../cmake amd64 3.28.3-1build7 [11.2 MB]"
+            sleep "${FAKE_APT_SLOW_SECONDS:-10}"
+            exit 0
+        fi
+        exit 0
+        ;;
+    stale_index_install)
+        # The one install failure a fresh `apt-get update` fixes: the
+        # cached index no longer matches what the mirror serves.
+        if [[ "$verb" == "install" && "$installs" -eq 1 ]]; then
+            echo "E: Failed to fetch .../cmake.deb  Hash Sum mismatch" >&2
             exit 100
         fi
         exit 0
@@ -245,15 +274,175 @@ def test_retries_when_update_fails(tmp_path: Path):
     assert calls[-1].endswith("install -y ngspice")
 
 
-def test_retries_the_whole_pair_when_install_fails(tmp_path: Path):
+def test_retries_the_install_when_update_already_succeeded(tmp_path: Path):
     """Signature 2: `apt-get update` succeeds and the *install* stalls.
-    Retrying `update` alone would not help, so the retry re-runs both."""
+    Retrying `update` alone would not help, so the retry has to re-run the
+    `install` -- which is what this asserts.
+
+    It must NOT re-run the already-successful `update` (issue #2662). Doing
+    so spent up to a whole per-command cap of the deadline re-fetching
+    indices the job already had, which is what left the Yosys-deps step
+    unable to afford a second full-length install attempt and flaked a
+    random `Tests` matrix leg roughly every other run.
+    """
     proc, apt_log = _run(tmp_path, "ngspice", mode="fail_first_install")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     calls = _invocations(apt_log)
+    assert len(calls) == 3, calls
+    assert " update" in calls[0]
+    assert calls[1].endswith("install -y ngspice")
+    assert calls[2].endswith("install -y ngspice")
+    assert sum(1 for c in calls if " update" in c) == 1, (
+        "a successful apt-get update must not be re-run on a retry: " + repr(calls)
+    )
+    assert "reusing the package index" in proc.stdout, proc.stdout
+
+
+def test_update_is_re_run_when_the_install_failure_is_a_stale_index(
+    tmp_path: Path,
+):
+    """The exception to the reuse above (issue #2662): a hash/size mismatch
+    or a 404 on a `.deb` the cached index still lists means the index itself
+    is the problem, and that is the one failure a fresh `apt-get update`
+    actually fixes. Retrying `install` against an index that cannot work
+    would burn the rest of the budget for nothing."""
+    proc, apt_log = _run(tmp_path, "ngspice", mode="stale_index_install")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = _invocations(apt_log)
     assert len(calls) == 4, calls
-    assert " update" in calls[2], "second attempt must re-run apt-get update"
+    assert " update" in calls[2], (
+        "a stale-index install failure must re-arm apt-get update: " + repr(calls)
+    )
     assert calls[3].endswith("install -y ngspice")
+    assert "stale/mismatched package index" in proc.stdout, proc.stdout
+
+
+def test_a_slow_attempt_leaves_budget_for_a_second_full_length_attempt(
+    tmp_path: Path,
+):
+    """The issue #2662 failure mode, reproduced at 1/50 scale: one
+    slow-but-eventually-successful mirror day where the first `install` is
+    killed by the per-command cap after consuming most of the budget.
+
+    The live incident (PR #2661, runs 36892466647 / 36893713413) had the
+    Yosys step advertise `attempt 2/4` and then give up with `budget
+    exhausted after attempt 2`, because 270s could not hold two 150s
+    commands, let alone four attempts. The budget shape here mirrors the
+    fixed one (380s deadline / 150s per command / 60s update cap -> 12 / 3 /
+    1 at 1/50 scale): the first install burns its whole cap, and a *second,
+    full-length* install attempt still fits and succeeds.
+    """
+    started = time.monotonic()
+    proc, apt_log = _run(
+        tmp_path,
+        "cmake",
+        mode="slow_install",
+        FAKE_APT_SLOW_SECONDS="10",
+        CI_APT_DEADLINE="12",
+        CI_APT_PER_CMD_TIMEOUT="3",
+        CI_APT_UPDATE_TIMEOUT="1",
+        CI_APT_MAX_ATTEMPTS="4",
+    )
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = _invocations(apt_log)
+    # update (ok) + install (killed at its cap) + install (ok) -- and no
+    # second update, so the retry's budget went to the call that stalled.
+    assert len(calls) == 3, calls
+    assert sum(1 for c in calls if " update" in c) == 1, calls
+    assert elapsed < 12, f"the run did not fit its own deadline ({elapsed:.1f}s)"
+    assert "installed: cmake" in proc.stdout, proc.stdout
+
+
+def test_the_pre_2662_budget_shape_could_not_fit_that_second_attempt(
+    tmp_path: Path,
+):
+    """The same slow mirror against the budget shape that was live when the
+    issue was filed -- 270s deadline with one 150s cap governing both
+    commands (5 / 3 / 3 at the same 1/50 scale). It exhausts the budget
+    mid-retry exactly as the real runs did, which is what makes the resize in
+    `.github/workflows/ci.yml` load-bearing rather than cosmetic."""
+    proc, apt_log = _run(
+        tmp_path,
+        "cmake",
+        mode="slow_install",
+        FAKE_APT_SLOW_SECONDS="10",
+        CI_APT_DEADLINE="5",
+        CI_APT_PER_CMD_TIMEOUT="3",
+        CI_APT_UPDATE_TIMEOUT="3",
+        CI_APT_MAX_ATTEMPTS="4",
+    )
+    assert proc.returncode != 0
+    assert "budget exhausted" in proc.stdout, proc.stdout
+    # Gave up long before the 4 attempts it advertised.
+    assert len(_invocations(apt_log)) < 4
+
+
+def test_update_gets_a_tighter_cap_than_the_package_fetch(tmp_path: Path):
+    """`CI_APT_PER_CMD_TIMEOUT` was widened (issue #1224) for an 11.2 MB
+    package download; letting the index refresh claim the same share of the
+    deadline is what made the Yosys step's retry unaffordable (issue #2662).
+    `update` therefore gets its own, smaller cap by default."""
+    proc, _ = _run(
+        tmp_path,
+        "cmake",
+        CI_APT_DEADLINE="380",
+        CI_APT_PER_CMD_TIMEOUT="150",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    update_cap = int(re.search(r"apt-get .*update \(cap (\d+)s", proc.stdout).group(1))
+    install_cap = int(
+        re.search(r"apt-get .*install [^\n]*\(cap (\d+)s", proc.stdout).group(1)
+    )
+    assert install_cap == 150
+    assert update_cap == 60, proc.stdout
+    assert update_cap < install_cap
+
+
+def test_the_script_states_how_many_attempts_its_budget_actually_fits(
+    tmp_path: Path,
+):
+    """A budget that cannot fit what `attempt i/N` advertises has to say so
+    in the log (issue #2662) -- the live incident was only diagnosable
+    because someone correlated `attempt 2/4` with `budget exhausted` by
+    hand."""
+    proc, _ = _run(
+        tmp_path,
+        "cmake",
+        CI_APT_DEADLINE="380",
+        CI_APT_PER_CMD_TIMEOUT="150",
+        CI_APT_BACKOFF="5",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # 60 (update) + 2x150 (installs) + 1x5 (backoff) = 365 <= 380, and a
+    # third would need 520.
+    assert "4 attempt(s) configured, of which 2 fit the deadline" in proc.stdout, (
+        proc.stdout
+    )
+    # No budget warning for a budget that does fit two (the unrelated
+    # "no apt source/mirror-list file found" warning every fixture-less run
+    # emits is not under test here).
+    assert "cannot fit a second full-length attempt" not in proc.stdout
+
+
+def test_a_budget_too_small_for_a_second_full_attempt_warns(tmp_path: Path):
+    """The exact pre-#2662 Yosys numbers: 270s cannot hold two 150s
+    commands, so the retry loop existed in name only. That must be a visible
+    WARNING in the CI log, not something a future edit can reintroduce
+    silently."""
+    proc, _ = _run(
+        tmp_path,
+        "cmake",
+        CI_APT_DEADLINE="270",
+        CI_APT_PER_CMD_TIMEOUT="150",
+        CI_APT_BACKOFF="5",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "of which 1 fit the deadline" in proc.stdout, proc.stdout
+    assert "WARNING" in proc.stdout
+    assert "cannot fit a second full-length attempt" in proc.stdout
+    # Names the smallest deadline that would: 60 + 2x150 + 5.
+    assert "at least 365s" in proc.stdout, proc.stdout
 
 
 def test_gives_up_nonzero_after_max_attempts(tmp_path: Path):
@@ -609,24 +798,33 @@ def test_all_apt_steps_go_through_the_wrapper():
 def test_apt_steps_keep_their_timeout_backstop():
     """The per-step `timeout-minutes` guard (issue #1204 / PR #1210) stays as
     the outer backstop -- the wrapper's own budget is sized to fit inside
-    it."""
+    it.
+
+    The Yosys step's backstop is 7 minutes rather than 5 (issue #2662): its
+    deadline has to hold two full-length 150s `cmake` fetches, which 300s
+    cannot. Every other step keeps the script's defaults and the original
+    5-minute backstop.
+    """
     text = WORKFLOW.read_text(encoding="utf-8")
     for name in _APT_STEP_NAMES:
-        start = text.index(f"name: {name}")
-        step = text[start : start + 3000]
-        # Stop at the next step in the same job.
-        end = step.find("\n      - name:", 1)
-        if end != -1:
-            step = step[:end]
-        assert "timeout-minutes: 5" in step, f"'{name}' lost its timeout backstop"
+        step = _step_text(text, name)
+        expected = 7 if name == "Install Yosys build dependencies" else 5
+        assert f"timeout-minutes: {expected}" in step, (
+            f"'{name}' lost its timeout backstop (expected {expected} minutes)"
+        )
         assert "DEBIAN_FRONTEND: noninteractive" in step, (
             f"'{name}' lost its noninteractive apt env"
         )
 
 
 def _step_text(workflow_text: str, name: str) -> str:
+    """The full YAML of one `- name: <name>` step, up to the next step in the
+    same job. Deliberately unbounded in length: an earlier version sliced a
+    fixed 3000 characters, which silently truncated a step whose explanatory
+    comment grew past that and made assertions on its `timeout-minutes` /
+    `env:` block vacuous."""
     start = workflow_text.index(f"name: {name}")
-    step = workflow_text[start : start + 3000]
+    step = workflow_text[start:]
     end = step.find("\n      - name:", 1)
     if end != -1:
         step = step[:end]
@@ -643,7 +841,7 @@ def test_yosys_step_widens_the_retry_budget_for_its_large_cmake_download():
     text = WORKFLOW.read_text(encoding="utf-8")
     yosys_step = _step_text(text, "Install Yosys build dependencies")
 
-    assert 'CI_APT_DEADLINE: "270"' in yosys_step
+    assert 'CI_APT_DEADLINE: "380"' in yosys_step
     assert 'CI_APT_PER_CMD_TIMEOUT: "150"' in yosys_step
     # Both larger than the script's own un-overridden defaults (250 / 90),
     # per the header comment in scripts/ci-apt-install.sh.
@@ -652,10 +850,14 @@ def test_yosys_step_widens_the_retry_budget_for_its_large_cmake_download():
     assert deadline > 250
     assert per_cmd > 90
 
-    # Still has to fit -- with margin -- inside the outer `timeout-minutes: 5`
-    # (300s) backstop from #1204; a bigger DEADLINE than the step's own
-    # outer bound would turn the fail-fast guard back into a long hang.
-    assert deadline < 300
+    # Still has to fit -- with margin -- inside the step's own
+    # `timeout-minutes` backstop from #1204; a DEADLINE at or past that outer
+    # bound would turn the fail-fast guard back into a long hang. The margin
+    # is what the mirror probes and the inter-attempt `dpkg --configure -a`
+    # run in.
+    outer = 60 * int(re.search(r"timeout-minutes: (\d+)", yosys_step).group(1))
+    assert deadline < outer
+    assert outer - deadline >= 30
 
     # The other steps are not observed stalling in the same way (their
     # payloads are an order of magnitude smaller) and keep the script's own
@@ -668,3 +870,90 @@ def test_yosys_step_widens_the_retry_budget_for_its_large_cmake_download():
         step = _step_text(text, name)
         assert "CI_APT_DEADLINE" not in step
         assert "CI_APT_PER_CMD_TIMEOUT" not in step
+
+
+# --------------------------------------------------------------------------- #
+# Budget feasibility (issue #2662): the arithmetic that `attempt i/N` claims
+# --------------------------------------------------------------------------- #
+
+
+def _script_default(name: str, pattern: str) -> int:
+    """Read a `CI_APT_*` default straight out of the script, so this file
+    cannot drift from it the way the hard-coded 270/150 pair did."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    match = re.search(pattern, text)
+    assert match, f"could not find the {name} default in {SCRIPT}"
+    return int(match.group(1))
+
+
+def _worst_case_attempts_that_fit(
+    deadline: int, per_cmd: int, update_cap: int, backoff: int, max_attempts: int
+) -> int:
+    """Python mirror of `worst_case_attempts_that_fit` in the script: with a
+    successful `apt-get update` reused for the rest of the run, N attempts
+    whose every call times out at its cap cost
+    `update_cap + N*per_cmd + (N-1)*backoff`."""
+    fits = 0
+    while fits < max_attempts:
+        cost = update_cap + (fits + 1) * per_cmd + fits * backoff
+        if cost > deadline:
+            break
+        fits += 1
+    return fits
+
+
+def test_every_apt_step_budget_fits_two_full_length_attempts():
+    """The defect behind issue #2662 was arithmetic, not a bug: 270s cannot
+    hold two 150s apt-get calls, so the Yosys step's "4 attempts" was really
+    one-and-a-bit, and a single slow-but-not-dead mirror flaked a random
+    `Tests (Python 3.x)` matrix leg roughly every other run.
+
+    This asserts the arithmetic statically for every apt step in ci.yml --
+    using each step's own overrides where it has them and the script's own
+    defaults where it doesn't -- so a future budget edit that reintroduces
+    the mismatch fails here instead of weeks later as a random red leg.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    default_deadline = _script_default(
+        "CI_APT_DEADLINE", r'DEADLINE="\$\{CI_APT_DEADLINE:-(\d+)\}"'
+    )
+    default_per_cmd = _script_default(
+        "CI_APT_PER_CMD_TIMEOUT",
+        r'PER_CMD_TIMEOUT="\$\{CI_APT_PER_CMD_TIMEOUT:-(\d+)\}"',
+    )
+    default_backoff = _script_default(
+        "CI_APT_BACKOFF", r'BACKOFF="\$\{CI_APT_BACKOFF:-(\d+)\}"'
+    )
+    default_max_attempts = _script_default(
+        "CI_APT_MAX_ATTEMPTS", r'MAX_ATTEMPTS="\$\{CI_APT_MAX_ATTEMPTS:-(\d+)\}"'
+    )
+
+    def _env(step: str, knob: str, fallback: int) -> int:
+        match = re.search(rf'{knob}: "(\d+)"', step)
+        return int(match.group(1)) if match else fallback
+
+    for name in _APT_STEP_NAMES:
+        step = _step_text(text, name)
+        deadline = _env(step, "CI_APT_DEADLINE", default_deadline)
+        per_cmd = _env(step, "CI_APT_PER_CMD_TIMEOUT", default_per_cmd)
+        backoff = _env(step, "CI_APT_BACKOFF", default_backoff)
+        max_attempts = _env(step, "CI_APT_MAX_ATTEMPTS", default_max_attempts)
+        # The script's own default: min(60, per-command cap).
+        update_cap = _env(step, "CI_APT_UPDATE_TIMEOUT", min(60, per_cmd))
+
+        fits = _worst_case_attempts_that_fit(
+            deadline, per_cmd, update_cap, backoff, max_attempts
+        )
+        assert fits >= 2, (
+            f"'{name}': a {deadline}s budget fits only {fits} full-length "
+            f"attempt(s) at {per_cmd}s per apt-get ({update_cap}s for update, "
+            f"{backoff}s backoff) while advertising {max_attempts} -- the "
+            f"issue #2662 mismatch. Raise CI_APT_DEADLINE to at least "
+            f"{update_cap + 2 * per_cmd + backoff}s (and its timeout-minutes "
+            f"with it) or lower CI_APT_PER_CMD_TIMEOUT."
+        )
+
+        # ...and the deadline still has to sit inside the step's own outer
+        # backstop, or the resize above just relocates the hang.
+        outer = 60 * int(re.search(r"timeout-minutes: (\d+)", step).group(1))
+        assert deadline < outer, f"'{name}': deadline {deadline}s >= {outer}s backstop"

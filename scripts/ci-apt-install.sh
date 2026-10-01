@@ -38,7 +38,9 @@
 #     near the whole step budget.
 #   - Retries the `update && install` pair, with a hard per-command
 #     `timeout(1)` cap and an overall deadline sized to fit *inside* the
-#     workflow step's own 5-minute budget, so a retry can still land.
+#     workflow step's own `timeout-minutes` budget, so a retry can still
+#     land. "Sized to fit" is now arithmetic the script checks and reports
+#     rather than an assertion -- see the issue #2662 note below.
 #
 # A genuine packaging failure (typo'd/nonexistent package) is NOT retried
 # and NOT masked: it is detected and fails immediately, non-zero.
@@ -85,9 +87,43 @@
 # the sources untouched (rather than guessing) when neither candidate
 # answers the probe.
 #
+# Update (issue #2662): the retry budget was mis-sized against its own
+# advertised attempt count, and the loop spent part of that budget twice.
+# Observed live on PR #2661 (runs 36892466647 / 36893713413, tree-identical
+# commits, a different random `Tests (Python 3.x)` leg red each time): the
+# Yosys-deps step logged `attempt 2/4` and then `budget exhausted after
+# attempt 2`, because the *deadline* -- not `CI_APT_MAX_ATTEMPTS` -- was the
+# binding constraint. Two causes, both fixed here:
+#
+#   1. `apt-get update` was re-run on every attempt even after it had
+#      already succeeded. Under a 150s per-command cap that is up to 150s of
+#      the 270s budget spent re-fetching indices the job already has --
+#      precisely the signature-2 case (`update` fine, `install` stalling)
+#      the retry exists for. A successful `update` is now reused for the
+#      rest of the run; it is re-armed only when the install failure looks
+#      like a stale/corrupt index (the one failure a fresh `update` fixes).
+#   2. One per-command cap governed both calls, so the *index refresh* was
+#      allowed to consume as much budget as the 11.2 MB `cmake` fetch it
+#      exists to enable. `CI_APT_UPDATE_TIMEOUT` now caps `update`
+#      separately (default: 60s, or the per-command cap when that is
+#      smaller), leaving the per-command cap to mean what it was widened for
+#      in #1224: the package download.
+#
+# On top of that the script now *states its own honest budget* at startup --
+# how many full-length (every call timing out at its cap) attempts the
+# deadline can actually fit, next to the attempt count configured -- and
+# WARNs when fewer than two do, because a budget that cannot fit a second
+# full-length attempt has a retry loop in name only. That is the check that
+# makes a future mis-sizing visible in the CI log instead of surfacing as a
+# random red matrix leg weeks later.
+#
 # Knobs (all optional; defaults are tuned for `timeout-minutes: 5`):
 #   CI_APT_DEADLINE          total wall-clock budget, seconds (default 250)
 #   CI_APT_PER_CMD_TIMEOUT   per apt-get invocation cap, seconds (default 90)
+#   CI_APT_UPDATE_TIMEOUT    cap for `apt-get update` specifically, seconds
+#                            (default: min(60, CI_APT_PER_CMD_TIMEOUT) --
+#                            an index refresh never needs the widened cap a
+#                            large package download does, see #2662)
 #   CI_APT_MAX_ATTEMPTS      attempts at the update+install pair (default 4)
 #   CI_APT_BACKOFF           seconds slept between attempts (default 5)
 #   CI_APT_SOURCE_FILES      space-separated apt source files to sanitize
@@ -110,6 +146,18 @@ DEADLINE="${CI_APT_DEADLINE:-250}"
 PER_CMD_TIMEOUT="${CI_APT_PER_CMD_TIMEOUT:-90}"
 MAX_ATTEMPTS="${CI_APT_MAX_ATTEMPTS:-4}"
 BACKOFF="${CI_APT_BACKOFF:-5}"
+# `apt-get update` fetches indices (a few MB of text), never the package
+# payload the per-command cap was widened for in #1224, so it gets its own,
+# tighter cap (issue #2662). Defaulting to min(60, PER_CMD_TIMEOUT) keeps it
+# at or below the general cap in every configuration, including the very
+# small caps the test suite uses.
+if [[ -n "${CI_APT_UPDATE_TIMEOUT:-}" ]]; then
+    UPDATE_TIMEOUT="$CI_APT_UPDATE_TIMEOUT"
+elif ((PER_CMD_TIMEOUT < 60)); then
+    UPDATE_TIMEOUT="$PER_CMD_TIMEOUT"
+else
+    UPDATE_TIMEOUT=60
+fi
 PROBE_PATH="${CI_APT_MIRROR_PROBE_PATH:-/ubuntu/dists/noble/InRelease}"
 PROBE_TIMEOUT="${CI_APT_MIRROR_PROBE_TIMEOUT:-5}"
 
@@ -290,6 +338,12 @@ sanitize_sources() {
 # Run one apt-get invocation under a hard cap that never exceeds the script's
 # remaining budget, streaming output to the CI log and appending it to $LOG
 # for the fatal-error scan below.
+#
+# `update` gets the (tighter) UPDATE_TIMEOUT rather than PER_CMD_TIMEOUT
+# (issue #2662): the per-command cap exists to give a large *package* fetch
+# enough contiguous time, and letting an index refresh claim the same share
+# of the deadline is what left the Yosys step unable to afford a second full
+# install attempt.
 run_apt() {
     local rem cap
     rem="$(remaining)"
@@ -297,11 +351,53 @@ run_apt() {
         log "budget exhausted before running: apt-get $*"
         return 1
     fi
-    cap="$PER_CMD_TIMEOUT"
+    if [[ "${1:-}" == "update" ]]; then
+        cap="$UPDATE_TIMEOUT"
+    else
+        cap="$PER_CMD_TIMEOUT"
+    fi
     ((cap > rem)) && cap="$rem"
 
     log "apt-get $* (cap ${cap}s, ${rem}s left in budget)"
     as_root timeout "$cap" apt-get "${APT_OPTS[@]}" "$@" 2>&1 | tee -a "$LOG"
+}
+
+# How many full-length attempts the deadline can actually fit -- "full
+# length" meaning every apt-get call in the attempt burns its whole cap
+# (issue #2662). With a successful `update` reused for the rest of the run,
+# N attempts cost UPDATE_TIMEOUT + N*PER_CMD_TIMEOUT + (N-1)*BACKOFF in the
+# worst case. This is the number `attempt i/MAX_ATTEMPTS` implicitly claims
+# and, before #2662, silently did not deliver.
+worst_case_attempts_that_fit() {
+    local n=0 cost
+    while ((n < MAX_ATTEMPTS)); do
+        cost=$((UPDATE_TIMEOUT + (n + 1) * PER_CMD_TIMEOUT + n * BACKOFF))
+        ((cost <= DEADLINE)) || break
+        n=$((n + 1))
+    done
+    echo "$n"
+}
+
+# Say the honest number out loud, every run. A mis-sized budget is otherwise
+# invisible until it shows up as a random red matrix leg (issue #2662): the
+# values that produced that incident -- 270s deadline, 150s per-command cap,
+# 4 attempts -- fit exactly one full-length attempt.
+report_budget() {
+    local fits min_two
+    fits="$(worst_case_attempts_that_fit)"
+    log "budget: ${DEADLINE}s total; caps: update ${UPDATE_TIMEOUT}s (run" \
+        "once per run), per apt-get ${PER_CMD_TIMEOUT}s, backoff ${BACKOFF}s;" \
+        "${MAX_ATTEMPTS} attempt(s) configured, of which ${fits} fit the" \
+        "deadline if every call times out at its cap (all ${MAX_ATTEMPTS}" \
+        "remain reachable when failures are faster than that)"
+    if (("$fits" < 2)); then
+        min_two=$((UPDATE_TIMEOUT + 2 * PER_CMD_TIMEOUT + BACKOFF))
+        log "WARNING: this budget cannot fit a second full-length attempt," \
+            "so a single slow-but-not-dead mirror exhausts it mid-retry (the" \
+            "issue #2662 failure mode). Raise CI_APT_DEADLINE to at least" \
+            "${min_two}s for this call site, or lower CI_APT_PER_CMD_TIMEOUT," \
+            "keeping the deadline inside the step's own timeout-minutes"
+    fi
 }
 
 # A packaging error is deterministic -- retrying it just burns the budget and
@@ -313,18 +409,46 @@ fatal_apt_error() {
         "$LOG"
 }
 
+# Did this attempt's `install` fail because the package index no longer
+# matches the mirror (hash/size mismatch, a 404 on a .deb the index still
+# lists, a mirror mid-resync)? That is the one case where re-running a
+# previously-successful `apt-get update` is the fix rather than wasted
+# budget, so the loop re-arms `update` on it (issue #2662).
+stale_index_error() {
+    grep -Eq \
+        "Hash Sum mismatch|File has unexpected size|Size mismatch|404 +Not Found|Mirror sync in progress|Release file for .* is (expired|not valid yet)" \
+        "$LOG"
+}
+
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 
+report_budget
 sanitize_sources
 
 attempt=0
+# Cleared once `apt-get update` has succeeded: a retry then goes straight to
+# `install` instead of re-fetching indices it already has (issue #2662). The
+# retry still wraps the *pair* in the sense that matters for signature 2 --
+# an `install` that stalls after a fine `update` is retried on its own, which
+# is what retrying `update` alone could never fix -- it just no longer pays
+# for the `update` half twice.
+need_update=1
 while ((attempt < MAX_ATTEMPTS)); do
     attempt=$((attempt + 1))
     : >"$LOG"
-    log "attempt ${attempt}/${MAX_ATTEMPTS}: update + install ${PACKAGES[*]}"
 
-    if run_apt update && run_apt install -y "${PACKAGES[@]}"; then
+    if ((need_update)); then
+        log "attempt ${attempt}/${MAX_ATTEMPTS}: update + install ${PACKAGES[*]}"
+        if run_apt update; then
+            need_update=0
+        fi
+    else
+        log "attempt ${attempt}/${MAX_ATTEMPTS}: install ${PACKAGES[*]}" \
+            "(reusing the package index from this run's successful apt-get update)"
+    fi
+
+    if ((need_update == 0)) && run_apt install -y "${PACKAGES[@]}"; then
         log "installed: ${PACKAGES[*]}"
         exit 0
     fi
@@ -332,6 +456,16 @@ while ((attempt < MAX_ATTEMPTS)); do
     if fatal_apt_error; then
         log "apt reported a packaging error, not a transient mirror failure -- not retrying"
         exit 1
+    fi
+
+    # The one install failure a fresh `apt-get update` actually fixes: the
+    # cached index no longer matches what the mirror serves (a mirror that
+    # rotated/resynced mid-job). Re-arm `update` for the next attempt rather
+    # than retrying `install` against an index that cannot work.
+    if ((need_update == 0)) && stale_index_error; then
+        log "install failure looks like a stale/mismatched package index --" \
+            "re-running apt-get update on the next attempt"
+        need_update=1
     fi
 
     # A timeout(1) kill can land mid-dpkg; clear that state so the next

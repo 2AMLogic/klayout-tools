@@ -1010,13 +1010,37 @@ jobs:
         # retrying, while the smaller steps completed fine under the same
         # numbers. Widening both knobs just for this step gives one attempt
         # enough contiguous time to land the large package instead of
-        # restarting it piecemeal; 270s still leaves 30s of margin inside
-        # the 300s (`timeout-minutes: 5`) backstop above, same proportion of
-        # slack the script's own un-overridden defaults use (250s of 300s).
-        timeout-minutes: 5
+        # restarting it piecemeal.
+        #
+        # Budget re-sized (issue #2662): 270s/150s bought that contiguous
+        # window for ONE attempt and nothing for a second. #1224's own
+        # arithmetic gave it away -- 150s per command x 2 commands is 300s,
+        # already past the 270s deadline -- and it showed up live on PR #2661
+        # as `attempt 2/4` followed by `budget exhausted after attempt 2`
+        # (runs 36892466647 / 36893713413, a different random Tests leg red
+        # each time on tree-identical commits), with the second attempt's
+        # `cmake` fetch capped at 111s instead of the 150s #1224 established
+        # it needs. Two changes, together, make the advertised retry real:
+        #
+        #   * the script no longer re-runs a successful `apt-get update` on a
+        #     retry, and caps `update` separately (60s) from the package
+        #     fetch, so a retry spends its budget on the thing that stalled;
+        #   * 380s/7min here fits TWO full-length 150s install attempts
+        #     (60 + 150 + 5 backoff + 150 = 365s <= 380s), with the 4-attempt
+        #     ceiling still reachable whenever failures are faster than their
+        #     cap. The script logs this arithmetic every run and WARNs if a
+        #     future edit stops fitting two, and
+        #     tests/test_ci_apt_install.py asserts it statically.
+        #
+        # 380s leaves 40s of margin inside the 420s (`timeout-minutes: 7`)
+        # backstop for the mirror probes and inter-attempt `dpkg --configure`.
+        # The worst case only materializes on a degraded-mirror day that is
+        # red today; a normal run is unchanged (~30s), so the leg stays far
+        # inside its 700s wall-clock budget (.github/ci-wall-clock-budget.json).
+        timeout-minutes: 7
         env:
           DEBIAN_FRONTEND: noninteractive
-          CI_APT_DEADLINE: "270"
+          CI_APT_DEADLINE: "380"
           CI_APT_PER_CMD_TIMEOUT: "150"
         run: |
           scripts/ci-apt-install.sh \
