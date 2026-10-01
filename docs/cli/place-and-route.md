@@ -648,11 +648,14 @@ error otherwise.
 
 | `macros[]` field | Type | Description |
 | --- | --- | --- |
-| `instance` | string | The RTL/netlist instance name this macro placement applies to. Required, and must be unique across the array. |
+| `instance` | string | The RTL/netlist instance name this macro placement applies to. Required, and must be unique across the array — a different thing from `cell` below, the *master* name, since a design may place several instances of one master. |
 | `lef` | string | Path to the macro's LEF abstract (e.g. `klt lef-abstract`'s own `output`). Required; must declare exactly one `MACRO`. Resolved relative to the request file's own directory. |
 | `x_um` / `y_um` | number | The macro's lower-left corner, in micrometres, in `place_macro -location`'s own coordinate space. Both required. |
 | `orientation` | string | One of `R0` (default) `R90` `R180` `R270` `MX` `MY` `MXR90` `MYR90` — OpenROAD's own orientation vocabulary. |
 | `gds` | string \| omitted | The macro's own GDS view. When given, merged into the final `gds_path` alongside the standard-cell GDS view (same "0 missing/orphan cells" check). When omitted, this instance's cell is expected to stay empty in the merged GDS — not an error — for a caller only after this issue's own DEF-level placement/obstruction verification. |
+| `cell` | string \| omitted | Additive field (issue #2635), shared with `klt synthesize`/`klt sta`'s own `macros[].cell`. The macro's master name — derived from the LEF's own `MACRO` name when omitted; when given, must match it exactly. |
+| `lib` (alias `liberty`) | object\<string, string\> \| omitted | Additive field (issue #2635), the same per-corner liberty map `klt synthesize`/`klt sta` accept: `{"<corner>": "<path>"}`, with a reserved `"default"` fallback key. `read_liberty`'d alongside the standard-cell liberty in every stage (the floorplan stage's own load, and every later stage's post-`read_db` reload) at whichever corner each stage runs — a macro `lib` map with no entry for that corner (and no `"default"`) is a request error naming the macro, the corner, and the keys that are available. Omitted leaves every stage script byte-identical to before this field existed; the instance is still placed and merged into the GDS exactly as it was. |
+| `halo` | number \| object \| omitted | Additive field (issue #2635). A keep-out margin around the macro, in micrometres: either one non-negative number (uniform on all four sides) or an object naming any of `left`/`right`/`top`/`bottom` (each defaulting to `0`). Honored two ways during `"floorplan"` — see "Macro halos" below. Omitted emits neither and leaves the floorplan/PDN Tcl byte-identical. |
 
 **Macro-pin routability cross-check (#464).** A macro LEF pin that `klt
 lef-abstract` emitted with no `PORT` geometry at all (a pin whose declared
@@ -676,6 +679,34 @@ netlist), the cross-check is silently skipped for that macro rather than
 risk a false positive or negative — OpenROAD's own `link_design` remains
 the authority on whether the netlist and LEF actually agree structurally.
 Discovered during Epic #393 Phase 3 (#456); see #464 for the full repro.
+
+### Macro halos (`macros[].halo`, issue #2635)
+
+A declared `halo` is honored two ways in the `"floorplan"` stage, both after
+`place_macro` (a halo needs the macro's own placed footprint, which only
+exists once it has a location):
+
+1. **Placement** — a `create_blockage` over the macro's own footprint
+   (its LEF `SIZE`, swapped for a rotated `orientation`) expanded by the
+   halo on each side, keeping standard cells (and the detailed placer's own
+   legalization) out of the margin so the macro's pins stay reachable and
+   its edges are not abutted by logic.
+2. **Power delivery** — only when `request.power` is also given: a
+   `define_pdn_grid -macro -halo ... -grid_over_boundary` /
+   `add_pdn_connect` pair per halo'd macro, connecting the macro's own
+   `USE POWER`/`USE GROUND` LEF pins (whichever routing layer their `PORT`
+   geometry is actually on — read from the LEF, never asked for in the
+   request) up to the next strap layer above it in `power.straps`. This is
+   the `v1` exclusion `request.power`'s own docstring has flagged since
+   issue #1091 ("a design with hard macros needs a caller-supplied macro
+   halo/grid spec"), closed by this field.
+
+A `halo` with no `request.power` in the same request gets only the
+placement blockage — a geometry-only run has no PDN grid to extend a macro
+grid from in the first place. A `halo` whose macro LEF declares no `SIZE`,
+or no power/ground pin with `PORT` geometry (when `request.power` is also
+given), is a named request error — never a halo silently skipped, since
+that would honor it in the response and not in the actual run.
 
 ## Timing-driven/repair-iteration routing flags (`route_critical_nets_percentage`, `max_antenna_repair_iterations`)
 
@@ -1939,7 +1970,16 @@ be within the target `--deck`'s own label-layer coverage (cross-check with
     { "name": "route", "...": "..." }
   ],
   "macros": [
-    { "instance": "u_analog", "lef": "/abs/path/analog_block.lef", "x_um": 12.5, "y_um": 3.0, "orientation": "R0" }
+    {
+      "instance": "u_analog",
+      "lef": "/abs/path/analog_block.lef",
+      "x_um": 12.5,
+      "y_um": 3.0,
+      "orientation": "R0",
+      "cell": "analog_block",
+      "lib": null,
+      "halo": null
+    }
   ],
   "def_path": "/abs/path/.klt/place-and-route/gcd.def",
   "unrouted_def_path": null,
@@ -2089,7 +2129,7 @@ plain string" for the full enumeration and rationale.
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
-| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path). `[]` when the request declared none. |
+| `macros` | array\<object\> | Echo of the request's `macros[]` (`instance`/`lef`/`x_um`/`y_um`/`orientation`; `lef` resolved to an absolute path), plus the additive `cell`/`lib`/`halo` fields (issue #2635) — `cell` is the resolved master name (shared with `klt synthesize`/`klt sta`'s own `macros[].cell`), `lib` is the per-corner liberty map resolved to absolute paths (`null` when omitted), `halo` is `{left, bottom, right, top}` in micrometres as actually honored (`null` when omitted). `[]` when the request declared none. |
 | `def_path` | string \| null | Populated once `write_def` has run (i.e. `stage_reached` is `"route"`); `null` otherwise. |
 | `unrouted_def_path` | string \| null | Additive field (issue #1826). A pre-route DEF, populated only when `target_stage` itself is `"place"` or `"cts"` — the deterministic `<hdl_toplevel>.place.def`/`<hdl_toplevel>.cts.def` path each of those stages' own Tcl already writes unconditionally (the `"place"`-stage one existed on disk since issue #785 but was previously internal-only; the `"cts"`-stage one is new). `null` at `"floorplan"` (no DEF exists yet) and at `"route"` (`def_path` above is the routed artifact to use there instead — the two fields are never populated together). Feed this path into `klt sta`'s own `def` field (with `request.geometry_source: "placement_estimate"`, see `docs/cli/sta.md`) to get a real, SDC-driven setup/hold slack number before a full route — this stage's own parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so treat the result as an estimate, not a signoff number. See also issue #1825, which proposes a different (netlist-input) shape for the same underlying gap. |
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
@@ -2552,11 +2592,12 @@ equivalent Tcl for *any* request, preset or explicit: their `global
 connections` / `voltage domains` sections (built instead from the
 per-library pin-pattern table plus the caller's own
 `power_net`/`ground_net` — which default to the same `VDD`/`VSS` all four
-configs use), `define_pdn_grid`'s `-pins {Metal5}`/`-pins {met5}` (see the
-row-rail fallback below for why PG nets are deliberately never promoted
-into the top-level DEF `PINS` / Verilog port list here), and `pdn.tcl`'s
-`macro grids` section (this command's already-documented v1 macro-PDN
-exclusion).
+configs use), and `define_pdn_grid`'s `-pins {Metal5}`/`-pins {met5}` (see
+the row-rail fallback below for why PG nets are deliberately never promoted
+into the top-level DEF `PINS` / Verilog port list here). `pdn.tcl`'s own
+`macro grids` section — the one piece of those four configs this command
+*does* now have an equivalent for — is emitted per macro only when that
+macro declares its own `macros[].halo`; see "Macro halos" above.
 
 **Live verification.** The three ORFS presets were run end to end against a
 real `openroad` (`26Q3-2056-g41a28926b9`, `openroad/orfs:latest`) and real
@@ -2576,10 +2617,11 @@ in `tests/test_place_and_route.py`, gated (skipped, never failed) on a
 machine without both halves of the toolchain, exactly like the existing
 worked-example integration tests.
 
-**Macro-specific PDN grids are out of scope for this v1.** `pdngen` here
-builds only the flat standard-cell grid (`define_pdn_grid` with no
-`-macro`) — a design with hard macros needs a caller-supplied macro
-halo/grid spec this field does not yet expose.
+**Macro-specific PDN grids** were out of scope for this section's own v1 —
+`pdngen` built only the flat standard-cell grid (`define_pdn_grid` with no
+`-macro`). Issue #2635 closed that gap additively: `define_pdn_grid -macro`
+Tcl is now emitted per macro that declares its own `macros[].halo` — see
+"Macro halos" above.
 
 **`write_verilog` strips the new physical-only cells.** When `request.power`
 is set, the `"route"` stage's `write_verilog` call (see "As-built netlist"
@@ -2939,10 +2981,9 @@ by
   power delivery were originally scoped out here too — see "Hard-macro
   placement" above and "Power delivery" below; issues #438 and #1091 closed
   those gaps.)
-- **Macro-specific PDN grids.** `request.power`'s `pdngen` call builds only
-  the flat standard-cell grid (`define_pdn_grid` with no `-macro`) — a
-  design with hard macros needs a caller-supplied macro halo/grid spec this
-  field does not yet expose. See "Power delivery" below.
+- **Macro-specific PDN grids** were scoped out here too — closed by issue
+  #2635's `macros[].halo`; see "Macro halos" above and "Power delivery"
+  below.
 - **IO-ring/footprint floorplanning.** Out of scope for a core-only block,
   per the OpenROAD survey section 2.
 - **A second P&R engine.** `request.engine` exists from day one so a later
