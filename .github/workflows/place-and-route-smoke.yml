@@ -69,10 +69,18 @@ jobs:
         # Mirrors .github/workflows/ci.yml's `test` job step of the same
         # name -- see that step's own comment for the per-package rationale
         # and the apt-mirror-stall history behind the timeout/retry wrapper.
-        timeout-minutes: 5
+        #
+        # The budget below mirrors ci.yml's post-#2662 numbers, not the
+        # 270s/5min this step carried until #2672: 380s fits TWO full-length
+        # 150s `cmake` fetches (60 update + 150 + 5 backoff + 150 = 365s),
+        # where 270s fit only one and made the advertised 4-attempt retry
+        # nominal. tests/test_ci_apt_install.py asserts that arithmetic for
+        # every workflow invoking scripts/ci-apt-install.sh, this one
+        # included, so the three copies cannot drift apart again.
+        timeout-minutes: 7
         env:
           DEBIAN_FRONTEND: noninteractive
-          CI_APT_DEADLINE: "270"
+          CI_APT_DEADLINE: "380"
           CI_APT_PER_CMD_TIMEOUT: "150"
         run: |
           scripts/ci-apt-install.sh \

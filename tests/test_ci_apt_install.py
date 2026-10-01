@@ -17,17 +17,25 @@ anything, so these tests control which host(s) the fake probe reports as
 reachable via `FAKE_CURL_MODE`, independent of real network access.
 
 One test asserts the workflow wiring itself, so a future edit that
-reintroduces a bare `sudo apt-get update && sudo apt-get install` into
-`.github/workflows/ci.yml` fails here rather than silently re-exposing CI to
-the mirror stall.
+reintroduces a bare `sudo apt-get update && sudo apt-get install` into a
+workflow fails here rather than silently re-exposing CI to the mirror stall.
 
 A final group asserts the retry *budget arithmetic* for every apt step in
-`ci.yml` (issue #2662). The Yosys-deps step advertised 4 attempts inside a
-270s deadline that could not hold even two of its own 150s apt-get calls, so
-a slow-but-not-dead mirror exhausted it mid-retry and flaked a random `Tests
-(Python 3.x)` matrix leg roughly every other run. Those tests pin the
-relation -- not just the literal numbers -- so a future budget edit that
-re-breaks it fails here instead of weeks later as a red leg.
+every workflow that calls the wrapper (issues #2662, #2672). The Yosys-deps
+step advertised 4 attempts inside a 270s deadline that could not hold even
+two of its own 150s apt-get calls, so a slow-but-not-dead mirror exhausted
+it mid-retry and flaked a random `Tests (Python 3.x)` matrix leg roughly
+every other run. Those tests pin the relation -- not just the literal
+numbers -- so a future budget edit that re-breaks it fails here instead of
+weeks later as a red leg.
+
+The workflow-wiring group walks `_APT_WORKFLOWS` rather than `ci.yml` alone
+(issue #2672): #2662 fixed the budget in `ci.yml`, but three sibling
+workflows carried a byte-identical copy of the same step -- each with a
+comment claiming to mirror `ci.yml` -- and kept the broken numbers for weeks
+because nothing checked them. Any new workflow invoking
+`scripts/ci-apt-install.sh` must be added to that table; re-derive the list
+with `git grep -l ci-apt-install.sh -- .github/workflows/`.
 """
 
 from __future__ import annotations
@@ -40,7 +48,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "ci-apt-install.sh"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
+WORKFLOW = WORKFLOW_DIR / "ci.yml"
 
 # Every fake apt-get invocation appends its argv to this file, so tests can
 # assert on attempt counts and on the options the script passed.
@@ -780,19 +789,69 @@ _APT_STEP_NAMES = (
     "Install Icarus Verilog + Verilator build dependencies",
 )
 
+# Every workflow that invokes `scripts/ci-apt-install.sh`, with the apt steps
+# it owns. The budget/wiring assertions below walk all of them, not just
+# `ci.yml` (issue #2672): `equiv-canary.yml`, `place-and-route-smoke.yml` and
+# `magic-oracle.yml` each carried a copy of `ci.yml`'s Yosys-deps step --
+# comment included -- and kept its pre-#2662 270s/5min budget after #2670
+# fixed `ci.yml`, because nothing checked the siblings.
+#
+# A step name may legitimately appear more than once in a file (each of
+# `design-agent-benchmark.yml`'s three jobs has its own `Install ngspice`);
+# every occurrence is asserted. Re-derive this table with:
+#   git grep -l ci-apt-install.sh -- .github/workflows/
+_APT_WORKFLOWS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ci.yml", _APT_STEP_NAMES),
+    ("design-agent-benchmark.yml", ("Install ngspice",)),
+    ("equiv-canary.yml", ("Install Yosys build dependencies",)),
+    ("kb-drift-canary.yml", ("Install ngspice",)),
+    ("magic-oracle.yml", ("Install magic build dependencies",)),
+    ("place-and-route-smoke.yml", ("Install Yosys build dependencies",)),
+)
+
+# The steps whose payload earns the widened #1224/#2662 budget (an 11.2 MB
+# `cmake` fetch), and therefore the 7-minute rather than 5-minute backstop.
+# Everything else takes the script's own defaults.
+_WIDE_BUDGET_STEP = "Install Yosys build dependencies"
+
+
+def test_the_apt_workflow_table_covers_every_wrapper_caller():
+    """The table above is what makes every other assertion in this section
+    exhaustive, so a new workflow calling the wrapper must not be able to
+    join CI without joining the table (issue #2672 -- three siblings drifted
+    for weeks precisely because the coverage was `ci.yml`-only)."""
+    callers = sorted(
+        path.name
+        for pattern in ("*.yml", "*.yaml")
+        for path in WORKFLOW_DIR.glob(pattern)
+        if "scripts/ci-apt-install.sh" in path.read_text(encoding="utf-8")
+    )
+    assert callers == sorted(name for name, _ in _APT_WORKFLOWS), (
+        "a workflow started/stopped calling scripts/ci-apt-install.sh -- update "
+        "_APT_WORKFLOWS in this file so its apt budget is checked too"
+    )
+
 
 def test_all_apt_steps_go_through_the_wrapper():
-    text = WORKFLOW.read_text(encoding="utf-8")
-    for name in _APT_STEP_NAMES:
-        assert f"name: {name}" in text, f"CI step '{name}' not found in {WORKFLOW}"
-    # Comments legitimately mention both the wrapper and apt-get; only what
-    # the workflow actually *runs* is under test here.
-    runnable = re.sub(r"^\s*#.*$", "", text, flags=re.MULTILINE)
-    # Every apt install in CI runs through the wrapper...
-    assert runnable.count("scripts/ci-apt-install.sh") == len(_APT_STEP_NAMES)
-    # ...and no step calls apt-get directly any more (which would reintroduce
-    # the unretried, unbounded mirror stall of issue #1219).
-    assert "apt-get" not in runnable
+    for workflow_name, step_names in _APT_WORKFLOWS:
+        path = WORKFLOW_DIR / workflow_name
+        text = path.read_text(encoding="utf-8")
+        steps = []
+        for name in step_names:
+            found = _step_texts(text, name)
+            assert found, f"step '{name}' not found in {path}"
+            steps.extend(found)
+        # Comments legitimately mention both the wrapper and apt-get; only what
+        # the workflow actually *runs* is under test here.
+        runnable = re.sub(r"^\s*#.*$", "", text, flags=re.MULTILINE)
+        # Every apt install in CI runs through the wrapper...
+        assert runnable.count("scripts/ci-apt-install.sh") == len(steps), (
+            f"{path}: {runnable.count('scripts/ci-apt-install.sh')} wrapper "
+            f"invocation(s) but {len(steps)} known apt step(s)"
+        )
+        # ...and no step calls apt-get directly any more (which would reintroduce
+        # the unretried, unbounded mirror stall of issue #1219).
+        assert "apt-get" not in runnable, f"{path} calls apt-get directly"
 
 
 def test_apt_steps_keep_their_timeout_backstop():
@@ -800,35 +859,52 @@ def test_apt_steps_keep_their_timeout_backstop():
     the outer backstop -- the wrapper's own budget is sized to fit inside
     it.
 
-    The Yosys step's backstop is 7 minutes rather than 5 (issue #2662): its
-    deadline has to hold two full-length 150s `cmake` fetches, which 300s
-    cannot. Every other step keeps the script's defaults and the original
-    5-minute backstop.
+    The Yosys steps' backstop is 7 minutes rather than 5 (issues #2662,
+    #2672): their deadline has to hold two full-length 150s `cmake` fetches,
+    which 300s cannot. Every other step keeps the script's defaults and the
+    original 5-minute backstop.
     """
-    text = WORKFLOW.read_text(encoding="utf-8")
-    for name in _APT_STEP_NAMES:
-        step = _step_text(text, name)
-        expected = 7 if name == "Install Yosys build dependencies" else 5
-        assert f"timeout-minutes: {expected}" in step, (
-            f"'{name}' lost its timeout backstop (expected {expected} minutes)"
-        )
-        assert "DEBIAN_FRONTEND: noninteractive" in step, (
-            f"'{name}' lost its noninteractive apt env"
-        )
+    for workflow_name, step_names in _APT_WORKFLOWS:
+        path = WORKFLOW_DIR / workflow_name
+        text = path.read_text(encoding="utf-8")
+        for name in step_names:
+            expected = 7 if name == _WIDE_BUDGET_STEP else 5
+            for step in _step_texts(text, name):
+                assert f"timeout-minutes: {expected}" in step, (
+                    f"{path}: '{name}' lost its timeout backstop (expected "
+                    f"{expected} minutes)"
+                )
+                assert "DEBIAN_FRONTEND: noninteractive" in step, (
+                    f"{path}: '{name}' lost its noninteractive apt env"
+                )
+
+
+def _step_texts(workflow_text: str, name: str) -> list[str]:
+    """The full YAML of every `- name: <name>` step in a workflow, each up to
+    the next step in the same job. All occurrences, not just the first: a step
+    name repeats across jobs (`design-agent-benchmark.yml` installs ngspice in
+    three), and asserting only on the first would let the others drift.
+
+    Deliberately unbounded in length: an earlier version sliced a fixed 3000
+    characters, which silently truncated a step whose explanatory comment grew
+    past that and made assertions on its `timeout-minutes` / `env:` block
+    vacuous."""
+    steps = []
+    for match in re.finditer(rf"name: {re.escape(name)}$", workflow_text, re.MULTILINE):
+        step = workflow_text[match.start() :]
+        end = step.find("\n      - name:", 1)
+        if end != -1:
+            step = step[:end]
+        steps.append(step)
+    return steps
 
 
 def _step_text(workflow_text: str, name: str) -> str:
-    """The full YAML of one `- name: <name>` step, up to the next step in the
-    same job. Deliberately unbounded in length: an earlier version sliced a
-    fixed 3000 characters, which silently truncated a step whose explanatory
-    comment grew past that and made assertions on its `timeout-minutes` /
-    `env:` block vacuous."""
-    start = workflow_text.index(f"name: {name}")
-    step = workflow_text[start:]
-    end = step.find("\n      - name:", 1)
-    if end != -1:
-        step = step[:end]
-    return step
+    """The first `- name: <name>` step -- for assertions about a step that is
+    unique to one workflow."""
+    steps = _step_texts(workflow_text, name)
+    assert steps, f"step '{name}' not found"
+    return steps[0]
 
 
 def test_yosys_step_widens_the_retry_budget_for_its_large_cmake_download():
@@ -908,12 +984,20 @@ def test_every_apt_step_budget_fits_two_full_length_attempts():
     one-and-a-bit, and a single slow-but-not-dead mirror flaked a random
     `Tests (Python 3.x)` matrix leg roughly every other run.
 
-    This asserts the arithmetic statically for every apt step in ci.yml --
-    using each step's own overrides where it has them and the script's own
-    defaults where it doesn't -- so a future budget edit that reintroduces
-    the mismatch fails here instead of weeks later as a random red leg.
+    This asserts the arithmetic statically for every apt step in every
+    workflow that calls the wrapper -- using each step's own overrides where it
+    has them and the script's own defaults where it doesn't -- so a future
+    budget edit that reintroduces the mismatch fails here instead of weeks
+    later as a random red leg.
+
+    Workflow-wide rather than `ci.yml`-only since issue #2672: #2670 fixed
+    `ci.yml` while `equiv-canary.yml`, `place-and-route-smoke.yml` and
+    `magic-oracle.yml` kept copies of the broken 270s budget, each under a
+    comment asserting it mirrored `ci.yml`. Being `workflow_dispatch`-only
+    made that cheap to miss -- a flake costs a re-dispatch, not a red required
+    check -- which is exactly why it needs a static guard rather than
+    observation.
     """
-    text = WORKFLOW.read_text(encoding="utf-8")
     default_deadline = _script_default(
         "CI_APT_DEADLINE", r'DEADLINE="\$\{CI_APT_DEADLINE:-(\d+)\}"'
     )
@@ -932,28 +1016,35 @@ def test_every_apt_step_budget_fits_two_full_length_attempts():
         match = re.search(rf'{knob}: "(\d+)"', step)
         return int(match.group(1)) if match else fallback
 
-    for name in _APT_STEP_NAMES:
-        step = _step_text(text, name)
-        deadline = _env(step, "CI_APT_DEADLINE", default_deadline)
-        per_cmd = _env(step, "CI_APT_PER_CMD_TIMEOUT", default_per_cmd)
-        backoff = _env(step, "CI_APT_BACKOFF", default_backoff)
-        max_attempts = _env(step, "CI_APT_MAX_ATTEMPTS", default_max_attempts)
-        # The script's own default: min(60, per-command cap).
-        update_cap = _env(step, "CI_APT_UPDATE_TIMEOUT", min(60, per_cmd))
+    for workflow_name, step_names in _APT_WORKFLOWS:
+        path = WORKFLOW_DIR / workflow_name
+        text = path.read_text(encoding="utf-8")
+        for name in step_names:
+            for step in _step_texts(text, name):
+                where = f"{workflow_name}: '{name}'"
+                deadline = _env(step, "CI_APT_DEADLINE", default_deadline)
+                per_cmd = _env(step, "CI_APT_PER_CMD_TIMEOUT", default_per_cmd)
+                backoff = _env(step, "CI_APT_BACKOFF", default_backoff)
+                max_attempts = _env(step, "CI_APT_MAX_ATTEMPTS", default_max_attempts)
+                # The script's own default: min(60, per-command cap).
+                update_cap = _env(step, "CI_APT_UPDATE_TIMEOUT", min(60, per_cmd))
 
-        fits = _worst_case_attempts_that_fit(
-            deadline, per_cmd, update_cap, backoff, max_attempts
-        )
-        assert fits >= 2, (
-            f"'{name}': a {deadline}s budget fits only {fits} full-length "
-            f"attempt(s) at {per_cmd}s per apt-get ({update_cap}s for update, "
-            f"{backoff}s backoff) while advertising {max_attempts} -- the "
-            f"issue #2662 mismatch. Raise CI_APT_DEADLINE to at least "
-            f"{update_cap + 2 * per_cmd + backoff}s (and its timeout-minutes "
-            f"with it) or lower CI_APT_PER_CMD_TIMEOUT."
-        )
+                fits = _worst_case_attempts_that_fit(
+                    deadline, per_cmd, update_cap, backoff, max_attempts
+                )
+                assert fits >= 2, (
+                    f"{where}: a {deadline}s budget fits only {fits} full-length "
+                    f"attempt(s) at {per_cmd}s per apt-get ({update_cap}s for "
+                    f"update, {backoff}s backoff) while advertising "
+                    f"{max_attempts} -- the issue #2662 mismatch. Raise "
+                    f"CI_APT_DEADLINE to at least "
+                    f"{update_cap + 2 * per_cmd + backoff}s (and its "
+                    f"timeout-minutes with it) or lower CI_APT_PER_CMD_TIMEOUT."
+                )
 
-        # ...and the deadline still has to sit inside the step's own outer
-        # backstop, or the resize above just relocates the hang.
-        outer = 60 * int(re.search(r"timeout-minutes: (\d+)", step).group(1))
-        assert deadline < outer, f"'{name}': deadline {deadline}s >= {outer}s backstop"
+                # ...and the deadline still has to sit inside the step's own
+                # outer backstop, or the resize above just relocates the hang.
+                outer = 60 * int(re.search(r"timeout-minutes: (\d+)", step).group(1))
+                assert deadline < outer, (
+                    f"{where}: deadline {deadline}s >= {outer}s backstop"
+                )
