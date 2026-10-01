@@ -550,12 +550,25 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             ]
         },
     ),
-    # `pplus.enclosing.comp.1` (PP.5b, 160 dbu): the exact mirror on `Pplus`.
+    # `pplus.enclosing.comp.1` (PP.5b, 160 dbu): the mirror on `Pplus`, with
+    # one difference from `nplus.enclosing.comp.1` above -- this rule now
+    # `requires_any_layer` (`Nwell`/`Dnwell`, issue #2634: the official
+    # `PP.5b` only ever applies "Inside NWELL" or "inside DNWELL", unlike
+    # `NP.5b`, whose two sub-cases both resolve to the same 0.16um
+    # regardless of well context -- see the rule's own comment in
+    # `gf180mcu.py`). The violate fixture therefore also draws a generously
+    # oversized `Nwell` fully enclosing `Comp` (>= `nwell.enclosing.comp.1`'s
+    # own 0.12um/120 dbu margin, so it does not itself trip a different
+    # rule) -- without it, this fixture's `Pplus`/`Comp`-only geometry no
+    # longer trips `pplus.enclosing.comp.1` at all (it is correctly skipped,
+    # not a regression). The clean fixture needs no such addition: skipped
+    # and genuinely-checked-and-clean are both still `"clean"`.
     "pplus.enclosing.comp.1": (
-        {  # violate: 110 dbu extension (< 160)
+        {  # violate: 110 dbu extension (< 160), with Nwell context present
             "shapes": [
                 {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
                 {"layer": [31, 0], "box": [-110, -110, 1110, 4110]},  # Pplus
+                {"layer": [21, 0], "box": [-1000, -1000, 2000, 5000]},  # Nwell
             ]
         },
         {  # clean: 210 dbu extension (> 160)

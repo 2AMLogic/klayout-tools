@@ -4351,22 +4351,33 @@ def test_run_drc_gf180mcu_implant_space_to_opposite_comp(
 def test_run_drc_gf180mcu_implant_enclosing_comp(tmp_path, implant):
     """NP.5b/PP.5b: an implant extending only 0.11um beyond its own
     diffusion (vs. the 0.16um minimum) trips `<implant>.enclosing.comp.1`;
-    exactly 0.16um -- the boundary condition -- is clean."""
+    exactly 0.16um -- the boundary condition -- is clean.
+
+    `pplus.enclosing.comp.1` additionally `requires_any_layer` an `Nwell`/
+    `Dnwell` context (issue #2634) -- see that rule's own comment in
+    `decks/gf180mcu.py` -- so the `pplus` fixture draws a generously-sized
+    `Nwell` fully enclosing `Comp` (>= `nwell.enclosing.comp.1`'s own 0.12um
+    margin, so it does not itself trip a *different* rule) to keep exercising
+    `PP.5b`'s real 0.16um threshold math. `nplus` needs no such context --
+    `NP.5b`'s own two sub-cases both resolve to the same 0.16um regardless
+    of well presence -- so its fixture is unchanged.
+    """
     layer_num, datatype = _IMPLANT_LAYERS[implant]
     rule_id = f"{implant}.enclosing.comp.1"
 
     def build(margin):
-        return _gf180mcu_implant_layout(
-            [
-                (22, 0, "Comp", kdb.Box(0, 0, 1000, 4000)),
-                (
-                    layer_num,
-                    datatype,
-                    implant.capitalize(),
-                    kdb.Box(-margin, -margin, 1000 + margin, 4000 + margin),
-                ),
-            ]
-        )
+        shapes = [
+            (22, 0, "Comp", kdb.Box(0, 0, 1000, 4000)),
+            (
+                layer_num,
+                datatype,
+                implant.capitalize(),
+                kdb.Box(-margin, -margin, 1000 + margin, 4000 + margin),
+            ),
+        ]
+        if implant == "pplus":
+            shapes.append((21, 0, "Nwell", kdb.Box(-1000, -1000, 2000, 5000)))
+        return _gf180mcu_implant_layout(shapes)
 
     violate_path = tmp_path / f"{rule_id}.violate.gds"
     build(110).write(str(violate_path))
@@ -4447,6 +4458,77 @@ def test_run_drc_gf180mcu_implant_rules_ignore_opposite_type_diffusion(tmp_path)
     report = run_drc(str(path), "gf180mcu")
 
     assert report["status"] == "clean", report["rule_counts"]
+
+
+def test_run_drc_gf180mcu_pplus_enclosing_comp_skips_without_well_context(tmp_path):
+    """Issue #2634 regression: an ordinary poly-resistor P+ substrate tap --
+    `Pplus` extending `Comp` by far less than the flat 0.16um
+    `pplus.enclosing.comp.1` threshold, with no `Nwell`/`Dnwell` anywhere in
+    the layout -- is a false positive this curated deck used to report, but
+    the PDK's own `rule_decks/pplus.drc` does not. gf180-ldo's `divider`/
+    `passives` cells (`ppolyf_u_*` resistors) draw their P+ substrate tap
+    exactly this way (a 20 dbu / 0.02um `Pplus` extension, verified against
+    the real geometry) and are DRC-clean on the PDK's own deck; see
+    `DrcRule.requires_any_layer`'s docstring for the real-deck verification
+    this fixture reproduces. `pplus.enclosing.comp.1` must now be skipped
+    rather than fire, and the mirrored `Nplus`/`NCOMP` geometry -- whose
+    `NP.5b` has no equivalent well-context split -- must still fire exactly
+    as it did before this fix.
+    """
+    tap = _gf180mcu_implant_layout(
+        [
+            (22, 0, "Comp", kdb.Box(0, 0, 400, 1000)),
+            (31, 0, "Pplus", kdb.Box(-20, -20, 420, 1020)),
+        ]
+    )
+    path = tmp_path / "pplus_enclosing_comp_no_well.gds"
+    tap.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean", report["rule_counts"]
+    assert "pplus.enclosing.comp.1" in report["coverage"]["rules_skipped"]
+
+    mirror = _gf180mcu_implant_layout(
+        [
+            (22, 0, "Comp", kdb.Box(0, 0, 400, 1000)),
+            (32, 0, "Nplus", kdb.Box(-20, -20, 420, 1020)),
+        ]
+    )
+    mirror_path = tmp_path / "nplus_enclosing_comp_no_well.gds"
+    mirror.write(str(mirror_path))
+
+    mirror_report = run_drc(str(mirror_path), "gf180mcu")
+
+    assert mirror_report["status"] == "violations"
+    assert mirror_report["rule_counts"]["nplus.enclosing.comp.1"] >= 1
+
+
+def test_run_drc_gf180mcu_pplus_enclosing_comp_still_fires_with_nwell_present(
+    tmp_path,
+):
+    """Negative control for the #2634 fix: the exact same under-threshold
+    PCOMP extension still trips `pplus.enclosing.comp.1` once an `Nwell`
+    shape is present *anywhere* in the layout -- `requires_any_layer` only
+    skips a layout with no well context at all; it does not blanket-disable
+    the rule."""
+    layout = _gf180mcu_implant_layout(
+        [
+            (22, 0, "Comp", kdb.Box(0, 0, 400, 1000)),
+            (31, 0, "Pplus", kdb.Box(-20, -20, 420, 1020)),
+            # Elsewhere in the same layout, not touching this tap -- an
+            # ordinary Nwell shape (e.g. a PMOS well drawn elsewhere in the
+            # same cell/array).
+            (21, 0, "Nwell", kdb.Box(5000, 5000, 10000, 10000)),
+        ]
+    )
+    path = tmp_path / "pplus_enclosing_comp_with_distant_nwell.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["pplus.enclosing.comp.1"] >= 1
 
 
 def test_run_drc_gf180mcu_no_implant_geometry_stays_clean(tmp_path):
