@@ -373,6 +373,21 @@ def _classify_skipped_rules(
             continue
         vacuous = any(
             layout.find_layer(*layer) is None for layer in _vacuity_layers(rule)
+        ) or (
+            # `requires_any_layer` (issue #2634) is a second, independent way
+            # a rule can be provably vacuous: its own checked geometry
+            # (`_vacuity_layers`) may well be present, but the official DRM
+            # scope this rule approximates only ever applies in the context
+            # of one of these other layers -- with none of them drawn
+            # anywhere, there is no shape in this stream the rule's
+            # threshold could have correctly applied to, exactly the same
+            # "nothing to check" conclusion `_vacuity_layers` reaches for its
+            # own inputs. See `DrcRule.requires_any_layer`'s docstring.
+            rule.requires_any_layer is not None
+            and not any(
+                layout.find_layer(*context_layer) is not None
+                for context_layer in rule.requires_any_layer
+            )
         )
         if vacuous:
             inapplicable.append(
@@ -711,6 +726,25 @@ def run_drc(
         # (below) and the check itself never runs -- see
         # `_validate_threshold_max`.
         _validate_threshold_max(rule)
+
+        # `requires_any_layer` (issue #2634) gates whether this rule applies
+        # at all, independent of `derived_layer`/`layer` input resolution
+        # below: a rule whose official DRM scope only ever applies in the
+        # context of some *other* layer (e.g. gf180mcu's
+        # `pplus.enclosing.comp.1`, scoped to "inside NWELL" or "inside
+        # DNWELL" PCOMP by the real PDK deck -- see `DrcRule`'s docstring)
+        # has nothing to check when none of those context layers were drawn
+        # anywhere in this stream, regardless of whether its own checked
+        # layer(s) are present. Skipped the same way a missing `layer`/
+        # `other_layer` already is -- see `coverage.rules_skipped` below --
+        # and, like those, contributes nothing to `deck_layer_tuples` (these
+        # layers gate the rule; they are never read as checked geometry).
+        if rule.requires_any_layer is not None and not any(
+            layout.find_layer(*context_layer) is not None
+            for context_layer in rule.requires_any_layer
+        ):
+            rules_skipped.append(rule.id)
+            continue
 
         # For a `derived_layer` rule (#345), the region actually checked is
         # computed from two *different* drawn layers (`derived_layer.base`/

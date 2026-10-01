@@ -1073,7 +1073,23 @@ official rules exclude, and use KLayout's default `euclidian` metric where
 `NP.5b`/`PP.5b` use `projection`). Each is called out explicitly in its
 rule's docstring in `gf180mcu.py`; the threshold values used are always the
 real, unmodified DRM values, and every implant approximation errs strict
-(over-flagging), never permissive.
+(over-flagging), never permissive -- **with one exception, fixed in issue
+#2634**: `pplus.enclosing.comp.1`'s official `PP.5b` only ever applies to a
+`PCOMP` shape "(1) Inside NWELL (2) outside LVPWELL but inside DNWELL"; a
+`PCOMP` shape with no `Nwell`/`Dnwell` context anywhere instead falls under
+`PP.5di`/`PP.5dii` ("outside DNWELL"), whose own threshold is as low as
+0.02 µm -- the ordinary case for a `ppolyf_u_*` poly resistor's P+
+substrate tap, confirmed a false positive against a real fetched
+`rule_decks/pplus.drc` and against two gf180-ldo cells that are clean on
+the PDK's own deck. `pplus.enclosing.comp.1` now carries a
+`requires_any_layer` gate (`Nwell`, `Dnwell`): a layout drawing neither
+anywhere skips the rule entirely rather than misapplying the flat 0.16 µm,
+while a layout drawing either keeps the pre-#2634 behaviour (still subject
+to the butting-edge/`euclidian`-metric approximations above). Its mirror,
+`nplus.enclosing.comp.1`, needed no such gate: `NP.5b`'s own two
+sub-cases -- "(1) inside LVPWELL (2) outside Nwell and DNWELL" -- both
+resolve to the same 0.16 µm regardless of well context, verified the same
+way.
 
 The DRM's two MiM capacitor rules scoped to the "virtual bottom plate" —
 `MIMTM.1` (minimum bottom-plate spacing to other bottom-plate-or-routing

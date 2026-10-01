@@ -434,6 +434,60 @@ class DrcRule:
     ``run_drc()`` raises :class:`~klayout_tools.drc.DrcError` for an
     ``"antenna"`` rule that leaves it unset or omits ``other_layer``.
 
+    ``requires_any_layer`` (issue #2634) skips this rule entirely -- the
+    same ``coverage.rules_skipped`` path a missing ``layer``/``other_layer``
+    already uses -- unless at least one of the listed ``(layer, datatype)``
+    pairs has **any** shapes anywhere in the layout stream being checked
+    (tested the same way ``layer``'s own presence is: ``Layout.find_layer``
+    resolving to a real index, not merely declared-but-empty). It exists for
+    a rule whose official DRM scope is *context-gated* by a layer the rule's
+    own checked region never reads geometrically -- unlike
+    ``derived_layer.intersect_with``, which both reads a second layer's
+    shapes *and* feeds them into the checked region, ``requires_any_layer``
+    only gates whether the rule applies at all; it contributes nothing to
+    ``coverage.deck_layers``/``layers_checked``, since no shape of these
+    layers is ever measured.
+
+    The motivating case is gf180mcu's ``pplus.enclosing.comp.1`` (DRM "7.9
+    Pplus" rule ``PP.5b``). The official ``rule_decks/pplus.drc`` does not
+    apply one flat 0.16um extension requirement to every ``PCOMP`` shape:
+    ``PP.5b`` itself only covers ``Pplus`` edges "(1) Inside NWELL (2)
+    outside LVPWELL but inside DNWELL" (``pp5b_pplus =
+    pp5b_pplus_slct.and(nwell).join(pp5b_pplus_slct.not(lvpwell).and(dnwell))``);
+    a ``PCOMP`` shape with **no** ``Nwell``/``Dnwell`` context anywhere falls
+    instead under ``PP.5di``/``PP.5dii`` ("outside DNWELL"), whose own
+    threshold is only 0.02um unless the shape sits within 0.429um of a pure
+    (non-``Dnwell``-overlapping) ``Nwell`` -- the common case for an
+    ordinary poly-resistor's P+ substrate tap, which this curated deck has
+    no :class:`DerivedLayer` mode to express (it would need a three-input,
+    proximity-sized derivation, not a sized/boolean combination of two
+    layers). Verified directly: a synthetic ``PCOMP`` tap extended by
+    exactly 0.11um of ``Pplus`` (below the flat 0.16um this deck checked
+    pre-#2634), with no ``Nwell``/``Dnwell``/``Lvpwell`` drawn anywhere,
+    reports **zero** findings against a real, locally fetched
+    ``rule_decks/pplus.drc`` (the identical geometry mirrored onto
+    ``Nplus``/``NCOMP`` *does* report 4 ``NP.5b`` findings, confirming the
+    asymmetry is real: ``NP.5b``'s own two sub-cases -- "(1) inside LVPWELL
+    (2) outside Nwell and DNWELL" -- both resolve to the *same* 0.16um
+    value, so ``nplus.enclosing.comp.1`` needs no equivalent gate). Setting
+    ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``) on
+    ``pplus.enclosing.comp.1`` matches this exactly: a layout that draws
+    neither anywhere has no shape this rule's 0.16um threshold can
+    correctly apply to, so the whole rule is skipped (not silently
+    evaluated at the wrong, stricter threshold) rather than reported
+    against an empty-but-still-flat-0.16um checked region. A layout that
+    draws *either* layer anywhere keeps today's unchanged (and still
+    approximate -- butting edges, ``euclidian`` vs. ``projection``, see the
+    rule's own comment in ``decks/gf180mcu.py``) flat 0.16um behaviour,
+    since this gate cannot further narrow *which* ``PCOMP`` shapes within
+    that layout are in which DRM sub-case without the same unsupported
+    three-input derivation.
+
+    Defaults to ``None`` (every pre-existing rule), under which this gate
+    never applies and a rule behaves exactly as it did before this field
+    existed -- skipped only by the pre-existing missing-``layer``/
+    ``other_layer``/``derived_layer`` input checks.
+
     ``voltage_independent`` (issue #2369) opts a rule out of
     ``run_drc()``'s ``coverage.voltage_domain_warnings`` gate (issue #552/
     #1110, see ``drc.py``). That gate warns when geometry inside an
@@ -468,6 +522,7 @@ class DrcRule:
     antenna_ratio_max: float | None = None
     threshold_max_dbu: int | None = None
     voltage_independent: bool = False
+    requires_any_layer: tuple[tuple[int, int], ...] | None = None
 
 
 class UnknownDeckError(Exception):

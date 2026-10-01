@@ -329,14 +329,27 @@ are always the real, unmodified DRM values:
   never a missed violation.
 - ``nplus.enclosing.comp.1``/``pplus.enclosing.comp.1``: the official
   ``NP.5b``/``PP.5b`` exclude butting edges (``nplus.edges.not
-  (nplus_butted_edges)``) and are relaxed to 0.02um by the ``NP.5c``/
-  ``NP.5d`` (``PP.5c``/``PP.5d``) well-context splits for a tap further
-  than 0.43um from an ``LVPWELL``/``Nwell`` edge; neither context is
-  expressible here, so the strict 0.16um is applied to every NCOMP/PCOMP
-  edge. They also measure with KLayout's default ``euclidian`` metric where
-  the official rules use ``projection`` -- again the conservative direction
-  (a corner distance the official rule ignores can be reported, never the
-  reverse).
+  (nplus_butted_edges)``) and are relaxed to as little as 0.02um by the
+  ``NP.5c``/``NP.5d`` (``PP.5c``/``PP.5d``) well-context splits for a tap
+  further than 0.43um from an ``LVPWELL``/``Nwell`` edge; neither
+  sub-threshold split is expressible here, so the strict 0.16um is applied
+  to every NCOMP/PCOMP edge this rule actually checks. They also measure
+  with KLayout's default ``euclidian`` metric where the official rules use
+  ``projection`` -- again the conservative direction (a corner distance the
+  official rule ignores can be reported, never the reverse). **Unlike
+  ``NP.5b``, whose two sub-cases both resolve to the same 0.16um regardless
+  of well context, ``PP.5b`` itself only ever applies to a PCOMP shape
+  "(1) Inside NWELL (2) outside LVPWELL but inside DNWELL"** -- a PCOMP
+  shape with no ``Nwell``/``Dnwell`` context anywhere instead falls under
+  ``PP.5di``/``PP.5dii`` at the much looser 0.02-0.16um range above,
+  structurally incapable of being correctly checked at a flat 0.16um
+  (issue #2634, confirmed a false positive on ordinary ``ppolyf_u_*``
+  poly-resistor P+ substrate taps against a real fetched
+  ``rule_decks/pplus.drc``). ``pplus.enclosing.comp.1`` therefore also
+  carries ``requires_any_layer=((21, 0), (12, 0))`` (``Nwell``, ``Dnwell``):
+  a layout drawing neither anywhere skips the whole rule rather than
+  misapplying it, while a layout drawing either keeps the approximations
+  above unchanged. ``nplus.enclosing.comp.1`` needs no equivalent gate.
 - ``bjt.separation.comp.1``: the official ``BJT.3`` scopes to COMP
   "unrelated" to the BJT device (i.e. excludes COMP that is itself part of
   the same bipolar device, a connectivity/netlist notion); our engine has no
@@ -1534,6 +1547,35 @@ DECK: list[DrcRule] = [
         # the derived checked region, and carrying the same two
         # approximations (butting edges not excluded, `euclidian` rather
         # than `projection` metric). Threshold value unmodified.
+        #
+        # UNLIKE `nplus.enclosing.comp.1` above, this rule's 0.16um
+        # threshold is NOT context-independent -- confirmed a false
+        # positive by issue #2634. The official `PP.5b` only covers `Pplus`
+        # "(1) Inside NWELL (2) outside LVPWELL but inside DNWELL"
+        # (`pp5b_pplus = pp5b_pplus_slct.and(nwell).join(
+        # pp5b_pplus_slct.not(lvpwell).and(dnwell))` in `pplus.drc`); a
+        # `PCOMP` shape with no `Nwell`/`Dnwell` context anywhere instead
+        # falls under `PP.5di`/`PP.5dii` ("outside DNWELL"), whose own
+        # threshold is only 0.02um unless the shape sits within 0.429um of
+        # a pure (non-`Dnwell`-overlapping) `Nwell` -- exactly the ordinary
+        # poly-resistor P+ substrate-tap case gf180-ldo's `divider`/
+        # `passives` cells hit, each already DRC-clean on the PDK's own
+        # deck. (`nplus.enclosing.comp.1`'s mirror, `NP.5b`, has no such
+        # split: its own two sub-cases -- "(1) inside LVPWELL (2) outside
+        # Nwell and DNWELL" -- both resolve to the same 0.16um, verified
+        # directly against a real fetched `rule_decks/{nplus,pplus}.drc`:
+        # the identical 0.11um-extension geometry reports 0 `PP.5b` findings
+        # but 4 `NP.5b` findings.) Modelling `PP.5di`/`PP.5dii`'s own
+        # 0.429um-proximity split needs a three-input derivation this
+        # engine's `DerivedLayer` has no mode for (see its docstring), so
+        # `requires_any_layer` below narrows scope instead: a layout that
+        # draws neither `Nwell` nor `Dnwell` anywhere has no PCOMP shape
+        # `PP.5b` can apply to, so the whole rule is skipped rather than
+        # misapplied at this flat, too-strict threshold. A layout that
+        # draws either layer anywhere keeps this rule's pre-#2634 behaviour
+        # unchanged (still approximate per the two approximations above,
+        # just no longer firing on well-free layouts).
+        requires_any_layer=((21, 0), (12, 0)),  # Nwell, Dnwell
         derived_layer=DerivedLayer(
             base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
             sized_by_um=0.0,
