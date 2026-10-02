@@ -197,6 +197,7 @@ from .extract_abstract import (
     _local_pin_candidate_points,
     _texts_excluding_abstract_cells,
     _wire_abstract_cells,
+    lef_layer_probe_roles,
 )
 from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
 
@@ -2323,6 +2324,10 @@ def run_extract(
         subcircuit_cell=subcircuit_cell,
         subcircuit_info=subcircuit_info,
         substrate_spreading_net=substrate_spreading_net,
+        # Issue #2658: only consumed by the `--abstract-cell-lef` pin-layer
+        # lookup (see that function's docstring); `None` unless `--pdk`/
+        # `--pdk-root` resolved one above.
+        pdk_info=pdk_info,
     )
 
     # `--subcircuit` (issue #2245), layout-dependent half: both rejections
@@ -3761,6 +3766,7 @@ def extract_netlist_from_layout(
     subcircuit_cell: str | None = None,
     subcircuit_info: dict[str, Any] | None = None,
     substrate_spreading_net: str | None = None,
+    pdk_info: dict[str, Any] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -3818,6 +3824,20 @@ def extract_netlist_from_layout(
     ``abstract_cell_lef_paths`` is consulted only as the *fallback* pin
     source, when a matched cell type draws no in-cell pin label -- see
     :func:`_resolve_abstract_cell_pins`.
+
+    ``pdk_info`` (issue #2658) is the caller's resolved
+    :func:`~klayout_tools.pdk.find_pdk` dict, or ``None`` when neither
+    ``--pdk`` nor ``--pdk-root`` was given. Its *only* use here is the
+    ``--abstract-cell-lef`` pin-layer lookup
+    (:func:`~klayout_tools.extract_abstract.lef_layer_probe_roles`): the
+    PDK's KLayout ``.map`` file is what translates a LEF ``PORT``'s
+    ``LAYER`` name into a ``deck.metals`` level, so the port can be probed
+    on its own metal before the bottom-up cross-layer fallback. Nothing
+    else about the extraction reads it, and ``None`` (or a PDK shipping no
+    map file) leaves every resolved pin exactly as it was before this
+    issue. Deliberately *not* used to bind device models -- that stays
+    :func:`run_extract`'s job, applied to the netlist this function
+    returns.
 
     ``subcircuit_cell``/``subcircuit_info`` (``--subcircuit``, issue #2245):
     a pure out-parameter pair that changes nothing about the extraction
@@ -4003,6 +4023,7 @@ def extract_netlist_from_layout(
         int, dict[str, list[tuple[kdb.Point, str]]]
     ] = {}
     abstract_cell_global_net_ports: dict[int, int] = {}
+    abstract_cell_lef_layer_roles: dict[str, str] = {}
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None
     abstract_well_tie_cover: kdb.Region | None = None
@@ -4077,6 +4098,13 @@ def extract_netlist_from_layout(
             _erase_abstracted_cell_geometry(layout, matched_cell_indices, mask_layers)
         if abstract_cell_lef_paths:
             lef_macros = _load_abstract_cell_lefs(abstract_cell_lef_paths)
+            # Issue #2658: the LEF layer name -> deck metal level lookup
+            # that lets each `PORT` box be probed on its own metal first.
+            # Resolved here, beside the LEF read it serves, and only when
+            # there is an `--abstract-cell-lef` to apply it to -- an empty
+            # dict (no `--pdk`, or a PDK shipping no KLayout `.map` file)
+            # leaves every LEF point role-free, exactly as before.
+            abstract_cell_lef_layer_roles = lef_layer_probe_roles(deck, pdk_info)
 
     (
         netlist,
@@ -4105,6 +4133,7 @@ def extract_netlist_from_layout(
         lef_macros=lef_macros,
         abstract_cell_local_candidates=abstract_cell_local_candidates,
         abstract_cell_global_net_ports=abstract_cell_global_net_ports,
+        abstract_cell_lef_layer_roles=abstract_cell_lef_layer_roles,
         abstract_body_identity_cover=abstract_body_identity_cover,
         abstract_capacitor_top_via_exclusions=abstract_capacitor_top_via_exclusions,
         abstract_well_tie_cover=abstract_well_tie_cover,
@@ -7174,6 +7203,7 @@ def _extract_netlist(
         dict[int, dict[str, list[tuple[kdb.Point, str]]]] | None
     ) = None,
     abstract_cell_global_net_ports: dict[int, int] | None = None,
+    abstract_cell_lef_layer_roles: dict[str, str] | None = None,
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None,
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None,
     abstract_well_tie_cover: kdb.Region | None = None,
@@ -7359,6 +7389,16 @@ def _extract_netlist(
     computed by the same caller from the *pre*-erasure geometry -- passed
     straight through to :func:`_wire_abstract_cells`; ``None`` (the default)
     disables the extra-candidate lookup entirely.
+
+    ``abstract_cell_lef_layer_roles`` (issue #2658) is
+    :func:`~klayout_tools.extract_abstract.lef_layer_probe_roles`'s
+    ``{<lower-cased LEF layer name>: "metal<i>"}`` result for the active
+    PDK, resolved by the same caller (which is where ``--pdk``/``--pdk-root``
+    land) and passed straight through to :func:`_wire_abstract_cells`. It
+    lets a ``--abstract-cell-lef`` ``PORT`` box be probed on the deck metal
+    its own LEF ``LAYER`` names, ahead of the ``probe_layers`` bottom-up
+    scan built below. ``None`` (the default) or an empty dict restores the
+    pre-#2658 role-free behaviour exactly.
 
     ``abstract_body_identity_cover``/``abstract_cell_global_net_ports``
     (issue #1911) are likewise computed by the same caller from the
@@ -8731,6 +8771,15 @@ def _extract_netlist(
         # takes the first hit. Well geometry includes the abstracted cells'
         # preserved cover (#2082); it must still never outrank a LEF pin's
         # drawn metal access. Poly/tap inside black boxes remain erased.
+        #
+        # This order is only the *fallback* for a candidate point with no
+        # role of its own. A LEF-resolved point whose `PORT LAYER` the
+        # active PDK's KLayout `.map` file translates into one of these
+        # `metal{i}` levels now carries that level as its role and is probed
+        # there first (issue #2658, `abstract_cell_lef_layer_roles`) --
+        # without which a parent power strap on a *low* metal under a hard
+        # macro's *upper*-metal port wins this bottom-up scan and collapses
+        # nearly every one of that macro's declared pins onto one net.
         probe_layers: list[tuple[str, kdb.Region]] = [
             (f"metal{index}", region) for index, region in enumerate(metals)
         ] + [("poly", poly), ("nwell", nwell), ("tap", tap)]
@@ -8745,6 +8794,7 @@ def _extract_netlist(
             probe_layers,
             abstract_cell_local_candidates,
             abstract_cell_global_net_ports,
+            abstract_cell_lef_layer_roles,
         )
         warnings = warnings + abstract_cell_warnings
 
