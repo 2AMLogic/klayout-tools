@@ -20599,7 +20599,11 @@ def test_extract_request_document_stdin_form(tmp_path, capsys, monkeypatch):
     code, report = _run_extract_json(capsys, ["-"])
 
     assert code == 0
-    assert report["file"] == path
+    # Issue #2659: the resolved layout, reported as the `{path, scope}`
+    # envelope. The request document's own *resolution* is unchanged -- only
+    # the shape the result is reported in. `netlist_path` is an output path
+    # and still the plain resolved string.
+    assert report["file"] == {"path": "inv.gds", "scope": "repo"}
     assert report["netlist_path"] == str(output)
     assert report["device_count"] == 2
 
@@ -20635,7 +20639,9 @@ def test_extract_request_document_relative_paths_resolve_against_its_directory(
     code, report = _run_extract_json(capsys, [str(request_path)])
 
     assert code == 0
-    assert report["file"] == str(design_dir / "inv.gds")
+    # The document-relative resolution is what is under test; #2659 only
+    # changed how the resolved *input* path is reported.
+    assert report["file"] == {"path": "design/inv.gds", "scope": "repo"}
     assert report["netlist_path"] == str(design_dir / "inv.spice")
 
 
