@@ -15411,9 +15411,32 @@ def test_parse_gate_level_verilog_escaped_identifier_bit_select_needs_whitespace
     }
 
 
-def test_parse_gate_level_verilog_escaped_identifier_range_slice_rejected():
-    """An escaped base name does not buy a multi-bit range slice past this
-    module's deliberately narrow grammar (issue #1371)."""
+def test_parse_gate_level_verilog_escaped_identifier_range_slice():
+    """A range slice on an escaped base (`\\c.d [3:0]`, terminating
+    whitespace explicit) expands per bit exactly like a plain base's (issue
+    #2657) -- the escaped and plain connection paths accept the same
+    multi-bit shapes -- while `\\c.d[3:0]` with no whitespace stays the one
+    atomic name Verilog defines (issue #1371)."""
+    text = "\n".join(
+        [
+            r"module m(y);",
+            r"  output y;",
+            r"  wire [3:0] \c.d ;",
+            r"  cellx u0 (.A(\c.d [2:1]), .B(\c.d[3:0] ), .Y(y));",
+            r"endmodule",
+        ]
+    )
+    assert parse_gate_level_verilog(text)[0]["instances"][0]["connections"] == {
+        "A": ["c.d[2]", "c.d[1]"],
+        "B": "c.d[3:0]",
+        "Y": "y",
+    }
+
+
+def test_parse_gate_level_verilog_escaped_identifier_range_slice_undeclared():
+    """A range slice of an escaped base with no bus declaration has no
+    declared direction to read the MSB from, so it fails loudly (issue
+    #2657)."""
     text = "\n".join(
         [
             r"module m(y);",
@@ -15422,7 +15445,7 @@ def test_parse_gate_level_verilog_escaped_identifier_range_slice_rejected():
             r"endmodule",
         ]
     )
-    with pytest.raises(VerilogNetlistError, match="range slice"):
+    with pytest.raises(VerilogNetlistError, match="range slice .* bus declaration"):
         parse_gate_level_verilog(text)
 
 
@@ -15624,22 +15647,283 @@ def test_parse_gate_level_verilog_positional_connection_rejected():
         parse_gate_level_verilog(text)
 
 
-def test_parse_gate_level_verilog_range_slice_connection_rejected():
+def test_parse_gate_level_verilog_range_slice_connection_expanded():
+    """Issue #2657: a multi-bit range slice of a wider bus -- the shape
+    Yosys writes for a vector macro pin -- expands MSB-first into its
+    per-bit nets, as written; a whole declared bus named plainly expands to
+    its full declared width."""
     text = (
-        "module m(a, y);\n  input [3:0] a;\n  output [3:0] y;\n"
-        "  cellx u0 (.A(a[3:0]), .Y(y));\nendmodule\n"
+        "module m(a, y);\n  input [7:0] a;\n  output [3:0] y;\n"
+        "  macro u0 (.A(a[5:2]), .Y(y));\nendmodule\n"
     )
-    with pytest.raises(VerilogNetlistError, match="range slice"):
-        parse_gate_level_verilog(text)
+    connections = parse_gate_level_verilog(text)[0]["instances"][0]["connections"]
+    assert connections == {
+        "A": ["a[5]", "a[4]", "a[3]", "a[2]"],
+        "Y": ["y[3]", "y[2]", "y[1]", "y[0]"],
+    }
 
 
-def test_parse_gate_level_verilog_concatenation_rejected():
+def test_parse_gate_level_verilog_concatenation_connection_expanded():
+    """Issue #2657: a concatenation onto a vector port -- OpenROAD
+    `write_verilog`'s rendering of individual nets on a bus pin -- expands
+    MSB-first (the first operand is the most-significant bits), with each
+    operand at its own declared width; part-selects and sized constants are
+    legal operands here (Yosys's `{ 2'h0, d[1:0] }` zero-padding)."""
     text = (
-        "module m(a, b, y);\n  input a;\n  input b;\n  output y;\n"
-        "  cellx u0 (.A({a, b}), .Y(y));\nendmodule\n"
+        "module m(a, b, d, y);\n  input a;\n  input b;\n  input [3:0] d;\n"
+        "  output y;\n  wire [1:0] w;\n"
+        "  macro u0 (.A({a, b}), .B({ 2'h1, d[1:0], w, d[3] }), .Y(y));\n"
+        "endmodule\n"
     )
-    with pytest.raises(VerilogNetlistError):
+    connections = parse_gate_level_verilog(text)[0]["instances"][0]["connections"]
+    assert connections["A"] == ["a", "b"]
+    assert connections["B"] == [
+        "__CONST0__",
+        "__CONST1__",
+        "d[1]",
+        "d[0]",
+        "w[1]",
+        "w[0]",
+        "d[3]",
+    ]
+    assert connections["Y"] == "y"
+
+
+def test_parse_gate_level_verilog_concatenation_connection_resolves_aliases():
+    """Each expanded bit goes through the same `assign` alias resolution as
+    a scalar connection does."""
+    text = (
+        "module m(a, y);\n  input [1:0] a;\n  output y;\n  wire [1:0] n;\n"
+        "  assign n = { a[0], a[1] };\n"
+        "  macro u0 (.A(n), .B({n[0], a[1]}), .Y(y));\nendmodule\n"
+    )
+    connections = parse_gate_level_verilog(text)[0]["instances"][0]["connections"]
+    assert connections["A"] == ["a[0]", "a[1]"]
+    assert connections["B"] == ["a[1]", "a[1]"]
+
+
+def test_parse_gate_level_verilog_whole_bus_assign_aliases_per_bit():
+    """`assign dout = _05_;` between two declared buses (Yosys's routine bus
+    output) aliases bit for bit, so the bit-expanded port reads as an alias
+    and a whole-bus macro connection resolves through it (issue #2657); a
+    width mismatch is rejected rather than truncated."""
+    text = (
+        "module top(q);\n  output [1:0] q;\n  wire [1:0] _05_;\n"
+        "  assign q = _05_;\n  macro u0 (.Q(_05_), .R(q));\nendmodule\n"
+    )
+    module = parse_gate_level_verilog(text)[0]
+    assert module["port_aliases"] == {"q[1]": "_05_[1]", "q[0]": "_05_[0]"}
+    connections = module["instances"][0]["connections"]
+    assert connections == {"Q": ["_05_[1]", "_05_[0]"], "R": ["_05_[1]", "_05_[0]"]}
+    with pytest.raises(VerilogNetlistError, match="2 bit\\(s\\) wide .* 3 bit"):
+        parse_gate_level_verilog(text.replace("wire [1:0] _05_", "wire [2:0] _05_"))
+
+
+@pytest.mark.parametrize(
+    ("constant", "bits"),
+    [
+        ("8'h00", "00000000"),
+        ("16'hffff", "1" * 16),
+        ("4'b1010", "1010"),
+        ("4'b10_10", "1010"),
+        ("3'd5", "101"),
+        ("3'o4", "100"),
+        ("8'sh0f", "00001111"),
+    ],
+)
+def test_parse_gate_level_verilog_wide_constant_connection(constant, bits):
+    """Issue #2657: a sized constant wider than one bit ties each bit,
+    MSB-first, to the module-scoped `__CONST0__`/`__CONST1__` net its value
+    selects."""
+    text = (
+        f"module m(y);\n  output y;\n  macro u0 (.A({constant}), .Y(y));\nendmodule\n"
+    )
+    connections = parse_gate_level_verilog(text)[0]["instances"][0]["connections"]
+    assert connections["A"] == [
+        "__CONST1__" if bit == "1" else "__CONST0__" for bit in bits
+    ]
+
+
+def test_parse_gate_level_verilog_one_bit_sized_constant_stays_scalar():
+    """`1'h0` (Yosys's own one-bit constant spelling) is a single tie net,
+    exactly like `1'b0`, not a one-element list."""
+    text = "module m(y);\n  output y;\n  cellx u0 (.A(1'h1), .Y(y));\nendmodule\n"
+    connections = parse_gate_level_verilog(text)[0]["instances"][0]["connections"]
+    assert connections["A"] == "__CONST1__"
+
+
+@pytest.mark.parametrize(
+    ("expr", "reason"),
+    [
+        ("{2{b}}", "replication or nested concatenation"),
+        ("{b, {b, c}}", "replication or nested concatenation"),
+        ("{}", "empty"),
+        ("{b, 'h0}", "unsized constant"),
+        ("{b, undeclared}", "width is unknown"),
+        ("{b, b & c}", "not a plain net reference"),
+        ("{a} & {b}", "not a plain net reference"),
+        ("4'bxx01", "'x'/'z'"),
+        ("2'h7", "does not fit"),
+        ("a[0:3]", "declared direction"),
+        ("a[9:6]", "declared direction"),
+        ("c[1:0]", "bus declaration"),
+        ("a[W-1:0]", "range slice"),
+        ("a + b", "not a plain net reference"),
+    ],
+)
+def test_parse_gate_level_verilog_unsupported_connection_still_rejected(expr, reason):
+    """Issue #2657 widens the instance-connection grammar to concatenation,
+    range slice and sized constant -- and no further: replication, nested
+    concatenation, unsized/`x`/`z`/overflowing constants, a reversed or
+    out-of-range or undeclared slice, and general expressions keep failing
+    loudly, naming the instance and port."""
+    text = (
+        "module m(a, b, y);\n  input [7:0] a;\n  input b;\n  output y;\n"
+        "  wire c;\n"
+        f"  macro u0 (.A({expr}), .Y(y));\nendmodule\n"
+    )
+    with pytest.raises(VerilogNetlistError, match="instance 'u0' .* port 'A'") as exc:
         parse_gate_level_verilog(text)
+    assert re.search(reason, str(exc.value))
+
+
+#: A vector-ported hard macro's pin list, shaped exactly like the real
+#: gf180mcu SRAM's -- copied verbatim from a ciel-fetched `gf180mcuD`
+#: install's own `libs.ref/gf180mcu_fd_ip_sram/cdl/
+#: gf180mcu_fd_ip_sram__sram64x8m8wm1.cdl` (verified 2026-10-01; the `.spice`
+#: header is identical). Its Verilog model declares `input [7:0] D;`, so
+#: `D[7]` is the MSB -- the bit a concatenation's *first* operand drives.
+_REAL_SRAM_MACRO_CDL = """
+.SUBCKT gf180mcu_fd_ip_sram__sram64x8m8wm1 A[5] A[4] A[3] A[2] A[1] A[0] CEN CLK
++ D[7] D[6] D[5] D[4] D[3] D[2] D[1] D[0] GWEN Q[7] Q[6] Q[5] Q[4] Q[3] Q[2]
++ Q[1] Q[0] VDD VSS WEN[7] WEN[6] WEN[5] WEN[4] WEN[3] WEN[2] WEN[1] WEN[0]
+.ENDS
+"""
+
+#: Yosys/OpenROAD-`write_verilog`-shaped black-box instantiation of that
+#: macro, using all three issue #2657 constructs plus a whole-bus name.
+_MACRO_GATE_LEVEL_VERILOG = """
+module top(clk, addr, din, dout, b7, b6);
+  input clk;
+  input [7:0] addr;
+  input [5:0] din;
+  output [7:0] dout;
+  input b7;
+  input b6;
+  gf180mcu_fd_ip_sram__sram64x8m8wm1 sram0 (
+    .CLK(clk),
+    .CEN(1'b0),
+    .GWEN(1'b1),
+    .A(addr[5:0]),
+    .D({b7, b6, din[5:0]}),
+    .WEN(8'h0f),
+    .Q(dout)
+  );
+endmodule
+"""
+
+
+def test_convert_gate_level_verilog_vector_macro_bit_order():
+    """Issue #2657, the bit-order check only `convert_gate_level_verilog`
+    can make (`parse_gate_level_verilog` never sees real pin names): every
+    bit of each construct lands on the real PDK pin of the same Verilog
+    significance -- the concatenation's first operand on `D[7]`, the
+    slice's `addr[5]` on `A[5]`, the constant's MSB on `WEN[7]`."""
+    orders = parse_subckt_pin_orders(_REAL_SRAM_MACRO_CDL)
+    out = convert_gate_level_verilog(
+        _MACRO_GATE_LEVEL_VERILOG, pin_order_lookup=orders.get
+    )
+    # Power pins dropped, every signal pin in the real declared order.
+    stub = next(line for line in out.splitlines() if line.startswith(".SUBCKT gf180"))
+    assert "VDD" not in stub and "VSS" not in stub
+    expected = {
+        **{f"A[{i}]": f"addr[{i}]" for i in range(6)},
+        "CEN": "__CONST0__",
+        "CLK": "clk",
+        "D[7]": "b7",
+        "D[6]": "b6",
+        **{f"D[{i}]": f"din[{i}]" for i in range(6)},
+        "GWEN": "__CONST1__",
+        **{f"Q[{i}]": f"dout[{i}]" for i in range(8)},
+        **{f"WEN[{i}]": "__CONST0__" if i >= 4 else "__CONST1__" for i in range(8)},
+    }
+    stub_pins = stub.split()[2:]
+    call = next(line for line in out.splitlines() if line.startswith("Xsram0 "))
+    call_nets = call.split()[1:-1]
+    assert dict(zip(stub_pins, call_nets, strict=True)) == expected
+
+
+def test_convert_gate_level_verilog_vector_pins_bound_by_index_not_header_position():
+    """A library whose `.subckt` header lists a bus's bits in some other
+    order still binds by Verilog bit index -- the header position carries
+    nothing Verilog defines (issue #2657's open design question)."""
+    orders = {"macro": ["D[0]", "D[2]", "Y", "D[3]", "D[1]"]}
+    text = (
+        "module m(d, y);\n  input [3:0] d;\n  output y;\n"
+        "  macro u0 (.D({d[0], d[1], d[2], d[3]}), .Y(y));\nendmodule\n"
+    )
+    out = convert_gate_level_verilog(text, pin_order_lookup=orders.get)
+    assert ".SUBCKT macro D[0] D[2] Y D[3] D[1]" in out
+    # D[3] <- d[0] (first operand, MSB), ..., D[0] <- d[3].
+    assert "Xu0 d[3] d[1] y d[0] d[2] macro" in out
+
+
+@pytest.mark.parametrize(
+    ("connection", "widths"),
+    [
+        ("{d[2], d[1], d[0]}", "4 bit\\(s\\) wide .* 3 bit\\(s\\) wide"),
+        ("d[4:0]", "4 bit\\(s\\) wide .* 5 bit\\(s\\) wide"),
+        ("8'h00", "4 bit\\(s\\) wide .* 8 bit\\(s\\) wide"),
+        ("d[0]", "4 bit\\(s\\) wide .* 1 bit\\(s\\) wide"),
+    ],
+)
+def test_convert_gate_level_verilog_vector_width_mismatch_errors(connection, widths):
+    """Issue #2657: a connection whose bit count differs from the port's
+    real per-bit pin count is an error naming instance, port and both
+    widths -- never a silent truncate or pad (Verilog itself would
+    zero-extend or truncate)."""
+    orders = {"macro": ["D[3]", "D[2]", "D[1]", "D[0]", "Y"]}
+    text = (
+        "module m(d, y);\n  input [7:0] d;\n  output y;\n"
+        f"  macro u0 (.D({connection}), .Y(y));\nendmodule\n"
+    )
+    with pytest.raises(
+        VerilogNetlistError, match="instance 'u0' \\('macro'\\) port 'D'"
+    ) as exc:
+        convert_gate_level_verilog(text, pin_order_lookup=orders.get)
+    assert re.search(widths, str(exc.value))
+
+
+def test_convert_gate_level_verilog_multi_bit_onto_scalar_pin_errors():
+    """A multi-bit connection onto a scalar pin is the same width mismatch."""
+    text = (
+        "module m(d, y);\n  input [1:0] d;\n  output y;\n"
+        "  cellx u0 (.A(d), .Y(y));\nendmodule\n"
+    )
+    with pytest.raises(VerilogNetlistError, match="1 bit\\(s\\) wide .* 2 bit"):
+        convert_gate_level_verilog(text, pin_order_lookup=lambda _c: ["A", "Y"])
+
+
+def test_convert_gate_level_verilog_bus_port_of_submodule():
+    """A whole-bus or concatenation connection onto a parsed sub-module's
+    bus port binds to its bit-expanded ports in *declared* order -- MSB-first
+    even for an ascending `[0:1]` range (whose MSB is bit 0)."""
+    text = """
+    module leaf(a, y);
+      input [0:1] a;
+      output y;
+      cellx u0 (.A(a[0]), .B(a[1]), .Y(y));
+    endmodule
+    module top(p, q, y);
+      input p;
+      input q;
+      output y;
+      leaf u1 (.a({p, q}), .y(y));
+    endmodule
+    """
+    out = convert_gate_level_verilog(text, pin_order_lookup=lambda _c: ["A", "B", "Y"])
+    assert ".SUBCKT leaf a[0] a[1] y" in out
+    assert "Xu1 p q y leaf" in out
 
 
 #: Issue #2372: a Yosys-shaped module whose output bus is a concatenation
@@ -15946,6 +16230,82 @@ def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
     # warning rather than an empty `mismatches[]`.
     assert report["error_count"] == 0
     assert report["category_counts"] == {"topology.top_level_pins_anchored": 1}
+
+
+#: Issue #2657 end-to-end: a library carrying a vector-ported hard macro, a
+#: gate-level reference instantiating it with a concatenation, a range slice
+#: and a wide constant, and the layout-side black-box abstraction `klt
+#: extract --abstract-cells` would write for the correctly wired design.
+_VECTOR_MACRO_LIBRARY_SPICE = (
+    ".subckt mylib__inv_1 A Y\n.ends\n"
+    ".subckt mymacro D[3] D[2] D[1] D[0] S[1] S[0] Q VDD VSS\n.ends\n"
+)
+
+_VECTOR_MACRO_REFERENCE_VERILOG = """
+module top(a, b, bus, q);
+  input a;
+  input b;
+  input [3:0] bus;
+  output q;
+  wire an;
+  mylib__inv_1 u1 (.A(a), .Y(an));
+  mymacro m0 (.D({an, b, bus[1:0]}), .S(2'b10), .Q(q));
+endmodule
+"""
+
+_VECTOR_MACRO_LAYOUT_SPICE = """
+.subckt top a b bus[1] bus[0] q
+X1 a an mylib__inv_1
+X2 an b bus[1] bus[0] __CONST1__ __CONST0__ q mymacro
+.ends
+.subckt mylib__inv_1 A Y
+.ends
+.subckt mymacro D[3] D[2] D[1] D[0] S[1] S[0] Q
+.ends
+"""
+
+
+@pytest.mark.parametrize(
+    ("layout_text", "status"),
+    [
+        (_VECTOR_MACRO_LAYOUT_SPICE, "match"),
+        # Negative control: two bits of the macro's `D` bus swapped in the
+        # layout -- what a wrong bit order in the conversion would produce.
+        # The swap must be *topologically* distinguishable for the compare
+        # to see it: KLayout pairs nets by topology, so swapping two bits
+        # that are each a bare top-level pin (`bus[1]`/`bus[0]`), or the two
+        # tie nets, compares clean. That blind spot is why the bit order is
+        # pinned by `test_convert_gate_level_verilog_vector_macro_bit_order`
+        # at the conversion level, not left to the compare.
+        (
+            _VECTOR_MACRO_LAYOUT_SPICE.replace(
+                "X2 an b bus[1] bus[0]", "X2 bus[0] b bus[1] an"
+            ),
+            "mismatch",
+        ),
+    ],
+)
+def test_run_lvs_gate_level_verilog_vector_macro_connections(
+    tmp_path, layout_text, status
+):
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _VECTOR_MACRO_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", layout_text)
+    reference_path = _write(tmp_path / "ref.v", _VECTOR_MACRO_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == status
 
 
 def test_run_lvs_gate_level_verilog_reference_populates_provenance_pdk(tmp_path):

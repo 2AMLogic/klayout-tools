@@ -974,7 +974,8 @@ actually needs are supported — `module`/`endmodule`, `input`/`output`/
 `inout` port declarations (with an optional `[msb:lsb]` bus range, expanded
 to one boundary pin per bit), named (`.PORT(NET)`) instance connections
 only (a plain net, a single-index bit-select `bus[3]`, a `1'b0`/`1'b1`
-constant, or `.PORT()` for an explicit no-connect), a simple `assign
+constant, `.PORT()` for an explicit no-connect, or one of the multi-bit
+forms under "Vector-ported macros" below), a simple `assign
 <net> = <net>;` alias, and a plain concatenation alias `assign <net> =
 { <net>, <net>, ... };` (issue #2372 — the form Yosys routinely emits for a
 vector alias or tie-off padding). A concatenation is expanded MSB-first into
@@ -997,12 +998,43 @@ which is always a single flat module post-place-and-route, but not assumed
 away) converts correctly too — an instantiated cell type that matches
 another parsed `module` in the same file is treated as a genuine
 subcircuit reference, never confused with a library cell of the same name.
-Anything else — positional (non-named) instance connections, concatenation
-outside an `assign` right-hand side,
-a multi-bit range-slice connection, a general expression, `always`/`case`/
-other behavioral statements, an ANSI-style inline port declaration — is an
-application error (exit 1) naming the offending construct, never a silent
-best-effort guess.
+
+**Vector-ported macros** (issue #2657). A black-box hard macro with bus pins
+(an SRAM, any IP block) is instantiated by Yosys and OpenROAD `write_verilog`
+with multi-bit connections, and those are accepted on a `.PORT(<expr>)`
+too: a concatenation `{a, b[3], c[7:4], 2'b01}`, a multi-bit range slice
+`bus[7:0]` (or `\bus [7:0]` on an escaped base), a sized constant wider than
+one bit (`8'h00`, `16'hffff`, `4'b1010` — each bit tied to the
+`__CONST0__`/`__CONST1__` net its value selects), and a whole declared bus
+named plainly (`.D(data)`). Each expands MSB-first to one net per bit, using
+the module's own declared widths. A plain `assign` between two declared
+buses (`assign dout = _05_;`, Yosys's routine bus output) aliases bit for
+bit and needs equal widths, so a whole-bus connection resolves through it. The bits are then bound to the cell's
+real `<PORT>[<index>]` pins from the library's `.subckt` header, **ordered
+by bit index, highest first**: the highest index is the MSB, matching the
+`[N-1:0]` port declarations of the real vector-ported macros checked
+(sky130's OpenRAM `sky130_sram_*`, whose pins are named `din0[31]` …
+`din0[0]`, and gf180mcu's `gf180mcu_fd_ip_sram__*`, named `D[7]` … `D[0]`).
+The bit index decides the binding, not the pin's position in the header.
+For a parsed sub-module the bus port's own declared range decides it. Some
+cases are application errors (exit 1): a bit count that differs from the
+port's pin count (named with the instance, port and both widths, never a
+silent truncate or pad), a range slice of an undeclared bus or against its
+declared direction, an undeclared plain concatenation operand, and an
+unsized, `x`/`z`, or overflowing constant. Replication (`{N{x}}`) and a
+nested concatenation are application errors too. A library whose bus pins
+are not named `<PORT>[<index>]` (e.g. `D<7>`) has no per-bit pins to bind
+to, so it fails the same way rather than guessing. One limit of the compare
+itself also applies here: KLayout pairs nets by topology, so swapping two
+bits that are each a bare top-level pin (or the two constant tie nets) would
+not change the compare result. The conversion's bit order is
+therefore fixed by the rule above and tested directly, not left to the
+compare.
+
+Anything else — positional (non-named) instance connections, a general
+expression, `always`/`case`/other behavioral statements, an ANSI-style
+inline port declaration — is an application error (exit 1) naming the
+offending construct, never a silent best-effort guess.
 
 ## Power/ground connectivity (issue #1952)
 
