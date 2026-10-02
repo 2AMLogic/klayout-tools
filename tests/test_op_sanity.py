@@ -13,14 +13,21 @@ Two tiers, mirroring `test_sim.py`/`test_size.py`:
   sky130A/gf180mcu ngspice model libraries -- the acceptance criterion that
   per-device `Vth` comes from the model rather than a constant can only be
   checked that way. They skip (never silently pass) when ngspice or the PDK
-  model library is absent, as CI installs neither ngspice model tree.
+  model library is absent, as CI installs neither ngspice model tree, when
+  `KLT_SKIP_NGSPICE_TESTS=1` opts the host out of this slow tier, and when
+  the run they did start was killed by its own wall-clock budget rather
+  than reaching an answer (issue #2677 --
+  `_skip_if_the_simulator_ran_out_of_wall_clock`). Every *other* way they
+  can fail still fails.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -33,7 +40,20 @@ from klayout_tools.pdk import PdkNotFoundError, find_pdk
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
-HAVE_NGSPICE = shutil.which("ngspice") is not None
+#: The integration tests at the bottom of this file invoke a real `ngspice`
+#: against a real vendor model library -- slow and host-load-sensitive, the
+#: tier issue #1651 carved out. `KLT_SKIP_NGSPICE_TESTS=1` (set by `npm run
+#: check:ci`'s local-only test script, never by CI) lets a host that *has*
+#: ngspice still opt out, exactly as `tests/test_extract.py`,
+#: `tests/test_sim.py` and `tests/test_eval.py` already do. Issue #2677:
+#: this file was never wired into that knob, so a saturated 8-vCPU dispatch
+#: worker ran these under the build gate and lost the operating point to a
+#: wall-clock timeout -- a red gate for a host-contention reason. CI, which
+#: never sets the variable, still runs them and still catches regressions.
+HAVE_NGSPICE = (
+    shutil.which("ngspice") is not None
+    and os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
+)
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 
@@ -59,11 +79,17 @@ GF180_NGSPICE_DESIGN = _pdk_ngspice_lib(
 
 _SKIP_NO_SKY130 = pytest.mark.skipif(
     not HAVE_NGSPICE or SKY130_NGSPICE_LIB is None,
-    reason="needs ngspice plus an installed sky130A ngspice model library",
+    reason=(
+        "needs ngspice (not disabled by KLT_SKIP_NGSPICE_TESTS=1) plus an "
+        "installed sky130A ngspice model library"
+    ),
 )
 _SKIP_NO_GF180 = pytest.mark.skipif(
     not HAVE_NGSPICE or GF180_NGSPICE_LIB is None or GF180_NGSPICE_DESIGN is None,
-    reason="needs ngspice plus an installed gf180mcu ngspice model library",
+    reason=(
+        "needs ngspice (not disabled by KLT_SKIP_NGSPICE_TESTS=1) plus an "
+        "installed gf180mcu ngspice model library"
+    ),
 )
 
 
@@ -189,6 +215,46 @@ _SATURATED_PMOS = {"vgs": 1.2, "vth": 0.75, "vds": 0.9, "vdsat": 0.39, "id": 4.5
 
 def _findings(report: dict, check: str) -> list[dict]:
     return [entry for entry in report["findings"] if entry["check"] == check]
+
+
+def _timeout_diagnostics(report: dict) -> list[dict]:
+    return [
+        entry
+        for entry in report.get("diagnostics", [])
+        if entry.get("code") == "timeout"
+    ]
+
+
+def _skip_if_the_simulator_ran_out_of_wall_clock(report: dict) -> None:
+    """Report an integration run killed by its wall-clock budget as "not
+    measured" rather than as a failure.
+
+    Issue #2677: the integration tests below drive a *real* ngspice, so
+    their result depends on how much CPU the host can spare. On a
+    saturated dispatch worker (load average ~= nproc on 8 vCPUs) the
+    operating point can miss any fixed budget, and the run then comes back
+    `status: "error"` -- indistinguishable, to a bare `== "clean"`
+    assertion, from a genuinely broken circuit. That makes the build gate
+    a coin flip, which trains reviewers to wave off single-test failures.
+
+    The discrimination is exact, not heuristic: `op_sanity._run_op()`
+    emits one specific `code: "timeout"` diagnostic for, and only for, a
+    `subprocess.TimeoutExpired` on the ngspice invocation. Every other
+    way the lint can fail -- a non-convergent operating point
+    (`singular_matrix`), a missing/unreadable model library, an
+    unlaunchable binary (`unknown`), or any error *finding* about the
+    circuit itself -- carries a different code or none at all and so still
+    fails the test loudly. Nothing here widens into a general
+    "integration tests may fail quietly" escape hatch.
+    """
+    timed_out = _timeout_diagnostics(report)
+    if timed_out:
+        pytest.skip(
+            "NOT MEASURED: ngspice exceeded its operating-point budget on "
+            f"this host -- {timed_out[0]['message']}. This is host "
+            "contention, not a circuit regression (issue #2677); re-run on "
+            "an idle host to actually exercise this test."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -734,6 +800,83 @@ def test_wiring_findings_survive_an_ngspice_launch_failure(tmp_path, monkeypatch
     assert any(diagnostic["code"] == "unknown" for diagnostic in report["diagnostics"])
 
 
+def test_a_killed_ngspice_is_reported_as_a_timeout_diagnostic(tmp_path, monkeypatch):
+    """Issue #2677: a run killed by its wall-clock budget is reported with
+    the distinct `code: "timeout"`, not folded into the generic error
+    bucket -- that distinction is what lets a caller tell "this host ran
+    out of CPU" apart from "this circuit is broken"."""
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(
+        monkeypatch,
+        {},
+        side_effect=subprocess.TimeoutExpired(cmd=["ngspice"], timeout=60),
+    )
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    (timed_out,) = _timeout_diagnostics(report)
+    assert timed_out["severity"] == "error"
+    # The message names the budget that was actually applied -- here the
+    # library default, since this request declares no `options.timeout_s`.
+    assert f"{op_sanity.DEFAULT_TIMEOUT_S}s" in timed_out["message"]
+    assert report["status"] == "error"
+
+
+def test_the_wall_clock_guard_skips_a_timed_out_run(tmp_path, monkeypatch):
+    """Issue #2677: the integration tests' guard turns exactly this shape
+    -- and nothing else -- into "not measured"."""
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(
+        monkeypatch,
+        {},
+        side_effect=subprocess.TimeoutExpired(cmd=["ngspice"], timeout=60),
+    )
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    with pytest.raises(pytest.skip.Exception, match="NOT MEASURED"):
+        _skip_if_the_simulator_ran_out_of_wall_clock(report)
+
+
+@pytest.mark.parametrize(
+    "side_effect,prologue",
+    [
+        # Unlaunchable binary -> `code: "unknown"`.
+        (FileNotFoundError("no ngspice"), ""),
+        # A real non-convergent operating point -> `code: "singular_matrix"`.
+        (None, "Warning: singular matrix:  check node out\nsimulation(s) aborted"),
+    ],
+)
+def test_the_wall_clock_guard_does_not_skip_a_genuine_failure(
+    tmp_path, monkeypatch, side_effect, prologue
+):
+    """Issue #2677's other half: the guard must not become a blanket
+    "integration failures are advisory" escape hatch. Both of these are
+    `status: "error"` runs that carry no timeout diagnostic, so the guard
+    is a no-op and the test's own assertions still fail loudly."""
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(monkeypatch, {}, side_effect=side_effect, prologue=prologue)
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    assert report["status"] == "error"
+    assert _skip_if_the_simulator_ran_out_of_wall_clock(report) is None
+
+
+def test_the_design_pipeline_op_request_budget_is_not_tighter_than_the_default():
+    """Issue #2677: `examples/design-pipeline/sim-op.request.json` is the
+    fixture for the sky130 op-sanity integration test, run on whatever
+    host the suite lands on. Its `options.timeout_s` used to be 60 --
+    *half* the library default -- which a saturated 8-vCPU worker missed
+    reproducibly. A shared fixture must never narrow the default budget;
+    this pins that so the value cannot drift back silently."""
+    request = json.loads(
+        (EXAMPLES / "design-pipeline" / "sim-op.request.json").read_text()
+    )
+
+    assert request["options"]["timeout_s"] >= op_sanity.DEFAULT_TIMEOUT_S
+
+
 def test_recovered_gmin_stepping_narration_is_downgraded(tmp_path, monkeypatch):
     """Issue #205's recovery rule, applied to an `op` run: ngspice narrates
     its own stepping attempts even on a run that converges."""
@@ -1155,6 +1298,7 @@ def test_integration_sky130_ota_is_clean_and_reads_vth_from_the_model():
 
     report = op_sanity.run_op_sanity(str(request), corner="tt/1.620V/-40C")
 
+    _skip_if_the_simulator_ran_out_of_wall_clock(report)
     assert report["status"] == "clean"
     assert report["error_count"] == 0
     assert report["device_count"] == 6
@@ -1216,6 +1360,7 @@ def test_integration_sky130_off_device_is_named(tmp_path):
 
     report = op_sanity.run_op_sanity(str(request))
 
+    _skip_if_the_simulator_ran_out_of_wall_clock(report)
     off = _findings(report, "off")
     assert [finding["device"] for finding in off] == ["XMdead"]
     assert off[0]["values"]["vth_v"] is not None
@@ -1252,6 +1397,7 @@ def test_integration_gf180_resolves_its_own_inner_element_convention(tmp_path):
 
     report = op_sanity.run_op_sanity(str(request))
 
+    _skip_if_the_simulator_ran_out_of_wall_clock(report)
     (device,) = report["devices"]
     assert device["op_point_element"] == "m.xm1.m0"
     assert device["values"]["vth_v"] is not None

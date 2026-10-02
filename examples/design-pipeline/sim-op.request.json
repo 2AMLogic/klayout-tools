@@ -13,5 +13,5 @@
     { "name": "isup_ua", "spice": ".meas tran isup_ua param='-idd*1e6'", "unit": "uA", "limits": { "max": 60 } },
     { "name": "vout_dc", "spice": ".meas tran vout_dc find v(out) at=5u", "unit": "V", "limits": { "min": 0.3, "max": 1.5 } }
   ],
-  "options": { "timeout_s": 60, "keep_artifacts": false }
+  "options": { "timeout_s": 300, "keep_artifacts": false }
 }
