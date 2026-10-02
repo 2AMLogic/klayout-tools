@@ -18095,6 +18095,408 @@ def test_run_lvs_gate_level_verilog_pdk_not_found_errors(tmp_path):
         run_lvs(json.dumps(request))
 
 
+# --- more than one pin-order source (issue #2693) --------------------------- #
+#
+# A macro-backed digital design instantiates cells from **at least two**
+# libraries: the standard cells (e.g. `sky130_fd_sc_hd`) plus each hard
+# macro's own library. The two ship different file layouts, and these
+# fixtures reproduce both exactly as a real open_pdks/volare/ciel install
+# does: a standard-cell library ships one aggregate
+# `spice/<library>.spice`, while a macro library ships **one file per macro
+# and no aggregate at all** (`sky130_sram_macros` has
+# `spice/sky130_sram_1kbyte_1rw1r_32x256_8.spice` and friends;
+# `gf180mcu_fd_ip_sram` has `cdl/gf180mcu_fd_ip_sram__sram64x8m8wm1.cdl`).
+# Before this issue `reference.library` named exactly one library resolved by
+# the aggregate rule alone, so such a design failed with "library cell '...'
+# has no resolvable pin order" whichever single library was named -- the
+# workaround during #2657's verification was a scratch PDK root whose
+# hand-merged `mixlib.spice` concatenated both files.
+
+#: Real `sky130_fd_sc_hd` `.subckt` headers -- pin names and order copied
+#: verbatim from a volare-fetched `sky130A` install (the same bytes
+#: `test_parse_subckt_pin_orders_real_sky130_header` pins) -- as the single
+#: aggregate file a standard-cell library ships.
+_SKY130_HD_LIBRARY_SPICE = (
+    ".subckt sky130_fd_sc_hd__inv_1 A VGND VNB VPB VPWR Y\n.ends\n"
+    ".subckt sky130_fd_sc_hd__dfxtp_1 CLK D VGND VNB VPB VPWR Q\n.ends\n"
+)
+
+#: One `sky130_sram_macros` macro, in its own per-macro file under the macro
+#: library's `spice/` directory, with the macro's real name and its own
+#: supply pin names (`vccd1`/`vssd1` -- not the standard cells'
+#: `VPWR`/`VGND`, which is part of why one library's pin-order file cannot
+#: cover the other). The pin list is trimmed to the macro's **scalar** pins:
+#: the real macro declares its `addr0`/`din0`/`dout0`/`wmask0` buses one
+#: `.subckt` pin per bit, and connecting those from Verilog is vector-port
+#: *connection* parsing (issue #2657), a separate concern from the
+#: pin-order *source* resolution under test here.
+_SRAM_MACRO_SPICE = (
+    ".subckt sky130_sram_1kbyte_1rw1r_32x256_8 clk0 csb0 web0 addr0 din0 "
+    "dout0 vccd1 vssd1\n.ends\n"
+)
+
+#: A second macro in the same library directory, deliberately *not*
+#: instantiated by the design below -- a macro library's asset directory
+#: holds one file per macro, and resolving the library must not depend on the
+#: design using every one of them.
+_SRAM_MACRO_2_SPICE = (
+    ".subckt sky130_sram_2kbyte_1rw1r_32x512_8 clk0 csb0 web0 addr0 din0 "
+    "dout0 vccd1 vssd1\n.ends\n"
+)
+
+#: The design: two standard cells around one SRAM macro, i.e. the smallest
+#: shape that cannot resolve from one library.
+_MACRO_GATE_LEVEL_VERILOG = """
+module top(clk, csb, web, addr, din, q);
+  input clk;
+  input csb;
+  input web;
+  input addr;
+  input din;
+  output q;
+  wire sram_in;
+  wire sram_out;
+  sky130_fd_sc_hd__inv_1 u_inv (.A(din), .Y(sram_in));
+  sky130_sram_1kbyte_1rw1r_32x256_8 u_sram (.clk0(clk), .csb0(csb),
+    .web0(web), .addr0(addr), .din0(sram_in), .dout0(sram_out));
+  sky130_fd_sc_hd__dfxtp_1 u_dff (.CLK(clk), .D(sram_out), .Q(q));
+endmodule
+"""
+
+#: Layout side, hand-written to mirror what `klt extract --abstract-cells`
+#: would write for that design: a pin-only black-box stub per instantiated
+#: master (standard cell *and* macro) plus the top circuit calling them.
+_MACRO_GATE_LEVEL_LAYOUT_SPICE = """
+.subckt top clk csb web addr din q
+X1 din sram_in sky130_fd_sc_hd__inv_1
+X2 clk csb web addr sram_in sram_out sky130_sram_1kbyte_1rw1r_32x256_8
+X3 clk sram_out q sky130_fd_sc_hd__dfxtp_1
+.ends
+.subckt sky130_fd_sc_hd__inv_1 A Y
+.ends
+.subckt sky130_fd_sc_hd__dfxtp_1 CLK D Q
+.ends
+.subckt sky130_sram_1kbyte_1rw1r_32x256_8 clk0 csb0 web0 addr0 din0 dout0
+.ends
+"""
+
+
+def _make_fake_macro_pdk(tmp_path: Path, *, macro_asset: str = "spice") -> str:
+    """A hermetic fake PDK install shaped exactly like a real
+    open_pdks/volare/ciel one, carrying **both** library file layouts: an
+    aggregate `libs.ref/sky130_fd_sc_hd/spice/sky130_fd_sc_hd.spice` and a
+    one-file-per-macro `libs.ref/sky130_sram_macros/<asset>/<macro>.<asset>`
+    directory with no aggregate `sky130_sram_macros.<asset>` in it at all.
+
+    `macro_asset` selects the macro library's own view directory, so the
+    `.cdl`-only shape (`gf180mcu_fd_ip_sram`) is exercised by the same
+    fixture."""
+    root = tmp_path / "pdk_install"
+    (root / "sky130A" / "libs.tech").mkdir(parents=True, exist_ok=True)
+    libs_ref = root / "sky130A" / "libs.ref"
+    hd_dir = libs_ref / "sky130_fd_sc_hd" / "spice"
+    hd_dir.mkdir(parents=True, exist_ok=True)
+    (hd_dir / "sky130_fd_sc_hd.spice").write_text(_SKY130_HD_LIBRARY_SPICE)
+    macro_dir = libs_ref / "sky130_sram_macros" / macro_asset
+    macro_dir.mkdir(parents=True, exist_ok=True)
+    (macro_dir / f"sky130_sram_1kbyte_1rw1r_32x256_8.{macro_asset}").write_text(
+        _SRAM_MACRO_SPICE
+    )
+    (macro_dir / f"sky130_sram_2kbyte_1rw1r_32x512_8.{macro_asset}").write_text(
+        _SRAM_MACRO_2_SPICE
+    )
+    return str(root)
+
+
+def _macro_request(tmp_path: Path, reference_extra: dict) -> str:
+    layout_path = _write(tmp_path / "layout.spice", _MACRO_GATE_LEVEL_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.v", _MACRO_GATE_LEVEL_VERILOG)
+    return json.dumps(
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "top",
+                "form": "gate-level-verilog",
+                **reference_extra,
+            },
+        }
+    )
+
+
+def test_run_lvs_gate_level_verilog_one_library_cannot_resolve_a_macro(tmp_path):
+    """The gap, pinned as a negative control: naming only the standard-cell
+    library leaves the SRAM macro unresolvable -- exactly the failure a real
+    `klt place-and-route` result containing an SRAM hit before this issue."""
+    root = _make_fake_macro_pdk(tmp_path)
+    request = _macro_request(
+        tmp_path,
+        {"library": "sky130_fd_sc_hd", "pdk": "sky130A", "pdk_root": root},
+    )
+    with pytest.raises(LvsError, match="no resolvable pin order"):
+        run_lvs(request)
+
+
+def test_run_lvs_gate_level_verilog_resolves_pin_orders_from_two_libraries(tmp_path):
+    """Issue #2693's acceptance criterion: a gate-level reference
+    instantiating `sky130_fd_sc_hd` cells plus a `sky130_sram_macros` macro
+    resolves with no hand-merged library file -- `reference.library` names
+    both, each resolved by its own install layout (aggregate file for the
+    standard cells, per-macro files for the macro library)."""
+    root = _make_fake_macro_pdk(tmp_path)
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": ["sky130_fd_sc_hd", "sky130_sram_macros"],
+            "pdk": "sky130A",
+            "pdk_root": root,
+        },
+    )
+    report = run_lvs(request)
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+
+
+def test_run_lvs_gate_level_verilog_records_every_pin_order_source(tmp_path):
+    """`provenance.pin_order_sources` names every file actually read, in read
+    order, each with the library it came from -- `provenance.pdk` alone
+    cannot answer "where did this cell's pin order come from" once more than
+    one library is involved."""
+    root = _make_fake_macro_pdk(tmp_path)
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": ["sky130_fd_sc_hd", "sky130_sram_macros"],
+            "pdk": "sky130A",
+            "pdk_root": root,
+        },
+    )
+    report = run_lvs(request)
+    sources = report["provenance"]["pin_order_sources"]
+    assert [entry["library"] for entry in sources] == [
+        "sky130_fd_sc_hd",
+        "sky130_sram_macros",
+        "sky130_sram_macros",
+    ]
+    assert [os.path.basename(entry["path"]) for entry in sources] == [
+        "sky130_fd_sc_hd.spice",
+        "sky130_sram_1kbyte_1rw1r_32x256_8.spice",
+        "sky130_sram_2kbyte_1rw1r_32x512_8.spice",
+    ]
+    assert [entry["cells"] for entry in sources] == [2, 1, 1]
+
+
+def test_run_lvs_gate_level_verilog_multi_library_power_universe_is_unchecked(tmp_path):
+    """A documented consequence, pinned so it cannot change silently: the
+    power-pin universe is derived by intersecting the pin names *every*
+    instantiated master declares (`POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER`),
+    and a macro declares its own supply names (`vccd1`/`vssd1`) rather than
+    the standard cells' (`VPWR`/`VGND`) -- so the intersection is empty and
+    `power_connectivity` reports `"unchecked"` with its reason, rather than
+    guessing. Honest, not wrong: a per-library power universe is follow-up
+    work, not part of pin-order source resolution."""
+    root = _make_fake_macro_pdk(tmp_path)
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": ["sky130_fd_sc_hd", "sky130_sram_macros"],
+            "pdk": "sky130A",
+            "pdk_root": root,
+        },
+    )
+    power = run_lvs(request)["power_connectivity"]
+    assert power["status"] == "unchecked"
+    assert power["power_pins"] == []
+    # The evidence block still names every master it intersected, which is
+    # what makes the empty universe diagnosable rather than mysterious.
+    assert power["power_pins_derivation"]["master_count"] == 3
+
+
+def test_run_lvs_gate_level_verilog_resolves_a_cdl_only_macro_library(tmp_path):
+    """The other real macro-library shape: `gf180mcu_fd_ip_sram` ships its
+    per-macro files as `.cdl`, with no `spice/` directory at all."""
+    root = _make_fake_macro_pdk(tmp_path, macro_asset="cdl")
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": ["sky130_fd_sc_hd", "sky130_sram_macros"],
+            "pdk": "sky130A",
+            "pdk_root": root,
+        },
+    )
+    report = run_lvs(request)
+    assert report["status"] == "match"
+    assert [
+        os.path.basename(entry["path"])
+        for entry in report["provenance"]["pin_order_sources"]
+    ] == [
+        "sky130_fd_sc_hd.spice",
+        "sky130_sram_1kbyte_1rw1r_32x256_8.cdl",
+        "sky130_sram_2kbyte_1rw1r_32x512_8.cdl",
+    ]
+
+
+def test_run_lvs_gate_level_verilog_pin_order_files_merge_into_the_lookup(tmp_path):
+    """`reference.pin_order_files` is the other half of the schema: an
+    explicit `.spice`/`.cdl` path merged into the same lookup, for a
+    pin-order source the `libs.ref/<library>/...` convention does not reach
+    (a macro netlist sitting beside the design)."""
+    root = _make_fake_macro_pdk(tmp_path)
+    macro_path = _write(tmp_path / "macro.spice", _SRAM_MACRO_SPICE)
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": "sky130_fd_sc_hd",
+            "pdk": "sky130A",
+            "pdk_root": root,
+            "pin_order_files": [macro_path],
+        },
+    )
+    report = run_lvs(request)
+    assert report["status"] == "match"
+    sources = report["provenance"]["pin_order_sources"]
+    # The explicit file belongs to no named library, and is read last.
+    assert sources[-1]["library"] is None
+    assert os.path.basename(sources[-1]["path"]) == "macro.spice"
+
+
+def test_run_lvs_gate_level_verilog_pin_order_files_alone_needs_no_pdk(tmp_path):
+    """`reference.pin_order_files` on its own resolves every cell without
+    naming a library at all -- and therefore resolves no PDK, so
+    `provenance.pdk` stays `null`."""
+    sources_path = _write(
+        tmp_path / "all_cells.spice", _SKY130_HD_LIBRARY_SPICE + _SRAM_MACRO_SPICE
+    )
+    request = _macro_request(tmp_path, {"pin_order_files": [sources_path]})
+    report = run_lvs(request)
+    assert report["status"] == "match"
+    assert report["provenance"]["pdk"] is None
+    assert len(report["provenance"]["pin_order_sources"]) == 1
+
+
+def test_run_lvs_gate_level_verilog_conflicting_pin_orders_error(tmp_path):
+    """A cell type declared by two sources with **different** pin lists is a
+    loud error, never "first wins": the conversion emits a positional
+    `X`-card call that parses perfectly either way, so a silent pick would
+    wire one side of the compare wrong with nothing to notice it."""
+    root = _make_fake_macro_pdk(tmp_path)
+    conflicting = _write(
+        tmp_path / "conflict.spice",
+        ".subckt sky130_fd_sc_hd__inv_1 Y VGND VNB VPB VPWR A\n.ends\n",
+    )
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": ["sky130_fd_sc_hd", "sky130_sram_macros"],
+            "pdk": "sky130A",
+            "pdk_root": root,
+            "pin_order_files": [conflicting],
+        },
+    )
+    with pytest.raises(LvsError, match="two different pin orders"):
+        run_lvs(request)
+
+
+def test_run_lvs_gate_level_verilog_identical_redeclaration_is_accepted(tmp_path):
+    """An *identical* redeclaration by a second source is not a conflict --
+    there is nothing to choose between, and a library that ships both a
+    `.spice` and a `.cdl` view with byte-identical `.subckt` headers (e.g.
+    gf180mcu) would otherwise be unusable alongside an explicit file."""
+    root = _make_fake_macro_pdk(tmp_path)
+    duplicate = _write(tmp_path / "duplicate.spice", _SKY130_HD_LIBRARY_SPICE)
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": ["sky130_fd_sc_hd", "sky130_sram_macros"],
+            "pdk": "sky130A",
+            "pdk_root": root,
+            "pin_order_files": [duplicate],
+        },
+    )
+    assert run_lvs(request)["status"] == "match"
+
+
+def test_run_lvs_gate_level_verilog_library_with_no_pin_order_source_errors(tmp_path):
+    """A named library that ships neither an aggregate file nor any per-cell
+    file is an error naming every candidate tried -- including the per-cell
+    glob, so the message says what the fallback looked for."""
+    root = _make_fake_macro_pdk(tmp_path)
+    (Path(root) / "sky130A" / "libs.ref" / "sky130_sram_macros_empty").mkdir(
+        parents=True, exist_ok=True
+    )
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": ["sky130_fd_sc_hd", "sky130_sram_macros_empty"],
+            "pdk": "sky130A",
+            "pdk_root": root,
+        },
+    )
+    with pytest.raises(LvsError, match="has no pin-order source under PDK variant"):
+        run_lvs(request)
+
+
+@pytest.mark.parametrize(
+    "library",
+    [42, ["sky130_fd_sc_hd", ""], ["sky130_fd_sc_hd", 7], {"name": "x"}],
+)
+def test_run_lvs_gate_level_verilog_malformed_library_errors(tmp_path, library):
+    root = _make_fake_macro_pdk(tmp_path)
+    request = _macro_request(
+        tmp_path, {"library": library, "pdk": "sky130A", "pdk_root": root}
+    )
+    with pytest.raises(LvsError, match="request.reference.library"):
+        run_lvs(request)
+
+
+@pytest.mark.parametrize("pin_order_files", ["macro.spice", [], [""], [3]])
+def test_run_lvs_gate_level_verilog_malformed_pin_order_files_errors(
+    tmp_path, pin_order_files
+):
+    root = _make_fake_macro_pdk(tmp_path)
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": "sky130_fd_sc_hd",
+            "pdk": "sky130A",
+            "pdk_root": root,
+            "pin_order_files": pin_order_files,
+        },
+    )
+    with pytest.raises(LvsError, match="request.reference.pin_order_files"):
+        run_lvs(request)
+
+
+def test_run_lvs_gate_level_verilog_missing_pin_order_file_errors(tmp_path):
+    root = _make_fake_macro_pdk(tmp_path)
+    request = _macro_request(
+        tmp_path,
+        {
+            "library": "sky130_fd_sc_hd",
+            "pdk": "sky130A",
+            "pdk_root": root,
+            "pin_order_files": [str(tmp_path / "nope.spice")],
+        },
+    )
+    with pytest.raises(LvsError, match="pin_order_files entry not found"):
+        run_lvs(request)
+
+
+def test_run_lvs_plain_reference_omits_pin_order_sources(tmp_path):
+    """`provenance.pin_order_sources` is omitted entirely for a reference
+    form that reads no pin-order source -- never a spuriously present empty
+    list."""
+    layout_path = _write(
+        tmp_path / "layout.spice", ".subckt top a b\nM1 a b VSS VSS nfet\n.ends\n"
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {"netlist": layout_path, "top": "top"},
+    }
+    report = run_lvs(json.dumps(request))
+    assert "pin_order_sources" not in report["provenance"]
+
+
 # --- real-PDK pin-order resolution ------------------------------------------ #
 #
 # The tests above pin pin-order *parsing* against `.subckt` header lines
@@ -18148,10 +18550,8 @@ _REAL_GF180MCU_9T5V0_VARIANT = _find_real_library_pin_order_variant(
 )
 def test_real_sky130_library_resolves_pin_order_from_the_installed_file():
     root, variant = _REAL_SKY130_HD_VARIANT
-    pin_orders, _pdk_info = lvs._resolve_gate_level_pin_orders(
-        "sky130_fd_sc_hd", variant, root
-    )
-    lookup = pin_orders.get
+    resolved = lvs._resolve_gate_level_pin_orders("sky130_fd_sc_hd", variant, root)
+    lookup = resolved.pin_orders.get
     # sky130's own declared order for a 1x inverter: signal `A`, the four
     # supply/well pins, then the output `Y` -- alphabetical, with the
     # supplies interleaved between the signal pins rather than grouped at
@@ -18182,10 +18582,10 @@ def test_real_sky130_library_resolves_pin_order_from_the_installed_file():
 )
 def test_real_gf180mcu_library_resolves_pin_order_from_the_installed_file():
     root, variant = _REAL_GF180MCU_9T5V0_VARIANT
-    pin_orders, _pdk_info = lvs._resolve_gate_level_pin_orders(
+    resolved = lvs._resolve_gate_level_pin_orders(
         "gf180mcu_fd_sc_mcu9t5v0", variant, root
     )
-    lookup = pin_orders.get
+    lookup = resolved.pin_orders.get
     # gf180mcu's own convention differs from sky130's on BOTH axes: pin
     # names (`I`/`ZN`, not `A`/`Y`) and order (signals first, supplies
     # last). Resolving both libraries correctly from one code path is the

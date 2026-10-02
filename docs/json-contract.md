@@ -341,6 +341,21 @@ content. It is a verb-local field, not a `build_provenance()` parameter —
 the same choice `klt lvs` made for its own second input
 (`environment.reference_sha256`).
 
+`klt lvs` carries its own extra key on the same footing (issue #2693):
+`provenance.pin_order_sources`, present **only** when `reference.form` is
+`"gate-level-verilog"`, is one `{library, path, cells}` record per
+`.spice`/`.cdl` pin-order file the run actually read, in read order
+(`library: null` for a `reference.pin_order_files` entry, which belongs to no
+named library). That form resolves each instantiated cell's pin order from a
+PDK library rather than from the reference netlist, and a macro-backed design
+resolves **several** libraries — the standard cells' aggregate file plus one
+file per instantiated hard macro — so `provenance.pdk` alone cannot answer
+"where did this cell's pin order come from". Like `klt erc`'s `spec`, it is a
+verb-local field rather than a `build_provenance()` parameter, and it is
+omitted entirely (never an empty list) for every reference form that reads no
+pin-order source. See [`docs/cli/lvs.md`](cli/lvs.md)'s "Digital gate-level
+LVS".
+
 `klt signoff` emits **no** `provenance` block of its own — it resolves no
 PDK, applies no deck, and reads no single input stream; the evidence it
 aggregates carries its own. Its two doc-parsing modes (`--manifest`,

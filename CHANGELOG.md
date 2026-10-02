@@ -14,6 +14,43 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2693, `klt lvs`; `schema_version` unchanged, additive —
+  `reference.library` accepts a new shape, a new `reference` field, and a new
+  `provenance` key): `reference.form: "gate-level-verilog"` resolved cell pin
+  orders from exactly **one** library file,
+  `libs.ref/<reference.library>/{spice,cdl}/<library>.{spice,cdl}` — but a
+  macro-backed digital design instantiates cells from at least **two**
+  libraries (the standard cells plus each hard macro's own), and macro
+  libraries ship one file *per macro* with no aggregate `<library>.spice` at
+  all (`sky130_sram_macros` ships
+  `spice/sky130_sram_1kbyte_1rw1r_32x256_8.spice` and friends,
+  `gf180mcu_fd_ip_sram` ships `cdl/gf180mcu_fd_ip_sram__sram64x8m8wm1.cdl`).
+  So a real `klt place-and-route` result containing an SRAM could not be run
+  through `klt lvs` at all — the macro failed with "library cell '...' has no
+  resolvable pin order" whichever single library was named, and the
+  workaround was a scratch PDK root whose hand-merged library file
+  concatenated both. `reference.library` now accepts an **array** of library
+  names as well as a single name, each resolved by the aggregate rule first
+  and then by reading every `.spice` (then every `.cdl`) file in the
+  library's asset directory — the per-macro shape. New
+  `reference.pin_order_files` (array of `.spice`/`.cdl` paths, resolved
+  against the request file's directory) merges explicit sources into the same
+  lookup for a file the `libs.ref/<library>/...` convention does not reach,
+  and may be used *instead of* `reference.library`, in which case the run
+  resolves no PDK and `provenance.pdk` stays `null`. **A cell type declared
+  by two sources with different pin lists is an application error (exit 1)**
+  naming the cell, both sources and both pin lists — never a silent "first
+  wins", which would mis-wire one side of a positional `X`-card compare with
+  nothing to notice it; an identical redeclaration is accepted. New
+  `provenance.pin_order_sources` records every file actually read
+  (`{library, path, cells}`, in read order; `library: null` for a
+  `pin_order_files` entry), present only for this reference form. One
+  documented consequence, unchanged by this issue: the power-pin universe is
+  derived by intersecting the pin names *every* instantiated master declares,
+  and a macro declares its own supply names, so a multi-library compare
+  reports `power_connectivity.status: "unchecked"` with its reason rather
+  than a partial universe — the signal-connectivity `status` is unaffected.
+  See [`docs/cli/lvs.md`](docs/cli/lvs.md)'s "Digital gate-level LVS".
 - **Fixed** (#2692, `klt lvs`; `schema_version` unchanged, additive new
   option + `mismatches[].category` — but **a `reference.form:
   "gate-level-verilog"` compare that previously reported `match` on a

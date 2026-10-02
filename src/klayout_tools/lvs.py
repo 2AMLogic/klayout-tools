@@ -1167,18 +1167,9 @@ def run_lvs(request: str) -> dict[str, Any]:
             "device-class/model name to the reference net its implicit bulk "
             "terminal carries"
         )
-    if reference_form == "gate-level-verilog" and not reference_spec.get("library"):
-        raise LvsError(
-            "request.reference.library is required with "
-            'form: "gate-level-verilog" -- it names the standard-cell '
-            "library (e.g. 'sky130_fd_sc_hd', 'gf180mcu_fd_sc_mcu9t5v0') "
-            "whose own .spice/.cdl subcircuit declarations resolve each "
-            "instantiated cell's pin order (see docs/cli/lvs.md, \"Netlist "
-            'form")'
-        )
     # Issue #1622: resolved here rather than inside `_read_reference_netlist`
-    # so the *same* mapping serves both consumers with one read of the
-    # library file -- the conversion's own `pin_order_lookup` and, below,
+    # so the *same* mapping serves both consumers with one read of each
+    # pin-order source -- the conversion's own `pin_order_lookup` and, below,
     # the power-pin universe `_prune_power_only_circuits` needs.
     reference_pin_orders: dict[str, list[str]] | None = None
     # Issue #1901: the PDK `_resolve_gate_level_pin_orders` resolves
@@ -1187,12 +1178,28 @@ def run_lvs(request: str) -> dict[str, Any]:
     # `klt extract`/`klt sta`/`klt place-and-route`. Stays `None` for every
     # other `reference.form`, which resolves no PDK at all.
     reference_pdk_info: dict[str, Any] | None = None
+    # Issue #2693: one record per pin-order file actually read -- a
+    # macro-backed design resolves pin orders from several libraries (the
+    # standard cells plus each macro's own one-file-per-macro library), so
+    # `provenance.pdk` alone no longer says where a cell's pin order came
+    # from. Empty for every other `reference.form`, which reads none.
+    reference_pin_order_sources: list[dict[str, Any]] = []
+    # Issue #2693: `reference.library`/`reference.pin_order_files` are
+    # validated inside the resolver (both are specific to this one form, and
+    # "neither was given" is its own error there), so this branch stays a
+    # single call.
     if reference_form == "gate-level-verilog":
-        reference_pin_orders, reference_pdk_info = _resolve_gate_level_pin_orders(
+        resolved_pin_orders = _resolve_gate_level_pin_orders(
             reference_spec.get("library"),
             reference_spec.get("pdk"),
             reference_spec.get("pdk_root"),
+            pin_order_files=_resolve_reference_pin_order_files(
+                reference_spec, request_dir
+            ),
         )
+        reference_pin_orders = resolved_pin_orders.pin_orders
+        reference_pdk_info = resolved_pin_orders.pdk_info
+        reference_pin_order_sources = resolved_pin_orders.sources
     # Issue #1907: populated by the `form: "subckt-call"` conversion with every
     # resistor/capacitor device class it wrote the literal `0` placeholder
     # value onto -- consumed by `_apply_reference_placeholder_values` below,
@@ -2216,6 +2223,65 @@ def run_lvs(request: str) -> dict[str, Any]:
                 category_error_counts.get(mismatch["category"], 0) + 1
             )
 
+    provenance = build_provenance(
+        deck_name=layout_deck_name,
+        deck_path=(deck_source_path(layout_deck_name) if layout_deck_name else None),
+        # Issue #1901: populated only for a `gate-level-verilog`
+        # reference whose `reference.pdk`/`reference.pdk_root` resolved
+        # a PDK (see `reference_pdk_info` above) -- `None` for a plain
+        # SPICE-vs-SPICE reference, which genuinely involves no PDK.
+        pdk=reference_pdk_info,
+        # Issue #1969: pin the layout side under `provenance.input`, the
+        # shared block's own field, for *both* engines (this call is
+        # reached after the `klayout`/`netgen` branch converges, and
+        # `layout_hash_source` is resolved before it). This deliberately
+        # reverses issue #331's original call: `environment.layout_sha256`
+        # above records the same digest of the same file (both go through
+        # `sha256_file`), but only under an LVS-specific key no generic
+        # consumer reads. `klt signoff --manifest`'s T1 item-4 staleness
+        # gate reads `provenance.input.content_hash` generically across
+        # every kind, so leaving this `null` made *every* content-hash-
+        # pinned "LVS clean" citation render `stale_evidence` -- a pinned
+        # hash can never match `None`. `environment.layout_sha256` is a
+        # bare hex digest and stays exactly as it was (a report-shape
+        # contract of its own); `provenance.input.content_hash` is the
+        # `sha256:`-prefixed form, so the two are redundant in content
+        # but not interchangeable in shape.
+        input_path=layout_hash_source,
+        # Issue #2027: and say *what* that hash is of -- `"layout"` for
+        # the `layout.file` shape (the original stream, the same bytes
+        # `klt drc` hashes), `"netlist"` for the pre-extracted
+        # `layout.netlist` shape. Without this discriminator `klt
+        # signoff` compared a pre-extracted run's SPICE digest against a
+        # DRC report's layout digest and refused to aggregate a
+        # perfectly consistent pair (the repo's own `examples/signoff/`
+        # pair reproduced it).
+        input_role=layout_input_role,
+        # Issue #600: echo the resolved `layout.deck_options` mapping
+        # under `provenance.deck.options`, matching `klt extract`'s
+        # shape exactly (`_deck_block` omits the key entirely when
+        # `deck_options` is `None`/empty).
+        deck_options=deck_options,
+        # Issue #2394: ...and, identically to `klt extract`, record the
+        # *fully resolved* option set (the deck's own defaults for every
+        # key `layout.deck_options` did not pin) plus `options_explicit`/
+        # `options_hash`. `layout_deck_name` is `None` for the
+        # pre-extracted `layout.netlist` shape, where `_deck_block`
+        # returns `None` and this has no effect.
+        resolve_deck_options=True,
+        include_klayout_version_mismatch=True,
+    )
+    if reference_pin_order_sources:
+        # Issue #2693: *which* pin-order sources this compare's cell pin
+        # orders came from -- one record per file read, in read order. A
+        # macro-backed `gate-level-verilog` reference resolves several
+        # (`sky130_fd_sc_hd`'s aggregate library file plus one file per
+        # instantiated SRAM macro), so `provenance.pdk` alone cannot answer
+        # "where did this cell's pin order come from". Omitted entirely for
+        # every other `reference.form`, which reads no pin-order source at
+        # all -- never a spuriously present empty list.
+        provenance["pin_order_sources"] = reference_pin_order_sources
+
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
@@ -2358,56 +2424,10 @@ def run_lvs(request: str) -> dict[str, Any]:
             "reference_sha256": sha256_file(reference_netlist_path),
             "extracted_netlist": extracted_netlist_path,
         },
-        "provenance": build_provenance(
-            deck_name=layout_deck_name,
-            deck_path=(
-                deck_source_path(layout_deck_name) if layout_deck_name else None
-            ),
-            # Issue #1901: populated only for a `gate-level-verilog`
-            # reference whose `reference.pdk`/`reference.pdk_root` resolved
-            # a PDK (see `reference_pdk_info` above) -- `None` for a plain
-            # SPICE-vs-SPICE reference, which genuinely involves no PDK.
-            pdk=reference_pdk_info,
-            # Issue #1969: pin the layout side under `provenance.input`, the
-            # shared block's own field, for *both* engines (this call is
-            # reached after the `klayout`/`netgen` branch converges, and
-            # `layout_hash_source` is resolved before it). This deliberately
-            # reverses issue #331's original call: `environment.layout_sha256`
-            # above records the same digest of the same file (both go through
-            # `sha256_file`), but only under an LVS-specific key no generic
-            # consumer reads. `klt signoff --manifest`'s T1 item-4 staleness
-            # gate reads `provenance.input.content_hash` generically across
-            # every kind, so leaving this `null` made *every* content-hash-
-            # pinned "LVS clean" citation render `stale_evidence` -- a pinned
-            # hash can never match `None`. `environment.layout_sha256` is a
-            # bare hex digest and stays exactly as it was (a report-shape
-            # contract of its own); `provenance.input.content_hash` is the
-            # `sha256:`-prefixed form, so the two are redundant in content
-            # but not interchangeable in shape.
-            input_path=layout_hash_source,
-            # Issue #2027: and say *what* that hash is of -- `"layout"` for
-            # the `layout.file` shape (the original stream, the same bytes
-            # `klt drc` hashes), `"netlist"` for the pre-extracted
-            # `layout.netlist` shape. Without this discriminator `klt
-            # signoff` compared a pre-extracted run's SPICE digest against a
-            # DRC report's layout digest and refused to aggregate a
-            # perfectly consistent pair (the repo's own `examples/signoff/`
-            # pair reproduced it).
-            input_role=layout_input_role,
-            # Issue #600: echo the resolved `layout.deck_options` mapping
-            # under `provenance.deck.options`, matching `klt extract`'s
-            # shape exactly (`_deck_block` omits the key entirely when
-            # `deck_options` is `None`/empty).
-            deck_options=deck_options,
-            # Issue #2394: ...and, identically to `klt extract`, record the
-            # *fully resolved* option set (the deck's own defaults for every
-            # key `layout.deck_options` did not pin) plus `options_explicit`/
-            # `options_hash`. `layout_deck_name` is `None` for the
-            # pre-extracted `layout.netlist` shape, where `_deck_block`
-            # returns `None` and this has no effect.
-            resolve_deck_options=True,
-            include_klayout_version_mismatch=True,
-        ),
+        # Issue #2693: built just above the return (rather than inline here)
+        # so the `gate-level-verilog` form's `pin_order_sources` can be added
+        # to it without duplicating this whole call per form.
+        "provenance": provenance,
         "mismatches": mismatches,
         "net_correspondence": net_correspondence,
     }
@@ -3222,9 +3242,10 @@ def _read_reference_netlist(
     form: str = "plain-element",
     deck: str | None = None,
     device_map: dict[str, object] | None = None,
-    library: str | None = None,
+    library: str | list[str] | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    pin_order_files: Sequence[str] | None = None,
     pin_orders: dict[str, list[str]] | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
     gate_level_port_aliases: dict[str, dict[str, str]] | None = None,
@@ -3273,11 +3294,16 @@ def _read_reference_netlist(
     place-and-route` `verilog_path` gate-level Verilog netlist instead of
     SPICE, and converts it to plain-element-shaped SPICE first (see
     :mod:`klayout_tools.verilog_netlist`). ``library`` (required for this
-    form) names the standard-cell library whose real
-    ``libs.ref/<library>/spice/<library>.spice`` (or ``.../cdl/<library>.cdl``)
-    file resolves each instantiated cell's pin order; ``pdk_variant``/
-    ``pdk_root`` are forwarded to :func:`klayout_tools.pdk.find_pdk` exactly
-    like `klt extract`'s own ``--pdk``/``--pdk-root`` flags.
+    form, unless ``pin_order_files`` is given instead) names the
+    standard-cell library -- or, as a list, every library the design
+    instantiates cells from (issue #2693) -- whose real
+    ``libs.ref/<library>/spice/<library>.spice`` (or ``.../cdl/<library>.cdl``,
+    or the per-macro files a macro library ships instead of an aggregate)
+    resolves each instantiated cell's pin order; ``pin_order_files`` adds
+    explicit, already-resolved ``.spice``/``.cdl`` paths to that lookup; and
+    ``pdk_variant``/``pdk_root`` are forwarded to
+    :func:`klayout_tools.pdk.find_pdk` exactly like `klt extract`'s own
+    ``--pdk``/``--pdk-root`` flags.
 
     ``pin_orders`` (issue #1622) lets a caller that already resolved that
     library file -- ``run_lvs`` does, because
@@ -3348,9 +3374,9 @@ def _read_reference_netlist(
         read_text = converted
     elif form == "gate-level-verilog":
         if pin_orders is None:
-            pin_orders, _ = _resolve_gate_level_pin_orders(
-                library, pdk_variant, pdk_root
-            )
+            pin_orders = _resolve_gate_level_pin_orders(
+                library, pdk_variant, pdk_root, pin_order_files=pin_order_files
+            ).pin_orders
         try:
             converted = convert_gate_level_verilog(
                 text, pin_order_lookup=pin_orders.get
@@ -3448,71 +3474,286 @@ _LIBRARY_PIN_ORDER_ASSETS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _resolve_gate_level_pin_orders(
-    library: str | None,
-    pdk_variant: str | None,
-    pdk_root: str | None,
-) -> tuple[dict[str, list[str]], dict[str, Any]]:
-    """``({<cell>: [<pin>, ...]}, pdk_info)`` -- every standard cell's real,
-    full PDK pin order (signal *and* power/ground), read from a resolved PDK
-    install's own ``libs.ref/<library>/{spice,cdl}/<library>.{spice,cdl}``
-    file (issue #1336) -- never a hardcoded pin-order table.
+class _GateLevelPinOrders(NamedTuple):
+    """What :func:`_resolve_gate_level_pin_orders` resolved (issue #2693).
 
-    Two consumers, one read of that file (issue #1622): ``.get`` on the pin-
-    order mapping is the ``pin_order_lookup`` callback
-    :func:`klayout_tools.verilog_netlist.convert_gate_level_verilog` wants,
-    while :func:`_gate_level_power_pin_names` needs the whole mapping, to
-    derive which of a cell's real PDK pins the conversion dropped.
+    ``pin_orders`` is the merged ``{<cell>: [<pin>, ...]}`` mapping across
+    *every* source the request named; ``pdk_info`` is the
+    :func:`~klayout_tools.pdk.find_pdk`-shaped dict the
+    ``reference.library`` resolution went through (``None`` only when the
+    request named ``reference.pin_order_files`` alone, which resolves no PDK
+    at all); ``sources`` is one ``{"library", "path", "cells"}`` record per
+    file actually read, in read order -- what ``run_lvs`` records as
+    ``provenance.pin_order_sources``.
 
-    Resolves the PDK exactly like `klt extract --pdk`/`klt place-and-route`
-    do (:func:`klayout_tools.pdk.find_pdk`, the same ``variant``/``root``
-    resolution order documented in ``docs/cli/pdk.md``), then reads whichever
-    of that library's ``spice/<library>.spice`` / ``cdl/<library>.cdl`` files
-    exists first (see :data:`_LIBRARY_PIN_ORDER_ASSETS`). The resolved
-    ``pdk_info`` (the same :func:`~klayout_tools.pdk.find_pdk`-shaped dict) is
-    returned alongside the pin-order mapping (issue #1901) so ``run_lvs`` can
-    record it in ``provenance.pdk`` without a second, redundant resolution.
-    Raises :class:`LvsError` -- never lets a lower-level exception escape
-    this command's JSON-envelope contract -- when the PDK does not resolve,
-    the resolved variant ships no ``libs_ref`` asset at all, or neither file
-    exists for ``library``.
+    A tuple-shaped return existed before this issue (``(pin_orders,
+    pdk_info)``); naming the fields is what keeps a third element from
+    turning every call site into positional guesswork.
     """
-    if not library:
-        raise LvsError(
-            'request.reference.library is required with form: "gate-level-verilog"'
-        )
-    try:
-        pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-    except PdkNotFoundError as exc:
-        raise LvsError(str(exc)) from exc
 
-    libs_ref = pdk_info["assets"]["libs_ref"]
-    if libs_ref is None:
-        raise LvsError(
-            f"PDK variant '{pdk_info['variant']}' (root '{pdk_info['root']}') "
-            "ships no 'libs.ref' asset -- cannot resolve "
-            f"'{library}''s pin order"
-        )
+    pin_orders: dict[str, list[str]]
+    pdk_info: dict[str, Any] | None
+    sources: list[dict[str, Any]]
 
+
+def _normalize_reference_libraries(value: Any) -> list[str]:
+    """``request.reference.library`` -> an ordered, de-duplicated list of
+    library names (issue #2693).
+
+    A bare string (the original shape, unchanged) names one library. A list
+    names several, resolved left to right: a macro-backed digital design
+    instantiates cells from **at least two** libraries -- the standard-cell
+    library (e.g. ``sky130_fd_sc_hd``) plus each hard macro's own (e.g.
+    ``sky130_sram_macros``) -- and before this issue only one could be named,
+    so such a design failed with "library cell '...' has no resolvable pin
+    order" no matter which single library was chosen.
+
+    ``None``/absent yields ``[]``, which is legal only when
+    ``reference.pin_order_files`` supplies the pin orders instead (the caller
+    raises the "library is required" error). A wrong-shaped value is a clean
+    request error rather than a silent coercion, matching this module's other
+    request-side list-or-scalar options (``options.combine_devices``).
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise LvsError(
+            "request.reference.library must be a library-name string or a "
+            'list of library-name strings (e.g. ["sky130_fd_sc_hd", '
+            f'"sky130_sram_macros"]); got {type(value).__name__}'
+        )
+    libraries: list[str] = []
+    for name in value:
+        if not isinstance(name, str) or not name.strip():
+            raise LvsError(
+                "request.reference.library list entries must be non-empty "
+                f"library-name strings; got {name!r}"
+            )
+        if name.strip() not in libraries:
+            libraries.append(name.strip())
+    return libraries
+
+
+def _resolve_reference_pin_order_files(
+    reference_spec: Mapping[str, Any], request_dir: str
+) -> list[str]:
+    """``request.reference.pin_order_files`` -> resolved, existing, de-
+    duplicated ``.spice``/``.cdl`` paths (issue #2693).
+
+    The escape hatch for a pin-order source that is not reachable by the
+    ``libs.ref/<library>/...`` convention at all -- a macro's netlist sitting
+    beside the design, a hand-written stub for a cell no installed library
+    ships. Paths resolve against the request file's directory exactly like
+    ``layout.netlist``/``reference.netlist`` (:func:`_resolve_relative`), and
+    a missing file is a clean request error rather than a pin order that
+    silently fails to resolve later.
+
+    Omitted (the default) yields ``[]``. An empty list is rejected for the
+    same reason ``layout.declared_pins`` rejects one: it reads as a
+    deliberate "no files", which is what omitting the key already means, so
+    it is far more likely a mistake.
+    """
+    value = reference_spec.get("pin_order_files")
+    if value is None:
+        return []
+    if not isinstance(value, list) or not value:
+        raise LvsError(
+            "request.reference.pin_order_files must be a non-empty list of "
+            ".spice/.cdl path strings -- omit the key entirely to resolve "
+            "pin orders from request.reference.library alone"
+        )
+    paths: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise LvsError(
+                "request.reference.pin_order_files entries must be non-empty "
+                f"path strings; got {entry!r}"
+            )
+        resolved = _resolve_relative(entry.strip(), request_dir)
+        if not os.path.isfile(resolved):
+            raise LvsError(f"reference pin_order_files entry not found: {resolved}")
+        if resolved not in paths:
+            paths.append(resolved)
+    return paths
+
+
+def _library_pin_order_files(libs_ref: str, library: str, variant: str) -> list[str]:
+    """Every pin-order file ``<library>`` ships, in read order (issue #2693).
+
+    Two shapes, because real installs ship two. A standard-cell library ships
+    one aggregate file covering every cell
+    (``libs.ref/<library>/{spice,cdl}/<library>.{spice,cdl}``, issue #1336's
+    original and still-first rule). A **macro** library ships one file *per
+    macro* and no aggregate at all -- ``sky130_sram_macros`` has
+    ``spice/sky130_sram_1kbyte_1rw1r_32x256_8.spice`` and friends,
+    ``gf180mcu_fd_ip_sram`` has ``cdl/gf180mcu_fd_ip_sram__sram64x8m8wm1.cdl``
+    -- so when no aggregate exists, every ``.spice`` (then every ``.cdl``)
+    the library's asset directory contains is read instead.
+
+    That per-library enumeration is deliberately **eager** rather than a lazy
+    per-cell ``<cell>.{spice,cdl}`` probe: the returned mapping has two
+    consumers (see :func:`_resolve_gate_level_pin_orders`) and one of them,
+    :func:`_supply_pin_universe`, needs the *whole* mapping rather than the
+    cells a conversion happened to look up, so a lazily-populated lookup
+    would make the derived power-pin universe depend on lookup order. A
+    macro library ships a handful of files, so reading them all costs
+    nothing; an aggregate-shipping library never reaches this branch.
+
+    Raises :class:`LvsError` naming every candidate it tried when the library
+    ships neither shape.
+    """
     lib_dir = os.path.join(libs_ref, library)
     tried: list[str] = []
     for subdir, extension in _LIBRARY_PIN_ORDER_ASSETS:
         candidate = os.path.join(lib_dir, subdir, f"{library}.{extension}")
         tried.append(candidate)
         if os.path.isfile(candidate):
-            try:
-                with open(candidate, encoding="utf-8", errors="replace") as handle:
-                    library_text = handle.read()
-            except OSError as exc:
-                raise LvsError(
-                    f"could not read library pin-order source '{candidate}': {exc}"
-                ) from exc
-            return parse_subckt_pin_orders(library_text), pdk_info
-
+            return [candidate]
+    for subdir, extension in _LIBRARY_PIN_ORDER_ASSETS:
+        asset_dir = os.path.join(lib_dir, subdir)
+        suffix = f".{extension}"
+        tried.append(os.path.join(asset_dir, f"*{suffix}"))
+        try:
+            names = sorted(os.listdir(asset_dir))
+        except OSError:
+            continue
+        per_cell = [
+            os.path.join(asset_dir, name) for name in names if name.endswith(suffix)
+        ]
+        if per_cell:
+            return per_cell
     raise LvsError(
         f"library '{library}' has no pin-order source under PDK variant "
-        f"'{pdk_info['variant']}' -- tried: {', '.join(tried)}"
+        f"'{variant}' -- tried: {', '.join(tried)}"
     )
+
+
+def _merge_pin_order_sources(
+    plan: Sequence[tuple[str | None, str]],
+) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    """Read every ``(library_or_None, path)`` pin-order source in ``plan``
+    and merge their ``.subckt`` declarations into one lookup (issue #2693),
+    returning ``(pin_orders, source_records)``.
+
+    **A cell type declared by two sources with different pin lists is a loud
+    error, never "first wins".** Two libraries disagreeing about one cell's
+    pin order means at least one side of the resulting compare would be wired
+    wrong -- and silently, since the conversion emits a positional
+    ``X``-card call that parses perfectly either way. An *identical*
+    redeclaration is accepted (a cell genuinely shipped by two views, e.g. a
+    library that ships both ``.spice`` and ``.cdl`` with byte-identical
+    headers) because there is nothing to choose between.
+    """
+    merged: dict[str, list[str]] = {}
+    origin: dict[str, str] = {}
+    records: list[dict[str, Any]] = []
+    for library, path in plan:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError as exc:
+            raise LvsError(
+                f"could not read library pin-order source '{path}': {exc}"
+            ) from exc
+        parsed = parse_subckt_pin_orders(text)
+        for cell, pins in parsed.items():
+            previous = merged.get(cell)
+            if previous is not None and previous != pins:
+                raise LvsError(
+                    f"library cell '{cell}' is declared with two different "
+                    f"pin orders by two pin-order sources: '{origin[cell]}' "
+                    f"declares ({' '.join(previous)}) and '{path}' declares "
+                    f"({' '.join(pins)}) -- resolve the conflict (drop one "
+                    "source from request.reference.library / "
+                    "request.reference.pin_order_files, or point "
+                    "reference.pdk_root at the install whose declaration is "
+                    "authoritative) rather than letting one silently win"
+                )
+            merged[cell] = pins
+            origin[cell] = path
+        records.append({"library": library, "path": path, "cells": len(parsed)})
+    return merged, records
+
+
+def _resolve_gate_level_pin_orders(
+    library: Any,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    *,
+    pin_order_files: Sequence[str] | None = None,
+) -> _GateLevelPinOrders:
+    """Every instantiated cell's real, full PDK pin order (signal *and*
+    power/ground), read from the pin-order sources the request named (issue
+    #1336, extended to more than one source by issue #2693) -- never a
+    hardcoded pin-order table.
+
+    Two consumers, one read of each source (issue #1622): ``.get`` on the
+    merged pin-order mapping is the ``pin_order_lookup`` callback
+    :func:`klayout_tools.verilog_netlist.convert_gate_level_verilog` wants,
+    while :func:`_gate_level_power_pin_names` needs the whole mapping, to
+    derive which of a cell's real PDK pins the conversion dropped.
+
+    ``library`` is one library name or a list of them (see
+    :func:`_normalize_reference_libraries`); each is resolved against a PDK
+    resolved exactly like `klt extract --pdk`/`klt place-and-route` do
+    (:func:`klayout_tools.pdk.find_pdk`, the same ``variant``/``root``
+    resolution order documented in ``docs/cli/pdk.md``), then enumerated by
+    :func:`_library_pin_order_files`. ``pin_order_files`` adds already-
+    resolved explicit paths on top (see
+    :func:`_resolve_reference_pin_order_files`), and is the only way to
+    resolve pin orders with no PDK involved at all -- a request naming it
+    alone returns ``pdk_info: None``.
+
+    The resolved ``pdk_info`` is returned alongside the mapping (issue #1901)
+    so ``run_lvs`` can record it in ``provenance.pdk`` without a second,
+    redundant resolution, and every source read is returned with it so
+    ``provenance.pin_order_sources`` can name all of them (issue #2693).
+    Raises :class:`LvsError` -- never lets a lower-level exception escape
+    this command's JSON-envelope contract -- when neither a library nor an
+    explicit file was named, the PDK does not resolve, the resolved variant
+    ships no ``libs_ref`` asset at all, a named library ships no pin-order
+    source, or two sources disagree about one cell's pin order.
+    """
+    libraries = _normalize_reference_libraries(library)
+    explicit_files = list(pin_order_files or ())
+    if not libraries and not explicit_files:
+        raise LvsError(
+            "request.reference.library is required with form: "
+            '"gate-level-verilog" -- it names the standard-cell library '
+            "(and, for a macro-backed design, each macro library) whose own "
+            ".spice/.cdl subcircuit declarations resolve each instantiated "
+            "cell's pin order; name request.reference.pin_order_files "
+            "instead to point at those files directly"
+        )
+
+    pdk_info: dict[str, Any] | None = None
+    plan: list[tuple[str | None, str]] = []
+    if libraries:
+        try:
+            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
+        except PdkNotFoundError as exc:
+            raise LvsError(str(exc)) from exc
+        libs_ref = pdk_info["assets"]["libs_ref"]
+        if libs_ref is None:
+            raise LvsError(
+                f"PDK variant '{pdk_info['variant']}' (root "
+                f"'{pdk_info['root']}') ships no 'libs.ref' asset -- cannot "
+                f"resolve {', '.join(repr(name) for name in libraries)}'s "
+                "pin order"
+            )
+        for name in libraries:
+            plan.extend(
+                (name, path)
+                for path in _library_pin_order_files(
+                    libs_ref, name, pdk_info["variant"]
+                )
+            )
+    plan.extend((None, path) for path in explicit_files)
+
+    pin_orders, sources = _merge_pin_order_sources(plan)
+    return _GateLevelPinOrders(pin_orders, pdk_info, sources)
 
 
 def _parse_combine_devices(options: Mapping[str, Any]) -> bool | list[str]:
