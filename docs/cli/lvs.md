@@ -1647,9 +1647,9 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "klayout",
-  "layout": "design.gds",
+  "layout": { "path": "design.gds", "scope": "repo" },
   "reference": "ota_5t.schematic.spice",
   "top": "ota_5t",
   "reference_top": "ota_5t",
@@ -1705,7 +1705,7 @@ section this engine buckets rather than fully structures:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "netgen",
   "status": "mismatch",
   "mismatch_count": 1,
@@ -1745,10 +1745,10 @@ section this engine buckets rather than fully structures:
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `schema_version` | integer | Version of this command's JSON shape (starts at `1`; per-command, per [`docs/json-contract.md`](../json-contract.md)). |
+| `schema_version` | integer | Version of this command's JSON shape (`2`; per-command, per [`docs/json-contract.md`](../json-contract.md)). |
 | `engine` | string | Echo of the request's `engine` (or the default, `"klayout"`). |
-| `layout` | string | Echo of `layout.file` or `layout.netlist`, exactly as provided. |
-| `reference` | string | Echo of `reference.netlist`, exactly as provided. |
+| `layout` | object | The layout side this run read and hashed, as the committable `{"path", "scope"}` envelope (issue #2659, `schema_version` 2): `scope: "repo"` with a repo-relative POSIX `path` when it lives inside the request's repo, `{"path": null, "scope": "external"}` when it does not. Built from the *resolved* `layout.file`/`layout.netlist` — the file `provenance.input.content_hash` actually hashes — and so, since `schema_version` 2, no longer the request's own verbatim echo: that echo was anchored to whatever directory the producing run used, which made a committed envelope's `input_verified` re-derivable only there. `klt signoff --manifest`'s gate resolves `scope: "repo"` against the repo root of the *evidence file's* own location, so a committed `klt lvs` envelope now re-verifies from any clone. Same shape `klt sim`'s `netlist` and `klt pex`'s `layout` carry (issue #1261); see [`docs/json-contract.md`](../json-contract.md)'s "Path fields: envelope vs. plain string". |
+| `reference` | string | Echo of `reference.netlist`, exactly as provided — deliberately **not** retyped by issue #2659 (see `layout` above). The reference netlist is pinned by its own `environment.reference_sha256` digest rather than by `provenance.input`, which covers the layout side only, so it is not the field `input_verified` re-hashes. |
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
 | `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
 | `parameter_tolerance` | number \| `null` | Echo of the effective `options.parameter_tolerance` (issue #589) — `null` when the option was omitted (the default exact compare). Always present, never omitted, so a consumer reading only the response can always tell whether a `"match"` was reached under a caller-supplied design tolerance at all. |
@@ -3676,20 +3676,32 @@ output (`--format text`, the default) renders each entry as `[DRIFT]
 provenance.klt_version: 0.3.0+g634e074ff484 (report) vs 0.3.1+gabc1234
 (current)`, printed after the `checks[]` lines.
 
-**Known limitation**: `layout`/`reference` are echoed exactly as given in
-the original request document, which may have been relative to that request
-*file's own directory* — not necessarily the current working directory (see
-"Request" above). This re-hashes them relative to the current working
-directory of the `--check` invocation, the same convention `klt drc
---check`'s `file` field uses; if the original request used request-file-
-relative paths, invoke `--check` from that same directory, or commit
-reports whose `layout`/`reference` are already absolute paths.
+**`layout` resolves from any checkout (issue #2659).** Since
+`schema_version` 2 it is the `{path, scope}` envelope built from the
+*resolved* layout path, and `--check`/`--rerun` join a `scope: "repo"` entry
+to the repo root discovered from **the committed report's own directory** —
+the same resolution `klt signoff`'s `input_verified` gate applies to the
+same shape, and the same treatment `klt drc --check`'s own `file` field got
+in the same issue, so the two verbs still agree. A report committed beside
+its layout therefore re-hashes correctly from any clone and from any working
+directory. A `scope: "external"`/`"absent"` entry names no path by
+construction and re-hashes to `null`, exactly as an absent field always did;
+`--rerun` reports it as the same clean "no `'layout'`/`'reference'` field to
+rerun" error.
+
+**Known limitation, reference side only**: `reference` is still echoed
+exactly as given in the original request document, which may have been
+relative to that request *file's own directory* — not necessarily the
+current working directory (see "Request" above). This re-hashes it relative
+to the current working directory of the `--check` invocation; if the
+original request used request-file-relative paths, invoke `--check` from
+that same directory, or commit reports whose `reference` is already an
+absolute path. A report predating #2659, whose `layout` is a bare string,
+has the same limitation on that field too.
 
 **`input_not_found` (issue #2595): hitting that limitation says so.** The
-anchoring above is deliberate and unchanged — re-anchoring `klt lvs --check`
-to the report's own directory without doing the same to `klt drc --check`
-would leave the two verbs silently disagreeing about what a committed
-relative path means. What *did* change is legibility: re-hashing a path that
+anchoring above is deliberate and unchanged for the fields it still covers.
+What *did* change in #2595 is legibility: re-hashing a path that
 names no existing file yields `actual: null`, which on its own is
 indistinguishable from "the recorded hash no longer matches". So a
 `checks[]` entry for `layout`/`reference` now carries an **additional,

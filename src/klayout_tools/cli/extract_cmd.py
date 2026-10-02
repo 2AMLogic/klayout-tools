@@ -42,6 +42,7 @@ and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 import argparse
 
 from .._paths import looks_like_request_document
+from ..env_provenance import render_path_field
 from ..extract import (
     REQUEST_SCHEMA,
     ExtractError,
@@ -575,7 +576,12 @@ def _print_substrate_spreading(block: dict | None) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    # `file` is the `{path, scope}` object `env_provenance.repo_relative_path`
+    # defines (issue #2659) -- rendered through the same courtesy helper
+    # `klt sim`/`klt pex` use, so the absolute path is never printed even in
+    # text mode (`<outside repo>`/`<unresolved>` instead). `netlist_path`
+    # below is an output path, still a plain string, and prints as-is.
+    print(f"file: {render_path_field(report['file'])}")
     print(f"deck: {report['deck']}")
     # Present whenever this deck declares a caller-selectable option at all
     # (issues #595, #2394) -- mirrors `provenance.deck.options` in the JSON
