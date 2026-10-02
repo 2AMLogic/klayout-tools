@@ -1,6 +1,9 @@
 {
-  "schema_version": 2,
-  "file": "examples/drc/example.gds",
+  "schema_version": 3,
+  "file": {
+    "path": "examples/drc/example.gds",
+    "scope": "repo"
+  },
   "deck": "sky130",
   "dbu_um": 0.001,
   "status": "violations",

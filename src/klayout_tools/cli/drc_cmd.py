@@ -64,6 +64,7 @@ from ..drc import (
     run_drc,
     run_drc_klayout_engine,
 )
+from ..env_provenance import render_path_field
 from . import _request_document as reqdoc
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -298,7 +299,11 @@ def _print_coverage_gaps(coverage: dict) -> None:
 
 
 def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
+    # `file` is the `{path, scope}` object `env_provenance.repo_relative_path`
+    # defines (issue #2659) -- rendered through the same courtesy helper
+    # `klt sim`/`klt pex` use, so the absolute path is never printed even in
+    # text mode (`<outside repo>`/`<unresolved>` instead).
+    print(f"file: {render_path_field(report['file'])}")
     print(f"deck: {report['deck']}")
     if "engine" in report:
         print(f"engine: {report['engine']}")
