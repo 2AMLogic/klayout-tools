@@ -1,0 +1,214 @@
+name: Publish native wheels to PyPI
+
+# Issue #2531 (operator ruling 2026-10-02): the Rust pyo3 extensions are
+# published as prebuilt wheels, one PyPI package per crate. Today only
+# `klt-yield-native` (native/yield/) is enabled; see docs/releasing-native.md
+# for the release order, the one-time operator setup, and how to add a crate
+# (mom / congestion / statime) -- it is one entry in `SUPPORTED` below plus a
+# PyPI project + trusted publisher, and nothing else.
+#
+# Trigger: push a tag `klt-<crate>-native-v<X.Y.Z>` (e.g.
+# `klt-yield-native-v0.1.0`). It must NOT start with `v`, so it never fires
+# `publish.yml` (the klayout-tools release, tags `v*`). The tag version must
+# equal `native/<crate>/pyproject.toml`'s `version`.
+#
+# `workflow_dispatch` runs the build + installed-wheel test legs only (no
+# publish) -- a dry run for checking a wheel before tagging.
+
+on:
+  push:
+    tags:
+      - "klt-*-native-v*"
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: "Crate directory under native/ (dry run: build + test only)"
+        required: true
+        default: "yield"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Resolve crate and version
+    runs-on: ubuntu-24.04
+    outputs:
+      crate: ${{ steps.plan.outputs.crate }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: plan
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          INPUT_CRATE: ${{ inputs.crate }}
+        run: |
+          set -euo pipefail
+          # Crates cleared for PyPI publication. Add a crate here only when it
+          # is asked for (and its PyPI project + trusted publisher exist).
+          SUPPORTED="yield"
+          if [ "$EVENT" = "push" ]; then
+            crate="$(printf '%s' "$REF_NAME" | sed -nE 's/^klt-(.+)-native-v[0-9].*$/\1/p')"
+            tag_version="$(printf '%s' "$REF_NAME" | sed -nE 's/^klt-.+-native-v(.+)$/\1/p')"
+          else
+            crate="$INPUT_CRATE"
+            tag_version=""
+          fi
+          case " $SUPPORTED " in
+            *" $crate "*) ;;
+            *) echo "::error::crate '$crate' is not enabled for PyPI publication (SUPPORTED='$SUPPORTED')"; exit 1;;
+          esac
+          version="$(python3 - "native/$crate/pyproject.toml" <<'PY'
+          import sys, tomllib
+          print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])
+          PY
+          )"
+          if [ -n "$tag_version" ] && [ "$tag_version" != "$version" ]; then
+            echo "::error::tag version $tag_version != native/$crate/pyproject.toml version $version"
+            exit 1
+          fi
+          echo "crate=$crate" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build wheel (${{ matrix.target }})
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64: manylinux_2_28 container via maturin-action, so the
+          # wheel installs on any reasonably recent distro, not only this
+          # runner's glibc.
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+            manylinux: "2_28"
+          # macOS arm64: GitHub-hosted Apple-silicon runner (`macos-14`).
+          # Free for public repos; if the runner label is retired/renamed this
+          # leg fails loudly rather than shipping a Linux-only release.
+          - target: macos-arm64
+            runner: macos-14
+            manylinux: "off"
+    steps:
+      - uses: actions/checkout@v7
+
+      # abi3: one wheel per platform covers every CPython >= 3.10 (the
+      # project's `requires-python`), instead of a wheel per interpreter. The
+      # feature is passed here, not in `[tool.maturin]`, so the checkout's
+      # from-source dev build is unchanged.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: native/${{ needs.plan.outputs.crate }}
+          target: ${{ matrix.target == 'macos-arm64' && 'aarch64-apple-darwin' || 'x86_64-unknown-linux-gnu' }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist --features pyo3/abi3-py310
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: native/${{ needs.plan.outputs.crate }}/dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: Build sdist
+    needs: plan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: native/${{ needs.plan.outputs.crate }}
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: native/${{ needs.plan.outputs.crate }}/dist/*.tar.gz
+          if-no-files-found: error
+
+  test-wheel:
+    # Install the BUILT wheel (never the checkout's source) into a clean venv
+    # next to klayout-tools and run the crate's tests against it, so what is
+    # published is exactly what was tested.
+    name: Test installed wheel (${{ matrix.target }}, py${{ matrix.python }})
+    needs: [plan, build]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x86_64, runner: ubuntu-24.04, python: "3.10" }
+          - { target: linux-x86_64, runner: ubuntu-24.04, python: "3.13" }
+          - { target: macos-arm64, runner: macos-14, python: "3.10" }
+          - { target: macos-arm64, runner: macos-14, python: "3.13" }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: "latest"
+          python-version: ${{ matrix.python }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/
+
+      - name: Install wheel + klayout-tools into a clean venv
+        run: |
+          set -euo pipefail
+          uv venv --python "${{ matrix.python }}" .wheel-venv
+          . .wheel-venv/bin/activate
+          uv pip install dist/*.whl
+          uv pip install . pytest
+
+      - name: Test the installed wheel
+        env:
+          CRATE: ${{ needs.plan.outputs.crate }}
+        run: |
+          set -euo pipefail
+          . .wheel-venv/bin/activate
+          # Run from a scratch dir so `import klt_<crate>_native` can only
+          # resolve to the installed wheel, never a checkout build.
+          mod="klt_${CRATE}_native"
+          (cd "$RUNNER_TEMP" && python -c "import $mod, sys; print($mod.__file__); assert 'site-packages' in $mod.__file__")
+          # Crate tests: tests/test_<crate>*.py. A skip means the extension
+          # was not picked up -- fail instead of passing vacuously.
+          python -m pytest -q -rs -p no:cacheprovider tests/test_${CRATE}*.py | tee "$RUNNER_TEMP/pytest.out"
+          if grep -Eq "SKIPPED|skipped" "$RUNNER_TEMP/pytest.out"; then
+            echo "::error::tests were skipped against the installed wheel -- it did not provide $mod"
+            exit 1
+          fi
+
+  publish:
+    name: Publish to PyPI
+    # Tag pushes only; workflow_dispatch is a dry run.
+    if: github.event_name == 'push'
+    needs: [plan, build, sdist, test-wheel]
+    runs-on: ubuntu-24.04
+    # Reuses the `pypi` environment of publish.yml. The PyPI trusted publisher
+    # for the `klt-<crate>-native` project must name this workflow file
+    # (publish-native.yml) and this environment (see docs/releasing-native.md).
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write  # Required for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: "latest"
+
+      - name: Show artifacts
+        run: ls -l dist/
+
+      - name: Publish to PyPI
+        run: uv publish

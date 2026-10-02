@@ -932,6 +932,9 @@ mom-cross-validation = [
 mom-pypeec-cross-validation = [
     { name = "pypeec" },
 ]
+yield = [
+    { name = "klt-yield-native" },
+]
 
 [package.dev-dependencies]
 congestion = [
@@ -957,12 +960,13 @@ requires-dist = [
     { name = "cocotb", marker = "extra == 'functional-verification'", specifier = ">=2.1.0,<2.2" },
     { name = "jsonschema", specifier = ">=4.0" },
     { name = "klayout", specifier = ">=0.30" },
+    { name = "klt-yield-native", marker = "extra == 'yield'", directory = "native/yield" },
     { name = "pynec", marker = "python_full_version >= '3.11' and extra == 'mom-cross-validation'", specifier = ">=2.3,<3" },
     { name = "pypeec", marker = "extra == 'mom-pypeec-cross-validation'", specifier = ">=5.8,<6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14" },
 ]
-provides-extras = ["dev", "functional-verification", "mom-cross-validation", "mom-pypeec-cross-validation"]
+provides-extras = ["dev", "functional-verification", "yield", "mom-cross-validation", "mom-pypeec-cross-validation"]
 
 [package.metadata.requires-dev]
 congestion = [{ name = "klt-congestion-native", directory = "native/congestion" }]

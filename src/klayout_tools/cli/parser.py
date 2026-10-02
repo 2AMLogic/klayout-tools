@@ -988,13 +988,15 @@ def _add_yield_parser(subparsers: argparse._SubParsersAction) -> None:
             "could only produce one -- a single sample, a confidence level "
             "of 0 or 1, a measurement with no limits -- is an error, not a "
             "warning. Statistics run in the klt_yield_native Rust "
-            "extension (native/yield/), which is NOT published as a "
-            "prebuilt wheel and is therefore unreachable from a "
-            "single-package `pip install`/`uv tool install` (including its "
-            "git-pinned `@git+...` form) -- it needs a full repo checkout "
-            "plus a Rust toolchain. See "
+            "extension (native/yield/), shipped as the prebuilt "
+            "`klt-yield-native` wheel (Linux x86_64, macOS arm64): "
+            "`pip install 'klayout-tools[yield]'` / `uv tool install "
+            "'klayout-tools[yield]'`. The git-pinned `@git+...` form and "
+            "other platforms, or a release predating the first "
+            "`klt-yield-native` publication, still need a full repo "
+            "checkout plus a Rust toolchain. See "
             "docs/cli/yield.md#building-the-native-extension for the "
-            "input/output schema and how to build the extension."
+            "input/output schema and install/build options."
         ),
     )
     yield_parser.add_argument(
@@ -1211,8 +1213,9 @@ def _add_yield_sensitivity_parser(subparsers: argparse._SubParsersAction) -> Non
             "yield-campaign`/`klt gen-compose`'s own precedent for a "
             "second analysis mode of existing data. Statistics run in the "
             "klt_yield_native Rust extension (native/yield/, the same "
-            "crate `klt yield` uses, and the same build-from-source gap "
-            "for a single-package install -- see "
+            "crate `klt yield` uses, installed the same way: `pip install "
+            "'klayout-tools[yield]'` for the prebuilt `klt-yield-native` "
+            "wheel, else build from a checkout -- see "
             "docs/cli/yield.md#building-the-native-extension)."
         ),
     )

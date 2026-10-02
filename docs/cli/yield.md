@@ -964,20 +964,28 @@ crate (standardized-regression/correlation numerics, still dependency-free).
 
 ## Building the native extension
 
-`klt yield` requires the `klt_yield_native` extension to be built once per
-environment (it is not published as a prebuilt wheel). Building it needs a
-Rust toolchain (`cargo`/`rustc`) — which is exactly why it is **optional**
-rather than a hard dependency: every other `klt` verb stays installable with
-no Rust toolchain in sight.
+`klt yield` requires the `klt_yield_native` extension. It is published as
+the prebuilt `klt-yield-native` wheel for Linux x86_64 and macOS arm64
+(issue #2531; release pipeline in [`docs/releasing-native.md`](../releasing-native.md)):
 
-> **Not reachable from a single-package install.** Neither `uv tool install
-> klayout-tools`/`pip install klayout-tools` nor the git-pinned form (`uv
+```bash
+pip install 'klayout-tools[yield]'          # or: uv tool install 'klayout-tools[yield]'
+```
+
+No Rust toolchain is needed on those platforms. Building from source needs one
+(`cargo`/`rustc`) — which is why the extension is an **extra**, not a hard
+dependency: every other `klt` verb stays installable with no Rust in sight.
+
+> **What the extra does and does not reach.** A bare `uv tool install
+> klayout-tools`/`pip install klayout-tools` and the git-pinned form (`uv
 > tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<ref>"`)
-> builds this extension — both install only the pure-Python package, with no
-> `native/yield/` source tree or dependency group in scope. `klt yield`,
-> `klt yield-campaign`, and `klt yield-sensitivity` all share this
-> requirement (same crate). Getting the extension needs the **full repo
-> checkout** shown below, not just an installed `klt`. `klt mom` and
+> install only the pure-Python package; add `[yield]` to get the wheel. The
+> extra only resolves once `klt-yield-native` has been published to PyPI: on a
+> release that predates its first publication, `[yield]` fails with "no
+> matching distribution", and other platforms (Linux aarch64, Windows, Intel
+> macOS) have no wheel yet. In those cases use the **full repo checkout**
+> build shown below. `klt yield`, `klt yield-campaign`, and
+> `klt yield-sensitivity` all share this requirement (same crate). `klt mom` and
 > `klt synthesize --restructure-timing` have the same from-source gap
 > for their own Rust extensions — see [`docs/cli/mom.md`](mom.md).
 

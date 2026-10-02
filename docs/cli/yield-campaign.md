@@ -51,8 +51,8 @@ the same response shape from a campaign spec instead.
 The command is headless and safe in CI, **except** that — like `klt yield` —
 it requires the `klt_yield_native` Rust extension to be built and importable;
 see [`docs/cli/yield.md`'s "Building the native
-extension"](yield.md#building-the-native-extension) (same crate, same gap,
-same fix).
+extension"](yield.md#building-the-native-extension) (same crate, same
+`pip install 'klayout-tools[yield]'` extra, same from-source fallback).
 
 ## Campaign spec
 

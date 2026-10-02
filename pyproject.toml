@@ -73,6 +73,27 @@ dev = [
 functional-verification = [
     "cocotb>=2.1.0,<2.2",
 ]
+# `yield` (issue #2531, operator ruling 2026-10-02): the prebuilt
+# `klt_yield_native` wheel behind `klt yield`/`yield-campaign`/
+# `yield-sensitivity`, published to PyPI as its own package `klt-yield-native`
+# by `.github/workflows/publish-native.yml` (Linux x86_64 + macOS arm64; see
+# docs/releasing-native.md). `pip install 'klayout-tools[yield]'` therefore
+# needs no Rust toolchain on those platforms.
+#
+# Release ordering: `klt-yield-native` MUST be on PyPI before a klayout-tools
+# release carrying this extra is published, otherwise `[yield]` fails with "no
+# matching distribution" (the base install is unaffected -- an extra's
+# requirements are only resolved when it is requested). The floor/ceiling pin
+# below tracks the 0.1.x wheel line; bump it when the extension's Python-visible
+# API changes. In a checkout, `[tool.uv.sources]` below still resolves the name
+# from `native/yield/`, so `uv sync --extra yield` builds from source.
+# The same-named `yield` dependency group further down stays for CI's
+# from-source build (`uv sync --group yield`, which must exercise the checkout's
+# own Rust source, never a published wheel). The other three Rust crates remain
+# dependency groups until each is asked for (same recipe).
+yield = [
+    "klt-yield-native>=0.1.0,<0.2",
+]
 # Backs `tests/test_mom_cross_validation.py` (issue #895, Phase 2c of the
 # Method-of-Moments epic #701): the external MoM oracle used to cross-check
 # `klt mom`'s full-wave S-parameters ("Cross-check against an external
@@ -182,6 +203,9 @@ mom = [
 congestion = [
     "klt-congestion-native",
 ]
+# Checkout-local from-source build of the same crate that the `yield` *extra*
+# above installs prebuilt from PyPI (issue #2531); CI uses this group so the
+# tests run against the checkout's Rust source.
 yield = [
     "klt-yield-native",
 ]

@@ -1834,17 +1834,19 @@ fail on its own terms, it simply does not prove what the item requires.
 #### Item 6's evidence needs a from-source toolchain (issue #2466)
 
 Item 6 accepts only a `yield` envelope, and `klt yield` requires the
-`klt_yield_native` Rust extension — which is **not** published as a
-prebuilt wheel. Neither `pip install klayout-tools`/`uv tool install
-klayout-tools` nor the git-pinned (`@git+…`) form builds it; getting it
+`klt_yield_native` Rust extension — published as the prebuilt
+`klt-yield-native` wheel (Linux x86_64, macOS arm64) and reached by
+`pip install 'klayout-tools[yield]'`. A bare `pip install klayout-tools`
+and the git-pinned (`@git+…`) form do not include it, and a release that
+predates the first `klt-yield-native` publication (or another platform)
 needs a full repo checkout with a Rust toolchain (see
-[`yield.md`](yield.md)'s "Not reachable from a single-package install"
+[`yield.md`](yield.md)'s "What the extra does and does not reach"
 callout for the full statement and the build steps). Every *other* T1
 item's evidence verb — `drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
 `functional-verification`, `erc`, `place-and-route` — is reachable from a
-published release, so item 6 is the one row a consumer pinning a published
-version cannot produce evidence for, or re-derive an already-committed
-report for, from that pin alone. Worth knowing *before* planning a T1
+published release, so item 6 is the one row that additionally needs the
+`[yield]` extra (or a from-source build) to produce evidence for, or to
+re-derive an already-committed report for, from a pinned release. Worth knowing *before* planning a T1
 campaign around it.
 
 This changes nothing about how the item grades: a `klt yield` report cites,
