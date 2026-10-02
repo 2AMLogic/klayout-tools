@@ -81,6 +81,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -301,6 +302,94 @@ class RemoteLaunchError(Exception):
 # --------------------------------------------------------------------------- #
 # Instance sizing (decision 2's recipe)
 # --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class WavePlan:
+    """Single-host sizing outcome (issue #2084): which instance, how many
+    units it runs concurrently, and how many sequential waves that takes.
+
+    ``waves == 1`` is exactly the pre-#2084 case (everything fits at once on
+    the instance :func:`select_instance_type` picks). ``waves > 1`` means the
+    request exceeds the largest ``c7i`` size's concurrent capacity, so the
+    units run in ``waves`` back-to-back batches of at most
+    ``wave_capacity`` on that one host.
+    """
+
+    instance_type: str
+    unit_count: int
+    wave_capacity: int
+    waves: int
+
+
+def max_concurrent_units(
+    threads_per_corner: int = ASSUMED_THREADS_PER_CORNER,
+    *,
+    headroom: float = SIZING_HEADROOM,
+) -> int:
+    """Most units the largest ``c7i`` instance runs concurrently under the
+    same ``ceil(units * threads * headroom) <= vCPU`` rule
+    :func:`select_instance_type` applies (20 at 8 threads on
+    ``c7i.48xlarge``). Always ``>= 1``: a unit wider than the whole box still
+    runs, alone, per wave.
+    """
+    if threads_per_corner < 1:
+        raise RemoteLaunchError("threads_per_corner must be a positive integer")
+    largest_vcpu = _C7I_LADDER[-1][1]
+    capacity = int(largest_vcpu / (threads_per_corner * headroom)) + 1
+    while capacity > 1 and math.ceil(capacity * threads_per_corner * headroom) > (
+        largest_vcpu
+    ):
+        capacity -= 1
+    return max(1, capacity)
+
+
+def partition_waves(unit_count: int, wave_capacity: int) -> list[int]:
+    """Split ``unit_count`` units into ``ceil(unit_count / wave_capacity)``
+    sequential waves of near-equal size (sizes differ by at most one, larger
+    waves first; they sum to ``unit_count`` and none exceeds
+    ``wave_capacity``).
+    """
+    if unit_count < 1:
+        raise RemoteLaunchError("corner_count must be a positive integer")
+    if wave_capacity < 1:
+        raise RemoteLaunchError("wave_capacity must be a positive integer")
+    waves = math.ceil(unit_count / wave_capacity)
+    base, extra = divmod(unit_count, waves)
+    return [base + 1 if i < extra else base for i in range(waves)]
+
+
+def plan_waves(
+    corner_count: int,
+    threads_per_corner: int = ASSUMED_THREADS_PER_CORNER,
+    *,
+    headroom: float = SIZING_HEADROOM,
+) -> WavePlan:
+    """Like :func:`select_instance_type` but never raises for an oversized
+    request: past the largest instance's concurrent capacity it caps the
+    instance at the largest size and reports the wave count instead.
+
+    For ``corner_count`` within capacity the instance type is exactly
+    :func:`select_instance_type`'s answer with ``waves == 1``.
+    """
+    if corner_count < 1:
+        raise RemoteLaunchError("corner_count must be a positive integer")
+    if threads_per_corner < 1:
+        raise RemoteLaunchError("threads_per_corner must be a positive integer")
+    capacity = max_concurrent_units(threads_per_corner, headroom=headroom)
+    if corner_count <= capacity:
+        return WavePlan(
+            select_instance_type(corner_count, threads_per_corner, headroom=headroom),
+            corner_count,
+            corner_count,
+            1,
+        )
+    return WavePlan(
+        _C7I_LADDER[-1][0],
+        corner_count,
+        capacity,
+        len(partition_waves(corner_count, capacity)),
+    )
 
 
 def select_instance_type(
@@ -1142,6 +1231,7 @@ class RemoteLauncher:
 
         self.instance_id: str | None = None
         self.instance_type: str | None = None
+        self.wave_plan: WavePlan | None = None
         self.ami: dict[str, str] | None = None
         self.estimated_hourly_cost_usd: float | None = None
         self.used_spot: bool | None = None
@@ -1195,9 +1285,9 @@ class RemoteLauncher:
                 f"{self.job_id!r}) -- one launcher instance is one job"
             )
 
-        self.instance_type = select_instance_type(
-            self.corner_count, self.threads_per_corner
-        )
+        plan = plan_waves(self.corner_count, self.threads_per_corner)
+        self.instance_type = plan.instance_type
+        self.wave_plan = plan
         self.ami = resolve_ami(self.pdk, self.region, self.manifest_path)
         self.estimated_hourly_cost_usd = require_cost_config(
             region=self.region,
@@ -1223,7 +1313,7 @@ class RemoteLauncher:
             )
         self.spin_up_s = round(time.monotonic() - started, 3)
 
-        return {
+        info: dict[str, Any] = {
             "provider": "aws",
             "region": self.region,
             "instance_type": self.instance_type,
@@ -1234,6 +1324,14 @@ class RemoteLauncher:
             "pdk_snapshot": self.ami["pdk_snapshot"],
             "spin_up_s": self.spin_up_s,
         }
+        if self.wave_plan is not None and self.wave_plan.waves > 1:
+            # Issue #2084: additive, present only for a multi-wave run so a
+            # request within capacity keeps its exact pre-#2084 shape. The
+            # hourly estimate above is a *rate*; total cost scales with the
+            # (longer) wall-clock the waves take.
+            info["waves"] = self.wave_plan.waves
+            info["wave_capacity"] = self.wave_plan.wave_capacity
+        return info
 
     def _resolve_launcher_cidrs(self) -> list[str]:
         """Combine ``launcher_cidr`` and ``launcher_cidrs`` into one ordered,

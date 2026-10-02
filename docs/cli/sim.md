@@ -383,7 +383,17 @@ match bit-for-bit.
 guest.** `remote_launcher.select_instance_type()` sizes one instance for the
 whole requested corner matrix (`corner_count * threads_per_corner`, ~20%
 headroom, smallest fitting `c7i` size — the 5-corner × 8-thread case selects
-`c7i.12xlarge`, 48 vCPU). `remote_launcher.resolve_ami()` resolves a
+`c7i.12xlarge`, 48 vCPU). **Multi-wave batching (issue #2084):** the largest
+size, `c7i.48xlarge` (192 vCPU), runs at most 20 units concurrently at 8
+threads each. A single-host request with more units no longer fails — the
+instance is capped at `c7i.48xlarge` and the units run in
+`ceil(N / 20)` sequential waves of near-equal size, the guest's worker pool
+pinned to the wave capacity. This makes a `hosts: 1` run a true same-job-size
+baseline for a `hosts > 1` fleet run. A request within capacity is unchanged.
+A multi-wave run adds two additive fields to `environment.remote`, `waves` and
+`wave_capacity`; both are absent when everything fits in one wave.
+`estimated_hourly_cost_usd` stays an hourly *rate* — total cost scales with the
+longer wall-clock the extra waves take. `remote_launcher.resolve_ami()` resolves a
 `(pdk, region)` pair against the versioned AMI manifest
 (`data/remote-sim-ami-manifest.json`, schema at
 `docs/schemas/remote-sim-ami-manifest.schema.json`) produced by

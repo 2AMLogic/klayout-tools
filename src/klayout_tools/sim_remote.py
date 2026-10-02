@@ -510,6 +510,12 @@ def _run_remote(
                     "ssh_timeout_s",
                     _default_remote_run_timeout_s(len(corner_points), timeout_s),
                 ),
+                # Issue #2084: a request beyond the largest instance's
+                # concurrent capacity runs in sequential waves on this one
+                # host -- pin the guest pool to the wave capacity so each
+                # wave is exactly that wide. None (within capacity) keeps
+                # the guest's own default, byte-identical to before.
+                max_workers=info.get("wave_capacity"),
             )
     except (RemoteLaunchError, remote_transport.RemoteTransportError) as exc:
         raise SimError(f"remote backend failed: {exc}") from exc
@@ -527,6 +533,10 @@ def _run_remote(
         "pdk_snapshot": info["pdk_snapshot"],
         "spin_up_s": spin_up_s,
     }
+    if info.get("waves", 1) > 1:
+        # Issue #2084: additive, present only for a multi-wave run.
+        remote_environment["waves"] = info["waves"]
+        remote_environment["wave_capacity"] = info["wave_capacity"]
     return corners, engine_version, remote_environment
 
 
@@ -545,6 +555,7 @@ def _run_remote_dispatch(
     ssh_key_path: str,
     ssh_run_timeout_s: float,
     explicit_points: list[CornerPoint] | None = None,
+    max_workers: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Push, run, and (when ``keep_artifacts``) pull one job's worth of
     corners against an already-provisioned, SSH-reachable remote host --
@@ -561,6 +572,10 @@ def _run_remote_dispatch(
     ``monte_carlo`` request fields; see that parameter's own docstring.
     ``_run_remote`` never passes it (a single host always runs the whole
     matrix); ``_run_remote_fleet`` always does (one shard's own slice).
+
+    ``max_workers`` (issue #2084) is threaded to
+    :func:`_build_remote_request`: ``_run_remote`` sets it to the wave
+    capacity only for a multi-wave run, otherwise ``None`` (unchanged).
     """
     remote_job_dir = remote_transport.job_dir(ssh_user, launcher.job_id)
     remote_request = _build_remote_request(
@@ -569,6 +584,7 @@ def _run_remote_dispatch(
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
         explicit_points=explicit_points,
+        max_workers=max_workers,
     )
     job = _build_remote_job_description(remote_request, netlist_path)
     remote_transport.push_job(
@@ -622,6 +638,7 @@ def _build_remote_request(
     keep_artifacts: bool,
     want_waveforms: bool,
     explicit_points: list[CornerPoint] | None = None,
+    max_workers: int | None = None,
 ) -> dict[str, Any]:
     """Build the request document pushed to the remote host: a copy of the
     caller's own request with ``backend`` forced to ``local-parallel`` (per
@@ -648,6 +665,11 @@ def _build_remote_request(
     on one host, which a fleet shard is not. ``None`` (the default,
     ``_run_remote``'s own case) forwards ``corners``/``monte_carlo``
     unchanged, exactly as before this parameter existed.
+
+    ``max_workers`` (issue #2084) -- when given -- pins the remote pool to
+    that many concurrent units, which is how a multi-wave single-host run
+    makes the guest execute exactly ``wave_capacity`` units per wave; ``None``
+    (the default) keeps the guest's own CPU-derived default.
     """
     from .sim import _corner_points_to_wire
 
@@ -667,6 +689,8 @@ def _build_remote_request(
     options["keep_artifacts"] = keep_artifacts
     options["waveforms"] = want_waveforms
     options.pop("max_workers", None)
+    if max_workers is not None:
+        options["max_workers"] = max_workers
     remote_request["options"] = options
     return remote_request
 
@@ -939,7 +963,8 @@ def _default_remote_run_timeout_s(
     after another) plus slack for SSH/``klt`` startup.
 
     The provisioned box is right-sized to run every corner concurrently
-    (``remote_launcher.select_instance_type``), so real runs are expected to
+    (``remote_launcher.select_instance_type``; past the largest instance's
+    capacity, in sequential waves -- issue #2084), so real runs are expected to
     finish far faster than this bound -- it exists only so a genuinely
     wedged remote run doesn't hang the SSH channel forever. Overridable via
     ``request.remote.ssh_timeout_s``.
