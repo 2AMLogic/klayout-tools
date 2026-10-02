@@ -20,7 +20,8 @@ destination ``INTERCONNECT`` normalization
 (:func:`_sdf_cell_model_is_physical_only`,
 :func:`_collect_sdf_physical_only_instances`,
 :func:`_sdf_interconnect_is_physical_only_droppable`,
-:func:`_drop_sdf_zero_delay_physical_only_interconnects`), and post-run diagnostics
+:func:`_drop_sdf_zero_delay_physical_only_interconnects`), header-triple
+normalization (:func:`_normalize_sdf_header_triples`), and post-run diagnostics
 (:func:`_check_sdf_engine_capability`, :func:`_scan_sdf_diagnostics`). This
 mirrors the shape of the earlier ``lvs.py``/``lvs_mismatch.py`` (#1721),
 ``extract.py``/``extract_parasitics.py`` (#1572), and
@@ -900,6 +901,76 @@ def _read_sdf_text(sdf_path: str) -> str | None:
             return handle.read()
     except OSError:
         return None
+
+
+#: The three SDF header fields whose value may be a ``min:typ:max`` triple
+#: (IEEE 1497 §5.3: ``VOLTAGE`` and ``TEMPERATURE`` take an ``rtriple``,
+#: ``PROCESS`` a quoted string OpenSTA writes in the same shape). OpenSTA's
+#: own ``write_sdf`` emits each as ``min::max`` with an *empty* typ member
+#: (issue #1880), which ``iverilog -T typ`` rejects with ``SDF ERROR: ...
+#: Chosen value not defined.`` even though Icarus uses none of the three for
+#: delay selection.
+_SDF_HEADER_TRIPLE_FIELD_RE = re.compile(
+    r'\((?P<field>VOLTAGE|TEMPERATURE|PROCESS)(?P<sep>\s+)(?P<quote>"?)'
+    r'(?P<value>[^()":]*:[^()":]*:[^()":]*)(?P=quote)\s*\)'
+)
+
+
+def _fill_sdf_triple(value: str) -> str:
+    """``value`` (an ``a:b:c`` triple, members possibly empty) with every
+    empty member filled from a populated neighbour -- typ from min (else
+    max), min/max from typ (else the other extreme) -- so ``1.8::1.8``
+    becomes ``1.8:1.8:1.8`` and ``-40::125`` becomes ``-40:-40:125``. An
+    all-empty triple has nothing to fill from and is returned unchanged."""
+    lo, typ, hi = (member.strip() for member in value.split(":"))
+    if not (lo or typ or hi):
+        return value
+    typ = typ or lo or hi
+    lo = lo or typ
+    hi = hi or typ
+    return f"{lo}:{typ}:{hi}"
+
+
+def _normalize_sdf_header_triples(sdf_path: str) -> str | None:
+    """``sdf_path``'s text with any partially-empty ``VOLTAGE``/
+    ``TEMPERATURE``/``PROCESS`` header triple filled in -- or ``None`` when
+    there is nothing to fill (or the file cannot be read), in which case the
+    caller keeps handing ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
+
+    Issue #1880: OpenSTA's ``write_sdf`` writes those three header fields as
+    ``min::max`` triples, and ``iverilog -T typ`` (the default
+    ``options.sdf.corner``) rejects each one with ``Chosen value not
+    defined`` -- an ``SDF ERROR`` the transcript gate correctly turns into a
+    hard failure, so the documented ``klt place-and-route`` -> ``klt
+    functional-verification`` handoff failed on every real design. Icarus
+    uses none of the three fields for delay selection, so filling the empty
+    member cannot change any simulated delay.
+
+    Scoped strictly to the header -- the text before the first ``(CELL``
+    -- and to those three fields: a delay entry with a missing triple member
+    is a real problem and is left untouched, for Icarus to report loudly.
+    """
+    text = _read_sdf_text(sdf_path)
+    if text is None:
+        return None
+    cell = re.search(r"\(CELL\b", text)
+    header_end = cell.start() if cell else len(text)
+    header = text[:header_end]
+
+    def _fill(match: re.Match[str]) -> str:
+        value = match.group("value")
+        filled = _fill_sdf_triple(value)
+        if filled == value:
+            return match.group(0)
+        start, end = match.span("value")
+        offset = match.start()
+        whole = match.group(0)
+        return whole[: start - offset] + filled + whole[end - offset :]
+
+    normalized = _SDF_HEADER_TRIPLE_FIELD_RE.sub(_fill, header)
+    if normalized == header:
+        return None
+    return normalized + text[header_end:]
 
 
 def _drop_sdf_interconnect_entries(

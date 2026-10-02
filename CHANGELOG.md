@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#1880, `klt functional-verification`; `schema_version`
+  unchanged, no JSON shape change): `options.sdf`'s default `corner: "typ"`
+  failed on every SDF `klt place-and-route` writes, because OpenSTA's
+  `write_sdf` header carries `VOLTAGE`/`PROCESS`/`TEMPERATURE` as `min::max`
+  triples with an empty typ member and `iverilog -T typ` rejects each with
+  `SDF ERROR: ... Chosen value not defined.` An always-on staging step now
+  fills any empty member of those three header triples (`1.800::1.800` ->
+  `1.800:1.800:1.800`) before annotation. Header-only: delay entries are never
+  touched, and Icarus selects no delay from these fields, so no simulated
+  delay changes.
 - **Added** (#2693, `klt lvs`; `schema_version` unchanged, additive —
   `reference.library` accepts a new shape, a new `reference` field, and a new
   `provenance` key): `reference.form: "gate-level-verilog"` resolved cell pin

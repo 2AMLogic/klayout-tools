@@ -220,6 +220,7 @@ from .functional_verification_sdf import (
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_zero_delay_alias_port_interconnects,
     _drop_sdf_zero_delay_physical_only_interconnects,
+    _normalize_sdf_header_triples,
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
     _reject_sdf_with_functional_models,
@@ -2028,6 +2029,30 @@ def _resolve_trace(
     return {"path": path, "format": fmt, "size_bytes": os.path.getsize(path)}
 
 
+def _apply_sdf_header_normalization(sdf_path: str, output_dir: str) -> str:
+    """Issue #1880's always-on first step of
+    :func:`run_functional_verification`'s SDF-normalization pipeline: fill
+    the empty member of any ``VOLTAGE``/``TEMPERATURE``/``PROCESS`` header
+    triple (OpenSTA's ``write_sdf`` writes them as ``min::max``) so
+    ``iverilog -T typ`` does not reject the header with ``Chosen value not
+    defined``. See :func:`_normalize_sdf_header_triples`.
+
+    Returns ``sdf_path`` unchanged when the header needed nothing (a run on
+    such an SDF is byte-identical to before), else the normalized-copy path.
+    Nothing is dropped, so no ``environment.sdf.dropped`` class is recorded:
+    Icarus selects no delay from these fields. A separate function for the
+    same cyclomatic-complexity reason ``_apply_sdf_physical_only_drop``'s
+    docstring records.
+    """
+    normalized = _normalize_sdf_header_triples(sdf_path)
+    if normalized is None:
+        return sdf_path
+    new_path = os.path.join(output_dir, "klt_sdf_header_normalized.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(normalized)
+    return new_path
+
+
 def _apply_sdf_interconnect_only_drop(
     annotate_source_path: str,
     output_dir: str,
@@ -2035,8 +2060,9 @@ def _apply_sdf_interconnect_only_drop(
     entries: str,
 ) -> str:
     """Issue #2364's ``options.sdf.entries: "interconnect"`` mode, applied as
-    the first step of :func:`run_functional_verification`'s SDF-normalization
-    pipeline: when the request selected net-delay back-annotation only, every
+    the first entry-level step (after :func:`_apply_sdf_header_normalization`)
+    of :func:`run_functional_verification`'s SDF-normalization pipeline: when
+    the request selected net-delay back-annotation only, every
     non-``INTERCONNECT`` delay entry (on a real ``write_sdf`` output, the
     ``IOPATH`` population) is removed from the SDF text before
     ``$sdf_annotate`` and counted under :data:`SDF_IOPATH_DROPPED_CLASS` --
@@ -2262,16 +2288,22 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         _write_sdf_dut_wrapper(wrapper_path, hdl_toplevel=hdl_toplevel, ports=ports)
 
         # Issue #2364: `options.sdf.entries: "interconnect"` -- net-delay
-        # back-annotation only, as the first normalization step. On a
-        # timing-clean design (positive setup/hold slack at the SDF's own
+        # back-annotation only, as the first entry-level normalization step.
+        # On a timing-clean design (positive setup/hold slack at the SDF's own
         # corner) IOPATH annotation on the sky130 specify-branch models
         # kills the design in Icarus even at a 10x-relaxed clock period,
         # while INTERCONNECT-only annotation simulates correctly, so that
         # configuration is a first-class, counted mode rather than something
         # a caller hand-filters off-tool. A run that did not select the mode
         # never drops anything and is byte-identical to before.
+        # Issue #1880: OpenSTA's `write_sdf` header carries VOLTAGE/
+        # TEMPERATURE/PROCESS as `min::max` triples with an empty typ member,
+        # which `iverilog -T typ` (the default corner) rejects as `Chosen
+        # value not defined`. Always-on, header-only, and a no-op on an SDF
+        # whose header is already complete.
+        annotate_source_path = _apply_sdf_header_normalization(sdf["file"], output_dir)
         annotate_source_path = _apply_sdf_interconnect_only_drop(
-            sdf["file"], output_dir, sdf_pre_dropped_counts, sdf["entries"]
+            annotate_source_path, output_dir, sdf_pre_dropped_counts, sdf["entries"]
         )
         # Issue #1619: a bit-selected top-level-port INTERCONNECT entry
         # (any real design's bus ports produce these) can poison a sibling

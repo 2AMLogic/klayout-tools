@@ -424,6 +424,24 @@ argument: Icarus ignores every argument past the second ("`$sdf_annotate`
 currently only uses the first two argument", its own wording), so a corner
 passed there would be silently ignored.
 
+**The SDF header is normalized for every corner (issue #1880).** OpenSTA's
+own `write_sdf` (and so `klt place-and-route`'s `post_route_sdf`) writes the
+`VOLTAGE`, `PROCESS`, and `TEMPERATURE` header fields as `min::max` triples
+with an *empty* typ member, e.g. `(VOLTAGE 1.800::1.800)`. `iverilog -T typ`
+rejects each one with `SDF ERROR: ... Chosen value not defined.`, which would
+fail the default `corner: "typ"` run on header lines that play no part in
+delay selection. Before annotation, any empty member of those three header
+triples is therefore filled from a populated neighbour (typ from min, else
+max; min/max from typ) — `1.800::1.800` becomes `1.800:1.800:1.800` — in a
+`klt_sdf_header_normalized.sdf` copy under `.klt/functional-verification/`.
+The pass is scoped to the header (the text before the first `CELL`) and to
+those three fields only: a delay entry with a missing triple member is left
+untouched and still fails the diagnostic gate below. Icarus selects no delay
+from these fields, so the normalization cannot change a simulated delay, is
+not an `environment.sdf.dropped` class, and leaves `environment.sdf.file`
+naming the caller's original SDF. An SDF whose header is already complete is
+handed to `$sdf_annotate` unchanged.
+
 **Every SDF failure mode is non-fatal, so the transcript is scanned.** Icarus
 reports an unopenable file, an unmatched instance, an `IOPATH` the cell's
 `specify` block does not declare, or an `INTERCONNECT` without
