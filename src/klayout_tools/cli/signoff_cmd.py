@@ -315,7 +315,9 @@ def _print_describe_grader_text(result: dict) -> None:
         print(f"graded T1 items ({result['source_doc']}): {joined}")
     print("opt-in evidence kinds (kind -> T1 items it may satisfy):")
     for kind, items in result["opt_in_evidence_kinds"].items():
-        scope = ", ".join(str(i) for i in items) if items else "none (satisfies nothing)"
+        scope = (
+            ", ".join(str(i) for i in items) if items else "none (satisfies nothing)"
+        )
         print(f"  {kind}: {scope}")
 
 
