@@ -75,6 +75,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   vs-testbench `.subckt` emission and PDK-root unification with `klt pdk` are
   deliberately out of this first slice (see `docs/cli/netlist.md`, "Not in
   this slice").
+- **Added** (#2680, `klt netlist`; additive — `schema_version` unchanged):
+  PDK-root unification with `klt pdk`, one of the two edges the #55 entry
+  above left out of the first slice. `--pdk`/`--pdk-root` resolve the PDK
+  through the same `find_pdk` path `klt sim` uses, and the result is checked
+  against the `PDK_ROOT` a project `--rcfile` (`xschemrc`) declares, so the
+  schematic side and the simulation side can no longer silently point at
+  different PDKs. A new top-level `pdk` field carries `variant`, `version`,
+  `resolved_via`, `root`, `rcfile_pdk_root`, `consistent` (`true`/`false`, or
+  `null` when there is nothing to compare), `warning` and `ambiguity_warning`;
+  the field is **absent** when no PDK is in play, so existing payloads are
+  unchanged. `--pdk`/`--pdk-root` are strict (an unresolvable PDK is an
+  error); without them `$PDK`/`$PDK_ROOT` are consulted only alongside an
+  `--rcfile`, best-effort. Exit codes are unchanged — a mismatch is a
+  warning, not a failure. Block-vs-testbench `.subckt` emission remains out
+  of scope (see `docs/cli/netlist.md`, "Not in this slice").
 - **Fixed** (#2654, `klt lvs`; `schema_version` unchanged, no new field — but
   **a request using `options.compare_parameters` can emit fewer
   `device.parameter_excluded` entries and different

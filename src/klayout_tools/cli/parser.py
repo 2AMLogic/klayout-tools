@@ -4873,10 +4873,17 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "project-local xschemrc to load (symbol search path, PDK root). "
-            "Passed through to xschem as --rcfile; this verb does not yet "
-            "resolve a PDK root itself (issue #55 scoped that to the "
-            "SPICE-side design follow-up), so the xschemrc remains the one "
-            "place that states it"
+            "Passed through to xschem as --rcfile verbatim. With "
+            "--pdk/--pdk-root (or $PDK/$PDK_ROOT), the PDK root the "
+            "xschemrc declares is cross-checked against the resolved PDK "
+            "and a mismatch is reported (issue #2680)"
+        ),
+    )
+    _add_pdk_args(
+        netlist_parser,
+        pdk_help=(
+            "PDK variant to resolve (e.g. sky130A); overrides $PDK. Used to "
+            "cross-check --rcfile's PDK root, as `klt sim` resolves it"
         ),
     )
     netlist_parser.add_argument(
