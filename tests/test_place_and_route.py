@@ -2677,7 +2677,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # path strings, not the `{path, scope}` envelope `klt synthesize`/`klt
     # pex`/`klt sim`/`klt size` use for their own output paths -- a
     # deliberate, documented split (see `docs/json-contract.md`'s
-    # "Output-artifact path fields: envelope vs. plain string"), not an
+    # "Path fields: envelope vs. plain string"), not an
     # oversight. These assertions are a regression guard for that shape:
     # they should keep passing exactly as-is unless a future issue migrates
     # `place-and-route` onto the envelope (which would also require bumping
@@ -10661,7 +10661,7 @@ def test_envelope_lint_finds_the_plain_string_path_fields(tmp_path, monkeypatch)
     """The other half of issue #2224, against a real envelope.
 
     `def_path`/`gds_path`/`verilog_path` are the *plain-string* path fields
-    `docs/json-contract.md`'s "Output-artifact path fields" table documents
+    `docs/json-contract.md`'s "Path fields: envelope vs. plain string" table documents
     for this verb -- absolute, with no `{path, scope}` envelope to make them
     committable. Retyping them is explicitly out of scope here (it is a
     breaking change to each field); what this pins is that
