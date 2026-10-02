@@ -56,11 +56,13 @@ MiM capacitor stack cmos5l's own forbidden-layer rule blocks outright).
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 
 import klayout.db as kdb
 import pytest
 
+from klayout_tools.cli import main
 from klayout_tools.decks import RuleProvenance, get_deck
 from klayout_tools.decks import sg13cmos5l as sg13cmos5l_deck_module
 from klayout_tools.decks.sg13cmos5l import EXTRACTION_DECK
@@ -201,7 +203,18 @@ def test_sg13cmos5l_deck_declares_full_metal_stack():
     `test_gf180mcu_deck_declares_full_metal_stack`. No `Metal5`/`Via4`/
     `TopVia2`/`TopMetal2`: cmos5l's own stack tops at `TopMetal1` (all four
     are on cmos5l's own LVS/DRC forbidden-layer lists -- see
-    `sg13cmos5l.py`'s module docstring)."""
+    `sg13cmos5l.py`'s module docstring).
+
+    The `.pin` (datatype 2) choice asserted here is **deliberately retained**
+    by issue #2656, which settles the "should this deck switch to `.text` to
+    match `sg13g2.py`" question the module docstring left open at #1414/#1417:
+    neither purpose is wrong, so flipping the default would only relocate the
+    zero-promoted-pins failure onto the foundry-sourced, `.pin`-labelled
+    layouts this value was independently confirmed against. A layout whose
+    names are on `.text` instead is served per request by `klt extract
+    --label-layer metal<i>=<layer>/25` (`ExtractionDeck.with_label_layers`),
+    covered by `test_sg13cmos5l_label_layer_override_reads_the_text_purpose`
+    below -- so this tuple is a default, no longer a constraint on callers."""
     assert EXTRACTION_DECK.metals == (
         (8, 0),  # Metal1.drawing
         (10, 0),  # Metal2.drawing
@@ -1775,3 +1788,174 @@ def test_sg13cmos5l_parasitics_distinct_net_overlap(
     fields = card.split()
     assert set(fields[1:3]) == {"LOWER__par", "UPPER__par"}
     assert float(fields[3]) == pytest.approx(coupling_ff * 1e-15, rel=1e-6, abs=0)
+
+
+# --------------------------------------------------------------------------- #
+# Net/pin names on the `.text` (datatype 25) purpose instead of `.pin`
+# (datatype 2) -- issue #2656
+#
+# This deck reads net/pin name text off the `.pin` purpose of every level
+# (`Metal1.pin` 8/2 .. `TopMetal1.pin` 126/2, plus `GatPoly.pin` 5/2 and
+# `NWell.pin` 31/2). The shared IHP `.lyp` layer map declares a `.text`
+# purpose (datatype 25) per level too, and `sg13g2.py`'s own deck picks *that*
+# side for the same conceptual field -- so a placed-and-routed stream from a
+# flow that wrote its names on `.text` names nothing at all under this deck.
+# Issue #2656 settles that fork with a per-request override rather than by
+# moving this deck's confirmed-against-a-live-checkout default: see
+# `test_sg13cmos5l_deck_declares_full_metal_stack` above and
+# `ExtractionDeck.with_label_layers`.
+# --------------------------------------------------------------------------- #
+
+#: Every `.text` (datatype 25) counterpart of this deck's own `metal_labels`
+#: entries, as the `klt extract --label-layer` role -> (layer, datatype)
+#: mapping that redirects the whole metal stack's name text onto that purpose.
+_TEXT_PURPOSE_METAL_LABELS = {
+    f"metal{index}": (layer, 25)
+    for index, (layer, _datatype) in enumerate(EXTRACTION_DECK.metal_labels)
+}
+
+
+def _make_nfet_layout_labelled_on_the_text_purpose() -> kdb.Layout:
+    """`_make_nfet_layout_routed_through_full_metal_stack`'s layout with every
+    name text moved from the `.pin` purpose (datatype 2) this deck reads to
+    the `.text` purpose (datatype 25) it does not -- issue #2656's reported
+    input shape (a routed LibreLane/KLayout-style GDS whose net and top-level
+    pin names all sit on `.text`).
+
+    Derived from that fixture rather than hand-drawn a second time, so the two
+    cannot drift on anything but the label purpose under test.
+    """
+    layout = _make_nfet_layout_routed_through_full_metal_stack()
+    for layer, datatype in EXTRACTION_DECK.metal_labels:
+        pin_index = layout.layer(layer, datatype)
+        text_index = layout.layer(layer, 25)
+        for cell in layout.each_cell():
+            cell.shapes(text_index).insert(cell.shapes(pin_index))
+            cell.shapes(pin_index).clear()
+    return layout
+
+
+def test_sg13cmos5l_text_purpose_names_promote_no_pins_by_default(tmp_path: Path):
+    """Issue #2656's reproduction: the same routed NMOS that extracts with
+    `S`/`G`/`D` when its names are on `.pin` extracts with *zero* named nets
+    and zero promoted pins when they are on `.text` instead -- extraction
+    succeeds, which is what makes it silent, and `klt lvs` against the result
+    is structurally impossible (the reference top circuit has ports, this one
+    has none).
+
+    This is the pre-#2656 behaviour, asserted deliberately: the deck default
+    is unchanged by that issue, so a foundry-sourced layout labelled on
+    `.pin` keeps extracting exactly as it did."""
+    path = _write_gds(
+        _make_nfet_layout_labelled_on_the_text_purpose(),
+        tmp_path / "text_purpose.gds",
+    )
+    report = run_extract(
+        path, "sg13cmos5l", output=str(tmp_path / "text_purpose.spice")
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    # The only surviving pin is the synthesized substrate global (no drawn
+    # label of any kind): every drawn name is gone.
+    assert [net["name"] for net in report["nets"] if net["pin"]] == ["vsubs"]
+    assert not any(net["name"] in {"S", "G", "D"} for net in report["nets"])
+    # The exact warning issue #2656 quotes, naming the `.pin` layers scanned.
+    (zero_labels,) = [
+        warning
+        for warning in report["warnings"]
+        if "found 0 pin-name label(s)" in warning
+    ]
+    assert "8/2" in zero_labels and "126/2" in zero_labels
+    assert "0 top-level pins will be promoted" in zero_labels
+
+
+def test_sg13cmos5l_label_layer_override_reads_the_text_purpose(tmp_path: Path):
+    """The fix: `--label-layer metal<i>=<layer>/25` for this deck's own metal
+    stack recovers the full `S`/`G`/`D` interface from the *same* layout that
+    promoted nothing above (issue #2656), with no change to the deck and no
+    effect on any other caller.
+
+    The `D` label sits only at the top of the via stack (`TopMetal1`, now
+    126/25), so this also re-confirms the #1417 connectivity chain is intact
+    through the override: a redirected label layer must still bind to its own
+    level's conductor region, not to a different one."""
+    path = _write_gds(
+        _make_nfet_layout_labelled_on_the_text_purpose(),
+        tmp_path / "text_purpose.gds",
+    )
+    report = run_extract(
+        path,
+        "sg13cmos5l",
+        output=str(tmp_path / "text_override.spice"),
+        label_layers=_TEXT_PURPOSE_METAL_LABELS,
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    (device,) = report["devices"]
+    assert device["nets"]["s"] == "S"
+    assert device["nets"]["g"] == "G"
+    assert device["nets"]["d"] == "D"
+    assert sorted(net["name"] for net in report["nets"] if net["pin"]) == [
+        "D",
+        "G",
+        "S",
+        "vsubs",
+    ]
+    assert not any("found 0 pin-name label(s)" in w for w in report["warnings"])
+    assert report["label_layers"] == {
+        "metal0": [8, 25],
+        "metal1": [10, 25],
+        "metal2": [30, 25],
+        "metal3": [50, 25],
+        "metal4": [126, 25],
+    }
+
+
+def test_sg13cmos5l_cli_label_layer_override_end_to_end(tmp_path: Path, capsys):
+    """The same override through the CLI, the surface issue #2656 was filed
+    against: `klt extract --deck sg13cmos5l --label-layer metal0=8/25 ...`."""
+    path = _write_gds(
+        _make_nfet_layout_labelled_on_the_text_purpose(),
+        tmp_path / "text_purpose.gds",
+    )
+    argv = [
+        "extract",
+        path,
+        "--deck",
+        "sg13cmos5l",
+        "-o",
+        str(tmp_path / "cli.spice"),
+    ]
+    for role, (layer, datatype) in sorted(_TEXT_PURPOSE_METAL_LABELS.items()):
+        argv += ["--label-layer", f"{role}={layer}/{datatype}"]
+    argv += ["--format", "json"]
+
+    assert main(argv) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["pin_count"] == 4
+    assert sorted(net["name"] for net in report["nets"] if net["pin"]) == [
+        "D",
+        "G",
+        "S",
+        "vsubs",
+    ]
+
+
+def test_sg13cmos5l_pin_purpose_labels_still_extract_unchanged(tmp_path: Path):
+    """The regression guard for issue #2656: the deck's own `.pin` default is
+    untouched, so the unmodified `.pin`-labelled fixture extracts exactly as
+    it did before the override existed -- and its report's `label_layers` echo
+    is `null`, not an empty object."""
+    path = _write_gds(
+        _make_nfet_layout_routed_through_full_metal_stack(),
+        tmp_path / "pin_purpose.gds",
+    )
+    report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "pin.spice"))
+
+    (device,) = report["devices"]
+    assert device["nets"]["s"] == "S"
+    assert device["nets"]["g"] == "G"
+    assert device["nets"]["d"] == "D"
+    assert report["label_layers"] is None
+    assert not any("found 0 pin-name label(s)" in w for w in report["warnings"])

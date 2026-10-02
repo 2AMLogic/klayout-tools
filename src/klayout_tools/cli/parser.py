@@ -2067,6 +2067,39 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--label-layer",
+        dest="label_layers",
+        action="append",
+        default=None,
+        metavar="ROLE=LAYER/DATATYPE",
+        help=(
+            "read net/pin name text for one label ROLE from the given GDS "
+            "layer/datatype instead of the one this --deck's curated default "
+            "picked (issue #2656), as ROLE=LAYER/DATATYPE; repeatable. ROLE "
+            "is `well`, `poly`, or `metal<i>` (0-based, index-aligned with "
+            "the deck's own metal stack, so `metal0` is the level `contact` "
+            "lands on); the value `none` reads no label layer for that role "
+            "at all. A PDK layer map usually declares more than one text "
+            "purpose per conductor and a deck has to pick one -- IHP's "
+            "shared layer map declares both `Metal1.pin` (8/2) and "
+            "`Metal1.text` (8/25), and `sg13cmos5l` reads `.pin` where "
+            "`sg13g2` reads `.text` -- so a placed-and-routed stream whose "
+            "names went on the other purpose names nothing: only named nets "
+            "are promoted, so the whole top-level pin interface comes out "
+            "empty and `klt lvs` has no anchor against a reference. "
+            "`--label-layer metal0=8/25 --label-layer metal1=10/25 ...` "
+            "points the reader at the purpose the flow actually wrote. "
+            "Replaces the deck's own pair for that role rather than adding "
+            "to it, and moves only where *names* are read from -- the deck's "
+            "drawing/connectivity layers are untouched. A ROLE this deck has "
+            "no label slot for is an error, not a silent no-op. Omitted by "
+            "default, which reads labels exactly as before this flag "
+            "existed. The mapping is echoed in the JSON response's "
+            "`label_layers` field. See docs/cli/extract.md's 'Overriding a "
+            "deck's label layers' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--defer-resistor-fixed-offset",
         dest="defer_resistor_fixed_offset",
         action="store_true",

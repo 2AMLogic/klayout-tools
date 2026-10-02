@@ -52,7 +52,7 @@ from ..extract import (
     run_extract,
 )
 from . import _request_document as reqdoc
-from ._parsing import parse_deck_options, parse_declared_pins
+from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
 from .output import emit_error, emit_success, render_rerun_drift
 
 EXIT_OK = 0
@@ -69,6 +69,16 @@ def _parse_deck_options(raw: list[str] | None) -> dict[str, str] | None:
     binding of the shared :func:`.._parsing.parse_deck_options` helper
     ``klt pex`` shares (issue #1558)."""
     return parse_deck_options(raw, ExtractError)
+
+
+def _parse_label_layers(
+    raw: list[str] | None,
+) -> dict[str, tuple[int, int] | None] | None:
+    """``--label-layer`` (issue #2656, repeatable) as the ``{role: (layer,
+    datatype) | None}`` mapping ``run_extract`` takes, or ``None`` when the
+    flag was never given -- this command's :class:`ExtractError` binding of
+    the shared :func:`.._parsing.parse_label_layers` helper."""
+    return parse_label_layers(raw, ExtractError)
 
 
 def _parse_declared_pins(raw: str | None) -> frozenset[str] | None:
@@ -235,6 +245,7 @@ _REQUEST_FIELD_DESTS = {
         "def_pins",
         "pin_source_cells",
         "deck_options",
+        "label_layers",
         "defer_resistor_fixed_offset",
         "abstract_cells",
         "abstract_cell_lef",
@@ -334,6 +345,13 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 flag="--deck-option",
                 error_cls=ExtractError,
             ),
+            "label_layers": reqdoc.get_label_layer_map_as_pairs(
+                request,
+                "label_layers",
+                verb="extract",
+                flag="--label-layer",
+                error_cls=ExtractError,
+            ),
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
             "abstract_cells": _str_list("abstract_cells"),
             "abstract_cell_lef": _str_list("abstract_cell_lef", paths=True),
@@ -373,6 +391,7 @@ def run(args: argparse.Namespace) -> int:
         def_pins = _parse_def_pins(args.def_pins)
         pin_source_cells = _parse_pin_source_cells(args.pin_source_cells)
         deck_options = _parse_deck_options(args.deck_options)
+        label_layers = _parse_label_layers(args.label_layers)
         def_net_connections = _parse_def_net_connections(
             args.def_net_connections, spef_output=args.spef
         )
@@ -398,6 +417,11 @@ def run(args: argparse.Namespace) -> int:
             # `poly_res`). `None` when the flag was never given, unchanged
             # from every call site that predates it.
             deck_options=deck_options,
+            # `--label-layer` (issue #2656): reads net/pin name text for one
+            # label role off a different GDS purpose than this deck's own
+            # curated default. `None` when the flag was never given,
+            # unchanged from every call site that predates it.
+            label_layers=label_layers,
             # `--abstract-cells`/`--abstract-cell-lef` (issue #620): cell-
             # level black-box abstraction. `()` when the flag(s) were never
             # given, unchanged from every call site that predates them.
@@ -508,6 +532,26 @@ def _run_check(args: argparse.Namespace) -> int:
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
+def _print_label_layers(label_layers: dict | None) -> None:
+    """One human-readable line for the response's ``label_layers`` echo
+    (issue #2656), or nothing when ``--label-layer`` was not given.
+
+    The ``deck`` name alone no longer answers "which GDS purpose did this run
+    read net/pin names from" once it can be overridden per request, so the text
+    surface states it too rather than leaving it visible only under
+    ``--format json``. Written as a helper taking the (possibly ``None``)
+    block, like :func:`_print_substrate_spreading` below, so the call site in
+    :func:`_print_text` adds no branch to an already long function.
+    """
+    if not label_layers:
+        return
+    rendered = ", ".join(
+        f"{role}={'none' if layer is None else f'{layer[0]}/{layer[1]}'}"
+        for role, layer in sorted(label_layers.items())
+    )
+    print(f"label_layers: {rendered}")
+
+
 def _print_substrate_spreading(block: dict | None) -> None:
     """One human-readable line for ``parasitics.substrate_spreading``
     (issue #2561), or nothing when ``--substrate-spreading`` was not given.
@@ -555,6 +599,11 @@ def _print_text(report: dict) -> None:
             for key, value in sorted(deck_options.items())
         )
         print(f"deck_options: {rendered}")
+    # Additive (issue #2656): only printed when --label-layer was given.
+    # Called unconditionally, with the absent/empty test inside the helper, so
+    # this line adds no branch to an already long function -- the same shape
+    # `_print_substrate_spreading` below already uses.
+    _print_label_layers(report.get("label_layers"))
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")

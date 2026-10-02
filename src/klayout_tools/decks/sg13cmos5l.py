@@ -54,6 +54,20 @@ recognition; it has since grown three follow-on increments the way
   should switch to ``.text`` to match ``sg13g2.py`` is a separate question
   -- it would have to move ``Metal1`` too -- and is deliberately not
   settled here.
+- **Settled by #2656** (the open question the bullet above left standing):
+  the ``.pin`` default **stays**, and the ``.text`` case is served per
+  request instead. A routed LibreLane/KLayout-style GDS that carries every
+  net/pin name on ``.text`` extracted here with zero promoted top-level pins
+  and generically-named nets, which makes layout-vs-reference LVS
+  structurally impossible. Flipping this deck to ``.text`` would not have
+  fixed that, only relocated it onto the foundry-sourced ``.pin``-labelled
+  layouts these values were confirmed against -- neither purpose is the
+  wrong one, the deck simply cannot know which one a given stream used. So
+  ``klt extract --label-layer metal0=8/25 --label-layer metal1=10/25 ...``
+  (``ExtractionDeck.with_label_layers``/``label_layer_roles``) redirects any
+  label role's purpose for one invocation, leaving every value below -- and
+  every existing caller -- untouched. See ``docs/cli/extract.md``'s
+  "Overriding a deck's label layers" section.
 - **Added by #1414**: ``tap_nplus``/``tap_pplus`` well/substrate tap
   derivation -- see ``EXTRACTION_DECK.tap_nplus``/``.tap_pplus`` below.
   Without it every PMOS body terminal extracted onto an isolated,
@@ -1073,7 +1087,11 @@ EXTRACTION_DECK = ExtractionDeck(
     # per level (datatype 25), which is the side `sg13g2.py` picks for this
     # same conceptual field -- so datatype 2 here is a consistency choice,
     # not the absence of a datatype-25 alternative (see the module
-    # docstring's own note). TopVia1/Via1/Via2/Via3 are
+    # docstring's own note). Issue #2656 keeps these values and makes the
+    # `.text` side reachable per request instead (`klt extract --label-layer
+    # metal0=8/25 ...`), so a stream labelled on the other purpose no longer
+    # needs this default to move: see the module docstring's "Settled by
+    # #2656" bullet. TopVia1/Via1/Via2/Via3 are
     # cut layers, not conductors, so -- like sg13g2's own vias -- they carry
     # no `metal_labels` entry of their own.
     metal_labels=(

@@ -34,6 +34,7 @@ from klayout_tools.cli import main
 from klayout_tools.decks import (
     DiodeDevice,
     ExtractionDeck,
+    InvalidLabelLayerError,
     get_extraction_deck,
     get_unmodeled_voltage_markers,
 )
@@ -8657,7 +8658,9 @@ _POLY_INTERCONNECT_MARKER = (101, 0)
 
 
 def _poly_interconnect_deck(
-    name: str = "sky130", deck_options: dict[str, str] | None = None
+    name: str = "sky130",
+    deck_options: dict[str, str] | None = None,
+    label_layers: dict[str, tuple[int, int] | None] | None = None,
 ) -> ExtractionDeck:
     """The registered ``name`` extraction deck (sky130 by default), with the
     optional ``poly_interconnect`` marker layer set to
@@ -8665,11 +8668,11 @@ def _poly_interconnect_deck(
     identical, so a layout with no shapes on that layer extracts exactly as it
     does under the shipped deck.
 
-    Written to accept the same ``(name, deck_options)`` positional signature
-    as ``get_extraction_deck`` (mirrors ``_dummy_deck`` above) so it can stand
-    in for it under ``monkeypatch.setattr``."""
+    Written to accept the same ``(name, deck_options, label_layers)``
+    positional signature as ``get_extraction_deck`` (mirrors ``_dummy_deck``
+    above) so it can stand in for it under ``monkeypatch.setattr``."""
     return dataclasses.replace(
-        get_extraction_deck(name, deck_options),
+        get_extraction_deck(name, deck_options, label_layers),
         poly_interconnect=_POLY_INTERCONNECT_MARKER,
     )
 
@@ -16893,23 +16896,26 @@ _DUMMY_MARKER = (100, 0)
 
 
 def _dummy_deck(
-    name: str = "sky130", deck_options: dict[str, str] | None = None
+    name: str = "sky130",
+    deck_options: dict[str, str] | None = None,
+    label_layers: dict[str, tuple[int, int] | None] | None = None,
 ) -> ExtractionDeck:
     """The registered ``name`` extraction deck (sky130 by default), with the
     optional ``dummy`` marker layer set to :data:`_DUMMY_MARKER` (issue #295).
     Everything else is identical, so a layout with no shapes on that layer
     extracts exactly as it does under the shipped deck.
 
-    Written to accept the same ``(name, deck_options)`` positional signature
-    as ``get_extraction_deck`` (issue #595) so it can stand in for it under
-    ``monkeypatch.setattr`` -- ``deck_options`` is forwarded, not ignored, so
-    a test that combines dummy-suppression with a `deck_options` override
-    still sees it applied. The ``get_extraction_deck`` it calls is this test
-    module's own import from ``klayout_tools.decks`` -- distinct from the
-    ``klayout_tools.extract`` reference the tests patch -- so there is no
-    recursion."""
+    Written to accept the same ``(name, deck_options, label_layers)``
+    positional signature as ``get_extraction_deck`` (issues #595, #2656) so it
+    can stand in for it under ``monkeypatch.setattr`` -- both are forwarded,
+    not ignored, so a test that combines dummy-suppression with a
+    ``deck_options``/``label_layers`` override still sees it applied. The
+    ``get_extraction_deck`` it calls is this test module's own import from
+    ``klayout_tools.decks`` -- distinct from the ``klayout_tools.extract``
+    reference the tests patch -- so there is no recursion."""
     return dataclasses.replace(
-        get_extraction_deck(name, deck_options), dummy=_DUMMY_MARKER
+        get_extraction_deck(name, deck_options, label_layers),
+        dummy=_DUMMY_MARKER,
     )
 
 
@@ -21582,3 +21588,523 @@ def test_subcircuit_deck_simulates_standalone_in_ngspice(tmp_path):
     assert float(match.group(1)) == pytest.approx(
         load_ohm / (load_ohm + series_ohm), rel=1e-3
     )
+
+
+# --------------------------------------------------------------------------- #
+# `--label-layer`: reading net/pin names off a different GDS purpose than the
+# deck's own curated default (issue #2656)
+#
+# A PDK layer map commonly declares more than one text purpose per conductor
+# and a curated deck has to pick one. A stream whose names went on the other
+# purpose therefore names *nothing* -- only named nets are promoted, so the
+# whole top-level pin interface comes out empty and `klt lvs` has no anchor
+# against a reference. These tests cover the per-request escape hatch: the
+# deck API (`label_layer_roles`/`with_label_layers`), the `--label-layer` flag
+# and its request-document field, the response echo, and the `--rerun` replay.
+# The sg13cmos5l reproduction the issue was filed from lives in
+# `tests/test_sg13cmos5l_deck.py`.
+# --------------------------------------------------------------------------- #
+
+#: A GDS purpose on sky130's own `li1` layer number that
+#: `decks.sky130.EXTRACTION_DECK` does **not** read for anything -- its
+#: `metal_labels[0]` is `li1.pin` (67/5). Used as the stand-in for "the other
+#: text purpose this flow happened to write its names on".
+_UNREAD_LI1_LABEL_PURPOSE = (67, 10)
+
+
+def _move_label_purpose(
+    layout: kdb.Layout, src: tuple[int, int], dst: tuple[int, int]
+) -> kdb.Layout:
+    """Move every shape on ``src`` to ``dst``, in place, and return
+    ``layout``.
+
+    Turns a fixture whose names are drawn on the purpose a deck reads into the
+    same layout with those names on a purpose it does not -- issue #2656's
+    input shape, without a second hand-maintained copy of the fixture that
+    could drift from it.
+    """
+    src_index = layout.layer(src[0], src[1])
+    dst_index = layout.layer(dst[0], dst[1])
+    for cell in layout.each_cell():
+        cell.shapes(dst_index).insert(cell.shapes(src_index))
+        cell.shapes(src_index).clear()
+    return layout
+
+
+def test_label_layer_roles_cover_well_poly_and_every_metal_level():
+    """`label_layer_roles` is the role vocabulary `--label-layer` accepts:
+    `well`/`poly` plus one `metal<i>` per *metal stack* level (not per
+    declared `metal_labels` entry), so a level the deck leaves unlabelled is
+    still addressable (issue #2656)."""
+    deck = get_extraction_deck("sky130")
+    assert deck.label_layer_roles == (
+        "well",
+        "poly",
+        "metal0",
+        "metal1",
+        "metal2",
+        "metal3",
+        "metal4",
+        "metal5",
+    )
+    assert len(deck.label_layer_roles) == len(deck.metals) + 2
+
+
+def test_with_label_layers_replaces_only_the_named_role():
+    """An override moves *only* where that one role's name text is read from:
+    every other label role, and the drawing/connectivity layers themselves,
+    are untouched (issue #2656)."""
+    deck = get_extraction_deck("sky130")
+    moved = deck.with_label_layers({"metal0": _UNREAD_LI1_LABEL_PURPOSE})
+
+    assert moved.metal_labels[0] == _UNREAD_LI1_LABEL_PURPOSE
+    assert moved.metal_labels[1:] == deck.metal_labels[1:]
+    assert moved.well_label == deck.well_label
+    assert moved.poly_label == deck.poly_label
+    # The deck is only re-pointed at a different *text* purpose; the layers it
+    # extracts geometry/connectivity from do not move.
+    assert moved.metals == deck.metals
+    assert moved.vias == deck.vias
+    # And the registered deck object itself is not mutated.
+    assert get_extraction_deck("sky130").metal_labels == deck.metal_labels
+
+
+def test_with_label_layers_none_clears_a_role():
+    """A `None` value drops that role's label layer entirely -- the "my flow
+    writes junk on the purpose this deck reads" half of the override (issue
+    #2656)."""
+    deck = get_extraction_deck("sky130")
+    cleared = deck.with_label_layers({"poly": None, "metal0": None})
+
+    assert cleared.poly_label is None
+    assert cleared.metal_labels[0] is None
+    assert cleared.well_label == deck.well_label
+
+
+def test_with_label_layers_empty_or_none_returns_the_deck_unchanged():
+    """The default everywhere: no override resolves the registered deck
+    byte-identically to every call site that predates the parameter (issue
+    #2656)."""
+    deck = get_extraction_deck("sky130")
+    assert deck.with_label_layers(None) is deck
+    assert deck.with_label_layers({}) is deck
+    assert get_extraction_deck("sky130", None, None) is deck
+
+
+def test_with_label_layers_unknown_role_is_an_error_not_a_silent_no_op():
+    """A typo'd role raises rather than being ignored: a silently-dropped
+    override is indistinguishable from the zero-promoted-pins bug the flag
+    exists to fix (issue #2656). The message names the available roles."""
+    deck = get_extraction_deck("sky130")
+    with pytest.raises(InvalidLabelLayerError, match="no label-layer role"):
+        deck.with_label_layers({"metal9": (67, 10)}, deck_name="sky130")
+    with pytest.raises(InvalidLabelLayerError, match="metal0"):
+        deck.with_label_layers({"nwell": (64, 10)})
+
+
+def test_with_label_layers_rejects_a_malformed_pair():
+    """A value that is neither `None` nor a 2-tuple of ints raises (issue
+    #2656) -- the Python-API counterpart of the CLI's own grammar check."""
+    deck = get_extraction_deck("sky130")
+    with pytest.raises(InvalidLabelLayerError, match="pair of integers"):
+        deck.with_label_layers({"metal0": (67,)})  # type: ignore[dict-item]
+    with pytest.raises(InvalidLabelLayerError, match="pair of integers"):
+        deck.with_label_layers({"metal0": "67/10"})  # type: ignore[dict-item]
+
+
+def test_with_label_layers_pads_a_level_the_deck_declares_no_label_for():
+    """`metal_labels` is index-aligned with `metals` but may be shorter (a
+    deck that declares no label layer for the upper levels). An override for
+    such a level extends the tuple with `None` padding rather than raising or
+    landing on the wrong index (issue #2656)."""
+    deck = dataclasses.replace(get_extraction_deck("sky130"), metal_labels=((67, 5),))
+    moved = deck.with_label_layers({"metal2": (69, 10)})
+
+    assert moved.metal_labels == ((67, 5), None, (69, 10))
+
+
+def test_names_on_an_unread_purpose_promote_zero_pins(tmp_path):
+    """Issue #2656's reported failure, reproduced on sky130: a layout whose
+    net/pin name text sits on a purpose this deck does not read extracts with
+    *zero* promoted top-level pins and anonymous net names -- extraction
+    itself succeeds, which is what makes it silent. `klt lvs` against such a
+    netlist is structurally impossible: the reference top circuit has ports,
+    this one has none."""
+    path = _write_gds(
+        _move_label_purpose(
+            _make_inverter_layout(), (67, 5), _UNREAD_LI1_LABEL_PURPOSE
+        ),
+        tmp_path / "unread_purpose.gds",
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "unread.spice"))
+
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+    # Only the well/body pin survives -- its own label sits on `well_label`
+    # (64/5), which this fixture did not move -- plus the synthesized
+    # substrate global. Every li1-named port is gone.
+    assert sorted(net["name"] for net in report["nets"] if net["pin"]) == [
+        "VPB",
+        "vsubs",
+    ]
+    assert not any(net["name"] in {"A", "Y", "VPWR", "VGND"} for net in report["nets"])
+    # ...and the names are not merely unpromoted, they are *absent*: all five
+    # li1-labelled nets (both source pads, both drain islands, and the gate)
+    # carry KLayout's anonymous `\$n` placeholders instead.
+    assert sum(net["name"].startswith("\\$") for net in report["nets"]) == 5, [
+        net["name"] for net in report["nets"]
+    ]
+    # The text is drawn, just on a layer nothing reads -- which is what the
+    # `ignored_layers` diagnostic is for.
+    assert (_UNREAD_LI1_LABEL_PURPOSE, 5) in [
+        ((entry["layer"], entry["datatype"]), entry["shapes"])
+        for entry in report["ignored_layers"]
+    ]
+
+
+def test_label_layer_override_promotes_pins_from_the_unread_purpose(tmp_path):
+    """The fix: pointing `metal0`'s label role at the purpose the flow
+    actually wrote recovers the full pin interface from the *same* layout
+    that promoted nothing above (issue #2656)."""
+    path = _write_gds(
+        _move_label_purpose(
+            _make_inverter_layout(), (67, 5), _UNREAD_LI1_LABEL_PURPOSE
+        ),
+        tmp_path / "unread_purpose.gds",
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "override.spice"),
+        label_layers={"metal0": _UNREAD_LI1_LABEL_PURPOSE},
+    )
+
+    assert report["device_counts"] == {"nfet": 1, "pfet": 1}
+    assert sorted(net["name"] for net in report["nets"] if net["pin"]) == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+        # Two distinct, unstrapped drain islands in this fixture carry the
+        # identical drawn label, plus the synthesized substrate global.
+        "Y",
+        "Y",
+        "vsubs",
+    ]
+    assert not any("found 0 pin-name label(s)" in w for w in report["warnings"])
+    # The echo records which purpose this run actually read names from -- the
+    # deck name alone no longer answers that.
+    assert report["label_layers"] == {"metal0": [67, 10]}
+
+
+def test_label_layers_echo_is_null_when_the_flag_was_never_given(tmp_path):
+    """The response field is additive and `null` by default, so an unoverridden
+    run's report is unchanged from before the field existed (issue #2656)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["label_layers"] is None
+
+
+def test_label_layer_override_does_not_disturb_the_decks_default(tmp_path):
+    """The regression guard: an overridden run is a *per-request* change. A
+    second run with no override, in the same process, reads the deck's own
+    `.pin` purpose exactly as it always did (issue #2656)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    overridden = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "a.spice"),
+        label_layers={"metal0": _UNREAD_LI1_LABEL_PURPOSE},
+    )
+    default = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
+
+    # Names live on 67/5 in this fixture, so the override (pointed at the
+    # empty 67/10) loses them and the default keeps them.
+    assert overridden["pin_count"] < default["pin_count"]
+    assert sorted(net["name"] for net in default["nets"] if net["pin"]) == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+        "Y",
+        "Y",
+        "vsubs",
+    ]
+
+
+def test_unknown_label_layer_role_is_a_clean_extract_error(tmp_path):
+    """A role the deck has no slot for surfaces as `ExtractError` (exit 1 with
+    a clean message), never a traceback -- the same treatment an unrecognised
+    `deck_options` key already gets (issue #2656)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    with pytest.raises(ExtractError, match="no label-layer role"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "bad.spice"),
+            label_layers={"metal9": (67, 10)},
+        )
+
+
+def test_cli_label_layer_reads_names_off_the_given_purpose(tmp_path, capsys):
+    """`klt extract --label-layer metal0=67/10` end to end: parsed by the CLI,
+    forwarded to `run_extract`, and echoed in the JSON response's
+    `label_layers` (issue #2656)."""
+    path = _write_gds(
+        _move_label_purpose(
+            _make_inverter_layout(), (67, 5), _UNREAD_LI1_LABEL_PURPOSE
+        ),
+        tmp_path / "unread_purpose.gds",
+    )
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "cli.spice"),
+            "--label-layer",
+            "metal0=67/10",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["label_layers"] == {"metal0": [67, 10]}
+    assert sorted(net["name"] for net in out["nets"] if net["pin"]) == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+        "Y",
+        "Y",
+        "vsubs",
+    ]
+
+
+def test_cli_label_layer_none_clears_a_role(tmp_path, capsys):
+    """`--label-layer <role>=none` reads no label layer for that role at all,
+    echoed as `null` (issue #2656)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "cleared.spice"),
+            "--label-layer",
+            "metal0=NONE",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["label_layers"] == {"metal0": None}
+    # Every li1-labelled net loses its name; the nwell-labelled body pin
+    # (`well_label`, 64/5) and the synthesized substrate global are untouched.
+    assert sorted(net["name"] for net in out["nets"] if net["pin"]) == [
+        "VPB",
+        "vsubs",
+    ]
+
+
+def test_cli_label_layer_text_output_names_the_purposes_it_read(tmp_path, capsys):
+    """Text mode surfaces the override too (issue #2656): "which purpose did
+    this run read names from" must not be visible only in `--format json`."""
+    path = _write_gds(
+        _move_label_purpose(
+            _make_inverter_layout(), (67, 5), _UNREAD_LI1_LABEL_PURPOSE
+        ),
+        tmp_path / "unread_purpose.gds",
+    )
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "text.spice"),
+            "--label-layer",
+            "metal0=67/10",
+            "--label-layer",
+            "poly=none",
+        ]
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "label_layers: metal0=67/10, poly=none" in out
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ("metal0", "ROLE=LAYER/DATATYPE"),
+        ("=67/10", "ROLE=LAYER/DATATYPE"),
+        ("metal0=67,10", "LAYER/DATATYPE"),
+        ("metal0=67/", "LAYER/DATATYPE"),
+        ("metal0=li1.pin", "LAYER/DATATYPE"),
+    ],
+)
+def test_cli_label_layer_malformed_entry_is_a_clean_error(
+    tmp_path, capsys, entry, expected
+):
+    """A malformed `--label-layer` entry exits 1 with a clean message naming
+    the expected spelling, not a traceback and never a silently-ignored
+    override (issue #2656)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "out.spice"),
+            "--label-layer",
+            entry,
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert expected in err["error"]["message"]
+
+
+def test_cli_label_layer_unknown_role_is_a_clean_error(tmp_path, capsys):
+    """An unknown ROLE exits 1 with the deck's own available-role list (issue
+    #2656) -- the role set is deck-dependent, so this check lives in the deck,
+    not the argument parser."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "out.spice"),
+            "--label-layer",
+            "metal42=67/10",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "no label-layer role" in err["error"]["message"]
+    assert "metal0" in err["error"]["message"]
+
+
+def test_request_document_label_layers_matches_the_flag_form(tmp_path, capsys):
+    """The request-document form (`"label_layers": {"metal0": [67, 10]}`)
+    produces the same report the repeatable flag does -- it normalizes back
+    through the same parser, so the two forms cannot drift (issue #2656)."""
+    _write_gds(
+        _move_label_purpose(
+            _make_inverter_layout(), (67, 5), _UNREAD_LI1_LABEL_PURPOSE
+        ),
+        tmp_path / "unread_purpose.gds",
+    )
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": "unread_purpose.gds",
+                "deck": "sky130",
+                "output": "req.spice",
+                "label_layers": {"metal0": [67, 10], "poly": None},
+            }
+        )
+    )
+    exit_code = main(["extract", str(request), "--format", "json"])
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["label_layers"] == {"metal0": [67, 10], "poly": None}
+    assert sorted(net["name"] for net in out["nets"] if net["pin"]) == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+        "Y",
+        "Y",
+        "vsubs",
+    ]
+
+
+def test_request_document_label_layers_rejects_a_malformed_pair(tmp_path, capsys):
+    """A request-document `label_layers` value that is not a `[layer,
+    datatype]` pair (or `null`) exits 1 with a clean error rather than being
+    dropped (issue #2656)."""
+    _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": "inv.gds",
+                "deck": "sky130",
+                "output": "req.spice",
+                "label_layers": {"metal0": "67/10"},
+            }
+        )
+    )
+    exit_code = main(["extract", str(request), "--format", "json"])
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "label_layers" in err["error"]["message"]
+
+
+def test_rerun_replays_the_label_layer_override(tmp_path):
+    """`--check --rerun` of a report produced with `--label-layer` replays the
+    same override. Without that replay the rerun would read the deck's own
+    purpose instead and report drift on *every* net name at once -- the
+    override itself read as drift, rather than any real change to the deck or
+    the layout (issue #2656)."""
+    path = _write_gds(
+        _move_label_purpose(
+            _make_inverter_layout(), (67, 5), _UNREAD_LI1_LABEL_PURPOSE
+        ),
+        tmp_path / "unread_purpose.gds",
+    )
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "rerun.spice"),
+        label_layers={"metal0": _UNREAD_LI1_LABEL_PURPOSE},
+    )
+    report_path = _write_report(tmp_path / "committed.json", committed)
+
+    result = rerun_extract_report(report_path)
+
+    assert result["status"] == "match"
+    assert result["fresh"]["label_layers"] == {"metal0": [67, 10]}
+
+
+def test_rerun_of_a_report_predating_the_field_replays_no_override(tmp_path):
+    """A report carrying no `label_layers` at all (every report written before
+    the field existed) replays as "no override" -- it extracts against the
+    deck's own purpose, exactly as the committed run did. The only drift
+    reported is the newly-added field itself, which is `_report_verify`'s
+    documented schema-evolution behaviour for *any* added field, not a
+    behaviour change in the rerun (issue #2656)."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    committed = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    assert committed.pop("label_layers") is None
+    report_path = _write_report(tmp_path / "legacy.json", committed)
+
+    result = rerun_extract_report(report_path)
+
+    assert [entry["field"] for entry in result["drift"]] == ["label_layers"]
+    assert result["fresh"]["label_layers"] is None
+    assert result["fresh"]["pin_count"] == committed["pin_count"]

@@ -16,6 +16,12 @@ factored the parsing here rather than duplicating it, so the two commands
 cannot drift on what they accept or on the message a malformed entry
 produces.
 
+:func:`parse_label_layers` (``klt extract --label-layer``, issue #2656) sits
+alongside them: only ``klt extract`` accepts it today, but it resolves into
+the *same* ``run_extract`` parameter (``label_layers``) those two already
+share a path into, so it is parsed here from the start rather than in one
+command module a second adopter would have to copy out of.
+
 Private to the :mod:`klayout_tools.cli` package -- not part of the public
 ``klayout_tools`` API.
 """
@@ -185,6 +191,76 @@ def parse_deck_options(
             )
         options[key] = value.strip()
     return options
+
+
+#: The spelling :func:`parse_label_layers` accepts for "this role reads no
+#: label layer at all" -- compared case-insensitively against the value half
+#: of a ``ROLE=VALUE`` entry.
+LABEL_LAYER_NONE = "none"
+
+
+def parse_label_layers(
+    raw: list[str] | None,
+    error_cls: ErrorFactory,
+    flag: str = "--label-layer",
+) -> dict[str, tuple[int, int] | None] | None:
+    """Parse the ``--label-layer`` flag's ``ROLE=LAYER/DATATYPE`` entries
+    (issue #2656, repeatable) into the ``{role: (layer, datatype) | None}``
+    mapping ``run_extract``'s own ``label_layers`` parameter takes, or
+    ``None`` when the flag was never given.
+
+    ``LAYER/DATATYPE`` is the ``<layer>/<datatype>`` spelling this CLI already
+    reports GDS layers in (``klt layers``, ``klt extract``'s own
+    ``ignored_layers``/label-layer warnings). The value ``none``
+    (case-insensitive, :data:`LABEL_LAYER_NONE`) clears the role instead:
+    that role's label layer is not read at all for this run.
+
+    Role *names* are deliberately **not** validated here -- the set depends on
+    the deck (``well``/``poly``/``metal0``..``metal<N>``, see
+    :attr:`~klayout_tools.decks.ExtractionDeck.label_layer_roles`), which this
+    parser does not resolve. An unknown role raises
+    :class:`~klayout_tools.decks.InvalidLabelLayerError` from the deck itself,
+    surfaced as the same clean exit-1 error, which is where the available-role
+    list can actually be quoted.
+
+    Raises ``error_cls`` for a malformed entry (no ``=``, a blank role, or a
+    value that is neither ``none`` nor two slash-separated integers) -- a
+    typo'd override must not read as "the override had no effect", which is
+    indistinguishable from the zero-promoted-pins bug the flag exists to fix.
+    A later entry for the same ROLE overrides an earlier one (last-one-wins,
+    matching :func:`parse_deck_options`).
+    """
+    if raw is None:
+        return None
+    overrides: dict[str, tuple[int, int] | None] = {}
+    for entry in raw:
+        role, sep, value = entry.partition("=")
+        role = role.strip()
+        value = value.strip()
+        if not sep or not role:
+            raise error_cls(
+                f"{flag} entry {entry!r} is not ROLE=LAYER/DATATYPE -- "
+                f"e.g. {flag} metal0=8/25 (or {flag} poly={LABEL_LAYER_NONE} "
+                "to read no label layer for that role)"
+            )
+        if value.lower() == LABEL_LAYER_NONE:
+            overrides[role] = None
+            continue
+        layer_raw, slash, datatype_raw = value.partition("/")
+        if not slash or not layer_raw.strip().isdigit():
+            raise error_cls(
+                f"{flag} {role!r} value {value!r} is not LAYER/DATATYPE -- "
+                f"e.g. {flag} {role}=8/25, or {flag} {role}="
+                f"{LABEL_LAYER_NONE} to read no label layer for that role"
+            )
+        if not datatype_raw.strip().isdigit():
+            raise error_cls(
+                f"{flag} {role!r} value {value!r} is not LAYER/DATATYPE -- "
+                f"e.g. {flag} {role}=8/25, or {flag} {role}="
+                f"{LABEL_LAYER_NONE} to read no label layer for that role"
+            )
+        overrides[role] = (int(layer_raw.strip()), int(datatype_raw.strip()))
+    return overrides
 
 
 def parse_declared_pins(

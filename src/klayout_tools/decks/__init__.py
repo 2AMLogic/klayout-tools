@@ -24,7 +24,7 @@ provenance fields:
   (:class:`ResistorDevice`, :class:`ResistorFlavour`, :class:`MOSFlavour`,
   :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`CapacitorDevice`,
   :class:`CapacitorFlavour`, :class:`MomCapacitorDevice`,
-  :class:`DiodeDevice`).
+  :class:`DiodeDevice`, :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
   (:class:`LayerRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
@@ -46,6 +46,7 @@ from .extraction import (
     CapacitorFlavour,
     DiodeDevice,
     ExtractionDeck,
+    InvalidLabelLayerError,
     MomCapacitorDevice,
     MOSFlavour,
     ResistorDevice,
@@ -68,6 +69,7 @@ __all__ = [
     "DrcRule",
     "ExtractionDeck",
     "InvalidDeckOptionError",
+    "InvalidLabelLayerError",
     "LayerRC",
     "MOSFlavour",
     "MomCapacitorDevice",
@@ -290,10 +292,13 @@ def known_extraction_deck_names() -> tuple[str, ...]:
 
 
 def get_extraction_deck(
-    name: str, deck_options: Mapping[str, str] | None = None
+    name: str,
+    deck_options: Mapping[str, str] | None = None,
+    label_layers: Mapping[str, tuple[int, int] | None] | None = None,
 ) -> ExtractionDeck:
     """Return the registered :class:`ExtractionDeck` for ``name``, optionally
-    resolved against ``deck_options`` (issue #595).
+    resolved against ``deck_options`` (issue #595) and ``label_layers``
+    (issue #2656).
 
     Raises :class:`UnknownExtractionDeckError` (which ``extract.py`` turns
     into an :class:`~klayout_tools.extract.ExtractError`) if ``name`` is not
@@ -319,6 +324,17 @@ def get_extraction_deck(
     :class:`ResistorFlavour.value`/:class:`CapacitorFlavour.value` set,
     raises :class:`InvalidDeckOptionError` rather than silently keeping the
     default or ignoring the override.
+
+    ``label_layers`` (``klt extract --label-layer <role>=<layer>/<datatype>``,
+    repeatable; issue #2656) replaces the ``(layer, datatype)`` pair this
+    deck's curated default reads net/pin name *text* from, per label role --
+    the escape hatch for a stream whose names sit on a different GDS purpose
+    of the same conductor than the deck picked (e.g. an IHP layout whose
+    names are on ``Metal1.text`` 8/25 under a deck reading ``Metal1.pin``
+    8/2). ``None`` or an empty mapping (the default) returns the deck
+    untouched. See :meth:`ExtractionDeck.with_label_layers` for the full
+    contract -- including why it *replaces* rather than unions, and the
+    :class:`InvalidLabelLayerError` an unknown role raises.
     """
     decks = _extraction_registry()
     try:
@@ -328,9 +344,9 @@ def get_extraction_deck(
         raise UnknownExtractionDeckError(
             f"unknown deck '{name}' (available: {available})"
         ) from None
-    if not deck_options:
-        return deck
-    return _resolve_device_flavours(name, deck, deck_options)
+    if deck_options:
+        deck = _resolve_device_flavours(name, deck, deck_options)
+    return deck.with_label_layers(label_layers, deck_name=name)
 
 
 def resolve_deck_option_values(

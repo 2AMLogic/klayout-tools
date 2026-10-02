@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--format text|json]
 klt extract <request.json>|-|'{...}' [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -113,6 +113,18 @@ two disagree, this document (and the code) win.
   silently-kept default. Omitting the flag resolves every deck exactly as
   before it existed. See "Selecting a shared-geometry resistor flavour"
   below.
+- `--label-layer` — optional, unset by default, repeatable.
+  `<role>=<layer>/<datatype>` reads net/pin name text for one label *role* off
+  the given GDS layer/datatype instead of the one this `--deck`'s curated
+  default picked (issue #2656). `<role>` is `well`, `poly`, or `metal<i>`
+  (0-based, index-aligned with the deck's own metal stack, so `metal0` is the
+  level `contact` lands on); the value `none` reads no label layer for that
+  role at all. A PDK layer map usually declares more than one text purpose per
+  conductor and a deck has to pick one — so a stream whose names went on the
+  other purpose names *nothing*, and extracts with an empty top-level pin
+  interface. An unknown role is an application error, not a silently-kept
+  default. Omitting the flag reads labels exactly as before it existed. See
+  "Overriding a deck's label layers" below.
 - `--defer-resistor-fixed-offset` — optional, off by default. Omit each
   opted-in resistor device class's `ResistorDevice.fixed_offset_ohm`
   head/end-resistance term from the extracted `R`, leaving only the raw
@@ -231,6 +243,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `def_pins` | string | `--def-pins` |
 | `pin_source_cells` | array\<string\> \| string | `--pin-source-cells` (same comma-joining rule as `pins`) |
 | `deck_options` | object\<string, string\|number\|bool\> | repeatable `--deck-option KEY=VALUE`. A key containing `=` is rejected. |
+| `label_layers` | object\<string, [int, int] \| null\> | repeatable `--label-layer ROLE=LAYER/DATATYPE` (issue #2656), e.g. `{"metal0": [8, 25], "poly": null}`. `null` is the flag's `none` spelling. A role name containing `=`, or a value that is neither `null` nor a `[layer, datatype]` pair of non-negative integers, is rejected. |
 | `defer_resistor_fixed_offset` | bool | `--defer-resistor-fixed-offset` |
 | `abstract_cells` | array\<string\> \| string | repeatable `--abstract-cells` |
 | `abstract_cell_lef` | array\<string\> \| string | repeatable `--abstract-cell-lef` |
@@ -2585,6 +2598,126 @@ device-recognition topology investigated and written up, not silently
 dropped. See `tests/test_lvs_native_extraction_cross_check_gf180mcu.py`'s
 own module docstring for the full per-rule table and each test's docstring
 for the underlying geometry/coefficient detail.
+
+## Overriding a deck's label layers (`--label-layer`, issue #2656)
+
+A curated deck declares, per label role, the **one** GDS `(layer, datatype)`
+pair it reads net/pin name *text* from: `metal_labels[i]` per metal level,
+plus the optional `well_label`/`poly_label`. A real PDK layer map usually
+declares more than one text purpose per conductor, so that declaration is a
+*choice* the deck makes on the caller's behalf — and the two IHP decks in this
+repo made it differently for the same conceptual field:
+
+| Deck | Metal name text read from |
+| ---- | ------------------------- |
+| `sg13g2` | the `.text` purpose, datatype 25 (`Metal1.text` 8/25 … `TopMetal2.text` 134/25) |
+| `sg13cmos5l` | the `.pin` purpose, datatype 2 (`Metal1.pin` 8/2 … `TopMetal1.pin` 126/2) |
+
+Both values are correct for the layouts they were confirmed against — the
+shared `.lyp` declares *both* purposes for every level. But a
+placed-and-routed stream from a flow that wrote its names on the purpose the
+deck does **not** read names nothing at all, and the failure is silent:
+extraction succeeds, every net comes out with an anonymous `$N` placeholder
+name, and because `make_top_level_pins()` promotes only *named* nets, the
+whole top-level pin interface comes out **empty**. A layout-vs-reference
+`klt lvs` against that netlist is then structurally impossible rather than
+merely mismatched — the reference top circuit has ports, the extracted one has
+none, so the two top circuits can never correspond however correct the layout
+is. (The `warnings[]` entry from issue #1385 names the layers that *were*
+scanned when a layout carries no recognisable label text at all; it is the
+first thing to read when `pin_count` is unexpectedly 0.)
+
+`--label-layer <role>=<layer>/<datatype>` re-points one label role at the
+purpose a given stream actually used, for one invocation:
+
+```bash
+# A routed sg13cmos5l GDS whose net/pin names are all on the `.text`
+# (datatype 25) purpose, under a deck whose default is `.pin` (datatype 2):
+klt extract routed.gds --deck sg13cmos5l -o routed.spice \
+  --label-layer metal0=8/25 \
+  --label-layer metal1=10/25 \
+  --label-layer metal2=30/25 \
+  --label-layer metal3=50/25 \
+  --label-layer metal4=126/25
+```
+
+or, as a request document:
+
+```json
+{
+  "schema": "klt.extract.request/1",
+  "file": "routed.gds",
+  "deck": "sg13cmos5l",
+  "output": "routed.spice",
+  "label_layers": {
+    "metal0": [8, 25],
+    "metal1": [10, 25],
+    "metal2": [30, 25],
+    "metal3": [50, 25],
+    "metal4": [126, 25]
+  }
+}
+```
+
+**Roles.** `well` (`well_label`), `poly` (`poly_label`), and `metal<i>`
+(`metal_labels[i]`) — one per level of the deck's own metal stack, 0-based and
+index-aligned with it, so `metal0` is the level `contact` lands on (`Metal1`
+on the IHP decks, `li1` on sky130). Every metal level is addressable whether
+or not the deck declares a label layer for it. A role the deck has no slot for
+is an application error naming the available ones, never a silent no-op — a
+typo'd role would otherwise be indistinguishable from the zero-pin bug the
+flag exists to fix:
+
+```
+klt extract: deck 'sg13cmos5l' has no label-layer role(s) named metal9
+(available: well, poly, metal0, metal1, metal2, metal3, metal4)
+```
+
+**It replaces, it does not extend.** The overridden purpose is read *instead
+of* the deck's own, never in addition to it. That is deliberate: in the case
+this exists for, the deck's default purpose carries foundry-cell-**internal**
+pin text, and flattening those in-cell strings into top-level net names is
+exactly the mis-naming `--top-cell-pins` exists to avoid. Pass
+`<role>=none` to read no label layer for a role at all — the same mechanism,
+for a role whose declared purpose carries text you do not want read.
+
+**Only name text moves.** The deck's `metals`/`vias`/device-recognition layers
+are untouched; connectivity, device recognition, and DRC are all unaffected. A
+redirected label layer still binds to its *own* level's conductor region, so a
+name drawn on `TopMetal1.text` still has to reach the net through the via
+stack exactly as it would from `TopMetal1.pin`.
+
+**It is per request, and recorded.** The deck's declared default is not
+modified, so every other caller — and every committed golden report — is
+unaffected. The override is echoed verbatim in the response's `label_layers`
+field (`null` when the flag was never given), because `deck` alone no longer
+answers "which purpose did this run read names from"; `klt extract --check
+<report> --rerun` reads it back and replays the same purposes rather than
+reporting the override itself as drift on every net name at once.
+
+**Getting from here to `klt lvs`.** `--label-layer` is a `klt extract` flag:
+`klt lvs` and `klt pex` do not accept it yet (both resolve their deck through
+the same `get_extraction_deck` path, so adding it there is a follow-on, not a
+redesign). Until they do, extract first and hand `klt lvs` the netlist through
+its pre-extracted `layout.netlist` + `layout.deck` path — which is also the
+cheaper shape for an LVS iteration loop, since the extraction is not re-run per
+comparison:
+
+```json
+{
+  "layout": { "netlist": "routed.spice", "deck": "sg13cmos5l", "top": "TOP" },
+  "reference": { "netlist": "schematic.spice" }
+}
+```
+
+**When to change the deck instead.** This is an escape hatch for a stream
+whose purpose convention differs from the deck's, not a substitute for a wrong
+deck default. If a family's layouts are *consistently* labelled on the purpose
+the deck does not read, fix the deck — see
+`src/klayout_tools/decks/sg13cmos5l.py`'s own "Settled by #2656" docstring
+note for why that deck kept `.pin` (neither purpose is wrong there, so moving
+the default would only relocate the same failure onto the layouts it was
+confirmed against).
 
 ## Top-cell-only pin promotion (`--top-cell-pins`, #291)
 
@@ -6111,6 +6244,7 @@ exit codes).
   "unbiased_pmos_body_nets": [],
   "single_terminal_nets": [],
   "dead_metal": [],
+  "label_layers": null,
   "pdk": null,
   "parasitics": null,
   "provenance": {
@@ -6158,6 +6292,7 @@ exit codes).
 | `matched_device_groups` | array\<object\>       | One entry per `--matched-group` declaration, in the order given (issue #1018 — see "Matched-device geometry check" above), each `{ "name": string, "instances": [string, ...], "unresolved_instances": [string, ...], "mismatched_fields": [{"field": string, "values": {"<instance name>": number, ...}}, ...] }`. `instances` echoes the declared member list verbatim; `unresolved_instances` (sorted) is the subset matching no extracted device; `mismatched_fields` lists every parameter that diverges across the group's resolved members (post-rounding equality — no numeric tolerance). A matching prose entry is also appended to `warnings[]` for a group with unresolved members and/or mismatched fields. Always present, empty (`[]`) when `--matched-group` was never given. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise. `root` is `{"path", "scope"}` (issue #1376, schema_version 3) -- not the raw `--pdk-root` argument -- via the same `{path, scope}` shape `klt env-provenance` and `klt pex`/`klt sim`/`klt size` use: `scope: "repo"` with a repo-relative `path` when the PDK install lives inside the invoking repo, `scope: "external"` with `path: null` otherwise (a PDK install almost always is). Committing this response as evidence (the normal use of `--format json`) no longer bakes the resolving machine's absolute PDK install path (and possibly a username) into the record; `provenance.pdk` below already carries the same PDK's reproducible identity (name/source/version) without a path. |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
+| `label_layers`     | object \| `null`           | Additive field (issue #2656). The `--label-layer` override this run read net/pin names through — `{"<role>": [layer, datatype] \| null, ...}`, keys sorted — or `null` when the flag was never given. The record of *which GDS purpose a run read names from*, which the `deck` name alone no longer answers once it can be overridden; `klt extract --check <report> --rerun` reads it back and replays the same purposes. See "Overriding a deck's label layers". |
 | `spef_path`        | string \| `null`           | Additive field (issue #948). Resolved path of the written SPEF file when `--spef` was given; `null` otherwise. See "SPEF export".                       |
 | `subcircuit`       | object \| `null`           | Additive field (issue #2245). The sliced sub-circuit deck when `--subcircuit` was given -- `{"cell", "path", "sha256", "pins": [{"name", "role"}, ...], "device_count", "net_count", "instance_line", "excluded_parasitics": {"r_count", "c_count", "l_count", "resistance_ohm", "capacitance_ff"}, "warnings": [...]}` -- `null` otherwise. `pins` is in the order the written `.SUBCKT` header declares them (`role`: `"boundary"` for a real port, `"parasitic"` for a reference node only a kept parasitic element needs); `device_count`/`net_count` count what that `.SUBCKT` carries, parasitic R/C/L included (unlike the top-level counts, which stay the schematic-equivalent whole-extraction figures); `excluded_parasitics` accounts for every element the boundary rule attributed to the parent deck. See "Sub-circuit isolation". |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193, non-fatal) for whether that hash ships in any released `klayout-tools` version -- `false` flags an unreleased/dev-edited deck, `null` when unresolvable (e.g. the generated deck history table is missing) -- and an `options` key (issue #595) echoing `--deck-option`'s resolved mapping when non-empty (omitted entirely otherwise) -- see "Selecting a shared-geometry resistor flavour" below; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |

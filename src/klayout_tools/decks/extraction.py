@@ -25,9 +25,25 @@ re-exports every public name below so existing
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .rules import RuleProvenance
+
+
+class InvalidLabelLayerError(Exception):
+    """Raised by :meth:`ExtractionDeck.with_label_layers` (and so by
+    :func:`~klayout_tools.decks.get_extraction_deck`) for a label-layer
+    override naming a role this deck has no label slot for, or carrying a
+    malformed ``(layer, datatype)`` pair (issue #2656).
+
+    ``extract.py`` turns this into an
+    :class:`~klayout_tools.extract.ExtractError` (a clean exit-1 message, not
+    a traceback), the same treatment it already gives
+    :class:`~klayout_tools.decks.UnknownExtractionDeckError` and
+    :class:`~klayout_tools.decks.InvalidDeckOptionError`.
+    """
 
 
 @dataclass(frozen=True)
@@ -431,6 +447,12 @@ class ExtractionDeck:
     ``nwell`` (for a PDK that labels the well/body pin on the well layer
     itself, e.g. sky130's ``VPB``) -- distinct from ``metal_labels``, which
     label metal-level pins/power straps.
+
+    Each of those three label fields is the deck's *curated default* for
+    "which GDS purpose carries net/pin name text", and a caller whose stream
+    wrote names on a different purpose of the same conductor can redirect it
+    per run without a deck change: see :meth:`with_label_layers` and
+    :attr:`label_layer_roles` (``klt extract --label-layer``, issue #2656).
 
     ``dummy`` is an optional marker layer declaring drawn-but-non-functional
     "dummy" devices (issue #295, extended to drawn resistors and bipolars in
@@ -909,6 +931,117 @@ class ExtractionDeck:
         layers.update(label for label in self.metal_labels if label is not None)
         layers.update(self.device_recognition_layers)
         return frozenset(layers)
+
+    @property
+    def label_layer_roles(self) -> tuple[str, ...]:
+        """The *role* token each of this deck's label slots can be addressed
+        by from outside it (``klt extract --label-layer <role>=<L>/<D>``,
+        issue #2656), in a stable order: ``"well"`` (:attr:`well_label`),
+        ``"poly"`` (:attr:`poly_label`), then ``"metal0"`` ..
+        ``"metal<len(metals) - 1>"`` (:attr:`metal_labels` ``[i]``, index-
+        aligned with :attr:`metals` exactly as that field already is).
+
+        Every metal level gets a role whether or not this deck declares a
+        label layer for it today: a ``metal_labels`` entry that is ``None``
+        (or absent entirely, when the tuple is shorter than ``metals``) is a
+        slot the deck leaves empty, not a slot a caller may not fill -- see
+        :meth:`with_label_layers`.
+        """
+        return ("well", "poly") + tuple(
+            f"metal{index}" for index in range(len(self.metals))
+        )
+
+    def with_label_layers(
+        self,
+        overrides: Mapping[str, tuple[int, int] | None] | None,
+        *,
+        deck_name: str | None = None,
+    ) -> ExtractionDeck:
+        """This deck with each :attr:`label_layer_roles` entry named in
+        ``overrides`` **replaced** by the given ``(layer, datatype)`` pair --
+        or cleared, for a ``None`` value (issue #2656).
+
+        The escape hatch for a layout whose net/pin name text sits on a
+        different GDS *purpose* than the one this deck's curated default
+        reads. A PDK layer map commonly declares more than one text purpose
+        per conductor (IHP's shared ``.lyp`` declares both ``Metal2.pin``
+        10/2 and ``Metal2.text`` 10/25, and ``sg13cmos5l.py`` picks ``.pin``
+        where ``sg13g2.py`` picks ``.text`` for the same conceptual field), so
+        a placed-and-routed stream from a flow that wrote names on the purpose
+        the deck does not read names *nothing*: ``make_top_level_pins()``
+        promotes only named nets, so the whole top-level pin interface
+        silently comes out empty and ``klt lvs`` has no anchor to seed
+        correspondence against a reference (issue #1385's warning fires, and
+        issue #2656 is the reproduction that motivated this method).
+
+        Replacement, not union: the overridden purpose is read *instead of*
+        the deck's own, never in addition to it. That is deliberate -- the
+        real case this exists for (a LibreLane/KLayout-style flow writing
+        every top-level net name on ``.text`` while ``.pin`` carries only
+        foundry-cell-*internal* pin text) wants the deck's default purpose
+        dropped, since flattening those in-cell strings into top-level net
+        names is exactly the mis-naming :func:`extract.py`'s below-top-label
+        reconciliation exists to avoid. A deck that should read *both*
+        purposes by default is a deck-data question, not a per-request one.
+
+        ``overrides`` is keyed by :attr:`label_layer_roles` token;
+        ``deck_name``, when given, is quoted in the error message. A role this
+        deck has no slot for, or a value that is neither ``None`` nor a
+        2-tuple of ints, raises :class:`InvalidLabelLayerError` rather than
+        being silently ignored -- a typo'd role would otherwise read as "the
+        override had no effect", indistinguishable from the zero-pin bug it
+        was passed to fix. ``None``/an empty mapping (the default everywhere)
+        returns ``self`` unchanged, so every call site that predates this
+        method is byte-identical.
+
+        A ``metal<i>`` override for a level this deck declares no
+        ``metal_labels`` entry for extends the tuple with ``None`` padding up
+        to that index -- the field is index-aligned with :attr:`metals`, and
+        every consumer already tolerates a ``None`` slot (that is what "this
+        level has no label layer in this curated deck" means).
+        """
+        if not overrides:
+            return self
+        where = f"deck '{deck_name}'" if deck_name else "this deck"
+        roles = self.label_layer_roles
+        unknown = [role for role in overrides if role not in roles]
+        if unknown:
+            raise InvalidLabelLayerError(
+                f"{where} has no label-layer role(s) named "
+                f"{', '.join(sorted(unknown))} (available: {', '.join(roles)})"
+            )
+        for role, layer in overrides.items():
+            if layer is None:
+                continue
+            if (
+                not isinstance(layer, tuple)
+                or len(layer) != 2
+                or not all(
+                    isinstance(v, int) and not isinstance(v, bool) for v in layer
+                )
+            ):
+                raise InvalidLabelLayerError(
+                    f"{where} label-layer role {role!r} override must be a "
+                    f"(layer, datatype) pair of integers or None, got {layer!r}"
+                )
+        replacements: dict[str, object] = {}
+        if "well" in overrides:
+            replacements["well_label"] = overrides["well"]
+        if "poly" in overrides:
+            replacements["poly_label"] = overrides["poly"]
+        metal_overrides = {
+            int(role.removeprefix("metal")): layer
+            for role, layer in overrides.items()
+            if role.startswith("metal")
+        }
+        if metal_overrides:
+            width = max(len(self.metal_labels), max(metal_overrides) + 1)
+            labels: list[tuple[int, int] | None] = list(self.metal_labels)
+            labels.extend([None] * (width - len(labels)))
+            for index, layer in metal_overrides.items():
+                labels[index] = layer
+            replacements["metal_labels"] = tuple(labels)
+        return dataclasses.replace(self, **replacements)
 
 
 @dataclass(frozen=True)

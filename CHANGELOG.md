@@ -126,6 +126,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   A pin name present on only one side, and an interior node (a bit tied to
   a Verilog constant included), are deliberately not anchored — see
   `docs/cli/lvs.md`, "Top-level pin anchoring".
+- **Added** (#2656, `klt extract`; `schema_version` unchanged, new additive
+  response field `label_layers`): `--label-layer <role>=<layer>/<datatype>`
+  (repeatable; request-document field `label_layers`) reads net/pin *name
+  text* for one label role off a different GDS purpose than the deck's own
+  curated default. A curated deck declares one `(layer, datatype)` per label
+  role, but a PDK layer map usually declares more than one text purpose per
+  conductor — the shared IHP `.lyp` declares both `Metal1.pin` (8/2) and
+  `Metal1.text` (8/25), and `sg13cmos5l` reads `.pin` where `sg13g2` reads
+  `.text`. A placed-and-routed stream whose names went on the other purpose
+  therefore named *nothing*: extraction succeeded, every net came out with an
+  anonymous `$N` name, and since only named nets are promoted, the whole
+  top-level pin interface came out empty — making layout-vs-reference
+  `klt lvs` against that netlist structurally impossible (reproduced on a
+  routed CMOS5L GDS carrying ~750 name texts on datatype 25). The override
+  **replaces** the deck's pair for a role rather than unioning with it
+  (`<role>=none` clears the role), moves only where names are read from
+  (connectivity/device recognition/DRC are untouched), and is echoed in the
+  response's new `label_layers` field so a committed report records which
+  purposes a run read — `--check --rerun` replays them rather than reporting
+  the override as drift on every net name. Roles are `well`/`poly`/`metal<i>`
+  (`ExtractionDeck.label_layer_roles`); an unknown role is an error, not a
+  silent no-op. No deck default changed: `sg13cmos5l` keeps `.pin`
+  (deliberately — neither purpose is wrong there, so flipping it would only
+  relocate the same failure onto the foundry-sourced layouts it was confirmed
+  against). See `docs/cli/extract.md`, "Overriding a deck's label layers".
 - **Added** (#55, new verb `klt netlist`; `schema_version: 1`): export an
   xschem schematic to a SPICE netlist headlessly, with a real exit status,
   plus a `--check` staleness gate over a committed netlist. The verb **owns
