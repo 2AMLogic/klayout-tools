@@ -975,6 +975,57 @@ on it by default would reject correct netlists wholesale. The fault it was
 reported against is instead fixed at its source — see the probe-layer rules
 above.
 
+**Escalation: *most* of one instance's pins on one net.** Because the entry
+above legitimately fires on every body-tie pair in a block, it is easy for the
+one shape that is almost never legitimate to disappear into it: a black box
+whose declared pins *mostly* resolved onto a single net (issue #2658 reported
+a hard macro whose 109 declared pins nearly all landed on one parent net).
+That subset therefore produces its own, deliberately louder second
+`warnings[]` entry, prefixed `MOST PINS ON ONE NET:` and stating the ratio and
+the dominant net explicitly (issue #2695):
+
+```
+MOST PINS ON ONE NET: 1 --abstract-cells instance(s) resolved a majority of
+their separately declared pins onto a single net: MACRO_0 (cell 'MACRO'): 104
+of 109 declared pins (95%) -> net 'VPWR' (pins ...). ...
+```
+
+The ratio is measured per *net* — the **dominant** net's share of that cell
+type's declared pin list — and the entry fires only when that net carries
+**both** at least 4 of the instance's separately declared pins and strictly
+more than 50% of them. Both bounds exist to keep it off the legal cases:
+
+- a per-*instance* "how many of my pins are tied at all" ratio would flag a
+  cell that ties `VPWR`/`VPB` and `VGND`/`VNB` to two different rails at 4 of
+  6 pins, which is the design's intent; measured per net it is 2 of 6 twice;
+- the 50% comparison is strict, so sky130's four-pin `decap`/`tap` cells
+  (`VPWR`/`VPB` + `VGND`/`VNB`, 2 of 4 == exactly 50%) stay unescalated;
+- the 4-pin floor keeps the smallest legal ties out regardless of ratio — a
+  deliberate two-pin tie cell is a 2-of-2 == 100% dominant net by
+  construction, and a three-pin `VPWR`/`VPB`/`VGND` fill cell is 2 of 3.
+
+**This is a warning too — there is deliberately no error path and no
+`--allow-tied-pins` opt-out.** Issue #2695 weighed adding one (an
+`ExtractError` above a second, higher threshold, gated behind an opt-out
+mirroring `klt drc`'s `--allow-deck-errors`) and decided against it, for the
+same reason the unconditioned entry is not an error plus one more:
+
+- above the threshold the condition is *still legal*. Nothing forbids a macro
+  from tying most of its ports together, and an abstracted cell is
+  unverifiable by construction — its interior was erased — so the extractor
+  cannot tell a deliberate multi-way tie from a binding fault. Only the
+  design's own intent can, which means a hard failure would reject correct
+  netlists;
+- so the strict half would cost a new CLI flag and its JSON-contract surface
+  purely to gate a check that cannot be made sound. The distinct warning
+  string buys the whole diagnostic value inside the existing
+  `warnings: array<string>` container, with no contract change at all.
+
+What the escalation does not reach is a collapse that produces *no* tie entry
+to escalate — this is a diagnostic on top of the pin binding, not a
+replacement for getting the binding right. The probe-layer rules above remain
+the source-level fix.
+
 **Mirrored/rotated instances** resolve their pins correctly: each
 occurrence's own instance transform (rotation, mirroring, array
 displacement) is applied to the cell-local access point before probing, so

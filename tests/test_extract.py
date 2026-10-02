@@ -11587,6 +11587,223 @@ def test_abstract_cells_warns_when_one_instance_ties_two_declared_pins(tmp_path)
     (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
     assert x_line.split()[1:3] == ["TIED", "TIED"], x_line
 
+    # Issue #2695: 2-of-2 is a 100% dominant net by construction, and this
+    # deliberate tie cell is exactly the legal case the louder
+    # many-pins-one-net escalation must stay off -- the min-pins floor keeps
+    # it off, see `_ABSTRACT_COLLAPSED_PIN_MIN_PINS`.
+    assert not [item for item in report["warnings"] if "MOST PINS ON ONE NET" in item]
+
+
+def _write_abstract_pin_pad(layout, cell, y, pin_names):
+    """Draw one li1 pad in ``cell`` at ``y``, carrying an ``li1.pin`` label
+    for every name in ``pin_names``, plus the mcon/met1 stack that lets the
+    parent route to it -- the single-pad building block issue #2695's
+    ratio fixtures below are assembled from.
+
+    Several names on one pad means several *separately declared* pins that
+    are one electrical node by construction, i.e. the legal tie shape
+    ``_tied_abstract_pin_warning`` exists to tolerate.
+    """
+    li1 = layout.layer(67, 20)
+    li1_pin = layout.layer(67, 5)
+    mcon = layout.layer(67, 44)
+    met1 = layout.layer(68, 20)
+    width = 600 * (len(pin_names) + 1)
+    cell.shapes(li1).insert(kdb.Box(0, y, width, y + 400))
+    for index, pin_name in enumerate(pin_names):
+        cell.shapes(li1_pin).insert(
+            kdb.Text(pin_name, kdb.Trans(200 + 600 * index, y + 200))
+        )
+    cell.shapes(mcon).insert(kdb.Box(500, y + 100, 700, y + 300))
+    cell.shapes(met1).insert(kdb.Box(400, y, 800, y + 400))
+
+
+def _route_abstract_pin_pad(layout, top, y, net_name):
+    """Route one :func:`_write_abstract_pin_pad` pad out of the macro on met1
+    and name the parent net, so the pin resolves onto a real, named net
+    rather than a bare island."""
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(400, y, 8000, y + 400))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text(net_name, kdb.Trans(7000, y + 200)))
+
+
+def test_abstract_cells_escalates_when_most_declared_pins_share_one_net(tmp_path):
+    """Issue #2695: an abstracted instance whose declared pins *mostly*
+    collapse onto a single net gets a second, distinct ``warnings[]`` entry
+    naming the ratio and the dominant net.
+
+    ``COLLAPSED`` declares six pins (``A``..``F``) all labelled on **one**
+    li1 pad, so all six resolve onto the one parent net the pad is routed to
+    -- 6 of 6 declared pins == 100%, a scaled-down version of issue #2658's
+    reported ~95% shape (109 declared pins, nearly all on one parent net).
+
+    The plain tie entry (issue #1366) reports that ties *exist* at any
+    ratio, which on a real block is also what every legal body-tie pair
+    produces; this escalated entry is what makes the collapse shape
+    unmissable in that list. Both are warnings -- see
+    :func:`~klayout_tools.extract_abstract._collapsed_abstract_pin_warning`
+    for why there is deliberately no gated error path.
+    """
+    layout = kdb.Layout()
+    leaf = layout.create_cell("COLLAPSED")
+    _write_abstract_pin_pad(layout, leaf, 0, ["A", "B", "C", "D", "E", "F"])
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    _route_abstract_pin_pad(layout, top, 0, "BUS")
+
+    path = _write_gds(layout, tmp_path / "collapsed.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "collapsed.spice"),
+        abstract_cell_patterns=("COLLAPSED",),
+    )
+
+    assert report["status"] == "extracted"
+    (entry,) = report["abstracted_cells"]
+    assert entry["pin_count"] == 6
+
+    (escalated,) = [
+        item for item in report["warnings"] if "MOST PINS ON ONE NET" in item
+    ]
+    assert "1 --abstract-cells instance(s)" in escalated
+    assert (
+        "COLLAPSED_0 (cell 'COLLAPSED'): 6 of 6 declared pins (100%) -> net "
+        "'BUS'" in escalated
+    ), escalated
+    assert "pins A, B, C, D, E, F" in escalated
+
+    # The plain issue #1366 entry still fires alongside it -- the escalation
+    # is an additional, louder entry, not a replacement.
+    assert [
+        item
+        for item in report["warnings"]
+        if "separately declared pins onto the same net" in item
+    ]
+
+    # Still a warning, never a failure: every pin stays wired to the net it
+    # resolved onto.
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    assert x_line.split()[1:7] == ["BUS"] * 6, x_line
+
+
+def test_abstract_cells_does_not_escalate_a_minority_tied_pin_share(tmp_path):
+    """Issue #2695: a *low* tied-pin ratio stays at the plain issue #1366
+    warning -- no escalation.
+
+    ``MINORITY_TIE`` declares six pins: ``A``/``B`` share one pad (the legal
+    deliberate tie), and ``C``..``F`` each have their own pad routed to their
+    own named parent net. The dominant net therefore carries 2 of 6 declared
+    pins == 33%, below :data:`~klayout_tools.extract_abstract.
+    _ABSTRACT_COLLAPSED_PIN_RATIO`, which is the ordinary shape a real
+    library's body-tie pins produce and must not be escalated.
+    """
+    layout = kdb.Layout()
+    leaf = layout.create_cell("MINORITY_TIE")
+    _write_abstract_pin_pad(layout, leaf, 0, ["A", "B"])
+    for index, pin_name in enumerate(["C", "D", "E", "F"]):
+        _write_abstract_pin_pad(layout, leaf, 1000 * (index + 1), [pin_name])
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    _route_abstract_pin_pad(layout, top, 0, "TIED")
+    for index, net_name in enumerate(["NC", "ND", "NE", "NF"]):
+        _route_abstract_pin_pad(layout, top, 1000 * (index + 1), net_name)
+
+    path = _write_gds(layout, tmp_path / "minority_tie.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "minority_tie.spice"),
+        abstract_cell_patterns=("MINORITY_TIE",),
+    )
+
+    assert report["status"] == "extracted"
+    (entry,) = report["abstracted_cells"]
+    assert entry["pin_count"] == 6
+
+    (warning,) = [
+        item
+        for item in report["warnings"]
+        if "separately declared pins onto the same net" in item
+    ]
+    assert "pins A, B -> net 'TIED'" in warning
+    assert not [item for item in report["warnings"] if "MOST PINS ON ONE NET" in item]
+
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    assert x_line.split()[1:7] == ["TIED", "TIED", "NC", "ND", "NE", "NF"], x_line
+
+
+@pytest.mark.parametrize(
+    ("tied_pins", "declared", "escalates"),
+    [
+        # Issue #2658's reported shape: 109 declared pins, nearly all on one
+        # net.
+        (104, 109, True),
+        # Exactly at the ratio boundary -- compared strictly, so 50% is not a
+        # majority and does not escalate. sky130's four-pin decap/tap cells
+        # (VPWR/VPB + VGND/VNB, each pair tied to its own rail) sit here.
+        (4, 8, False),
+        (5, 8, True),
+        # Below the min-pins floor, whatever the ratio: a deliberate two-pin
+        # tie cell and a three-pin VPWR/VPB/VGND fill cell are both legal.
+        (2, 2, False),
+        (2, 3, False),
+        (3, 3, False),
+        (4, 4, True),
+    ],
+)
+def test_collapsed_abstract_pin_warning_thresholds(tied_pins, declared, escalates):
+    """Issue #2695: the escalation's two bounds, unit-tested directly.
+
+    Driving :func:`~klayout_tools.extract_abstract.
+    _collapsed_abstract_pin_warning` with a synthetic ``tied`` accumulator
+    pins down the ratio boundary and the minimum-pin floor exactly, without
+    needing a drawn layout per case.
+    """
+    pin_names = [f"P{index}" for index in range(tied_pins)]
+    entries = extract_abstract._collapsed_abstract_pin_warning(
+        [("MACRO_0", "MACRO", "VPWR", pin_names, declared)]
+    )
+    if not escalates:
+        assert entries == []
+        return
+    (entry,) = entries
+    assert f"{tied_pins} of {declared} declared pins" in entry
+    assert "net 'VPWR'" in entry
+
+
+def test_collapsed_abstract_pin_warning_tolerates_zero_declared_pins():
+    """Issue #2695: a zero declared-pin count must not divide by zero.
+
+    `_wire_abstract_cells` raises :class:`~klayout_tools.extract.ExtractError`
+    for a matched cell type with no resolvable pins, so the ratio's
+    denominator is >= 2 in practice (a tie needs two pins) -- the guard is
+    defence in depth against a future caller, not a reachable path today.
+    """
+    assert (
+        extract_abstract._collapsed_abstract_pin_warning(
+            [("MACRO_0", "MACRO", "VPWR", ["A", "B", "C", "D"], 0)]
+        )
+        == []
+    )
+
+
+def test_collapsed_abstract_pin_warning_aggregates_beyond_five_instances():
+    """Issue #2695: the escalated entry spells out at most five instances and
+    then counts the remainder, exactly as the plain issue #1366 entry does --
+    a block-wide collapse must stay one readable ``warnings[]`` string."""
+    pin_names = ["A", "B", "C", "D", "E"]
+    (entry,) = extract_abstract._collapsed_abstract_pin_warning(
+        [(f"MACRO_{index}", "MACRO", "VPWR", pin_names, 5) for index in range(8)]
+    )
+    assert "8 --abstract-cells instance(s)" in entry
+    assert "MACRO_4 (cell 'MACRO')" in entry
+    assert "MACRO_5 (cell 'MACRO')" not in entry
+    assert "... and 3 more instance(s)" in entry
+
 
 def _make_multi_layer_pin_macro_layout(extra_pin: bool = False) -> kdb.Layout:
     """Issue #2142's reproduction layout: one macro whose declared pins are

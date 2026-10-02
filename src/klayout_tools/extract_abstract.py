@@ -98,6 +98,33 @@ _INSTANCE_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
 #: which is a diagnostic, not a message a caller should have to read in full.
 _ABSTRACT_TIED_PIN_WARNING_EXAMPLES = 5
 
+#: The share of one abstracted instance's *declared* pins that must land on a
+#: **single** net before :func:`_collapsed_abstract_pin_warning` escalates the
+#: ordinary ":func:`_tied_abstract_pin_warning` ties exist" report into its own
+#: louder ``warnings[]`` entry -- issue #2695 (the deferred half of #2658).
+#:
+#: Compared **strictly** (``>``), so the natural "exactly half the pins" shapes
+#: a real library draws on purpose stay unescalated: sky130's four-pin
+#: `decap`/`tap` cells declare ``VPWR``/``VPB`` and ``VGND``/``VNB`` and tie
+#: each pair to its own rail, i.e. a dominant net carrying 2 of 4 pins == 0.5.
+#: The reported collapse this escalation exists for is ~95% (#2658: 109
+#: declared pins, nearly all on one parent net).
+_ABSTRACT_COLLAPSED_PIN_RATIO = 0.5
+
+#: How many separately declared pins a single net must carry before the
+#: majority-share test above is even applied -- issue #2695.
+#:
+#: The ratio alone cannot separate a collapse from the smallest legal ties: a
+#: deliberate two-pin tie cell (``tests/test_extract.py::
+#: test_abstract_cells_warns_when_one_instance_ties_two_declared_pins``) is a
+#: 2-of-2 == 100% dominant net by construction, and a three-pin
+#: ``VPWR``/``VPB``/``VGND`` fill cell is 2-of-3 == 67%, both entirely legal
+#: and both louder-than-useful if escalated. Four or more *separately
+#: declared* pins sharing one net, while being a majority of the macro's port
+#: list, is not a shape a correct library cell draws -- it is the signature of
+#: pins falling through onto one wide parent net.
+_ABSTRACT_COLLAPSED_PIN_MIN_PINS = 4
+
 #: The :func:`_wire_abstract_cells` ``probe_layers`` roles that are **body
 #: identity** rather than signal interconnect -- issue #2142.
 #:
@@ -1508,14 +1535,20 @@ def _probe_abstract_pin_net(
 
 
 def _tied_abstract_pin_warning(
-    tied: list[tuple[str, str, str, list[str]]],
+    tied: list[tuple[str, str, str, list[str], int]],
 ) -> list[str]:
     """A single ``warnings[]`` entry naming abstracted-cell instances that
     resolved two or more of their *separately declared* pins onto one net --
     or ``[]`` when there are none (issue #1366).
 
-    ``tied`` is ``[(instance name, cell name, net name, [pin names]), ...]``
-    in :func:`_wire_abstract_cells`'s own deterministic instance/pin order.
+    ``tied`` is ``[(instance name, cell name, net name, [pin names],
+    <declared pin count for that cell type>), ...]`` in
+    :func:`_wire_abstract_cells`'s own deterministic instance/pin order. The
+    declared-pin count is unused here (this entry reports the *existence* of
+    ties, at any ratio) and carried for
+    :func:`_collapsed_abstract_pin_warning`, which escalates the subset of
+    these entries whose tied share of the macro's declared pins crosses
+    :data:`_ABSTRACT_COLLAPSED_PIN_RATIO` (issue #2695).
 
     **Why warn rather than fail.** Tying two declared pins together is legal
     -- a deliberately tied-off input is the standard case -- so this cannot
@@ -1545,7 +1578,7 @@ def _tied_abstract_pin_warning(
     examples = [
         f"{instance_name} (cell '{cell_name}'): pins "
         f"{', '.join(pin_names)} -> net '{net_name}'"
-        for instance_name, cell_name, net_name, pin_names in tied[
+        for instance_name, cell_name, net_name, pin_names, _declared in tied[
             :_ABSTRACT_TIED_PIN_WARNING_EXAMPLES
         ]
     ]
@@ -1562,6 +1595,92 @@ def _tied_abstract_pin_warning(
         "binding fault (a ground-role pin resolved onto the power net, or "
         "an output resolved onto one of its own instance's inputs) -- "
         "confirm these against the design's intent before trusting a "
+        "downstream `klt lvs` verdict built on this netlist"
+    ]
+
+
+def _collapsed_abstract_pin_warning(
+    tied: list[tuple[str, str, str, list[str], int]],
+) -> list[str]:
+    """A second, deliberately **louder** ``warnings[]`` entry for the subset
+    of :func:`_tied_abstract_pin_warning`'s ties where *most* of one
+    abstracted instance's declared pins collapsed onto a **single** net --
+    or ``[]`` when none does (issue #2695, the deferred half of #2658).
+
+    ``tied`` is :func:`_wire_abstract_cells`'s accumulator,
+    ``[(instance name, cell name, net name, [pin names], <declared pin count
+    for that cell type>), ...]``. An entry is escalated when its net carries
+    both
+
+    - at least :data:`_ABSTRACT_COLLAPSED_PIN_MIN_PINS` of that instance's
+      separately declared pins, **and**
+    - strictly more than :data:`_ABSTRACT_COLLAPSED_PIN_RATIO` of them.
+
+    Both bounds are load-bearing, and both exist to keep this entry off the
+    legal cases the plain tie warning is built to tolerate -- see each
+    constant's own derivation. The ratio is per *net*, not per instance: it is
+    the **dominant** net's share of the macro's port list, so a cell that ties
+    ``VPWR``/``VPB`` and ``VGND``/``VNB`` to their own two rails is 2-of-N
+    twice rather than 4-of-N once, and only a genuine single-net collapse
+    (#2658's report: 109 declared pins, nearly all on one parent net) crosses
+    the line.
+
+    **Why a warning and not an error** (the decision issue #2695 exists to
+    record). This stays in ``warnings[]``; there is deliberately no
+    ``ExtractError`` path and no ``--allow-tied-pins`` opt-out:
+
+    - Above the threshold the condition is *still legal*. Nothing in the
+      extraction contract forbids a macro from tying most of its ports
+      together, and an abstracted cell is unverifiable by construction (its
+      interior was erased), so the extractor cannot distinguish a deliberate
+      multi-way tie from a binding fault -- only the design's own intent can.
+      Failing the run would therefore reject correct netlists, exactly the
+      reasoning :func:`_tied_abstract_pin_warning` already records for the
+      unconditioned case and that ``docs/cli/extract.md`` records for issue
+      #2142's identical "make it an error" ask.
+    - A hard failure would need an escape hatch the CLI does not have, so the
+      strict half of the sketch costs a new flag plus its JSON-contract
+      surface to gate a check that cannot be made sound anyway. A distinct
+      warning string in the existing ``warnings: array<string>`` container
+      buys the whole diagnostic value at no contract cost.
+
+    So this function's job is purely to make the shape *unmissable* in a
+    ``warnings[]`` list that a whole-block run legitimately fills with
+    body-tie entries: it states the ratio and names the dominant net, which
+    the aggregated tie entry does not.
+    """
+    collapsed = [
+        (instance_name, cell_name, net_name, pin_names, declared)
+        for instance_name, cell_name, net_name, pin_names, declared in tied
+        if declared > 0
+        and len(pin_names) >= _ABSTRACT_COLLAPSED_PIN_MIN_PINS
+        and len(pin_names) / declared > _ABSTRACT_COLLAPSED_PIN_RATIO
+    ]
+    if not collapsed:
+        return []
+    examples = [
+        f"{instance_name} (cell '{cell_name}'): {len(pin_names)} of "
+        f"{declared} declared pins ({len(pin_names) / declared:.0%}) -> net "
+        f"'{net_name}' (pins {', '.join(pin_names)})"
+        for instance_name, cell_name, net_name, pin_names, declared in collapsed[
+            :_ABSTRACT_TIED_PIN_WARNING_EXAMPLES
+        ]
+    ]
+    remainder = len(collapsed) - len(examples)
+    if remainder > 0:
+        examples.append(f"... and {remainder} more instance(s)")
+    return [
+        f"MOST PINS ON ONE NET: {len(collapsed)} --abstract-cells instance(s) "
+        "resolved a majority of their separately declared pins onto a single "
+        "net: " + "; ".join(examples) + ". This is the many-pins-one-net "
+        "collapse signature (issue #2658): when a pin's own access point "
+        "lands on no conductor of its own layer, the cross-layer fallback can "
+        "bind it to whatever wide parent shape happens to run under it, "
+        "collapsing most of a black box's port list onto that one net. It is "
+        "reported rather than failed because a deliberately tied-off pin is "
+        "legal and an abstracted cell's interior cannot be inspected to "
+        "confirm which this is -- so check the dominant net named above "
+        "against the macro's own declared port list before trusting a "
         "downstream `klt lvs` verdict built on this netlist"
     ]
 
@@ -1622,7 +1741,12 @@ def _wire_abstract_cells(
     that ended up with two or more of its *separately declared* pins on one
     net -- see :func:`_tied_abstract_pin_warning` for why that is a warning
     rather than an error, and why it is the one observable signature both of
-    that issue's reported impossible bindings collapse to.
+    that issue's reported impossible bindings collapse to. A second,
+    deliberately louder entry (issue #2695) escalates the subset of those
+    ties where one net carries a *majority* of the instance's declared pins,
+    naming the ratio and the dominant net -- see
+    :func:`_collapsed_abstract_pin_warning`, including why that too stays a
+    warning rather than becoming a gated error.
 
     A LEF-fallback pin the ``--abstract-cell-lef`` parser could not resolve
     any ``PORT`` geometry for (issue #624 -- see
@@ -1668,7 +1792,7 @@ def _wire_abstract_cells(
 
     report: list[dict[str, Any]] = []
     warnings: list[str] = []
-    tied: list[tuple[str, str, str, list[str]]] = []
+    tied: list[tuple[str, str, str, list[str], int]] = []
 
     for cell_index, transforms in grouped.items():
         cell = layout.cell(cell_index)
@@ -1748,7 +1872,13 @@ def _wire_abstract_cells(
                 pins_by_net.setdefault(net.expanded_name(), []).append(pin_name)
             for net_name, pin_names in pins_by_net.items():
                 if len(pin_names) > 1:
-                    tied.append((instance_name, cell.name, net_name, pin_names))
+                    # `len(pins)` is this instance's *declared* pin count (every
+                    # instance of one cell type shares the resolved pin list),
+                    # i.e. the denominator `_collapsed_abstract_pin_warning`
+                    # measures the dominant net's share against -- issue #2695.
+                    tied.append(
+                        (instance_name, cell.name, net_name, pin_names, len(pins))
+                    )
 
         report.append(
             {
@@ -1761,5 +1891,6 @@ def _wire_abstract_cells(
         )
 
     warnings.extend(_tied_abstract_pin_warning(tied))
+    warnings.extend(_collapsed_abstract_pin_warning(tied))
     report.sort(key=lambda entry: entry["cell"])
     return report, warnings
