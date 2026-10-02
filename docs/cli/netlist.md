@@ -7,7 +7,7 @@ on the SPICE side: it produces the netlist `klt sim` simulates and (eventually)
 `klt lvs` compares a layout against.
 
 ```
-klt netlist <schematic> -o <netlist> [--check] [--timeout-s <s>] [--rcfile <path>] [--xschem-binary <path>] [--format text|json]
+klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--format text|json]
 ```
 
 - `<schematic>` — path to the xschem schematic to netlist (`.sch`). Checked
@@ -19,12 +19,21 @@ klt netlist <schematic> -o <netlist> [--check] [--timeout-s <s>] [--rcfile <path
   diff against the committed file at `--output`, reporting `status: "match"`
   (exit `0`) or `"drifted"` (exit `3`). See
   [`--check`: the staleness gate](#--check-the-staleness-gate).
+- `--block` — emit this schematic as an includable block rather than a
+  testbench deck: uncomment xschem's commented top-level `**.subckt`/
+  `**.ends` pair and drop the trailing `.end` it always appends. Off by
+  default. See [Block mode](#block-mode-an-includable-subckt).
 - `--timeout-s` — wall-clock bound on the xschem run, in seconds (default
   `120`). Exceeding it is an error (exit `1`), never a silent empty result.
   See [Timeout and SIGKILL escalation](#timeout-and-sigkill-escalation).
 - `--rcfile` — project-local `xschemrc` to load (symbol search path, PDK
-  root), passed through to xschem as `--rcfile`. This verb does **not** resolve
-  a PDK root itself yet — see [Not in this slice](#not-in-this-slice).
+  root), passed through to xschem as `--rcfile` verbatim (never generated).
+  With `--pdk`/`--pdk-root` (or `$PDK`/`$PDK_ROOT`), the PDK root the
+  `xschemrc` declares is cross-checked against the resolved PDK — see
+  [PDK-root consistency](#pdk-root-consistency).
+- `--pdk`, `--pdk-root` — resolve a PDK the same way `klt sim` does, to
+  cross-check against `--rcfile`'s declared PDK root. See
+  [PDK-root consistency](#pdk-root-consistency).
 - `--xschem-binary` — the xschem executable to run (default: `xschem`,
   resolved on `PATH`), for a pinned install or a container wrapper. It never
   changes the forced flag set below.
@@ -164,22 +173,38 @@ here `--check` is a boolean switch.
 
 ## Not in this slice
 
-One of issue #55's sharp edges is deliberately **not** addressed yet, pending
-the SPICE-side design follow-up to
-[`docs/design/spice-corner-runner-spike.md`](../design/spice-corner-runner-spike.md)
-(tracked by #2680):
+Both of issue #55's originally-deferred sharp edges are now addressed: block
+export (see [Block mode](#block-mode-an-includable-subckt)) and PDK-root
+unification (see [PDK-root consistency](#pdk-root-consistency), a consistency
+check — it does not generate an `xschemrc`; the project still maintains its
+own).
 
-- **Block-vs-testbench subckt emission.** xschem comments out the top-level
-  `.subckt`/`.ends` pair (right when the top sheet is a testbench, wrong when
-  it is a reusable block) and emits a trailing `.end`. Making a block export
-  includable by a testbench still needs a post-processing pass this verb does
-  not do.
+`klt netlist` exports SPICE only — no VHDL/Verilog/tEDAx netlist types.
 
-The other, PDK-root unification, is covered as a consistency check — see
-[PDK-root consistency](#pdk-root-consistency) below. It does not generate an
-`xschemrc`; the project still maintains its own.
+## Block mode: an includable `.subckt`
 
-`klt netlist` also exports SPICE only — no VHDL/Verilog/tEDAx netlist types.
+xschem comments out the top sheet's own `.subckt`/`.ends` pair when it is
+netlisted as a testbench (`**.subckt ...` / `**.ends`) and always appends a
+trailing `.end` — correct for a testbench top sheet, wrong when the top sheet
+is a reusable block meant to be `.include`d elsewhere: the including deck
+already has its own `.end`, so a second one would terminate it early.
+
+`--block` post-processes the export: the first commented `.subckt`/`.ends`
+pair is uncommented, and the trailing `.end` is dropped. The result carries a
+`block` object in the JSON payload:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `requested` | boolean | Always `true` when `block` is present (only added when `--block` was passed). |
+| `subckt_uncommented` | boolean | Whether a commented `**.subckt` header was found and uncommented. |
+| `ends_uncommented` | boolean | Whether a commented `**.ends` was found and uncommented. |
+| `trailing_end_removed` | boolean | Whether a trailing `.end` line was found and dropped. |
+| `warning` | string \| null | Set when any of the above was *not* found — the export may not have been shaped like a testbench netlist. The netlist is still written as xschem produced it; this is a warning, not an error. |
+
+This is purely a post-processing step on the netlist text; it does not change
+the xschem invocation (`--block` adds no xschem flags). Under `--check`,
+the transform runs before the comparison, so a committed block artifact is
+diffed against the transformed (not the raw testbench-shaped) regeneration.
 
 ## PDK-root consistency
 
@@ -238,6 +263,7 @@ error: the netlist is still produced and the exit code is unchanged.
 | `xschem` | object | How xschem was invoked and what it returned — see below. |
 | `netlist` | object | Identity of the netlist this run produced — see below. |
 | `pdk` | object | **Only when a PDK resolved** (see [PDK-root consistency](#pdk-root-consistency)); absent otherwise. Additive. |
+| `block` | object | **Only when `--block` was passed** (see [Block mode](#block-mode-an-includable-subckt)); absent otherwise. Additive. |
 | `drift` | object | **`check` mode only** (absent in `generate` mode) — see below. |
 
 ### `xschem`
@@ -317,6 +343,13 @@ Export a block's netlist, committing the result:
 
 ```bash
 klt netlist design/block.sch -o design/netlist/block.spice --rcfile design/xschemrc
+```
+
+Export a reusable block as an includable `.subckt` (no trailing `.end`):
+
+```bash
+klt netlist design/block.sch -o design/netlist/block.spice --block \
+    --rcfile design/xschemrc
 ```
 
 Gate CI on the committed netlist still being current:
