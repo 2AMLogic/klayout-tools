@@ -6949,12 +6949,13 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 # extension) already have full golden violate/clean coverage via
 # `tests/golden_deck/sg13g2/manifest.json` (parametrized by
 # `tests/test_golden_deck.py`, which also asserts their `provenance` is
-# populated). The 11 rules below (`gatpoly.separation.activ.1`,
+# populated). The 13 rules below (`gatpoly.separation.activ.1`,
 # `activ.enclosing.cont.1`, `gatpoly.enclosing.cont.1`,
 # `metal1.enclosing.via1.1`, `metal2.enclosing.via2.1`, plus issue #1243's
 # `metal3.enclosing.via3.1`, `metal4.enclosing.via4.1`,
 # `metal5.enclosing.topvia1.1`, `topmetal1.enclosing.topvia1.1`,
-# `topmetal1.enclosing.topvia2.1`, `topmetal2.enclosing.topvia2.1`) are
+# `topmetal1.enclosing.topvia2.1`, `topmetal2.enclosing.topvia2.1` and issue
+# #2581's `metal5.enclosing.mim.1`, `mim.enclosing.topvia1.1`) are
 # `enclosing`/`separation` checks, out of that manifest's width/space-only
 # scope (see its own README.md) -- mirroring how sky130/gf180mcu's own
 # enclosing/separation rules are hand-tested directly in this module (e.g.
@@ -6962,13 +6963,14 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 43 curated `DrcRule` entries carries a populated
+    """Every one of sg13g2's 45 curated `DrcRule` entries carries a populated
     `provenance` citation (issue #905's own acceptance criterion: "every
     compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
-    Metal3-TopMetal2 stack) -- not just the 32 width/space rules
-    `tests/test_golden_deck.py`'s generic check already covers."""
+    Metal3-TopMetal2 stack and issue #2581's 6.11 MIM group) -- not just the
+    32 width/space rules `tests/test_golden_deck.py`'s generic check already
+    covers."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 43
+    assert len(deck) == 45
     for rule in deck:
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
@@ -7544,6 +7546,248 @@ def test_run_drc_sg13g2_fixed_size_cut_rules_declare_both_bounds():
         assert rule.check == "width"
         assert rule.threshold_max_dbu == rule.threshold_dbu, rule.id
     assert seen == fixed_size_rule_ids
+
+
+# --- 6.11 MIM plate rules (MIM.c/MIM.d, issue #2581) ----------------------
+#
+# The MiM-capacitor plate pair's own rule group, transcribed by issue #2581.
+# Before it, `sg13g2.py`'s `DECK` carried *no* `MIM` (36/0) rule at all, so
+# every MiM-drawing stream was reported `clean` whatever its plate geometry
+# was -- which is exactly how issue #2576's `klt gen cap_array` bug (a 0.50um
+# `Metal5` bottom-plate enclosure against this group's own 0.60um `MIM.c`
+# minimum) survived for the generator's whole life. These pairs are the
+# deck-side regression guard the generator-side bbox assertion in
+# `tests/test_gen.py` could not be.
+#
+# Both rules are `enclosing` checks, out of
+# `tests/golden_deck/sg13g2/manifest.json`'s width/space-only scope, so they
+# are hand-tested here like the eleven `enclosing`/`separation` rules above.
+#
+#: `MIM.c`'s own threshold (`drc_rules['Mim_c']` = 0.6) and the pre-#2576
+#: `cap_array` margin that violated it, in um.
+_SG13G2_MIM_C_UM = 0.6
+_SG13G2_PRE_2576_CAP_MARGIN_UM = 0.5
+
+#: `MIM.d`'s own threshold (`drc_rules['Mim_d']` = 0.36), in um.
+_SG13G2_MIM_D_UM = 0.36
+
+
+def _write_sg13g2_mim_plate_pair(path, *, margin_um, plate_um=5.0):
+    """A single MiM plate pair: a `plate_um` square `MIM` (36/0) top plate
+    with a `Metal5` (67/0) bottom plate extending `margin_um` past it on all
+    four sides -- the geometry `klt gen cap_array` draws for this family, with
+    the margin as the free variable `MIM.c` bounds.
+
+    Dimensions are converted to whole dbu with `round`, not `int`: at
+    `dbu = 0.001` a truncating `int(12.42 * 1000)` lands a nanometre short and
+    turns an exactly-at-threshold case into a 1 dbu violation.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+
+    def box(x0, y0, x1, y1):
+        return kdb.Box(
+            round(x0 / layout.dbu),
+            round(y0 / layout.dbu),
+            round(x1 / layout.dbu),
+            round(y1 / layout.dbu),
+        )
+
+    top = layout.create_cell("TOP")
+    mim = layout.layer(36, 0)
+    layout.set_info(mim, kdb.LayerInfo(36, 0, "MIM.drawing"))
+    metal5 = layout.layer(67, 0)
+    layout.set_info(metal5, kdb.LayerInfo(67, 0, "Metal5.drawing"))
+
+    # The plate is placed away from the origin so the bottom plate's own
+    # `Metal5` width/space rules (0.16um/0.20um) are comfortably satisfied.
+    x0 = y0 = 10.0
+    x1 = y1 = x0 + plate_um
+    top.shapes(mim).insert(box(x0, y0, x1, y1))
+    top.shapes(metal5).insert(
+        box(x0 - margin_um, y0 - margin_um, x1 + margin_um, y1 + margin_um)
+    )
+    layout.write(str(path))
+    return path
+
+
+def test_run_drc_sg13g2_metal5_enclosing_mim_violation(tmp_path):
+    """The reproducer issue #2581 exists for: a MiM plate pair drawn with the
+    pre-#2576 0.50um `Metal5` enclosure -- 0.10um short of `MIM.c`'s own
+    0.60um minimum -- is now flagged, once per plate edge.
+
+    The count matches what IHP-Open-PDK's *own* signoff runset reported for
+    the same geometry when issue #2576 measured it (`ihp-sg13g2.drc`,
+    `tables=main`: 4 `MIM.c` violations pre-fix, 0 post-fix), so this test
+    pins the curated deck against the upstream deck's own answer, not merely
+    against itself."""
+    path = _write_sg13g2_mim_plate_pair(
+        tmp_path / "sg13g2_mim_c_violation.gds",
+        margin_um=_SG13G2_PRE_2576_CAP_MARGIN_UM,
+    )
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"metal5.enclosing.mim.1": 4}
+    for violation in report["violations"]:
+        assert violation["check"] == "enclosing"
+        assert violation["layer"] == "Metal5.drawing"
+
+
+def test_run_drc_sg13g2_metal5_enclosing_mim_clean(tmp_path):
+    """False-positive guard, and the other half of the upstream cross-check:
+    the same pair drawn at exactly `MIM.c`'s 0.60um -- the margin #2576 made
+    `klt gen cap_array` draw -- is clean."""
+    path = _write_sg13g2_mim_plate_pair(
+        tmp_path / "sg13g2_mim_c_clean.gds", margin_um=_SG13G2_MIM_C_UM
+    )
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "clean", report["violations"]
+
+
+def test_run_drc_sg13g2_mim_covered_by_rules_once_transcribed(tmp_path):
+    """`MIM` (36/0) is no longer an unchecked layer: a stream drawing the
+    plate pair reports it under `coverage.layers_checked`, not under
+    `coverage.layers_in_stream_without_rules` -- the gap issue #2576 could
+    only point at (see `docs/cli/gen.md`'s sg13g2 `cap_array` note)."""
+    path = _write_sg13g2_mim_plate_pair(
+        tmp_path / "sg13g2_mim_coverage.gds", margin_um=_SG13G2_MIM_C_UM
+    )
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert "36/0" in report["coverage"]["layers_checked"]
+    assert "36/0" not in report["coverage"]["layers_in_stream_without_rules"]
+    assert "MIM" in report["coverage"]["deck_scope"]
+
+
+def test_run_drc_sg13g2_mim_tab_escaping_metal5_is_flagged(tmp_path):
+    """`MIM.c`'s *second* term (`mim_drw.not(metal5_drw)`, joined onto the
+    enclosure check upstream) is covered by this engine's own
+    zero-overlap-escape term (#318) under the same rule id: a `MIM` plate
+    with a tab protruding past its `Metal5` bottom plate entirely is flagged
+    even though the rest of the plate clears 0.60um."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    mim = layout.layer(36, 0)
+    layout.set_info(mim, kdb.LayerInfo(36, 0, "MIM.drawing"))
+    metal5 = layout.layer(67, 0)
+    layout.set_info(metal5, kdb.LayerInfo(67, 0, "Metal5.drawing"))
+
+    # 5x5um plate at (10,10) with a 0.6um bottom-plate margin (clean on its
+    # own), plus a MIM tab running 2um out past the bottom plate's right edge.
+    top.shapes(mim).insert(kdb.Box(10_000, 10_000, 15_000, 15_000))
+    top.shapes(mim).insert(kdb.Box(15_000, 12_000, 17_600, 13_000))
+    top.shapes(metal5).insert(kdb.Box(9_400, 9_400, 15_600, 15_600))
+    path = tmp_path / "sg13g2_mim_c_escape.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"].get("metal5.enclosing.mim.1", 0) > 0
+
+
+def _write_sg13g2_mim_over_topvia1(path, *, mim_margin_um):
+    """A hand-drawn `TopVia1`-over-`MIM` landing (the geometry `MIM.d` is
+    written against), with the `MIM` plate enclosing the via by
+    `mim_margin_um` and a `Metal5` bottom plate clearing `MIM.c`'s own 0.60um
+    underneath so only `MIM.d` is in play."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+
+    def box(x0, y0, x1, y1):
+        return kdb.Box(
+            round(x0 / layout.dbu),
+            round(y0 / layout.dbu),
+            round(x1 / layout.dbu),
+            round(y1 / layout.dbu),
+        )
+
+    top = layout.create_cell("TOP")
+    for layer, datatype, name in (
+        (36, 0, "MIM.drawing"),
+        (67, 0, "Metal5.drawing"),
+        (125, 0, "TopVia1.drawing"),
+        (126, 0, "TopMetal1.drawing"),
+    ):
+        index = layout.layer(layer, datatype)
+        layout.set_info(index, kdb.LayerInfo(layer, datatype, name))
+
+    # TopVia1 at its own fixed 0.42um size (`TV1.a`), centred at (12.21, 12.21).
+    via_x0 = via_y0 = 12.0
+    via_x1 = via_y1 = via_x0 + 0.42
+    top.shapes(layout.layer(125, 0)).insert(box(via_x0, via_y0, via_x1, via_y1))
+
+    m = mim_margin_um
+    top.shapes(layout.layer(36, 0)).insert(
+        box(via_x0 - m, via_y0 - m, via_x1 + m, via_y1 + m)
+    )
+    top.shapes(layout.layer(67, 0)).insert(
+        box(
+            via_x0 - m - _SG13G2_MIM_C_UM,
+            via_y0 - m - _SG13G2_MIM_C_UM,
+            via_x1 + m + _SG13G2_MIM_C_UM,
+            via_y1 + m + _SG13G2_MIM_C_UM,
+        )
+    )
+    # TopMetal1 landing pad, wide enough for `TM1.a`'s coarse 1.64um minimum
+    # width and clearing `TV1.d`'s 0.42um enclosure of the via.
+    top.shapes(layout.layer(126, 0)).insert(box(10.0, 10.0, 14.0, 14.0))
+    layout.write(str(path))
+    return path
+
+
+def test_run_drc_sg13g2_mim_enclosing_topvia1_violation(tmp_path):
+    """A hand-drawn `TopVia1` landing on a `MIM` plate that encloses it by
+    only 0.30um -- under `MIM.d`'s 0.36um minimum -- is flagged."""
+    path = _write_sg13g2_mim_over_topvia1(
+        tmp_path / "sg13g2_mim_d_violation.gds", mim_margin_um=0.30
+    )
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"mim.enclosing.topvia1.1": 4}
+    for violation in report["violations"]:
+        assert violation["check"] == "enclosing"
+        assert violation["layer"] == "MIM.drawing"
+
+
+def test_run_drc_sg13g2_mim_enclosing_topvia1_clean(tmp_path):
+    """False-positive guard: the same landing drawn at exactly `MIM.d`'s
+    0.36um is clean."""
+    path = _write_sg13g2_mim_over_topvia1(
+        tmp_path / "sg13g2_mim_d_clean.gds", mim_margin_um=_SG13G2_MIM_D_UM
+    )
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert report["status"] == "clean", report["violations"]
+
+
+def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
+    """Structural half: both new rules carry the `MIM` scope and cite
+    `6_11_mim.drc`'s own official rule ids -- and nothing in this deck cites
+    the `maximal`-only runset `MIM.a`/`MIM.b`/`MIM.e`/`MIM.f` live in (see
+    `sg13g2.py`'s "Scope guard")."""
+    deck = get_deck("sg13g2")
+    mim_rules = {rule.id: rule for rule in deck if rule.scope == "MIM"}
+    assert set(mim_rules) == {"metal5.enclosing.mim.1", "mim.enclosing.topvia1.1"}
+    assert mim_rules["metal5.enclosing.mim.1"].provenance.rule_id == "MIM.c"
+    assert mim_rules["metal5.enclosing.mim.1"].threshold_dbu == 600
+    assert mim_rules["mim.enclosing.topvia1.1"].provenance.rule_id == "MIM.d"
+    assert mim_rules["mim.enclosing.topvia1.1"].threshold_dbu == 360
+    for rule in mim_rules.values():
+        assert rule.check == "enclosing"
+        assert rule.provenance.source_path.endswith("beol/6_11_mim.drc")
+    assert not [
+        rule.id for rule in deck if "maximal" in (rule.provenance.source_path or "")
+    ]
 
 
 # --------------------------------------------------------------------------- #

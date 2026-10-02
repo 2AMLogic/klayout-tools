@@ -6763,9 +6763,14 @@ def test_sg13g2_cap_array_draws_mim_stack_layers(tmp_path, sg13g2_pdk_root):
 #: `drc_rules['Mim_c']` = 0.6 in `sg13g2_tech_default.json`, applied by
 #: `rule_decks/beol/6_11_mim.drc`), the rule that governs how far this
 #: family's drawn `Metal5` bottom plate must extend past its `MIM` top plate
-#: (issue #2576). The curated `klayout_tools.decks.sg13g2` deck carries no
-#: `MIM` rule group at all, so `klt drc --deck sg13g2` cannot catch a
-#: shortfall here -- these tests measure the drawn geometry directly instead.
+#: (issue #2576). At #2576 the curated `klayout_tools.decks.sg13g2` deck
+#: carried no `MIM` rule group at all, so `klt drc --deck sg13g2` could not
+#: catch a shortfall here -- hence the direct geometry measurement below.
+#: Issue #2581 has since transcribed `MIM.c`/`MIM.d` into that deck, so the
+#: same dimension is now *independently* checkable through `klt drc`; the bbox
+#: assertion is kept as the narrower, deck-independent guard, with
+#: `test_sg13g2_cap_array_output_is_clean_under_the_mim_rules` below as the
+#: end-to-end half.
 _SG13G2_MIM_C_ENCLOSURE_UM = 0.6
 
 
@@ -6808,6 +6813,50 @@ def test_sg13g2_cap_array_bottom_plate_clears_mim_c_enclosure(
     }
     for side, enclosure in enclosures.items():
         assert enclosure >= _SG13G2_MIM_C_ENCLOSURE_UM - 1e-9, (side, enclosures)
+
+
+@pytest.mark.parametrize(
+    ("plate_w_um", "plate_h_um", "num"),
+    ((5.0, 5.0, 1), (25.7, 25.7, 1), (2.0, 11.3, 1), (5.0, 5.0, 3)),
+)
+def test_sg13g2_cap_array_output_is_clean_under_the_mim_rules(
+    plate_w_um, plate_h_um, num, tmp_path, sg13g2_pdk_root
+):
+    """The end-to-end half issue #2576 could not assert and issue #2581
+    unblocked: `cap_array`'s *current* sg13g2 output passes `klt drc --deck
+    sg13g2` clean now that the deck actually carries the `MIM.c`/`MIM.d`
+    rules governing its plate pair -- and the `MIM` (36/0) layer is reported
+    as checked rather than as a coverage gap.
+
+    Pre-#2576 geometry (a 0.50um bottom-plate margin) trips
+    `metal5.enclosing.mim.1` four times under these same rules; see
+    `tests/test_drc.py::test_run_drc_sg13g2_metal5_enclosing_mim_violation`
+    for that hand-built reproducer."""
+    output = tmp_path / f"cap_array_sg13g2_mim_clean_{num}.gds"
+    generate(
+        {
+            "generator": "cap_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {
+                "plate_w_um": plate_w_um,
+                "plate_h_um": plate_h_um,
+                "num": num,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_drc(str(output), "sg13g2")
+
+    assert report["status"] == "clean", report["violations"]
+    coverage = report["coverage"]
+    assert "36/0" in coverage["layers_checked"]
+    assert "36/0" not in coverage["layers_in_stream_without_rules"]
+    assert "MIM" in coverage["deck_scope"]
+    # `Vmim` (129/0) legitimately stays uncovered: `MIM.c`/`MIM.d` key off
+    # MIM/Metal5/TopVia1, and no curated sg13g2 rule reads the MIM-to-TopMetal1
+    # via layer this family's own PyCells draw.
+    assert "129/0" in coverage["layers_in_stream_without_rules"]
 
 
 def test_sg13g2_cap_bottom_plate_margin_floor_is_the_mim_c_minimum():

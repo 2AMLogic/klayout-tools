@@ -1310,6 +1310,55 @@ family's resolution details rather than here — see
 the SG13CMOS5L curated deck goes" sections for their own per-surface
 coverage tables and gaps.
 
+**sg13g2's `MIM` rule group: `MIM.c`/`MIM.d` are modeled, `MIM.a`/`MIM.b`/
+`MIM.e`/`MIM.f`/`MIM.gR` are not (issue #2581).** Of the `sg13g2` deck's 45
+rules, two carry `scope: "MIM"` — the MiM-capacitor plate pair's own rules,
+transcribed from IHP-Open-PDK's `rule_decks/beol/6_11_mim.drc`:
+
+| rule id (this deck) | official id | check | value |
+| --- | --- | --- | --- |
+| `metal5.enclosing.mim.1` | `MIM.c` | `enclosing` (`Metal5` 67/0 over `MIM` 36/0) | 0.60 µm |
+| `mim.enclosing.topvia1.1` | `MIM.d` | `enclosing` (`MIM` 36/0 over `TopVia1` 125/0) | 0.36 µm |
+
+Before these two landed, `DECK` carried **no** `MIM` rule at all, so any
+stream drawing the 36/0 plate — `klt gen cap_array` on this family, or a
+caller's own externally-drawn MiM geometry — was reported `status: "clean"`
+whatever its plate geometry was, with the bare `36/0` pair under
+`coverage.layers_in_stream_without_rules` the only signal that anything went
+unchecked. That is not hypothetical: `cap_array` drew a 0.50 µm `Metal5`
+enclosure against `MIM.c`'s own 0.60 µm minimum for the generator's whole
+life (issue #2576 — see `gen.md`'s own `sg13g2`/`cap_array` note), and this
+deck could not see it. `36/0` is now reported under `coverage.layers_checked`
+instead; `129/0` (`Vmim`, the MIM↔TopMetal1 via this family's own PyCells
+draw) legitimately stays uncovered — neither rule reads it.
+
+`MIM.c` is one rule with two upstream terms —
+`mim_drw.enclosed(metal5_drw, 0.60um).polygons.join(mim_drw.not(metal5_drw))`
+— and both are reported here under the one rule id: the enclosure term is
+`enclosing_check` directly, and the "MIM with no `Metal5` under it" term is
+this engine's own zero-overlap-escape term (see
+"`"enclosing"`/`"enclosed"` also catch zero-overlap escapes" above). One
+documented residue: that term is scoped to `MIM` shapes interacting with
+`Metal5` *somewhere*, so a `MIM` polygon with no `Metal5` anywhere near it is
+not flagged, where upstream's plain Boolean `not` would flag the whole
+polygon. The `.interacting(...)` pre-filter is engine-wide and deliberate
+(same section), and a MiM plate with no bottom plate at all is not the
+realistic failure mode — a bottom plate sized short of the margin is, and
+that is caught exactly.
+
+The other `MIM.*` ids are a *different kind* of gap from the approximations
+listed for sky130/gf180mcu above — they are not approximated, they are not in
+the `main` tables this deck transcribes at all. `MIM.a` (min. `MIM` width,
+1.14 µm), `MIM.b` (min. `MIM` space, 0.6 µm), `MIM.e` and `MIM.f` are
+defined and executed only in IHP-Open-PDK's separate, stricter top-level
+`sg13g2_maximal.drc` runset, which no rule in this deck is sourced from;
+whether the curated decks should model that runset at all is an open
+repo-wide question, not something #2581 decided as a side effect.
+`MIM.gR` falls under the standing "no `area`/`density` rules" carve-out for a
+second reason as well: it is a `RECOMMENDED`-gated *whole-chip* total-area
+budget (174800 µm²), a sum over the layout rather than the per-polygon bound
+`check: "area"` expresses.
+
 Coverage is expected to grow incrementally in follow-on issues, for every
 deck.
 

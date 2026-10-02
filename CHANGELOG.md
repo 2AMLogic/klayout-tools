@@ -128,6 +128,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   kind yet. See
   [`docs/cli/drc.md`](docs/cli/drc.md) → "`"ongrid"` / `"angle"` check
   kinds" and "Manufacturing grid and corner angle".
+- **Added** (#2581, `klt drc`/`klt deck rules` on `sg13g2`; additive — **no**
+  `schema_version` bump, but user-visible on two axes: previously-`clean`
+  streams drawing illegal MiM geometry now report violations, and
+  `provenance.deck.content_hash` for `sg13g2` changes): the curated `sg13g2`
+  deck transcribes the PDK's **6.11 MIM** rule group — its first non-`5.x`
+  section — closing a gap in which it carried **no** `MIM` (36/0) rule at all,
+  so every MiM-drawing stream was reported `status: "clean"` whatever its
+  plate geometry was. Two rules, both from
+  `rule_decks/beol/6_11_mim.drc` at the IHP-Open-PDK v0.3.0 tag this deck
+  already pins: `metal5.enclosing.mim.1` (`MIM.c`, "Min. Metal5 enclosure of
+  MIM is 0.60 um", `drc_rules['Mim_c']`) and `mim.enclosing.topvia1.1`
+  (`MIM.d`, "Min. MIM enclosure of TopVia1 is 0.36 um", `drc_rules['Mim_d']`);
+  `klt deck rules --deck sg13g2` now lists a `MIM` scope, and
+  `coverage.layers_checked` reports `36/0` where
+  `coverage.layers_in_stream_without_rules` used to (`129/0`/`Vmim` stays
+  uncovered — neither rule reads it). This is the deck-side half of #2576,
+  where `klt gen cap_array` drew a 0.50 µm `Metal5` enclosure against
+  `MIM.c`'s 0.60 µm minimum for the generator's whole life with this deck
+  reporting `clean` throughout: the generator-side floor #2576 added makes
+  *klt's own* output legal, while these rules are what can catch a caller's
+  externally-drawn MiM geometry. A pre-#2576-shaped stream now reports 4
+  `metal5.enclosing.mim.1` violations — the same count IHP-Open-PDK's own
+  `ihp-sg13g2.drc` runset reported for that geometry — and `cap_array`'s
+  current output reports `clean`. `MIM.a`/`MIM.b`/`MIM.e`/`MIM.f` are
+  deliberately **not** transcribed: they are defined only in the separate,
+  stricter top-level `sg13g2_maximal.drc` runset, which no rule in this deck
+  is sourced from (a repo-wide policy question, not a side effect of this
+  change); the `RECOMMENDED`-gated whole-chip `MIM.gR` area budget stays under
+  the standing "no `area`/`density` rules" carve-out. See `docs/cli/drc.md`'s
+  "Coverage" section for the full modeled/unmodeled split and the one
+  documented residue in `MIM.c`'s two-term upstream construct.
 - **Fixed** (#2594, `klt gen`/`klt gen compose`/`klt drc` on `sky130`;
   additive — **no** `schema_version` bump, but user-visible on two axes:
   drawn `licon1`/`mcon` geometry shrinks, and `provenance.deck.content_hash`
