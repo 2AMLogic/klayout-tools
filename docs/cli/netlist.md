@@ -164,21 +164,38 @@ here `--check` is a boolean switch.
 
 ## Not in this slice
 
-Two of issue #55's sharp edges are deliberately **not** addressed yet, pending
+One of issue #55's sharp edges is deliberately **not** addressed yet, pending
 the SPICE-side design follow-up to
-[`docs/design/spice-corner-runner-spike.md`](../design/spice-corner-runner-spike.md):
+[`docs/design/spice-corner-runner-spike.md`](../design/spice-corner-runner-spike.md)
+(tracked by #2680):
 
 - **Block-vs-testbench subckt emission.** xschem comments out the top-level
   `.subckt`/`.ends` pair (right when the top sheet is a testbench, wrong when
   it is a reusable block) and emits a trailing `.end`. Making a block export
   includable by a testbench still needs a post-processing pass this verb does
   not do.
-- **PDK-root unification.** `klt netlist` does not resolve a PDK root through
-  [`klt pdk`](pdk.md)'s discovery path, so the schematic and simulation sides
-  can still disagree about which PDK they are using. State the PDK root in the
-  project's `xschemrc` and pass it with `--rcfile`.
+
+The other, PDK-root unification, is covered as a consistency check — see
+[PDK-root consistency](#pdk-root-consistency) below. It does not generate an
+`xschemrc`; the project still maintains its own.
 
 `klt netlist` also exports SPICE only — no VHDL/Verilog/tEDAx netlist types.
+
+## PDK-root consistency
+
+`--pdk` / `--pdk-root` mirror [`klt sim`](sim.md)'s flags and resolve through
+the same discovery path as [`klt pdk`](pdk.md). When a PDK resolves, the PDK
+root the `--rcfile` statically declares (`set PDK_ROOT <path>` or
+`set env(PDK_ROOT) <path>`; computed values containing `$` or `[` are not
+evaluated) is compared with it. A declared root matches if it equals, contains,
+or is contained by the resolved install root (so both `$PDK_ROOT` and
+`$PDK_ROOT/sky130A` are accepted). A mismatch is a **warning**, not an error:
+the netlist is still produced and the exit code is unchanged.
+
+- `--pdk`/`--pdk-root` given: strict — an unresolvable PDK is an error (exit `1`).
+- Neither given, `--rcfile` given, and `$PDK`/`$PDK_ROOT` set: best effort — an
+  unresolvable PDK is silently skipped.
+- No PDK in play: no `pdk` field, exactly as before.
 
 ## JSON output
 
@@ -218,6 +235,7 @@ the SPICE-side design follow-up to
 | `status` | `"generated"` \| `"match"` \| `"drifted"` | `"generated"` in `generate` mode; `"match"`/`"drifted"` in `check` mode. |
 | `xschem` | object | How xschem was invoked and what it returned — see below. |
 | `netlist` | object | Identity of the netlist this run produced — see below. |
+| `pdk` | object | **Only when a PDK resolved** (see [PDK-root consistency](#pdk-root-consistency)); absent otherwise. Additive. |
 | `drift` | object | **`check` mode only** (absent in `generate` mode) — see below. |
 
 ### `xschem`
@@ -240,6 +258,19 @@ the SPICE-side design follow-up to
 | `bytes` | integer | Size of the produced netlist. |
 | `lines` | integer | Newline count. |
 | `content_hash` | string | `sha256:<hex>` of the produced netlist's bytes. |
+
+### `pdk`
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `variant` | string | Resolved PDK variant. |
+| `version` | string \| null | Resolved version, when known. |
+| `resolved_via` | string | How the install was found (search-order label). |
+| `root` | string | Absolute resolved install root. |
+| `rcfile_pdk_root` | string \| null | PDK root the `--rcfile` statically declares; `null` if none/computed/no rcfile. |
+| `consistent` | boolean \| null | Whether `rcfile_pdk_root` matches `root`; `null` when there is nothing to compare. |
+| `warning` | string \| null | Mismatch explanation when `consistent` is `false`. |
+| `ambiguity_warning` | string \| null | `klt pdk`'s multiple-installs warning, when applicable. |
 
 ### `drift` (`--check` only)
 

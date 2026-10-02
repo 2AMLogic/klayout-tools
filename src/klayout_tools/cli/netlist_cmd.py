@@ -42,6 +42,8 @@ def run(args: argparse.Namespace) -> int:
             timeout_s=args.timeout_s,
             xschem_binary=args.xschem_binary,
             rcfile=args.rcfile,
+            pdk=args.pdk,
+            pdk_root=args.pdk_root,
         )
     except NetlistError as exc:
         return emit_error("netlist", str(exc), args.format)
@@ -72,6 +74,17 @@ def _print_text(report: dict) -> None:
         f"netlist: {netlist['lines']} lines, {netlist['bytes']} bytes, "
         f"{netlist['content_hash']}"
     )
+
+    pdk_block = report.get("pdk")
+    if pdk_block is not None:
+        print(
+            f"pdk: {pdk_block['variant']} {pdk_block['version'] or '-'} "
+            f"(via {pdk_block['resolved_via']})"
+        )
+        if pdk_block["warning"]:
+            print(f"pdk: WARNING: {pdk_block['warning']}")
+        if pdk_block["ambiguity_warning"]:
+            print(f"pdk: {pdk_block['ambiguity_warning']}")
 
     drift = report.get("drift")
     if drift is None:

@@ -42,12 +42,12 @@ never as a silent empty result.
 
 Deliberately **out of scope** for this first slice (issue #55's maintainer
 scope-narrowing comment, 2026-10-01): emitting a block as an includable
-``.subckt`` rather than a full deck (edge #2), and resolving the PDK root
-through :mod:`klayout_tools.pdk` so the schematic and simulation sides cannot
-disagree (edge #3). Both wait on the SPICE-side design follow-up to
-``docs/design/spice-corner-runner-spike.md``; this module does not pre-empt
-either -- it takes an explicit ``--rcfile`` and leaves PDK plumbing to the
-project's own ``xschemrc``.
+``.subckt`` rather than a full deck (edge #2; tracked by #2680). The PDK-root
+edge (#55 edge #3) is addressed as a *consistency check* (issue #2680, option
+A): ``--pdk``/``--pdk-root`` resolve through :mod:`klayout_tools.pdk` and any
+PDK root the ``--rcfile`` declares is compared against it, so a disagreement
+is surfaced (:func:`_pdk_consistency`) rather than silently ignored. The
+``xschemrc`` is still passed through verbatim and never generated.
 """
 
 from __future__ import annotations
@@ -55,12 +55,15 @@ from __future__ import annotations
 import difflib
 import hashlib
 import os
+import re
 import shutil
 import signal
 import subprocess
 import tempfile
 import time
 from typing import Any
+
+from . import pdk as pdk_module
 
 #: Payload schema version (``docs/json-contract.md``; versioned per command).
 SCHEMA_VERSION = 1
@@ -457,6 +460,94 @@ def _write_output(output: str, data: bytes) -> None:
         raise NetlistError(f"could not write netlist to {output}: {exc}") from exc
 
 
+_RC_PDK_ROOT_RE = re.compile(
+    r"^\s*set\s+(?:::)?(?:env\(PDK_ROOT\)|PDK_ROOT)\s+(\"[^\"]*\"|\{[^}]*\}|\S+)",
+    re.MULTILINE,
+)
+
+
+def _rcfile_pdk_root(rcfile: str) -> str | None:
+    """The PDK root a ``xschemrc`` statically declares, or ``None``.
+
+    Recognises ``set PDK_ROOT <path>`` and ``set env(PDK_ROOT) <path>`` (the
+    last such assignment wins). A value that is computed (contains ``$`` or
+    ``[``) cannot be evaluated without a Tcl interpreter and is reported as
+    undeclared rather than guessed at.
+    """
+    try:
+        with open(rcfile, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    found = _RC_PDK_ROOT_RE.findall(text)
+    if not found:
+        return None
+    value = found[-1].strip()
+    if value[:1] in ('"', "{") and value[-1:] in ('"', "}"):
+        value = value[1:-1]
+    if not value or "$" in value or "[" in value:
+        return None
+    return os.path.realpath(os.path.expanduser(value))
+
+
+def _related(a: str, b: str) -> bool:
+    """True if one path equals or contains the other (after realpath)."""
+    a, b = os.path.realpath(a), os.path.realpath(b)
+    return a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep)
+
+
+def _pdk_consistency(
+    rcfile: str | None, pdk: str | None, pdk_root: str | None
+) -> dict[str, Any] | None:
+    """Resolve the PDK like ``klt sim`` and compare it to the ``--rcfile``.
+
+    Returns ``None`` when no PDK is in play (the pre-#2680 behaviour,
+    unchanged). ``--pdk``/``--pdk-root`` are strict: an unresolvable PDK is a
+    :class:`NetlistError`. Without either flag, ``$PDK``/``$PDK_ROOT`` are
+    consulted only when an ``--rcfile`` is given, best-effort (failure to
+    resolve is silently "no PDK").
+
+    ``consistent`` is ``True``/``False`` when the rcfile declares a PDK root
+    that does/doesn't match the resolved root (a declared root may be the
+    install root itself or its parent, e.g. ``$PDK_ROOT`` holding
+    ``sky130A/``), and ``None`` when there is nothing to compare.
+    """
+    explicit = pdk is not None or pdk_root is not None
+    if not explicit and not (
+        rcfile and (os.environ.get("PDK") or os.environ.get("PDK_ROOT"))
+    ):
+        return None
+    try:
+        found = pdk_module.find_pdk(pdk, pdk_root)
+    except pdk_module.PdkNotFoundError as exc:
+        if explicit:
+            raise NetlistError(str(exc)) from exc
+        return None
+
+    declared = _rcfile_pdk_root(rcfile) if rcfile else None
+    consistent: bool | None = None
+    warning: str | None = None
+    if declared is not None:
+        consistent = _related(declared, found["root"])
+        if not consistent:
+            warning = (
+                f"xschemrc {rcfile} declares PDK root {declared}, but the "
+                f"resolved PDK {found['variant']} is at {found['root']} "
+                f"(via {found['resolved_via']}); the schematic and "
+                "simulation sides may be using different PDKs"
+            )
+    return {
+        "variant": found["variant"],
+        "version": found.get("version"),
+        "resolved_via": found["resolved_via"],
+        "root": found["root"],
+        "rcfile_pdk_root": declared,
+        "consistent": consistent,
+        "warning": warning,
+        "ambiguity_warning": pdk_module.ambiguity_warning(found),
+    }
+
+
 def run_netlist(
     schematic: str,
     output: str,
@@ -465,6 +556,8 @@ def run_netlist(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     xschem_binary: str = DEFAULT_XSCHEM_BINARY,
     rcfile: str | None = None,
+    pdk: str | None = None,
+    pdk_root: str | None = None,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -483,6 +576,7 @@ def run_netlist(
         raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
     if rcfile is not None and not os.path.isfile(rcfile):
         raise NetlistError(f"xschemrc file not found: {rcfile}")
+    pdk_block = _pdk_consistency(rcfile, pdk, pdk_root)
 
     stem = os.path.splitext(os.path.basename(schematic))[0]
     work_dir = tempfile.mkdtemp(prefix="klt-netlist-")
@@ -528,6 +622,9 @@ def run_netlist(
                 "duration_s": round(duration_s, 3),
             },
         }
+
+        if pdk_block is not None:
+            payload["pdk"] = pdk_block
 
         if check:
             status, drift = _check_result(output, fresh_data)

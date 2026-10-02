@@ -708,3 +708,119 @@ def test_stub_really_exits_nonzero_on_success(tmp_path, argv_log):
 
     assert completed.returncode != 0
     assert (out_dir / "block.spice").is_file()
+
+
+# ---------------------------------------------------------------------------
+# PDK-root consistency with `klt pdk` (issue #2680, edge 2 option A)
+# ---------------------------------------------------------------------------
+
+
+def _fake_pdk_root(tmp_path: Path, name: str = "pdks") -> Path:
+    root = tmp_path / name
+    (root / "sky130A" / "libs.tech").mkdir(parents=True)
+    return root
+
+
+def _rc(tmp_path: Path, body: str) -> str:
+    rc = tmp_path / "xschemrc"
+    rc.write_text(body, encoding="utf-8")
+    return str(rc)
+
+
+def test_no_pdk_means_no_pdk_block(tmp_path, argv_log, monkeypatch):
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    report = run_netlist(
+        schematic,
+        str(tmp_path / "b.spice"),
+        xschem_binary=binary,
+        rcfile=_rc(tmp_path, "set PDK_ROOT /somewhere\n"),
+    )
+    assert "pdk" not in report
+
+
+def test_pdk_root_mismatch_is_surfaced(tmp_path, argv_log):
+    root = _fake_pdk_root(tmp_path)
+    other = _fake_pdk_root(tmp_path, "other")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    report = run_netlist(
+        schematic,
+        str(tmp_path / "b.spice"),
+        xschem_binary=binary,
+        rcfile=_rc(tmp_path, f"set PDK_ROOT {other}\n"),
+        pdk="sky130A",
+        pdk_root=str(root),
+    )
+    block = report["pdk"]
+    assert block["consistent"] is False
+    assert block["rcfile_pdk_root"] == os.path.realpath(other)
+    assert "different PDKs" in block["warning"]
+    assert report["status"] == "generated"
+
+
+def test_pdk_root_match_and_parent_forms(tmp_path, argv_log):
+    root = _fake_pdk_root(tmp_path)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    for decl in (
+        f"set PDK_ROOT {root}",
+        f'set ::env(PDK_ROOT) "{root}"',
+        f"set env(PDK_ROOT) {root / 'sky130A'}",
+    ):
+        report = run_netlist(
+            schematic,
+            str(tmp_path / "b.spice"),
+            xschem_binary=binary,
+            rcfile=_rc(tmp_path, decl + "\n"),
+            pdk_root=str(root),
+        )
+        assert report["pdk"]["consistent"] is True, decl
+        assert report["pdk"]["warning"] is None
+
+
+def test_undeclared_or_computed_rcfile_root_is_not_compared(tmp_path, argv_log):
+    root = _fake_pdk_root(tmp_path)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    for body in ("# nothing\n", "set PDK_ROOT $env(HOME)/pdks\n"):
+        report = run_netlist(
+            schematic,
+            str(tmp_path / "b.spice"),
+            xschem_binary=binary,
+            rcfile=_rc(tmp_path, body),
+            pdk_root=str(root),
+        )
+        assert report["pdk"]["consistent"] is None
+        assert report["pdk"]["rcfile_pdk_root"] is None
+
+
+def test_explicit_unresolvable_pdk_is_an_error(tmp_path, argv_log):
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    with pytest.raises(NetlistError):
+        run_netlist(
+            schematic,
+            str(tmp_path / "b.spice"),
+            xschem_binary=binary,
+            pdk_root=str(tmp_path / "nope"),
+        )
+
+
+def test_cli_text_prints_pdk_mismatch_warning(tmp_path, argv_log, capsys):
+    root = _fake_pdk_root(tmp_path)
+    other = _fake_pdk_root(tmp_path, "other")
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    code = main(
+        [
+            "netlist", schematic, "-o", str(tmp_path / "b.spice"),
+            "--xschem-binary", binary,
+            "--rcfile", _rc(tmp_path, f"set PDK_ROOT {other}\n"),
+            "--pdk-root", str(root),
+        ]
+    )  # fmt: skip
+    assert code == 0
+    assert "pdk: WARNING:" in capsys.readouterr().out
