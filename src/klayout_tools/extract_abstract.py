@@ -718,6 +718,155 @@ def _load_abstract_cell_lefs(
     return macros
 
 
+def _resolve_pdk_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
+    """The open_pdks KLayout LEF/DEF layer-map file for a resolved PDK
+    (``libs.tech/klayout/tech/<variant>.map``), as ``(path, resolution)``.
+
+    This module's own copy of the resolution ``lef_abstract.py`` and
+    ``place_and_route.py`` each already carry -- every verb module in this
+    repo is self-contained, the precedent those two modules' own docstrings
+    record, rather than one reaching into another's private helpers.
+
+    Prefers the variant-named file (``<variant>.map``, ``resolution=
+    "exact"``); falls back to a family-level file (``<family>.map``,
+    ``resolution="family"``) when the variant-named file is absent -- some
+    open_pdks families (gf180mcu, unlike sky130) ship a single map file
+    shared across every variant. Returns ``(None, "none")`` when neither
+    exists, or when the variant ships no ``klayout`` asset at all.
+    """
+    klayout_dir = pdk_info["assets"].get("klayout")
+    if klayout_dir is None:
+        return None, "none"
+    tech_dir = os.path.join(klayout_dir, "tech")
+    variant = pdk_info["variant"]
+    exact = os.path.join(tech_dir, f"{variant}.map")
+    if os.path.isfile(exact):
+        return exact, "exact"
+
+    family = variant
+    if len(family) > 1 and family[-1].isupper():
+        family = family[:-1]
+    if family != variant:
+        family_candidate = os.path.join(tech_dir, f"{family}.map")
+        if os.path.isfile(family_candidate):
+            return family_candidate, "family"
+
+    return None, "none"
+
+
+def _load_gds_to_lef_layer_map(map_path: str) -> dict[tuple[int, int], str]:
+    """Parse an open_pdks KLayout ``.map`` file into ``{(gds_layer,
+    gds_datatype): <LEF layer name>}``.
+
+    File shape (whitespace-delimited, one entry per line): ``<lef_layer_name>
+    <comma-separated purposes> <gds_layer> <gds_datatype>``.
+    ``NAME``/``DIEAREA`` pseudo-entries (annotation purposes, not a real
+    drawn layer) are skipped. Several purposes of the same LEF layer simply
+    contribute several entries mapping to the same name -- never a conflict,
+    since distinct purposes always use distinct datatypes in a real
+    open_pdks map file.
+
+    Same parser as ``lef_abstract.py``'s identically named function (see
+    :func:`_resolve_pdk_layer_map` for why it is duplicated rather than
+    imported).
+    """
+    mapping: dict[tuple[int, int], str] = {}
+    with open(map_path, encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.split("#", 1)[0].strip()
+            if not stripped:
+                continue
+            parts = stripped.split()
+            if len(parts) < 4:
+                continue
+            lef_name = parts[0]
+            if lef_name in ("NAME", "DIEAREA"):
+                continue
+            try:
+                gds_layer = int(parts[-2])
+                gds_datatype = int(parts[-1])
+            except ValueError:
+                continue
+            mapping[(gds_layer, gds_datatype)] = lef_name
+    return mapping
+
+
+def lef_layer_probe_roles(
+    deck: ExtractionDeck,
+    pdk_info: dict[str, Any] | None,
+) -> dict[str, str]:
+    """``{<lower-cased LEF layer name>: "metal<i>"}`` for every
+    ``deck.metals`` level the active PDK's KLayout ``.map`` file names --
+    the lookup :func:`_resolve_abstract_cell_pins` uses to give a
+    ``--abstract-cell-lef`` ``PORT`` box the probe-layer role of its own
+    declared ``LAYER`` (issue #2658).
+
+    The role strings are exactly the ones ``extract.py`` builds its
+    ``probe_layers`` list with (``f"metal{index}"`` over ``deck.metals``), so
+    a hit here makes :func:`_probe_single_abstract_pin_point` probe that
+    specific metal region *first* -- the same per-point priority issue #2142
+    already gave in-cell-label pins, whose own layer is known directly from
+    the label layer they were read off.
+
+    **Why this is needed.** Without a role a LEF-resolved point goes straight
+    to the bottom-up cross-layer fallback (``metal0``, ``metal1``, ... then
+    ``poly``/``nwell``/``tap``), which takes the first conductor carrying
+    *anything* at that coordinate. A foundry hard macro's ports sit on an
+    upper metal, and a routed parent's power grid runs on a lower one
+    directly underneath the macro's footprint -- so the fallback resolved
+    almost every separately declared pin of such a macro onto the one power
+    net, producing a black box whose pins are nearly all shorted together
+    and a downstream ``klt lvs`` compare that is structurally meaningless at
+    the macro boundary (issue #2658's report: 109 declared pins, ~104 on one
+    net).
+
+    **Strictly additive.** Returns ``{}`` -- restoring today's role-free
+    behaviour exactly -- whenever the PDK is unresolved (no ``--pdk``/
+    ``--pdk-root``), ships no KLayout ``.map`` file, or the map is
+    unreadable. A LEF layer name absent from the returned dict (a non-routing
+    annotation layer, a via layer, a metal level this deck does not declare)
+    likewise keeps the bottom-up fallback: nothing here can make a pin
+    resolve to *fewer* nets than before, only to its own declared layer's
+    one.
+
+    Matching is on ``deck.metals``'s own ``(layer, datatype)`` pairs first.
+    A deck metal whose exact pair the map does not list falls back to a
+    match on the **GDS layer number alone** -- within one GDS layer number an
+    open_pdks map file always names the same LEF layer across every drawn
+    purpose/datatype (``met1`` at ``68/20`` for routing and ``68/4`` for
+    ``LEFOBS``; only the ``NAME`` pseudo-entries differ, and those are
+    skipped above), so this widens coverage to a deck that draws on a
+    purpose the map happens not to enumerate without ever crossing between
+    two different metal levels.
+    """
+    if pdk_info is None:
+        return {}
+    map_path, _resolution = _resolve_pdk_layer_map(pdk_info)
+    if map_path is None:
+        return {}
+    try:
+        gds_to_lef = _load_gds_to_lef_layer_map(map_path)
+    except OSError:
+        # A map file that resolved but cannot be read degrades to "no map",
+        # never to a hard error: the whole mechanism is an optional accuracy
+        # improvement over a fallback that still works without it.
+        return {}
+    by_layer_number: dict[int, str] = {}
+    for (gds_layer, _datatype), lef_name in sorted(gds_to_lef.items()):
+        by_layer_number.setdefault(gds_layer, lef_name)
+
+    roles: dict[str, str] = {}
+    for index, pair in enumerate(deck.metals):
+        lef_name = gds_to_lef.get(pair) or by_layer_number.get(pair[0])
+        if lef_name is None:
+            continue
+        # First (lowest) metal level wins a duplicate name -- a map that
+        # named two deck levels identically would be malformed, and binding
+        # the lower one keeps the result deterministic either way.
+        roles.setdefault(lef_name.lower(), f"metal{index}")
+    return roles
+
+
 def _local_pin_candidate_points(
     layout: kdb.Layout,
     cell: kdb.Cell,
@@ -978,12 +1127,52 @@ def _polygon_interior_point(polygon: kdb.Polygon) -> kdb.Point:
     return kdb.Point(x, y)
 
 
+def _lef_port_access_points(
+    boxes: list[dict[str, Any]],
+    dbu: float,
+    lef_layer_roles: dict[str, str] | None,
+) -> list[tuple[kdb.Point, str | None]]:
+    """One ``(cell-local dbu point, probe-layer role or ``None``)`` candidate
+    per ``PORT`` box of a single ``--abstract-cell-lef`` pin.
+
+    **Every** disjoint box's bounding-box centre is kept, not just the first
+    in LEF source order (issue #1181): a LEF pin may legally declare several
+    disjoint same-layer rectangles for one electrical node, and only a subset
+    may receive external routing in any given placement. Committing to
+    ``boxes[0]`` silently discarded every rectangle after the first, so if the
+    externally-routed one was not first, the whole pin resolved onto an
+    isolated island net instead of the routed net.
+    :func:`_probe_abstract_pin_net` probes every candidate returned here and
+    keeps whichever one actually lands on routed geometry.
+
+    Each box's role is its **own** declared LEF ``LAYER``, translated through
+    ``lef_layer_roles`` (:func:`lef_layer_probe_roles`, issue #2658) -- per
+    point, never per pin, the same shape issue #2142 established for in-cell
+    labels: one LEF pin may legally declare ports on several metals, and a
+    single pin-wide role would send every off-role box straight back into the
+    bottom-up fallback this fix exists to keep them out of. ``None`` (no
+    resolvable PDK layer map, or a LEF layer name that maps to no deck metal
+    level) is exactly the pre-#2658 behaviour for that box.
+    """
+    import klayout.db as kdb
+
+    roles = lef_layer_roles or {}
+    points: list[tuple[kdb.Point, str | None]] = []
+    for box in boxes:
+        x0, y0, x1, y1 = box["bbox_um"]
+        role = roles.get(str(box.get("layer") or "").lower())
+        centre = kdb.Point(round(((x0 + x1) / 2) / dbu), round(((y0 + y1) / 2) / dbu))
+        points.append((centre, role))
+    return points
+
+
 def _resolve_abstract_cell_pins(
     layout: kdb.Layout,
     cell: kdb.Cell,
     deck: ExtractionDeck,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
     local_candidates: dict[str, list[tuple[kdb.Point, str]]] | None = None,
+    lef_layer_roles: dict[str, str] | None = None,
 ) -> tuple[
     list[tuple[str, list[tuple[kdb.Point, str | None]]]],
     str | None,
@@ -1049,11 +1238,16 @@ def _resolve_abstract_cell_pins(
       shift). A LEF whose macro declares a non-zero ``ORIGIN`` relative to
       its cell's drawn geometry is a known, out-of-scope gap -- not expected
       for a standard-cell/hard-macro LEF generated by (or compatible with)
-      real PDK tooling. The LEF layer name is not translated to a GDS layer
-      (that would need a PDK layer map ``klt extract`` does not resolve), so
-      these pins carry no layer role and are probed against the deck's
-      *signal* conductor layers bottom-up instead -- never against
-      ``nwell``/``tap``, see :data:`_BODY_IDENTITY_PROBE_ROLES`.
+      real PDK tooling. Each port box carries the probe-layer role of its
+      own declared LEF ``LAYER`` when ``lef_layer_roles`` translates that
+      name into one of the deck's metal levels (issue #2658; see
+      :func:`lef_layer_probe_roles`), exactly as an in-cell label carries
+      its own layer's role. A port box whose LEF layer the active PDK's
+      KLayout ``.map`` file does not translate into ``deck.metals`` -- and
+      every port box at all when no PDK/map resolves -- carries no role and
+      is probed against the deck's *signal* conductor layers bottom-up
+      instead, never against ``nwell``/``tap`` (see
+      :data:`_BODY_IDENTITY_PROBE_ROLES`).
     - ``None`` -- neither source resolved anything; the caller turns this
       into an :class:`ExtractError` when the cell type actually has
       instances.
@@ -1088,6 +1282,13 @@ def _resolve_abstract_cell_pins(
     point list, deduplicated, so :func:`_probe_abstract_pin_net` can probe
     every candidate exactly as it already does for a multi-rectangle LEF pin
     (#1181/#1182) and pick whichever one actually lands on routed geometry.
+
+    ``lef_layer_roles`` (issue #2658) is :func:`lef_layer_probe_roles`'s
+    ``{<lower-cased LEF layer name>: "metal<i>"}`` result for the active
+    PDK. Only consulted on the ``"lef_abstract"`` path (an in-cell label
+    already knows its own layer directly). ``None`` (the default) or an
+    empty dict behaves exactly as before this issue's fix: every LEF point
+    carries ``role=None`` and is probed bottom-up.
     """
     import klayout.db as kdb
 
@@ -1152,28 +1353,9 @@ def _resolve_abstract_cell_pins(
                     "the abstracted cell's resolved pin list"
                 )
                 continue
-            # Every disjoint PORT box's bounding-box centre is kept as its
-            # own candidate access point (issue #1181), not just the first
-            # in LEF source order: a LEF pin may legally declare several
-            # disjoint same-layer rectangles for one electrical node, and
-            # only a subset may receive external routing in any given
-            # placement. Committing to `boxes[0]` here silently discarded
-            # every rectangle after the first, so if the externally-routed
-            # one was not first, the whole pin resolved onto an isolated
-            # island net instead of the routed net. `_probe_abstract_pin_net`
-            # probes every candidate point and keeps whichever one actually
-            # lands on routed geometry.
-            lef_points: list[tuple[kdb.Point, str | None]] = [
-                (
-                    kdb.Point(
-                        round(((x0 + x1) / 2) / dbu),
-                        round(((y0 + y1) / 2) / dbu),
-                    ),
-                    None,
-                )
-                for x0, y0, x1, y1 in (box["bbox_um"] for box in boxes)
-            ]
-            lef_resolved.append((pin_name, lef_points))
+            lef_resolved.append(
+                (pin_name, _lef_port_access_points(boxes, dbu, lef_layer_roles))
+            )
         if lef_resolved:
             return lef_resolved, "lef_abstract", lef_path, lef_warnings
 
@@ -1565,6 +1747,24 @@ def _tied_abstract_pin_warning(
     resolved onto one of its own instance's inputs leaves that instance's
     output and input pins on one net.
 
+    **Why it is still a warning after issue #2658, and not escalated above
+    a ratio.** That issue reports the same observable shape at extreme
+    scale -- a 109-pin hard macro with ~104 pins on one net -- and proposes
+    (as an alternative to fixing the binding) raising this to an
+    application error once the tied-pin ratio crosses some threshold. The
+    binding fault behind it is fixed at source instead
+    (:func:`lef_layer_probe_roles`: a LEF port is now probed on its own
+    declared metal before the bottom-up fallback that collapsed it), so the
+    escalation would now fire almost exclusively on the *legal* case this
+    docstring opens with -- and a hard failure there needs an opt-out flag
+    (``--allow-tied-pins`` or a deck setting) that nothing else in the
+    extraction contract has a use for. The escalation is therefore
+    deliberately deferred, not dropped: it is tracked as issue #2695, as
+    defence-in-depth for a collapse this fix cannot reach (a run without
+    ``--pdk``, a PDK with no KLayout layer map, or a LEF whose port layers
+    the map does not name), where the role-free bottom-up fallback still
+    applies.
+
     Deliberately *not* a separate "two supply-role pins on one net" check
     (the first of the two self-checks issue #1366 proposes): an
     :class:`~klayout_tools.decks.ExtractionDeck` declares no power/ground
@@ -1698,6 +1898,7 @@ def _wire_abstract_cells(
         dict[int, dict[str, list[tuple[kdb.Point, str]]]] | None
     ) = None,
     global_net_ports_by_cell: dict[int, int] | None = None,
+    lef_layer_roles: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
     black-box ``kdb.SubCircuit`` (issue #620), and return the JSON response's
@@ -1783,6 +1984,13 @@ def _wire_abstract_cells(
     and the dropped port's *effect* on net naming elsewhere in the design is
     fixed separately, in
     :func:`_abstract_cell_body_identity_cover`.
+
+    ``lef_layer_roles`` (issue #2658) is :func:`lef_layer_probe_roles`'s
+    result for the active PDK, passed straight through to
+    :func:`_resolve_abstract_cell_pins` so a ``--abstract-cell-lef`` port
+    box is probed on the metal its own LEF ``LAYER`` names before any
+    bottom-up fallback. ``None`` (the default) or an empty dict is this
+    function's pre-#2658 behaviour exactly.
     """
     import klayout.db as kdb
 
@@ -1798,7 +2006,7 @@ def _wire_abstract_cells(
         cell = layout.cell(cell_index)
         local_candidates = (local_candidates_by_cell or {}).get(cell_index)
         pins, source, lef_path, pin_warnings = _resolve_abstract_cell_pins(
-            layout, cell, deck, lef_macros, local_candidates
+            layout, cell, deck, lef_macros, local_candidates, lef_layer_roles
         )
         warnings.extend(pin_warnings)
         if source is None:

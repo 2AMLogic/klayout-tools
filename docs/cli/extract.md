@@ -703,9 +703,24 @@ every occurrence of that type):
    and access points (each port's bounding-box centre, in the macro's own
    local micrometre frame — the standard convention every real PDK
    standard-cell LEF follows, `ORIGIN 0 0` matching the cell's own drawn GDS
-   origin). The LEF's own layer name is not translated to a GDS layer, so a
-   LEF-resolved pin is probed against the deck's **signal** conductor stack
-   bottom-up (`metals[]`, then `poly`) instead of one specific layer.
+   origin). Each `PORT` box is probed on the deck metal level its own LEF
+   `LAYER` names, when `--pdk`/`--pdk-root` resolves a PDK whose KLayout
+   LEF/DEF map file (`libs.tech/klayout/tech/<variant>.map`) translates that
+   name into one of the deck's `metals[]` levels (issue #2658) — the same
+   "the probe layer is a property of the access point" rule step 1 applies
+   to in-cell labels. Without a resolvable map (no `--pdk`, a PDK that ships
+   no map file, or a LEF layer the map does not name) that port box carries
+   no layer and is probed against the deck's **signal** conductor stack
+   bottom-up (`metals[]`, then `poly`) instead, exactly as before.
+
+   Passing `--pdk` matters for a **hard macro** here. Its ports sit on an
+   upper metal, while a routed parent's power grid runs on a lower one
+   straight under the macro's footprint — and the bottom-up fallback takes
+   the first conductor carrying anything at the port's coordinate, which is
+   the power strap. Without the map, such a macro can resolve nearly every
+   one of its separately declared pins onto that single net (the
+   many-pins-one-net `warnings[]` entry below), and the resulting black box
+   makes a downstream `klt lvs` compare meaningless at the macro boundary.
 
 **`nwell`/`tap` are never a fallback answer** (issue #2142). Whichever
 source resolved the pin, the probe only ever lands on the deck's
