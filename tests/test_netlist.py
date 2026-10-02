@@ -781,6 +781,41 @@ def test_pdk_root_match_and_parent_forms(tmp_path, argv_log):
         assert report["pdk"]["warning"] is None
 
 
+def test_pdk_root_wrong_variant_same_install_root_is_inconsistent(tmp_path, argv_log):
+    root = tmp_path / "pdks"
+    (root / "sky130A" / "libs.tech").mkdir(parents=True)
+    (root / "sky130B" / "libs.tech").mkdir(parents=True)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    report = run_netlist(
+        schematic,
+        str(tmp_path / "b.spice"),
+        xschem_binary=binary,
+        rcfile=_rc(tmp_path, f"set PDK_ROOT {root / 'sky130A'}\n"),
+        pdk="sky130B",
+        pdk_root=str(root),
+    )
+    block = report["pdk"]
+    assert block["consistent"] is False
+    assert "different PDKs" in block["warning"]
+
+
+def test_pdk_root_declared_ancestor_of_install_root_is_inconsistent(tmp_path, argv_log):
+    root = _fake_pdk_root(tmp_path)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    report = run_netlist(
+        schematic,
+        str(tmp_path / "b.spice"),
+        xschem_binary=binary,
+        rcfile=_rc(tmp_path, f"set PDK_ROOT {root.parent}\n"),
+        pdk_root=str(root),
+    )
+    block = report["pdk"]
+    assert block["consistent"] is False
+    assert "different PDKs" in block["warning"]
+
+
 def test_undeclared_or_computed_rcfile_root_is_not_compared(tmp_path, argv_log):
     root = _fake_pdk_root(tmp_path)
     schematic = _write_schematic(tmp_path)

@@ -490,10 +490,23 @@ def _rcfile_pdk_root(rcfile: str) -> str | None:
     return os.path.realpath(os.path.expanduser(value))
 
 
-def _related(a: str, b: str) -> bool:
-    """True if one path equals or contains the other (after realpath)."""
-    a, b = os.path.realpath(a), os.path.realpath(b)
-    return a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep)
+def _pdk_root_consistent(declared: str, root: str, variant: str) -> bool:
+    """True if a declared ``xschemrc`` PDK root agrees with the resolved PDK.
+
+    Consistent when ``declared`` equals the install ``root`` itself (the
+    ``$PDK_ROOT`` convention), or equals/sits under the resolved variant
+    directory ``root/variant`` (the ``$PDK_ROOT/sky130A`` convention).
+    Deliberately *not* consistent when ``declared`` merely sits above
+    ``root`` (too permissive to mean anything, e.g. ``$PDK_ROOT=/home/me``)
+    or names a different variant under the same install root (e.g. declares
+    ``sky130A`` while the resolved PDK is ``sky130B``).
+    """
+    declared = os.path.realpath(declared)
+    root = os.path.realpath(root)
+    if declared == root:
+        return True
+    variant_dir = os.path.realpath(os.path.join(root, variant))
+    return declared == variant_dir or declared.startswith(variant_dir + os.sep)
 
 
 def _pdk_consistency(
@@ -509,8 +522,9 @@ def _pdk_consistency(
 
     ``consistent`` is ``True``/``False`` when the rcfile declares a PDK root
     that does/doesn't match the resolved root (a declared root may be the
-    install root itself or its parent, e.g. ``$PDK_ROOT`` holding
-    ``sky130A/``), and ``None`` when there is nothing to compare.
+    install root itself, or the resolved variant directory under it, e.g.
+    ``$PDK_ROOT`` holding ``sky130A/``), and ``None`` when there is nothing
+    to compare.
     """
     explicit = pdk is not None or pdk_root is not None
     if not explicit and not (
@@ -528,7 +542,7 @@ def _pdk_consistency(
     consistent: bool | None = None
     warning: str | None = None
     if declared is not None:
-        consistent = _related(declared, found["root"])
+        consistent = _pdk_root_consistent(declared, found["root"], found["variant"])
         if not consistent:
             warning = (
                 f"xschemrc {rcfile} declares PDK root {declared}, but the "

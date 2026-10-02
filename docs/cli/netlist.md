@@ -187,10 +187,12 @@ The other, PDK-root unification, is covered as a consistency check — see
 the same discovery path as [`klt pdk`](pdk.md). When a PDK resolves, the PDK
 root the `--rcfile` statically declares (`set PDK_ROOT <path>` or
 `set env(PDK_ROOT) <path>`; computed values containing `$` or `[` are not
-evaluated) is compared with it. A declared root matches if it equals, contains,
-or is contained by the resolved install root (so both `$PDK_ROOT` and
-`$PDK_ROOT/sky130A` are accepted). A mismatch is a **warning**, not an error:
-the netlist is still produced and the exit code is unchanged.
+evaluated) is compared with it. A declared root matches if it equals the
+resolved install root, or equals/sits under the resolved variant directory
+(so both `$PDK_ROOT` and `$PDK_ROOT/sky130A` are accepted) — a declared root
+naming a *different* variant under the same install root, or merely sitting
+above the install root, is a mismatch. A mismatch is a **warning**, not an
+error: the netlist is still produced and the exit code is unchanged.
 
 - `--pdk`/`--pdk-root` given: strict — an unresolvable PDK is an error (exit `1`).
 - Neither given, `--rcfile` given, and `$PDK`/`$PDK_ROOT` set: best effort — an
