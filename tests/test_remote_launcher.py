@@ -748,6 +748,85 @@ def test_provision_returns_documented_response_shape(manifest_path):
     launcher.instance_id = None  # avoid a real terminate call in fixture teardown
 
 
+def test_provision_within_capacity_reports_no_wave_fields(manifest_path):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond("ec2", "run-instances", "i-abc123")
+
+    launcher = _make_launcher(manifest_path, aws, corner_count=20)
+    info = launcher.provision()
+
+    assert info["instance_type"] == "c7i.48xlarge"
+    assert "waves" not in info and "wave_capacity" not in info
+    assert launcher.wave_plan.waves == 1
+    launcher.instance_id = None
+
+
+def test_provision_beyond_capacity_runs_in_waves_on_largest_instance(manifest_path):
+    aws = _FakeAws(manifest_path)
+    aws.respond("ec2", "create-security-group", "sg-new")
+    aws.respond("ec2", "run-instances", "i-abc123")
+
+    launcher = _make_launcher(manifest_path, aws, corner_count=45)
+    info = launcher.provision()
+
+    assert info["instance_type"] == "c7i.48xlarge"
+    assert info["wave_capacity"] == 20
+    assert info["waves"] == 3
+    launcher.instance_id = None
+
+
+def test_max_concurrent_units_matches_select_instance_type_ceiling():
+    assert rl.max_concurrent_units(8) == 20
+    assert rl.select_instance_type(20, 8) == "c7i.48xlarge"
+    with pytest.raises(rl.RemoteLaunchError):
+        rl.select_instance_type(21, 8)
+    # Other widths: capacity is the exact boundary of the fit rule.
+    for threads in (1, 2, 4, 16, 64):
+        cap = rl.max_concurrent_units(threads)
+        assert cap >= 1
+        if cap * threads <= 192:
+            rl.select_instance_type(cap, threads)
+        with pytest.raises(rl.RemoteLaunchError):
+            rl.select_instance_type(cap + 1, threads)
+    # A unit wider than the whole box still gets one-per-wave.
+    assert rl.max_concurrent_units(500) == 1
+
+
+@pytest.mark.parametrize("n", [1, 5, 20])
+def test_plan_waves_within_capacity_matches_select_instance_type(n):
+    plan = rl.plan_waves(n)
+    assert plan.instance_type == rl.select_instance_type(n)
+    assert (plan.unit_count, plan.wave_capacity, plan.waves) == (n, n, 1)
+
+
+@pytest.mark.parametrize("n,waves", [(21, 2), (40, 2), (41, 3), (100, 5), (101, 6)])
+def test_plan_waves_beyond_capacity_caps_instance_and_counts_waves(n, waves):
+    plan = rl.plan_waves(n)
+    assert plan.instance_type == "c7i.48xlarge"
+    assert plan.wave_capacity == 20
+    assert plan.waves == waves
+
+
+@pytest.mark.parametrize("n,cap", [(21, 20), (45, 20), (100, 20), (7, 3), (1, 5)])
+def test_partition_waves_math(n, cap):
+    sizes = rl.partition_waves(n, cap)
+    assert sum(sizes) == n
+    assert len(sizes) == -(-n // cap)
+    assert max(sizes) <= cap
+    assert max(sizes) - min(sizes) <= 1
+    assert sizes == sorted(sizes, reverse=True)
+
+
+def test_plan_waves_rejects_non_positive_inputs():
+    with pytest.raises(rl.RemoteLaunchError):
+        rl.plan_waves(0)
+    with pytest.raises(rl.RemoteLaunchError):
+        rl.plan_waves(5, 0)
+    with pytest.raises(rl.RemoteLaunchError):
+        rl.partition_waves(5, 0)
+
+
 def test_provision_never_calls_aws_when_over_budget(manifest_path):
     aws = _FakeAws(manifest_path)
     launcher = _make_launcher(manifest_path, aws, max_hourly_cost_usd=0.01)

@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2084, `klt sim --backend remote`; `schema_version` unchanged,
+  additive): a single-host (`hosts: 1`) request larger than the largest
+  `c7i.48xlarge` concurrent capacity (20 units at 8 threads) now runs in
+  `ceil(N / capacity)` sequential waves on that one host instead of raising
+  `RemoteLaunchError`. `environment.remote` gains `waves` and `wave_capacity`
+  only for a multi-wave run; requests within capacity are unchanged.
 - **Fixed** (#1880, `klt functional-verification`; `schema_version`
   unchanged, no JSON shape change): `options.sdf`'s default `corner: "typ"`
   failed on every SDF `klt place-and-route` writes, because OpenSTA's

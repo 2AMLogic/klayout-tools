@@ -10958,3 +10958,14 @@ def test_checkpoint_fingerprint_keys_on_per_section_lib_content(tmp_path):
     assert (
         sim._checkpoint_fingerprint(**kwargs, corner_section_libs=(str(cap),)) != first
     )
+
+
+def test_build_remote_request_max_workers_only_pinned_when_given():
+    """Issue #2084: a multi-wave single-host run pins the guest pool to the
+    wave capacity; the default still drops it (guest picks its own)."""
+    request = {"options": {"max_workers": 99}}
+    kwargs = dict(timeout_s=10.0, keep_artifacts=False, want_waveforms=False)
+    default = sim_remote._build_remote_request(request, **kwargs)
+    assert "max_workers" not in default["options"]
+    pinned = sim_remote._build_remote_request(request, max_workers=20, **kwargs)
+    assert pinned["options"]["max_workers"] == 20
