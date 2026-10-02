@@ -1183,11 +1183,16 @@ EXTRACTION_DECK = ExtractionDeck(
     #   (`utility_functions.py`, itself symlinked into the sibling
     #   checkout) composing `l/weff*(b+1)*rspec + ... + 2/w*rzspec` with a
     #   per-flavour line-width delta (`*_lwd`) and a width-dependent
-    #   contact/transition term (`*_rzspec`). Neither is expressible in
-    #   this engine's `sheet_rho_ohm_sq` (+ the optional, *not*
-    #   width-dependent `fixed_offset_ohm`), so `R = L/W * rspec` is a
-    #   first-order transcription of the body term only -- stated here
-    #   rather than silently implied.
+    #   contact/transition term (`*_rzspec`). Issue #2660 closed this gap
+    #   (previously documented here as unmodelled), mirroring sg13g2's
+    #   #2652: `end_term_ohm_um` (applied as `end_term_ohm_um / W`) and
+    #   `width_offset_um` (shifts the body term's denominator from `W` to
+    #   `W + width_offset_um`) on each entry below transcribe the pinned
+    #   IHP-Open-PDK device symbols' closed-form `value=` expressions
+    #   (`end_term/w + body_coeff*l/(w +- lwd)`). cmos5l's own
+    #   `libs.tech/xschem/sg13cmos5l_pr/{rsil,rppd,rhigh}.sym` are symlinks
+    #   to the sg13g2 `.sym` files, so the constants are identical; see
+    #   each entry's own provenance comment.
     #
     # Metal resistors are deliberately **not** declared, even now that
     # #1417 (above) lands the Metal2-TopMetal1 stack those bodies need. The
@@ -1228,6 +1233,17 @@ EXTRACTION_DECK = ExtractionDeck(
                 (44, 0),  # ThickGateOx -/ a transistor, not a resistor)
             ),
             bulk_to_substrate=True,  # upstream connects `rsil_sub` to pwell
+            # Issue #2660: `libs.tech/xschem/sg13cmos5l_pr/rsil.sym` is a
+            # symlink -> `../../../../ihp-sg13g2/libs.tech/xschem/sg13g2_pr/
+            # rsil.sym` (pinned IHP-Open-PDK commit
+            # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
+            # rule-deck symlinks above), i.e. the same file sg13g2 uses:
+            # `9.0e-6/w + 7.0*l/(w + 1.0e-8)` (SI, w/l in metres).
+            # `end_term_ohm_um` and
+            # `width_offset_um` are the end-term and line-width-delta
+            # constants converted to ohm*um / um (`* 1e6`).
+            end_term_ohm_um=9.0,
+            width_offset_um=0.01,
             provenance=_cmos5l_shared_g2_provenance(
                 f"{_LVS_RULE_DECKS}/res_extraction.lvs", "rsil"
             ),
@@ -1255,6 +1271,17 @@ EXTRACTION_DECK = ExtractionDeck(
                 (44, 0),  # ThickGateOx -/
             ),
             bulk_to_substrate=True,  # upstream connects `rppd_sub` to pwell
+            # Issue #2660: `libs.tech/xschem/sg13cmos5l_pr/rppd.sym` is a
+            # symlink -> `../../../../ihp-sg13g2/libs.tech/xschem/sg13g2_pr/
+            # rppd.sym` (pinned IHP-Open-PDK commit
+            # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
+            # rule-deck symlinks above), i.e. the same file sg13g2 uses:
+            # `70.0e-6/w + 260.0*l/(w + 6.0e-9)` (SI, w/l in metres).
+            # `end_term_ohm_um` and
+            # `width_offset_um` are the end-term and line-width-delta
+            # constants converted to ohm*um / um (`* 1e6`).
+            end_term_ohm_um=70.0,
+            width_offset_um=0.006,
             provenance=_cmos5l_shared_g2_provenance(
                 f"{_LVS_RULE_DECKS}/res_extraction.lvs", "rppd"
             ),
@@ -1303,6 +1330,17 @@ EXTRACTION_DECK = ExtractionDeck(
                 (44, 0),  # ThickGateOx -/ above
             ),
             bulk_to_substrate=True,  # upstream connects `rhigh_sub` to pwell
+            # Issue #2660: `libs.tech/xschem/sg13cmos5l_pr/rhigh.sym` is a
+            # symlink -> `../../../../ihp-sg13g2/libs.tech/xschem/sg13g2_pr/
+            # rhigh.sym` (pinned IHP-Open-PDK commit
+            # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
+            # rule-deck symlinks above), i.e. the same file sg13g2 uses:
+            # `1.6e-4/w + 1360.0*l/(w - 0.04e-6)` (SI, w/l in metres).
+            # `end_term_ohm_um` and
+            # `width_offset_um` are the end-term and line-width-delta
+            # constants converted to ohm*um / um (`* 1e6`).
+            end_term_ohm_um=160.0,
+            width_offset_um=-0.04,
             provenance=_cmos5l_shared_g2_provenance(
                 f"{_LVS_RULE_DECKS}/res_extraction.lvs", "rhigh"
             ),
