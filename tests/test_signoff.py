@@ -7231,6 +7231,8 @@ def test_describe_grader_shape():
         "grading_ruleset_id",
         "source_doc",
         "graded_t1_item_ids",
+        "opt_in_evidence_kinds",
+        "opt_in_kinds_by_item",
     }
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")
@@ -12862,3 +12864,31 @@ def test_check_mode_sees_through_a_pointer_citation(tmp_path):
     drifted = check_tier_report(committed, manifest)
     assert drifted["status"] == "drifted"
     assert any(entry["field"].endswith("status") for entry in drifted["drift"])
+
+
+def test_describe_grader_opt_in_kinds_derive_from_the_grading_table(capsys):
+    """Issue #2655: the published kind->item mapping is the grader's own."""
+    result = signoff_module.describe_grader()
+    table = signoff_module._OPT_IN_KIND_ITEMS
+    assert result["opt_in_evidence_kinds"] == {
+        kind: sorted(items) for kind, items in table.items()
+    }
+    # Empty-scope kinds are listed explicitly, not omitted.
+    assert result["opt_in_evidence_kinds"]["power"] == []
+    # Inverse answers "what can satisfy item N?".
+    for kind, items in table.items():
+        for item in items:
+            assert kind in result["opt_in_kinds_by_item"][str(item)]
+    assert "8" in result["opt_in_kinds_by_item"]
+    assert "generic" in result["opt_in_kinds_by_item"]["8"]
+
+
+def test_signoff_help_lists_opt_in_kind_scopes(capsys):
+    from klayout_tools.cli.parser import create_parser
+
+    with pytest.raises(SystemExit):
+        create_parser().parse_args(["signoff", "--help"])
+    out = capsys.readouterr().out
+    for kind in signoff_module._OPT_IN_KIND_ITEMS:
+        assert f"{kind}:" in out
+    assert "power: no T1 item" in out

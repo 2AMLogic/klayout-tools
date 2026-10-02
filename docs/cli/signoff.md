@@ -1539,6 +1539,26 @@ Two mechanisms close that gap, both driven by the same content hash:
    the same "never invent a claim this build cannot substantiate" rule
    `graded_by_build` follows.
 
+   The payload also carries two additive fields (issue #2655, no
+   `schema_version` bump) publishing the **opt-in evidence kinds** — the
+   non-native envelope kinds that may satisfy only a restricted set of T1
+   items — rendered from the same table the grader consults, so they cannot
+   drift from it:
+
+   ```json
+   "opt_in_evidence_kinds": {"generic": [8], "power": [], "erc": [11], "place-and-route": [11]},
+   "opt_in_kinds_by_item": {"8": ["generic"], "11": ["erc", "place-and-route"]}
+   ```
+
+   `opt_in_evidence_kinds` maps kind to the item ids it may satisfy; an
+   empty list (`power` today) means the kind is recognised but currently
+   satisfies **nothing** (every item grades it `wrong_kind`).
+   `opt_in_kinds_by_item` is the inverse — "which non-native kinds can
+   satisfy item N?"; an item absent from it accepts no opt-in kind. The same
+   mapping is printed in the epilog of `klt signoff --help`. Values reflect
+   the running build and have changed across releases; read them at runtime
+   rather than hardcoding.
+
    Always reports **this build's own shipped** grading rules — deliberately
    unaffected by `--tiers-doc`/`$KLT_TIERS_DOC` (which override the item
    *list* a tier report parses, not the grading logic compiled into the

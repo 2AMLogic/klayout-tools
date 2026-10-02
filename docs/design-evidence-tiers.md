@@ -356,7 +356,9 @@ written to every block.
    unlike every other item, item 8 is the *only* T1 item this generic kind
    may satisfy: see `docs/cli/signoff.md`'s "Generic evidence (opt-in,
    non-`klt`-native)" section for the envelope shape and why items 3–7 keep
-   rejecting it.
+   rejecting it. The full opt-in kind -> item mapping (including kinds
+   whose scope is currently empty) is published by `klt signoff
+   --describe-grader` and the `klt signoff --help` epilog.
 9. **Testbenches shipped** — every claimed measurement's testbench
    committed, with a documented cold-start invocation a third party can
    run; pinned PDK revision.
