@@ -801,8 +801,6 @@ def test_sg13cmos5l_thick_oxide_mos_was_misclassified_before_mos_flavours(
 # Drawn poly resistors (issue #1415)
 # --------------------------------------------------------------------------- #
 
-_RES_SQUARES = 6.0  # 6um marked segment / 1um drawn width
-
 
 def test_sg13cmos5l_recognises_the_three_poly_resistor_flavours():
     """`EXTRACTION_DECK.resistors` declares exactly the three poly flavours
@@ -976,9 +974,10 @@ def test_golden_pair_sg13cmos5l_poly_resistor_r_ohm_matches_provenance_coefficie
     tmp_path: Path, name: str, extra_layers: tuple[tuple[int, int], ...]
 ):
     """A drawn 6-square `GatPoly` bar marked `PolyRes` and narrowed to one
-    flavour extracts as that device class with `R = squares *
-    sheet_rho_ohm_sq`, computed from the deck's own provenance-cited
-    coefficient -- the golden layout->netlist pair for each new entry."""
+    flavour extracts as that device class with `R = L / (W +
+    width_offset_um) * sheet_rho_ohm_sq + end_term_ohm_um / W` (issue
+    #2660's two-term correction, same as sg13g2's #2652) -- the golden
+    layout->netlist pair for each entry."""
     resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == name)
 
     path = _write_gds(
@@ -991,9 +990,20 @@ def test_golden_pair_sg13cmos5l_poly_resistor_r_ohm_matches_provenance_coefficie
     assert device["class"] == name
     assert device["params"]["l_um"] == pytest.approx(6.0)
     assert device["params"]["w_um"] == pytest.approx(1.0)
-    assert device["params"]["r_ohm"] == pytest.approx(
-        _RES_SQUARES * resistor.sheet_rho_ohm_sq
+    w_um = 1.0
+    l_um = 6.0
+    expected_r_ohm = (
+        l_um / (w_um + resistor.width_offset_um) * resistor.sheet_rho_ohm_sq
     )
+    expected_r_ohm += resistor.end_term_ohm_um / w_um
+    assert device["params"]["r_ohm"] == pytest.approx(expected_r_ohm)
+    # Independent hand-computed values (issue #2660 table).
+    hand = {
+        "rsil": 6 / 1.01 * 7.0 + 9.0,
+        "rppd": 6 / 1.006 * 260.0 + 70.0,
+        "rhigh": 6 / 0.96 * 1360.0 + 160.0,
+    }
+    assert device["params"]["r_ohm"] == pytest.approx(hand[name])
 
 
 @pytest.mark.parametrize(("name", "extra_layers"), _POLY_RESISTOR_FLAVOURS)
