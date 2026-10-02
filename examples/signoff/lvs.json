@@ -15,6 +15,7 @@
     "parameter_tolerance": null,
     "compare_parameters": null,
     "power_connectivity": null,
+    "anchor_top_level_pins": null,
     "supply_nets": [
       "GND",
       "VCC",

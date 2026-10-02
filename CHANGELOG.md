@@ -14,6 +14,42 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2692, `klt lvs`; `schema_version` unchanged, additive new
+  option + `mismatches[].category` — but **a `reference.form:
+  "gate-level-verilog"` compare that previously reported `match` on a
+  permuted macro bus now reports `mismatch` by default, and every such
+  compare now carries one extra `severity: "warning"` entry**):
+  `NetlistComparer` pairs nets by **topology**, and top-level pin names
+  were never used as anchors — so two nets with identical topology were
+  interchangeable and swapping them compared clean. On a black-box
+  (pin-only) macro that covers a whole bus: every bit wired straight from a
+  top-level port to a macro pin is topologically indistinguishable from its
+  neighbours, so a **bit-reversed** `din0[15:0]` on the real
+  `sky130_sram_1kbyte_1rw1r_32x256_8` reported `status: "match"`,
+  `mismatch_count: 0`. A macro bus taken to the chip boundary (SRAM
+  data/address pins, most IP buses) is the ordinary case, so a mis-ordered
+  bus could pass sign-off clean. `klt lvs` now anchors every top-level pin
+  name declared on **both** sides by name —
+  `NetlistComparer.same_nets(..., must_match=True)`, the mechanism
+  `hints.same_nets` already exposed by hand — so a permuted bus contradicts
+  an assertion the comparer must honor and is reported as one
+  `hints.rejected` entry per disagreeing pin (each carrying the new
+  `details.anchored_top_level_pin`, which tells an automatic anchor's
+  refusal apart from a hand-written hint's). New `options
+  .anchor_top_level_pins` (boolean) controls it: **on by default for
+  `reference.form: "gate-level-verilog"`** (whose reference is generated
+  from the same DEF/Verilog the layout's pin names come from, so a shared
+  pin name names the same boundary node by construction), **off for every
+  other form** (opt in with `true`), and `false` restores the previous
+  topology-only compare. `"engine": "klayout"` only. Each run that
+  anchors at least one pin discloses it as a single new
+  `topology.top_level_pins_anchored` warning naming the anchored pins, so a
+  `"match"` resting on name-anchored boundary pins is distinguishable from
+  one reached by topology alone — which is why a previously clean
+  gate-level report now carries `mismatch_count: 1` with `error_count: 0`.
+  A pin name present on only one side, and an interior node (a bit tied to
+  a Verilog constant included), are deliberately not anchored — see
+  `docs/cli/lvs.md`, "Top-level pin anchoring".
 - **Added** (#55, new verb `klt netlist`; `schema_version: 1`): export an
   xschem schematic to a SPICE netlist headlessly, with a real exit status,
   plus a `--check` staleness gate over a committed netlist. The verb **owns

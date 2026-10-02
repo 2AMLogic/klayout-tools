@@ -14991,6 +14991,10 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "compare_parameters": None,
         # Issue #1952: `null` when the option was omitted.
         "power_connectivity": None,
+        # Issue #2692: `null` when the option was omitted -- the
+        # form-dependent default applies (off for this `plain-element`
+        # reference, on for `gate-level-verilog`).
+        "anchor_top_level_pins": None,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
     }
     # The pre-#1205 fields are untouched -- this is an additive change, so no
@@ -15936,7 +15940,12 @@ def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
     }
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
-    assert report["mismatch_count"] == 0
+    # Issue #2692: every `gate-level-verilog` compare now carries the
+    # `topology.top_level_pins_anchored` disclosure (anchoring is on by
+    # default for this form), so a clean run is `error_count: 0` with that one
+    # warning rather than an empty `mismatches[]`.
+    assert report["error_count"] == 0
+    assert report["category_counts"] == {"topology.top_level_pins_anchored": 1}
 
 
 def test_run_lvs_gate_level_verilog_reference_populates_provenance_pdk(tmp_path):
@@ -16046,7 +16055,10 @@ def test_run_lvs_gate_level_verilog_reference_escaped_hierarchy_names(tmp_path):
     }
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
-    assert report["mismatch_count"] == 0
+    # Issue #2692: clean apart from the always-on
+    # `topology.top_level_pins_anchored` disclosure this form now carries.
+    assert report["error_count"] == 0
+    assert report["category_counts"] == {"topology.top_level_pins_anchored": 1}
 
 
 #: The same design with power pins on the LAYOUT side only -- the real
@@ -16118,7 +16130,12 @@ def test_run_lvs_gate_level_verilog_tolerates_layout_side_power_pins(tmp_path):
     }
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
-    assert report["mismatch_count"] == 0
+    # Issue #2692: clean apart from the always-on
+    # `topology.top_level_pins_anchored` disclosure this form now carries --
+    # the layout's extra `VPWR`/`VGND` pins are *not* anchored (they appear on
+    # one side only), so they still cannot produce a finding here.
+    assert report["error_count"] == 0
+    assert report["category_counts"] == {"topology.top_level_pins_anchored": 1}
     assert "pin.unmatched" not in report["category_counts"]
 
 
@@ -16179,7 +16196,14 @@ def test_run_lvs_gate_level_verilog_flags_supply_matched_to_signal_net(tmp_path)
     # The signal verdict is untouched -- this issue adds a disclosure
     # beside `status`, it never changes it.
     assert report["status"] == "match"
-    assert report["mismatch_count"] == 0
+    # Issue #2692: clean apart from the always-on
+    # `topology.top_level_pins_anchored` disclosure this form now carries. The
+    # layout's `VGND` rail is still free to pair with the reference's spare
+    # `OEN` signal net: `VGND` is a layout-side-only pin name, so anchoring
+    # never constrains it (and `OEN`'s own reference-side pin has no
+    # same-named layout counterpart either).
+    assert report["error_count"] == 0
+    assert report["category_counts"] == {"topology.top_level_pins_anchored": 1}
 
     correspondence = report["net_correspondence"]
     supply_to_signal = [
@@ -16342,8 +16366,11 @@ def test_run_lvs_gate_level_verilog_power_miswire_leaves_signal_status_match(tmp
     )
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
-    assert report["mismatch_count"] == 0
+    # Issue #2692: clean apart from the always-on
+    # `topology.top_level_pins_anchored` disclosure this form now carries --
+    # the signal verdict stays `match`, exactly as before.
     assert report["error_count"] == 0
+    assert report["category_counts"] == {"topology.top_level_pins_anchored": 1}
 
 
 def test_run_lvs_gate_level_verilog_power_miswire_is_detected(tmp_path):
@@ -16413,6 +16440,349 @@ def test_run_lvs_gate_level_verilog_power_connectivity_clean_layout(tmp_path):
             'power/ground pin (see docs/cli/lvs.md, "power_pins_derivation")'
         ),
     }
+
+
+# --------------------------------------------------------------------------- #
+# options.anchor_top_level_pins (issue #2692): top-level pin names as compare
+# anchors
+# --------------------------------------------------------------------------- #
+
+#: A black-box (pin-only) macro, the shape `klt extract --abstract-cells`
+#: writes for a hard macro and the shape the `gate-level-verilog` conversion
+#: reads out of a library `.spice`: a four-bit data bus plus one output, no
+#: devices inside. Because the master carries no internal structure, its pins
+#: are topologically interchangeable -- which is exactly why a bus wired
+#: straight to the chip boundary can be permuted undetected without issue
+#: #2692's anchoring.
+_MACRO_BUS_LIBRARY_SPICE = ".subckt mylib__macro_4 D0 D1 D2 D3 Q\n.ends\n"
+
+#: Issue #2692's headline repro, in miniature: every bit of the macro's bus is
+#: driven straight from a top-level input port (the ordinary case for an SRAM's
+#: data/address pins, or any IP bus taken to the chip boundary).
+_MACRO_BUS_REFERENCE_VERILOG = """
+module top(din, dout);
+  input [3:0] din;
+  output dout;
+  mylib__macro_4 u1 (.D0(din[0]), .D1(din[1]), .D2(din[2]), .D3(din[3]), .Q(dout));
+endmodule
+"""
+
+#: The correctly-wired layout side: bit `i` of the top-level bus reaches macro
+#: pin `Di`, exactly as the reference declares.
+_MACRO_BUS_LAYOUT_SPICE = """
+.subckt top din[3] din[2] din[1] din[0] dout
+X1 din[0] din[1] din[2] din[3] dout mylib__macro_4
+.ends
+.subckt mylib__macro_4 D0 D1 D2 D3 Q
+.ends
+"""
+
+#: The same layout with the bus **bit-reversed** (`D0` reaches `din[3]`, `D1`
+#: reaches `din[2]`, ...) -- a real, fabrication-visible defect that is
+#: topologically symmetric, so `NetlistComparer`'s topology-only net pairing
+#: cannot see it.
+_MACRO_BUS_LAYOUT_SPICE_REVERSED = _MACRO_BUS_LAYOUT_SPICE.replace(
+    "X1 din[0] din[1] din[2] din[3] dout", "X1 din[3] din[2] din[1] din[0] dout"
+)
+
+
+def _macro_bus_request(
+    tmp_path,
+    layout_spice=_MACRO_BUS_LAYOUT_SPICE,
+    reference_verilog=_MACRO_BUS_REFERENCE_VERILOG,
+    **options,
+):
+    """A `reference.form: "gate-level-verilog"` request against the black-box
+    macro-bus fixtures above, with an optional `options` block (issue
+    #2692)."""
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _MACRO_BUS_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
+    reference_path = _write(tmp_path / "ref.v", reference_verilog)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    if options:
+        request["options"] = options
+    return json.dumps(request)
+
+
+def test_run_lvs_bit_reversed_macro_bus_compares_clean_without_anchoring(tmp_path):
+    """Issue #2692's reported defect, reproduced: with anchoring opted out, a
+    bit-reversed top-level bus on a black-box macro reports `status: "match"`
+    with zero findings.
+
+    This is the negative control the fix is measured against, and the
+    documented limitation of a topology-only compare (`docs/cli/lvs.md`,
+    "Top-level pin anchoring"): both sides agree that four nets each carry one
+    top-level pin and one macro pin, and nothing else distinguishes them, so
+    `NetlistComparer` finds an isomorphism that maps `din[0]` onto `din[3]`
+    and calls the netlists equivalent. Only the pin *names* can tell the two
+    wirings apart.
+    """
+    report = run_lvs(
+        _macro_bus_request(
+            tmp_path,
+            _MACRO_BUS_LAYOUT_SPICE_REVERSED,
+            anchor_top_level_pins=False,
+        )
+    )
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+    assert report["options"]["anchor_top_level_pins"] is False
+
+
+def test_run_lvs_bit_reversed_macro_bus_is_caught_by_pin_anchoring(tmp_path):
+    """Issue #2692's acceptance criterion: the same bit-reversed bus reports
+    `status: "mismatch"` under the default (anchoring on for
+    `reference.form: "gate-level-verilog"`), with one `hints.rejected` entry
+    per boundary pin the two sides disagree about."""
+    report = run_lvs(_macro_bus_request(tmp_path, _MACRO_BUS_LAYOUT_SPICE_REVERSED))
+
+    assert report["status"] == "mismatch"
+    rejected = [m for m in report["mismatches"] if m["category"] == "hints.rejected"]
+    assert [m["net"]["layout"] for m in rejected] == [
+        "DIN[0]",
+        "DIN[1]",
+        "DIN[2]",
+        "DIN[3]",
+    ]
+    # Every refused pairing is attributed to the pin that licensed it -- the
+    # field that tells an automatic anchor's refusal apart from a hand-written
+    # `hints.same_nets` refusal (whose `details` stays `null`).
+    assert [m["details"] for m in rejected] == [
+        {"anchored_top_level_pin": f"DIN[{bit}]"} for bit in range(4)
+    ]
+    assert all(m["severity"] == "error" for m in rejected)
+    assert all(m["net"]["reference"] == m["net"]["layout"] for m in rejected)
+    assert report["error_count"] >= 4
+
+
+def test_run_lvs_macro_bus_anchoring_discloses_the_anchored_pins(tmp_path):
+    """Issue #2692: the correctly-wired bus still reports `status: "match"`
+    -- anchoring only ever removes a degree of freedom, it never invents a
+    defect -- and the run discloses that the verdict rests on name-anchored
+    boundary pins, naming every pin it anchored."""
+    report = run_lvs(_macro_bus_request(tmp_path))
+
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+    assert "hints.rejected" not in report["category_counts"]
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    assert entry["severity"] == "warning"
+    assert entry["side"] == "both"
+    assert entry["details"] == {
+        "pins": ["DIN[0]", "DIN[1]", "DIN[2]", "DIN[3]", "DOUT"],
+        "pin_count": 5,
+        "pins_truncated": False,
+    }
+    # The option was not named in the request: the disclosure is how a reader
+    # of a committed report learns the default-on anchoring ran at all.
+    assert report["options"]["anchor_top_level_pins"] is None
+
+
+def test_run_lvs_macro_bus_anchoring_opt_out_emits_no_disclosure(tmp_path):
+    """Issue #2692: with the option off there is nothing to disclose -- the
+    report stays byte-identical in shape to one from before this hook
+    existed."""
+    report = run_lvs(_macro_bus_request(tmp_path, anchor_top_level_pins=False))
+
+    assert report["status"] == "match"
+    assert report["mismatches"] == []
+    assert "topology.top_level_pins_anchored" not in report["category_counts"]
+
+
+def test_run_lvs_anchoring_is_off_by_default_for_a_plain_element_reference(tmp_path):
+    """Issue #2692's scope boundary: a `plain-element` reference's pin names
+    are only conventionally related to the layout's (a hand-authored
+    schematic may legitimately spell a boundary node differently on each
+    side), so anchoring stays opt-in there -- and opting in works, which is
+    what makes it available to every form."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+
+    default_report = run_lvs(json.dumps(request))
+    assert default_report["status"] == "match"
+    assert "topology.top_level_pins_anchored" not in default_report["category_counts"]
+    assert default_report["options"]["anchor_top_level_pins"] is None
+
+    request["options"] = {"anchor_top_level_pins": True}
+    opted_in = run_lvs(json.dumps(request))
+    assert opted_in["status"] == "match"
+    assert opted_in["category_counts"]["topology.top_level_pins_anchored"] == 1
+    assert opted_in["options"]["anchor_top_level_pins"] is True
+    (entry,) = [
+        m
+        for m in opted_in["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    assert entry["details"]["pins"] == ["A", "VGND", "VPWR", "Y"]
+
+
+def test_run_lvs_anchoring_skips_a_pin_a_hand_written_hint_already_names(tmp_path):
+    """Issue #2692: a `hints.same_nets` entry is the caller's own explicit
+    declaration about the nets it names, so anchoring leaves them alone --
+    otherwise one refusal would be reported twice (once per mechanism) and
+    the report could not say which assertion the comparer rejected."""
+    request = json.loads(_macro_bus_request(tmp_path))
+    # `NetlistSpiceReader` upper-cases net names, which is the spelling a
+    # `hints.same_nets` entry has to use (`_apply_hints` looks each net up by
+    # name, exactly as given).
+    request["hints"] = {"same_nets": [["DIN[0]", "DIN[0]"]]}
+    hinted = run_lvs(json.dumps(request))
+
+    assert hinted["status"] == "match"
+    (entry,) = [
+        m
+        for m in hinted["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    # `DIN[0]` is the caller's business now; the remaining four pins are
+    # anchored automatically.
+    assert entry["details"]["pins"] == ["DIN[1]", "DIN[2]", "DIN[3]", "DOUT"]
+
+
+#: Issue #2692: the same macro with two of its bus pins tied to Verilog
+#: constants (`1'b0`/`1'b1`, which the conversion renders as the
+#: `__CONST0__`/`__CONST1__` nets) instead of to top-level ports -- the
+#: issue's second repro, and the boundary of what *top-level pin* anchoring
+#: can reach.
+_MACRO_TIE_REFERENCE_VERILOG = """
+module top(din, dout);
+  input [1:0] din;
+  output dout;
+  mylib__macro_4 u1 (.D0(din[0]), .D1(din[1]), .D2(1'b0), .D3(1'b1), .Q(dout));
+endmodule
+"""
+
+_MACRO_TIE_LAYOUT_SPICE = """
+.subckt top din[1] din[0] dout
+X1 din[0] din[1] lo hi dout mylib__macro_4
+.ends
+.subckt mylib__macro_4 D0 D1 D2 D3 Q
+.ends
+"""
+
+#: The same layout with the two tie nets swapped (`D2` reaches the layout's
+#: logic-high node, `D3` the logic-low one) -- the issue's `.S(2'b10)` repro.
+_MACRO_TIE_LAYOUT_SPICE_SWAPPED = _MACRO_TIE_LAYOUT_SPICE.replace(
+    "X1 din[0] din[1] lo hi dout", "X1 din[0] din[1] hi lo dout"
+)
+
+
+def test_run_lvs_macro_bus_anchoring_does_not_reach_internal_tie_nets(tmp_path):
+    """Issue #2692's documented residual gap, pinned by a test so it cannot
+    be mistaken for coverage this option provides.
+
+    Anchoring is licensed by a pin name present on *both* sides, so it reaches
+    exactly the nets that are top-level pins. A bit tied to a Verilog constant
+    is not: `__CONST0__`/`__CONST1__` are interior nets of the reference, and
+    the layout's own tie nodes are interior too, so the two tie bits stay
+    topologically interchangeable (one macro pin each, nothing else) and
+    swapping them still compares clean. The correctly-wired twin below is the
+    control that the fixture itself is sound. See `docs/cli/lvs.md`,
+    "Top-level pin anchoring" -- reaching this case needs the macro's *own*
+    pin names anchored, which is a different (and separately filed)
+    mechanism.
+    """
+    clean = run_lvs(
+        _macro_bus_request(
+            tmp_path / "clean",
+            _MACRO_TIE_LAYOUT_SPICE,
+            _MACRO_TIE_REFERENCE_VERILOG,
+        )
+    )
+    assert clean["status"] == "match"
+    assert clean["error_count"] == 0
+
+    swapped = run_lvs(
+        _macro_bus_request(
+            tmp_path / "swapped",
+            _MACRO_TIE_LAYOUT_SPICE_SWAPPED,
+            _MACRO_TIE_REFERENCE_VERILOG,
+        )
+    )
+    assert swapped["status"] == "match"
+    # The two bits that *are* top-level pins are still anchored, so the
+    # anchoring that did run is unaffected by the gap above.
+    (entry,) = [
+        m
+        for m in swapped["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    assert entry["details"]["pins"] == ["DIN[0]", "DIN[1]", "DOUT"]
+
+
+def test_run_lvs_anchor_top_level_pins_rejects_a_non_boolean(tmp_path):
+    """Issue #2692: a wrong-shaped value is a clean request error, matching
+    every other option parser in this module."""
+    with pytest.raises(LvsError, match="options.anchor_top_level_pins must be a"):
+        run_lvs(_macro_bus_request(tmp_path, anchor_top_level_pins="yes"))
+
+
+def test_netgen_engine_anchor_top_level_pins_unsupported_raises(tmp_path, monkeypatch):
+    """Issue #2692: anchoring is applied through `klayout.db`'s
+    `NetlistComparer.same_nets` -- the same hook `request.hints` is rejected
+    for on the netgen engine. Rejected rather than silently ignored: a caller
+    who asked for the stronger compare must not be handed the weaker one."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(tmp_path, options={"anchor_top_level_pins": True})
+
+    with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
+        run_lvs(path)
+
+    # An explicit opt-out is accepted on both engines: it asks for the
+    # behaviour netgen already has.
+    off_dir = tmp_path / "off"
+    off_dir.mkdir()
+    off = _netgen_request(off_dir, options={"anchor_top_level_pins": False})
+    assert run_lvs(off)["status"] == "match"
+
+
+def test_rerun_reconstructs_anchor_top_level_pins(tmp_path):
+    """Issue #2692: a committed report's `options.anchor_top_level_pins` must
+    round-trip back into the same compare -- including `false`, which (unlike
+    every other option here) is *not* what omitting it means for a
+    `gate-level-verilog` reference, so dropping it would replay the compare
+    with anchoring on and report the difference as drift."""
+    committed = {
+        "options": {"anchor_top_level_pins": False},
+        "layout": "layout.spice",
+        "reference": "ref.spice",
+        "top": "top",
+    }
+    request = lvs._reconstruct_lvs_request(committed)
+    assert request["options"]["anchor_top_level_pins"] is False
+
+    committed["options"]["anchor_top_level_pins"] = True
+    request = lvs._reconstruct_lvs_request(committed)
+    assert request["options"]["anchor_top_level_pins"] is True
+
+    # `null`/omitted stays omitted: that is already the form-dependent
+    # default, so re-asserting it would not keep the reconstructed request
+    # any closer to the original.
+    committed["options"]["anchor_top_level_pins"] = None
+    request = lvs._reconstruct_lvs_request(committed)
+    assert "anchor_top_level_pins" not in request.get("options", {})
 
 
 #: Issue #2076's reproducer library: three logic cells whose outputs are
@@ -17040,7 +17410,12 @@ def test_run_lvs_gate_level_verilog_ignores_power_only_filler_circuit(tmp_path):
     assert report["error_count"] == 0
     assert "topology" not in report.get("category_counts", {})
     assert report.get("category_counts", {}).get("topology.power_only_pruned") == 1
-    (entry,) = report["mismatches"]
+    # Issue #2692: this form's compare also carries the always-on
+    # `topology.top_level_pins_anchored` disclosure now, so the pruning
+    # disclosure is selected by category rather than by being the sole entry.
+    (entry,) = [
+        e for e in report["mismatches"] if e["category"] == "topology.power_only_pruned"
+    ]
     assert entry["severity"] == "warning"
     assert "MYLIB__TAPVPWRVGND_1" in entry["description"]
 
@@ -18824,7 +19199,10 @@ def test_power_grid_no_pdn_row_rail_fragmentation_is_detected(tmp_path):
     # The signal half never saw a defect: the chain matches instance for
     # instance. The failure is purely the power half.
     assert report["status"] == "match"
-    assert report["mismatch_count"] == 0
+    # Issue #2692: clean apart from the always-on
+    # `topology.top_level_pins_anchored` disclosure this form now carries.
+    assert report["error_count"] == 0
+    assert report["category_counts"] == {"topology.top_level_pins_anchored": 1}
 
     power = report["power_connectivity"]
     assert power["status"] == "mismatch"
@@ -18868,7 +19246,10 @@ def test_power_grid_strapped_twin_reports_match(tmp_path):
     report = run_lvs(_power_grid_request(tmp_path, rows=6, strapped=True))
 
     assert report["status"] == "match"
-    assert report["mismatch_count"] == 0
+    # Issue #2692: clean apart from the always-on
+    # `topology.top_level_pins_anchored` disclosure this form now carries.
+    assert report["error_count"] == 0
+    assert report["category_counts"] == {"topology.top_level_pins_anchored": 1}
     power = report["power_connectivity"]
     assert power["status"] == "match"
     assert power["findings"] == []

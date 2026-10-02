@@ -123,7 +123,7 @@ import os
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ._paths import _load_request_json, _resolve_relative
 from ._paths import load_request_arg as _shared_load_request_arg
@@ -349,6 +349,19 @@ CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
 #: .connect_pin`) before comparing, so it is not reported as
 #: `pin.unmatched`/`net.unmatched` -- see `_apply_gate_level_port_aliases`.
 CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_joined"
+#: Issue #2692: `options.anchor_top_level_pins` tied each top-level pin name
+#: declared on *both* sides to its own net on the other side
+#: (`NetlistComparer.same_nets(..., must_match=True)`, the same mechanism
+#: `hints.same_nets` exposes by hand) before comparing -- the disclosure that
+#: this run's verdict rests on name-anchored boundary pins, not on topology
+#: alone. `NetlistComparer` pairs nets purely by topology, so without this a
+#: topologically-symmetric swap between two boundary nets (two bits of a
+#: black-box macro's bus, both wired straight through to a top-level pin) is
+#: interchangeable with its neighbour and compares clean. See
+#: `_apply_top_level_pin_anchors`; a pin pairing the comparer *refuses* is
+#: reported as `hints.rejected` (carrying `details.anchored_top_level_pin`),
+#: exactly as a hand-written `hints.same_nets` entry would be.
+CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED = "topology.top_level_pins_anchored"
 #: Issue #2653: `hints.short_nets` resolved a mask-option (metal-option/
 #: probe-pad/e-fuse trim) reference's behavioural option construct to one
 #: concrete drawn state before comparing -- every reference net group the
@@ -844,6 +857,22 @@ def run_lvs(request: str) -> dict[str, Any]:
     Under ``reference.form: "subckt-call"`` the two disclosures combine:
     the primary is excluded as a placeholder *and* the geometry is
     secondary, so nothing about the device is compared at all.
+
+    ``options.anchor_top_level_pins`` (issue #2692, ``"engine": "klayout"``
+    only) decides whether every top-level pin name declared on **both** sides
+    is used as a compare anchor -- ``NetlistComparer`` pairs nets by topology
+    and never by top-level pin name, so without it two boundary nets with
+    identical topology (every bit of a black-box macro's bus wired straight
+    through) are interchangeable and a bit-reversed bus compares clean.
+    Default **on** for ``reference.form: "gate-level-verilog"`` (whose
+    reference is generated from the same DEF/Verilog the layout's pin names
+    come from), **off** for every other form; ``false`` restores the
+    topology-only compare. Every anchored run discloses the pins it anchored
+    as a ``severity: "warning"`` ``topology.top_level_pins_anchored`` entry,
+    and a pin pairing the comparer refuses is reported as ``hints.rejected``
+    carrying ``details.anchored_top_level_pin``. See
+    :func:`_parse_anchor_top_level_pins`, :func:`_anchor_top_level_pins_enabled`
+    and :func:`_apply_top_level_pin_anchors`.
     """
     request, request_dir = load_request_arg(request)
 
@@ -949,6 +978,15 @@ def run_lvs(request: str) -> dict[str, Any]:
         power_connectivity_expected_nets,
         power_connectivity_echo,
     ) = _parse_power_connectivity(options)
+    # Issue #2692: top-level pin anchoring -- parsed unconditionally here (the
+    # same discipline `power_connectivity` above follows) so a malformed value
+    # is a clean request error for every reference form, with the
+    # form-dependent default resolved below once `reference_form` is known.
+    # See `_apply_top_level_pin_anchors` for the soundness gap it closes.
+    (
+        anchor_top_level_pins_requested,
+        anchor_top_level_pins_echo,
+    ) = _parse_anchor_top_level_pins(options, engine)
     supply_nets = parse_supply_nets(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
@@ -1094,6 +1132,13 @@ def run_lvs(request: str) -> dict[str, Any]:
             f"{', '.join(repr(f) for f in _REFERENCE_FORMS)}; got "
             f"{reference_form!r}"
         )
+    # Issue #2692: resolved here, the first point both the caller's own
+    # `options.anchor_top_level_pins` and the `reference.form` its default
+    # depends on are known -- see `_anchor_top_level_pins_enabled` for why the
+    # default is form-dependent (on for `gate-level-verilog`, off elsewhere).
+    anchor_top_level_pins = _anchor_top_level_pins_enabled(
+        anchor_top_level_pins_requested, reference_form
+    )
     # Issue #1952: the `power_connectivity` report block, replaced below for
     # a `gate-level-verilog` reference. Every other form's reference is
     # arbitrary SPICE that carries its own power nets and pins, so the
@@ -1602,6 +1647,15 @@ def run_lvs(request: str) -> dict[str, Any]:
     # branch below rejects any `request.hints` outright (no equivalent hook
     # in that engine's scope), so this stays empty for every netgen run.
     equivalent_pins_applied: dict[str, list[list[str]]] = {}
+    # Issue #2692: populated only for `engine == "klayout"` (the netgen engine
+    # has no `same_nets` equivalent -- `_parse_anchor_top_level_pins` already
+    # rejected an explicit opt-in there), and only when anchoring is enabled
+    # for this reference form. `anchored_pins` feeds `_build_mismatches`'s
+    # same-nets reconciliation (a refused anchor is a `hints.rejected`
+    # finding); `anchor_warnings` is the single disclosure entry appended with
+    # the other request-side disclosures further down.
+    anchored_pins: list[_TopLevelPinAnchor] = []
+    anchor_warnings: list[dict[str, Any]] = []
 
     if engine == "klayout":
         # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
@@ -1693,6 +1747,19 @@ def run_lvs(request: str) -> dict[str, Any]:
         same_nets_hints, equivalent_pins_applied = _apply_hints(
             comparer, request.get("hints") or {}, layout_circuit, reference_circuit
         )
+        # Issue #2692: applied *after* `_apply_hints` so a hand-written
+        # `hints.same_nets` pair stays the authority on the nets it names (see
+        # `_apply_top_level_pin_anchors`'s `declared` argument), and before
+        # `compare()` for the same reason `same_nets` itself must be: the
+        # assertions are comparer state read during the compare, not netlist
+        # state.
+        anchored_pins, anchor_warnings = _apply_top_level_pin_anchors(
+            comparer,
+            layout_circuit,
+            reference_circuit,
+            enabled=anchor_top_level_pins,
+            declared=same_nets_hints,
+        )
 
         # `logger` is already bound via the `NetlistComparer(logger)` constructor
         # above, so the 2-arg overload is used here (not the 3-arg one, which
@@ -1733,6 +1800,18 @@ def run_lvs(request: str) -> dict[str, Any]:
                     layout_circuit,
                     reference_circuit,
                 )
+                # Issue #2692: re-declared on the fresh comparer for exactly
+                # the same reason the hints above are -- an anchor is comparer
+                # state, so the second pass would otherwise compare on
+                # topology alone and could reach a `"match"` the first,
+                # anchored pass had already refused.
+                anchored_pins, anchor_warnings = _apply_top_level_pin_anchors(
+                    comparer,
+                    layout_circuit,
+                    reference_circuit,
+                    enabled=anchor_top_level_pins,
+                    declared=same_nets_hints,
+                )
                 compare_result = comparer.compare(layout_netlist, reference_netlist)
                 if compare_result:
                     break
@@ -1742,6 +1821,13 @@ def run_lvs(request: str) -> dict[str, Any]:
             layout_netlist,
             reference_netlist,
             same_nets_hints=same_nets_hints,
+            # Issue #2692: an anchored pin pairing the comparer refused is a
+            # real finding, reported through the same reconciliation a
+            # hand-written `hints.same_nets` refusal goes through.
+            anchored_pins=[
+                (anchor.layout_net, anchor.reference_net, anchor.pin)
+                for anchor in anchored_pins
+            ],
             excluded_parameters=excluded_parameters,
         )
         if not compare_result and not mismatches:
@@ -1979,6 +2065,19 @@ def run_lvs(request: str) -> dict[str, Any]:
     # `scripts/check_complexity_baseline.py`.
     mismatches.extend(short_nets_warnings)
 
+    # Issue #2692: same rationale as `short_nets_warnings` just above -- a
+    # `topology.top_level_pins_anchored` disclosure records a *request-side*
+    # strengthening of the compare (assertions declared on the comparer before
+    # `compare()` ran), not a `NetlistComparer` event, so it is appended here
+    # rather than folded into `_build_mismatches`. Always `severity:
+    # "warning"`: anchoring only ever removes a degree of freedom, so it never
+    # changes `status` on its own -- it keeps a match that rests on
+    # name-anchored boundary pins from being indistinguishable from one
+    # reached by topology alone. Extended unconditionally (an empty list is a
+    # no-op) for the same `run_lvs`-complexity reason, see
+    # `scripts/check_complexity_baseline.py`.
+    mismatches.extend(anchor_warnings)
+
     if bulk_warnings:
         # Issue #506: same rationale again -- a `reference.device_bulk`
         # disclosure records a *request-side* normalisation applied before the
@@ -2184,6 +2283,15 @@ def run_lvs(request: str) -> dict[str, Any]:
             # unresolved so a committed report round-trips back into the
             # request document it came from.
             "power_connectivity": power_connectivity_echo,
+            # Issue #2692: `null` when the option was omitted (the
+            # form-dependent default applies -- on for
+            # `reference.form: "gate-level-verilog"`, off elsewhere), else the
+            # caller's own boolean verbatim. Same always-present-but-nullable
+            # convention `power_connectivity` above follows, echoed unresolved
+            # so a committed report round-trips back into the request document
+            # it came from; what this run actually *did* is reported as the
+            # `topology.top_level_pins_anchored` disclosure in `mismatches[]`.
+            "anchor_top_level_pins": anchor_top_level_pins_echo,
             "supply_nets": supply_nets,
         },
         # Issue #1998: every `hints.equivalent_pins` grouping actually passed
@@ -2626,11 +2734,36 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         options["power_connectivity"] = power_connectivity
     elif isinstance(power_connectivity, dict):
         options["power_connectivity"] = dict(power_connectivity)
+    # Issue #2692: re-assert the caller's own `anchor_top_level_pins` value
+    # verbatim when the committed report carried one -- see
+    # `_anchor_top_level_pins_replay_options` for why `false` must survive the
+    # replay too (unlike the options above, it is not the default for every
+    # form). Applied as an `update` of a helper's result, like
+    # `_supply_nets_replay_options` below, rather than an inline branch:
+    # `_reconstruct_lvs_request` is complexity-baselined (see
+    # `scripts/check_complexity_baseline.py`).
+    options.update(_anchor_top_level_pins_replay_options(echoed))
     # Includes []: explicitly disabling the finding must survive a replay.
     options.update(_supply_nets_replay_options(echoed))
     if options:
         request["options"] = options
     return request
+
+
+def _anchor_top_level_pins_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
+    """``{"anchor_top_level_pins": <bool>}`` when the committed report echoed
+    an explicit value for it, else ``{}`` (issue #2692).
+
+    Includes ``false``: unlike every other option
+    :func:`_reconstruct_lvs_request` replays, omitting this one does **not**
+    mean "off" for every reference form -- a ``gate-level-verilog`` request
+    that omits it gets anchoring *on* (see
+    :func:`_anchor_top_level_pins_enabled`). Dropping an explicit ``false``
+    would therefore replay the original compare with anchoring turned on, and
+    report the resulting (correct, but different) verdict as drift.
+    """
+    requested = echoed.get("anchor_top_level_pins")
+    return {"anchor_top_level_pins": requested} if isinstance(requested, bool) else {}
 
 
 def _supply_nets_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
@@ -2751,13 +2884,14 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
         )
         if field not in committed
     )
-    # Issue #1952: the same "a field the committed report never carried
-    # cannot itself have drifted" rule, one level down -- a report committed
-    # after issue #1205 added the `options` echo but before this option
-    # existed has an `options` block without this key, and the current
-    # build's richer echo is not drift.
+    # Issue #1952 (extended by #2692's `anchor_top_level_pins`): the same "a
+    # field the committed report never carried cannot itself have drifted"
+    # rule, one level down -- a report committed after issue #1205 added the
+    # `options` echo but before one of these options existed has an `options`
+    # block without that key, and the current build's richer echo is not
+    # drift.
     committed_options = committed.get("options")
-    for option in ("power_connectivity", "supply_nets"):
+    for option in ("power_connectivity", "supply_nets", "anchor_top_level_pins"):
         if not isinstance(committed_options, dict) or option not in committed_options:
             exclude.add(("options", option))
     return build_rerun_result(
@@ -4644,6 +4778,236 @@ def _apply_hints(
         equivalent_pins_applied[subcircuit_name] = applied_groups
 
     return same_nets_declared, equivalent_pins_applied
+
+
+# --------------------------------------------------------------------------- #
+# Top-level pin anchoring: options.anchor_top_level_pins (issue #2692)
+# --------------------------------------------------------------------------- #
+
+
+#: Issue #2692: how many anchored pin names the
+#: :data:`CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED` disclosure lists before
+#: truncating (``pins_truncated: true``). A routed block anchors every bit of
+#: every boundary bus, which on a bus-heavy design is hundreds of names --
+#: enough to bury the rest of ``mismatches[]`` if the entry dumped all of
+#: them. The entry's own ``pin_count`` is always the exact, untruncated total
+#: (same discipline as :data:`_POWER_INSTANCE_SAMPLE_LIMIT`).
+_ANCHORED_PIN_SAMPLE_LIMIT = 20
+
+
+class _TopLevelPinAnchor(NamedTuple):
+    """One top-level pin name whose net was anchored across the two sides
+    (issue #2692) -- the automatic counterpart of a hand-written
+    ``hints.same_nets`` pair, carrying the pin name that licensed it.
+
+    ``layout_net``/``reference_net`` are ``Net.expanded_name()`` values, the
+    same spelling :func:`_apply_hints` records its declared pairs under (and
+    the spelling ``_build_mismatches`` reconciles against the comparer's own
+    pairing events).
+    """
+
+    pin: str
+    layout_net: str
+    reference_net: str
+
+
+def _anchor_top_level_pins_enabled(requested: bool | None, reference_form: str) -> bool:
+    """Whether top-level pin anchoring runs (issue #2692).
+
+    ``requested`` is ``options.anchor_top_level_pins`` as parsed by
+    :func:`_parse_anchor_top_level_pins` (``None`` when the caller omitted
+    it). Omitted means **on for** ``reference.form:
+    "gate-level-verilog"`` and **off for every other form** -- the one form
+    whose reference netlist is generated from the very DEF/Verilog the
+    layout's own pin names come from, so a pin name shared by both sides
+    names the same boundary node by construction and anchoring it is sound
+    without the caller having to say so. Every other form's reference is
+    arbitrary SPICE whose pin names are only conventionally related to the
+    layout's (a hand-authored schematic may legitimately spell a boundary
+    node differently on each side), so there anchoring stays opt-in.
+    """
+    if requested is not None:
+        return requested
+    return reference_form == "gate-level-verilog"
+
+
+def _pin_nets_by_name(circuit: Any) -> dict[str, Any]:
+    """``{<upper-cased pin name>: <net>}`` for every named top-level pin of
+    ``circuit`` that resolves to a net (issue #2692).
+
+    Upper-cased for the same reason :func:`_circuit_pin_names` upper-cases:
+    the two sides reach this module through readers that disagree about case
+    (``NetlistSpiceReader`` normalises to upper case; a netlist handed over
+    from ``klt extract``'s in-process extraction does not), so folding both
+    to one case is what lets a layout pin line up with its reference
+    counterpart at all.
+
+    A name declared by **more than one** pin on the same circuit is dropped
+    rather than anchored: with two candidate nets there is no single pairing
+    the name licenses, and guessing one would be exactly the unsound
+    name-matching this anchoring exists to avoid. An unnamed pin, and a pin
+    that resolves to no net at all, are skipped for the same reason.
+    """
+    nets: dict[str, Any] = {}
+    ambiguous: set[str] = set()
+    for pin in circuit.each_pin():
+        name = (pin.name() or "").upper()
+        net = circuit.net_for_pin(pin.id())
+        if not name or net is None:
+            continue
+        if name in nets:
+            ambiguous.add(name)
+        nets[name] = net
+    for name in ambiguous:
+        del nets[name]
+    return nets
+
+
+def _apply_top_level_pin_anchors(
+    comparer: Any,
+    layout_circuit: Any,
+    reference_circuit: Any,
+    *,
+    enabled: bool,
+    declared: Sequence[tuple[str, str]] | None = None,
+) -> tuple[list[_TopLevelPinAnchor], list[dict[str, Any]]]:
+    """Anchor every top-level pin name declared on both sides by name
+    (issue #2692), returning ``(anchors, disclosure_warnings)``.
+
+    **The gap this closes.** ``NetlistComparer`` pairs nets by *topology*;
+    top-level pin names are never used as anchors. So two nets with identical
+    topology are interchangeable, and swapping them compares clean. On a
+    black-box (pin-only) macro that covers a whole bus: every bit wired
+    straight from a top-level pin to a macro pin -- the ordinary shape of an
+    SRAM's data/address bus, or any IP bus taken to the chip boundary -- is
+    topologically indistinguishable from its neighbours, so a bit-reversed
+    (or otherwise permuted) layout-side bus reported ``status: "match"`` with
+    ``mismatch_count: 0``. The same holds for two bits tied to constant nets
+    (``__CONST0__``/``__CONST1__``).
+
+    The fix uses the mechanism ``hints.same_nets`` already exposes by hand,
+    applied automatically: for each pin name present on both sides,
+    ``NetlistComparer.same_nets(..., must_match=True)`` ties the layout net
+    that pin lands on to the reference net of the same-named pin. A swap then
+    contradicts an assertion the comparer must honor, and the compare reports
+    ``mismatch`` -- with the refused pairing surfaced as a ``hints.rejected``
+    entry by ``_build_mismatches``, exactly as a hand-written hint's refusal
+    is (``details.anchored_top_level_pin`` tells the two apart).
+
+    A pin name present on only **one** side is not an error, matching the
+    convention ``options.combine_devices``/``reference.device_bulk`` already
+    use -- only names resolvable on both sides are anchored (a
+    ``gate-level-verilog`` reference carries no power/ground pins at all, so
+    the layout's rails simply fall out of scope here).
+
+    ``declared`` is the ``hints.same_nets`` pairs :func:`_apply_hints`
+    already applied. A net named by one of them is left alone: the caller's
+    own explicit declaration is the authority on that net, and anchoring it
+    a second time would either duplicate the pairing or, where the two
+    disagree, report one refusal twice.
+
+    Returns ``([], [])`` untouched when ``enabled`` is false, so a request
+    that opts out (or any form this does not default on for) is
+    byte-identical to before this hook existed.
+    """
+    if not enabled:
+        return [], []
+    layout_nets = _pin_nets_by_name(layout_circuit)
+    reference_nets = _pin_nets_by_name(reference_circuit)
+    spoken_for = {name for pair in declared or () for name in pair}
+    anchors: list[_TopLevelPinAnchor] = []
+    for pin_name in sorted(set(layout_nets) & set(reference_nets)):
+        net_a = layout_nets[pin_name]
+        net_b = reference_nets[pin_name]
+        layout_name = net_a.expanded_name()
+        reference_name = net_b.expanded_name()
+        if layout_name in spoken_for or reference_name in spoken_for:
+            continue
+        comparer.same_nets(layout_circuit, reference_circuit, net_a, net_b, True)
+        anchors.append(_TopLevelPinAnchor(pin_name, layout_name, reference_name))
+    return anchors, _top_level_pin_anchor_warnings(anchors)
+
+
+def _top_level_pin_anchor_warnings(
+    anchors: Sequence[_TopLevelPinAnchor],
+) -> list[dict[str, Any]]:
+    """The single ``severity: "warning"``
+    :data:`CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED` disclosure for a run
+    that anchored at least one top-level pin (issue #2692), or ``[]``.
+
+    Always a warning: anchoring never *creates* a mismatch on its own -- it
+    removes a degree of freedom the comparer would otherwise have used, so a
+    verdict reached with it is strictly stronger than one without. The entry
+    exists so a ``"match"`` that rests on name-anchored boundary pins is
+    distinguishable from one reached by topology alone (and so a reader of a
+    committed report can tell the hook ran at all).
+    """
+    if not anchors:
+        return []
+    pins = [anchor.pin for anchor in anchors]
+    sample = pins[:_ANCHORED_PIN_SAMPLE_LIMIT]
+    return [
+        _mismatch(
+            CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED,
+            "warning",
+            f"{len(pins)} top-level pin name(s) declared on both sides were "
+            "anchored by name before comparing (options."
+            "anchor_top_level_pins): each one's layout net is asserted to "
+            "match the reference net of the same-named pin, which the "
+            "comparer's own topology-only net pairing does not otherwise "
+            "require. Without it, two boundary nets with identical topology "
+            "(e.g. two bits of a black-box macro's bus) are interchangeable "
+            "and a swap between them compares clean -- see docs/cli/lvs.md, "
+            '"Top-level pin anchoring"',
+            "both",
+            details={
+                "pins": sample,
+                "pin_count": len(pins),
+                "pins_truncated": len(sample) < len(pins),
+            },
+        )
+    ]
+
+
+def _parse_anchor_top_level_pins(
+    options: Mapping[str, Any], engine: str
+) -> tuple[bool | None, Any]:
+    """Resolve ``options.anchor_top_level_pins`` into ``(requested, echo)``
+    (issue #2692).
+
+    ``requested`` is ``None`` when the option was omitted -- the
+    form-dependent default :func:`_anchor_top_level_pins_enabled` applies --
+    and the caller's own boolean otherwise. ``echo`` is the caller's value
+    verbatim (``None`` when omitted), so a committed report round-trips back
+    into the request document it came from, matching
+    ``options.power_connectivity``'s own echo discipline.
+
+    A non-boolean value is a clean request error, like every other option
+    parser in this module. An explicit ``true`` on ``"engine": "netgen"`` is
+    rejected rather than silently ignored: anchoring is implemented with
+    ``klayout.db``'s ``NetlistComparer.same_nets``, the same hook
+    ``request.hints`` is rejected for on that engine (see
+    ``docs/cli/lvs.md``, "Engine"). An explicit ``false`` is accepted on
+    both engines -- it asks for the behaviour netgen already has.
+    """
+    if "anchor_top_level_pins" not in options:
+        return None, None
+    value = options["anchor_top_level_pins"]
+    if not isinstance(value, bool):
+        raise LvsError(
+            "options.anchor_top_level_pins must be a boolean -- true to "
+            "anchor every top-level pin name declared on both sides by name "
+            "before comparing, false to compare on topology alone"
+        )
+    if value and engine != "klayout":
+        raise LvsError(
+            "options.anchor_top_level_pins is only supported for engine "
+            "'klayout' -- it is applied through klayout.db's "
+            "NetlistComparer.same_nets, the same hook request.hints is "
+            "rejected for on the netgen engine (see docs/cli/lvs.md, "
+            '"Engine")'
+        )
+    return value, value
 
 
 # --------------------------------------------------------------------------- #

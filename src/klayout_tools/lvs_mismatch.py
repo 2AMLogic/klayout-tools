@@ -39,7 +39,7 @@ the test suite/callers used before this split.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from typing import Any, NamedTuple
 
@@ -366,11 +366,15 @@ def _mismatch(
 ) -> dict[str, Any]:
     """Build one ``mismatches[]`` entry.
 
-    ``details`` (issue #343) is an engine-specific escape hatch: raw data
-    that does not map cleanly onto the shared ``category``/``net``/
-    ``device``/``property`` shape (currently only produced by the ``netgen``
-    engine's report parser, e.g. the raw side-by-side text netgen printed for
-    a net/device mismatch block it did not fully structure) -- additive per
+    ``details`` (issue #343) is an engine-specific/category-specific escape
+    hatch: data that does not map cleanly onto the shared ``category``/
+    ``net``/``device``/``property`` shape -- originally the raw side-by-side
+    text the ``netgen`` engine's report parser could not further structure,
+    now also several ``"klayout"``-engine categories' own payloads (the full
+    per-category list is ``docs/cli/lvs.md``'s ``details`` row; issue #2692's
+    ``topology.top_level_pins_anchored`` pin list and the
+    ``anchored_top_level_pin`` attribution on an automatically anchored
+    ``hints.rejected`` entry are the most recent) -- additive per
     ``docs/json-contract.md`` ("adding a field is not [a breaking change]"),
     so every entry carries the key (``null`` when unused, never omitted,
     matching this contract's existing null-not-omitted convention) rather
@@ -811,12 +815,12 @@ def _build_mismatches(
     reference_netlist: Any | None = None,
     *,
     same_nets_hints: list[tuple[str, str]] | None = None,
+    anchored_pins: Sequence[tuple[str, str, str]] | None = None,
     excluded_parameters: ExcludedParameters | None = None,
 ) -> list[dict[str, Any]]:
     from .lvs import (
         CATEGORY_DEVICE_CLASS,
         CATEGORY_DEVICE_UNMATCHED,
-        CATEGORY_HINTS_REJECTED,
         CATEGORY_PIN_UNMATCHED,
         CATEGORY_TOPOLOGY,
         _name_or_none,
@@ -837,8 +841,13 @@ def _build_mismatches(
     # `hints.same_nets` assertion -- needed twice below (to decide which
     # declared pairs are `hints.rejected` findings, and to suppress the
     # `topology` entry that would otherwise report the same comparer event a
-    # second time).
-    hint_outcomes = _same_nets_hint_outcomes(logger, same_nets_hints)
+    # second time). Issue #2692: `anchored_pins` (the automatic top-level-pin
+    # anchors) are classified through the very same reconciliation -- they are
+    # `same_nets(..., must_match=True)` assertions too, just ones this module
+    # declared on the caller's behalf rather than ones the request spelled out.
+    hint_outcomes = _same_nets_hint_outcomes(
+        logger, _same_nets_assertion_pairs(same_nets_hints, anchored_pins)
+    )
 
     # Issue #1622 deliberately does NOT filter the `circuit_mismatches`/
     # `subcircuit_mismatches` loops below for power-only (filler/tap)
@@ -1083,29 +1092,73 @@ def _build_mismatches(
 
     # Issue #499: a `hints.same_nets` pairing is a hard assertion --
     # `_apply_hints` calls `comparer.same_nets(..., must_match=True)` for
-    # every declared pair. If the comparer did not end up confirming that
-    # pair as a match, the caller's assertion was refused, and that
-    # disagreement is reported here rather than silently dropped. Detected
-    # structurally (declared pair vs. the comparer's own pairing events, both
-    # keyed by the top circuit's `top_scope` -- see
-    # `_same_nets_hint_outcomes`), not by parsing the comparer's own
-    # `log_entry` text -- this field's own contract (docs/cli/lvs.md,
-    # "mismatches[].description") requires a curated description, never raw
-    # `NetlistComparer` log text.
-    top_scope = getattr(logger, "top_scope", None)
+    # every declared pair; issue #2692's automatic top-level-pin anchors are
+    # the same assertion, declared by `_apply_top_level_pin_anchors`. If the
+    # comparer did not end up confirming such a pair as a match, the assertion
+    # was refused, and that disagreement is reported rather than silently
+    # dropped -- see `_same_nets_rejections`.
+    mismatches.extend(
+        _same_nets_rejections(logger, hint_outcomes, same_nets_hints, anchored_pins)
+    )
+
+    mismatches.sort(key=_sort_key)
+    return mismatches
+
+
+def _same_nets_assertion_pairs(
+    same_nets_hints: Sequence[tuple[str, str]] | None,
+    anchored_pins: Sequence[tuple[str, str, str]] | None,
+) -> list[tuple[str, str]]:
+    """Every ``(layout net, reference net)`` pair this run asserted with
+    ``same_nets(..., must_match=True)`` -- the request's own
+    ``hints.same_nets`` pairs (issue #499) followed by the automatic
+    top-level-pin anchors (issue #2692), whose third element (the pin name
+    that licensed the anchor) is dropped here."""
+    return [
+        *(same_nets_hints or ()),
+        *(
+            (layout_name, reference_name)
+            for layout_name, reference_name, _ in anchored_pins or ()
+        ),
+    ]
+
+
+def _same_nets_assertions(
+    same_nets_hints: Sequence[tuple[str, str]] | None,
+    anchored_pins: Sequence[tuple[str, str, str]] | None,
+) -> Iterator[tuple[str, str, str | None]]:
+    """:func:`_same_nets_assertion_pairs` with provenance kept: each pair
+    yielded as ``(layout net, reference net, pin name or None)``, where the
+    pin name is the top-level pin that licensed an automatic anchor (issue
+    #2692) and ``None`` marks a pair the request declared by hand."""
     for layout_name, reference_name in same_nets_hints or ():
-        pair = ((top_scope, layout_name), (top_scope, reference_name))
-        if pair in hint_outcomes.confirmed:
-            continue
-        # Issue #1484: distinguish the two ways an assertion is refused. A
-        # pair the comparer associated and then flagged (a both-sided
-        # `net_mismatch`) is refused *because the two nets are not
-        # topologically identical* -- the real difference is reported
-        # elsewhere in this same `mismatches[]`, and no hint can paper over
-        # it. Saying so is the difference between an actionable report and a
-        # caller re-declaring the hint expecting a different answer.
-        if pair in hint_outcomes.refused_after_pairing:
-            description = (
+        yield layout_name, reference_name, None
+    for layout_name, reference_name, pin_name in anchored_pins or ():
+        yield layout_name, reference_name, pin_name
+
+
+def _same_nets_rejection_description(
+    pin_name: str | None, refused_after_pairing: bool
+) -> str:
+    """The ``hints.rejected`` description for one refused
+    ``same_nets(..., must_match=True)`` assertion.
+
+    Issue #1484 distinguishes the two ways an assertion is refused. A pair the
+    comparer associated and then flagged (a both-sided ``net_mismatch``) is
+    refused *because the two nets are not topologically identical* -- the real
+    difference is reported elsewhere in the same ``mismatches[]``, and no hint
+    can paper over it. Saying so is the difference between an actionable report
+    and a caller re-declaring the hint expecting a different answer.
+
+    Issue #2692 adds the second axis: whether the assertion was the request's
+    own ``hints.same_nets`` entry or an automatic top-level-pin anchor. An
+    anchor's refusal is not a malformed request -- it is the finding the
+    anchoring exists to produce (typically a permuted boundary bus) -- so it
+    names the pin and points at the option rather than at the hint.
+    """
+    if pin_name is None:
+        if refused_after_pairing:
+            return (
                 "hints.same_nets declared this pairing, but the comparer "
                 "associated the two nets and found them not identical "
                 "topologically -- the underlying structural difference is "
@@ -1113,23 +1166,69 @@ def _build_mismatches(
                 "hints.same_nets entry cannot resolve it (see "
                 'docs/cli/lvs.md, "hints.rejected")'
             )
-        else:
-            description = (
-                "hints.same_nets declared this pairing, but the comparer "
-                "did not confirm it as a topological match"
-            )
-        mismatches.append(
+        return (
+            "hints.same_nets declared this pairing, but the comparer "
+            "did not confirm it as a topological match"
+        )
+    return (
+        f"top-level pin '{pin_name}' is declared on both sides, so "
+        "options.anchor_top_level_pins asserted that its layout net and its "
+        "reference net are the same node -- and the comparer did not confirm "
+        "that pairing. The two sides disagree about what this boundary pin is "
+        "wired to (a permuted bus on a black-box macro is the ordinary cause: "
+        "every bit wired straight through is topologically interchangeable "
+        "with its neighbours, so only the pin names can tell them apart). Set "
+        "options.anchor_top_level_pins: false to compare on topology alone "
+        '(see docs/cli/lvs.md, "Top-level pin anchoring")'
+    )
+
+
+def _same_nets_rejections(
+    logger: Any,
+    hint_outcomes: _SameNetsHintOutcomes,
+    same_nets_hints: Sequence[tuple[str, str]] | None,
+    anchored_pins: Sequence[tuple[str, str, str]] | None,
+) -> list[dict[str, Any]]:
+    """One ``hints.rejected`` entry per ``same_nets(..., must_match=True)``
+    assertion the comparer did not confirm (issue #499 / #1484 / #2692).
+
+    Detected structurally (declared pair vs. the comparer's own pairing
+    events, both keyed by the top circuit's ``top_scope`` -- see
+    :func:`_same_nets_hint_outcomes`), never by parsing the comparer's own
+    ``log_entry`` text: that field's contract (``docs/cli/lvs.md``,
+    ``mismatches[].description``) requires a curated description, never raw
+    ``NetlistComparer`` log text.
+
+    An automatically anchored pin's refusal (issue #2692) carries
+    ``details.anchored_top_level_pin`` naming the pin, so a reader can always
+    tell it apart from a hand-written ``hints.same_nets`` refusal (whose
+    ``details`` stays ``null``, exactly as before this distinction existed).
+    """
+    from .lvs import CATEGORY_HINTS_REJECTED
+
+    top_scope = getattr(logger, "top_scope", None)
+    entries: list[dict[str, Any]] = []
+    for layout_name, reference_name, pin_name in _same_nets_assertions(
+        same_nets_hints, anchored_pins
+    ):
+        pair = ((top_scope, layout_name), (top_scope, reference_name))
+        if pair in hint_outcomes.confirmed:
+            continue
+        entries.append(
             _mismatch(
                 CATEGORY_HINTS_REJECTED,
                 "error",
-                description,
+                _same_nets_rejection_description(
+                    pin_name, pair in hint_outcomes.refused_after_pairing
+                ),
                 "both",
                 net={"layout": layout_name, "reference": reference_name},
+                details=(
+                    None if pin_name is None else {"anchored_top_level_pin": pin_name}
+                ),
             )
         )
-
-    mismatches.sort(key=_sort_key)
-    return mismatches
+    return entries
 
 
 #: ``(compare scope, expanded net name)`` -- see ``_make_compare_logger``'s
