@@ -859,3 +859,121 @@ def test_cli_text_prints_pdk_mismatch_warning(tmp_path, argv_log, capsys):
     )  # fmt: skip
     assert code == 0
     assert "pdk: WARNING:" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Block mode: an includable .subckt (issue #2680, edge 1)
+# ---------------------------------------------------------------------------
+
+#: What a real `xschem -n -s -q -x -r` run against a trivial block emits when
+#: netlisted as a testbench (issue #2680's own framing): the top-level
+#: `.subckt`/`.ends` pair commented out, plus a trailing `.end`.
+_TESTBENCH_SHAPED_BODY = (
+    "* stub netlist\n**.subckt block a b\n.something x\n**.ends\n.end"
+)
+
+
+def test_block_mode_uncomments_subckt_and_drops_trailing_end(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", _TESTBENCH_SHAPED_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    report = run_netlist(schematic, str(output), xschem_binary=binary, block=True)
+
+    written = output.read_text(encoding="utf-8")
+    assert written == "* stub netlist\n.subckt block a b\n.something x\n.ends\n"
+    # includable: no trailing .end to terminate an including testbench deck.
+    assert ".end" not in written.splitlines()
+
+    block = report["block"]
+    assert block == {
+        "requested": True,
+        "subckt_uncommented": True,
+        "ends_uncommented": True,
+        "trailing_end_removed": True,
+        "warning": None,
+    }
+
+
+def test_without_block_flag_testbench_shape_is_unchanged(
+    tmp_path, argv_log, monkeypatch
+):
+    """Regression: `--block` is off by default, so the raw (commented
+    subckt/ends, trailing .end) testbench export is unaffected."""
+    monkeypatch.setenv("NETLIST_BODY", _TESTBENCH_SHAPED_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    report = run_netlist(schematic, str(output), xschem_binary=binary)
+
+    assert output.read_text(encoding="utf-8") == _TESTBENCH_SHAPED_BODY + "\n"
+    assert "block" not in report
+
+
+def test_block_mode_warns_when_not_testbench_shaped(tmp_path, argv_log, monkeypatch):
+    """A schematic that was not exported in the commented-header/trailing-.end
+    shape is passed through unchanged, with the gap reported as a warning
+    rather than failing the run."""
+    # _NETLIST_BODY is already bare .subckt/.ends -- no commented header.
+    monkeypatch.setenv("NETLIST_BODY", _NETLIST_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+
+    report = run_netlist(schematic, str(output), xschem_binary=binary, block=True)
+
+    block = report["block"]
+    assert block["subckt_uncommented"] is False
+    assert block["ends_uncommented"] is False
+    # _NETLIST_BODY does end with ".end", so that part is still removed.
+    assert block["trailing_end_removed"] is True
+    assert "no commented '**.subckt'" in block["warning"]
+    assert "no commented '**.ends'" in block["warning"]
+    assert report["status"] == "generated"
+
+
+def test_block_mode_applies_before_check_diff(tmp_path, argv_log, monkeypatch):
+    """Under `--check`, the committed artifact is the block-shaped netlist,
+    so the comparison must run on the transformed text, not xschem's raw
+    testbench-shaped export."""
+    monkeypatch.setenv("NETLIST_BODY", _TESTBENCH_SHAPED_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        "* stub netlist\n.subckt block a b\n.something x\n.ends\n", encoding="utf-8"
+    )
+
+    report = run_netlist(
+        schematic, str(output), xschem_binary=binary, check=True, block=True
+    )
+
+    assert report["status"] == "match"
+    assert report["drift"]["diff"] == []
+
+
+def test_cli_text_prints_block_summary_and_warning(
+    tmp_path, argv_log, capsys, monkeypatch
+):
+    # _NETLIST_BODY (the argv_log fixture's default) is bare .subckt/.ends
+    # with no commented header, so block mode warns rather than failing.
+    monkeypatch.setenv("NETLIST_BODY", _NETLIST_BODY)
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+
+    code = main(
+        [
+            "netlist", schematic, "-o", str(tmp_path / "b.spice"),
+            "--xschem-binary", binary,
+            "--block",
+        ]
+    )  # fmt: skip
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "block: subckt_uncommented=False" in out
+    assert "block: WARNING:" in out

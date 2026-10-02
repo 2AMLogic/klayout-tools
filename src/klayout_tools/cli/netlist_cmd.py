@@ -44,6 +44,7 @@ def run(args: argparse.Namespace) -> int:
             rcfile=args.rcfile,
             pdk=args.pdk,
             pdk_root=args.pdk_root,
+            block=args.block,
         )
     except NetlistError as exc:
         return emit_error("netlist", str(exc), args.format)
@@ -85,6 +86,17 @@ def _print_text(report: dict) -> None:
             print(f"pdk: WARNING: {pdk_block['warning']}")
         if pdk_block["ambiguity_warning"]:
             print(f"pdk: {pdk_block['ambiguity_warning']}")
+
+    block_block = report.get("block")
+    if block_block is not None:
+        print(
+            "block: subckt_uncommented="
+            f"{block_block['subckt_uncommented']} "
+            f"ends_uncommented={block_block['ends_uncommented']} "
+            f"trailing_end_removed={block_block['trailing_end_removed']}"
+        )
+        if block_block["warning"]:
+            print(f"block: WARNING: {block_block['warning']}")
 
     drift = report.get("drift")
     if drift is None:

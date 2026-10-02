@@ -40,14 +40,25 @@ ignores SIGTERM -- escalated to SIGKILL on the whole group (see
 :class:`NetlistError` naming the bound, the escalation, and the known cause,
 never as a silent empty result.
 
-Deliberately **out of scope** for this first slice (issue #55's maintainer
-scope-narrowing comment, 2026-10-01): emitting a block as an includable
-``.subckt`` rather than a full deck (edge #2; tracked by #2680). The PDK-root
-edge (#55 edge #3) is addressed as a *consistency check* (issue #2680, option
-A): ``--pdk``/``--pdk-root`` resolve through :mod:`klayout_tools.pdk` and any
-PDK root the ``--rcfile`` declares is compared against it, so a disagreement
-is surfaced (:func:`_pdk_consistency`) rather than silently ignored. The
-``xschemrc`` is still passed through verbatim and never generated.
+Issue #55's two sharp edges the first slice deliberately left out (maintainer
+scope-narrowing comment, 2026-10-01) are both now addressed, via #2680:
+
+4. **A block's export is shaped for a testbench, not for reuse** (edge #2).
+   xschem comments out the top sheet's own ``.subckt``/``.ends`` pair
+   (``**.subckt ...`` / ``**.ends``) and always appends a trailing ``.end`` --
+   correct when the top sheet is a testbench, wrong when it is a reusable
+   block meant to be ``.include``d elsewhere. ``block=True`` post-processes
+   the export: the first commented ``.subckt``/``.ends`` pair is uncommented
+   and the trailing ``.end`` is dropped, so the result is directly
+   ``.include``able without a duplicate ``.end`` terminating the including
+   deck early (:func:`_apply_block_mode`).
+5. **PDK-root disagreement between the schematic and simulation sides is
+   silent** (edge #3). Addressed as a *consistency check*, not
+   auto-generation: ``--pdk``/``--pdk-root`` resolve through
+   :mod:`klayout_tools.pdk` and any PDK root the ``--rcfile`` declares is
+   compared against it, so a disagreement is surfaced
+   (:func:`_pdk_consistency`) rather than silently ignored. The ``xschemrc``
+   is still passed through verbatim and never generated.
 """
 
 from __future__ import annotations
@@ -460,6 +471,76 @@ def _write_output(output: str, data: bytes) -> None:
         raise NetlistError(f"could not write netlist to {output}: {exc}") from exc
 
 
+#: xschem comments out the top sheet's own ``.subckt``/``.ends`` pair when it
+#: netlists it as a testbench (``**.subckt ...`` / ``**.ends``). Matches the
+#: first such line so it can be uncommented; the capture group is everything
+#: after the ``**`` (preserving the directive's own arguments verbatim).
+_BLOCK_SUBCKT_COMMENT_RE = re.compile(
+    r"^([ \t]*)\*\*([ \t]*\.subckt\b.*)$", re.IGNORECASE | re.MULTILINE
+)
+_BLOCK_ENDS_COMMENT_RE = re.compile(
+    r"^([ \t]*)\*\*([ \t]*\.ends\b.*)$", re.IGNORECASE | re.MULTILINE
+)
+
+#: xschem always appends a trailing ``.end`` -- correct for a complete deck,
+#: wrong for an includable block (a second ``.end`` in the including
+#: testbench's own deck would terminate it early). Matches only when ``.end``
+#: is the last line of the file.
+_TRAILING_END_RE = re.compile(r"\n[ \t]*\.end[ \t]*\n?\Z", re.IGNORECASE)
+
+
+def _apply_block_mode(data: bytes) -> tuple[bytes, dict[str, Any]]:
+    """Post-process a testbench-shaped xschem export into an includable block
+    (issue #2680, edge 1).
+
+    xschem comments out the top sheet's own ``.subckt``/``.ends`` pair and
+    always appends a trailing ``.end`` -- correct when the top sheet is a
+    testbench, wrong when it is a reusable block meant to be ``.include``d
+    elsewhere. This uncomments the first commented ``.subckt``/``.ends`` pair
+    found and drops the trailing ``.end``, so the result can be ``.include``d
+    by a separate testbench deck without a duplicate ``.end`` terminating it
+    early.
+
+    Never raises: a schematic that was not shaped like a testbench export
+    (no commented header, no trailing ``.end``) is passed through unchanged,
+    with the gap reported in the returned info dict's ``warning`` rather than
+    failing the whole run -- the netlist itself is still valid output.
+    """
+    text = data.decode("utf-8", errors="replace")
+
+    text, n_subckt = _BLOCK_SUBCKT_COMMENT_RE.subn(r"\1\2", text, count=1)
+    text, n_ends = _BLOCK_ENDS_COMMENT_RE.subn(r"\1\2", text, count=1)
+    text, n_end = _TRAILING_END_RE.subn("\n", text, count=1)
+
+    subckt_uncommented = n_subckt > 0
+    ends_uncommented = n_ends > 0
+    trailing_end_removed = n_end > 0
+
+    warning = None
+    missing = []
+    if not subckt_uncommented:
+        missing.append("no commented '**.subckt' header found to uncomment")
+    if not ends_uncommented:
+        missing.append("no commented '**.ends' found to uncomment")
+    if not trailing_end_removed:
+        missing.append("no trailing '.end' line found to remove")
+    if missing:
+        warning = (
+            "--block requested but " + "; ".join(missing) + " -- the export "
+            "may not have been shaped like a testbench netlist; it was "
+            "written as xschem produced it"
+        )
+
+    info = {
+        "requested": True,
+        "subckt_uncommented": subckt_uncommented,
+        "ends_uncommented": ends_uncommented,
+        "trailing_end_removed": trailing_end_removed,
+        "warning": warning,
+    }
+    return text.encode("utf-8"), info
+
+
 _RC_PDK_ROOT_RE = re.compile(
     r"^\s*set\s+(?:::)?(?:env\(PDK_ROOT\)|PDK_ROOT)\s+(\"[^\"]*\"|\{[^}]*\}|\S+)",
     re.MULTILINE,
@@ -572,6 +653,7 @@ def run_netlist(
     rcfile: str | None = None,
     pdk: str | None = None,
     pdk_root: str | None = None,
+    block: bool = False,
 ) -> dict[str, Any]:
     """Export ``schematic`` to a SPICE netlist at ``output`` via xschem.
 
@@ -579,6 +661,11 @@ def run_netlist(
     directory and compares, reporting ``status: "match"`` or ``"drifted"``
     (with a capped unified diff under ``drift``). This is the staleness gate
     a repo runs in CI over a committed netlist.
+
+    ``block=True`` post-processes the export into an includable block (issue
+    #2680, edge 1): see :func:`_apply_block_mode`. The transform runs before
+    ``check``'s comparison/diff and before the normal write, so both modes
+    operate on the block-shaped netlist, not xschem's raw testbench export.
 
     Returns the documented payload (see ``docs/cli/netlist.md``). Raises
     :class:`NetlistError` for every failure mode: unreadable schematic,
@@ -617,6 +704,10 @@ def run_netlist(
         with open(produced, "rb") as handle:
             fresh_data = handle.read()
 
+        block_info: dict[str, Any] | None = None
+        if block:
+            fresh_data, block_info = _apply_block_mode(fresh_data)
+
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "schematic": schematic,
@@ -639,6 +730,8 @@ def run_netlist(
 
         if pdk_block is not None:
             payload["pdk"] = pdk_block
+        if block_info is not None:
+            payload["block"] = block_info
 
         if check:
             status, drift = _check_result(output, fresh_data)

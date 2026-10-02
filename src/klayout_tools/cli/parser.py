@@ -4887,6 +4887,20 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     netlist_parser.add_argument(
+        "--block",
+        action="store_true",
+        default=False,
+        help=(
+            "emit this schematic as an includable block rather than a "
+            "testbench deck: uncomment xschem's top-level **.subckt/**.ends "
+            "pair and drop the trailing .end it always appends, so the "
+            "result can be .include'd by a separate testbench netlist "
+            "without a duplicate .end terminating it early (issue #2680, "
+            "edge 1). Off by default -- xschem's unmodified export is "
+            "correct for a testbench top sheet"
+        ),
+    )
+    netlist_parser.add_argument(
         "--xschem-binary",
         dest="xschem_binary",
         default=netlist.DEFAULT_XSCHEM_BINARY,
