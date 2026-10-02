@@ -9258,13 +9258,56 @@ def _parameter_id(device_class: kdb.DeviceClass, name: str) -> int | None:
     return None
 
 
+def _corrected_resistor_r_ohm(
+    r_ohm: float,
+    w_um: float | None,
+    fixed_offset_ohm: float,
+    end_term_ohm_um: float,
+    width_offset_um: float,
+) -> float:
+    """Return ``r_ohm`` with one device's three ``ResistorDevice`` corrections
+    applied, in the order the PDK models compose them (issue #518, #559,
+    #2652).
+
+    Extracted from :func:`apply_resistor_fixed_offset_corrections` purely to
+    keep that function under the repository's cyclomatic-complexity ratchet
+    (C901, max 10) -- the arithmetic and its ordering are unchanged:
+
+    1. ``width_offset_um`` rescales ``R`` by ``w_um / (w_um +
+       width_offset_um)``, i.e. re-evaluates the sheet-resistance term at the
+       PDK's *effective* width without needing ``L`` read back separately.
+       Applied first, so the two additive terms below land on the
+       width-corrected value rather than being rescaled themselves.
+    2. ``end_term_ohm_um`` adds the width-normalized end/contact term
+       ``end_term_ohm_um / w_um``.
+    3. ``fixed_offset_ohm`` adds the width-independent fixed term.
+
+    ``w_um`` is the device's ``W`` parameter (µm), or ``None`` when the class
+    defines no ``W`` -- in which case the two width-dependent corrections are
+    skipped rather than guessed at. A zero ``w_um`` is likewise treated as
+    unusable (same falsy guard), avoiding a divide-by-zero, and a
+    ``width_offset_um`` that cancels ``w_um`` exactly leaves ``R`` untouched.
+    """
+    if width_offset_um and w_um:
+        new_width_um = w_um + width_offset_um
+        if new_width_um:
+            r_ohm = r_ohm * w_um / new_width_um
+    if end_term_ohm_um and w_um:
+        r_ohm += end_term_ohm_um / w_um
+    if fixed_offset_ohm:
+        r_ohm += fixed_offset_ohm
+    return r_ohm
+
+
 def apply_resistor_fixed_offset_corrections(
     netlist: kdb.Netlist, deck: ExtractionDeck
 ) -> None:
     """Add each opted-in resistor device class's
-    :attr:`~klayout_tools.decks.ResistorDevice.fixed_offset_ohm` to ``R`` --
-    once per ``kdb.Device`` object currently in ``netlist`` (issue #518,
-    #559).
+    :attr:`~klayout_tools.decks.ResistorDevice.fixed_offset_ohm`,
+    :attr:`~klayout_tools.decks.ResistorDevice.end_term_ohm_um`, and
+    :attr:`~klayout_tools.decks.ResistorDevice.width_offset_um` corrections to
+    ``R`` -- once per ``kdb.Device`` object currently in ``netlist`` (issue
+    #518, #559, #2652).
 
     Public (no leading underscore): shared between
     :func:`_apply_device_parameter_corrections`'s default apply-at-
@@ -9275,18 +9318,26 @@ def apply_resistor_fixed_offset_corrections(
     this function itself *after* ``Netlist.combine_devices()`` has folded
     series-connected primitives into one device object. Because this
     function walks whatever devices exist in ``netlist`` *at the time it
-    runs*, calling it post-combine adds the fixed offset exactly once per
+    runs*, calling it post-combine applies every correction exactly once per
     surviving (possibly-folded) logical device, regardless of how many
     drawn primitives fed into it -- fixing the over-count KLayout's native
     series fold otherwise produces by summing each primitive's
-    already-corrected ``R`` (issue #559).
+    already-corrected ``R`` (issue #559). This is still correct for
+    ``end_term_ohm_um``/``width_offset_um`` (issue #2652): a uniform-width
+    series string's combined ``R``/``W`` stay ``L_total / W * sheet_rho``
+    (linear in the summed ``L``), so rescaling the combined ``R`` by ``W /
+    (W + width_offset_um)`` reproduces ``L_total / (W + width_offset_um) *
+    sheet_rho`` without reading ``L`` back separately, and only the folded
+    string's two true end contacts -- not one per drawn primitive -- get an
+    ``end_term_ohm_um / W`` term.
 
-    A deck that has not opted in (the default ``fixed_offset_ohm=0.0``) gets
-    no write at all. Keyed by device-class *name* (``ResistorDevice.name``
-    is the string KLayout reports back as ``DeviceClass.name``), so this is a
-    direct lookup, not a positional match. The lookup is **case-insensitive**
-    (issue #585): the in-process ``kdb.Netlist`` an inline extraction builds
-    reports the deck's name verbatim (lowercase, e.g. ``res_high_po``), but a
+    A deck that has not opted in (the default ``fixed_offset_ohm=0.0``,
+    ``end_term_ohm_um=0.0``, ``width_offset_um=0.0``) gets no write at all.
+    Keyed by device-class *name* (``ResistorDevice.name`` is the string
+    KLayout reports back as ``DeviceClass.name``), so this is a direct
+    lookup, not a positional match. The lookup is **case-insensitive** (issue
+    #585): the in-process ``kdb.Netlist`` an inline extraction builds reports
+    the deck's name verbatim (lowercase, e.g. ``res_high_po``), but a
     netlist read back from a SPICE file via ``kdb.NetlistSpiceReader`` (the
     ``layout.netlist`` pre-extracted shape in ``lvs.py``) reports every
     device-class name **uppercased** (``RES_HIGH_PO``). A verbatim lookup
@@ -9297,24 +9348,48 @@ def apply_resistor_fixed_offset_corrections(
     extraction returns) carry their own generated class names and are never
     reached by this function -- no double-application.
     """
-    fixed_offset_lookup = {
-        resistor.name.lower(): resistor.fixed_offset_ohm
+    correction_lookup = {
+        resistor.name.lower(): (
+            resistor.fixed_offset_ohm,
+            resistor.end_term_ohm_um,
+            resistor.width_offset_um,
+        )
         for resistor in deck.resistors
         if resistor.fixed_offset_ohm
+        or resistor.end_term_ohm_um
+        or resistor.width_offset_um
     }
-    if not fixed_offset_lookup:
+    if not correction_lookup:
         return
 
     for circuit in netlist.each_circuit():
         for device in circuit.each_device():
             device_class = device.device_class()
-            fixed_offset_ohm = fixed_offset_lookup.get(device_class.name.lower())
-            if fixed_offset_ohm:
-                r_id = _parameter_id(device_class, "R")
-                if r_id is not None:
-                    device.set_parameter(
-                        r_id, device.parameter(r_id) + fixed_offset_ohm
-                    )
+            corrections = correction_lookup.get(device_class.name.lower())
+            if not corrections:
+                continue
+            fixed_offset_ohm, end_term_ohm_um, width_offset_um = corrections
+            r_id = _parameter_id(device_class, "R")
+            if r_id is None:
+                continue
+            r_ohm = device.parameter(r_id)
+
+            w_um = None
+            if end_term_ohm_um or width_offset_um:
+                w_id = _parameter_id(device_class, "W")
+                if w_id is not None:
+                    w_um = device.parameter(w_id)
+
+            device.set_parameter(
+                r_id,
+                _corrected_resistor_r_ohm(
+                    r_ohm,
+                    w_um,
+                    fixed_offset_ohm,
+                    end_term_ohm_um,
+                    width_offset_um,
+                ),
+            )
 
 
 def _apply_device_parameter_corrections(
