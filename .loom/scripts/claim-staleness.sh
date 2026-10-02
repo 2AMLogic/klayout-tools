@@ -47,6 +47,49 @@
 #   was; only the accidental "any stranger's comment pins the claim" behaviour
 #   is removed.
 #
+# LOCAL ADDITION - frozen-timeline protection (klayout-tools #1966; #668/#509)
+#
+#   NOT in upstream rjwalters/loom's defaults/scripts/claim-staleness.sh. This
+#   file is pinned in .loom/resync-ignore so a resync cannot drop it.
+#
+#   CLAIMED_AT comes solely from the /timeline endpoint's last `labeled` event.
+#   On issue #509 (2026-08-10) a real remove/re-add label toggle was confirmed
+#   by a direct issue read, but /events and /timeline kept returning the OLD
+#   `labeled` event for minutes. CLAIMED_AT never advanced, every pass saw the
+#   same "stale" claim, and the same "Reclaiming stale claim..." comment was
+#   posted 30+ times - each one stomping the live claimant the last reclaim
+#   had just installed. So whenever the evaluation above concludes `stale` or
+#   `stale-bounded-fallback`, two extra checks run before that verdict stands:
+#
+#   1. Reclaim-loop guard. RECLAIM_COUNT counts trusted comments posted after
+#      CLAIMED_AT that record a reclaim of THIS claim: the legacy local marker
+#      `<!-- loom:reclaimed claim=<CLAIMED_AT> -->`, or upstream's marker-less
+#      reclaim prose ("Reclaiming loom:<x> claim..." / "Reclaiming stale
+#      loom:<x> claim..."). A reclaim re-adds the label after its comment, so a
+#      reclaim comment newer than CLAIMED_AT means the timeline has not caught
+#      up with that re-add.
+#   2. Ground-truth cross-check. A fresh NON-timeline read of the issue/PR
+#      resource (`labels` + `updated_at`, the same row
+#      `gh issue|pr view --json labels,updatedAt` reads).
+#
+#   Outcomes (the stale verdict is only ever WEAKENED, never strengthened):
+#     ground-truth read failed / rate-limited / garbled -> `unknown` (fail safe)
+#     label no longer present                            -> `unclaimed`
+#     RECLAIM_COUNT >= 1 and updated_at > CLAIMED_AT     -> `fresh`, with
+#         FROZEN_TIMELINE=true: never re-reclaim the same frozen CLAIMED_AT.
+#         `standdown` then carries a one-time (edited-in-place)
+#         `<!-- loom:frozen-timeline claim=... -->` diagnostic for a human.
+#     RECLAIM_COUNT >= 1 and updated_at <= CLAIMED_AT    -> `unknown` (the two
+#         reads disagree)
+#     RECLAIM_COUNT == 0, label present                  -> verdict stands.
+#         `updated_at` alone is NOT liveness: any comment bumps it, and
+#         treating it as such would bring back the #6514 defect.
+#
+#   This bounds the #509 failure to ONE reclaim per frozen CLAIMED_AT. Once the
+#   timeline catches up, the re-add becomes the new CLAIMED_AT, the old reclaim
+#   comment predates it, RECLAIM_COUNT resets to 0, and normal behaviour
+#   resumes with no manual reset.
+#
 # Usage:
 #   claim-staleness.sh check     --number N --label LABEL [options]
 #   claim-staleness.sh standdown --number N --label LABEL [options] [--dry-run]
@@ -84,7 +127,14 @@
 #                          -> force-reclaim (livelock breaker).
 #   unknown                Timeline unavailable/unparseable -> FAIL SAFE, treat
 #                          exactly like `fresh`. Never stomp a claim on missing
-#                          data.
+#                          data (incl. a failed ground-truth read, #1966).
+#
+# Frozen-timeline fields (local, #1966 - see LOCAL ADDITION above):
+#   RECLAIM_COUNT            Reclaims already recorded against this CLAIMED_AT.
+#   FROZEN_TIMELINE          true when a stale verdict was downgraded to fresh
+#                            because the timeline read looks frozen.
+#   GROUND_TRUTH             not-read | ok | unavailable.
+#   GROUND_TRUTH_UPDATED_AT  The resource's updated_at from that read.
 #
 # Exit codes:
 #   0  evaluation completed (branch on CLAIM_STATE)
@@ -101,11 +151,14 @@ SCRIPT_NAME="$(basename "$0")"
 
 STANDDOWN_PREFIX="<!-- loom:standdown claim="
 ACTIVITY_PREFIX="<!-- loom:claim-activity claim="
+RECLAIM_PREFIX="<!-- loom:reclaimed claim="
+FROZEN_PREFIX="<!-- loom:frozen-timeline claim="
 
 _usage() {
-    # Keep this range in sync with the header comment block above
-    # (currently lines 50-96: "Usage:" through the gh-cached caveat).
-    sed -n '50,96p' "$0" | sed 's/^# \{0,1\}//'
+    # Print the header comment block from "Usage:" through the gh-cached
+    # caveat. Anchored on those lines rather than fixed line numbers so the
+    # local header additions (#1966) cannot silently desync it.
+    sed -n '/^# Usage:$/,/^# route them through gh-cached\.$/p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 _die() {
@@ -342,6 +395,70 @@ if [[ -z "$CLAIM_STATE" ]]; then
     fi
 fi
 
+# --- frozen-timeline cross-check + reclaim-loop guard (LOCAL, #1966/#668) ----
+# Runs only when the timeline-derived evaluation above wants to reclaim
+# (`stale` or `stale-bounded-fallback`). See "LOCAL ADDITION" in the header.
+RECLAIM_COUNT=0
+FROZEN_TIMELINE=false
+GROUND_TRUTH="not-read"
+GROUND_TRUTH_UPDATED_AT=""
+
+if [[ "$CLAIM_STATE" == "stale" || "$CLAIM_STATE" == "stale-bounded-fallback" ]]; then
+    # Reclaim evidence against THIS exact CLAIMED_AT, from trusted authors only
+    # (AFTER_JSON is already trust-filtered, #9548): the legacy local marker
+    # `<!-- loom:reclaimed claim=<CLAIMED_AT> -->` (pinned curator/judge/doctor
+    # .md, #668) OR upstream's marker-less reclaim prose, which every role file
+    # opens with "Reclaiming loom:<x> claim" / "Reclaiming stale loom:<x>
+    # claim". A reclaim removes and RE-ADDS the label, so its re-add is a newer
+    # `labeled` event than the reclaim comment itself; seeing that comment AFTER
+    # CLAIMED_AT means /timeline has not caught up with the re-add.
+    RECLAIM_JSON="$(jq --arg m "${RECLAIM_PREFIX}${CLAIMED_AT} -->" --arg re "(^|\n)[^A-Za-z0-9\n]*Reclaiming (stale )?${LABEL} claim" \
+        '[.[] | select((.body // "") as $b | ($b | contains($m)) or ($b | test($re)))]' <<<"$AFTER_JSON")"
+    RECLAIM_COUNT="$(jq 'length' <<<"$RECLAIM_JSON")"
+
+    # Ground truth: a fresh, NON-timeline read of the issue/PR resource itself
+    # (the same row `gh issue|pr view --json labels,updatedAt` reads; REST so it
+    # works for issues and PRs alike and does not spend GraphQL quota).
+    GT_JSON=""
+    if GT_JSON="$(gh api "$API_BASE/issues/$NUMBER" --jq '{labels: [.labels[].name], updated_at: .updated_at}' 2>/dev/null)" &&
+        GT_HAS_LABEL="$(jq -r --arg l "$LABEL" '.labels | index($l) != null' <<<"$GT_JSON" 2>/dev/null)" &&
+        GT_UPDATED="$(jq -r '.updated_at // empty' <<<"$GT_JSON" 2>/dev/null)" &&
+        [[ "$GT_UPDATED" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] &&
+        [[ "$GT_HAS_LABEL" == "true" || "$GT_HAS_LABEL" == "false" ]]; then
+        GROUND_TRUTH="ok"
+        GROUND_TRUTH_UPDATED_AT="$GT_UPDATED"
+    else
+        GROUND_TRUTH="unavailable"
+    fi
+
+    if [[ "$GROUND_TRUTH" != "ok" ]]; then
+        # Fail safe: a failed / rate-limited / garbled ground-truth read is
+        # never a basis for stomping a claim.
+        CLAIM_STATE="unknown"
+    elif [[ "$GT_HAS_LABEL" == "false" ]]; then
+        # Someone resolved the claim between the first read and now.
+        CLAIM_STATE="unclaimed"
+    elif ((RECLAIM_COUNT >= 1)); then
+        # This CLAIMED_AT was already reclaimed by a prior pass and the
+        # timeline still has not advanced past it.
+        if [[ "$GROUND_TRUTH_UPDATED_AT" > "$CLAIMED_AT" ]]; then
+            # Ground truth shows the resource changed after the frozen claim
+            # point -> the timeline read is frozen, not the claim dead (#509).
+            # Stand down; never re-reclaim the same frozen CLAIMED_AT.
+            FROZEN_TIMELINE=true
+            CLAIM_STATE="fresh"
+        else
+            # Ground truth says nothing changed since CLAIMED_AT, yet a reclaim
+            # was recorded after it: the two reads disagree. Fail safe.
+            CLAIM_STATE="unknown"
+        fi
+    fi
+    # RECLAIM_COUNT == 0 with the label confirmed present: the stale verdict
+    # stands. `updated_at` alone is NOT treated as liveness here - any comment
+    # (a lease record, a stand-down bump, a bot) bumps it, so gating on it
+    # would resurrect the #6514 "any stranger's comment pins the claim" defect.
+fi
+
 _emit_evaluation() {
     local extra_key="${1:-}" extra_val="${2:-}"
     if [[ "$JSON_OUTPUT" == true ]]; then
@@ -355,6 +472,10 @@ _emit_evaluation() {
             --argjson standdown "${STANDDOWN_COUNT:-0}" \
             --argjson stale_minutes "$STALE_MINUTES" \
             --argjson max_streak "$MAX_STREAK" \
+            --argjson reclaim "${RECLAIM_COUNT:-0}" \
+            --argjson frozen "${FROZEN_TIMELINE:-false}" \
+            --arg ground_truth "$GROUND_TRUTH" \
+            --arg gt_updated_at "$GROUND_TRUTH_UPDATED_AT" \
             --arg claim_label "$LABEL" \
             --arg extra_key "$extra_key" \
             --arg extra_val "$extra_val" \
@@ -368,7 +489,11 @@ _emit_evaluation() {
                activity_count: $activity,
                standdown_count: $standdown,
                stale_minutes: $stale_minutes,
-               max_standdown_streak: $max_streak
+               max_standdown_streak: $max_streak,
+               reclaim_count: $reclaim,
+               frozen_timeline: $frozen,
+               ground_truth: $ground_truth,
+               ground_truth_updated_at: $gt_updated_at
              }
              + (if $extra_key == "" then {} else {($extra_key | ascii_downcase): $extra_val} end)'
     else
@@ -382,6 +507,10 @@ _emit_evaluation() {
         echo "STANDDOWN_COUNT=${STANDDOWN_COUNT:-0}"
         echo "STALE_MINUTES=$STALE_MINUTES"
         echo "MAX_STANDDOWN_STREAK=$MAX_STREAK"
+        echo "RECLAIM_COUNT=${RECLAIM_COUNT:-0}"
+        echo "FROZEN_TIMELINE=${FROZEN_TIMELINE:-false}"
+        echo "GROUND_TRUTH=$GROUND_TRUTH"
+        echo "GROUND_TRUTH_UPDATED_AT=$GROUND_TRUTH_UPDATED_AT"
         [[ -n "$extra_key" ]] && echo "$extra_key=$extra_val"
     fi
     return 0
@@ -416,6 +545,14 @@ BODY="$ROLE pass: still carries a fresh \`$LABEL\` claim (claimed $CLAIMED_AT, i
 
 Stand-down passes against this claim: $NEXT_SEQ of $MAX_STREAK before the bounded fallback force-reclaims it. This comment is edited in place on each pass rather than reposted (#5123, #6514).
 ${STANDDOWN_PREFIX}${CLAIMED_AT} seq=${NEXT_SEQ} -->"
+if [[ "$FROZEN_TIMELINE" == true ]]; then
+    # #668 diagnostic, carried in the (edited-in-place) stand-down comment so it
+    # is raised once per frozen CLAIMED_AT, never once per pass.
+    BODY="$BODY
+
+Frozen-timeline check (#668, #1966): \`CLAIMED_AT\` ($CLAIMED_AT) has not advanced despite an already-recorded reclaim against it, but the issue resource's \`updated_at\` ($GROUND_TRUTH_UPDATED_AT) shows more recent activity — the Events/Timeline read looks frozen. Not reclaiming again; a human should verify current label state directly before further action.
+${FROZEN_PREFIX}${CLAIMED_AT} -->"
+fi
 
 if [[ "$DRY_RUN" == true ]]; then
     if [[ -n "$STANDDOWN_COMMENT_ID" ]]; then
