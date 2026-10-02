@@ -1238,7 +1238,8 @@ EXTRACTION_DECK = ExtractionDeck(
             # rsil.sym` (pinned IHP-Open-PDK commit
             # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
             # rule-deck symlinks above), i.e. the same file sg13g2 uses:
-            # `9.0e-6/w + 7.0*l/(w + 1.0e-8)` (SI, w/l in metres). `end_term_ohm_um` and
+            # `9.0e-6/w + 7.0*l/(w + 1.0e-8)` (SI, w/l in metres).
+            # `end_term_ohm_um` and
             # `width_offset_um` are the end-term and line-width-delta
             # constants converted to ohm*um / um (`* 1e6`).
             end_term_ohm_um=9.0,
@@ -1275,7 +1276,8 @@ EXTRACTION_DECK = ExtractionDeck(
             # rppd.sym` (pinned IHP-Open-PDK commit
             # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
             # rule-deck symlinks above), i.e. the same file sg13g2 uses:
-            # `70.0e-6/w + 260.0*l/(w + 6.0e-9)` (SI, w/l in metres). `end_term_ohm_um` and
+            # `70.0e-6/w + 260.0*l/(w + 6.0e-9)` (SI, w/l in metres).
+            # `end_term_ohm_um` and
             # `width_offset_um` are the end-term and line-width-delta
             # constants converted to ohm*um / um (`* 1e6`).
             end_term_ohm_um=70.0,
@@ -1333,7 +1335,8 @@ EXTRACTION_DECK = ExtractionDeck(
             # rhigh.sym` (pinned IHP-Open-PDK commit
             # d2cc0355f26235c777dfcc6867b390fa1e78083f, same pin as the
             # rule-deck symlinks above), i.e. the same file sg13g2 uses:
-            # `1.6e-4/w + 1360.0*l/(w - 0.04e-6)` (SI, w/l in metres). `end_term_ohm_um` and
+            # `1.6e-4/w + 1360.0*l/(w - 0.04e-6)` (SI, w/l in metres).
+            # `end_term_ohm_um` and
             # `width_offset_um` are the end-term and line-width-delta
             # constants converted to ohm*um / um (`* 1e6`).
             end_term_ohm_um=160.0,
