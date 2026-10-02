@@ -3010,6 +3010,145 @@ def test_integration_real_icarus_sdf_corner_selects_a_triplet_member(
     assert report["environment"]["sdf"]["corner"] == corner
 
 
+#: The header OpenSTA's own `write_sdf` emits (issue #1880): `VOLTAGE`,
+#: `PROCESS`, and `TEMPERATURE` as `min::max` triples whose *typ* member is
+#: empty. `iverilog -T typ` rejects each with `SDF ERROR: ... Chosen value not
+#: defined.` unless the header is normalised before annotation.
+_OPENSTA_SDF_HEADER = """\
+  (DATE "Tue Sep 15 12:00:00 2026")
+  (VENDOR "Parallax")
+  (PROGRAM "STA")
+  (VERSION "3.1.0")
+  (DIVIDER .)
+  (VOLTAGE 1.800::1.800)
+  (PROCESS "1.000::1.000")
+  (TEMPERATURE 25.000::25.000)
+"""
+
+
+def _opensta_header_sdf_text() -> str:
+    return _sdf_text().replace("  (DIVIDER .)\n", _OPENSTA_SDF_HEADER)
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+@pytest.mark.parametrize(
+    ("corner", "expected_status"),
+    [("min", "pass"), ("typ", "fail"), ("max", "fail")],
+)
+def test_integration_real_icarus_sdf_opensta_header_triples_apply_at_every_corner(
+    tmp_path, corner, expected_status
+):
+    """Issue #1880: an OpenSTA `write_sdf` header (`VOLTAGE`/`PROCESS`/
+    `TEMPERATURE` as `min::max` with an empty typ member) used to fail the
+    default `corner: "typ"` run with `Chosen value not defined` on the header
+    lines. After header normalisation every corner annotates the delay
+    triplet and the verdict tracks the selected member, exactly as on a
+    header-free SDF (`..._corner_selects_a_triplet_member`)."""
+    _stage_sdf_design(tmp_path, sdf_text=_opensta_header_sdf_text())
+    request_path = _sdf_integration_request(
+        tmp_path, f"request-{corner}.json", {"file": "route.sdf", "corner": corner}
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == expected_status
+    sdf = report["environment"]["sdf"]
+    assert sdf["corner"] == corner
+    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["partial"] is False
+    assert sdf["dropped"] == {}
+
+
+def test_normalize_sdf_header_triples_fills_empty_typ_member(tmp_path):
+    """The three header fields' `a::b` triples become `a:a:b`; every other
+    line -- including the delay entries -- is byte-identical."""
+    original = _opensta_header_sdf_text()
+    sdf_path = _write(tmp_path / "route.sdf", original)
+
+    text = fv._normalize_sdf_header_triples(sdf_path)
+
+    assert text is not None
+    assert "(VOLTAGE 1.800:1.800:1.800)" in text
+    assert '(PROCESS "1.000:1.000:1.000")' in text
+    assert "(TEMPERATURE 25.000:25.000:25.000)" in text
+    assert (
+        text.replace("1.800:1.800:1.800", "1.800::1.800")
+        .replace("1.000:1.000:1.000", "1.000::1.000")
+        .replace("25.000:25.000:25.000", "25.000::25.000")
+        == original
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("(VOLTAGE :1.8:)", "(VOLTAGE 1.8:1.8:1.8)"),
+        ("(VOLTAGE 1.7::)", "(VOLTAGE 1.7:1.7:1.7)"),
+        ("(VOLTAGE ::1.9)", "(VOLTAGE 1.9:1.9:1.9)"),
+        ("(TEMPERATURE -40.0::125.0)", "(TEMPERATURE -40.0:-40.0:125.0)"),
+        ('(PROCESS "typical")', '(PROCESS "typical")'),
+    ],
+)
+def test_normalize_sdf_header_triples_fills_any_empty_member(tmp_path, field, expected):
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        _sdf_text().replace("  (DIVIDER .)\n", f"  (DIVIDER .)\n  {field}\n"),
+    )
+
+    text = fv._normalize_sdf_header_triples(sdf_path)
+
+    if field == expected:
+        assert text is None
+    else:
+        assert text is not None
+        assert f"  {expected}\n" in text
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "(VOLTAGE 1.8)",
+        "(VOLTAGE 1.6:1.8:1.9)",
+        '(PROCESS "1.000:1.000:1.000")',
+        "(TEMPERATURE 25)",
+        "(VOLTAGE ::)",
+    ],
+)
+def test_normalize_sdf_header_triples_is_a_noop_on_complete_headers(tmp_path, field):
+    """A scalar, a fully-populated triple, or an all-empty triple (nothing to
+    fill from) is left alone -- `None` tells the caller to hand the original
+    file to `$sdf_annotate` unchanged."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        _sdf_text().replace("  (DIVIDER .)\n", f"  (DIVIDER .)\n  {field}\n"),
+    )
+
+    assert fv._normalize_sdf_header_triples(sdf_path) is None
+
+
+def test_normalize_sdf_header_triples_never_touches_delay_entries(tmp_path):
+    """Scoped to the header: an `a::b` triple inside a `CELL` block (a delay
+    entry with a genuinely missing typ member) is left for Icarus to report
+    loudly, not silently filled in."""
+    original = _sdf_text().replace("(1.000:5.000:9.000)", "(1.000::9.000)")
+    sdf_path = _write(tmp_path / "route.sdf", original)
+
+    assert fv._normalize_sdf_header_triples(sdf_path) is None
+
+    with_header = original.replace("  (DIVIDER .)\n", _OPENSTA_SDF_HEADER)
+    sdf_path = _write(tmp_path / "route-header.sdf", with_header)
+    text = fv._normalize_sdf_header_triples(sdf_path)
+    assert text is not None
+    assert text.count("(1.000::9.000)") == 2
+
+
+def test_normalize_sdf_header_triples_tolerates_an_unreadable_file(tmp_path):
+    assert fv._normalize_sdf_header_triples(str(tmp_path / "missing.sdf")) is None
+
+
 @pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
 @pytest.mark.skipif(
     not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
