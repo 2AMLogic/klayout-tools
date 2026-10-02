@@ -54,6 +54,7 @@ docs/
     lef-abstract.md
     lvs.md
     mom.md
+    netlist.md
     pdk.md
     pex.md
     place-and-route.md
