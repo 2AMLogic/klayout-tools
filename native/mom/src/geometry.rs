@@ -4,6 +4,12 @@
 
 use crate::contract::{BoxRequest, ConductorRequest};
 
+/// Oriented series paths for mixed-axis windings (L/U traces, square
+/// spirals) -- increment (iii), issue #2728. A separate representation
+/// alongside the parallel-bundle model below, not a relaxation of
+/// `classify_bars`; see the submodule docs.
+pub(crate) mod oriented_path;
+
 /// One flat rectangular panel: a constant-charge-density collocation point
 /// (`center`) with an `area` (um^2), tagged with the index of the conductor
 /// it belongs to (an index into the caller's conductor-name list).
@@ -454,6 +460,12 @@ pub(crate) fn classify_bar(name: &str, b: &BoxRequest) -> Result<Bar, String> {
 /// conductor (e.g. a coax shield's four wall segments) still need the
 /// general Ruehli mesh, a follow-up beyond increments (i) and (ii). See
 /// docs/cli/mom.md's "PEEC inductance/resistance" section.
+///
+/// Increment (iii) (#2728) classifies an open mixed-axis *winding* into an
+/// explicit series path in [`oriented_path`] instead of relaxing this
+/// function: its parallel-bundle checks stay exactly as they are, and a
+/// winding keeps failing here (so every public PEEC/full-wave request for it
+/// keeps rejecting) until a series-path consumer lands (#2729/#2730).
 ///
 /// Returns one entry **per box** (not per conductor, now that a conductor
 /// may contribute more than one), in request order (conductor order, then

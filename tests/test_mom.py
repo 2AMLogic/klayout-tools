@@ -833,6 +833,81 @@ def test_run_mom_peec_rejects_mixed_axis_multi_box_conductor(tmp_path):
         run_mom(str(gds), str(spec))
 
 
+def _tiled_u_winding_fixture(path) -> None:
+    """One open U-shaped winding on one layer, drawn as three tiled legs
+    (centreline (0,40) -> (0,0) -> (50,0) -> (50,40), width 2 um, each corner
+    square owned by the leg arriving at it -- the
+    `tests/test_mom_pypeec_cross_validation.py` spiral convention). The shapes
+    are inserted out of electrical order on purpose: GDS enumeration order is
+    not the winding's traversal order."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    shapes = top.shapes(layout.layer(1, 0))
+    for x0, y0, x1, y1 in ((1, -1, 51, 1), (49, 1, 51, 40), (-1, -1, 1, 40)):
+        shapes.insert(kdb.Box.new(_um(x0), _um(y0), _um(x1), _um(y1)))
+    layout.write(str(path))
+
+
+def _u_winding_spec(path, **extra) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "panel_size_um": 2.0,
+                "stackup": [
+                    {
+                        "layer": "1/0",
+                        "conductor": "winding",
+                        "z0_um": 0.0,
+                        "z1_um": 2.0,
+                        "conductivity_S_per_m": 5.96e7,
+                    }
+                ],
+                **extra,
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param({"compute_inductance": True}, id="static-peec"),
+        pytest.param(
+            {"frequencies_hz": [1.0e9], "segment_size_um": 5.0}, id="full-wave"
+        ),
+    ],
+)
+def test_run_mom_single_mixed_axis_winding_still_rejects_public_solves(tmp_path, extra):
+    """Issue #2728 (increment (iii)) only *classifies* an open mixed-axis
+    winding into an oriented series path inside the native geometry module.
+    No public consumer uses that path yet -- series L/R (#2729) and retarded
+    coupling (#2730) own that -- so a single-conductor winding must keep
+    failing explicitly on both the static PEEC and the full-wave surface
+    rather than being silently treated as parallel bars."""
+    gds = tmp_path / "u.gds"
+    spec = tmp_path / "u.mom.json"
+    _tiled_u_winding_fixture(gds)
+    _u_winding_spec(spec, **extra)
+
+    with pytest.raises(MomError, match="current-flow axis"):
+        run_mom(str(gds), str(spec))
+
+
+def test_run_mom_single_mixed_axis_winding_capacitance_is_unchanged(tmp_path):
+    """Capacitance-only behaviour for the same winding stays governed by its
+    surface discretisation (abutting legs' coincident faces deduplicated)."""
+    gds = tmp_path / "u.gds"
+    spec = tmp_path / "u.mom.json"
+    _tiled_u_winding_fixture(gds)
+    _u_winding_spec(spec)
+
+    report = run_mom(str(gds), str(spec))
+    assert report["conductors"] == ["winding"]
+    assert report["capacitance_matrix_ff"][0][0] > 0
+
+
 # --- full-wave frequency sweep (issue #893) ---------------------------------
 
 
