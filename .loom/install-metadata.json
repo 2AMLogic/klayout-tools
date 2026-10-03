@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.634",
-  "loom_commit": "e54b8a76ee0a907fb3c7fec91e10b0d6fccfbcc7",
+  "loom_version": "0.19.636",
+  "loom_commit": "e41edfbb52c13982f7d8b0577f42957427a6514c",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -317,5 +317,5 @@
     ".loom/scripts/worktree.sh"
   ],
   "last_resync": "2026-10-03",
-  "loom_source_remote": "git@github.com:rjwalters/loom.git"
+  "loom_source_remote": "https://github.com/rjwalters/loom.git"
 }
