@@ -637,7 +637,7 @@ def _plan_for(tmp_path: Path, request: dict) -> tuple[dict, dict]:
     """Resolve `request` far enough to build its stimulus plan, without
     running anything."""
     request_dir = str(tmp_path)
-    cell = characterize._resolve_cell(request, request_dir)
+    cell = characterize._resolve_cell_spec(request["cell"], request_dir, "request.cell")
     corner = characterize._resolve_corner(request)
     grid = characterize._resolve_grid(request)
     thresholds = characterize._resolve_thresholds(request)
@@ -986,9 +986,7 @@ def test_extract_measurements_refuses_a_multi_corner_report(tmp_path):
 
 
 def test_probe_netlist_instantiates_the_cell_once(tmp_path):
-    text = characterize._probe_netlist(
-        cell_name="nand2_demo", input_pins=("A", "B"), output_pins=("Y",)
-    )
+    text = characterize._probe_netlist_cells([("nand2_demo", ("A", "B"), ("Y",))])
     assert "module klt_characterize_probe(A, B, Y);" in text
     assert "nand2_demo u0 (" in text
     assert ".A(A)" in text and ".B(B)" in text and ".Y(Y)" in text
@@ -1036,17 +1034,15 @@ def test_example_emits_a_lib_that_round_trips_through_statime(example_run):
 @_SKIP_NO_NGSPICE
 def test_example_lib_parses_through_statime_when_reread(example_run):
     """Re-run the reader over the emitted file directly, independently of the
-    in-run check, so a regression in `roundtrip_check` itself cannot mask a
+    in-run check, so a regression in `roundtrip_check_cells` itself cannot mask a
     genuinely unparseable file."""
     if not _have_statime():
         pytest.skip("klt_statime_native extension is not installed")
 
     report, workdir = example_run
-    result = characterize.roundtrip_check(
+    result = characterize.roundtrip_check_cells(
         lib_path=report["liberty"]["path"],
-        cell_name=report["cell"]["name"],
-        input_pins=("A", "B"),
-        output_pins=("Y",),
+        cells=[(report["cell"]["name"], ("A", "B"), ("Y",))],
         work_dir=str(workdir),
     )
     assert result["status"] == "pass", result["message"]
