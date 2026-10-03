@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#2707, `klt lvs`; `schema_version` unchanged, additive):
+  `power_connectivity` now derives the power/ground pin universe per pin-order
+  library and unions the results when the instantiated masters span several
+  libraries (e.g. `sky130_fd_sc_hd` + a `sky130_sram_macros` macro), instead of
+  reporting `unchecked` on the empty cross-library intersection. New
+  `power_pins_derivation.rule` value
+  `"declared-by-every-instantiated-master-per-library"` plus an additive
+  `power_pins_derivation.libraries[]`; the original rule is unchanged for
+  single-library references.
+
 - **Added** (#2084, `klt sim --backend remote`; `schema_version` unchanged,
   additive): a single-host (`hosts: 1`) request larger than the largest
   `c7i.48xlarge` concurrent capacity (20 units at 8 threads) now runs in
