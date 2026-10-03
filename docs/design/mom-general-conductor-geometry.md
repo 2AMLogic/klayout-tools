@@ -191,6 +191,148 @@ equivalent generalization for the frequency-domain sweep to follow.
    specific formula is already validated to (`peec.rs`'s existing
    `max_relative = 1e-6`).
 
+### Increment (iii) — oriented series paths for mixed-axis windings
+
+**Scope ([#2728](https://github.com/2AMLogic/klayout-tools/issues/2728),
+geometry only).** Increments (i) and (ii) let *different* conductors take
+any orientation, but a conductor's own boxes must still be a parallel bundle:
+co-axis, co-spanning bars, each a cross-section sample of one current. A
+winding is the other shape. Its boxes are *series* legs joined at turns. This
+increment adds a separate representation and classifier for it in
+`native/mom/src/geometry/oriented_path.rs`: `classify_oriented_path` returns
+an `OrientedPath` of `PathSegment`s. `classify_bars` is **not** relaxed.
+Its one-length-per-conductor and one-equivalent-wire assumptions are still
+what the current PEEC and full-wave consumers need. No wire-format change
+was needed: the existing box list carries enough information, so
+`contract.rs` and `mom.py` are unchanged.
+
+**What a path records.** Each segment carries:
+
+- its owning conductor, its position along the traversal, and the request
+  box indices that make it up;
+- its current-flow axis and `axis_sign` (`+1` toward increasing coordinate);
+- its electrical centreline `start_um`/`end_um` and its length;
+- its rectangular cross-section;
+- its physical solid extents, kept separate from the electrical endpoints.
+
+`discretize_oriented_path` emits `PathFilament`s, which are tagged with the
+segment index as well as the conductor. Filaments sharing a segment index are
+parallel cross-section samples of one leg; different indices are series legs.
+The conductor index alone cannot make that distinction.
+
+**Contacts are defined on the physical solids.** Centreline endpoint
+coincidence plays no part. Every comparison uses a tolerance of
+`CONTACT_TOL_UM = 1e-6` um. That absorbs the floating-point noise of the
+`dbu` scaling in `mom.py` and is three orders of magnitude below one 1 nm
+database unit. For two boxes:
+
+- **Face contact.** Gap within tolerance on exactly one axis, overlap on the
+  other two (a rectangle of positive area). This is the only electrical
+  connection.
+- **Overlap.** Positive-volume intersection. Rejected: corner metal would be
+  double-counted.
+- **Edge- or point-only contact.** Rejected as an undefined connection. It is
+  neither silently joined nor silently ignored.
+- A gap wider than the tolerance is no contact at all.
+
+**Collinear subdivision is canonicalised first.** Two boxes merge into one
+straight run when their union is exactly one box: identical extents on two
+axes, abutting on the third. Merging is transitive, and it covers both
+lengthwise and widthwise splits. Each merged run must be one rectangular
+solid, and the run as a whole must pass `classify_bar`'s aspect check
+(`MIN_BAR_ASPECT_RATIO`). Individual pieces need not, so a 3x2x2 um stub
+abutting the rest of its leg is accepted. An equivalent subdivision of a path
+classifies to the identical topology. A corner square drawn as its own box
+could merge into either leg, which makes the run non-rectangular. It is
+rejected as ambiguous corner ownership.
+
+**Turns and corner volume.** A turn joins two runs on different axes. One
+run's *end face* sits flush on the other run's side face, at that run's end.
+This is the tiled convention of
+`tests/test_mom_pypeec_cross_validation.py`'s `_leg_boxes_and_signs`. Either
+leg may physically own the corner square. Electrically, both centrelines run
+to the corner's centre (the vertex):
+
+- along the owner's axis, the vertex is at the centre of the arriving leg's
+  width;
+- along the arriving leg's axis, it is at the centre of the owner's width.
+
+The owner is shortened by half the arriving leg's width, and the arriving leg
+is lengthened by half the owner's width. So `sum(length * area)` over the
+segments equals the summed box volume **exactly**, for equal or unequal
+widths, with nothing double-counted or dropped in total. This is the
+centreline convention filament-PEEC extractors use. Locally, one corner
+quadrant is counted twice and one is omitted, and that is the documented
+approximation. The physical solids are retained unchanged, so the tiled
+reference geometry is never replaced by overlapping legs. The capacitance
+surface discretisation continues to see exactly the drawn boxes.
+
+**Terminals and orientation.** A supported path is connected and open, and
+every segment end joins at most one neighbour. Its two free ends are the
+terminals, each at the centre of its free end face. The traversal starts at
+the **lexicographically smaller terminal**: compare x, then y, then z, each
+within tolerance. Segment signs are relative to that order. Permuting or
+reversing the input boxes therefore yields the same topology, ownership and
+orientation, because GDS enumeration order is never electrical order. An
+explicit terminal reversal (`OrientedPath::reversed`) is a separate operation
+recorded as `PathOrientation::Reversed`, so it can never be confused with a
+permutation. On the two-turn spiral, the canonical start is the inner end
+(-30, -30). The reversed path reproduces `_spiral_vertices` and the fixture's
+per-leg signs leg for leg.
+
+**Rejected explicitly.** Each case gets a conductor-specific message, never an
+arbitrarily chosen traversal:
+
+- an empty conductor, or a degenerate (zero-extent) box;
+- overlapping boxes, or edge/point-only contact;
+- a non-rectangular collinear group (a separately drawn corner block), or a
+  segment that is not bar-shaped;
+- side-by-side contact between parallel segments, or an end-to-end
+  cross-section step;
+- a stacked, via-like contact normal to both segment axes;
+- a turn that:
+  - changes the shared out-of-plane extent,
+  - overhangs the other leg's end, or
+  - is ambiguous because a leg is exactly as long as its neighbour is wide;
+- a T-junction, or more than two segments meeting at one end (a branch);
+- a segment whose electrical length collapses to ~0;
+- disconnected pieces, or a closed loop.
+
+Turns may be vertical (an x bar rising into a z riser).
+
+**Backward compatibility.** `classify_conductor_topology` tests the existing
+parallel-bundle discipline **first**. A single box, or physically separate
+co-axis, co-spanning boxes (e.g. a coax shield's north/south walls), stays a
+`ParallelBundle` exactly as before, so disconnected-path rejection cannot
+remove that geometry class. Only a conductor that is not a bundle is
+classified as a path.
+
+**Public solves still reject.** No public consumer reads an `OrientedPath`
+yet. A single mixed-axis winding still fails `classify_bars` ("same
+current-flow axis") on every `compute_inductance` and `frequencies_hz`
+request. Series L/R aggregation and public static acceptance belong to
+[#2729](https://github.com/2AMLogic/klayout-tools/issues/2729). Retarded
+coupling and frequency/port acceptance belong to
+[#2730](https://github.com/2AMLogic/klayout-tools/issues/2730). Accepting the
+geometry here therefore cannot produce incorrect numbers.
+Capacitance-only solves of the same winding are unchanged.
+
+**Validation.** Native tests in `oriented_path.rs` cover:
+
+- signed traversal, terminals, lengths, cross-sections and box ownership for
+  L/U paths, a vertical turn, and the tiled eight-leg spiral;
+- comparison against `_spiral_vertices`/`_leg_boxes_and_signs`, transcribed
+  so the native suite never imports the optional PyPEEC module;
+- normalized-topology equality under reversed and permuted box lists;
+- corner-volume conservation, including unequal widths;
+- collinear subdivision, including a piece below the aspect threshold;
+- every rejection above, with tolerance-boundary gap cases on both sides of
+  `CONTACT_TOL_UM`.
+
+`tests/test_mom.py` covers the public static/full-wave rejection and the
+unchanged capacitance solve for a tiled U winding, drawn out of electrical
+order.
+
 ## Out of scope
 
 - Any change to the full-field `klt em`/geode-fem direction (epic #708) —
