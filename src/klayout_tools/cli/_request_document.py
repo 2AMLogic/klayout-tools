@@ -300,6 +300,71 @@ def _scalar_to_flag_value(
     )
 
 
+def get_label_layer_map_as_pairs(
+    request: dict[str, Any],
+    key: str,
+    *,
+    verb: str,
+    flag: str,
+    error_cls: ErrorFactory,
+) -> list[str] | None:
+    """``request[key]`` as the ``["ROLE=LAYER/DATATYPE", ...]`` list its
+    repeatable flag accumulates, or ``None`` when absent/``null`` (issue
+    #2656).
+
+    The request form is the natural JSON shape -- ``{"metal0": [8, 25],
+    "poly": null}`` -- normalized back into the argv encoding so the document
+    and flag forms run through the *same* ``--label-layer`` parser
+    (:func:`.._parsing.parse_label_layers`) and cannot drift on what they
+    accept. ``null`` becomes the flag's own ``none`` spelling ("read no label
+    layer for this role").
+
+    Rejects a role name containing ``=`` for the same reason
+    :func:`get_str_map_as_pairs` does, and a value that is neither ``null``
+    nor a ``[layer, datatype]`` pair of integers -- the encoding cannot carry
+    it, and a silently-dropped override is indistinguishable from the
+    zero-promoted-pins bug the field exists to fix.
+    """
+    value = request.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _type_error(
+            verb,
+            key,
+            "a JSON object of role -> [layer, datatype] (or null)",
+            value,
+            error_cls,
+        )
+    pairs: list[str] = []
+    for role, layer in value.items():
+        if "=" in role:
+            raise error_cls(
+                f"`klt {verb}` request field {key!r} role {role!r} contains a "
+                f"'=' -- entries are passed through this command's own {flag} "
+                "ROLE=LAYER/DATATYPE encoding, which cannot represent one"
+            )
+        if layer is None:
+            pairs.append(f"{role}=none")
+            continue
+        if (
+            not isinstance(layer, list)
+            or len(layer) != 2
+            or not all(
+                isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in layer
+            )
+        ):
+            raise _type_error(
+                verb,
+                f"{key}.{role}",
+                "a [layer, datatype] pair of non-negative integers, or null",
+                layer,
+                error_cls,
+            )
+        pairs.append(f"{role}={layer[0]}/{layer[1]}")
+    return pairs
+
+
 def get_group_map_as_pairs(
     request: dict[str, Any],
     key: str,

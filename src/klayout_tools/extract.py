@@ -164,6 +164,7 @@ from .decks import (
     DiodeDevice,
     ExtractionDeck,
     InvalidDeckOptionError,
+    InvalidLabelLayerError,
     ParasiticsDeck,
     ResistorDevice,
     UnknownExtractionDeckError,
@@ -905,6 +906,58 @@ def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
         raise ExtractError(f"{flag} requires --parasitics")
 
 
+def _describe_label_layers(
+    label_layers: Mapping[str, tuple[int, int] | None] | None,
+) -> dict[str, list[int] | None] | None:
+    """The response's own ``label_layers`` echo (issue #2656) -- the caller's
+    role -> ``(layer, datatype)`` override mapping as JSON (``[layer,
+    datatype]`` arrays, ``null`` for a cleared role), sorted by role, or
+    ``None`` when no override was given.
+
+    The inverse of :func:`_label_layers_from_report`, which reads the same
+    shape back out of a committed report for ``--check --rerun``.
+    """
+    if not label_layers:
+        return None
+    return {
+        role: (None if layer is None else [layer[0], layer[1]])
+        for role, layer in sorted(label_layers.items())
+    }
+
+
+def _label_layers_from_report(
+    committed: dict[str, Any],
+) -> dict[str, tuple[int, int] | None] | None:
+    """A committed report's ``label_layers`` echo (issue #2656) back as the
+    ``run_extract`` parameter that produced it, or ``None`` when the report
+    carries no override (including every report written before the field
+    existed, which reruns exactly as it used to).
+
+    Deliberately tolerant of a malformed/hand-edited entry: a value that is
+    not a 2-element array of ints is dropped rather than raising, since this
+    runs on the ``--rerun`` path where the point is to reproduce the
+    committed run as faithfully as the record allows -- a role that cannot be
+    reproduced falls back to the deck's own default and shows up as honest
+    drift in the diff, which is exactly what that mode reports.
+    """
+    raw = committed.get("label_layers")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    overrides: dict[str, tuple[int, int] | None] = {}
+    for role, value in raw.items():
+        if not isinstance(role, str):
+            continue
+        if value is None:
+            overrides[role] = None
+        elif (
+            isinstance(value, list)
+            and len(value) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+        ):
+            overrides[role] = (value[0], value[1])
+    return overrides or None
+
+
 def run_extract(
     path: str,
     deck_name: str,
@@ -917,6 +970,7 @@ def run_extract(
     declared_pins: frozenset[str] | None = None,
     apply_resistor_fixed_offset: bool = True,
     deck_options: Mapping[str, str] | None = None,
+    label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_cell_lef_paths: tuple[str, ...] = (),
     mom_net: str | None = None,
@@ -966,6 +1020,35 @@ def run_extract(
     or a silently-kept default. The resolved mapping is echoed verbatim in
     the response's ``provenance.deck.options`` so a record can pin exactly
     which flavour a run selected.
+
+    ``label_layers`` (``klt extract --label-layer <role>=<layer>/<datatype>``,
+    repeatable; issue #2656) redirects which GDS purpose this deck reads
+    net/pin name *text* from, per label role (``well``/``poly``/``metal<i>``
+    -- :attr:`~klayout_tools.decks.ExtractionDeck.label_layer_roles`), for
+    this run only. A PDK layer map usually declares more than one text
+    purpose per conductor and a deck has to pick one: IHP's shared ``.lyp``
+    declares both ``Metal1.pin`` (8/2) and ``Metal1.text`` (8/25), and
+    ``sg13cmos5l``'s curated deck reads ``.pin`` where ``sg13g2``'s reads
+    ``.text``. A placed-and-routed stream from a flow that wrote its names on
+    the *other* purpose therefore names nothing at all: only named nets are
+    promoted, so the entire top-level pin interface comes out empty (the
+    issue #1385 warning below fires) and ``klt lvs`` has no net/device anchor
+    to seed correspondence against a reference. This is the per-request
+    escape hatch for exactly that, with no deck change and no effect on any
+    other caller: ``--label-layer metal0=8/25`` reads Metal1 names off
+    ``Metal1.text`` instead of ``Metal1.pin``. It **replaces** the deck's own
+    pair for that role rather than adding to it (a ``None`` value clears the
+    role outright) -- see
+    :meth:`~klayout_tools.decks.ExtractionDeck.with_label_layers` for why,
+    and note that the deck's *drawing*/connectivity layers are untouched:
+    only where name text is read from moves. A role this deck has no slot
+    for is an :class:`ExtractError` (wrapping
+    :class:`~klayout_tools.decks.InvalidLabelLayerError`), not a silent
+    no-op. ``None``/an empty mapping (the default) extracts byte-identically
+    to a run predating this parameter. The mapping is echoed verbatim in the
+    response's own ``label_layers`` field, so a committed report records
+    which purposes a run actually read -- and ``--check --rerun`` replays
+    them instead of drifting on every net name at once.
 
     ``top_cell_pins_only`` (the ``--top-cell-pins`` flag) controls how
     labelled nets become top-level pins (issue #291). Extraction is flat, so
@@ -1543,6 +1626,10 @@ def run_extract(
                 },
                 ...
             ],
+            # `null` unless `label_layers` (--label-layer) was given; the
+            # caller's own role -> [layer, datatype] (or `null`) mapping
+            # otherwise -- issue #2656.
+            "label_layers": {<role>: [int, int] | None, ...} | None,
             "pdk": {
                 "variant": str,
                 # {path, scope} (issue #1376), never a raw path -- see
@@ -2017,7 +2104,8 @@ def run_extract(
     (true for both shipped decks today).
 
     Raises :class:`ExtractError` if the file is missing/unreadable, the deck
-    name is unknown, ``deck_options`` names an unrecognised key/value, the
+    name is unknown, ``deck_options`` names an unrecognised key/value,
+    ``label_layers`` names a label role this deck has no slot for, the
     PDK (when given) does not resolve, the top cell is missing/ambiguous, an
     ``abstract_cell_lef_paths`` entry cannot be read, a matched
     ``abstract_cell_patterns`` cell type resolves no pins from either source,
@@ -2047,6 +2135,10 @@ def run_extract(
         except PdkNotFoundError as exc:
             raise ExtractError(str(exc)) from exc
 
+        # No `label_layers` (issue #2656) here on purpose: a label-layer
+        # override redirects which GDS purpose net/pin *names* are read from
+        # and cannot change which device classes this deck recognises, which
+        # is the only thing `resolve_device_bindings` reads off the deck.
         try:
             deck_for_models = get_extraction_deck(deck_name, deck_options)
         except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
@@ -2217,6 +2309,7 @@ def run_extract(
         declared_pins=declared_pins,
         apply_resistor_fixed_offset=apply_resistor_fixed_offset,
         deck_options=deck_options,
+        label_layers=label_layers,
         abstract_cell_patterns=abstract_cell_patterns,
         abstract_cell_lef_paths=abstract_cell_lef_paths,
         mom_net=mom_net,
@@ -2278,7 +2371,7 @@ def run_extract(
     # consistently) to read its static device-class coverage
     # (`device_classes`, issue #221) and its `substrate_net` cannot itself
     # raise.
-    deck = get_extraction_deck(deck_name, deck_options)
+    deck = get_extraction_deck(deck_name, deck_options, label_layers)
 
     circuit = netlist.circuit_by_name(top_cell_name)
     if circuit is not None:
@@ -3001,6 +3094,15 @@ def run_extract(
         # reconciliation summary otherwise -- see run_extract's docstring and
         # `_unpromoted_def_pin_geometry` for the field's full meaning.
         "def_pin_promotion": def_pin_promotion,
+        # Additive field (issue #2656): `null` unless `label_layers`
+        # (--label-layer) was given, otherwise the caller's own role ->
+        # [layer, datatype] (or `null`) mapping echoed verbatim -- the record
+        # of *which GDS purpose this run read net/pin names from*, which the
+        # deck name alone no longer answers once it can be overridden. Read
+        # back by `rerun_extract_report` so a `--check --rerun` of such a
+        # report replays the same purposes instead of drifting on every net
+        # name at once. See run_extract's `label_layers` docstring paragraph.
+        "label_layers": _describe_label_layers(label_layers),
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -3611,12 +3713,21 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     # `explicit_deck_options`).
     deck_options = explicit_deck_options(get_path(committed, ("provenance", "deck")))
 
+    # Issue #2656: replay the label-layer override the committed run read its
+    # net/pin names through. Without it, rerunning a report produced with
+    # `--label-layer` would extract against the deck's own purpose instead and
+    # drift on *every* net name at once (and on `pin_count`), reporting the
+    # override itself as drift rather than any real change to the deck/layout
+    # -- the drift this mode exists to surface.
+    label_layers = _label_layers_from_report(committed)
+
     fresh = run_extract(
         file_path,
         deck_name,
         output=committed.get("netlist_path"),
         top=committed.get("top"),
         deck_options=deck_options,
+        label_layers=label_layers,
     )
     return build_rerun_result(
         report_path=report_path,
@@ -3636,6 +3747,7 @@ def extract_netlist_from_layout(
     declared_pins: frozenset[str] | None = None,
     apply_resistor_fixed_offset: bool = True,
     deck_options: Mapping[str, str] | None = None,
+    label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_cell_lef_paths: tuple[str, ...] = (),
     mom_net: str | None = None,
@@ -3724,6 +3836,12 @@ def extract_netlist_from_layout(
     caller-visible sheet-rho flavour for any resistor family whose
     ``flavour_option`` it names. ``None``/empty resolves the deck unchanged.
     See :func:`run_extract`'s docstring for the full contract.
+
+    ``label_layers`` (issue #2656): forwarded to the same
+    :func:`~klayout_tools.decks.get_extraction_deck` call -- replaces, per
+    label role, the GDS purpose this deck reads net/pin name text from, for
+    this call only. ``None``/empty resolves the deck unchanged. See
+    :func:`run_extract`'s docstring for the full contract.
 
     ``def_net_names`` (issue #951): forwarded to ``_extract_netlist`` --
     ``True`` names routed nets from the DEF net name KLayout's LEF/DEF reader
@@ -3826,8 +3944,8 @@ def extract_netlist_from_layout(
     round-trip through a written SPICE file just to compare it.
 
     Raises :class:`ExtractError` for a bad file, unknown deck, invalid
-    ``deck_options`` entry, or missing/ambiguous top cell -- identical error
-    semantics to ``run_extract``.
+    ``deck_options``/``label_layers`` entry, or missing/ambiguous top cell --
+    identical error semantics to ``run_extract``.
     """
     if not os.path.exists(path):
         raise ExtractError(f"file not found: {path}")
@@ -3835,8 +3953,12 @@ def extract_netlist_from_layout(
         raise ExtractError(f"not a file: {path}")
 
     try:
-        deck = get_extraction_deck(deck_name, deck_options)
-    except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
+        deck = get_extraction_deck(deck_name, deck_options, label_layers)
+    except (
+        UnknownExtractionDeckError,
+        InvalidDeckOptionError,
+        InvalidLabelLayerError,
+    ) as exc:
         raise ExtractError(str(exc)) from exc
 
     # Imported lazily (after the cheap checks above) so `klt --version` and
