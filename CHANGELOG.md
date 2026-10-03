@@ -151,6 +151,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   (deliberately — neither purpose is wrong there, so flipping it would only
   relocate the same failure onto the foundry-sourced layouts it was confirmed
   against). See `docs/cli/extract.md`, "Overriding a deck's label layers".
+- **Added** (#2657, `klt lvs` `reference.form: "gate-level-verilog"`;
+  additive — `schema_version` unchanged, no response field changes): the
+  gate-level Verilog converter now accepts the connections Yosys and
+  OpenROAD `write_verilog` emit for a **vector-ported black-box macro** (an
+  SRAM, any bus-pinned IP). Each of these used to be an application error,
+  so no macro-backed design could be compared at all. The accepted forms are
+  a concatenation `.D({a, b[3], c[7:4], 2'b01})`, a range slice
+  `.A(addr[9:2])`, a sized constant wider than one bit `.WEN(8'h0f)`, and a
+  whole declared bus `.Q(dout)`. Each expands MSB-first and binds to the
+  library cell's real `<PORT>[<index>]` pins by **bit index, highest first**.
+  That matches the `[N-1:0]` ports of the real sky130 OpenRAM and gf180mcu
+  SRAM macros, and it holds however the `.subckt` header orders the bits. A
+  width mismatch is an error naming the instance, port and both widths.
+  Replication and nested concatenation are still rejected, as are unsized,
+  `x`/`z` and overflowing constants. Two side effects can change behavior:
+  a plain `assign` between two declared buses (`assign dout = _05_;`) now
+  aliases bit for bit (equal widths required, so a width-mismatched bus
+  `assign` is now an error), and a one-bit constant spelled `1'h0` is now
+  accepted. See [`docs/cli/lvs.md`](docs/cli/lvs.md), "Vector-ported macros".
 - **Added** (#55, new verb `klt netlist`; `schema_version: 1`): export an
   xschem schematic to a SPICE netlist headlessly, with a real exit status,
   plus a `--check` staleness gate over a committed netlist. The verb **owns

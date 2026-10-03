@@ -92,7 +92,8 @@ gate-level, already-flattened netlist actually needs are supported --
 `module`/`endmodule`, `input`/`output`/`inout` port declarations (with an
 optional `[msb:lsb]` bus range), plain instance calls with **named**
 (`.PORT(NET)`) connections, a bare identifier or single-index bit-select
-(`net`/`bus[3]`) or `1'b0`/`1'b1` constant as a connection expression, a
+(`net`/`bus[3]`) or `1'b0`/`1'b1` constant as a connection expression (or
+one of the multi-bit connections described below), a
 simple `assign <net> = <net>;` alias, and a plain concatenation `assign
 <net> = { <net>, <net>, ... };` (issue #2372 -- Yosys's routine rendering of
 a vector alias or tie-off padding), expanded MSB-first into one per-bit
@@ -105,9 +106,41 @@ concatenation stay rejected. A Verilog escaped identifier
 Verilog's own whitespace-terminated escape rule defines -- so a
 place-and-route-flattened hierarchy path like `\\my_array[0].u_inst/_01_` is
 the literal net name `my_array[0].u_inst/_01_`, never re-read as a
-bit-select of a bus `my_array` (issue #1371). Anything else -- positional
-instance connections, a concatenation anywhere but an `assign` right-hand
-side, a multi-bit range slice, a non-constant
+bit-select of a bus `my_array` (issue #1371).
+
+**Multi-bit instance connections onto a vector port** (issue #2657) -- the
+shapes Yosys and OpenROAD `write_verilog` emit when a black-box hard macro
+(an SRAM, any IP with a bus pin) is instantiated -- are also accepted as a
+`.PORT(<expr>)` connection: a concatenation `{a, b[3], c[7:4], 2'b01}`, a
+multi-bit range slice `bus[7:0]` (also on an escaped base, `\\bus [7:0]`), a
+sized constant wider than one bit (`8'h00`, `16'hffff`, `4'b1010`, each bit
+tied to the module-scoped `__CONST0__`/`__CONST1__` net), and a whole
+declared bus named plainly (`.PORT(bus)`) -- and, so a whole-bus
+connection resolves through Yosys's routine `assign dout = _05_;`, a plain
+`assign` between two declared buses aliases bit for bit (equal widths
+required). Each resolves at parse time to the MSB-first list of per-bit
+nets, from the module's own declared widths; a range slice must name a
+declared bus in its declared direction, and a plain concatenation operand
+must be declared. Replication (`{N{x}}`), a
+nested concatenation, an unsized or `x`/`z` constant, a constant whose value
+does not fit its width, and any other expression stay rejected. The per-bit
+nets are bound to the cell's real per-bit pins only in
+:func:`convert_gate_level_verilog`, once the PDK pin order is known: a
+library cell's `<PORT>[<index>]` pins are ordered by **numeric bit index,
+descending** (the highest index is the MSB -- the `[N-1:0]` convention
+every real vector-ported macro checked declares its Verilog ports with:
+sky130's OpenRAM `sky130_sram_*` and gf180mcu's `gf180mcu_fd_ip_sram__*`,
+whose `.subckt`/`.cdl` pins are named `din0[31]`..`din0[0]` / `D[7]`..`D[0]`).
+The index, not the pin's position in the `.subckt` header, decides the
+binding, so a library that declares its bits in another header order still
+binds correctly; a library whose bus pins are not named `<PORT>[<index>]`
+(e.g. `D<7>`) has no per-bit pins to bind and fails loudly rather than
+guessing. A width mismatch between the expression and the pin
+count is an error naming the instance, port and both widths, never a
+silent truncate or pad. (An `assign` right-hand side keeps its own,
+narrower concatenation grammar above -- unchanged by this.)
+
+Anything else -- positional instance connections, a non-constant
 expression, `always`/`case`/other behavioral statements -- raises
 :class:`VerilogNetlistError` naming the offending construct, never a silent
 best-effort guess (the same "a wrong conversion in a sign-off tool must
@@ -173,6 +206,30 @@ _RANGE_SUFFIX_RE = re.compile(r"^\[[^\]]*:[^\]]*\]$")
 #: instead).
 _CONST_RE = re.compile(r"^\d*'[bB]([01])$")
 
+#: A sized Verilog constant of any base -- `8'h00`, `16'hffff`, `4'b1010`,
+#: `3'd5`, `1'h0` (issue #2657). Only an instance connection (and an operand
+#: of a connection concatenation) reads this; a width above one expands to
+#: one `__CONST0__`/`__CONST1__` net per bit, MSB-first. The digit class is
+#: deliberately wide (`x`/`z`/`?` included) so an unknown/high-impedance bit
+#: is matched here and rejected by name rather than falling through to a
+#: vaguer "not a plain net reference" error.
+_SIZED_CONST_RE = re.compile(
+    r"^(?P<width>\d+)\s*'(?P<signed>[sS])?(?P<base>[bBoOdDhH])\s*"
+    r"(?P<digits>[0-9a-fA-FxXzZ?_]+)$"
+)
+_CONST_BASES = {"b": 2, "o": 8, "d": 10, "h": 16}
+
+#: A multi-bit range slice with integer bounds, on a plain base
+#: (`bus[7:0]`) or, via :data:`_ESCAPED_RANGE_RE`, on an escaped base
+#: written with Verilog's terminating whitespace (`\bus [7:0]`).
+_RANGE_SLICE_RE = re.compile(
+    r"^(?P<base>[A-Za-z_$][A-Za-z0-9_$]*)\s*"
+    r"\[\s*(?P<msb>-?\d+)\s*:\s*(?P<lsb>-?\d+)\s*\]$"
+)
+_ESCAPED_RANGE_RE = re.compile(
+    r"^(?P<base>\\\S+)\s+\[\s*(?P<msb>-?\d+)\s*:\s*(?P<lsb>-?\d+)\s*\]$"
+)
+
 #: Net names substituted for a `1'b0`/`1'b1` connection, module-scoped (every
 #: constant reference within one module shares the same synthesized net, the
 #: same "one tie net feeds many loads" shape a real tie-cell produces).
@@ -202,10 +259,11 @@ class VerilogNetlistError(Exception):
     """Raised when a gate-level Verilog netlist cannot be converted
     correctly and unambiguously to plain-element-shaped SPICE: an
     unsupported construct (positional instance ports, an expression this
-    module does not model, a range-slice connection), a malformed
-    declaration, or a library cell instantiated with no resolvable pin
-    order. Always names the offending construct/instance -- never a silent
-    best-effort guess that could degrade a sign-off comparison invisibly.
+    module does not model, a multi-bit connection whose width disagrees
+    with the port it drives), a malformed declaration, or a library cell
+    instantiated with no resolvable pin order. Always names the offending
+    construct/instance -- never a silent best-effort guess that could
+    degrade a sign-off comparison invisibly.
     """
 
 
@@ -213,11 +271,20 @@ class VerilogNetlistError(Exception):
 class _Instance:
     cell: str
     name: str
-    #: `{<port name>: <net name>}`, in encounter order. A `.PORT()` empty
-    #: connection or a missing (never mentioned) pin is not recorded here --
-    #: :func:`_convert_module` synthesizes a fresh disconnected net for it at
-    #: write time, once the stub's full declared pin list is known.
-    connections: dict[str, str] = field(default_factory=dict)
+    #: `{<port name>: <connection expression text>}`, in encounter order --
+    #: resolved into :attr:`connections` by :func:`_resolve_connection` only
+    #: once every declaration in the module is seen (issue #2657: a
+    #: multi-bit expression needs the declared widths, which may follow the
+    #: instance).
+    expressions: dict[str, str] = field(default_factory=dict)
+    #: `{<port name>: <net name> | [<net name>, ...]}`, in encounter order --
+    #: one net for a scalar connection, or the MSB-first per-bit net list of
+    #: a multi-bit one (issue #2657). A `.PORT()` empty connection or a
+    #: missing (never mentioned) pin is not recorded here --
+    #: :func:`convert_gate_level_verilog` synthesizes a fresh disconnected
+    #: net for it at write time, once the stub's full declared pin list is
+    #: known.
+    connections: dict[str, str | list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -362,8 +429,13 @@ def _parse_escaped_connection_expr(expr: str) -> str:
     A select on an escaped name is written with the terminating whitespace
     made explicit (`\\bus [3]`), so anything left after the escaped token is
     handled here: a single-index select is folded into the same
-    `<net>[<index>]` flat name every other net uses, and a multi-bit range
-    slice stays as loudly unsupported as it is for a plain base name.
+    `<net>[<index>]` flat name every other net uses. This function resolves
+    to *one* net, so a multi-bit range slice is rejected here exactly as it
+    is for a plain base name -- which is what an `assign` operand still
+    gets. An instance connection never reaches this with a range slice:
+    :func:`_resolve_connection` expands `\\bus [7:0]` per bit first (issue
+    #2657), the same as `bus[7:0]`, so the escaped and plain paths accept
+    the same multi-bit shapes.
     """
     match = _ESCAPED_IDENT_RE.match(expr)
     if match is None:
@@ -395,9 +467,14 @@ def _parse_escaped_connection_expr(expr: str) -> str:
 
 
 def _parse_connection_expr(expr: str, aliases: dict[str, str] | None = None) -> str:
-    """Resolve one `.PORT(<expr>)` connection expression to a net name, or
-    raise :class:`VerilogNetlistError` for anything this narrow grammar does
-    not model (a range slice, concatenation, a non-constant expression)."""
+    """Resolve one single-net expression to a net name, or raise
+    :class:`VerilogNetlistError` for anything this narrow grammar does not
+    model (a range slice, concatenation, a non-constant expression).
+
+    The scalar core of both an `assign` operand and an instance connection.
+    An instance connection goes through :func:`_resolve_connection` first,
+    which handles the multi-bit shapes (issue #2657) and falls back to this
+    for everything else."""
     expr = expr.strip()
     const_match = _CONST_RE.match(expr)
     if const_match:
@@ -446,7 +523,7 @@ def _parse_instance_statement(statement: str) -> _Instance:
             f"content {trailer!r} after its connection list"
         )
     body = rest[open_paren + 1 : close_paren].strip()
-    connections: dict[str, str] = {}
+    expressions: dict[str, str] = {}
     if body:
         for item in _split_top_level(body):
             if not item.startswith("."):
@@ -474,8 +551,192 @@ def _parse_instance_statement(statement: str) -> _Instance:
                 # `_convert_module` synthesizes a fresh disconnected net for
                 # any declared pin with no recorded connection.
                 continue
-            connections[_unescape(port_name)] = _parse_connection_expr(expr)
-    return _Instance(cell=cell, name=inst_name, connections=connections)
+            expressions[_unescape(port_name)] = expr
+    return _Instance(cell=cell, name=inst_name, expressions=expressions)
+
+
+def _resolve_instance_connections(
+    instance: _Instance, net_widths: dict[str, list[str]]
+) -> None:
+    """Fill ``instance.connections`` from its raw ``expressions``. Deferred
+    like an `assign` until the whole module is read (issue #2657): a
+    multi-bit connection expands against declared widths, and a declaration
+    may follow the instance that uses it."""
+    for port, expr in instance.expressions.items():
+        try:
+            instance.connections[port] = _resolve_connection(expr, net_widths)
+        except VerilogNetlistError as exc:
+            raise _instance_error(instance, port, str(exc)) from exc
+
+
+def _instance_error(
+    instance: _Instance, port: str, message: str
+) -> VerilogNetlistError:
+    return VerilogNetlistError(
+        f"instance '{instance.name}' ('{instance.cell}') port '{port}': {message}"
+    )
+
+
+def _sized_constant_bits(expr: str) -> list[str] | None:
+    """The MSB-first `__CONST0__`/`__CONST1__` net list of a sized Verilog
+    constant (`8'h00`, `4'b1010`, `1'h0`; issue #2657), or ``None`` when
+    ``expr`` is not one. An `x`/`z`/`?` digit, a zero width, or a value that
+    does not fit its declared width is an error -- Verilog would silently
+    truncate the last; a sign-off converter must not."""
+    match = _SIZED_CONST_RE.match(expr)
+    if match is None:
+        return None
+    width = int(match.group("width"))
+    digits = match.group("digits").replace("_", "")
+    if width == 0 or not digits:
+        raise VerilogNetlistError(f"constant {expr!r} has no bits")
+    if re.search(r"[xXzZ?]", digits):
+        raise VerilogNetlistError(
+            f"constant {expr!r} has an 'x'/'z' (unknown/high-impedance) bit, "
+            "which has no net to tie to"
+        )
+    try:
+        value = int(digits, _CONST_BASES[match.group("base").lower()])
+    except ValueError as exc:
+        raise VerilogNetlistError(
+            f"constant {expr!r} has a digit that is not valid in its base"
+        ) from exc
+    if value >= 1 << width:
+        raise VerilogNetlistError(
+            f"constant {expr!r} does not fit in its declared {width} bit(s)"
+        )
+    return [_CONST_NET_NAMES[bit] for bit in format(value, f"0{width}b")]
+
+
+def _range_slice_bits(expr: str, net_widths: dict[str, list[str]]) -> list[str] | None:
+    """The MSB-first per-bit net list of a multi-bit range slice
+    (`bus[7:0]`, `\\bus [7:0]`; issue #2657), or ``None`` when ``expr`` is
+    not one.
+
+    The base must be a declared bus and the slice must run in its declared
+    direction over declared bits: Verilog itself rejects a reversed
+    part-select, and an undeclared base has no width to check against, so
+    either is an error rather than a guess at which bit is the MSB."""
+    match = _RANGE_SLICE_RE.match(expr) or _ESCAPED_RANGE_RE.match(expr)
+    if match is None:
+        return None
+    base = _unescape(match.group("base"))
+    bits = _expand_range(base, int(match.group("msb")), int(match.group("lsb")))
+    declared = net_widths.get(base)
+    if declared is None or declared == [base]:
+        raise VerilogNetlistError(
+            f"range slice {expr!r} selects from {base!r}, which has no "
+            "'wire'/'input'/'output'/'inout' bus declaration in this module"
+        )
+    positions = [declared.index(bit) if bit in declared else -1 for bit in bits]
+    if -1 in positions or positions != list(
+        range(positions[0], positions[0] + len(positions))
+    ):
+        raise VerilogNetlistError(
+            f"range slice {expr!r} does not select declared bits of {base!r} "
+            f"in their declared direction ({declared[0]} .. {declared[-1]})"
+        )
+    return bits
+
+
+def _split_concatenation(expr: str) -> list[str] | None:
+    """The top-level operands of ``expr`` when it is exactly one
+    brace-delimited concatenation (`{a, b}`), else ``None`` -- so
+    `{a} & {b}` is not mistaken for one."""
+    if not expr.startswith("{"):
+        return None
+    depth = 0
+    for position, char in enumerate(expr):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                if position != len(expr) - 1:
+                    return None
+                return _split_top_level(expr[1:-1])
+    return None
+
+
+def _is_bit_select(expr: str) -> bool:
+    """``True`` for a single-index bit-select -- `bus[3]`, or `\\bus [3]` on
+    an escaped base. An escaped name with no whitespace before its `[`
+    (`\\a.b[3]`) is one atomic name, not a select (issue #1371)."""
+    if expr.startswith("\\"):
+        match = _ESCAPED_IDENT_RE.match(expr)
+        rest = expr[match.end() :].strip() if match else ""
+        return bool(_INDEX_SUFFIX_RE.match(rest))
+    return bool(_BIT_SELECT_RE.match(expr))
+
+
+def _concat_connection_operand_bits(
+    operand: str, net_widths: dict[str, list[str]]
+) -> list[str]:
+    """One operand of an instance-connection concatenation (issue #2657) to
+    its MSB-first per-bit net list: a declared net (its full declared
+    width), a single-index bit-select, a range slice, or a sized constant.
+
+    Wider than an `assign` concatenation operand
+    (:func:`_concat_operand_bits`) on purpose: Yosys/OpenROAD routinely
+    write a bus-pin connection as `{ 24'h000000, data[7:0] }`, so a
+    part-select and a sized constant are exactly what this position needs.
+    Replication and a nested concatenation stay rejected."""
+    if "{" in operand or "}" in operand:
+        raise VerilogNetlistError(
+            f"concatenation operand {operand!r} is a replication or nested "
+            "concatenation, which is not supported"
+        )
+    constant = _sized_constant_bits(operand)
+    if constant is not None:
+        return constant
+    if "'" in operand:
+        raise VerilogNetlistError(
+            f"concatenation operand {operand!r} is an unsized constant -- its "
+            "width (and so every later operand's bit position) is ambiguous"
+        )
+    sliced = _range_slice_bits(operand, net_widths)
+    if sliced is not None:
+        return sliced
+    net = _parse_connection_expr(operand)
+    if net in net_widths:
+        return list(net_widths[net])
+    if _is_bit_select(operand):
+        # A single-index bit-select (`bus[3]`, `\bus [3]`): one bit by
+        # construction, whatever the base's declared width.
+        return [net]
+    raise VerilogNetlistError(
+        f"concatenation operand {operand!r} has no 'wire'/'input'/'output'/"
+        "'inout' declaration in this module, so its bit width is unknown"
+    )
+
+
+def _resolve_connection(expr: str, net_widths: dict[str, list[str]]) -> str | list[str]:
+    """Resolve one `.PORT(<expr>)` instance connection to a single net
+    name, or -- for a multi-bit connection (issue #2657) -- its MSB-first
+    per-bit net list: a concatenation, a range slice, a sized constant wider
+    than one bit, or a plain name of a declared bus. Everything else falls
+    through to :func:`_parse_connection_expr`'s scalar grammar unchanged."""
+    operands = _split_concatenation(expr)
+    if operands is not None:
+        if not operands:
+            raise VerilogNetlistError(f"concatenation {expr!r} is empty")
+        bits: list[str] = []
+        for operand in operands:
+            bits.extend(_concat_connection_operand_bits(operand, net_widths))
+        return bits
+    constant = _sized_constant_bits(expr)
+    if constant is not None:
+        return constant[0] if len(constant) == 1 else constant
+    sliced = _range_slice_bits(expr, net_widths)
+    if sliced is not None:
+        return sliced
+    net = _parse_connection_expr(expr)
+    declared = net_widths.get(net)
+    if declared is not None and declared != [net]:
+        # A whole declared bus named plainly -- `.D(data)`, Yosys's own
+        # rendering of a full-width bus connection.
+        return list(declared)
+    return net
 
 
 def _port_aliases(ports: list[str], aliases: dict[str, str]) -> dict[str, str]:
@@ -549,6 +810,8 @@ def _parse_module_chunk(chunk: str) -> _Module:
             instances.append(_parse_instance_statement(stripped))
 
     net_widths = {**wire_widths, **port_widths}
+    for instance in instances:
+        _resolve_instance_connections(instance, net_widths)
     for stripped in assign_statements:
         _parse_assign_statement(stripped, aliases, net_widths)
 
@@ -719,7 +982,23 @@ def _parse_assign_statement(
         raise _unsupported_assign(statement)
     lhs = _parse_connection_expr(match.group("lhs"))
     rhs = _parse_connection_expr(match.group("rhs"))
-    aliases[lhs] = rhs
+    lhs_bits = (net_widths or {}).get(lhs, [lhs])
+    rhs_bits = (net_widths or {}).get(rhs, [rhs])
+    if lhs_bits == [lhs] and rhs_bits == [rhs]:
+        aliases[lhs] = rhs
+        return
+    # A whole-bus alias (`assign dout = _05_;`, Yosys's routine rendering of
+    # a bus output): alias bit for bit, so a per-bit consumer -- a
+    # bit-expanded port, or a whole-bus macro connection (issue #2657) --
+    # resolves through it.
+    if len(lhs_bits) != len(rhs_bits):
+        raise _unsupported_assign(
+            statement,
+            f"left-hand side is {len(lhs_bits)} bit(s) wide but the "
+            f"right-hand side is {len(rhs_bits)} bit(s) wide",
+        )
+    for lhs_bit, rhs_bit in zip(lhs_bits, rhs_bits, strict=True):
+        aliases[lhs_bit] = rhs_bit
 
 
 def _resolve_alias(net: str, aliases: dict[str, str]) -> str:
@@ -735,12 +1014,20 @@ def parse_gate_level_verilog(text: str) -> list[dict[str, object]]:
     one per ``module``/``endmodule`` block, in file order.
 
     Each entry is ``{"name": str, "ports": list[str], "instances":
-    list[{"cell": str, "name": str, "connections": dict[str, str]}],
-    "port_aliases": dict[str, str]}`` -- plain JSON-serialisable primitives,
-    mirroring every other pure-library function in this repo. ``ports`` is
-    already bit-expanded (a ``[15:0]`` bus port becomes 16 individual
-    entries); ``connections`` values are already alias-resolved (a preceding
-    ``assign`` is transparent to every consumer of this data).
+    list[{"cell": str, "name": str, "connections": dict[str, str |
+    list[str]]}], "port_aliases": dict[str, str]}`` -- plain
+    JSON-serialisable primitives, mirroring every other pure-library
+    function in this repo. ``ports`` is already bit-expanded (a ``[15:0]``
+    bus port becomes 16 individual entries); ``connections`` values are
+    already alias-resolved (a preceding ``assign`` is transparent to every
+    consumer of this data). A ``connections`` value is one net name for a
+    scalar connection, or -- for a multi-bit connection onto a vector port
+    (a concatenation, a range slice, a sized constant wider than one bit, or
+    a whole declared bus; issue #2657) -- the MSB-first list of per-bit net
+    names, bound to the port's real per-bit pins only later, by
+    :func:`convert_gate_level_verilog`. A plain ``assign`` between two
+    declared buses aliases bit for bit, so ``port_aliases`` keys are then
+    the bit-expanded port names.
     ``port_aliases`` (issue #2021, see :func:`_port_aliases`) is
     ``{<port>: <canonical net>}`` for every declared port whose only
     Verilog-level connection is an ``assign`` -- empty for every module that
@@ -768,7 +1055,11 @@ def parse_gate_level_verilog(text: str) -> list[dict[str, object]]:
                 "cell": inst.cell,
                 "name": inst.name,
                 "connections": {
-                    port: _resolve_alias(net, module.aliases)
+                    port: (
+                        [_resolve_alias(bit, module.aliases) for bit in net]
+                        if isinstance(net, list)
+                        else _resolve_alias(net, module.aliases)
+                    )
                     for port, net in inst.connections.items()
                 },
             }
@@ -883,49 +1174,23 @@ def convert_gate_level_verilog(
     pins carried" sections for exactly which pins that stub declares and
     why). A cell type that resolves as neither is :class:`VerilogNetlistError`,
     naming the instance and cell type -- never a silent skip.
+
+    A multi-bit connection (issue #2657) is bound here, where the real pin
+    names are first known, by :func:`_bind_connections`: a library cell's
+    `<PORT>[<index>]` pins in descending numeric index order, a parsed
+    sub-module's bit-expanded ports in their declared order.
     """
     modules = parse_gate_level_verilog(text)
-    module_names = {module["name"] for module in modules}
-
-    # First pass: for every library-cell instance (i.e. not a call to
-    # another parsed module), record every pin actually connected across
-    # every instance of that cell type -- the union that becomes the
-    # black-box stub's own declared (signal-only) pin list, ordered per the
-    # real PDK declaration.
-    used_pins: dict[str, set[str]] = {}
-    for module in modules:
-        for instance in module["instances"]:
-            cell = instance["cell"]
-            if cell in module_names:
-                continue
-            used_pins.setdefault(cell, set()).update(instance["connections"])
-
-    stub_pin_order: dict[str, list[str]] = {}
-    for cell, connected in used_pins.items():
-        real_order = pin_order_lookup(cell)
-        if real_order is None:
-            raise VerilogNetlistError(
-                f"library cell '{cell}' has no resolvable pin order (no "
-                "matching '.subckt' declaration in the resolved PDK "
-                "library) -- pass the correct 'reference.library' (and "
-                "'reference.pdk'/'reference.pdk_root' if needed), or "
-                "confirm this cell type ships in that library"
-            )
-        unknown = connected - set(real_order)
-        if unknown:
-            raise VerilogNetlistError(
-                f"library cell '{cell}' is instantiated with connection(s) to "
-                f"pin(s) {sorted(unknown)!r} that are not in its resolved PDK "
-                f"pin list {real_order!r}"
-            )
-        stub_pin_order[cell] = [pin for pin in real_order if pin in connected]
+    real_orders = _library_pin_orders(modules, pin_order_lookup)
+    bound, stub_pin_order = _bind_all_instances(modules, real_orders)
 
     out: list[str] = []
-    for module in modules:
+    for module, module_bound in zip(modules, bound, strict=True):
         out.append(f".SUBCKT {module['name']} {' '.join(module['ports'])}".rstrip())
-        for instance in module["instances"]:
+        for instance, connections in zip(
+            module["instances"], module_bound, strict=True
+        ):
             cell = instance["cell"]
-            connections = instance["connections"]
             pins = (
                 stub_pin_order[cell]
                 if cell in stub_pin_order
@@ -942,6 +1207,142 @@ def convert_gate_level_verilog(
         out.append(f".ENDS {cell}")
 
     return "\n".join(out) + "\n"
+
+
+def _library_pin_orders(
+    modules: list[dict[str, object]], pin_order_lookup
+) -> dict[str, list[str]]:
+    """``{<library cell>: <real PDK pin order>}`` for every instantiated cell
+    type that is not a call to another parsed module, in encounter order --
+    all resolved before any connection is bound, since a multi-bit
+    connection (issue #2657) can only be bound against real pin names."""
+    module_names = {module["name"] for module in modules}
+    real_orders: dict[str, list[str]] = {}
+    for module in modules:
+        for instance in module["instances"]:  # type: ignore[attr-defined]
+            cell = instance["cell"]
+            if cell in module_names or cell in real_orders:
+                continue
+            real_order = pin_order_lookup(cell)
+            if real_order is None:
+                raise VerilogNetlistError(
+                    f"library cell '{cell}' has no resolvable pin order (no "
+                    "matching '.subckt' declaration in the resolved PDK "
+                    "library) -- pass the correct 'reference.library' (and "
+                    "'reference.pdk'/'reference.pdk_root' if needed), or "
+                    "confirm this cell type ships in that library"
+                )
+            real_orders[cell] = list(real_order)
+    return real_orders
+
+
+def _bind_all_instances(
+    modules: list[dict[str, object]], real_orders: dict[str, list[str]]
+) -> tuple[list[list[dict[str, str]]], dict[str, list[str]]]:
+    """``(bound, stub_pin_order)``: every instance's ``{<pin>: <net>}``
+    binding (:func:`_bind_connections`), per module, in instance order; and
+    each library cell's black-box stub pin list -- the union of the pins
+    actually connected across every instance of that cell type, in the
+    real PDK declared order. A connection to a pin the library cell does
+    not declare is an error naming every such pin across the cell type."""
+    bound: list[list[dict[str, str]]] = []
+    used_pins: dict[str, set[str]] = {cell: set() for cell in real_orders}
+    unknown_pins: dict[str, set[str]] = {cell: set() for cell in real_orders}
+    for module in modules:
+        module_bound: list[dict[str, str]] = []
+        for instance in module["instances"]:  # type: ignore[attr-defined]
+            cell = instance["cell"]
+            library = cell in real_orders
+            pins = (
+                real_orders[cell]
+                if library
+                else _sub_module_by_name(modules, cell)["ports"]
+            )
+            pin_nets, unknown = _bind_connections(instance, pins, library=library)  # type: ignore[arg-type]
+            if library:
+                used_pins[cell].update(pin_nets)
+                unknown_pins[cell].update(unknown)
+            module_bound.append(pin_nets)
+        bound.append(module_bound)
+
+    stub_pin_order: dict[str, list[str]] = {}
+    for cell, real_order in real_orders.items():
+        if unknown_pins[cell]:
+            raise VerilogNetlistError(
+                f"library cell '{cell}' is instantiated with connection(s) to "
+                f"pin(s) {sorted(unknown_pins[cell])!r} that are not in its "
+                f"resolved PDK pin list {real_order!r}"
+            )
+        stub_pin_order[cell] = [pin for pin in real_order if pin in used_pins[cell]]
+    return bound, stub_pin_order
+
+
+def _port_bit_pins(port: str, pins: list[str], *, library: bool) -> list[str]:
+    """``port``'s per-bit pins among ``pins`` (every `<port>[<index>]`
+    entry), MSB-first (issue #2657).
+
+    A parsed sub-module's ports were bit-expanded by :func:`_expand_range`
+    from its own `[msb:lsb]` declaration, so their declared order already is
+    MSB-first, ascending range included. A library cell's pins come from a
+    `.subckt`/`.cdl` header, whose bit names carry the Verilog index but
+    whose header position carries nothing Verilog defines, so they are
+    sorted by that index, highest first: the `[N-1:0]` convention every real
+    vector-ported macro checked uses (see the module docstring)."""
+    pattern = re.compile(rf"^{re.escape(port)}\[(-?\d+)\]$")
+    hits = [
+        (int(match.group(1)), pin)
+        for pin in pins
+        if (match := pattern.match(pin)) is not None
+    ]
+    if library:
+        hits.sort(key=lambda hit: hit[0], reverse=True)
+    return [pin for _, pin in hits]
+
+
+def _bind_connections(
+    instance: dict[str, object], pins: list[str], *, library: bool
+) -> tuple[dict[str, str], set[str]]:
+    """``({<real pin>: <net>}, {<unknown port>, ...})`` for one instance
+    calling a cell/module with declared ``pins``.
+
+    A scalar connection binds to its pin by name, as it always has. A
+    multi-bit one (issue #2657) is zipped MSB-first onto the port's per-bit
+    pins (:func:`_port_bit_pins`) -- or onto a scalar pin of that name, when
+    one bit wide. A bit-count mismatch either way is an error naming the
+    instance, port and both widths, never a silent truncate or pad. A port
+    with no pin at all is returned as unknown for the caller to report (a
+    library cell's error aggregates every such port across every instance
+    of the cell type).
+    """
+    pin_set = set(pins)
+    pin_nets: dict[str, str] = {}
+    unknown: set[str] = set()
+    connections: dict[str, str | list[str]] = instance["connections"]  # type: ignore[assignment]
+    for port, net in connections.items():
+        if isinstance(net, str) and port in pin_set:
+            bit_pins = [port]
+        else:
+            bit_pins = _port_bit_pins(port, pins, library=library)
+            if not bit_pins and port in pin_set:
+                bit_pins = [port]
+        if not bit_pins:
+            unknown.add(port)
+            continue
+        bits = net if isinstance(net, list) else [net]
+        if len(bits) != len(bit_pins):
+            raise VerilogNetlistError(
+                f"instance '{instance['name']}' ('{instance['cell']}') port "
+                f"'{port}' is {len(bit_pins)} bit(s) wide ({bit_pins[0]} .. "
+                f"{bit_pins[-1]}) but its connection is {len(bits)} bit(s) wide"
+            )
+        for pin, bit in zip(bit_pins, bits, strict=True):
+            if pin in pin_nets:
+                raise VerilogNetlistError(
+                    f"instance '{instance['name']}' ('{instance['cell']}') "
+                    f"connects pin '{pin}' twice"
+                )
+            pin_nets[pin] = bit
+    return pin_nets, unknown
 
 
 def _sub_module_by_name(
