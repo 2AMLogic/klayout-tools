@@ -1460,6 +1460,43 @@ def _graded_t1_item_ids() -> frozenset[int] | None:
     return graded_table_ids | build_item_ids
 
 
+def opt_in_kind_scopes() -> dict[str, list[int]]:
+    """Opt-in evidence kind -> sorted T1 item ids it may satisfy (issue #2655).
+
+    Derived directly from :data:`_OPT_IN_KIND_ITEMS`, the table the grader
+    itself consults, so the published mapping cannot drift from it. A kind
+    whose scope is currently empty (``power``) maps to ``[]``: it is
+    recognised but satisfies no item.
+    """
+    return {kind: sorted(items) for kind, items in _OPT_IN_KIND_ITEMS.items()}
+
+
+def opt_in_kinds_by_item() -> dict[str, list[str]]:
+    """T1 item id (as a string JSON key) -> opt-in kinds that may satisfy it.
+
+    The inverse of :func:`opt_in_kind_scopes`, answering "which non-native
+    kinds can satisfy item N?". Items no opt-in kind may satisfy are absent.
+    """
+    inverse: dict[int, list[str]] = {}
+    for kind, items in opt_in_kind_scopes().items():
+        for item in items:
+            inverse.setdefault(item, []).append(kind)
+    return {str(item): inverse[item] for item in sorted(inverse)}
+
+
+def describe_opt_in_kinds_text() -> str:
+    """Human-readable one-line-per-kind rendering for ``--help``/text output."""
+    lines = []
+    for kind, items in opt_in_kind_scopes().items():
+        scope = (
+            "T1 item(s) " + ", ".join(str(i) for i in items)
+            if items
+            else "no T1 item (recognised, but currently satisfies nothing)"
+        )
+        lines.append(f"  {kind}: {scope}")
+    return "\n".join(lines)
+
+
 def describe_grader() -> dict[str, Any]:
     """The ``klt signoff --describe-grader`` JSON payload (issue #2216).
 
@@ -1497,6 +1534,9 @@ def describe_grader() -> dict[str, Any]:
         "grading_ruleset_id": report["grading_ruleset_id"],
         "source_doc": CANONICAL_DOC_LABEL,
         "graded_t1_item_ids": (sorted(graded_ids) if graded_ids is not None else None),
+        # Additive (issue #2655): derived from the grader's own table.
+        "opt_in_evidence_kinds": opt_in_kind_scopes(),
+        "opt_in_kinds_by_item": opt_in_kinds_by_item(),
     }
 
 

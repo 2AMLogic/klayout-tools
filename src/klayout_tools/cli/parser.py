@@ -2700,8 +2700,17 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
     Aggregate klt drc/lvs/extract/sim results into a pass/fail verdict.
     See docs/cli/signoff.md for full details.
     """
+    from klayout_tools.signoff import describe_opt_in_kinds_text
+
     signoff_parser = subparsers.add_parser(
         "signoff",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Opt-in evidence kinds (non-native envelopes) and the T1 "
+            "checklist items each may satisfy; any other item rejects them "
+            "as wrong_kind. Also available as JSON via --describe-grader:\n"
+            + describe_opt_in_kinds_text()
+        ),
         help=(
             "aggregate klt drc/lvs/extract/sim JSON envelopes into one "
             "pass/fail verdict, render a T1-T4 tier-verdict report with "
