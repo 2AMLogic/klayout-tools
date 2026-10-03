@@ -69,7 +69,7 @@ def run(args: argparse.Namespace) -> int:
             fail_on_diagnostic=args.fail_on_diagnostic,
         )
     except SimError as exc:
-        return emit_error("sim", str(exc), args.format)
+        return emit_error("sim", str(exc), args.format, code=exc.code)
 
     emit_success(report, args.format, _print_text)
 

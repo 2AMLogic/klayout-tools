@@ -52,6 +52,27 @@ def test_emit_error_json_shape_and_exit_code(capsys):
     }
 
 
+def test_emit_error_code_is_emitted_only_when_set(capsys):
+    """Issue #2721: `error.code` is additive -- present when a caller passes
+    one, absent (not null) otherwise, and never in the text rendering."""
+    assert emit_error("sim", "no capacity", "json", code="batch_no_capacity") == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error == {
+        "schema_version": 1,
+        "error": {
+            "command": "sim",
+            "message": "no capacity",
+            "code": "batch_no_capacity",
+        },
+    }
+
+    emit_error("sim", "no capacity", "json", code=None)
+    assert "code" not in json.loads(capsys.readouterr().err)["error"]
+
+    emit_error("sim", "no capacity", "text", code="batch_no_capacity")
+    assert capsys.readouterr().err == "klt sim: no capacity\n"
+
+
 def test_emit_error_text_plain_line(capsys):
     exit_code = emit_error("layers", "file not found: missing.gds", "text")
 

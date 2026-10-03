@@ -595,8 +595,199 @@ def test_launch_shells_out_once_with_apply_and_profile(tmp_path):
 def test_launch_failure_raises_batch_error(tmp_path):
     runner = _FakeRunner()
     runner.queue("launch", fake_completed(returncode=1, stderr="capacity floor"))
-    with pytest.raises(sb.BatchError, match="capacity floor"):
+    with pytest.raises(sb.BatchError, match="capacity floor") as excinfo:
         sb.launch_job(_config(tmp_path), "job-1", runner=runner)
+    # Not the capacity-refusal text: unclassified, so never retried and never
+    # surfaced as `error.code` (issue #2721).
+    assert excinfo.value.code is None
+
+
+# --------------------------------------------------------------------------- #
+# Capacity refusal: `batch_no_capacity` + `batch.capacity_wait_s` (#2721)
+# --------------------------------------------------------------------------- #
+
+#: Verbatim shape of 2am's `batch-fleet-provision.sh` `cmd_launch` refusal.
+_CAPACITY_REFUSAL = (
+    "error: no capacity in any of the 30 pools after 3 attempt(s) — this is "
+    "the capacity-refusal case, and it is now visible instead of silent"
+)
+
+
+class _FakeClock:
+    """A monotonic clock that only moves when the code under test sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _queue_refusals(runner: _FakeRunner, count: int) -> None:
+    for _ in range(count):
+        runner.queue("launch", fake_completed(returncode=1, stderr=_CAPACITY_REFUSAL))
+
+
+def test_classify_launch_failure_only_matches_the_capacity_refusal():
+    assert sb._classify_launch_failure(_CAPACITY_REFUSAL) == "batch_no_capacity"
+    assert sb.BATCH_NO_CAPACITY_CODE == "batch_no_capacity"
+    for other in (
+        "error: only 2 instance type(s) configured, floor is 3",
+        "error: 4 instance(s) already running + 1 requested exceeds "
+        "BATCH_MAX_CONCURRENT_INSTANCES=4",
+        "error: nothing launched and pools refused with UnauthorizedOperation",
+        "error: no job spec at s3://bucket/jobs/x/job.json",
+        "",
+    ):
+        assert sb._classify_launch_failure(other) is None
+
+
+def test_capacity_refusal_without_wait_is_one_attempt_with_a_code(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    _queue_refusals(runner, 1)
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb.launch_job(
+            _config(tmp_path),
+            "job-1",
+            runner=runner,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+    assert excinfo.value.code == "batch_no_capacity"
+    # Same message as before #2721 -- only the code is new.
+    assert str(excinfo.value) == (
+        f"batch-fleet-provision.sh launch failed (exit 1): {_CAPACITY_REFUSAL}"
+    )
+    assert len(runner.argvs_matching("launch")) == 1
+    assert clock.sleeps == []
+
+
+def test_capacity_wait_relaunches_the_same_job_after_backoff(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    _queue_refusals(runner, 2)  # then the default success
+
+    sb.launch_job(
+        _config(tmp_path, capacity_wait_s=3600.0),
+        "job-1",
+        runner=runner,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+        jitter=lambda: 0.0,
+    )
+
+    launches = runner.argvs_matching("launch")
+    assert len(launches) == 3
+    # Idempotent per job id: every attempt is the identical invocation.
+    assert all(argv == launches[0] for argv in launches)
+    assert "job-1" in launches[0]
+    # Exponential from 30s, jitter=0 -> half of nominal.
+    assert clock.sleeps == [15.0, 30.0]
+    # Nothing but `launch` was re-run (no re-upload, no polling).
+    assert len(runner.calls) == 3
+
+
+def test_capacity_wait_budget_exhausted_fails_with_the_code(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    _queue_refusals(runner, 10)
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb.launch_job(
+            _config(tmp_path, capacity_wait_s=100.0),
+            "job-1",
+            runner=runner,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+            jitter=lambda: 1.0,
+        )
+
+    assert excinfo.value.code == "batch_no_capacity"
+    assert "capacity wait budget of 100s exhausted after 4 launch attempt(s)" in str(
+        excinfo.value
+    )
+    assert _CAPACITY_REFUSAL in str(excinfo.value)
+    # 30, 60, then clipped to the 10s left -- never sleeps past the budget.
+    assert clock.sleeps == [30.0, 60.0, 10.0]
+    assert sum(clock.sleeps) == pytest.approx(100.0)
+    assert len(runner.argvs_matching("launch")) == 4
+
+
+def test_capacity_wait_never_retries_an_unrelated_launch_failure(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    runner.queue(
+        "launch",
+        fake_completed(
+            returncode=1,
+            stderr="error: 4 instance(s) already running + 1 requested exceeds "
+            "BATCH_MAX_CONCURRENT_INSTANCES=4",
+        ),
+    )
+
+    with pytest.raises(sb.BatchError, match="BATCH_MAX_CONCURRENT_INSTANCES") as exc:
+        sb.launch_job(
+            _config(tmp_path, capacity_wait_s=3600.0),
+            "job-1",
+            runner=runner,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+    assert exc.value.code is None
+    assert len(runner.argvs_matching("launch")) == 1
+    assert clock.sleeps == []
+
+
+def test_capacity_backoff_is_jittered_doubling_and_capped():
+    assert sb._capacity_backoff_s(0, lambda: 0.0) == 15.0
+    assert sb._capacity_backoff_s(0, lambda: 1.0) == 30.0
+    assert sb._capacity_backoff_s(1, lambda: 1.0) == 60.0
+    assert sb._capacity_backoff_s(4, lambda: 1.0) == 480.0
+    assert sb._capacity_backoff_s(5, lambda: 1.0) == 600.0  # capped
+    assert sb._capacity_backoff_s(40, lambda: 1.0) == 600.0
+    assert sb._capacity_backoff_s(40, lambda: 0.0) == 300.0
+
+
+def test_capacity_wait_defaults_to_zero_and_accepts_a_number(tmp_path):
+    script = str(_provision_script(tmp_path))
+    base = {"provision_script_path": script, "bucket": FAKE_BUCKET}
+
+    default = sb._resolve_batch_config(
+        {"batch": dict(base)}, corner_count=1, timeout_s=30.0
+    )
+    assert default.capacity_wait_s == 0.0
+
+    for value, expected in ((0, 0.0), (120, 120.0), (90.5, 90.5)):
+        config = sb._resolve_batch_config(
+            {"batch": dict(base, capacity_wait_s=value)},
+            corner_count=1,
+            timeout_s=30.0,
+        )
+        assert config.capacity_wait_s == expected
+
+
+@pytest.mark.parametrize("bad", [-1, -0.5, "600", True, None, float("inf"), [60]])
+def test_invalid_capacity_wait_is_rejected_before_any_s3_write(
+    tmp_path, monkeypatch, bad
+):
+    runner = _install_fake_batch_transport(monkeypatch, runner=_FakeRunner())
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    request["batch"]["capacity_wait_s"] = bad
+
+    with pytest.raises(sim.SimError, match="capacity_wait_s") as excinfo:
+        sim.run_sim(str(_write_request(tmp_path, request)))
+    assert excinfo.value.code is None
+    assert runner.calls == []  # not one byte uploaded
 
 
 def test_poll_waits_through_running_and_interrupted_and_never_relaunches(tmp_path):
@@ -1274,8 +1465,98 @@ def test_transport_failure_is_a_sim_error(tmp_path, monkeypatch):
     _install_fake_batch_transport(monkeypatch, runner=runner)
 
     _write_body(tmp_path)
-    with pytest.raises(sim.SimError, match="batch backend failed"):
+    with pytest.raises(sim.SimError, match="batch backend failed") as excinfo:
         sim.run_sim(str(_write_request(tmp_path, _batch_request(tmp_path))))
+    assert excinfo.value.code is None
+
+
+def test_capacity_refusal_is_a_sim_error_with_the_code(tmp_path, monkeypatch):
+    """No `capacity_wait_s`: today's single attempt, today's message, plus
+    the machine-readable code (issue #2721)."""
+    runner = _FakeRunner()
+    _queue_refusals(runner, 1)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    _write_body(tmp_path)
+    with pytest.raises(sim.SimError) as excinfo:
+        sim.run_sim(str(_write_request(tmp_path, _batch_request(tmp_path))))
+
+    assert excinfo.value.code == "batch_no_capacity"
+    assert str(excinfo.value) == (
+        "batch backend failed: batch-fleet-provision.sh launch failed (exit 1): "
+        f"{_CAPACITY_REFUSAL}"
+    )
+    assert len(runner.argvs_matching("launch")) == 1
+    assert runner.argvs_matching("status.json") == []
+
+
+def test_run_sim_waits_out_a_capacity_refusal(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _queue_refusals(runner, 1)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    request["batch"]["capacity_wait_s"] = 3600
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+
+    assert [corner["corner_id"] for corner in report["corners"]] == ["tt_1.800_27"]
+    assert len(runner.argvs_matching("launch")) == 2
+    # The job contract was uploaded once and reused by the re-launch.
+    assert len(runner.argvs_matching("job.json")) == 1
+    # One backoff sleep (through the patched `time.sleep`), within [15, 30].
+    assert len(runner.sleeps) >= 1
+    assert 15.0 <= runner.sleeps[0] <= 30.0
+
+
+def _error_envelope(stderr: str) -> dict:
+    """The JSON error envelope from a `--format json` run's stderr, skipping
+    any host-specific warning lines (e.g. a PDK-resolution notice) that
+    precede it."""
+    lines = stderr.splitlines()
+    return json.loads("\n".join(lines[lines.index("{") :]))
+
+
+def test_cli_json_error_envelope_carries_batch_no_capacity(
+    tmp_path, monkeypatch, capsys
+):
+    from klayout_tools.cli import main
+
+    runner = _FakeRunner()
+    _queue_refusals(runner, 1)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+
+    assert main(["sim", str(path), "--format", "json"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    envelope = _error_envelope(captured.err)
+    assert envelope["schema_version"] == 1
+    assert envelope["error"]["command"] == "sim"
+    assert envelope["error"]["code"] == "batch_no_capacity"
+    assert _CAPACITY_REFUSAL in envelope["error"]["message"]
+
+
+def test_cli_json_error_envelope_has_no_code_for_other_failures(
+    tmp_path, monkeypatch, capsys
+):
+    from klayout_tools.cli import main
+
+    runner = _FakeRunner()
+    runner.queue("job.json", fake_completed(returncode=1, stderr="AccessDenied"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+
+    assert main(["sim", str(path), "--format", "json"]) == 1
+
+    envelope = _error_envelope(capsys.readouterr().err)
+    assert set(envelope) == {"schema_version", "error"}
+    assert set(envelope["error"]) == {"command", "message"}
 
 
 # --------------------------------------------------------------------------- #

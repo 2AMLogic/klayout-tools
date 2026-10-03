@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2721, `klt sim --backend batch` + shared error envelope;
+  `schema_version` unchanged, additive): the error envelope gains an optional
+  `error.code`, emitted only when a command classifies the failure (every
+  other error keeps the two-field `{command, message}` shape). A Spot
+  capacity refusal from 2am's `batch-fleet-provision.sh launch` now carries
+  `error.code: "batch_no_capacity"`, so callers can tell a retryable
+  infrastructure failure from a request error without parsing the message.
+  New opt-in `request.batch.capacity_wait_s` (default `0`, today's single
+  attempt) re-launches the same job through a capacity refusal with jittered,
+  capped exponential backoff until the budget elapses; it is not charged to
+  `batch.poll_timeout_s`, and in a sharded run each shard has its own budget.
+  No `--wait-for-capacity` CLI flag yet (request field only).
+
 - **Changed** (#2707, `klt lvs`; `schema_version` unchanged, additive):
   `power_connectivity` now derives the power/ground pin universe per pin-order
   library and unions the results when the instantiated masters span several
