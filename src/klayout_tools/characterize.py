@@ -2448,10 +2448,10 @@ def _build_response(
             # a *generated artifact a caller chains onward* (into `klt sta`'s
             # `pdk.liberty`, say), the same role `klt extract`'s
             # `netlist_path` and `klt sim`'s `corners[].artifacts.*` fill --
-            # see docs/json-contract.md's "Output-artifact path fields" table,
-            # which lists both shapes and which fields use each. `cell.netlist`
-            # above is an *input* and does use the envelope, matching
-            # `klt sim`'s own `netlist`.
+            # see docs/json-contract.md's "Path fields: envelope vs.
+            # plain string" table, which lists both shapes and which fields
+            # use each. `cell.netlist` above is an *input* and does use the
+            # envelope, matching `klt sim`'s own `netlist`.
             "path": emitted_path,
             "library_name": library.name,
             "cell_count": len(library.cells),

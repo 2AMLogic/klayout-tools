@@ -673,6 +673,25 @@ stability statement, concrete precedents, and drift-detection guidance, and
   [`cli/signoff.md`](cli/signoff.md)); a verb that pins an `input` hash
   without echoing the path it covers leaves its consumers with `null` there,
   so **new verbs should echo the artifact path they hashed**.
+
+  **That echoed path is the `{path, scope}` shape, not a bare string (issue
+  #2659).** `input_verified` is only re-derivable where the echoed path still
+  resolves, and a bare echo is anchored to the producing run's own
+  filesystem: an absolute string names a directory that exists on exactly
+  one machine, and a relative one is anchored to whatever cwd (or request
+  file) that run happened to use. A committed `drc`/`extract`/`lvs` envelope
+  cited by a block manifest therefore verified `input_verified: true` on the
+  producing host and `null` from every other checkout, so `klt signoff
+  --check` reported drift on `items.N.citation.input_verified` for a signoff
+  record whose evidence was committed in full beside it. `drc`'s `file`,
+  `extract`'s `file` and `lvs`'s `layout` now carry the same `{path, scope}`
+  envelope `sim`'s `netlist` and `pex`'s `layout` adopted in issue #1261 —
+  `scope: "repo"` is joined to the repo root `klt signoff` discovers from
+  the evidence file's own location, which is what makes the citation
+  portable. A **new** verb echoing an input path should emit that shape from
+  the start. `lvs`'s `reference` is the one documented exception: it stays
+  the verbatim request echo, because it is pinned by its own
+  `environment.reference_sha256` digest rather than by `provenance.input`.
   - `role` (issue #2027) — **which kind of artifact `content_hash` covers**.
     One of:
 
@@ -880,11 +899,11 @@ convention).
   registry — it cannot be declared ahead of time because `klt` does not own
   the name.
 
-## Output-artifact path fields: envelope vs. plain string (issue #2073)
+## Path fields: envelope vs. plain string (issue #2073)
 
-`klt` reports an output-artifact path (a file it just wrote — a netlist, a
-DEF, a GDS, a script) in one of two shapes today, and the two coexist
-deliberately rather than by oversight:
+`klt` reports a path — an output artifact it just wrote (a netlist, a DEF, a
+GDS, a script) or an input it read and hashed — in one of two shapes today,
+and the two coexist deliberately rather than by oversight:
 
 - **`{path, scope}` envelope** — `{"path": "<repo-relative POSIX path>",
   "scope": "repo"}` when the artifact lives inside the invoking repo,
@@ -911,7 +930,28 @@ stable split. The table below is the durable fix: it is the one place a
 consumer (or a future migration) checks to know a field's shape without
 probing the value's Python type at runtime.
 
-**`{path, scope}` envelope fields**, as of `712a0219` (2026-09-18):
+**One class of field is exempt from "do not force a migration" (issue
+#2659): an input path a verb echoes beside a `provenance.input.content_hash`
+that covers it.** That field is not merely nicer as an envelope, it is the
+*only* shape in which it works at all for its stated purpose — closing the
+`input_verified` loop from a checkout other than the producing one (see
+"Shared `provenance` block" above). So `drc`'s `file`, `extract`'s `file`
+and `lvs`'s `layout` moved to the envelope column below even though #2073
+left them alone, and a new verb echoing a hashed input emits the envelope
+from the start rather than being added to the plain-string table.
+
+**The exemption stops at inputs, deliberately.** It does not extend to an
+*output* path in the same response — `extract`'s `netlist_path`, `spef_path`
+and `abstracted_cells[].lef_path` all stayed plain strings through #2659's
+bump. The envelope carries no repo root of its own, so a `scope: "repo"`
+entry is resolvable only against *one* root per envelope, and for a cited
+envelope that root is the input artifact's repo (the one the evidence is
+committed in). An output written outside it would degrade to `path: null`
+and leave a caller with no machine-readable handle on the file it just asked
+`klt` to write — a real loss for an output, and no gain for `input_verified`,
+which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
+
+**`{path, scope}` envelope fields**, as of `dbb82fbe` (2026-10-02):
 
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
@@ -921,15 +961,19 @@ probing the value's Python type at runtime.
 | `size` | `models_lib` | 2 | #1274 |
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
+| `drc` | `file` (the hashed input layout; both engines) | 3 | #2659 |
+| `extract` | `file` (the hashed input layout; both response builders) | 4 (`run_extract_klayout_engine`: 2) | #2659 |
+| `lvs` | `layout` (the hashed layout side — **not** `reference`) | 2 | #2659 |
 
-**Plain-string fields** — intentionally unchanged by this issue:
+**Plain-string fields** — intentionally unchanged:
 
 | Command | Field(s) | `SCHEMA_VERSION` |
 |---|---|---|
 | `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` | 1 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` | 1 |
 | `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
-| `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 3 |
+| `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 4 |
+| `lvs` | `reference` (pinned by `environment.reference_sha256`, not `provenance.input` — see issue #2659 above) | 2 |
 | `equiv` | `artifacts.{script_path,netlist_path,log_path}`, `artifacts.stage2_{script_path,log_path}` | 1 |
 | `gen` | `gds_path` | 1 |
 | `gen-compose` | `gds_path` (top-level and per-block) | 1 |
@@ -1054,12 +1098,25 @@ All six share one contract:
   pass**: `hash_check()` renders `expected: null` as `match: false`, so a
   report predating the field it would be checked against renders `"drifted"`,
   never a false `"match"`.
+- **A `{path, scope}` input field re-hashes from any checkout (issue
+  #2659).** `drc`/`extract`'s `file` and `lvs`'s `layout` are the
+  `{path, scope}` envelope, and both modes resolve `scope: "repo"` against
+  the repo root discovered from **the committed report's own directory** —
+  the identical resolution `klt signoff`'s `input_verified` gate applies to
+  the same shape — so a report committed beside its inputs verifies from any
+  clone and from any working directory. A `scope: "external"`/`"absent"`
+  entry names no path by construction: `--check` reports it as the same
+  unverifiable `actual: null` an absent field gets, and `--rerun` as the
+  same clean "no `file`/`layout` field to rerun" error, never a traceback.
+  A report predating #2659, whose field is a bare string, keeps the old
+  anchoring described in the next bullet exactly as before.
 - **An unresolvable input path is named, not silently `null` (issue #2595,
-  `lvs` only so far).** A committed report echoes its inputs back exactly as
-  the request gave them, so a *relative* echoed path is re-hashed against the
+  `lvs` only so far).** A committed report that echoes an input back exactly
+  as the request gave it re-hashes a *relative* echoed path against the
   **current working directory** of the `--check` invocation — a deliberate,
-  shared convention (`drc`'s `file`, `lvs`'s `layout`/`reference`), not an
-  oversight, and unchanged here. But a path that resolves to no existing file
+  shared convention, not an oversight, and unchanged here. Since #2659 above
+  this covers only `lvs`'s `reference` (and any pre-#2659 report's
+  bare-string field). But a path that resolves to no existing file
   re-hashes to `null`, which alone reads as "the recorded hash moved". `klt
   lvs --check` therefore attaches an **additive, optional** `input_not_found`
   block (`path`, `resolved`, `found_relative_to_report`) to such a

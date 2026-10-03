@@ -74,6 +74,35 @@ CORPUS_DIR = Path(__file__).parent / "corpus"
 SKY130_INV = CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"
 
 
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """Shadows pytest's own built-in `tmp_path` fixture for every test in this
+    module (issue #2659): seeds a `.git` marker so `tmp_path` itself resolves
+    as this run's own repo root (`env_provenance.find_repo_root` only checks
+    for a `.git` entry -- no real `git` binary or working tree is needed).
+
+    Since #2659 `run_lvs`'s `layout` field is the committable `{path, scope}`
+    envelope built from the *resolved* layout path, rather than the request
+    document's own verbatim echo, and `klt lvs --check`/`--rerun` resolve a
+    `scope: "repo"` entry against the repo root of the committed report's own
+    directory. A layout under a bare `tmp_path` resolves to `scope:
+    "external"` with `path: null` -- correct, but it means the report records
+    no locatable layout, which is the one case `--check`/`--rerun` cannot
+    verify. Seeding the marker puts every test below in the *realistic*
+    position of a design inside a repo (the only position a report committed
+    as `klt signoff` evidence is ever in), so this module's `--check`/
+    `--rerun` coverage exercises the resolution that matters rather than the
+    degenerate one.
+
+    The external branch is not thereby left uncovered: the tests that pin it
+    deliberately work outside `tmp_path`, via `tmp_path_factory` -- mirroring
+    how `tests/test_synthesize.py`'s own `tmp_path` override (issue #1844)
+    keeps its "no repo at all" case honest.
+    """
+    (tmp_path / ".git").mkdir()
+    return tmp_path
+
+
 def _write(path: Path, text: str) -> str:
     path.write_text(text)
     return str(path)
@@ -602,7 +631,7 @@ def test_clean_self_compare_reports_match(tmp_path):
     )
     report = run_lvs(path)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["engine"] == "klayout"
     assert report["status"] == "match"
     assert report["mismatch_count"] == 0
@@ -14541,16 +14570,22 @@ def _portable_pair(tmp_path: Path) -> tuple[Path, Path]:
 
 def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     """Issue #2595: `--check`ing a committed request/report pair from a
-    *different* directory than the one its relative `layout`/`reference`
-    were written against must say the inputs could not be found -- and
-    where it looked -- instead of a bare `actual: None` that reads as "the
-    recorded hash no longer matches".
+    *different* directory than the one its relative `reference` was written
+    against must say the input could not be found -- and where it looked --
+    instead of a bare `actual: None` that reads as "the recorded hash no
+    longer matches".
 
-    Path anchoring itself is unchanged (still the current working
-    directory, the same convention `klt drc --check` uses): the entry is
-    still `match: False` / `status: "drifted"`, it just carries an
-    additional `input_not_found` block naming the resolved path, plus the
-    report-relative path that *does* exist when one does.
+    `reference`'s anchoring is unchanged (still the current working
+    directory): the entry is still `match: False` / `status: "drifted"`, it
+    just carries an additional `input_not_found` block naming the resolved
+    path, plus the report-relative path that *does* exist when one does.
+
+    Issue #2659 removed the trap for `layout`, which is now the
+    `{path, scope}` envelope resolved against the repo root of the committed
+    report's own directory rather than the cwd -- so this test now also pins
+    the *asymmetry* between the two sides, which is the whole point of
+    leaving `reference` alone (it is pinned by
+    `environment.reference_sha256`, not by `provenance.input`).
     """
     pair, report_path = _portable_pair(tmp_path)
 
@@ -14559,22 +14594,25 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
 
     assert result["status"] == "drifted"
     by_field = {check["field"]: check for check in result["checks"]}
-    for field, name in (
-        ("environment.layout_sha256", "layout.spice"),
-        ("environment.reference_sha256", "ref.spice"),
-    ):
-        check = by_field[field]
-        assert check["match"] is False
-        assert check["expected"] is not None
-        assert check["actual"] is None
-        missing = check["input_not_found"]
-        assert missing["path"] == name
-        assert os.path.realpath(missing["resolved"]) == os.path.realpath(
-            tmp_path / name
-        )
-        assert os.path.realpath(
-            missing["found_relative_to_report"]
-        ) == os.path.realpath(pair / name)
+    # Issue #2659 narrowed this to the *reference* side: `layout` is now the
+    # `{path, scope}` envelope, resolved against the repo root of the
+    # report's own directory, so it no longer hits the anchoring trap at all
+    # (asserted directly below, and from a third directory in
+    # `test_check_lvs_report_re_hashes_a_repo_scoped_layout_from_another_checkout`).
+    check = by_field["environment.reference_sha256"]
+    assert check["match"] is False
+    assert check["expected"] is not None
+    assert check["actual"] is None
+    missing = check["input_not_found"]
+    assert missing["path"] == "ref.spice"
+    assert os.path.realpath(missing["resolved"]) == os.path.realpath(
+        tmp_path / "ref.spice"
+    )
+    assert os.path.realpath(missing["found_relative_to_report"]) == os.path.realpath(
+        pair / "ref.spice"
+    )
+    assert by_field["environment.layout_sha256"]["match"] is True
+    assert "input_not_found" not in by_field["environment.layout_sha256"]
 
 
 def test_check_lvs_report_portable_pair_matches_from_its_own_directory(
@@ -14834,13 +14872,21 @@ def test_rerun_lvs_report_excludes_extracted_netlist_path(tmp_path):
     about the compare changed."""
     from klayout_tools.extract import run_extract
 
+    # The corpus layout is copied *into* `tmp_path` rather than used in
+    # place: since issue #2659 the report's `layout` is repo-relative, and
+    # `--rerun` resolves it against the repo root of the report's own
+    # directory. A layout left in `tests/corpus/` would be relative to *this*
+    # repo while the report sits in the `.git`-seeded `tmp_path` -- two
+    # different repos, which real usage never mixes.
+    layout_path = str(tmp_path / "inv.gds")
+    shutil.copyfile(SKY130_INV, layout_path)
     reference_path = str(tmp_path / "ref.spice")
-    extracted = run_extract(str(SKY130_INV), "sky130", output=reference_path)
+    extracted = run_extract(layout_path, "sky130", output=reference_path)
 
     request_path = _write_request(
         tmp_path / "request.json",
         {
-            "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+            "layout": {"file": layout_path, "deck": "sky130"},
             "reference": {"netlist": reference_path, "top": extracted["top"]},
             "options": {"keep_extracted": True},
         },
@@ -14997,9 +15043,11 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "anchor_top_level_pins": None,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
     }
-    # The pre-#1205 fields are untouched -- this is an additive change, so no
-    # `schema_version` bump (docs/json-contract.md, "additive envelope").
-    assert report["schema_version"] == 1
+    # The pre-#1205 fields are untouched -- that change was additive and
+    # earned no `schema_version` bump of its own (docs/json-contract.md,
+    # "additive envelope"). The envelope is at `2` because issue #2659
+    # separately retyped `layout`.
+    assert report["schema_version"] == 2
     assert report["parameter_tolerance"] is None
 
 
@@ -15195,9 +15243,13 @@ def test_cli_lvs_check_text_names_unresolvable_input(tmp_path, capsys, monkeypat
     assert main(["lvs", "--check", os.path.join("pair", "lvs.json")]) == 3
     out = capsys.readouterr().out
     assert "status: drifted" in out
-    assert "[DRIFTED] environment.layout_sha256" in out
-    assert f"actual:   None (input not found: {tmp_path / 'layout.spice'})" in out
-    assert str(pair / "layout.spice") in out
+    # Issue #2659: the *layout* side resolves cleanly now (the `{path, scope}`
+    # envelope, anchored on the report's own repo root), so the diagnostic is
+    # the reference side's.
+    assert "[OK] environment.layout_sha256" in out
+    assert "[DRIFTED] environment.reference_sha256" in out
+    assert f"actual:   None (input not found: {tmp_path / 'ref.spice'})" in out
+    assert str(pair / "ref.spice") in out
     assert "re-run from there" in out
 
 
@@ -19811,3 +19863,298 @@ def test_power_grid_real_run_lvs_report_through_signoff_fail_and_pass(tmp_path):
     assert check["kind"] == "lvs"
     assert check["passed"] is True
     assert check["detail"]["power_connectivity_status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2659: `layout` is the portable `{path, scope}` envelope built from
+# the *resolved* layout path, not the request document's verbatim echo.
+#
+# A `klt lvs --format json` envelope is cited verbatim by a `klt signoff`
+# manifest, and that verb's `input_verified` freshness gate (issue #2196)
+# re-hashes the artifact `layout` names to check
+# `provenance.input.content_hash` against the file rather than against
+# another claim. While `layout` was the request's own echo it was anchored to
+# whatever directory the producing run used, so the gate resolved it only
+# there -- `input_verified: true` on the producing host, `null` from every
+# other clone, and `klt signoff --check` reported drift on
+# `items.N.citation.input_verified` for evidence committed in full beside the
+# manifest.
+#
+# `reference` is deliberately untouched: it is pinned by its own
+# `environment.reference_sha256` digest, not by `provenance.input`, which is
+# the layout side only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
+# --------------------------------------------------------------------------- #
+
+
+def test_run_lvs_layout_is_repo_relative_inside_a_repo(tmp_path):
+    """The happy path: a layout inside a repo is reported as a repo-relative
+    `{path, scope: "repo"}` entry, while `reference` stays the request's own
+    verbatim echo."""
+    (tmp_path / "blocks").mkdir()
+    layout_path = _write(tmp_path / "blocks" / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+
+    report = run_lvs(request_path)
+
+    assert report["schema_version"] == 2
+    assert report["layout"] == {"path": "blocks/layout.spice", "scope": "repo"}
+    assert report["reference"] == reference_path
+
+
+def test_run_lvs_layout_is_external_outside_any_repo(tmp_path_factory):
+    """The edge case from the issue's Test Plan: a layout outside any repo
+    reports `scope: "external"` with `path: null` -- detail is lost, the
+    absolute path is *never* echoed.
+
+    Deliberately uses `tmp_path_factory` rather than this module's own
+    `tmp_path` override, which seeds a `.git` marker."""
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    layout_path = _write(outside / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(outside / "ref.spice", _INVERTER_SPICE)
+    request_path = _write_request(
+        outside / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+
+    report = run_lvs(request_path)
+
+    assert report["layout"] == {"path": None, "scope": "external"}
+
+
+def test_run_lvs_layout_scope_follows_the_layout_not_the_request(
+    tmp_path, tmp_path_factory
+):
+    """`layout`'s scope answers "is the *layout* inside a repo", so it is
+    anchored on the layout's own location rather than the request document's
+    (`_report_repo_root`). The two are genuinely different questions -- and
+    the inline/stdin request forms have no document directory at all -- so
+    anchoring on the request would make the field depend on where `klt` was
+    invoked from. This is also the anchor `klt drc`/`klt extract`/`klt pex`
+    use for their own input-path fields."""
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    # The request document lives outside the layout's repo entirely...
+    request_path = _write_request(
+        outside / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+
+    from_document = run_lvs(request_path)
+    # ...and the inline form has no document directory at all.
+    from_inline = run_lvs(
+        json.dumps(
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            }
+        )
+    )
+
+    expected = {"path": "layout.spice", "scope": "repo"}
+    assert from_document["layout"] == expected
+    assert from_inline["layout"] == expected
+
+
+def test_check_lvs_report_re_hashes_a_repo_scoped_layout_from_another_checkout(
+    tmp_path, monkeypatch
+):
+    """The issue's own reproduction, reduced to `--check`: a report committed
+    beside its layout verifies from a *different* checkout of the same
+    content, because the `{path, scope}` entry resolves against the repo root
+    of the committed report's own directory.
+
+    The pre-#2659 echo could not do this: it was `"layout.spice"` relative to
+    the request file, re-hashed against the grading process's cwd (the known
+    limitation `check_lvs_report`'s docstring still documents for
+    `reference`). Here the cwd is a third directory that holds neither
+    clone's copy, so cwd-anchored resolution cannot succeed by accident.
+    """
+    producer = tmp_path / "producer"
+    (producer / ".git").mkdir(parents=True)
+    layout_path = _write(producer / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(producer / "ref.spice", _INVERTER_SPICE)
+    report = run_lvs(
+        _write_request(
+            producer / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            },
+        )
+    )
+    assert report["layout"] == {"path": "layout.spice", "scope": "repo"}
+
+    consumer = tmp_path / "consumer"
+    (consumer / ".git").mkdir(parents=True)
+    _write(consumer / "layout.spice", _INVERTER_SPICE)
+    report_path = consumer / "lvs.json"
+    _write_report(report_path, report)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = check_lvs_report(str(report_path))
+
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["environment.layout_sha256"]["match"] is True
+    assert "input_not_found" not in by_field["environment.layout_sha256"]
+
+
+def test_check_lvs_report_reports_an_external_layout_as_unverifiable(
+    tmp_path_factory,
+):
+    """A `scope: "external"` entry names no path by construction, so there is
+    nothing to re-hash: `actual: null`, `match: false` -- never a crash, and
+    never a false `"match"`.
+
+    This is the accepted cost of the portability fix, stated here rather than
+    left to be discovered: a compare whose layout is outside any repository
+    records no locatable layout, so its committed report can no longer be
+    re-verified anywhere -- including on the producing host, which the old
+    echo did support. Inside a repo (every case where the report is committed
+    as evidence at all) the opposite holds, and `--check` now works from
+    *every* checkout rather than only one."""
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    layout_path = _write(outside / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(outside / "ref.spice", _INVERTER_SPICE)
+    report_path = outside / "lvs.json"
+    _write_report(
+        report_path,
+        run_lvs(
+            _write_request(
+                outside / "request.json",
+                {
+                    "layout": {"netlist": layout_path, "top": "inv"},
+                    "reference": {"netlist": reference_path, "top": "inv"},
+                },
+            )
+        ),
+    )
+
+    result = check_lvs_report(str(report_path))
+
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["environment.layout_sha256"]["actual"] is None
+    assert by_field["environment.layout_sha256"]["match"] is False
+    # The reference side is unaffected -- still the verbatim echo, still
+    # re-hashed against the cwd, and here it resolves and matches.
+    assert by_field["environment.reference_sha256"]["match"] is True
+    assert result["status"] == "drifted"
+
+
+def test_rerun_lvs_report_refuses_an_external_layout_cleanly(tmp_path_factory):
+    """`--rerun` has nothing to re-run from when `layout` names no path: the
+    same clean `LvsError` a report missing the field entirely raises, never a
+    traceback."""
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    layout_path = _write(outside / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(outside / "ref.spice", _INVERTER_SPICE)
+    report_path = outside / "lvs.json"
+    _write_report(
+        report_path,
+        run_lvs(
+            _write_request(
+                outside / "request.json",
+                {
+                    "layout": {"netlist": layout_path, "top": "inv"},
+                    "reference": {"netlist": reference_path, "top": "inv"},
+                },
+            )
+        ),
+    )
+
+    with pytest.raises(LvsError, match="no 'layout'/'reference' field to rerun"):
+        rerun_lvs_report(str(report_path))
+
+
+def test_check_lvs_report_still_resolves_a_pre_2659_bare_string_layout(
+    tmp_path_factory,
+):
+    """Backwards compatibility: every report committed before #2659 carries
+    `layout` as a bare path string, and `--check` must keep resolving it
+    exactly as it always did -- including, as here, from outside any
+    repository, which is where the old shape was the *only* thing that
+    worked."""
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    layout_path = _write(outside / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(outside / "ref.spice", _INVERTER_SPICE)
+    report = run_lvs(
+        _write_request(
+            outside / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            },
+        )
+    )
+    report["schema_version"] = 1
+    report["layout"] = layout_path  # the pre-#2659 shape
+    report_path = outside / "lvs.json"
+    _write_report(report_path, report)
+
+    result = check_lvs_report(str(report_path))
+
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["environment.layout_sha256"]["match"] is True
+    assert result["status"] == "match"
+
+
+def test_lvs_text_output_renders_the_layout_envelope_not_a_dict_repr(
+    tmp_path, tmp_path_factory, capsys
+):
+    """`--format text` is a courtesy, but it must stay readable: `layout` is
+    rendered through the shared `env_provenance.render_path_field` helper
+    `klt sim`/`klt pex` already use. `reference` keeps printing its verbatim
+    echo."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+
+    assert main(["lvs", json.dumps(request)]) == 0
+    inside = capsys.readouterr().out
+
+    outside = tmp_path_factory.mktemp("outside-any-repo")
+    assert (
+        main(
+            [
+                "lvs",
+                json.dumps(
+                    {
+                        "layout": {
+                            "netlist": _write(
+                                outside / "layout.spice", _INVERTER_SPICE
+                            ),
+                            "top": "inv",
+                        },
+                        "reference": {
+                            "netlist": _write(outside / "ref.spice", _INVERTER_SPICE),
+                            "top": "inv",
+                        },
+                    }
+                ),
+            ]
+        )
+        == 0
+    )
+    outside_text = capsys.readouterr().out
+
+    assert "layout: layout.spice\n" in inside
+    assert f"reference: {reference_path}\n" in inside
+    assert "layout: <outside repo>\n" in outside_text

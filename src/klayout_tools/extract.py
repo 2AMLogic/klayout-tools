@@ -156,7 +156,13 @@ from ._provenance import (
     explicit_deck_options,
     sha256_file,
 )
-from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
+from ._report_verify import (
+    build_check_result,
+    build_rerun_result,
+    get_path,
+    hash_check,
+    resolve_committed_path,
+)
 from ._report_verify import load_committed_report as _load_committed_report
 from .decks import (
     BipolarDevice,
@@ -299,7 +305,30 @@ if TYPE_CHECKING:
 #: already carries the reproducible identity of the same PDK without it. See
 #: docs/cli/env-provenance.md's "external input pinned by identity, not
 #: location" rationale.
-SCHEMA_VERSION = 3
+#:
+#: 4 (issue #2659): the top-level `file` field -- the layout stream this run
+#: read and hashed into `provenance.input.content_hash` -- changed from a raw
+#: (usually absolute) path string to the same `{path, scope}` shape, for the
+#: same reason #1376 moved `pdk.root`: a committed `klt extract` envelope is
+#: cited verbatim by a `klt signoff` manifest, and an absolute path pinned
+#: that record to the producing host's own filesystem, so `klt signoff`'s
+#: `input_verified` freshness gate (issue #2196) could re-verify such a
+#: citation only there and reported drift from every other checkout even
+#: with every byte of evidence committed beside it.
+#:
+#: Only `file` -- the *output*-artifact paths this response also carries
+#: (`netlist_path`, `spef_path`, `abstracted_cells[].lef_path`) stay plain
+#: strings, per docs/json-contract.md's "Path fields: envelope vs. plain
+#: string" table and its #2073 disposition. The `{path, scope}` shape
+#: carries no repo root of its own, so a `scope: "repo"` entry is only
+#: resolvable against *one* root per envelope (here: the input layout's,
+#: which is the repo a cited envelope is committed in). An output written
+#: outside that repo would therefore degrade to `path: null` and leave a
+#: caller with no machine-readable handle on the file it just asked `klt` to
+#: write -- a real loss for an output path, and no gain at all for
+#: `input_verified`, which reads only `file` (`signoff.py`'s
+#: `_INPUT_ARTIFACT_FIELDS`). See `_report_path` below.
+SCHEMA_VERSION = 4
 
 # `run_extract()`'s own field name -> its declared METRICS2.1-style name in
 # `metrics.py`'s registry (issue #1848, adopting the #247 registry beyond its
@@ -905,6 +934,37 @@ def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
         raise ExtractError(f"{flag} requires --parasitics")
 
 
+def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
+    """Normalise this module's own ``file`` response field (issue #2659) -- a
+    thin, module-local wrapper over
+    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
+    second normalizer, so `klt extract`'s reports, `klt drc`/`klt sim`/`klt
+    pex`'s and `klt env-provenance`'s own emitter agree on exactly one
+    ``{path, scope}`` shape.
+
+    Applied to the top-level ``file`` only -- the input layout
+    ``provenance.input.content_hash`` covers, and so the one `klt signoff`'s
+    ``input_verified`` gate re-hashes for an `extract` citation
+    (``signoff.py``'s ``_INPUT_ARTIFACT_FIELDS``). ``netlist_path``,
+    ``spef_path`` and ``abstracted_cells[].lef_path`` are *output* artifacts
+    and deliberately stay plain strings -- see ``SCHEMA_VERSION`` above and
+    ``docs/json-contract.md``'s "Path fields: envelope vs. plain string".
+
+    The reader counterpart is
+    :func:`~klayout_tools._report_verify.resolve_committed_path`.
+    """
+    return env_provenance.repo_relative_path(path, repo_root=repo_root)
+
+
+def _report_repo_root(path: str) -> str | None:
+    """The repo root this run's own ``file`` field is normalised against --
+    resolved from the layout's own location, the same "walk up from the
+    input" default :func:`~klayout_tools.env_provenance.find_repo_root` uses
+    for its own caller (and the same anchor `klt pex` picks for its own
+    ``layout``)."""
+    return env_provenance.find_repo_root(os.path.dirname(os.path.abspath(path)))
+
+
 def run_extract(
     path: str,
     deck_name: str,
@@ -1404,8 +1464,8 @@ def run_extract(
     section 2a)::
 
         {
-            "schema_version": 1,
-            "file": <path as provided>,
+            "schema_version": 4,
+            "file": {"path": <repo-relative path>, "scope": "repo"},
             "deck": <deck name>,
             "top": <top cell name>,
             "dbu_um": <database unit in micrometres, float>,
@@ -1575,6 +1635,21 @@ def run_extract(
                 },
             },
         }
+
+    ``file`` is the committable ``{path, scope}`` object
+    :func:`~klayout_tools.env_provenance.repo_relative_path` defines (issue
+    #2659, ``schema_version`` ``4``) -- ``scope: "repo"`` with a
+    repo-relative ``path`` when the layout sits inside the invocation's
+    repo, ``{"path": null, "scope": "external"}`` when it does not. The
+    producing host's absolute path is never echoed: a `klt extract` envelope
+    is cited verbatim in committed `klt signoff` evidence, and an absolute
+    path there is re-verifiable only on the machine that wrote it. Same
+    shape `klt sim`'s ``netlist`` and `klt pex`'s ``layout`` carry (issue
+    #1261). The *output*-artifact paths -- ``netlist_path``, ``spef_path``,
+    ``abstracted_cells[].lef_path`` -- deliberately stay plain strings (see
+    ``SCHEMA_VERSION`` and ``docs/json-contract.md``'s "Path fields:
+    envelope vs. plain string"), so a caller chaining on the written netlist
+    reads ``netlist_path`` exactly as it always did.
 
     ``devices``/``nets`` are sorted by name for deterministic, diff-clean
     output (same discipline as ``drc.py``'s ``violations`` sort).
@@ -2927,9 +3002,15 @@ def run_extract(
     # so a caller reading only that (the documented contract) still sees them.
     warnings.extend(_subcircuit_warnings(subcircuit_report))
 
+    # Issue #2659: `file` -- the input layout `provenance.input.content_hash`
+    # below covers -- is normalised against the repo root resolved from the
+    # layout's own location, the same "walk up from the input" anchor
+    # `klt pex` picks for its own `layout`. `netlist_path` below is an
+    # *output* path and stays a plain string (see `SCHEMA_VERSION`).
+    repo_root = _report_repo_root(path)
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "file": path,
+        "file": _report_path(path, repo_root=repo_root),
         "deck": deck_name,
         "top": top_cell_name,
         "dbu_um": dbu_um,
@@ -3310,6 +3391,15 @@ def check_extract_report(report_path: str) -> dict[str, Any]:
     via :func:`~klayout_tools.decks.deck_source_path`, which likewise never
     counts as a match.
 
+    ``committed["file"]`` is read through
+    :func:`klayout_tools._report_verify.resolve_committed_path` (issue
+    #2659), so both shapes a committed report can carry work: the ``{path,
+    scope}`` object this verb emits today resolves against the repo root of
+    **the committed report's own directory** -- which is what makes a
+    committed report re-checkable from any clone -- while a bare path string
+    (every report predating #2659) keeps resolving exactly as before,
+    against the current working directory.
+
     Raises :class:`ExtractError` for a missing/unparseable committed report
     (:func:`klayout_tools._report_verify.load_committed_report`) -- never a
     traceback.
@@ -3320,7 +3410,9 @@ def check_extract_report(report_path: str) -> dict[str, Any]:
         hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            _content_hash(committed.get("file")),
+            _content_hash(
+                resolve_committed_path(committed.get("file"), report_path=report_path)
+            ),
         ),
         hash_check(
             "provenance.deck.content_hash",
@@ -3585,13 +3677,24 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     only -- the embedded ``fresh`` in the response below is always the real,
     un-normalized report.
 
+    ``committed["file"]`` is resolved through
+    :func:`klayout_tools._report_verify.resolve_committed_path` (issue
+    #2659) -- the ``{path, scope}`` object against the repo root of the
+    committed report's own directory, a bare string (a pre-#2659 report)
+    exactly as before. A ``scope: "external"``/``"absent"`` entry names no
+    path at all by construction, so there is nothing to re-run from: that is
+    reported as the same clean "no 'file' field to rerun" error a report
+    missing the field entirely gets. ``committed["netlist_path"]`` is
+    untouched by #2659 -- still the plain output path the committed report
+    recorded, replayed as this rerun's own ``-o``.
+
     Raises :class:`ExtractError` for a missing/unparseable committed report,
-    a report missing ``file``/``deck`` to rerun, or any error the rerun
-    itself raises (bad file, unknown deck, engine error) -- never a
-    traceback.
+    a report missing (or carrying an unresolvable) ``file``, a report
+    missing ``deck`` to rerun, or any error the rerun itself raises (bad
+    file, unknown deck, engine error) -- never a traceback.
     """
     committed = _load_committed_report(report_path, ExtractError)
-    file_path = committed.get("file")
+    file_path = resolve_committed_path(committed.get("file"), report_path=report_path)
     if not file_path:
         raise ExtractError(
             f"committed report has no 'file' field to rerun: {report_path}"
@@ -4200,7 +4303,9 @@ def run_extract_klayout_engine(
 
     Returns a dict shaped closely enough to :func:`run_extract`'s own
     ``devices``/``device_counts`` fields to compare directly (see
-    ``docs/cli/extract.md``): ``{"schema_version": 1, "file": path, "deck":
+    ``docs/cli/extract.md``): ``{"schema_version": 2, "file": {"path":
+    <repo-relative path>, "scope": "repo"} (issue #2659 -- the same
+    ``{path, scope}`` normalization :func:`run_extract` applies), "deck":
     lvs_deck_file, "engine": "klayout", "top": <resolved top cell name>,
     "device_count": int, "device_counts": {<class name>: int, ...},
     "devices": [{"name": str, "class": str, "params": {<name>: float,
@@ -4329,8 +4434,13 @@ def run_extract_klayout_engine(
     devices.sort(key=lambda d: d["name"])
 
     return {
-        "schema_version": 1,
-        "file": path,
+        # Versioned independently of `run_extract`'s own response above --
+        # this is a narrow agreement oracle, not a second general-purpose
+        # engine. Bumped 1 -> 2 (issue #2659) for the same `file` retype
+        # that took `run_extract` to `schema_version` 4, so the two stay
+        # shape-compatible field-for-field where they overlap.
+        "schema_version": 2,
+        "file": _report_path(path, repo_root=_report_repo_root(path)),
         "deck": lvs_deck_file,
         "engine": "klayout",
         "top": top_cell_name,

@@ -236,8 +236,10 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
 
     report = run_drc_klayout_engine(gds, deck_file)
 
-    assert report["schema_version"] == 2
-    assert report["file"] == gds
+    assert report["schema_version"] == 3
+    # Issue #2659: the `{path, scope}` envelope. `tmp_path` is outside any
+    # repo here, so the absolute path is dropped rather than echoed.
+    assert report["file"] == {"path": None, "scope": "external"}
     assert report["deck"] == deck_file
     assert report["engine"] == "klayout"
     assert report["dbu_um"] == 0.001
@@ -1748,3 +1750,43 @@ def test_cli_klayout_engine_real_binary_resolves_sg13cmos5l_via_pdk_flags(
     assert payload["deck"] == str(
         pdk_root / "libs.tech" / "klayout" / "tech" / "drc" / "ihp-sg13cmos5l.drc"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2659: `file` is the portable `{path, scope}` envelope on *both*
+# response builders. The two engines' envelopes are read generically by a
+# `klt signoff` citation, so they must not drift apart on this field.
+# --------------------------------------------------------------------------- #
+
+
+def test_klayout_engine_file_is_repo_relative_inside_a_repo(tmp_path, monkeypatch):
+    """A layout inside a repo is echoed as `{path, scope: "repo"}` -- the
+    same shape the curated engine's own response builder emits, so a
+    committed envelope is re-verifiable from any clone whichever engine
+    produced it (issue #2659)."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    gds = _write_gds(root / "test.gds")
+    deck_file = _write_deck_file(root / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["schema_version"] == 3
+    assert report["file"] == {"path": "test.gds", "scope": "repo"}
+    # `deck` is untouched: it is pinned by `provenance.deck.content_hash`,
+    # not by `provenance.input`, and for this engine it is the deck script's
+    # own path rather than a curated deck name.
+    assert report["deck"] == deck_file
+
+
+def test_klayout_engine_file_is_external_outside_any_repo(tmp_path, monkeypatch):
+    """Outside any repo the absolute path is dropped rather than leaked
+    (issue #2659) -- `scope: "external"`, `path: null`."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["file"] == {"path": None, "scope": "external"}
