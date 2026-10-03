@@ -440,6 +440,19 @@ RULE_POWER_UNCONNECTED_PIN = "power.unconnected_pin"
 #: meaning for this one.
 POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER = "declared-by-every-instantiated-master"
 
+#: ``power_connectivity.power_pins_derivation.rule`` (issue #2707): the rule
+#: applied when the instantiated masters come from **more than one** pin-order
+#: source library (a standard-cell library plus a macro library, #2693). A pin
+#: name is admitted when every instantiated master *of one library* declares
+#: it and no reference circuit carries it; the universe is the union of those
+#: per-library intersections. A hard macro declares its own supply names
+#: (``vccd1``/``vssd1``), so a single cross-library intersection would always
+#: be empty. A single-library reference keeps
+#: :data:`POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER`, with its meaning unchanged.
+POWER_PINS_RULE_EVERY_MASTER_PER_LIBRARY = (
+    "declared-by-every-instantiated-master-per-library"
+)
+
 #: How many individual instances each ``power_connectivity.findings[].nets[]``
 #: group names before truncating (``instances_truncated: true``). A real
 #: routed block has hundreds of standard-cell instances on one rail, and a
@@ -3474,6 +3487,25 @@ _LIBRARY_PIN_ORDER_ASSETS: tuple[tuple[str, str], ...] = (
 )
 
 
+class _AttributedPinOrders(dict):
+    """The merged ``{<cell>: [<pin>, ...]}`` pin-order mapping, carrying the
+    library each cell's declaration came from as ``cell_libraries``
+    (upper-cased cell name -> library name, or ``None`` for a cell from an
+    explicit ``reference.pin_order_files`` entry; issue #2707).
+
+    A ``dict`` subclass so every existing consumer of the plain mapping is
+    unaffected, while :func:`_gate_level_power_pin_evidence_detail` can derive
+    the power-pin universe per library without every intermediate function
+    threading a second argument.
+    """
+
+    cell_libraries: dict[str, str | None]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.cell_libraries = {}
+
+
 class _GateLevelPinOrders(NamedTuple):
     """What :func:`_resolve_gate_level_pin_orders` resolved (issue #2693).
 
@@ -3632,7 +3664,7 @@ def _library_pin_order_files(libs_ref: str, library: str, variant: str) -> list[
 
 def _merge_pin_order_sources(
     plan: Sequence[tuple[str | None, str]],
-) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+) -> tuple[_AttributedPinOrders, list[dict[str, Any]]]:
     """Read every ``(library_or_None, path)`` pin-order source in ``plan``
     and merge their ``.subckt`` declarations into one lookup (issue #2693),
     returning ``(pin_orders, source_records)``.
@@ -3646,7 +3678,7 @@ def _merge_pin_order_sources(
     library that ships both ``.spice`` and ``.cdl`` with byte-identical
     headers) because there is nothing to choose between.
     """
-    merged: dict[str, list[str]] = {}
+    merged = _AttributedPinOrders()
     origin: dict[str, str] = {}
     records: list[dict[str, Any]] = []
     for library, path in plan:
@@ -3673,6 +3705,7 @@ def _merge_pin_order_sources(
                 )
             merged[cell] = pins
             origin[cell] = path
+            merged.cell_libraries[cell.upper()] = library
         records.append({"library": library, "path": path, "cells": len(parsed)})
     return merged, records
 
@@ -6698,38 +6731,104 @@ def _gate_level_power_pin_evidence(
     whenever the universe is ``None`` or the reference instantiates no cell
     of this library at all.
     """
+    return _gate_level_power_pin_evidence_detail(reference_netlist, library_pin_orders)[
+        :3
+    ]
+
+
+def _gate_level_power_pin_evidence_detail(
+    reference_netlist: Any | None,
+    library_pin_orders: Mapping[str, list[str]] | None,
+) -> tuple[frozenset[str] | None, list[str], bool, list[dict[str, Any]] | None]:
+    """:func:`_gate_level_power_pin_evidence`'s three values plus a fourth,
+    ``libraries`` (issue #2707): ``None`` when the single-library rule
+    (:data:`POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER`) applied, otherwise one
+    record per pin-order source library the instantiated masters came from
+    (:data:`POWER_PINS_RULE_EVERY_MASTER_PER_LIBRARY`).
+
+    **The per-library rule.** Library attribution comes from
+    ``library_pin_orders.cell_libraries`` (see :class:`_AttributedPinOrders`).
+    When the instantiated masters span two or more libraries, the
+    intersection is taken *within* each library and the results are unioned,
+    then the reference's signal pins are subtracted (condition 1, which is
+    library-independent). ``corroborated`` is true only when **every**
+    contributing library has at least two distinct declared-pin shapes.
+
+    **Single-master library decision (issue #2707).** A library contributing
+    exactly one master (typically one SRAM macro) is *admitted* to the union,
+    with ``corroborated: false`` for that library. Not admitting it would
+    silently drop the power check for exactly the designs (macro-bearing
+    blocks) that most need it. Admission costs little: the layout-side
+    power-pin connections only report pins actually observed on layout
+    instances, and a macro signal pin left dangling in the reference could
+    only be mistaken for a supply -- the same disclosed limitation the
+    single-library single-master case already carries. No second source of
+    evidence is required; instead the per-library ``corroborated`` and the
+    top-level ``reason`` name each uncorroborated library so a reader can
+    discount it.
+    """
     if not library_pin_orders:
-        return None, [], False
+        return None, [], False, None
     signal_pin_names = _reference_signal_pin_names(reference_netlist)
     if signal_pin_names is None:
-        return None, [], False
+        return None, [], False, None
     # Case-folded once: library cell names are verbatim from the `.subckt`
     # header (lower case, in both supported libraries), while the reference
     # circuit names come back from `NetlistSpiceReader` upper-cased.
     by_upper_name = {
         str(cell).upper(): pins for cell, pins in library_pin_orders.items()
     }
+    cell_libraries: Mapping[str, str | None] = getattr(
+        library_pin_orders, "cell_libraries", {}
+    )
     masters: set[str] = set()
     declared_per_master: list[set[str]] = []
+    groups: dict[str | None, list[tuple[str, set[str]]]] = {}
     for circuit in reference_netlist.each_circuit():
         name = str(circuit.name).upper()
         pins = by_upper_name.get(name)
         if pins is None or name in masters:
             continue
         masters.add(name)
-        declared_per_master.append({pin.upper() for pin in pins if pin})
+        declared = {pin.upper() for pin in pins if pin}
+        declared_per_master.append(declared)
+        groups.setdefault(cell_libraries.get(name), []).append((name, declared))
     if not declared_per_master:
-        return frozenset(), [], False
-    corroborated_pins = set.intersection(*declared_per_master)
-    # Genuine corroboration requires at least two distinct declared-pin
-    # *shapes* -- not just two master names -- see the docstring above.
-    distinct_shapes = {frozenset(pins) for pins in declared_per_master}
-    corroborated = len(distinct_shapes) > 1
-    return (
-        frozenset(corroborated_pins - signal_pin_names),
-        sorted(masters),
-        corroborated,
-    )
+        return frozenset(), [], False, None
+
+    if len(groups) <= 1:
+        corroborated_pins = set.intersection(*declared_per_master)
+        # Genuine corroboration requires at least two distinct declared-pin
+        # *shapes* -- not just two master names -- see the docstring above.
+        distinct_shapes = {frozenset(pins) for pins in declared_per_master}
+        corroborated = len(distinct_shapes) > 1
+        return (
+            frozenset(corroborated_pins - signal_pin_names),
+            sorted(masters),
+            corroborated,
+            None,
+        )
+
+    universe: set[str] = set()
+    libraries: list[dict[str, Any]] = []
+    all_corroborated = True
+    for library in sorted(groups, key=lambda value: (value is None, value or "")):
+        members = groups[library]
+        declared_sets = [declared for _, declared in members]
+        library_pins = set.intersection(*declared_sets) - signal_pin_names
+        universe |= library_pins
+        library_corroborated = len({frozenset(d) for d in declared_sets}) > 1
+        all_corroborated = all_corroborated and library_corroborated
+        libraries.append(
+            {
+                "library": library,
+                "masters": sorted(name for name, _ in members),
+                "master_count": len(members),
+                "corroborated": library_corroborated,
+                "power_pins": sorted(library_pins),
+            }
+        )
+    return frozenset(universe), sorted(masters), all_corroborated, libraries
 
 
 def _gate_level_power_pin_names(
@@ -7729,7 +7828,11 @@ def _body_verification_report(layout_circuit: Any, deck: Any) -> dict[str, Any]:
     }
 
 
-def _power_pins_derivation(masters: list[str], corroborated: bool) -> dict[str, Any]:
+def _power_pins_derivation(
+    masters: list[str],
+    corroborated: bool,
+    libraries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """The ``power_connectivity.power_pins_derivation`` block (issue #2076):
     how this run decided which pin names are power/ground, and how strong
     the evidence behind that decision is.
@@ -7754,6 +7857,36 @@ def _power_pins_derivation(masters: list[str], corroborated: bool) -> dict[str, 
     right), the check runs and says so here -- ``corroborated: false`` plus
     a ``reason`` naming the limitation.
     """
+    if libraries is not None:
+        # Issue #2707: multi-library derivation. `reason` names each library
+        # that could not be corroborated on its own.
+        weak = [entry for entry in libraries if not entry["corroborated"]]
+        reason = None
+        if weak:
+            reason = (
+                "the power/ground pin universe is derived per library "
+                "(union of each library's own intersection), and "
+                + "; ".join(
+                    f"library {entry['library']!r} contributes "
+                    + (
+                        f"a single master ({entry['masters'][0]})"
+                        if entry["master_count"] == 1
+                        else f"{entry['master_count']} masters of one identical pin set"
+                    )
+                    + ", so no second distinct master corroborates which of "
+                    "its declared-but-unconnected pins are supplies"
+                    for entry in weak
+                )
+                + ' (see docs/cli/lvs.md, "power_pins_derivation")'
+            )
+        return {
+            "rule": POWER_PINS_RULE_EVERY_MASTER_PER_LIBRARY,
+            "masters": list(masters),
+            "master_count": len(masters),
+            "corroborated": corroborated,
+            "reason": reason,
+            "libraries": libraries,
+        }
     reason: str | None = None
     if not masters:
         reason = (
@@ -7884,10 +8017,10 @@ def _power_connectivity_report(
     whether that evidence was corroborated by more than one master -- see
     :func:`_power_pins_derivation`.
     """
-    power_pin_names, masters, corroborated = _gate_level_power_pin_evidence(
-        reference_netlist, library_pin_orders
+    power_pin_names, masters, corroborated, libraries = (
+        _gate_level_power_pin_evidence_detail(reference_netlist, library_pin_orders)
     )
-    derivation = _power_pins_derivation(masters, corroborated)
+    derivation = _power_pins_derivation(masters, corroborated, libraries)
     if not power_pin_names:
         return _power_connectivity_unchecked(
             "no power/ground pin universe could be derived from the "

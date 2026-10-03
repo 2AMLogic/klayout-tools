@@ -18286,15 +18286,13 @@ def test_run_lvs_gate_level_verilog_records_every_pin_order_source(tmp_path):
     assert [entry["cells"] for entry in sources] == [2, 1, 1]
 
 
-def test_run_lvs_gate_level_verilog_multi_library_power_universe_is_unchecked(tmp_path):
-    """A documented consequence, pinned so it cannot change silently: the
-    power-pin universe is derived by intersecting the pin names *every*
-    instantiated master declares (`POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER`),
-    and a macro declares its own supply names (`vccd1`/`vssd1`) rather than
-    the standard cells' (`VPWR`/`VGND`) -- so the intersection is empty and
-    `power_connectivity` reports `"unchecked"` with its reason, rather than
-    guessing. Honest, not wrong: a per-library power universe is follow-up
-    work, not part of pin-order source resolution."""
+def test_run_lvs_gate_level_verilog_multi_library_power_universe_is_per_library(
+    tmp_path,
+):
+    """Issue #2707: a macro declares its own supply names (`vccd1`/`vssd1`)
+    rather than the standard cells' (`VPWR`/`VGND`), so a single cross-master
+    intersection is empty. The universe is derived per library and unioned
+    under a *new* rule identifier; the old one keeps its meaning."""
     root = _make_fake_macro_pdk(tmp_path)
     request = _macro_request(
         tmp_path,
@@ -18305,11 +18303,68 @@ def test_run_lvs_gate_level_verilog_multi_library_power_universe_is_unchecked(tm
         },
     )
     power = run_lvs(request)["power_connectivity"]
+    derivation = power["power_pins_derivation"]
+    assert derivation["rule"] == "declared-by-every-instantiated-master-per-library"
+    assert derivation["master_count"] == 3
+    by_library = {entry["library"]: entry for entry in derivation["libraries"]}
+    assert set(by_library) == {"sky130_fd_sc_hd", "sky130_sram_macros"}
+    assert by_library["sky130_sram_macros"]["power_pins"] == ["VCCD1", "VSSD1"]
+    assert by_library["sky130_sram_macros"]["master_count"] == 1
+    # A single-master library is admitted but flagged uncorroborated, with a
+    # reason naming it.
+    assert by_library["sky130_sram_macros"]["corroborated"] is False
+    assert derivation["corroborated"] is False
+    assert "sky130_sram_macros" in derivation["reason"]
+    std_pins = set(by_library["sky130_fd_sc_hd"]["power_pins"])
+    assert {"VPWR", "VGND"} <= std_pins
+    # The stub layout of this fixture carries no supply pins at all, so the
+    # layout side has nothing to check -- but the *universe* was derived.
     assert power["status"] == "unchecked"
-    assert power["power_pins"] == []
-    # The evidence block still names every master it intersected, which is
-    # what makes the empty universe diagnosable rather than mysterious.
-    assert power["power_pins_derivation"]["master_count"] == 3
+    assert "no layout-side subcircuit instance declares" in power["reason"]
+    assert "VCCD1" in power["reason"]
+    assert "VPWR" in power["reason"]
+
+
+#: Layout side of the macro design with every stub declaring its own supply
+#: pins, wired to two rails: the standard cells' `VPWR`/`VGND`/`VPB`/`VNB`
+#: and the macro's `vccd1`/`vssd1`.
+_MACRO_POWER_LAYOUT_SPICE = """
+.subckt top clk csb web addr din q VPWR VGND
+X1 din VGND VGND VPWR VPWR sram_in sky130_fd_sc_hd__inv_1
+X2 clk csb web addr sram_in sram_out VPWR VGND sky130_sram_1kbyte_1rw1r_32x256_8
+X3 clk sram_out VGND VGND VPWR VPWR q sky130_fd_sc_hd__dfxtp_1
+.ends
+.subckt sky130_fd_sc_hd__inv_1 A VGND VNB VPB VPWR Y
+.ends
+.subckt sky130_fd_sc_hd__dfxtp_1 CLK D VGND VNB VPB VPWR Q
+.ends
+.subckt sky130_sram_1kbyte_1rw1r_32x256_8 clk0 csb0 web0 addr0 din0 dout0 vccd1 vssd1
+.ends
+"""
+
+
+def test_run_lvs_gate_level_verilog_multi_library_power_check_runs_and_matches(
+    tmp_path,
+):
+    """Issue #2707 acceptance: a design mixing `sky130_fd_sc_hd` cells with a
+    `sky130_sram_macros` macro now gets a real power-connectivity verdict, with
+    `power_pins` carrying both libraries' supply names."""
+    root = _make_fake_macro_pdk(tmp_path)
+    layout = _write(tmp_path / "layout_pg.spice", _MACRO_POWER_LAYOUT_SPICE)
+    request = json.loads(
+        _macro_request(
+            tmp_path,
+            {
+                "library": ["sky130_fd_sc_hd", "sky130_sram_macros"],
+                "pdk": "sky130A",
+                "pdk_root": root,
+            },
+        )
+    )
+    request["layout"]["netlist"] = layout
+    power = run_lvs(json.dumps(request))["power_connectivity"]
+    assert power["status"] == "match", power["findings"]
+    assert {"VPWR", "VGND", "VPB", "VNB", "VCCD1", "VSSD1"} == set(power["power_pins"])
 
 
 def test_run_lvs_gate_level_verilog_resolves_a_cdl_only_macro_library(tmp_path):

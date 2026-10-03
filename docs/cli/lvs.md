@@ -1112,19 +1112,35 @@ is `false` with a `reason` naming the limitation (which masters, and whether
 it's a single master or several sharing one shape), rather than a guessed
 universe presented as a corroborated one.
 
-**A multi-library (macro-backed) design reports `"unchecked"` rather than a
-partial universe** (issue #2693). Condition 2 intersects across *every*
-instantiated master, and a hard macro declares its own supply pin names
+**A multi-library (macro-backed) design derives the universe per library**
+(issue #2707, following #2693). A hard macro declares its own supply pin names
 (`sky130_sram_macros`' `vccd1`/`vssd1`) rather than the standard cells'
-(`VPWR`/`VGND`/`VPB`/`VNB`) — so the intersection is empty and
-`power_connectivity.status` is `"unchecked"` with its reason, with
-`power_pins_derivation.masters` still naming every master intersected. That
-is the honest answer under today's single rule, not a defect of the compare:
-the signal-connectivity verdict (`status`) is unaffected, and
-`reference.library` naming several libraries is what made such a design
-comparable at all. A per-library power universe would be a new
-`power_pins_derivation.rule` value, never a silent change of meaning for
-this one.
+(`VPWR`/`VGND`/`VPB`/`VNB`), so a single intersection across every
+instantiated master would be empty. When the instantiated masters come from
+**two or more** pin-order source libraries (attributed per cell from the same
+sources `provenance.pin_order_sources` records), condition 2 is applied
+*within* each library and the results are unioned; condition 1 (subtract
+every pin any reference circuit carries) is library-independent and applied
+once. `power_pins_derivation.rule` is then the new identifier
+`"declared-by-every-instantiated-master-per-library"`, and
+`power_pins_derivation.libraries[]` lists, per library, its `masters`,
+`master_count`, `corroborated`, and the `power_pins` it contributed. A
+reference whose masters all come from one library (including cells from
+`reference.pin_order_files` alone) keeps the original rule, unchanged, and
+carries no `libraries` key.
+
+**Single-master libraries are admitted, flagged uncorroborated.** A library
+contributing one instantiated master (typically one SRAM macro) cannot
+corroborate anything on its own, but dropping it would silently remove the
+power check from exactly the macro-bearing designs that need it, so its
+supply set joins the union with that library's `corroborated: false`. No
+second source of evidence is required: the check only reports pins actually
+observed on layout instances, and the limitation (a macro signal pin left
+dangling in the reference is indistinguishable from a supply) is the same one
+the single-library single-master case already discloses. The top-level
+`corroborated` is `true` only when **every** contributing library is
+corroborated, and `reason` names each library that is not, so a reader can
+discount that library's names.
 
 Narrowing further — requiring a supply to be declared by every cell in the
 *whole* library, not just the instantiated ones — was measured against both
@@ -1220,7 +1236,7 @@ would silently exempt them.
 | `status` | `"match"` \| `"mismatch"` \| `"unchecked"` | The power/ground verdict, **independent of the report's top-level `status`** (which stays exactly `NetlistComparer.compare()`'s own signal-connectivity result). `"match"` when the check ran and found nothing; `"mismatch"` when it produced findings; `"unchecked"` when it did not run — never a clean verdict on absent evidence. |
 | `reason` | string \| `null` | Why the check did not run, for `status: "unchecked"`; `null` otherwise. One of: a `reference.form` other than `"gate-level-verilog"` (that form's reference carries its own power pins and nets, which the ordinary compare already checks); `options.power_connectivity: false`; no power-pin universe derivable from the reference library's pin-order data; or a layout netlist whose instances declare none of those pins (e.g. an `--abstract-cell-lef` that never declared PG pins). |
 | `power_pins` | array\<string\> | The power/ground pin names actually found on layout-side instances, upper-cased and sorted — what was checked, not what the library declares. `[]` when `status` is `"unchecked"`. |
-| `power_pins_derivation` | object \| `null` | Issue #2076. Where `power_pins` came from: `rule` (a stable identifier for the derivation — `"declared-by-every-instantiated-master"` today; a future rule would be a new value, never a silent change of meaning for this one), `masters` (the library cells the reference instantiates, upper-cased and sorted — the evidence the rule was applied to), `master_count`, `corroborated` (`true` only when the instantiated masters include at least two genuinely distinct declared-pin shapes — not merely more than one master *name*; two drive-strength variants of one logical cell declare the same shape and corroborate nothing), and `reason` (`null` when corroborated; otherwise what the evidence could not establish, including a same-shape-only multi-master case). Populated — never `null` — whenever `reference.form` is `"gate-level-verilog"` and `power_connectivity` was not disabled, even when the reference instantiates no cell of the resolved library at all (`masters: []`, `reason` naming that). `null` only when the check never attempted a derivation: a non-gate-level `reference.form`, or the `power_connectivity: false` opt-out. **Read `corroborated` before quoting `power_pins` as a coverage claim**: a `false` means this design gave the derivation nothing to cross-check against (see "How the power-pin universe is derived" above). |
+| `power_pins_derivation` | object \| `null` | Issue #2076. Where `power_pins` came from: `rule` (a stable identifier for the derivation — `"declared-by-every-instantiated-master"` for a single-library reference, or — issue #2707 — `"declared-by-every-instantiated-master-per-library"` when the masters span several pin-order libraries; a future rule would be a new value, never a silent change of meaning for an existing one), `masters` (the library cells the reference instantiates, upper-cased and sorted — the evidence the rule was applied to), `master_count`, `corroborated` (`true` only when the instantiated masters include at least two genuinely distinct declared-pin shapes — not merely more than one master *name*; two drive-strength variants of one logical cell declare the same shape and corroborate nothing), and `reason` (`null` when corroborated; otherwise what the evidence could not establish, including a same-shape-only multi-master case). Populated — never `null` — whenever `reference.form` is `"gate-level-verilog"` and `power_connectivity` was not disabled, even when the reference instantiates no cell of the resolved library at all (`masters: []`, `reason` naming that). `null` only when the check never attempted a derivation: a non-gate-level `reference.form`, or the `power_connectivity: false` opt-out. Under the per-library rule the object additionally carries `libraries` (additive; absent under the original rule): one `{library, masters, master_count, corroborated, power_pins}` record per library, `library` being `null` for cells from `reference.pin_order_files`. **Read `corroborated` before quoting `power_pins` as a coverage claim**: a `false` means this design gave the derivation nothing to cross-check against (see "How the power-pin universe is derived" above). |
 | `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
 | `expected_nets` | object\<string, string\> \| `null` | The resolved `options.power_connectivity.expected_nets` mapping (upper-cased, key-sorted), or `null` when none was declared. |
 | `unchecked_expected_pins` | array\<string\> | Issue #1978. `expected_nets` keys that named a power/ground pin no layout-side instance was actually observed to carry — a typo, or a PDK standard cell whose tie pin has no in-cell label/LEF port at all. Such a pin matches zero rows in `_power_pin_connections` and so produces zero findings, which reads identically to "checked and found correct" unless this field is consulted; a non-empty list means at least one declared expectation was never exercised by this run. `[]` on a clean check, and always `[]` when `status` is `"unchecked"`. |
