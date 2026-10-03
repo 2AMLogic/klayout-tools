@@ -108,7 +108,10 @@ A request naming both, or neither, is a request error.
   },
   "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 },
   "spef": "gcd_route.spef",
-  "geometry_source": "routed"
+  "geometry_source": "routed",
+  "macros": [
+    { "lef": "sram_8x8.lef", "lib": { "tt_025C_1v80": "sram_8x8_tt.lib" } }
+  ]
 }
 ```
 
@@ -127,6 +130,7 @@ A request naming both, or neither, is a request error.
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
 | `spef` | string \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. |
 | `geometry_source` | string \| omitted | In `def` mode (issue #1826): `"routed"` (the default, when omitted) declares `def` a fully-implemented, detailed-SPEF-eligible signoff geometry — this command's original and only behaviour. `"placement_estimate"` declares `def` a pre-route DEF from `klt place-and-route`'s `"place"`/`"cts"` stages (its own `unrouted_def_path` output) — nothing about this command's OpenSTA session construction actually changes (it is a plain `read_def` either way), but a placement-/CTS-stage DEF's parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so the resulting slack numbers are real but less accurate than the same fields on a routed DEF. Purely a caller-supplied label — a bare DEF file carries no stage provenance, so this command cannot infer it — echoed back verbatim as the response's own `geometry_source` field (see "Pre-route DEFs" below). Any other value is a request error in `def` mode. In `verilog` mode (issue #1825): this field is forced to `"netlist_estimate"` regardless of whether the request supplies it — omit it, or set it explicitly to `"netlist_estimate"`; any other explicit value is a request error. |
+| `macros` | array\<object\> \| omitted | Hard-macro declarations (issue #2635) — the same shared shape `klt synthesize`/`klt place-and-route` accept, documented once in `klayout_tools.macros`. See "Hard macros" below. `[]`/omitted (the default) leaves every pre-#2635 request byte-identical. |
 
 ## Response
 
@@ -143,6 +147,7 @@ A request naming both, or neither, is a request error.
   "wire_load_model": null,
   "wire_load_mode": null,
   "spef_path": null,
+  "macros": [],
   "worst_slack_ns": -0.15321,
   "total_negative_slack_ns": -1.20144,
   "worst_hold_slack_ns": 0.03812,
@@ -184,6 +189,7 @@ string" for the full enumeration and rationale.
 | `geometry_source` | string | Additive field (issue #1826), extended by issue #1825. Echo of `request.geometry_source` in `def` mode — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. Forced to `"netlist_estimate"` whenever `request.verilog` was given, regardless of what (if anything) the request supplied. See "Pre-route DEFs" and "From-scratch netlist input" below. |
 | `wire_load_model` / `wire_load_mode` | string \| null | Additive fields (issue #1825). Echo of `request.constraints.wire_load_model`/`.wire_load_mode` — the parasitics-estimate knob actually used, for provenance. Always `null`/`null` on a `def`-mode response (that mode's parasitics never come from a liberty wire-load model); on a `verilog`-mode response, `null`/`null` means no `set_wire_load*` command was issued at all (the resolved liberty's own default wire load, if any, was left in effect). See "From-scratch netlist input" below. |
 | `spef_path` | string \| null | The resolved, absolute path to the caller-supplied SPEF; `null` unless `request.spef` was given (never given together with `request.verilog`). |
+| `macros` | array\<object\> | **Always present** (issue #2635). Echo of `request.macros`, resolved to absolute paths (`cell`, `lef`, `lib` per corner, `gds`, `verilog_blackbox`) — the same shape `klt synthesize`'s own `macros` response field carries. `[]` when the request declared none. On a `pdk.corners` (list) response this is hoisted to the top level like every other field that cannot vary per corner — see "Multi-corner characterization" below. |
 | `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. A design with **no constrained path at all** reports OpenSTA's own unconstrained sentinel (`1e+39`/`0`) here rather than a real number — check `timing_status` below before treating this as a measurement. |
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
@@ -193,6 +199,40 @@ string" for the full enumeration and rationale.
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def` (`input.role: "layout"`) — or of `verilog` in netlist mode, where the role is `"netlist"` instead (issue #2027, so a consumer never compares a netlist digest against a layout one). On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
+
+## Hard macros (`request.macros`)
+
+Issue #2635 adds an optional `macros` array — the same shared shape `klt
+synthesize` and `klt place-and-route` accept, documented once in
+`klayout_tools.macros`. Each entry's `lef` is `read_lef`'d alongside the
+tech/cell LEF **before** `read_def`/`link_design` — without it, a
+macro-bearing DEF/netlist fails to load at all with `[ERROR ORD-2013]
+instance <inst> LEF master <cell> not found`, because OpenSTA resolves a
+DEF's `COMPONENTS` records (or a netlist's instances) against the already-
+loaded masters. This command's own error message appends a hint naming the
+`request.macros` entry that would fix an `ORD-2013` failure, rather than
+leaving a caller to search the OpenROAD source for what a LEF master is.
+
+Each entry's optional `lib` (alias `liberty`) — a per-corner liberty map,
+exactly as `klt synthesize` takes it — is `read_liberty`'d alongside the
+standard-cell library for whichever corner is being analysed, so the
+macro's real timing arcs participate in this command's slack/`fmax`/power
+numbers instead of the macro being timed as an untimed blackbox (OpenSTA's
+own `[WARNING STA-0198] module <cell> not found. Creating black box for
+<inst>`, a legitimate choice for a geometry-only run with no macro `lib`
+declared at all). A `lib` map with **no entry for the corner actually being
+analysed** (and no `"default"` key) is a request error naming the macro,
+the corner, and the keys that are available — never a silent fallback to
+another corner's timing, which matters most in a `pdk.corners` sweep, where
+one corner's macro liberty is the wrong answer for the next.
+
+`gds`/`verilog_blackbox` are accepted (for shape-compatibility with the
+other two verbs) but unused by this command — it reads physical/timing
+views only, never Verilog or GDS.
+
+See `docs/cli/synthesize.md`'s and `docs/cli/place-and-route.md`'s own
+"Hard macros"/"Hard-macro placement" sections for how the other two verbs
+consume the same declaration.
 
 ## Multi-corner characterization (`pdk.corners`, issue #1871)
 

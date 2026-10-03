@@ -301,6 +301,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   `licon.1b/c` instead — is unchanged by this fix (the pre-#2594 0.22 µm cut
   did not satisfy it either) and stays tracked under #2449. See
   `docs/cli/gen.md`'s "Fixed-size cut/via layers (issue #2585)" section.
+- **Added** (#2635, `klt synthesize` + `klt sta` + `klt place-and-route`;
+  additive — `schema_version` unchanged on all three): a shared
+  `request.macros` hard-macro declaration (`cell`, `lef`, `lib`/`liberty`
+  per-corner map, `gds`, `verilog_blackbox`), documented once in
+  `klayout_tools.macros` and accepted identically by all three verbs, so a
+  pre-characterized block (a compiled SRAM, a third-party IP core) no
+  longer fails at a different stage in each one. `klt synthesize` loads
+  each macro's liberty (or a LEF-derived blackbox) before `hierarchy`, so
+  the macro survives as an opaque instance, and reports it separately in
+  the new `macros`/`macro_instance_counts_by_type`/`macro_instance_count`
+  response fields; the new `cells_without_area` field (plus a
+  `warnings` entry) names every instantiated cell type `area_um2` does not
+  account for, so a blackboxed macro's area is never silently `0`. `klt
+  sta` reads each macro's LEF and corner-matching liberty alongside the
+  standard-cell library, fixing the `ORD-2013 LEF master not found` a
+  macro-bearing DEF/netlist used to hit. `klt place-and-route`'s existing
+  `request.macros` (issue #438/#464) gains `halo` (a keep-out margin,
+  honored as a placement blockage and — with `request.power` — a
+  `define_pdn_grid -macro` grid, closing that command's own v1 macro-PDN
+  exclusion) and `lib`/`liberty`. Both engine errors (Yosys's "not part of
+  the design", OpenROAD's `ORD-2013`) now append a hint naming the
+  `request.macros` entry that would fix them.
 - **Added** (#2638, `klt gen` + `klt gen-compose`; additive —
   `schema_version` unchanged on both): `gen-compose`'s `"explicit"`-placement
   clearance advisory (#692) no longer fires on the two placements that sit
