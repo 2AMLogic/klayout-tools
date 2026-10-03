@@ -151,6 +151,39 @@ not `klt --version`, if you need to detect this kind of drift. See
   (deliberately — neither purpose is wrong there, so flipping it would only
   relocate the same failure onto the foundry-sourced layouts it was confirmed
   against). See `docs/cli/extract.md`, "Overriding a deck's label layers".
+- **Fixed** (#2658, `klt extract --abstract-cells --abstract-cell-lef`;
+  additive — **no** `schema_version` bump, no new or removed field, but **a
+  run that also passes `--pdk`/`--pdk-root` can now bind an abstracted
+  instance's pins to different parent nets than before, and emit fewer
+  many-pins-one-net `warnings[]` entries**): a LEF-resolved pin carried no
+  layer role at all, so it skipped the "probe this point's own conductor
+  first" rule that in-cell-label pins have had since #2142 and went straight
+  to the bottom-up cross-layer fallback (`metals[0]`, `metals[1]`, … then
+  `poly`). That fallback takes the first conductor carrying *anything* at the
+  port's coordinate — which, for a foundry **hard macro** whose ports sit on
+  an upper metal placed over a routed parent power grid on a lower one, is
+  the power strap underneath. Reported from a real run: a macro with 109
+  LEF-declared pins resolved ~104 of them onto the parent's one power net,
+  disclosed only as the low-key "instance(s) resolved two or more of their
+  separately declared pins onto the same net" warning, leaving a black box
+  whose pins are nearly all shorted together and a downstream `klt lvs`
+  compare that is structurally meaningless at the macro boundary — a
+  mismatch cascade reading like a design defect. Each LEF `PORT` box is now
+  probed on the deck metal level its own `LAYER` names, resolved through the
+  active PDK's KLayout LEF/DEF map file
+  (`libs.tech/klayout/tech/<variant>.map`, the same file `klt lef-abstract`
+  and `klt place-and-route`'s DEF→GDS merge already read), before any
+  bottom-up fallback. Per **port box**, not per pin, so a pin declaring
+  ports on several metals keeps one correctly-probed candidate each.
+  Strictly additive: with no `--pdk`/`--pdk-root`, a PDK that ships no map
+  file, an unreadable map, or a LEF layer name the map does not translate
+  into one of the deck's `metals[]` levels, that port keeps today's role-free
+  bottom-up probe exactly. The many-pins-one-net warning itself is
+  unchanged and still fires for genuinely tied pins (the legal case); raising
+  it to a hard error above a tied-pin ratio is deliberately deferred rather
+  than dropped (tracked as #2695) — see `_tied_abstract_pin_warning`'s
+  docstring for why that needs an opt-out flag now that the binding fault
+  behind it is fixed at source.
 - **Added** (#55, new verb `klt netlist`; `schema_version: 1`): export an
   xschem schematic to a SPICE netlist headlessly, with a real exit status,
   plus a `--check` staleness gate over a committed netlist. The verb **owns
