@@ -5,10 +5,19 @@ build-backend = "maturin"
 [project]
 name = "klt-yield-native"
 version = "0.1.0"
-description = "Compiled pyo3 extension backing `klt yield` (2AMLogic/klayout-tools, issue #816) -- not published standalone"
+description = "Compiled pyo3 extension backing `klt yield` (2AMLogic/klayout-tools): distribution fit, yield estimates with confidence intervals, Cpk, sample-size verdict. Install via `pip install 'klayout-tools[yield]'`."
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-classifiers = ["Programming Language :: Rust"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Homepage = "https://klayout-tools.org"
+Source = "https://github.com/2AMLogic/klayout-tools/tree/main/native/yield"
 
 [tool.maturin]
 # The extension module Python imports as `klt_yield_native` (matches the
