@@ -485,6 +485,62 @@ What differs from `remote` is *who acquires the machine*:
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
+| `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
+
+### Capacity refusal and `batch_no_capacity`
+
+When 2am's `batch-fleet-provision.sh launch` finds no Spot capacity in any
+pool — after its own short internal retry loop (`BATCH_LAUNCH_RETRIES`, a
+2am setting `klt` does not control) — the request fails with exit `1` and,
+under `--format json`, an error envelope carrying a stable
+**`error.code: "batch_no_capacity"`**
+([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721); the optional
+`error.code` field is defined in [docs/json-contract.md](../json-contract.md)
+"Error shape"):
+
+```json
+{
+  "schema_version": 1,
+  "error": {
+    "command": "sim",
+    "message": "batch backend failed: batch-fleet-provision.sh launch failed (exit 1): error: no capacity in any of the 30 pools after 3 attempt(s) — ...",
+    "code": "batch_no_capacity"
+  }
+}
+```
+
+A capacity refusal is a fleet-wide condition that usually clears within
+minutes, so the code marks it as **retryable**, unlike a request error.
+Every other launch failure (the diversification floors, the shared
+concurrency cap, a missing `job.json`, an IAM denial) carries no `error.code`
+and is never retried. The classification is a match on the provisioner's
+refusal text, because the script exits `1` for every refusal and exposes no
+distinct exit code; it lives in one helper
+(`sim_batch._classify_launch_failure`) so a wording change on the 2am side is
+a one-line fix here.
+
+`batch.capacity_wait_s` opts into waiting instead of failing. With a positive
+budget, a `batch_no_capacity` refusal re-invokes `launch` for the **same
+job id** after a jittered exponential backoff (about 30 s, doubling, capped at
+10 min, each delay drawn from 50–100 % of its nominal value and never past
+the remaining budget) until the budget elapses; then the request fails with
+the same `batch_no_capacity` code, its message noting how many attempts were
+made. Things worth knowing:
+
+- **The wait is not charged to `batch.poll_timeout_s`.** The poll clock
+  starts only once a launch succeeds.
+- **Re-launching is safe.** A refused launch starts no instance and closes the
+  launch record it opened (2am's `cmd_launch` writes a `start` record and its
+  matching `end` on that path), and 2am's own Spot-interruption `reconcile`
+  already re-launches under an existing job id. The uploaded `job.json` and
+  `inputs/` are reused, never re-uploaded.
+- **The budget is per `launch` call.** A sharded run (`remote.hosts > 1`) launches one
+  job per shard, so each shard waits on its own `capacity_wait_s` budget,
+  concurrently. A shard whose budget runs out is reported as a `lost_shard`
+  (see "Fleet sharding" below) like any other launch failure, not as a
+  request-level `error.code` — its sibling shards' results are kept.
+- **There is no `--wait-for-capacity` CLI flag yet.** The request field is
+  the one control for now; a flag mirroring it is a possible follow-up.
 
 ### Both off-host backends validate `models.pdk` up front
 
@@ -693,7 +749,8 @@ not just equivalent.
   job on its own diversified Spot capacity, so there is no K-instance
   launch, cost gate, or teardown to run here. `hosts` may not exceed the
   unit count, for the same reason. A shard whose job fails to submit,
-  launch, or collect is a `lost_shard` exactly as above; a shard whose job
+  launch, or collect is a `lost_shard` exactly as above (a capacity refusal
+  included, once that shard's own `batch.capacity_wait_s` budget is spent); a shard whose job
   *ran* and failed reports `batch_job_failed`/`batch_job_timeout` per unit
   instead (see "Failure classification" below).
 
@@ -2447,7 +2504,7 @@ the *response* echoes back.
 | `engine`                 | string            | Engine selector. Defaults to `"ngspice"`; `"xyce"` (Sandia's Xyce, the cross-validation oracle — issue #2016) is implemented for DC/OP/TRAN analyses, process/temperature corners, and the local backends — see the "Xyce engine" section below. Any other value is an application error.                                                                                                |
 | `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool; `"remote"` provisions an EC2 instance and runs it there; `"batch"` submits an S3 job contract to 2am's EDA batch fleet (see "Execution backends", "Remote backend", and "Batch backend" above). Overridable with the `--backend` CLI flag. |
 | `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`launcher_cidrs`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`, `ami_manifest`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
-| `batch.*`                | object            | Request fields for the `batch` backend (`provision_script_path`, `bucket`, `jobs_prefix`, `region`, `profile`, `poll_interval_s`, `poll_timeout_s`) — see "Batch backend" above. Only read/validated when `backend: "batch"` is selected. |
+| `batch.*`                | object            | Request fields for the `batch` backend (`provision_script_path`, `bucket`, `jobs_prefix`, `region`, `profile`, `poll_interval_s`, `poll_timeout_s`, `capacity_wait_s`) — see "Batch backend" above. Only read/validated when `backend: "batch"` is selected. |
 | `remote.hosts`           | integer           | Shard the expanded unit list across this many hosts and merge the per-shard reports. Defaults to `1` (today's single-host behaviour, byte-identical). Must be a positive integer, and (for `backend: "remote"`) no greater than the unit count. `local`/`local-parallel` shard in-process; `backend: "remote"` provisions a real `hosts`-instance EC2 fleet ([#906](https://github.com/2AMLogic/klayout-tools/issues/906)). Overridable with the `--hosts` CLI flag, same precedence rule as `backend`/`--backend`. See "Fleet sharding" above. |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set **and** at least one selected section reads from it (a bundle whose every section names its own `lib` needs none — issue #2522). See "Model library resolution" above. |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` — and any per-section `lib` — through `klt pdk find` instead of a literal path.                                                                    |

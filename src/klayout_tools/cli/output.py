@@ -149,6 +149,7 @@ def emit_error(
     message: str,
     format: str,
     exit_code: int = ERROR_EXIT_CODE,
+    code: str | None = None,
 ) -> int:
     """Emit an error envelope and return the exit code to use.
 
@@ -164,12 +165,17 @@ def emit_error(
     report it -- passes :data:`EXIT_USAGE_ERROR` (``2``) explicitly rather
     than hand-rolling a plain-text ``print`` that would bypass the envelope
     under ``--format json`` (issue #2029).
+
+    ``code`` is an optional machine-readable classification (issue #2721),
+    emitted as ``error.code`` **only when set** -- the envelope of every
+    error without one is byte-for-byte unchanged. It does not appear in the
+    ``--format text`` line, which stays the plain message.
     """
     if format == "json":
-        error_payload = {
-            "schema_version": 1,
-            "error": {"command": command, "message": message},
-        }
+        error: dict[str, str] = {"command": command, "message": message}
+        if code is not None:
+            error["code"] = code
+        error_payload = {"schema_version": 1, "error": error}
         json.dump(error_payload, sys.stderr, indent=2)
         print(file=sys.stderr)
     else:

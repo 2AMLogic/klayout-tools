@@ -79,11 +79,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import shutil
 import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -195,6 +197,19 @@ _BATCH_AWS_TIMEOUT_S = 900.0
 #: (``BATCH_LAUNCH_RETRIES``) runs inside this budget.
 _BATCH_LAUNCH_TIMEOUT_S = 900.0
 
+#: Machine-readable ``error.code`` a launch refused for lack of Spot capacity
+#: carries (issue #2721): a retryable, fleet-wide infrastructure condition,
+#: distinct from a request error a caller must not retry.
+BATCH_NO_CAPACITY_CODE = "batch_no_capacity"
+
+#: Capacity-wait backoff (``request.batch.capacity_wait_s``, issue #2721):
+#: the first re-launch waits ~:data:`_CAPACITY_BACKOFF_BASE_S`, each further
+#: one doubles, capped at :data:`_CAPACITY_BACKOFF_CAP_S`. Every delay is
+#: jittered into ``[0.5, 1.0) x`` its nominal value so concurrent submitters
+#: refused by the same shortage do not re-launch in lock-step.
+_CAPACITY_BACKOFF_BASE_S = 30.0
+_CAPACITY_BACKOFF_CAP_S = 600.0
+
 #: ``status.json`` states that mean the job is over, one way or another.
 BATCH_TERMINAL_STATES = ("done", "failed", "timeout")
 
@@ -238,7 +253,16 @@ class BatchError(Exception):
     transport -- :func:`_run_batch` re-raises it as
     :class:`klayout_tools.sim.SimError` (no corner ever ran: the same
     "sweep never started" class as an unresolvable netlist).
+
+    ``code`` is an optional machine-readable classification (issue #2721),
+    carried through to that ``SimError`` and from there to the error
+    envelope's ``error.code``. ``None`` -- the common case -- means
+    "unclassified"; today only :data:`BATCH_NO_CAPACITY_CODE` is set.
     """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class BatchPollTimeout(BatchError):
@@ -476,6 +500,10 @@ class BatchConfig:
     poll_interval_s: float
     poll_timeout_s: float
     aws_binary: str = "aws"
+    #: Wall-clock budget :func:`launch_job` keeps re-launching through a
+    #: ``batch_no_capacity`` refusal (``request.batch.capacity_wait_s``,
+    #: issue #2721). ``0`` -- the default -- is one launch attempt.
+    capacity_wait_s: float = 0.0
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -612,6 +640,7 @@ def _resolve_batch_config(
             f"the ${BUCKET_ENV} environment variable, or BATCH_JOB_BUCKET in the "
             f"{FLEET_CONFIG_FILENAME} beside the provision script"
         )
+    capacity_wait_s = _resolve_capacity_wait_s(batch_spec)
     return BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -641,7 +670,32 @@ def _resolve_batch_config(
                 _default_batch_poll_timeout_s(corner_count, timeout_s),
             )
         ),
+        capacity_wait_s=capacity_wait_s,
     )
+
+
+def _resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
+    """``request.batch.capacity_wait_s``: a finite, non-negative number of
+    seconds (default ``0``), else :class:`~klayout_tools.sim.SimError` --
+    raised from :func:`_resolve_batch_config`, i.e. before any S3 write.
+
+    A ``bool`` is refused even though it is an ``int`` subclass: ``true``
+    reading as "wait one second" is never what a request author meant.
+    """
+    from .sim import SimError
+
+    value = batch_spec.get("capacity_wait_s", 0)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise SimError(
+            "request.batch.capacity_wait_s must be a non-negative number of "
+            f"seconds (got {value!r})"
+        )
+    return float(value)
 
 
 # --------------------------------------------------------------------------- #
@@ -681,7 +735,13 @@ def _run_checked(
     argv: list[str],
     timeout_s: float,
     label: str,
+    *,
+    classify: Callable[[str], str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run one transport command; any non-zero exit becomes a
+    :class:`BatchError`. ``classify``, when given, maps the failed command's
+    stderr to the error's machine-readable ``code`` (``None`` = unclassified).
+    """
     try:
         result = runner(argv, timeout_s)
     except subprocess.TimeoutExpired as exc:
@@ -690,8 +750,42 @@ def _run_checked(
         raise BatchError(f"{label} could not be spawned: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or "").strip()
-        raise BatchError(f"{label} failed (exit {result.returncode}): {detail}")
+        raise BatchError(
+            f"{label} failed (exit {result.returncode}): {detail}",
+            code=classify(detail) if classify is not None else None,
+        )
     return result
+
+
+#: The fragment of 2am's ``batch-fleet-provision.sh launch`` refusal line
+#: (``fail "no capacity in any of the N pools after K attempt(s) -- this is
+#: the capacity-refusal case, ..."``) that identifies a Spot capacity refusal.
+_CAPACITY_REFUSAL_MARKER = "no capacity in any of the"
+
+
+def _classify_launch_failure(stderr: str) -> str | None:
+    """:data:`BATCH_NO_CAPACITY_CODE` when a failed ``launch``'s stderr is
+    the provisioner's capacity refusal, else ``None``.
+
+    **Coupling:** this is a text match against 2am's
+    ``infra/aws/batch-fleet-provision.sh`` (``cmd_launch``'s final
+    ``fail "no capacity in any of the ..."``), because that script exits ``1``
+    for *every* refusal -- the diversification floors, the concurrency cap,
+    a missing ``job.json``, an IAM denial, and a capacity shortfall alike --
+    and exposes no distinct exit code. Kept in this one helper so a change on
+    the 2am side is a one-line fix here. Every other launch failure stays
+    unclassified, so it is never mistaken for something worth retrying.
+    """
+    return BATCH_NO_CAPACITY_CODE if _CAPACITY_REFUSAL_MARKER in stderr else None
+
+
+def _capacity_backoff_s(retry_index: int, jitter: Callable[[], float]) -> float:
+    """The jittered, capped delay before capacity re-launch ``retry_index``
+    (``0`` = the first re-launch). ``jitter`` returns a float in ``[0, 1)``."""
+    nominal = min(
+        _CAPACITY_BACKOFF_CAP_S, _CAPACITY_BACKOFF_BASE_S * (2.0**retry_index)
+    )
+    return nominal * (0.5 + 0.5 * jitter())
 
 
 def submit_job(
@@ -755,9 +849,13 @@ def launch_job(
     job_id: str,
     *,
     runner: remote_transport.CommandRunner | None = None,
+    sleep: Callable[[float], None] | None = None,
+    monotonic: Callable[[], float] | None = None,
+    jitter: Callable[[], float] | None = None,
 ) -> None:
     """Shell out to 2am's ``batch-fleet-provision.sh launch --job <id>
-    --apply --profile <profile>`` -- exactly one invocation per job.
+    --apply --profile <profile>`` -- exactly one invocation per job, unless
+    ``config.capacity_wait_s`` opts into waiting out a capacity refusal.
 
     Shelling out (rather than issuing a native ``CreateFleet``) is the
     recorded decision for this backend: ``launch`` is not a thin API
@@ -769,8 +867,29 @@ def launch_job(
     budget from a runaway submitter. Re-deriving any of that here would
     duplicate already-tested logic, and skipping it would be a safety
     regression.
+
+    **Capacity wait (issue #2721).** A launch the provisioner refuses for
+    lack of Spot capacity raises :class:`BatchError` with
+    ``code == "batch_no_capacity"`` (:func:`_classify_launch_failure`). With
+    ``config.capacity_wait_s > 0`` such a refusal is instead retried -- the
+    same ``launch`` invocation for the same job id, after a jittered, capped
+    exponential backoff (:func:`_capacity_backoff_s`) -- until that budget
+    elapses, then raised with the same code. Any *other* launch failure is
+    raised at once, never retried. Re-invoking is safe because a refused
+    launch creates no instance and closes the launch record it opened (2am's
+    ``cmd_launch`` writes a ``start`` record and its matching ``end`` on that
+    path), and 2am's own Spot-interruption ``reconcile`` already re-launches
+    under an existing job id. The wait is measured on its own clock and is
+    **not** charged to ``poll_timeout_s``, whose clock starts in
+    :func:`poll_status` once a launch succeeds. ``sleep``/``monotonic``/
+    ``jitter`` are injectable for tests; ``None`` resolves to
+    :func:`time.sleep`/:func:`time.monotonic`/:func:`random.random` at call
+    time.
     """
     run = runner if runner is not None else _run_subprocess
+    sleep = sleep if sleep is not None else time.sleep
+    monotonic = monotonic if monotonic is not None else time.monotonic
+    jitter = jitter if jitter is not None else random.random
     argv = [
         config.provision_script,
         "launch",
@@ -782,7 +901,30 @@ def launch_job(
     ]
     if config.region:
         argv += ["--region", config.region]
-    _run_checked(run, argv, _BATCH_LAUNCH_TIMEOUT_S, "batch-fleet-provision.sh launch")
+    started = monotonic()
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            _run_checked(
+                run,
+                argv,
+                _BATCH_LAUNCH_TIMEOUT_S,
+                "batch-fleet-provision.sh launch",
+                classify=_classify_launch_failure,
+            )
+            return
+        except BatchError as exc:
+            if exc.code != BATCH_NO_CAPACITY_CODE or config.capacity_wait_s <= 0:
+                raise
+            remaining = config.capacity_wait_s - (monotonic() - started)
+            if remaining <= 0:
+                raise BatchError(
+                    f"{exc} (capacity wait budget of {config.capacity_wait_s:g}s "
+                    f"exhausted after {attempts} launch attempt(s))",
+                    code=BATCH_NO_CAPACITY_CODE,
+                ) from exc
+            sleep(min(_capacity_backoff_s(attempts - 1, jitter), remaining))
 
 
 def _read_status(
@@ -1199,7 +1341,7 @@ def _run_batch(
             measurements_spec=measurements_spec,
         )
     except BatchError as exc:
-        raise SimError(f"batch backend failed: {exc}") from exc
+        raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
 
 
 def _run_batch_fleet(
@@ -1283,6 +1425,7 @@ def _run_batch_fleet(
 __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
     "BATCH_JOB_TOOL",
+    "BATCH_NO_CAPACITY_CODE",
     "BATCH_NETLIST_FILENAME",
     "BATCH_REPORT_FILENAME",
     "BATCH_REQUEST_FILENAME",

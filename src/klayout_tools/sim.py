@@ -751,7 +751,16 @@ class SimError(Exception):
     traceback. Distinct from a *corner* reporting ``status: "error"`` inside
     an otherwise-successful response -- that is a documented outcome, not an
     exception (see this module's docstring and docs/cli/sim.md).
+
+    ``code`` is an optional machine-readable classification (issue #2721)
+    the CLI emits as the error envelope's ``error.code`` -- e.g.
+    ``"batch_no_capacity"`` for a retryable batch-fleet capacity refusal.
+    ``None`` (every other error today) emits no ``code`` field at all.
     """
+
+    def __init__(self, *args: object, code: str | None = None) -> None:
+        super().__init__(*args)
+        self.code = code
 
 
 #: Environment-variable override for the ngspice binary (issue #2423), the

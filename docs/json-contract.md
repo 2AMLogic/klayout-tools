@@ -1263,6 +1263,18 @@ the exit code alone is authoritative.
 - `error.command` — the subcommand name (e.g. `"layers"`).
 - `error.message` — a concise, human-readable description of what went wrong.
   No Python traceback is ever emitted.
+- `error.code` — **optional**, a stable machine-readable classification of the
+  failure, present **only** when the command classified it (absent — not
+  `null` — otherwise). It lets a caller tell, e.g., a retryable infrastructure
+  condition from a request error without parsing `error.message`, whose prose
+  is not part of the contract. Added additively (issue #2721): every error
+  without a code keeps exactly the two-field shape above, and
+  `schema_version` is unchanged. Consumers must ignore codes they do not
+  recognize. Codes defined today:
+
+  | Command | `error.code` | Meaning |
+  |---------|--------------|---------|
+  | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
 
 Under `--format text` (the default), errors remain the pre-existing
 plain-text stderr line: `klt <command>: <message>`. Text is a courtesy
