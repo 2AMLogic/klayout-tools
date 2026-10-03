@@ -20,7 +20,7 @@ Rust parser's model (``Table2D`` there is a *parse target*, with no
 serialisation code to share); (2) the round-trip acceptance bar --
 "the emitted ``.lib`` parses in ``statime``" -- is satisfied identically
 either way, since it exercises the *reader*, wherever the writer lives
-(see :func:`klayout_tools.characterize.roundtrip_check`); (3) keeping it
+(see :func:`klayout_tools.characterize.roundtrip_check_cells`); (3) keeping it
 here means the emission path has no Rust toolchain dependency at all, so
 ``klt characterize`` degrades to "emitted, round-trip not verified" rather
 than "cannot emit" on a machine with no built extension.

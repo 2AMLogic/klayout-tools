@@ -46,7 +46,7 @@ caller-declared ``pins[].capacitance_pf`` still overrides it, and the
 response's ``capacitance_source`` says which of the two won.
 
 The emitted file is checked against ``native/statime``'s own Liberty reader
-before the run reports success (:func:`roundtrip_check`), so "it parses"
+before the run reports success (:func:`roundtrip_check_cells`), so "it parses"
 is a property of every run rather than only of this module's tests. When the
 ``klt_statime_native`` extension is not installed the check reports
 ``status: "skipped"`` with the reason -- never a fabricated pass.
@@ -453,12 +453,6 @@ def _cell_entries(
         wanted = set(selected)
         entries = [entry for entry in entries if entry[1].get("name") in wanted]
     return entries
-
-
-def _resolve_cell(request: dict[str, Any], request_dir: str) -> dict[str, Any]:
-    """Resolve the single-cell form's ``request.cell`` (kept for callers of
-    the #2502 shape; batch mode goes through :func:`_resolve_cell_spec`)."""
-    return _resolve_cell_spec(request["cell"], request_dir, "request.cell")
 
 
 def _resolve_cell_spec(
@@ -2184,23 +2178,6 @@ def _resolve_lib_path(
 # --------------------------------------------------------------------------- #
 
 
-def roundtrip_check(
-    *,
-    lib_path: str,
-    cell_name: str,
-    input_pins: tuple[str, ...],
-    output_pins: tuple[str, ...],
-    work_dir: str,
-) -> dict[str, Any]:
-    """Parse ``lib_path`` back through ``native/statime``'s Liberty reader,
-    probing one cell. See :func:`roundtrip_check_cells`."""
-    return roundtrip_check_cells(
-        lib_path=lib_path,
-        cells=[(cell_name, input_pins, output_pins)],
-        work_dir=work_dir,
-    )
-
-
 def roundtrip_check_cells(
     *,
     lib_path: str,
@@ -2277,12 +2254,6 @@ def roundtrip_check_cells(
         ),
         "probe_netlist": probe_path,
     }
-
-
-def _probe_netlist(
-    *, cell_name: str, input_pins: tuple[str, ...], output_pins: tuple[str, ...]
-) -> str:
-    return _probe_netlist_cells([(cell_name, input_pins, output_pins)])
 
 
 def _probe_netlist_cells(
