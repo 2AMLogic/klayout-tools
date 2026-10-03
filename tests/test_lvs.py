@@ -15802,7 +15802,7 @@ _REAL_SRAM_MACRO_CDL = """
 
 #: Yosys/OpenROAD-`write_verilog`-shaped black-box instantiation of that
 #: macro, using all three issue #2657 constructs plus a whole-bus name.
-_MACRO_GATE_LEVEL_VERILOG = """
+_VECTOR_MACRO_GATE_LEVEL_VERILOG = """
 module top(clk, addr, din, dout, b7, b6);
   input clk;
   input [7:0] addr;
@@ -15831,7 +15831,7 @@ def test_convert_gate_level_verilog_vector_macro_bit_order():
     slice's `addr[5]` on `A[5]`, the constant's MSB on `WEN[7]`."""
     orders = parse_subckt_pin_orders(_REAL_SRAM_MACRO_CDL)
     out = convert_gate_level_verilog(
-        _MACRO_GATE_LEVEL_VERILOG, pin_order_lookup=orders.get
+        _VECTOR_MACRO_GATE_LEVEL_VERILOG, pin_order_lookup=orders.get
     )
     # Power pins dropped, every signal pin in the real declared order.
     stub = next(line for line in out.splitlines() if line.startswith(".SUBCKT gf180"))
