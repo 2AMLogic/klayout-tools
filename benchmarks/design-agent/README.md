@@ -484,6 +484,15 @@ This is a first milestone, not the full issue #1719 scope.
    construction. Tightening that spread -- #1795's originally scoped
    regenerative-feedback / PTAT-CTAT work -- is the remaining follow-on.
 
+   The same ship-alongside pattern applies to the relaxation VCO (issue
+   #2735, part of #1779): `relaxation-vco`'s scored reference stays the
+   PDK-free behavioral `reference/relaxation-vco/vco.spice`, and an
+   **unscored**, separately runnable sky130A device-level variant lives in
+   [`reference/relaxation-vco/device-vco/`](reference/relaxation-vco/device-vco/README.md)
+   (own `sim_request.json`, reusable `vco_dev` subcircuit for the PLL
+   follow-on). It is not selected by the harness and adds no PDK dependency
+   or runtime to the scored reference gate.
+
    `telescopic-cascode-amp` is the task where the swap mattered most: a
    generic LEVEL=1 device has no short-channel output-conductance
    degradation, so the old generic-model reference measured ~94-103 dB, well
