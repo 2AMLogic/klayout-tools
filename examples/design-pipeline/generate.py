@@ -140,7 +140,17 @@ _OP_REQUEST = {
             "limits": {"min": 0.3, "max": 1.5},
         },
     ],
-    "options": {"timeout_s": 60, "keep_artifacts": False},
+    # Issue #2677: 300s, not the 60s its AC sibling uses. This request is
+    # also the fixture for `klt sim --op-lint`'s sky130 integration test
+    # (`tests/test_op_sanity.py`), which runs a real ngspice on whatever
+    # host the suite lands on. On a saturated CI/dispatch worker (load
+    # average ~= nproc) the operating point reproducibly missed a 60s
+    # budget, turning the build gate red for a host-contention reason
+    # rather than a circuit one. The budget exists to bound a *hung*
+    # simulator, not to measure one -- this OTA's op point takes ~1s
+    # unloaded, so 300s still catches a hang while leaving headroom for a
+    # ~2 orders-of-magnitude contention slowdown.
+    "options": {"timeout_s": 300, "keep_artifacts": False},
 }
 
 
