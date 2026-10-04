@@ -12,6 +12,8 @@ respectively, against the same fixtures.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -371,14 +373,88 @@ def test_blackbox_verilog_text_maps_power_pins_to_inout(tmp_path):
 def test_blackbox_verilog_text_escapes_a_non_identifier_pin_name(tmp_path):
     _write_macro_lef(
         tmp_path / "m.lef",
-        pins=("  PIN A[0]\n    DIRECTION INPUT ;\n    USE SIGNAL ;\n  END A[0]\n"),
+        pins=("  PIN a-b\n    DIRECTION INPUT ;\n    USE SIGNAL ;\n  END a-b\n"),
     )
     macro = macro_spec.validate_macros(
         [{"lef": "m.lef"}], str(tmp_path), error_cls=_Err
     )[0]
     text = macro_spec.blackbox_verilog_text(macro)
-    assert "module sram_8x8 (\\A[0] );" in text
-    assert "  input \\A[0] ;" in text
+    assert "module sram_8x8 (\\a-b );" in text
+    assert "  input \\a-b ;" in text
+
+
+def _bus_pin(name, direction="INPUT"):
+    return (
+        f"  PIN {name}\n    DIRECTION {direction} ;\n    USE SIGNAL ;\n  END {name}\n"
+    )
+
+
+def _bus_macro(tmp_path, pins):
+    _write_macro_lef(tmp_path / "m.lef", pins="".join(pins))
+    return macro_spec.validate_macros(
+        [{"lef": "m.lef"}], str(tmp_path), error_cls=_Err
+    )[0]
+
+
+def test_blackbox_verilog_text_groups_bus_bits_into_vector_ports(tmp_path):
+    macro = _bus_macro(
+        tmp_path,
+        [
+            _bus_pin("A[0]"),
+            _bus_pin("Q[1]", "OUTPUT"),
+            _bus_pin("A[1]"),
+            _bus_pin("Q[0]", "OUTPUT"),
+            _bus_pin("CLK"),
+        ],
+    )
+    text = macro_spec.blackbox_verilog_text(macro)
+    assert "module sram_8x8 (A, CLK, Q);" in text
+    assert "  input [1:0] A;" in text
+    assert "  output [1:0] Q;" in text
+    assert "  input CLK;" in text
+    assert "\\A[" not in text
+
+
+@pytest.mark.parametrize(
+    "pins, fragment",
+    [
+        ([_bus_pin("A[0]"), _bus_pin("A[2]")], "non-contiguous"),
+        ([_bus_pin("A[0]"), _bus_pin("A[1]", "OUTPUT")], "mixes pin directions"),
+        ([_bus_pin("A"), _bus_pin("A[0]")], "both a scalar pin"),
+    ],
+)
+def test_blackbox_verilog_text_rejects_unrepresentable_buses(tmp_path, pins, fragment):
+    macro = _bus_macro(tmp_path, pins)
+    with pytest.raises(_Err, match=fragment):
+        macro_spec.blackbox_verilog_text(macro, error_cls=_Err)
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="yosys is not installed")
+def test_blackbox_verilog_text_elaborates_in_yosys_with_vector_ports(tmp_path):
+    macro = _bus_macro(
+        tmp_path,
+        [_bus_pin(f"A[{i}]") for i in range(4)]
+        + [_bus_pin(f"Q[{i}]", "OUTPUT") for i in range(8)],
+    )
+    (tmp_path / "stub.v").write_text(macro_spec.blackbox_verilog_text(macro))
+    (tmp_path / "top.v").write_text(
+        "module top(input [3:0] address, output [7:0] data);\n"
+        "  sram_8x8 u_sram (.A(address), .Q(data));\n"
+        "endmodule\n"
+    )
+    result = subprocess.run(
+        [
+            "yosys",
+            "-q",
+            "-p",
+            "read_verilog -lib stub.v; read_verilog top.v; hierarchy -check -top top",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # --------------------------------------------------------------------------- #

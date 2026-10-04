@@ -1892,7 +1892,10 @@ def _macro_blackbox_inputs(
             )
             continue
         generated = os.path.join(output_dir, f"{macro['cell']}_blackbox.v")
-        _write_text_file(generated, macro_spec.blackbox_verilog_text(macro))
+        _write_text_file(
+            generated,
+            macro_spec.blackbox_verilog_text(macro, error_cls=SynthesizeError),
+        )
         inputs.append({"cell": macro["cell"], "source": "lef", "path": generated})
     return inputs
 
