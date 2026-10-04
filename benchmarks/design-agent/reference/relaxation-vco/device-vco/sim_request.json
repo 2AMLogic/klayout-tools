@@ -1,0 +1,245 @@
+{
+  "netlist": "vco_device.spice",
+  "engine": "ngspice",
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "5n 50u"
+  },
+  "measurements": [
+    {
+      "name": "t_start_lo",
+      "spice": ".meas tran t_start_lo WHEN v(out_lo)=0.8 RISE=1 TD=0.2u",
+      "unit": "s",
+      "limits": {
+        "max": 5e-06
+      }
+    },
+    {
+      "name": "t1_lo",
+      "spice": ".meas tran t1_lo WHEN v(out_lo)=0.8 RISE=1 TD=14u",
+      "unit": "s"
+    },
+    {
+      "name": "t3_lo",
+      "spice": ".meas tran t3_lo WHEN v(out_lo)=0.8 RISE=3 TD=14u",
+      "unit": "s"
+    },
+    {
+      "name": "tl1_lo",
+      "spice": ".meas tran tl1_lo WHEN v(out_lo)=0.8 RISE=1 TD=36u",
+      "unit": "s"
+    },
+    {
+      "name": "tl3_lo",
+      "spice": ".meas tran tl3_lo WHEN v(out_lo)=0.8 RISE=3 TD=36u",
+      "unit": "s"
+    },
+    {
+      "name": "freq_lo",
+      "spice": ".meas tran freq_lo param='2/(t3_lo-t1_lo)'",
+      "unit": "Hz",
+      "limits": {
+        "min": 230000,
+        "max": 380000
+      }
+    },
+    {
+      "name": "drift_lo_pct",
+      "spice": ".meas tran drift_lo_pct param='100*((tl3_lo-tl1_lo)-(t3_lo-t1_lo))/(t3_lo-t1_lo)'",
+      "unit": "%",
+      "limits": {
+        "min": -2.0,
+        "max": 2.0
+      }
+    },
+    {
+      "name": "t_start_mid",
+      "spice": ".meas tran t_start_mid WHEN v(out_mid)=0.8 RISE=1 TD=0.2u",
+      "unit": "s",
+      "limits": {
+        "max": 5e-06
+      }
+    },
+    {
+      "name": "t1_mid",
+      "spice": ".meas tran t1_mid WHEN v(out_mid)=0.8 RISE=1 TD=14u",
+      "unit": "s"
+    },
+    {
+      "name": "t3_mid",
+      "spice": ".meas tran t3_mid WHEN v(out_mid)=0.8 RISE=3 TD=14u",
+      "unit": "s"
+    },
+    {
+      "name": "tl1_mid",
+      "spice": ".meas tran tl1_mid WHEN v(out_mid)=0.8 RISE=1 TD=36u",
+      "unit": "s"
+    },
+    {
+      "name": "tl3_mid",
+      "spice": ".meas tran tl3_mid WHEN v(out_mid)=0.8 RISE=3 TD=36u",
+      "unit": "s"
+    },
+    {
+      "name": "freq_mid",
+      "spice": ".meas tran freq_mid param='2/(t3_mid-t1_mid)'",
+      "unit": "Hz",
+      "limits": {
+        "min": 450000,
+        "max": 650000
+      }
+    },
+    {
+      "name": "drift_mid_pct",
+      "spice": ".meas tran drift_mid_pct param='100*((tl3_mid-tl1_mid)-(t3_mid-t1_mid))/(t3_mid-t1_mid)'",
+      "unit": "%",
+      "limits": {
+        "min": -2.0,
+        "max": 2.0
+      }
+    },
+    {
+      "name": "t_start_hi",
+      "spice": ".meas tran t_start_hi WHEN v(out_hi)=0.8 RISE=1 TD=0.2u",
+      "unit": "s",
+      "limits": {
+        "max": 5e-06
+      }
+    },
+    {
+      "name": "t1_hi",
+      "spice": ".meas tran t1_hi WHEN v(out_hi)=0.8 RISE=1 TD=14u",
+      "unit": "s"
+    },
+    {
+      "name": "t3_hi",
+      "spice": ".meas tran t3_hi WHEN v(out_hi)=0.8 RISE=3 TD=14u",
+      "unit": "s"
+    },
+    {
+      "name": "tl1_hi",
+      "spice": ".meas tran tl1_hi WHEN v(out_hi)=0.8 RISE=1 TD=36u",
+      "unit": "s"
+    },
+    {
+      "name": "tl3_hi",
+      "spice": ".meas tran tl3_hi WHEN v(out_hi)=0.8 RISE=3 TD=36u",
+      "unit": "s"
+    },
+    {
+      "name": "freq_hi",
+      "spice": ".meas tran freq_hi param='2/(t3_hi-t1_hi)'",
+      "unit": "Hz",
+      "limits": {
+        "min": 700000,
+        "max": 1150000
+      }
+    },
+    {
+      "name": "drift_hi_pct",
+      "spice": ".meas tran drift_hi_pct param='100*((tl3_hi-tl1_hi)-(t3_hi-t1_hi))/(t3_hi-t1_hi)'",
+      "unit": "%",
+      "limits": {
+        "min": -2.0,
+        "max": 2.0
+      }
+    },
+    {
+      "name": "ratio_mid_lo",
+      "spice": ".meas tran ratio_mid_lo param='freq_mid/freq_lo'",
+      "unit": "",
+      "limits": {
+        "min": 1.5
+      }
+    },
+    {
+      "name": "ratio_hi_mid",
+      "spice": ".meas tran ratio_hi_mid param='freq_hi/freq_mid'",
+      "unit": "",
+      "limits": {
+        "min": 1.2
+      }
+    },
+    {
+      "name": "vco_sensitivity",
+      "spice": ".meas tran vco_sensitivity param='(freq_hi-freq_lo)/(vctrl_hi-vctrl_lo)'",
+      "unit": "Hz/V",
+      "limits": {
+        "min": 800000,
+        "max": 1250000
+      }
+    },
+    {
+      "name": "vco_sens_lo_mid",
+      "spice": ".meas tran vco_sens_lo_mid param='(freq_mid-freq_lo)/(vctrl_mid-vctrl_lo)'",
+      "unit": "Hz/V",
+      "limits": {
+        "min": 600000,
+        "max": 1000000
+      }
+    },
+    {
+      "name": "vco_sens_mid_hi",
+      "spice": ".meas tran vco_sens_mid_hi param='(freq_hi-freq_mid)/(vctrl_hi-vctrl_mid)'",
+      "unit": "Hz/V",
+      "limits": {
+        "min": 800000,
+        "max": 1300000
+      }
+    },
+    {
+      "name": "vs_lo_v",
+      "spice": ".meas tran vs_lo_v AVG v(xvco_lo.vs) FROM=14u TO=50u",
+      "unit": "V"
+    },
+    {
+      "name": "vs_err_lo_mv",
+      "spice": ".meas tran vs_err_lo_mv param='1000*(vs_lo_v-vctrl_lo)'",
+      "unit": "mV",
+      "limits": {
+        "min": -25,
+        "max": 25
+      }
+    },
+    {
+      "name": "vs_hi_v",
+      "spice": ".meas tran vs_hi_v AVG v(xvco_hi.vs) FROM=14u TO=50u",
+      "unit": "V"
+    },
+    {
+      "name": "vs_err_hi_mv",
+      "spice": ".meas tran vs_err_hi_mv param='1000*(vs_hi_v-vctrl_hi)'",
+      "unit": "mV",
+      "limits": {
+        "min": -25,
+        "max": 25
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 2400,
+    "keep_artifacts": false
+  }
+}

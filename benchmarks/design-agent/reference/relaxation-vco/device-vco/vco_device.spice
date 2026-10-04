@@ -1,0 +1,223 @@
+* Device-level sky130A relaxation VCO (issue #2735, part of epic #1779).
+*
+* NOT the benchmark's reference solution and NOT scored. The scored
+* reference for benchmarks/design-agent/tasks/relaxation-vco.json stays
+* the behavioral ../vco.spice (PDK-free). This file is an unscored,
+* separately runnable device-level variant shipped alongside it, the
+* same "ship alongside" precedent as
+* ../../rc-relaxation-oscillator/device-oscillator/ (#1822/#2155).
+* See README.md here for the pin contract, measured per-corner results
+* and the remaining ideal elements.
+*
+* -------------------------------------------------------------------
+* Topology
+* -------------------------------------------------------------------
+* vco_dev is the reusable block. It is the device oscillator's
+* comparator/latch/charge-discharge core with ONE structural change:
+* the charge/discharge current no longer comes from the comparator
+* bias rails. It comes from a voltage-to-current converter driven by
+* the vctrl pin:
+*
+*   ictrl = vctrl / Rv          (op-amp-forced, Rv ~ 61 kohm)
+*   T     = 2 * Cosc * dV / ictrl + comparator/latch delay
+*   f     ~ vctrl / (2 * Cosc * dV * Rv)
+*
+* The thresholds vth_lo/vth_hi are still set by the fixed {ib} bias
+* (the pbias pin) through the same zero-TC composite divider the device
+* oscillator uses, so dV does NOT move with vctrl. That separation is
+* deliberate: in the device oscillator both dV and the charge current
+* derive from the same {ib}, which is exactly why {ib} cancels out of
+* its period. Copying that bias sharing unchanged would have made a
+* control current that also widens the threshold window, cancelling the
+* tuning. Here only the numerator of f moves with vctrl.
+*
+* -------------------------------------------------------------------
+* Voltage-to-current converter (all real sky130 devices)
+* -------------------------------------------------------------------
+* XA1/XA2: lvt PMOS input pair (pfet_01v8_lvt), tail XAT mirrored off
+*   pbias, NMOS mirror load XA3/XA4. PMOS input so the common mode
+*   reaches down to vctrl ~ 0.2 V; lvt so it still reaches 0.9 V at
+*   vdd = 1.62 V (the tail is the headroom limit, see README.md).
+* XMg: lvt NMOS common-source second stage, drives the PMOS diode XPd.
+* XMp: PMOS copy of XPd that sources ictrl into node vs -> Rv -> vss.
+*   Loop: vs up -> ga down -> XMg less current -> pg up -> XMp less
+*   current -> vs down. Negative feedback forces v(vs) = v(vctrl).
+*   (An NMOS source-follower V-to-I was tried first and rejected: body
+*   effect plus the 5T OTA's output ceiling left v(vs) 150 mV short of
+*   vctrl at ff/1.98V/125C.)
+* Rv: zero-TC composite of res_xhigh_po + res_generic_nd, same
+*   construction and same poly fraction (~0.51) as the threshold divider.
+* XMchg: PMOS copy of XPd (charge current, 1:1).
+* XPn/XNd/XMdis: PMOS copy into an NMOS diode, mirrored by XMdis
+*   (discharge current, 1:1).
+* Cc compensates the two-stage loop (dominant pole at ga); Cpg holds the
+* shared pg gate rail still against switch kickback.
+*
+* The vctrl pin is a MOS gate only (XA1): it draws no DC current, so a
+* PLL loop filter can drive it directly.
+*
+* -------------------------------------------------------------------
+* Comparators, latch, switches: reused from the device oscillator
+* -------------------------------------------------------------------
+* cmp_n/cmp_p bodies, the NOT(olo) inverter, the cross-coupled NOR SR
+* latch and the complementary charge/discharge switches are the device
+* oscillator's circuits with the global ground replaced by the vss pin.
+* q = 1 discharges vo, q = 0 charges it; q rises when vo crosses vth_hi.
+* A two-inverter buffer drives the out pin so external load does not sit
+* on the latch.
+*
+* Start-up: like the device oscillator there is no kick source. The DC
+* operating point of this loop is an unstable equilibrium; the measured
+* first output edge is bounded in sim_request.json (t_start_*).
+*
+* Circuit body only: no .control/.end cards (klt sim generates those --
+* see docs/cli/sim.md). Real sky130 devices via $PDK_ROOT. Device W/L in
+* microns (sky130_fd_pr subckt convention).
+
+.param vdd=1.8
+.param ib=5u
+.param cosc=10p
+* Threshold divider, identical to the device oscillator's zero-TC divider
+* (vth_lo ~ 0.36 V, dV ~ 0.85 V at ib = 5 uA).
+.param r1_l=18
+.param r1n_l=308
+.param r2_l=42.4
+.param r2n_l=726
+.param cref=0.5p
+* V-to-I resistor Rv: 14.5 um xhigh_po (~30.7 kohm) + 255 um generic_nd
+* (~30.0 kohm) -> ~61 kohm, ictrl ~ 4.8 uA at 0.3 V, ~14.5 uA at 0.9 V.
+.param rv_l=14.5
+.param rvn_l=255
+* Control points for the standalone testbench (lo / mid / hi). These are
+* testbench values, not part of vco_dev.
+.param vctrl_lo=0.3
+.param vctrl_mid=0.6
+.param vctrl_hi=0.9
+
+* ===================================================================
+* Comparators (device oscillator's cmp_n / cmp_p, ground -> vss pin)
+* ===================================================================
+.subckt vco_cmp_n in vref out vdd vss nbias
+XM5  tail nbias vss vss sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+XM1  n1   in   tail vss sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM2  pout vref tail vss sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM3  n1   n1   vdd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM4  pout n1   vdd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XMN6 nb  pout vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMP6 nb  pout vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMN7 out nb   vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMP7 out nb   vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+CLo out vss 0.02p
+.ends vco_cmp_n
+
+.subckt vco_cmp_p in vref out vdd vss pbias
+XM5  tailp pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+XM1  n1   in    tailp vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM2  nout vref  tailp vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM3  n1   n1    vss vss sky130_fd_pr__nfet_01v8 L=0.5 W=10 nf=1 mult=1
+XM4  nout n1    vss vss sky130_fd_pr__nfet_01v8 L=0.5 W=10 nf=1 mult=1
+XMN6 nb  nout vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMP6 nb  nout vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMN7 out nb   vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMP7 out nb   vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+CLo out vss 0.02p
+.ends vco_cmp_p
+
+* ===================================================================
+* Reusable VCO block
+*   pins: vctrl out vdd vss nbias pbias
+*   out   : buffered clock, rising edge when the timing node reaches vth_hi
+*   nbias/pbias : 5 uA bias gate rails (NMOS / PMOS diode-connected
+*                 references live outside the block, see testbench)
+* ===================================================================
+.subckt vco_dev vctrl out vdd vss nbias pbias
+
+* --- threshold reference: fixed bias, independent of vctrl ---
+XMref vth_hi pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+XRdiv2  vth_hi rmid2  vss sky130_fd_pr__res_xhigh_po   W=1 L={r2_l}  mult=1 m=1
+XRdiv2n rmid2  vth_lo vss sky130_fd_pr__res_generic_nd w=1 l={r2n_l}
+XRdiv1  vth_lo rmid1  vss sky130_fd_pr__res_xhigh_po   W=1 L={r1_l}  mult=1 m=1
+XRdiv1n rmid1  vss    vss sky130_fd_pr__res_generic_nd w=1 l={r1n_l}
+Crefh vth_hi vss {cref}
+Crefl vth_lo vss {cref}
+
+* --- voltage-to-current converter: ictrl = vctrl / Rv ---
+XAT tl  pbias vdd vdd sky130_fd_pr__pfet_01v8     L=1 W=40 nf=2 mult=1
+XA1 a1  vctrl tl  vdd sky130_fd_pr__pfet_01v8_lvt L=1 W=20 nf=2 mult=1
+XA2 ga  vs    tl  vdd sky130_fd_pr__pfet_01v8_lvt L=1 W=20 nf=2 mult=1
+XA3 a1  a1    vss vss sky130_fd_pr__nfet_01v8     L=1 W=4  nf=1 mult=1
+XA4 ga  a1    vss vss sky130_fd_pr__nfet_01v8     L=1 W=4  nf=1 mult=1
+Cc  ga  vss 2p
+XMg pg  ga    vss vss sky130_fd_pr__nfet_01v8_lvt L=1 W=20 nf=2 mult=1
+XPd pg  pg    vdd vdd sky130_fd_pr__pfet_01v8     L=1 W=80 nf=4 mult=1
+XMp vs  pg    vdd vdd sky130_fd_pr__pfet_01v8     L=1 W=80 nf=4 mult=1
+XRv  vs  rvm  vss sky130_fd_pr__res_xhigh_po   W=1 L={rv_l} mult=1 m=1
+XRvn rvm vss  vss sky130_fd_pr__res_generic_nd w=1 l={rvn_l}
+Cpg pg vdd 1p
+
+* --- discharge-current reference: PMOS copy into an NMOS diode ---
+XPn nctl pg   vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=80 nf=4 mult=1
+XNd nctl nctl vss vss sky130_fd_pr__nfet_01v8 L=1 W=20 nf=2 mult=1
+Cnc nctl vss 1p
+
+* --- comparators ---
+Xhi vo vth_hi ohi vdd vss nbias vco_cmp_n
+Xlo vo vth_lo olo vdd vss pbias vco_cmp_p
+
+* --- NOT(olo) + cross-coupled NOR SR latch (device oscillator's) ---
+XINVp olo_b olo vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XINVn olo_b olo vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+Colo olo_b vss 0.005p
+XP1a na1  olo_b vdd  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XP1b q    qb    na1  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XN1a q    olo_b vss  vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XN1b q    qb    vss  vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+Cq q vss 0.005p
+XP2a na2  ohi   vdd  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XP2b qb   q     na2  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XN2a qb   ohi   vss  vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XN2b qb   q     vss  vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+Cqb qb vss 0.005p
+
+* --- charge/discharge path + timing capacitor ---
+XMchg  chgd pg   vdd vdd sky130_fd_pr__pfet_01v8 L=1   W=80 nf=4 mult=1
+XSWchg vo   q    chgd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=8  nf=1 mult=1
+XMdis  disd nctl vss vss sky130_fd_pr__nfet_01v8 L=1   W=20 nf=2 mult=1
+XSWdis vo   q    disd vss sky130_fd_pr__nfet_01v8 L=0.5 W=8  nf=1 mult=1
+Ccap vo vss {cosc}
+Rleak vo vss 1G
+
+* --- output buffer (q -> out, non-inverting) ---
+XB1p ob q  vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XB1n ob q  vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XB2p out ob vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XB2n out ob vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+.ends vco_dev
+
+* ===================================================================
+* Standalone testbench (not part of the reusable block)
+* ===================================================================
+* Ideal elements, all testbench-only:
+*   Vdd                     - supply (swept by corners.supply_v.vdd)
+*   Iref / Irefp            - 5 uA bias references (same ideal sources
+*                             the device oscillator uses), mirrored by
+*                             real XM5b / XM5c diodes into nbias / pbias
+*   Vctrl_lo/_mid/_hi       - ideal DC control voltages
+*   Cl_*                    - 20 fF output load per instance
+Vdd vdd 0 DC {vdd}
+Iref vdd nbias DC {ib}
+XM5b nbias nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+Irefp pbias 0 DC {ib}
+XM5c pbias pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+
+Vctrl_lo  vctrl_lo  0 DC {vctrl_lo}
+Vctrl_mid vctrl_mid 0 DC {vctrl_mid}
+Vctrl_hi  vctrl_hi  0 DC {vctrl_hi}
+
+Xvco_lo  vctrl_lo  out_lo  vdd 0 nbias pbias vco_dev
+Xvco_mid vctrl_mid out_mid vdd 0 nbias pbias vco_dev
+Xvco_hi  vctrl_hi  out_hi  vdd 0 nbias pbias vco_dev
+
+Cl_lo  out_lo  0 0.02p
+Cl_mid out_mid 0 0.02p
+Cl_hi  out_hi  0 0.02p
