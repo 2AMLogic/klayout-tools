@@ -4676,8 +4676,9 @@ def _macro_pdn_grid_lines(
     contain any shapes or vias`` / ``[ERROR PDN-0233] Failed to generate
     full power grid``.
 
-    The connection's **lower** layer is the macro's own P/G ``PORT`` layer,
-    read from its LEF (:func:`_macro_power_ground_layers`) rather than asked
+    The connection's **lower** layer is the macro's own P/G ``PORT`` layer
+    (one connection per distinct layer when supplies sit on several), read
+    from its LEF (:func:`_macro_power_ground_layers`) rather than asked
     for in the request -- the LEF is the authority on it. The **upper**
     layer is the next strap layer above it in ``power.straps`` (which every
     real platform config lists bottom-to-top, the same assumption the core
@@ -4707,23 +4708,24 @@ def _macro_pdn_grid_lines(
                 "macro's supplies to the grid on -- drop the halo, or drop "
                 "request.power"
             )
-        lower = pg_layers[0]
-        if lower not in strap_layers:
-            raise PlaceAndRouteError(
-                f"request.macros[].halo for instance '{macro['instance']}' "
-                "needs a request.power strap on the macro's own P/G layer "
-                f"'{lower}' to connect to; request.power.straps declares "
-                + ", ".join(strap_layers)
-            )
-        index = strap_layers.index(lower)
-        if index + 1 >= len(strap_layers):
-            raise PlaceAndRouteError(
-                f"request.macros[].halo for instance '{macro['instance']}' "
-                "needs a request.power strap *above* the macro's own P/G "
-                f"layer '{lower}' to connect up to, but '{lower}' is the "
-                "topmost strap declared"
-            )
-        upper = strap_layers[index + 1]
+        connects: list[str] = []
+        for lower in pg_layers:
+            if lower not in strap_layers:
+                raise PlaceAndRouteError(
+                    f"request.macros[].halo for instance '{macro['instance']}' "
+                    "needs a request.power strap on the macro's own P/G layer "
+                    f"'{lower}' to connect to; request.power.straps declares "
+                    + ", ".join(strap_layers)
+                )
+            index = strap_layers.index(lower)
+            if index + 1 >= len(strap_layers):
+                raise PlaceAndRouteError(
+                    f"request.macros[].halo for instance '{macro['instance']}' "
+                    "needs a request.power strap *above* the macro's own P/G "
+                    f"layer '{lower}' to connect up to, but '{lower}' is the "
+                    "topmost strap declared"
+                )
+            connects.append(f"{lower} {strap_layers[index + 1]}")
         name = f"macro_{macro['instance']}"
         lines.append(
             f"define_pdn_grid -macro -name {{{name}}} -voltage_domains {{CORE}} "
@@ -4731,7 +4733,11 @@ def _macro_pdn_grid_lines(
             f"{{{halo['left']} {halo['bottom']} {halo['right']} {halo['top']}}} "
             "-grid_over_boundary"
         )
-        lines.append(f"add_pdn_connect -grid {{{name}}} -layers {{{lower} {upper}}}")
+        # One connection per distinct supply-pin layer: a macro exposing
+        # POWER on one layer and GROUND on another is only fully tied in
+        # when each layer reaches the grid.
+        for layers in dict.fromkeys(connects):
+            lines.append(f"add_pdn_connect -grid {{{name}}} -layers {{{layers}}}")
     return lines
 
 

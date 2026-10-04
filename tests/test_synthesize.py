@@ -5621,6 +5621,24 @@ def test_response_flags_a_non_macro_cell_with_no_liberty_area(tmp_path, monkeypa
     assert "macro_area_excluded" not in report["warnings"]["by_category"]
 
 
+def test_cells_without_area_reports_types_when_every_parsed_cell_lacks_area(
+    tmp_path,
+):
+    """A liberty with parseable `cell (...)` groups but no `area` on any of
+    them is not "unparseable": every instantiated type is unaccounted for and
+    must be named, and the AC2 warning must fire."""
+    liberty = tmp_path / "noarea.lib"
+    liberty.write_text(
+        "library(test) { cell(BUF) { pin(A) { direction : input; } } }\n",
+        encoding="utf-8",
+    )
+    missing = synthesize._cells_without_area(str(liberty), {"BUF": 1, "sram": 1})
+
+    assert missing == ["BUF", "sram"]
+    warning = synthesize._macro_area_warning(missing, frozenset({"sram"}))
+    assert "macro_area_excluded" in warning
+
+
 def test_cells_without_area_is_null_when_the_liberty_declares_no_cells(
     tmp_path, monkeypatch
 ):

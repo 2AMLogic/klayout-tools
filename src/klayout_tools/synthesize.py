@@ -1944,7 +1944,9 @@ def _cells_without_area(
     instantiates nothing at all, or when every instantiated type does have
     an area. ``None`` -- "not establishable", never a fabricated empty list
     -- when the liberty cannot be read or this deliberately-partial parser
-    can see no ``cell (...)`` group in it at all, exactly the posture
+    can see no ``cell (...)`` group in it at all (a liberty whose cells all
+    lack ``area`` is *not* that case: its cells are parseable, so every
+    instantiated type is reported missing), exactly the posture
     :func:`_liberty_cell_names` takes for the same two cases.
     """
     if not instance_counts_by_type:
@@ -1954,9 +1956,9 @@ def _cells_without_area(
             liberty_text = handle.read()
     except (OSError, UnicodeDecodeError):
         return None
-    areas = _liberty_cell_areas(liberty_text)
-    if not areas:
+    if _LIBERTY_CELL_HEADER_RE.search(liberty_text) is None:
         return None
+    areas = _liberty_cell_areas(liberty_text)
     return sorted(
         cell_type for cell_type in instance_counts_by_type if cell_type not in areas
     )

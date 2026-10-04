@@ -11352,3 +11352,47 @@ def test_ord_2013_failure_names_request_macros(tmp_path, monkeypatch):
     assert "ORD-2013" in message
     assert "request.macros" in message
     assert "sram_8x8" in message
+
+
+# -- `_macro_pdn_grid_lines` with supplies on several layers ----------------- #
+
+
+def _pdn_macro(layers):
+    return {
+        "instance": "u_sram",
+        "halo": {"left": 2, "bottom": 2, "right": 2, "top": 2},
+        "power_ground_layers": layers,
+    }
+
+
+_PDN_POWER = {
+    "straps": [
+        {"layer": "met1"},
+        {"layer": "met3"},
+        {"layer": "met4"},
+        {"layer": "met5"},
+    ]
+}
+
+
+def test_macro_pdn_connects_every_supply_pin_layer():
+    """POWER on met1, GROUND on met3: each layer gets its own
+    `add_pdn_connect`, not just the first-declared one."""
+    lines = place_and_route._macro_pdn_grid_lines(
+        [_pdn_macro(["met1", "met3"])], _PDN_POWER
+    )
+
+    connects = [line for line in lines if line.startswith("add_pdn_connect")]
+    assert connects == [
+        "add_pdn_connect -grid {macro_u_sram} -layers {met1 met3}",
+        "add_pdn_connect -grid {macro_u_sram} -layers {met3 met4}",
+    ]
+
+
+def test_macro_pdn_rejects_supply_layer_missing_from_straps():
+    """A second supply layer with no matching strap is rejected up front
+    rather than silently left unconnected."""
+    power = {"straps": [{"layer": "met1"}, {"layer": "met4"}, {"layer": "met5"}]}
+    with pytest.raises(place_and_route.PlaceAndRouteError) as excinfo:
+        place_and_route._macro_pdn_grid_lines([_pdn_macro(["met1", "met3"])], power)
+    assert "met3" in str(excinfo.value)
