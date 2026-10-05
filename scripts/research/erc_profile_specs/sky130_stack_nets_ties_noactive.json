@@ -1,0 +1,111 @@
+{
+  "stackup": [
+    {
+      "name": "poly",
+      "layer": "66/20",
+      "role": "gate"
+    },
+    {
+      "name": "li1",
+      "layer": "67/20",
+      "label_layer": "67/5"
+    },
+    {
+      "name": "met1",
+      "layer": "68/20",
+      "label_layer": "68/5"
+    },
+    {
+      "name": "met2",
+      "layer": "69/20",
+      "label_layer": "69/5"
+    },
+    {
+      "name": "met3",
+      "layer": "70/20",
+      "label_layer": "70/5"
+    },
+    {
+      "name": "met4",
+      "layer": "71/20",
+      "label_layer": "71/5"
+    },
+    {
+      "name": "met5",
+      "layer": "72/20",
+      "label_layer": "72/5"
+    }
+  ],
+  "vias": [
+    {
+      "name": "licon1",
+      "layer": "66/44",
+      "between": [
+        "poly",
+        "li1"
+      ]
+    },
+    {
+      "name": "mcon",
+      "layer": "67/44",
+      "between": [
+        "li1",
+        "met1"
+      ]
+    },
+    {
+      "name": "via1",
+      "layer": "68/44",
+      "between": [
+        "met1",
+        "met2"
+      ]
+    },
+    {
+      "name": "via2",
+      "layer": "69/44",
+      "between": [
+        "met2",
+        "met3"
+      ]
+    },
+    {
+      "name": "via3",
+      "layer": "70/44",
+      "between": [
+        "met3",
+        "met4"
+      ]
+    },
+    {
+      "name": "via4",
+      "layer": "71/44",
+      "between": [
+        "met4",
+        "met5"
+      ]
+    }
+  ],
+  "nets": [
+    {
+      "name": "VDD",
+      "kind": "supply"
+    },
+    {
+      "name": "VSS",
+      "kind": "supply"
+    }
+  ],
+  "ties": [
+    {
+      "name": "nwell_tap",
+      "well_layer": "64/20",
+      "tap_layer": "65/44",
+      "tap_requires": [
+        "93/44"
+      ],
+      "connect_to": "li1",
+      "net": "VDD"
+    }
+  ]
+}
