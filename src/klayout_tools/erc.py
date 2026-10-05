@@ -356,7 +356,12 @@ from ._devices import (
 from ._layout import cells_in_hierarchy, load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
-from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
+from ._paths import (
+    _load_spec_json,
+    _parse_layer_datatype,
+    _reject_unknown_keys,
+    _validate_via_entries,
+)
 from ._provenance import _content_hash, build_provenance
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
@@ -1070,6 +1075,45 @@ def _connectivity_coverage(
     }
 
 
+#: The keys each part of the ``klt erc`` spec file recognises (issue #2243).
+#: Any other key is rejected with its full path rather than ignored -- see
+#: ``docs/cli/erc.md``'s "Unrecognised spec keys". Keep these in step with
+#: the ``_validate_*``/``_parse_*`` readers below when a spec field is added.
+_SPEC_KEYS = (
+    "stackup",
+    "vias",
+    "nets",
+    "ties",
+    "ties_disclosure",
+    "devices",
+)
+_STACKUP_KEYS = ("name", "layer", "label_layer", "active_layer", "role")
+_NET_KEYS = (
+    "name",
+    "kind",
+    "islands",
+    "same_net_as",
+    "roles",
+    "unlabelled_allowed_boxes",
+)
+_TIE_KEYS = (
+    "name",
+    "well_layer",
+    "tap_layer",
+    "connect_to",
+    "net",
+    "tap_requires",
+    "tap_is_dedicated",
+    "tap_boxes",
+    "well_boxes",
+    "well_requires",
+    "well_excludes",
+    "well_requires_boxes",
+    "well_excludes_boxes",
+)
+_TIES_DISCLOSURE_KEYS = ("reason", "kind", "undeclared_classes")
+
+
 class ErcError(Exception):
     """Raised when ``klt erc`` cannot run: a bad layout/spec file, a
     malformed stackup/via declaration, an unresolvable top cell, an unknown
@@ -1232,6 +1276,7 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise ErcError(f"spec '{spec_path}': stackup[{i}] must be a JSON object")
+        _reject_unknown_keys(entry, _STACKUP_KEYS, spec_path, f"stackup[{i}]", ErcError)
         for key in ("name", "layer"):
             if key not in entry:
                 raise ErcError(f"spec '{spec_path}': stackup[{i}] missing {key!r}")
@@ -1375,6 +1420,7 @@ def _validate_nets(
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise ErcError(f"spec '{spec_path}': nets[{i}] must be a JSON object")
+        _reject_unknown_keys(entry, _NET_KEYS, spec_path, f"nets[{i}]", ErcError)
         if "name" not in entry:
             raise ErcError(f"spec '{spec_path}': nets[{i}] missing 'name'")
         name = str(entry["name"]).strip()
@@ -1965,6 +2011,7 @@ def _validate_ties(
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise ErcError(f"spec '{spec_path}': ties[{i}] must be a JSON object")
+        _reject_unknown_keys(entry, _TIE_KEYS, spec_path, f"ties[{i}]", ErcError)
         for key in ("well_layer", "tap_layer", "connect_to", "net"):
             if key not in entry:
                 raise ErcError(f"spec '{spec_path}': ties[{i}] missing {key!r}")
@@ -2131,6 +2178,9 @@ def _validate_ties_disclosure(
         return None
     if not isinstance(raw, dict):
         raise ErcError(f"spec '{spec_path}': 'ties_disclosure' must be a JSON object")
+    _reject_unknown_keys(
+        raw, _TIES_DISCLOSURE_KEYS, spec_path, "ties_disclosure", ErcError
+    )
     reason = raw.get("reason")
     if not isinstance(reason, str) or not reason.strip():
         raise ErcError(
@@ -4161,6 +4211,7 @@ def run_erc(
     deck_obj = _resolve_deck(deck)
 
     spec = _load_spec_json(spec_path, ErcError)
+    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", ErcError)
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
     vias = _validate_vias(spec, spec_path, stackup_names)

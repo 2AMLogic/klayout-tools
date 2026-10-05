@@ -27,7 +27,7 @@ from typing import Any
 from . import pdk_stackup
 from ._layout import load_layout, select_top_cells
 from ._native import _load_native_extension
-from ._paths import _load_spec_json, _parse_layer_datatype
+from ._paths import _load_spec_json, _parse_layer_datatype, _reject_unknown_keys
 
 #: Mirrors ``native/mom/src/contract.rs``'s ``DEFAULT_PANEL_SIZE_UM`` -- kept
 #: in sync manually (no shared source of truth across the Rust/Python
@@ -65,6 +65,25 @@ DEFAULT_PORT_REFERENCE_IMPEDANCE_OHM = 50.0
 #:        ``ports``/``s_parameters`` fields (present only when the spec sets
 #:        exactly two ``ports``) are added under the same "no bump" policy.
 SCHEMA_VERSION = 2
+
+
+#: The keys each part of the ``klt mom`` spec file recognises (issue #2243).
+#: Any other key is rejected with its full path rather than ignored -- see
+#: ``docs/cli/mom.md``'s "Unrecognised spec keys".
+_SPEC_KEYS = (
+    "stackup",
+    "stackup_from_pdk",
+    "background_permittivity",
+    "panel_size_um",
+    "compute_inductance",
+    "filament_size_um",
+    "frequencies_hz",
+    "segment_size_um",
+    "ports",
+)
+_STACKUP_ENTRY_KEYS = ("layer", "conductor", "z0_um", "z1_um", "conductivity_S_per_m")
+_STACKUP_FROM_PDK_KEYS = ("pdk", "layers", "corner")
+_PORT_KEYS = ("position_um", "reference_impedance_ohm")
 
 
 class MomError(Exception):
@@ -108,7 +127,11 @@ def _stackup_boxes(
     boxes: dict[str, list[dict[str, float]]] = {}
     conductivity: dict[str, float | None] = {}
 
-    for entry in spec["stackup"]:
+    for i, entry in enumerate(spec["stackup"]):
+        if isinstance(entry, dict):
+            _reject_unknown_keys(
+                entry, _STACKUP_ENTRY_KEYS, spec_path, f"stackup[{i}]", MomError
+            )
         for key in ("layer", "conductor", "z0_um", "z1_um"):
             if key not in entry:
                 raise MomError(
@@ -239,6 +262,9 @@ def _resolve_stackup_from_pdk(
     """
     if not isinstance(request, dict):
         raise MomError(f"spec '{spec_path}': 'stackup_from_pdk' must be an object")
+    _reject_unknown_keys(
+        request, _STACKUP_FROM_PDK_KEYS, spec_path, "stackup_from_pdk", MomError
+    )
     if "pdk" not in request or "layers" not in request:
         raise MomError(
             f"spec '{spec_path}': 'stackup_from_pdk' must set 'pdk' and 'layers'"
@@ -329,6 +355,7 @@ def _parse_ports(spec: dict[str, Any], spec_path: str) -> list[dict[str, float]]
                 f"spec '{spec_path}': ports[{i}] must be an object with a "
                 "'position_um' field"
             )
+        _reject_unknown_keys(entry, _PORT_KEYS, spec_path, f"ports[{i}]", MomError)
         ports.append(
             {
                 "position_um": float(entry["position_um"]),
@@ -473,8 +500,19 @@ def run_mom(
     ``docs/cli/mom.md``), including ``schema_version``.
     """
     spec = _load_spec_json(spec_path, MomError)
+    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", MomError)
 
     explicit_stackup = spec.get("stackup")
+    # Reject unknown stackup/ports keys before the layout is read or any
+    # solver runs (issue #2243); the later readers re-check harmlessly.
+    for i, entry in enumerate(
+        explicit_stackup if isinstance(explicit_stackup, list) else []
+    ):
+        if isinstance(entry, dict):
+            _reject_unknown_keys(
+                entry, _STACKUP_ENTRY_KEYS, spec_path, f"stackup[{i}]", MomError
+            )
+    ports = _parse_ports(spec, spec_path)
     stackup_from_pdk_echo: dict[str, Any] | None = None
     derived_background_permittivity: float | None = None
 
@@ -513,7 +551,6 @@ def run_mom(
     filament_size_um = float(spec.get("filament_size_um", DEFAULT_FILAMENT_SIZE_UM))
     frequencies_hz = [float(f) for f in spec.get("frequencies_hz", [])]
     segment_size_um = float(spec.get("segment_size_um", DEFAULT_SEGMENT_SIZE_UM))
-    ports = _parse_ports(spec, spec_path)
     request = {
         "background_permittivity": float(spec["background_permittivity"]),
         "panel_size_um": panel_size_um,

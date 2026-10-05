@@ -50,7 +50,7 @@ import sys
 from typing import Any
 
 from ._layout import region as _region
-from ._paths import _parse_layer_datatype
+from ._paths import _parse_layer_datatype, _reject_unknown_keys
 
 
 def _validate_device_entry(
@@ -65,6 +65,9 @@ def _validate_device_entry(
     complexity ratchet."""
     if not isinstance(entry, dict):
         raise error_cls(f"spec '{spec_path}': devices[{index}] must be a JSON object")
+    _reject_unknown_keys(
+        entry, ("name", "body_layer", "on"), spec_path, f"devices[{index}]", error_cls
+    )
     for key in ("body_layer", "on"):
         if key not in entry:
             raise error_cls(f"spec '{spec_path}': devices[{index}] missing {key!r}")
