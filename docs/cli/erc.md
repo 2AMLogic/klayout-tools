@@ -2207,6 +2207,15 @@ measurement. It scales as *gate nets × stackup roles*, and on a dense
 layout (the issue measured 16,640 gate nets × a four-role stackup at ~26
 minutes single-threaded) it is the dominant per-gate cost.
 
+How large that share of a *whole* run is depends on the spec. The profile
+in
+[`docs/design/erc-runtime-profile.md`](../design/erc-runtime-profile.md)
+(issue #2229) covers routed sky130 layouts with up to 40k nets. Without
+`stackup[0].active_layer`, connectivity extraction dominates and the
+accumulation is about 8-16% of the run. With `active_layer`, the per-net
+`poly ∩ active` intersection dominates (about 99%), and `--findings-only`
+does not skip it (issue #2751).
+
 A caller who only wants the `erc_findings` half pays all of it for nothing.
 The structural supply read that
 [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 11
