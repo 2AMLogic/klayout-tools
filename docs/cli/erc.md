@@ -729,6 +729,20 @@ declared taps" as a general net-merging conductor (reusing `ties[]`'s
 `well_layer`/`tap_requires` declaration shape) is a larger, separate
 follow-on — see #2180 for the option this section defers.
 
+**Design spike ([#2192](https://github.com/2AMLogic/klayout-tools/issues/2192)):**
+[`docs/design/erc-well-tap-connectivity-spike.md`](../design/erc-well-tap-connectivity-spike.md)
+works through that option against reproducible synthetic layouts (same-well
+taps, separate wells, substrate taps and an ordinary CMOS inverter). It
+recommends **not** merging any well or substrate conductor into either
+graph. One finding there matters for the cross-check above: a device-aware
+extraction joins taps in one merged well, and substrate taps die-wide, so
+LVS also "matches" a severed metal rail whose two halves both tap the same
+well. The follow-up the note proposes is reporting only: it would tag each
+multi-island finding's islands with the tapped wells they share, and leave
+findings and verdicts unchanged. Until an implementation lands, the
+limitation and LVS cross-check guidance in this section are the documented
+behavior.
+
 **The mirror-image case is "Device bodies are not wires" below**: this
 section is *too little* declared connectivity (real continuity the stackup
 cannot see, producing a false `erc.unconnected_net`); that one is *too
@@ -2694,6 +2708,11 @@ ingestion harness exists is a natural follow-on.
   documented diffusion/well-continuity false-positive risk for
   `erc.unconnected_net` ("Known false-positive: diffusion/well continuity
   is not modeled" above).
+- [#2192](https://github.com/2AMLogic/klayout-tools/issues/2192) — the
+  well/substrate-tap continuity design spike,
+  [`docs/design/erc-well-tap-connectivity-spike.md`](../design/erc-well-tap-connectivity-spike.md):
+  why no net-merging well conductor is added, and the reporting-only
+  follow-up it recommends.
 - [#520](https://github.com/2AMLogic/klayout-tools/issues/520) — the Tiny
   Tapeout corpus epic named as this feature's cross-check corpus; not yet
   implemented (see "Cross-checked against klayout's own built-in antenna
