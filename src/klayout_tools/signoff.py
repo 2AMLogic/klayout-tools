@@ -5072,6 +5072,17 @@ def _resolve_input_artifact_value(
       exactly as the *request document* gave them, so evidence committed
       beside its inputs (``examples/signoff/`` -- ``lvs.json`` naming
       ``layout.spice``) is only resolvable this way.
+    - for an **absolute** string, the evidence directory joined with the
+      path's *basename* (issue #2340). A legacy `klt drc`/`klt extract`/
+      `klt erc` envelope records its layout exactly as invoked -- often an
+      absolute ``$PWD/...`` host path from the producing run's checkout,
+      which never exists in a different one (a CI runner, another
+      worktree). When the artifact is committed beside its evidence under
+      the same name, this candidate finds it. It is appended *after* the
+      as-named candidate, and like every candidate here it only ever
+      verifies on a **hash match**: a same-named file with different bytes
+      reports a mismatch (``False``) unless another candidate matches, and
+      it never verifies on its name alone.
 
     The ``{path, scope}`` shape (issue #1261 -- `klt sim`'s ``netlist``,
     `klt pex`'s ``layout``; issue #2403 -- a ``generic`` envelope's opt-in
@@ -5085,8 +5096,15 @@ def _resolve_input_artifact_value(
     candidates: list[str] = []
     if isinstance(value, str) and value:
         candidates.append(_resolve_relative_to_spec(value, spec))
-        if evidence_dir is not None and not os.path.isabs(value):
-            candidates.append(os.path.join(evidence_dir, value))
+        if evidence_dir is not None:
+            if not os.path.isabs(value):
+                candidates.append(os.path.join(evidence_dir, value))
+            else:
+                # Issue #2340: a legacy absolute host path from the producing
+                # run's checkout -- also try its basename beside the evidence.
+                basename = os.path.basename(value)
+                if basename:
+                    candidates.append(os.path.join(evidence_dir, basename))
     elif isinstance(value, Mapping) and value.get("scope") == "repo":
         repo_relative = value.get("path")
         if isinstance(repo_relative, str) and repo_relative:
