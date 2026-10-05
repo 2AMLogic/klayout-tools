@@ -215,6 +215,7 @@ from ._provenance import (
     _content_hash,
     _yosys_version,
     build_provenance,
+    sha256_file,
     wasi_sandbox_hint_if_applicable,
 )
 from ._report_verify import (
@@ -1295,6 +1296,11 @@ def run_synthesize(
         "cell_exclusions": cell_exclusions,
         "warnings": warnings_summary,
         "netlist_path": _report_path(netlist_path, repo_root=repo_root),
+        # Issue #2452: SHA-256 of the exact bytes of the file `netlist_path`
+        # refers to, taken from the internal absolute path (never the
+        # redacted `{path, scope}` object) after signed-qualifier stripping.
+        # Additive field; no `schema_version` bump.
+        "netlist_sha256": sha256_file(netlist_path),
         "script_path": _report_path(script_path, repo_root=repo_root),
         # Issue #1870: the script Yosys was actually handed. Equal to
         # `script_path` whenever no `$PDK_ROOT` token was written (a liberty

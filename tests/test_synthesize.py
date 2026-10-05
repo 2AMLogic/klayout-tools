@@ -3117,6 +3117,75 @@ def test_run_synthesize_strips_signed_from_emitted_netlist(tmp_path, monkeypatch
     assert "output [15:0] sample;" in netlist_text
 
 
+def _sha256_bytes(path) -> str:
+    import hashlib
+
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def test_netlist_sha256_matches_repo_scoped_netlist_bytes(tmp_path, monkeypatch):
+    """Issue #2452: `netlist_sha256` is the independently computed SHA-256 of
+    the file `netlist_path` refers to."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    actual = _abs_path(report["netlist_path"], tmp_path)
+    digest = report["netlist_sha256"]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    assert digest == _sha256_bytes(actual)
+
+
+def test_netlist_sha256_covers_stripped_signed_qualifiers(tmp_path, monkeypatch):
+    """The digest describes the final written file, not Yosys's raw output."""
+    import hashlib
+
+    raw = (
+        "module gcd(clk, sample);\n"
+        "  input clk;\n"
+        "  output signed [15:0] sample;\n"
+        "endmodule\n"
+    )
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, netlist_body=raw)
+
+    report = run_synthesize(request_path)
+
+    actual = _abs_path(report["netlist_path"], tmp_path)
+    assert "signed" not in open(actual, encoding="utf-8").read()
+    assert report["netlist_sha256"] == _sha256_bytes(actual)
+    assert report["netlist_sha256"] != hashlib.sha256(raw.encode()).hexdigest()
+
+
+def test_netlist_sha256_present_for_external_redacted_path(
+    tmp_path_factory, monkeypatch
+):
+    """An outside-any-repo netlist reports a redacted path but still carries
+    the digest of the real file."""
+    no_repo_dir = tmp_path_factory.mktemp("no-repo-digest")
+    _isolate_pdk(monkeypatch, no_repo_dir)
+    install_root = no_repo_dir / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(no_repo_dir / "gcd.v", _GCD_RTL)
+    request_path = _write_request(no_repo_dir / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["netlist_path"] == {"path": None, "scope": "external"}
+    actual = [
+        os.path.join(os.path.dirname(s), "gcd_synth.v")
+        for s in scripts
+        if not s.endswith("_baseline.ys")
+    ]
+    assert actual and os.path.isfile(actual[0])
+    assert report["netlist_sha256"] == _sha256_bytes(actual[0])
+
+
 def test_run_synthesize_leaves_netlist_untouched_when_no_signed(tmp_path, monkeypatch):
     """No rewrite at all -- not even a no-op byte-identical write -- when
     the emitted netlist never carried `signed` in the first place (the
