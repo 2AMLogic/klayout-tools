@@ -435,7 +435,12 @@ precedent):
 - No new spec input exists, so no new spec-error path exists. Malformed
   `ties[]` keeps its existing exit-1 errors.
 
-Effects:
+Effects, comparing reports for the **same spec** before and after the
+annotation lands. This is not a comparison between a spec with and without
+`ties[]`: declaring ties already changes `erc_coverage`, can add
+`erc.missing_tie`, and a degenerate tie can move `erc_status` to
+`clean_partial` today (B3, B4, B6). §9 tests the two comparisons
+separately.
 
 | Output | Effect |
 |---|---|
@@ -579,7 +584,8 @@ Tests (in `tests/test_erc.py`, each with its expected outcome):
 | separate wells | E2 + tie | finding unchanged; `well_bridge_groups == [[0], [1]]`; different `well_bbox`es |
 | no ties | E1, no `ties[]` | the three fields are `null`; every other key byte-identical to today's output |
 | degenerate tie excluded | E1 + tie with an un-narrowed `tap_layer` naming licon (66/44) | fields `null` (the only tie is excluded); `erc_coverage.skipped` unchanged |
-| isolation regression | extend `test_ties_never_alter_gates_or_net_findings` | `gates[]`, `erc_finding_count`, rule/net/description of every finding, `status`, `erc_status`, and `erc_coverage` identical with and without `ties[]`; only the three annotation keys may differ |
+| ties isolation (with vs. without `ties[]`) | extend `test_ties_never_alter_gates_or_net_findings`: E1 and E2, each run with no `ties[]` and with a non-degenerate tie | `gates[]`, antenna `levels[]` and verdicts, and rule/net/description of every finding **except `erc.missing_tie`** are identical across the two runs; the three annotation keys are ignored. `erc_finding_count`, `status`, `erc_status`, `erc_coverage` and the exit code are deliberately **not** compared: declaring ties already changes them today (`_connectivity_coverage` takes the tie lists, `erc.py` ~4494–4501; `_tie_findings` can add `erc.missing_tie`, ~4385; a degenerate tie can move `erc_status` to `clean_partial`, B4) |
+| annotation non-regression (same spec, before vs. after) | one spec per case, `ties[]` included: E1 + correct tie, E1 + a tie the layout does not satisfy (negative control: `erc.missing_tie` emitted), E1 + degenerate tie (un-narrowed licon `tap_layer`) | the report with the annotation, after deleting `tapped_wells`, `well_bridge_groups` and `well_bridge_basis` from every finding, is byte-identical to the pre-change report for the same spec: every finding, `erc_finding_count`, `status`, `erc_status`, `erc_coverage`, `gates[]`/antenna, and the exit code. Pin the pre-change reports as golden JSON in the same PR |
 | CMOS non-regression | E3 + tie | no `erc.unconnected_net`, so no annotation; zero findings, as today |
 
 Explicit non-goals for the follow-up: no merge in any graph, no new spec
