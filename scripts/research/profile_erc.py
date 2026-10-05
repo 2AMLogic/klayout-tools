@@ -105,85 +105,96 @@ class _Recorder:
         self.counts[key] = self.counts.get(key, 0) + 1
 
 
-@contextlib.contextmanager
-def _instrumented(rec: _Recorder) -> Iterator[None]:
-    originals: dict[str, Any] = {}
+def _start_walk(rec: _Recorder, result: Any, t1: tuple[float, float]) -> None:
+    """Snapshot the primary circuit's counts and open the candidate walk.
 
-    def install(name: str, wrapper: Any) -> None:
-        originals[name] = getattr(erc, name)
-        setattr(erc, name, wrapper)
+    The circuit does not outlive run_erc's own l2n, so count it here; the
+    counting time is excluded from every phase and subtracted from
+    end-to-end.
+    """
+    nets = list(result[1].each_net())
+    rec.counts_snapshot = {
+        "primary_circuit_nets": len(nets),
+        "candidates": sum(1 for n in nets if n.cluster_id != 0),
+        "primary_circuit_subcircuits": sum(1 for _ in result[1].each_subcircuit()),
+    }
+    rec.walk_start = _now()
+    spent = _sub(rec.walk_start, t1)
+    rec.overhead = (rec.overhead[0] + spent[0], rec.overhead[1] + spent[1])
+    rec.in_walk = True
 
-    orig_extract = erc._extract_connectivity
 
-    def extract_wrapper(*args: Any, **kwargs: Any) -> Any:
+def _extract_wrapper(rec: _Recorder, orig: Any) -> Any:
+    """Time ``_extract_connectivity`` as primary or tie extraction."""
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         ties = args[4] if len(args) > 4 else kwargs.get("ties")
         key = "tie_extraction" if ties else "primary_extraction"
         rec.depth += 1
         t0 = _now()
         try:
-            result = orig_extract(*args, **kwargs)
+            result = orig(*args, **kwargs)
         finally:
             t1 = _now()
             rec.depth -= 1
             rec.add(key, _sub(t1, t0))
         if key == "primary_extraction":
-            # The circuit does not outlive run_erc's own l2n, so count it
-            # here; the counting time is excluded from every phase and
-            # subtracted from end-to-end.
-            nets = list(result[1].each_net())
-            rec.counts_snapshot = {
-                "primary_circuit_nets": len(nets),
-                "candidates": sum(1 for n in nets if n.cluster_id != 0),
-                "primary_circuit_subcircuits": sum(
-                    1 for _ in result[1].each_subcircuit()
-                ),
-            }
-            rec.walk_start = _now()
-            spent = _sub(rec.walk_start, t1)
-            rec.overhead = (rec.overhead[0] + spent[0], rec.overhead[1] + spent[1])
-            rec.in_walk = True
+            _start_walk(rec, result, t1)
         return result
 
-    install("_extract_connectivity", extract_wrapper)
+    return wrapper
 
-    def nested(name: str) -> Any:
+
+def _nested_wrapper(rec: _Recorder, name: str, orig: Any) -> Any:
+    """Time a sub-cost of the candidate walk (reported, never summed)."""
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if not rec.in_walk or rec.depth:
+            return orig(*args, **kwargs)
+        t0 = _now()
+        try:
+            return orig(*args, **kwargs)
+        finally:
+            rec.add(f"walk.{name}", _sub(_now(), t0))
+
+    return wrapper
+
+
+def _top_level_wrapper(rec: _Recorder, name: str, orig: Any) -> Any:
+    """Time a top-level remainder helper; closes the walk on
+    ``_floating_gate_findings`` entry."""
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if name == "_floating_gate_findings" and rec.in_walk:
+            rec.walk_end = _now()
+            rec.in_walk = False
+        if rec.depth:
+            return orig(*args, **kwargs)
+        rec.depth += 1
+        t0 = _now()
+        try:
+            return orig(*args, **kwargs)
+        finally:
+            rec.depth -= 1
+            rec.add(f"remainder.{name}", _sub(_now(), t0))
+
+    return wrapper
+
+
+@contextlib.contextmanager
+def _instrumented(rec: _Recorder) -> Iterator[None]:
+    originals: dict[str, Any] = {}
+
+    def install(name: str, factory: Any, *extra: Any) -> None:
         orig = getattr(erc, name)
+        originals[name] = orig
+        setattr(erc, name, factory(rec, *extra, orig))
 
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not rec.in_walk or rec.depth:
-                return orig(*args, **kwargs)
-            t0 = _now()
-            try:
-                return orig(*args, **kwargs)
-            finally:
-                rec.add(f"walk.{name}", _sub(_now(), t0))
-
-        return wrapper
-
+    install("_extract_connectivity", _extract_wrapper)
     for name in ("_accumulated_levels", "_gate_is_floating", "_region"):
-        install(name, nested(name))
-
-    def top_level(name: str) -> Any:
-        orig = getattr(erc, name)
-
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if name == "_floating_gate_findings" and rec.in_walk:
-                rec.walk_end = _now()
-                rec.in_walk = False
-            if rec.depth:
-                return orig(*args, **kwargs)
-            rec.depth += 1
-            t0 = _now()
-            try:
-                return orig(*args, **kwargs)
-            finally:
-                rec.depth -= 1
-                rec.add(f"remainder.{name}", _sub(_now(), t0))
-
-        return wrapper
-
+        install(name, _nested_wrapper, name)
     for name in _REMAINDER_FUNCS:
-        install(name, top_level(name))
+        install(name, _top_level_wrapper, name)
 
     try:
         yield

@@ -290,14 +290,15 @@ CPU, so the wrappers add no material overhead.
   The only regime measured here that comes within an order of magnitude
   of that is `active_layer` declared: 144 ms CPU per gate net at `w128`
   (15,198 gate nets, 20,239 active polygons, 7 roles). The no-`active_layer`
-  regime is about 2-3 ms per gate net, roughly 30-50x too cheap to explain
+  regime is about 1-3 ms per gate net, roughly 30-80x too cheap to explain
   #2219. This is an **inference**: #2219's layout and spec are not
   available here. However, `active_layer` is the documented fix for the
   #1979 tie-cell false positives, so a real signoff spec at that scale is
   likely to declare it. If it did, #2219's runtime was this intersection
   and not the accumulation `--findings-only` removes.
-- #2229's synthetic 5,000-gate fixtures ran at about 0.1 ms per gate net,
-  with extraction at about 75%. That matches the no-`active_layer` rows
+- #2229's synthetic 5,000-gate fixtures ran at about 0.45 ms per gate net
+  (2.24 s / 5,000; the issue text's ~0.1 ms understates it), with extraction
+  at about 75%. That matches the no-`active_layer` rows
   here (primary extraction 72-75% without ties), so those fixtures were
   representative of that regime. They could not reproduce #2219 because
   they had no `active_layer` and no whole-chip active region.
