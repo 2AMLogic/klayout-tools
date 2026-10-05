@@ -1,0 +1,95 @@
+* Device-level sky130A switched UP/DOWN charge pump (issue #2743, part of
+* epic #1779 / PLL assembly #2736).
+*
+* NOT the benchmark's reference solution and NOT scored. Unscored,
+* separately runnable device-level block shipped alongside the behavioral
+* ../pll.spice (same "ship alongside" precedent as
+* ../../relaxation-vco/device-vco/). See README-pump.md for the pin and
+* bias contract, limits, measured per-corner results and ideal elements.
+*
+* Topology derived from examples/kb/pfd-charge-pump-tri-state/
+* charge_pump.spice (1:1 PMOS source / NMOS sink mirrors, L=1 W=8), with
+* the fixed branch-output clamps removed and a series switch added to each
+* branch at the OUTPUT side (so the mirror gates stay on a quiet bias rail
+* and the off-state leakage is that of one off switch):
+*   UP:   vdd -> XMUP (gate pbias) -> nup -> XSUP (gate upb) -> out
+*   DOWN: vss -> XMDN (gate nbias) -> ndn -> XSDN (gate dn)  -> out
+* The switches are L=1 (not minimum length): a first draft with L=0.15
+* switches leaked 0.1-300 nA at hot ff/tt corners (limit 2 nA), see README.
+* upb is generated inside the block by one inverter from `up`, so both
+* controls are ACTIVE-HIGH logic referenced to vdd/vss.
+*
+* Sign convention: positive pump current flows OUT of `out` (UP sources).
+* The reusable block is the .subckt cp_dev only; everything after the
+* "standalone testbench" banner is stimulus and is NOT needed by a loader.
+* To reuse (e.g. #2744) copy/include the .subckt cp_dev ... .ends cp_dev
+* region, or the whole file and drop the testbench instances.
+
+.param vdd=1.8
+.param icp=20u
+.param ccap=2p
+
+* -------------------------------------------------------------------
+* cp_dev up dn out vdd vss nbias pbias
+*   up, dn : active-high logic, 0 = vss, 1 = vdd. Both low = high-Z.
+*   out    : current output, to a passive loop filter; validated for
+*            0.3-0.9 V at all 18 PVT corners.
+*   vdd,vss: explicit supply/ground, no global source in the block.
+*   nbias  : gate rail of an external diode-connected NMOS (W=8 L=1,
+*            vss-referenced) carrying icp (20 uA) from vdd.
+*   pbias  : gate rail of an external diode-connected PMOS (W=8 L=1,
+*            vdd-referenced) carrying icp (20 uA) to vss.
+*   Pump current = icp x (device ratio 1:1) = 20 uA nominal.
+* -------------------------------------------------------------------
+.subckt cp_dev up dn out vdd vss nbias pbias
+XIp upb up vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XIn upb up vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMUP nup pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+XSUP out upb nup vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+XMDN ndn nbias vss vss sky130_fd_pr__nfet_01v8 L=1 W=8 nf=1 mult=1
+XSDN out dn ndn vss sky130_fd_pr__nfet_01v8 L=1 W=4 nf=1 mult=1
+.ends cp_dev
+
+* ===================================================================
+* Standalone testbench (not part of the reusable block)
+* ===================================================================
+* Ideal elements, all testbench-only:
+*   Vdd           - supply (swept by corners.supply_v.vdd)
+*   Iref, Irefp   - 20 uA bias references, mirrored by real XM1n/XM1p
+*   Vsu/Vsd/Vcu/Vcd - 0/1 logic schedules; Bup/Bdn/Bcu/Bcd scale them
+*                   by v(vdd) so the logic high is the ACTUAL swept supply
+*   Vcl*          - ideal output clamps (current measurement only)
+*   Cc            - 2 pF ideal loop-filter-like load for the transient
+*   .ic           - 0.6 V initial voltage on that load
+Vdd vdd 0 DC {vdd}
+Iref  vdd nbias DC {icp}
+XM1n  nbias nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=8 nf=1 mult=1
+Irefp pbias 0 DC {icp}
+XM1p  pbias pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+
+* Logic schedules (0/1), scaled to the ACTUAL swept supply by the B sources.
+Vsu su 0 PWL(0.0n 0 500.0n 0 500.1n 1 1000.0n 1 1000.1n 0 3500.0n 0 3500.1n 1 4000.0n 1 4000.1n 0)
+Vsd sd 0 PWL(0.0n 0 1500.0n 0 1500.1n 1 2000.0n 1 2000.1n 0 3500.0n 0 3500.1n 1 4000.0n 1 4000.1n 0)
+Vcu cuL 0 PWL(0.0n 0 5000.0n 0 5000.1n 1 5010.0n 1 5010.1n 0 6000.0n 0 6000.1n 1 6002.0n 1 6002.1n 0 7000.0n 0 7000.1n 1 7010.0n 1 7010.1n 0 8000.0n 0 8000.1n 1 8030.0n 1 8030.1n 0)
+Vcd cdL 0 PWL(0.0n 0 5500.0n 0 5500.1n 1 5510.0n 1 5510.1n 0 6500.0n 0 6500.1n 1 6502.0n 1 6502.1n 0 7000.0n 0 7000.1n 1 7010.0n 1 7010.1n 0 7500.0n 0 7500.1n 1 7530.0n 1 7530.1n 0)
+Bup up_s 0 V='v(vdd)*v(su)'
+Bdn dn_s 0 V='v(vdd)*v(sd)'
+Bcu up_c 0 V='v(vdd)*v(cuL)'
+Bcd dn_c 0 V='v(vdd)*v(cdL)'
+
+* Held-output pumps (compliance / current / leakage)
+Xp03 up_s dn_s o03 vdd 0 nbias pbias cp_dev
+Vcl03 o03 0 DC 0.3
+Xp045 up_s dn_s o045 vdd 0 nbias pbias cp_dev
+Vcl045 o045 0 DC 0.45
+Xp06 up_s dn_s o06 vdd 0 nbias pbias cp_dev
+Vcl06 o06 0 DC 0.6
+Xp075 up_s dn_s o075 vdd 0 nbias pbias cp_dev
+Vcl075 o075 0 DC 0.75
+Xp09 up_s dn_s o09 vdd 0 nbias pbias cp_dev
+Vcl09 o09 0 DC 0.9
+
+* Capacitive-load pump (switching / dead-zone / hold)
+Xpc up_c dn_c oc vdd 0 nbias pbias cp_dev
+Cc  oc 0 {ccap}
+.ic v(oc)=0.6

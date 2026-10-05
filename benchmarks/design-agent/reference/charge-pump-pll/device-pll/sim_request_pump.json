@@ -1,0 +1,573 @@
+{
+  "netlist": "charge_pump_device.spice",
+  "engine": "ngspice",
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "100p 10.5u"
+  },
+  "measurements": [
+    {
+      "name": "iup_raw_03",
+      "spice": ".meas tran iup_raw_03 AVG i(Vcl03) FROM=0.80u TO=0.95u",
+      "unit": "A"
+    },
+    {
+      "name": "idn_raw_03",
+      "spice": ".meas tran idn_raw_03 AVG i(Vcl03) FROM=1.80u TO=1.95u",
+      "unit": "A"
+    },
+    {
+      "name": "ioff_raw_03",
+      "spice": ".meas tran ioff_raw_03 AVG i(Vcl03) FROM=2.80u TO=2.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iov_raw_03",
+      "spice": ".meas tran iov_raw_03 AVG i(Vcl03) FROM=3.80u TO=3.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iup_03",
+      "spice": ".meas tran iup_03 param='1e6*iup_raw_03'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "idn_03",
+      "spice": ".meas tran idn_03 param='-1e6*idn_raw_03'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "mm_03_pct",
+      "spice": ".meas tran mm_03_pct param='100*(iup_03-idn_03)/(1e6*icp)'",
+      "unit": "%",
+      "limits": {
+        "min": -15,
+        "max": 15
+      }
+    },
+    {
+      "name": "ioff_03_na",
+      "spice": ".meas tran ioff_03_na param='1e9*abs(ioff_raw_03)'",
+      "unit": "nA",
+      "limits": {
+        "max": 2
+      }
+    },
+    {
+      "name": "iov_03",
+      "spice": ".meas tran iov_03 param='1e6*iov_raw_03'",
+      "unit": "uA",
+      "limits": {
+        "min": -3,
+        "max": 3
+      }
+    },
+    {
+      "name": "iup_raw_045",
+      "spice": ".meas tran iup_raw_045 AVG i(Vcl045) FROM=0.80u TO=0.95u",
+      "unit": "A"
+    },
+    {
+      "name": "idn_raw_045",
+      "spice": ".meas tran idn_raw_045 AVG i(Vcl045) FROM=1.80u TO=1.95u",
+      "unit": "A"
+    },
+    {
+      "name": "ioff_raw_045",
+      "spice": ".meas tran ioff_raw_045 AVG i(Vcl045) FROM=2.80u TO=2.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iov_raw_045",
+      "spice": ".meas tran iov_raw_045 AVG i(Vcl045) FROM=3.80u TO=3.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iup_045",
+      "spice": ".meas tran iup_045 param='1e6*iup_raw_045'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "idn_045",
+      "spice": ".meas tran idn_045 param='-1e6*idn_raw_045'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "mm_045_pct",
+      "spice": ".meas tran mm_045_pct param='100*(iup_045-idn_045)/(1e6*icp)'",
+      "unit": "%",
+      "limits": {
+        "min": -15,
+        "max": 15
+      }
+    },
+    {
+      "name": "ioff_045_na",
+      "spice": ".meas tran ioff_045_na param='1e9*abs(ioff_raw_045)'",
+      "unit": "nA",
+      "limits": {
+        "max": 2
+      }
+    },
+    {
+      "name": "iov_045",
+      "spice": ".meas tran iov_045 param='1e6*iov_raw_045'",
+      "unit": "uA",
+      "limits": {
+        "min": -3,
+        "max": 3
+      }
+    },
+    {
+      "name": "iup_raw_06",
+      "spice": ".meas tran iup_raw_06 AVG i(Vcl06) FROM=0.80u TO=0.95u",
+      "unit": "A"
+    },
+    {
+      "name": "idn_raw_06",
+      "spice": ".meas tran idn_raw_06 AVG i(Vcl06) FROM=1.80u TO=1.95u",
+      "unit": "A"
+    },
+    {
+      "name": "ioff_raw_06",
+      "spice": ".meas tran ioff_raw_06 AVG i(Vcl06) FROM=2.80u TO=2.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iov_raw_06",
+      "spice": ".meas tran iov_raw_06 AVG i(Vcl06) FROM=3.80u TO=3.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iup_06",
+      "spice": ".meas tran iup_06 param='1e6*iup_raw_06'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "idn_06",
+      "spice": ".meas tran idn_06 param='-1e6*idn_raw_06'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "mm_06_pct",
+      "spice": ".meas tran mm_06_pct param='100*(iup_06-idn_06)/(1e6*icp)'",
+      "unit": "%",
+      "limits": {
+        "min": -15,
+        "max": 15
+      }
+    },
+    {
+      "name": "ioff_06_na",
+      "spice": ".meas tran ioff_06_na param='1e9*abs(ioff_raw_06)'",
+      "unit": "nA",
+      "limits": {
+        "max": 2
+      }
+    },
+    {
+      "name": "iov_06",
+      "spice": ".meas tran iov_06 param='1e6*iov_raw_06'",
+      "unit": "uA",
+      "limits": {
+        "min": -3,
+        "max": 3
+      }
+    },
+    {
+      "name": "iup_raw_075",
+      "spice": ".meas tran iup_raw_075 AVG i(Vcl075) FROM=0.80u TO=0.95u",
+      "unit": "A"
+    },
+    {
+      "name": "idn_raw_075",
+      "spice": ".meas tran idn_raw_075 AVG i(Vcl075) FROM=1.80u TO=1.95u",
+      "unit": "A"
+    },
+    {
+      "name": "ioff_raw_075",
+      "spice": ".meas tran ioff_raw_075 AVG i(Vcl075) FROM=2.80u TO=2.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iov_raw_075",
+      "spice": ".meas tran iov_raw_075 AVG i(Vcl075) FROM=3.80u TO=3.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iup_075",
+      "spice": ".meas tran iup_075 param='1e6*iup_raw_075'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "idn_075",
+      "spice": ".meas tran idn_075 param='-1e6*idn_raw_075'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "mm_075_pct",
+      "spice": ".meas tran mm_075_pct param='100*(iup_075-idn_075)/(1e6*icp)'",
+      "unit": "%",
+      "limits": {
+        "min": -15,
+        "max": 15
+      }
+    },
+    {
+      "name": "ioff_075_na",
+      "spice": ".meas tran ioff_075_na param='1e9*abs(ioff_raw_075)'",
+      "unit": "nA",
+      "limits": {
+        "max": 2
+      }
+    },
+    {
+      "name": "iov_075",
+      "spice": ".meas tran iov_075 param='1e6*iov_raw_075'",
+      "unit": "uA",
+      "limits": {
+        "min": -3,
+        "max": 3
+      }
+    },
+    {
+      "name": "iup_raw_09",
+      "spice": ".meas tran iup_raw_09 AVG i(Vcl09) FROM=0.80u TO=0.95u",
+      "unit": "A"
+    },
+    {
+      "name": "idn_raw_09",
+      "spice": ".meas tran idn_raw_09 AVG i(Vcl09) FROM=1.80u TO=1.95u",
+      "unit": "A"
+    },
+    {
+      "name": "ioff_raw_09",
+      "spice": ".meas tran ioff_raw_09 AVG i(Vcl09) FROM=2.80u TO=2.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iov_raw_09",
+      "spice": ".meas tran iov_raw_09 AVG i(Vcl09) FROM=3.80u TO=3.95u",
+      "unit": "A"
+    },
+    {
+      "name": "iup_09",
+      "spice": ".meas tran iup_09 param='1e6*iup_raw_09'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "idn_09",
+      "spice": ".meas tran idn_09 param='-1e6*idn_raw_09'",
+      "unit": "uA",
+      "limits": {
+        "min": 14,
+        "max": 26
+      }
+    },
+    {
+      "name": "mm_09_pct",
+      "spice": ".meas tran mm_09_pct param='100*(iup_09-idn_09)/(1e6*icp)'",
+      "unit": "%",
+      "limits": {
+        "min": -15,
+        "max": 15
+      }
+    },
+    {
+      "name": "ioff_09_na",
+      "spice": ".meas tran ioff_09_na param='1e9*abs(ioff_raw_09)'",
+      "unit": "nA",
+      "limits": {
+        "max": 2
+      }
+    },
+    {
+      "name": "iov_09",
+      "spice": ".meas tran iov_09 param='1e6*iov_raw_09'",
+      "unit": "uA",
+      "limits": {
+        "min": -3,
+        "max": 3
+      }
+    },
+    {
+      "name": "iup_span_pct",
+      "spice": ".meas tran iup_span_pct param='100*(max(max(max(max(iup_03,iup_045),iup_06),iup_075),iup_09)-min(min(min(min(iup_03,iup_045),iup_06),iup_075),iup_09))/iup_06'",
+      "unit": "%",
+      "limits": {
+        "max": 15
+      }
+    },
+    {
+      "name": "idn_span_pct",
+      "spice": ".meas tran idn_span_pct param='100*(max(max(max(max(idn_03,idn_045),idn_06),idn_075),idn_09)-min(min(min(min(idn_03,idn_045),idn_06),idn_075),idn_09))/idn_06'",
+      "unit": "%",
+      "limits": {
+        "max": 15
+      }
+    },
+    {
+      "name": "vb_up10",
+      "spice": ".meas tran vb_up10 FIND v(oc) AT=4.90u",
+      "unit": "V"
+    },
+    {
+      "name": "va_up10",
+      "spice": ".meas tran va_up10 FIND v(oc) AT=5.30u",
+      "unit": "V"
+    },
+    {
+      "name": "dv_up10_mv",
+      "spice": ".meas tran dv_up10_mv param='1000*(va_up10-vb_up10)'",
+      "unit": "mV"
+    },
+    {
+      "name": "vb_dn10",
+      "spice": ".meas tran vb_dn10 FIND v(oc) AT=5.40u",
+      "unit": "V"
+    },
+    {
+      "name": "va_dn10",
+      "spice": ".meas tran va_dn10 FIND v(oc) AT=5.80u",
+      "unit": "V"
+    },
+    {
+      "name": "dv_dn10_mv",
+      "spice": ".meas tran dv_dn10_mv param='1000*(va_dn10-vb_dn10)'",
+      "unit": "mV"
+    },
+    {
+      "name": "vb_up2",
+      "spice": ".meas tran vb_up2 FIND v(oc) AT=5.90u",
+      "unit": "V"
+    },
+    {
+      "name": "va_up2",
+      "spice": ".meas tran va_up2 FIND v(oc) AT=6.30u",
+      "unit": "V"
+    },
+    {
+      "name": "dv_up2_mv",
+      "spice": ".meas tran dv_up2_mv param='1000*(va_up2-vb_up2)'",
+      "unit": "mV"
+    },
+    {
+      "name": "vb_dn2",
+      "spice": ".meas tran vb_dn2 FIND v(oc) AT=6.40u",
+      "unit": "V"
+    },
+    {
+      "name": "va_dn2",
+      "spice": ".meas tran va_dn2 FIND v(oc) AT=6.80u",
+      "unit": "V"
+    },
+    {
+      "name": "dv_dn2_mv",
+      "spice": ".meas tran dv_dn2_mv param='1000*(va_dn2-vb_dn2)'",
+      "unit": "mV"
+    },
+    {
+      "name": "vb_ov10",
+      "spice": ".meas tran vb_ov10 FIND v(oc) AT=6.90u",
+      "unit": "V"
+    },
+    {
+      "name": "va_ov10",
+      "spice": ".meas tran va_ov10 FIND v(oc) AT=7.30u",
+      "unit": "V"
+    },
+    {
+      "name": "dv_ov10_mv",
+      "spice": ".meas tran dv_ov10_mv param='1000*(va_ov10-vb_ov10)'",
+      "unit": "mV"
+    },
+    {
+      "name": "vb_dn30",
+      "spice": ".meas tran vb_dn30 FIND v(oc) AT=7.40u",
+      "unit": "V"
+    },
+    {
+      "name": "va_dn30",
+      "spice": ".meas tran va_dn30 FIND v(oc) AT=7.80u",
+      "unit": "V"
+    },
+    {
+      "name": "dv_dn30_mv",
+      "spice": ".meas tran dv_dn30_mv param='1000*(va_dn30-vb_dn30)'",
+      "unit": "mV"
+    },
+    {
+      "name": "vb_up30",
+      "spice": ".meas tran vb_up30 FIND v(oc) AT=7.90u",
+      "unit": "V"
+    },
+    {
+      "name": "va_up30",
+      "spice": ".meas tran va_up30 FIND v(oc) AT=8.30u",
+      "unit": "V"
+    },
+    {
+      "name": "dv_up30_mv",
+      "spice": ".meas tran dv_up30_mv param='1000*(va_up30-vb_up30)'",
+      "unit": "mV"
+    },
+    {
+      "name": "q_up10_ratio",
+      "spice": ".meas tran q_up10_ratio param='1*dv_up10_mv*1e-3/(icp*10n/ccap)'",
+      "unit": "",
+      "limits": {
+        "min": 0.7,
+        "max": 1.15
+      }
+    },
+    {
+      "name": "q_dn10_ratio",
+      "spice": ".meas tran q_dn10_ratio param='-1*dv_dn10_mv*1e-3/(icp*10n/ccap)'",
+      "unit": "",
+      "limits": {
+        "min": 0.7,
+        "max": 1.15
+      }
+    },
+    {
+      "name": "q_up2_ratio",
+      "spice": ".meas tran q_up2_ratio param='1*dv_up2_mv*1e-3/(icp*2n/ccap)'",
+      "unit": "",
+      "limits": {
+        "min": 0.3,
+        "max": 1.3
+      }
+    },
+    {
+      "name": "q_dn2_ratio",
+      "spice": ".meas tran q_dn2_ratio param='-1*dv_dn2_mv*1e-3/(icp*2n/ccap)'",
+      "unit": "",
+      "limits": {
+        "min": 0.3,
+        "max": 1.3
+      }
+    },
+    {
+      "name": "dv_ov10_abs_mv",
+      "spice": ".meas tran dv_ov10_abs_mv param='abs(dv_ov10_mv)'",
+      "unit": "mV",
+      "limits": {
+        "max": 30
+      }
+    },
+    {
+      "name": "q_dn30_ratio",
+      "spice": ".meas tran q_dn30_ratio param='-1*dv_dn30_mv*1e-3/(icp*30n/ccap)'",
+      "unit": "",
+      "limits": {
+        "min": 0.85,
+        "max": 1.1
+      }
+    },
+    {
+      "name": "q_up30_ratio",
+      "spice": ".meas tran q_up30_ratio param='1*dv_up30_mv*1e-3/(icp*30n/ccap)'",
+      "unit": "",
+      "limits": {
+        "min": 0.85,
+        "max": 1.1
+      }
+    },
+    {
+      "name": "tloss_up_ns",
+      "spice": ".meas tran tloss_up_ns param='10-10*(q_up10_ratio)/((q_up30_ratio*30-q_up10_ratio*10)/20)'",
+      "unit": "ns",
+      "limits": {
+        "max": 3
+      }
+    },
+    {
+      "name": "tloss_dn_ns",
+      "spice": ".meas tran tloss_dn_ns param='10-10*(q_dn10_ratio)/((q_dn30_ratio*30-q_dn10_ratio*10)/20)'",
+      "unit": "ns",
+      "limits": {
+        "max": 3
+      }
+    },
+    {
+      "name": "vh_a",
+      "spice": ".meas tran vh_a FIND v(oc) AT=8.6u",
+      "unit": "V"
+    },
+    {
+      "name": "vh_b",
+      "spice": ".meas tran vh_b FIND v(oc) AT=10.4u",
+      "unit": "V"
+    },
+    {
+      "name": "hold_drift_mv",
+      "spice": ".meas tran hold_drift_mv param='abs(1000*(vh_b-vh_a))'",
+      "unit": "mV",
+      "limits": {
+        "max": 2
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 1800,
+    "keep_artifacts": false
+  }
+}
