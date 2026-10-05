@@ -97,6 +97,17 @@ def _set(*path: Any) -> Callable[[Any], Mutator]:
     return make
 
 
+def _derived(request: dict[str, Any]) -> Mutator:
+    """Mutator: drop the explicit ``stackup`` so the MoM spec derives its
+    stackup from ``request`` (a ``stackup_from_pdk`` object)."""
+
+    def mutate(spec: dict[str, Any]) -> None:
+        del spec["stackup"]
+        spec["stackup_from_pdk"] = request
+
+    return mutate
+
+
 # (id, mutator, expected unknown field path). Includes wrong-section keys
 # (a key valid in another section) and array indices.
 ERC_CASES = [
@@ -151,6 +162,23 @@ MOM_CASES = [
     ("stackup", _set("stackup", 1, "z2_um")(1), "stackup[1].z2_um"),
     ("stackup-wrong-section", _set("stackup", 0, "pdk")("x"), "stackup[0].pdk"),
     ("ports", _set("ports", 1, "position")(1), "ports[1].position"),
+    # `stackup_from_pdk` is checked even when an explicit `stackup` makes it
+    # otherwise unused, so a typo in it never passes silently.
+    (
+        "stackup_from_pdk-with-explicit-stackup",
+        _set("stackup_from_pdk")({"pdk": "sky130A", "layers": ["met1"], "cornr": 1}),
+        "stackup_from_pdk.cornr",
+    ),
+    (
+        "stackup_from_pdk-derived",
+        _derived({"pdk": "sky130A", "layers": ["met1"], "cornr": "nom"}),
+        "stackup_from_pdk.cornr",
+    ),
+    (
+        "stackup_from_pdk-wrong-section",
+        _derived({"pdk": "sky130A", "layers": ["met1"], "z0_um": 0.0}),
+        "stackup_from_pdk.z0_um",
+    ),
 ]
 
 VERBS = {
@@ -216,7 +244,7 @@ def test_power_valid_spec_still_runs(tmp_path):
     assert "networks" in run_power(str(gds), str(spec))
 
 
-@pytest.mark.parametrize("verb", ["erc", "power"])
+@pytest.mark.parametrize("verb", ["erc", "power", "mom"])
 def test_full_spec_with_every_optional_section_passes_key_validation(tmp_path, verb):
     """The fully-populated base specs above carry every recognised key; the
     rejection must come only from the injected unknown key, never from a
@@ -226,4 +254,28 @@ def test_full_spec_with_every_optional_section_passes_key_validation(tmp_path, v
     gds, spec = _write(tmp_path, verb, lambda s: None)
     with pytest.raises(error_cls) as excinfo:
         run(gds, spec)
+    assert "unknown field" not in str(excinfo.value)
+
+
+_FULL_STACKUP_FROM_PDK = {"pdk": "sky130A", "layers": ["met1"], "corner": "nom"}
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            _set("stackup_from_pdk")(dict(_FULL_STACKUP_FROM_PDK)),
+            id="explicit-stackup",
+        ),
+        pytest.param(_derived(dict(_FULL_STACKUP_FROM_PDK)), id="pdk-derived"),
+    ],
+)
+def test_mom_stackup_from_pdk_with_every_key_passes_key_validation(tmp_path, mutate):
+    """A ``stackup_from_pdk`` carrying every recognised key is accepted, both
+    beside an explicit ``stackup`` and as the stackup's only source; the run
+    proceeds past key validation and fails later (no PDK is installed, or the
+    layout is missing) for a reason other than an unknown field."""
+    gds, spec = _write(tmp_path, "mom", mutate)
+    with pytest.raises(MomError) as excinfo:
+        run_mom(gds, spec)
     assert "unknown field" not in str(excinfo.value)

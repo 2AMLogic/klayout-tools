@@ -86,6 +86,35 @@ _STACKUP_FROM_PDK_KEYS = ("pdk", "layers", "corner")
 _PORT_KEYS = ("position_um", "reference_impedance_ohm")
 
 
+def _validate_spec_keys(spec: dict[str, Any], spec_path: str) -> None:
+    """Reject unknown keys anywhere in a ``klt mom`` spec (issue #2243).
+
+    Runs before the layout is read or any solver runs. Covers the top level,
+    every explicit ``stackup[]`` entry and a supplied ``stackup_from_pdk``
+    object -- the latter is checked even when an explicit ``stackup`` makes it
+    otherwise unused, so a typo in it never passes silently. ``ports[]`` keys
+    are checked by :func:`_parse_ports`, which ``run_mom`` also calls before
+    reading the layout.
+    """
+    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", MomError)
+    explicit_stackup = spec.get("stackup")
+    entries = explicit_stackup if isinstance(explicit_stackup, list) else []
+    for i, entry in enumerate(entries):
+        if isinstance(entry, dict):
+            _reject_unknown_keys(
+                entry, _STACKUP_ENTRY_KEYS, spec_path, f"stackup[{i}]", MomError
+            )
+    stackup_from_pdk = spec.get("stackup_from_pdk")
+    if isinstance(stackup_from_pdk, dict):
+        _reject_unknown_keys(
+            stackup_from_pdk,
+            _STACKUP_FROM_PDK_KEYS,
+            spec_path,
+            "stackup_from_pdk",
+            MomError,
+        )
+
+
 class MomError(Exception):
     """Raised when ``klt mom`` cannot run: a bad layout/spec file, a stackup
     entry that matches no shapes, the native extension not being built, or a
@@ -127,11 +156,7 @@ def _stackup_boxes(
     boxes: dict[str, list[dict[str, float]]] = {}
     conductivity: dict[str, float | None] = {}
 
-    for i, entry in enumerate(spec["stackup"]):
-        if isinstance(entry, dict):
-            _reject_unknown_keys(
-                entry, _STACKUP_ENTRY_KEYS, spec_path, f"stackup[{i}]", MomError
-            )
+    for entry in spec["stackup"]:
         for key in ("layer", "conductor", "z0_um", "z1_um"):
             if key not in entry:
                 raise MomError(
@@ -500,18 +525,9 @@ def run_mom(
     ``docs/cli/mom.md``), including ``schema_version``.
     """
     spec = _load_spec_json(spec_path, MomError)
-    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", MomError)
+    _validate_spec_keys(spec, spec_path)
 
     explicit_stackup = spec.get("stackup")
-    # Reject unknown stackup/ports keys before the layout is read or any
-    # solver runs (issue #2243); the later readers re-check harmlessly.
-    for i, entry in enumerate(
-        explicit_stackup if isinstance(explicit_stackup, list) else []
-    ):
-        if isinstance(entry, dict):
-            _reject_unknown_keys(
-                entry, _STACKUP_ENTRY_KEYS, spec_path, f"stackup[{i}]", MomError
-            )
     ports = _parse_ports(spec, spec_path)
     stackup_from_pdk_echo: dict[str, Any] | None = None
     derived_background_permittivity: float | None = None

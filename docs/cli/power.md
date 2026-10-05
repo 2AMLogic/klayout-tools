@@ -285,11 +285,12 @@ legitimately empty result).
 and **rejects** anything else: a key it does not know is an error, not a
 silent no-op. The run raises the verb's usual spec error naming the spec
 filename and the complete field path (for example
-`spec 'spec.json': unknown field 'ties[0].well_boxess'`), exits `1`, prints
+`spec 'spec.json': unknown field 'pads[0].z_um'`), exits `1`, prints
 no success report on stdout, and does so before the layout is read or any
 analysis/solver runs. This applies to the top level and to every nested object
-(`power_nets[]` objects, `stackup[]`, `vias[]`, `devices[]`, `pads[]`, `current_model`, its `instances[]` and their `activity` objects). A key that is valid in a *different* section is still unknown in the
-section it appears in.
+(`power_nets[]` objects, `stackup[]`, `vias[]`, `devices[]`, `pads[]`,
+`current_model`, its `instances[]` and their `activity` objects). A key that is
+valid in a *different* section is still unknown in the section it appears in.
 
 The reason is version skew: a spec written against a newer `klt` that carries a
 field this build predates would otherwise run green and report the older

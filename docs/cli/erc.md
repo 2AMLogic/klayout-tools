@@ -194,8 +194,9 @@ filename and the complete field path (for example
 `spec 'spec.json': unknown field 'ties[0].well_boxess'`), exits `1`, prints
 no success report on stdout, and does so before the layout is read or any
 analysis/solver runs. This applies to the top level and to every nested object
-(`stackup[]`, `vias[]`, `nets[]`, `ties[]`, `ties_disclosure`, `devices[]`). A key that is valid in a *different* section is still unknown in the
-section it appears in.
+(`stackup[]`, `vias[]`, `nets[]`, `ties[]`, `ties_disclosure`, `devices[]`).
+A key that is valid in a *different* section is still unknown in the section it
+appears in.
 
 The reason is version skew: a spec written against a newer `klt` that carries a
 field this build predates would otherwise run green and report the older
