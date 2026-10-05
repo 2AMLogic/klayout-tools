@@ -279,6 +279,25 @@ does** — in which case the command fails (a request with zero resolved
 geometry is almost certainly a layer-number/net-name mismatch, not a
 legitimately empty result).
 
+### Unrecognised spec keys are rejected (issue #2243)
+
+`klt power` validates every spec-file object against the keys it recognises
+and **rejects** anything else: a key it does not know is an error, not a
+silent no-op. The run raises the verb's usual spec error naming the spec
+filename and the complete field path (for example
+`spec 'spec.json': unknown field 'pads[0].z_um'`), exits `1`, prints
+no success report on stdout, and does so before the layout is read or any
+analysis/solver runs. This applies to the top level and to every nested object
+(`power_nets[]` objects, `stackup[]`, `vias[]`, `devices[]`, `pads[]`,
+`current_model`, its `instances[]` and their `activity` objects). A key that is
+valid in a *different* section is still unknown in the section it appears in.
+
+The reason is version skew: a spec written against a newer `klt` that carries a
+field this build predates would otherwise run green and report the older
+semantics, indistinguishable from a spec that never asked for the field. Upgrade
+`klt` to use such a field; do not rely on it being ignored. Optional supported
+fields, their defaults, and the shape of the JSON report are unchanged.
+
 ### Matching a power net
 
 `klt power` names a net from the text labels attached to its geometry, via

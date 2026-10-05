@@ -185,6 +185,25 @@ The spec file is a JSON object:
     `active_layer` region) instead of raw poly-net area — see "Gate area:
     `poly ∩ diff` vs. raw poly area" below.
 
+### Unrecognised spec keys are rejected (issue #2243)
+
+`klt erc` validates every spec-file object against the keys it recognises
+and **rejects** anything else: a key it does not know is an error, not a
+silent no-op. The run raises the verb's usual spec error naming the spec
+filename and the complete field path (for example
+`spec 'spec.json': unknown field 'ties[0].well_boxess'`), exits `1`, prints
+no success report on stdout, and does so before the layout is read or any
+analysis/solver runs. This applies to the top level and to every nested object
+(`stackup[]`, `vias[]`, `nets[]`, `ties[]`, `ties_disclosure`, `devices[]`).
+A key that is valid in a *different* section is still unknown in the section it
+appears in.
+
+The reason is version skew: a spec written against a newer `klt` that carries a
+field this build predates would otherwise run green and report the older
+semantics, indistinguishable from a spec that never asked for the field. Upgrade
+`klt` to use such a field; do not rely on it being ignored. Optional supported
+fields, their defaults, and the shape of the JSON report are unchanged.
+
 ### Gate area: `poly ∩ diff` vs. raw poly area
 
 By default (`active_layer` omitted), `gates[].gate_area_um2` is a net's own

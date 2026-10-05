@@ -239,6 +239,43 @@ def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any
     return spec
 
 
+def _reject_unknown_keys(
+    obj: dict[str, Any],
+    allowed: Iterable[str],
+    spec_path: str,
+    field: str,
+    error_cls: type[Exception],
+) -> None:
+    """Raise ``error_cls`` if ``obj`` carries a key outside ``allowed``
+    (issue #2243).
+
+    The spec-file verbs (``klt erc``/``power``/``mom``) used to read only the
+    keys they knew and pass every other key through in silence, so an older
+    ``klt`` handed a spec using a newer field computed the older semantics
+    while the spec read as if it asked for the newer ones. Strict rejection
+    makes "requested but unsupported" fail loudly instead.
+
+    This helper is schema-neutral: each caller supplies its own ``allowed``
+    set (schema knowledge stays with the verb). ``field`` is the path of
+    ``obj`` inside the spec (``"ties[0]"``; ``""`` for the top level), so the
+    message names the complete unknown path (``ties[0].well_boxess``) plus the
+    spec filename. Only the *keys* of ``obj`` are checked -- a user-defined
+    map's own names are the caller's to treat as data, not pass here.
+    """
+    allowed_set = set(allowed)
+    unknown = sorted(str(key) for key in obj if key not in allowed_set)
+    if not unknown:
+        return
+    paths = ", ".join(repr(f"{field}.{key}" if field else key) for key in unknown)
+    noun = "field" if len(unknown) == 1 else "fields"
+    raise error_cls(
+        f"spec '{spec_path}': unknown {noun} {paths} -- this klt does not "
+        f"recognise it (allowed here: {', '.join(sorted(allowed_set))}); a "
+        "misspelt key, a key from a newer klt release, or a key that belongs "
+        "to a different section"
+    )
+
+
 def _parse_layer_datatype(
     raw: str, spec_path: str, field: str, error_cls: type[Exception]
 ) -> tuple[int, int]:
@@ -269,6 +306,7 @@ def _validate_via_entries(
     error_cls: type[Exception],
     *,
     required_keys: tuple[str, ...] = ("layer", "between"),
+    extra_allowed_keys: tuple[str, ...] = (),
 ) -> list[ViaEntry]:
     """Validate the ``"vias"`` array shared shape used by ``erc.py``'s and
     ``power.py``'s ``_validate_vias``: default/type-check ``spec["vias"]``,
@@ -296,6 +334,13 @@ def _validate_via_entries(
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise error_cls(f"spec '{spec_path}': vias[{i}] must be a JSON object")
+        _reject_unknown_keys(
+            entry,
+            ("name", "layer", "between", *extra_allowed_keys),
+            spec_path,
+            f"vias[{i}]",
+            error_cls,
+        )
         for key in required_keys:
             if key not in entry:
                 raise error_cls(f"spec '{spec_path}': vias[{i}] missing {key!r}")
