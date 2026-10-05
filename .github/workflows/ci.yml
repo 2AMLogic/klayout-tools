@@ -866,7 +866,7 @@ jobs:
         with:
           # Node 22+ per site/README.md / site's @types/node -- matches
           # deploy-site.yml's own Node setup.
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: site/package-lock.json
 

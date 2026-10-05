@@ -53,7 +53,7 @@ jobs:
         uses: actions/setup-node@v7
         with:
           # Node 22+ per scripts/deploy-site.sh / site @types/node.
-          node-version: "22"
+          node-version: "24"
 
       - name: Build and deploy
         # scripts/deploy-site.sh builds site/dist/ then runs
