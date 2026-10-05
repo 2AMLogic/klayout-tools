@@ -197,6 +197,15 @@ time.
 | **end to end** | **3,940.4 s** | **2,194.2 s** | **3,933.7 s** | **2,188.1 s** |
 | per gate net (15,198) | 259 ms | 144 ms | 259 ms | 144 ms |
 
+**Unprofiled cross-check.** Running the plain CLI on the same layout with
+`active_layer` and no `ties[]`,
+`/usr/bin/time -p klt erc GDS scripts/research/erc_profile_specs/sky130_stack.json --pdk sky130 --format json`,
+took **3,965.5 s wall / 2,162.8 s user + 74.1 s sys**. It reported 15,198
+gates and 0 findings (`erc_status: clean`). This ran alongside the
+profiled runs for part of its lifetime. Its CPU time (2,236.9 s) matches
+the profiled full run's 2,194.2 s CPU, so the wrappers are not what makes
+this regime slow.
+
 After the nested accumulation, about 3,882 s of the walk remains. It is
 spent in the per-net prologue: `polygons_of_net(net, gate).merged()`,
 then `& active_region` with `.merged()`, then `.area()`. The statement
