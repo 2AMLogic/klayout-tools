@@ -35,7 +35,7 @@ scripts/
   mom_nec_reference.py           # standalone NEC2++ reference solve for `klt mom` S-parameter cross-validation (#895)
   design_agent_benchmark.py      # design-agent benchmark harness: task set x PDK, S4->S6->S10 slice scored with pass@k (#1719)
   design_agent_benchmark_interactive.py  # multi-turn, tool-using agent provider for the benchmark harness (imported by the above, #1739)
-  research/                      # measurement harnesses behind docs/design/ findings (FLUTE congestion #785, SDF annotate #962)
+  research/                      # measurement harnesses behind docs/design/ findings (FLUTE congestion #785, SDF annotate #962, klt erc runtime profile #2229)
   aws/build-remote-sim-ami.sh    # build/publish the remote-sim AMI (see docs/cli/sim.md)
 ```
 

@@ -3805,11 +3805,17 @@ inline extraction from the response alone — both populate `provenance.deck`
 — so `--rerun` always reconstructs `layout.file`; in that specific combo it
 fails loudly (a clean error, not a silent wrong answer) since the named path
 is actually a SPICE netlist, not a layout stream. A non-default
-`reference.form` (`"subckt-call"`), `reference.device_map`/`device_bulk`, and
+`reference.form` (`"subckt-call"` or `"gate-level-verilog"`),
+`reference.device_map`/`device_bulk`, and
 `layout.top_cell_pins`/`declared_pins`/`pin_source_cells` are never echoed
 anywhere in the response and are always reconstructed as each option's own
 default. Use cheap mode instead when any of these apply to the original
-request.
+request. When the omitted `reference.form` makes the default
+`"plain-element"` re-read of the reference fail to parse (e.g. a
+gate-level Verilog `.v` reference), `--rerun` exits `1` with the usual
+"could not parse reference netlist" error followed by a note that the
+original request may have used a non-default `reference.form` and pointing
+to cheap mode (issue #2250).
 
 A **report committed before issue #1205** added `reference_top` and the
 `options` echo is reconstructed the way it always was: the single recorded

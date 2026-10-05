@@ -185,6 +185,25 @@ The spec file is a JSON object:
     `active_layer` region) instead of raw poly-net area — see "Gate area:
     `poly ∩ diff` vs. raw poly area" below.
 
+### Unrecognised spec keys are rejected (issue #2243)
+
+`klt erc` validates every spec-file object against the keys it recognises
+and **rejects** anything else: a key it does not know is an error, not a
+silent no-op. The run raises the verb's usual spec error naming the spec
+filename and the complete field path (for example
+`spec 'spec.json': unknown field 'ties[0].well_boxess'`), exits `1`, prints
+no success report on stdout, and does so before the layout is read or any
+analysis/solver runs. This applies to the top level and to every nested object
+(`stackup[]`, `vias[]`, `nets[]`, `ties[]`, `ties_disclosure`, `devices[]`).
+A key that is valid in a *different* section is still unknown in the section it
+appears in.
+
+The reason is version skew: a spec written against a newer `klt` that carries a
+field this build predates would otherwise run green and report the older
+semantics, indistinguishable from a spec that never asked for the field. Upgrade
+`klt` to use such a field; do not rely on it being ignored. Optional supported
+fields, their defaults, and the shape of the JSON report are unchanged.
+
 ### Gate area: `poly ∩ diff` vs. raw poly area
 
 By default (`active_layer` omitted), `gates[].gate_area_um2` is a net's own
@@ -728,6 +747,20 @@ timeline: expressing "this well/tap geometry conducts, scoped only to its
 declared taps" as a general net-merging conductor (reusing `ties[]`'s
 `well_layer`/`tap_requires` declaration shape) is a larger, separate
 follow-on — see #2180 for the option this section defers.
+
+**Design spike ([#2192](https://github.com/2AMLogic/klayout-tools/issues/2192)):**
+[`docs/design/erc-well-tap-connectivity-spike.md`](../design/erc-well-tap-connectivity-spike.md)
+works through that option against reproducible synthetic layouts (same-well
+taps, separate wells, substrate taps and an ordinary CMOS inverter). It
+recommends **not** merging any well or substrate conductor into either
+graph. One finding there matters for the cross-check above: a device-aware
+extraction joins taps in one merged well, and substrate taps die-wide, so
+LVS also "matches" a severed metal rail whose two halves both tap the same
+well. The follow-up the note proposes is reporting only: it would tag each
+multi-island finding's islands with the tapped wells they share, and leave
+findings and verdicts unchanged. Until an implementation lands, the
+limitation and LVS cross-check guidance in this section are the documented
+behavior.
 
 **The mirror-image case is "Device bodies are not wires" below**: this
 section is *too little* declared connectivity (real continuity the stackup
@@ -2193,6 +2226,15 @@ measurement. It scales as *gate nets × stackup roles*, and on a dense
 layout (the issue measured 16,640 gate nets × a four-role stackup at ~26
 minutes single-threaded) it is the dominant per-gate cost.
 
+How large that share of a *whole* run is depends on the spec. The profile
+in
+[`docs/design/erc-runtime-profile.md`](../design/erc-runtime-profile.md)
+(issue #2229) covers routed sky130 layouts with up to 40k nets. Without
+`stackup[0].active_layer`, connectivity extraction dominates and the
+accumulation is about 8-16% of the run. With `active_layer`, the per-net
+`poly ∩ active` intersection dominates (about 99%), and `--findings-only`
+does not skip it (issue #2751).
+
 A caller who only wants the `erc_findings` half pays all of it for nothing.
 The structural supply read that
 [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 11
@@ -2694,6 +2736,11 @@ ingestion harness exists is a natural follow-on.
   documented diffusion/well-continuity false-positive risk for
   `erc.unconnected_net` ("Known false-positive: diffusion/well continuity
   is not modeled" above).
+- [#2192](https://github.com/2AMLogic/klayout-tools/issues/2192) — the
+  well/substrate-tap continuity design spike,
+  [`docs/design/erc-well-tap-connectivity-spike.md`](../design/erc-well-tap-connectivity-spike.md):
+  why no net-merging well conductor is added, and the reporting-only
+  follow-up it recommends.
 - [#520](https://github.com/2AMLogic/klayout-tools/issues/520) — the Tiny
   Tapeout corpus epic named as this feature's cross-check corpus; not yet
   implemented (see "Cross-checked against klayout's own built-in antenna

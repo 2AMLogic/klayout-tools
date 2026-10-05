@@ -76,6 +76,7 @@ test-config-resolver.sh
 test-config-tiers-cli-migration.sh
 test-cpu-budget.sh
 test-create-pr-provenance.sh
+test-create-pr-rate-limit-fallback.sh
 test-create-pr-review-gate.sh
 test-create-pr-superseded-issue.sh
 test-create-pr-version-check.sh
@@ -176,6 +177,7 @@ test-resync-installed-dogfood-symlink.sh
 test-resync-installed-stamp.sh
 test-resync-installed-output-staging.sh
 test-resync-installed.sh
+test-resync-installed-egress-doctor.sh
 test-review-feedback-reconciliation.sh
 test-run-ci-suites-daemon-guard.sh
 test-run-ci-suites-failure-excerpt.sh
@@ -198,6 +200,7 @@ test-sweep-lease-fence.sh
 test-sweep-lease-fence-race.sh
 test-sweep-lease-publish.sh
 test-sweep-lease-renew.sh
+test-sweep-lease-renew-lifecycle.sh
 test-sweep-pr-mode.sh
 test-sweep-run-registry.sh
 test-sync-labels-check.sh

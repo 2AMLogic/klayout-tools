@@ -16284,6 +16284,122 @@ def test_run_lvs_gate_level_verilog_reference_converts_and_matches(tmp_path):
     assert report["category_counts"] == {"topology.top_level_pins_anchored": 1}
 
 
+def _committed_gate_level_verilog_report(tmp_path: Path) -> Path:
+    """Commit a clean `reference.form: "gate-level-verilog"` report (issue
+    #2250) -- a form `--rerun` cannot reconstruct, since no report echoes
+    `reference.form`."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, report)
+    return report_path
+
+
+#: The `--rerun`-only context issue #2250 appends to a reference parse failure.
+_RERUN_OMITTED_FORM_NOTE = "original request may have used a non-default reference.form"
+
+
+def test_rerun_lvs_report_gate_level_verilog_reference_explains_omitted_form(
+    tmp_path,
+):
+    """Issue #2250: `--rerun` re-reads a gate-level Verilog reference as the
+    default plain-element SPICE form (the report never echoes
+    `reference.form`), which fails to parse. The error keeps the underlying
+    parse message and exception chain, and adds context naming the omitted
+    `reference.form` and the cheap `--check` workaround."""
+    report_path = _committed_gate_level_verilog_report(tmp_path)
+
+    with pytest.raises(LvsError) as exc_info:
+        rerun_lvs_report(str(report_path))
+
+    message = str(exc_info.value)
+    assert message.startswith("could not parse reference netlist ")
+    assert str(tmp_path / "ref.v") in message
+    assert _RERUN_OMITTED_FORM_NOTE in message
+    assert '"plain-element"' in message
+    assert "klt lvs --check <report> (without --rerun)" in message
+    # The chain is preserved: contextual error <- generic parse error <-
+    # KLayout's own reader exception.
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, lvs._ReferenceNetlistParseError)
+    assert str(cause).startswith("could not parse reference netlist ")
+    assert _RERUN_OMITTED_FORM_NOTE not in str(cause)
+    assert cause.__cause__ is not None
+
+
+def test_check_lvs_report_gate_level_verilog_reference_cheap_mode_matches(tmp_path):
+    """Issue #2250's documented workaround: cheap `--check` (no `--rerun`) on
+    the same unchanged committed report still verifies cleanly."""
+    report_path = _committed_gate_level_verilog_report(tmp_path)
+
+    result = check_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+
+
+def test_cli_lvs_check_rerun_gate_level_verilog_reference_error(tmp_path, capsys):
+    """Issue #2250, CLI: the contextual message rides the existing JSON error
+    envelope and the existing application-error exit code (1)."""
+    report_path = _committed_gate_level_verilog_report(tmp_path)
+    capsys.readouterr()
+
+    assert (
+        main(["lvs", "--check", str(report_path), "--rerun", "--format", "json"]) == 1
+    )
+    err = json.loads(capsys.readouterr().err)
+    message = err["error"]["message"]
+    assert "could not parse reference netlist" in message
+    assert _RERUN_OMITTED_FORM_NOTE in message
+    assert "without --rerun" in message
+
+
+def test_rerun_lvs_report_layout_failure_has_no_reference_form_note(tmp_path):
+    """Issue #2250 scope: only reference *parse* failures get the
+    `reference.form` note -- an unrelated rerun failure (here, a layout
+    input that has since vanished) keeps its existing message."""
+    report_path = _committed_gate_level_verilog_report(tmp_path)
+    os.remove(tmp_path / "layout.spice")
+
+    with pytest.raises(LvsError) as exc_info:
+        rerun_lvs_report(str(report_path))
+
+    assert "layout netlist not found" in str(exc_info.value)
+    assert _RERUN_OMITTED_FORM_NOTE not in str(exc_info.value)
+
+
+def test_direct_unparseable_reference_netlist_has_no_reference_form_note(tmp_path):
+    """Issue #2250 scope: a direct `klt lvs` call (no `--rerun`) on a
+    malformed plain-element reference keeps the generic message untouched."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", "not a spice file at all")
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path},
+    }
+
+    with pytest.raises(LvsError) as exc_info:
+        run_lvs(json.dumps(request))
+
+    assert str(exc_info.value).startswith("could not parse reference netlist ")
+    assert _RERUN_OMITTED_FORM_NOTE not in str(exc_info.value)
+
+
 #: Issue #2657 end-to-end: a library carrying a vector-ported hard macro, a
 #: gate-level reference instantiating it with a concatenation, a range slice
 #: and a wide constant, and the layout-side black-box abstraction `klt

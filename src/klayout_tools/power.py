@@ -150,7 +150,12 @@ from ._devices import (
 from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
-from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
+from ._paths import (
+    _load_spec_json,
+    _parse_layer_datatype,
+    _reject_unknown_keys,
+    _validate_via_entries,
+)
 from ._provenance import INPUT_ROLE_LAYOUT, _content_hash, build_provenance
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
@@ -189,6 +194,34 @@ SCHEMA_VERSION = 1
 MAX_DECOMPOSITION_CELLS = 4096
 
 
+#: The keys each part of the ``klt power`` spec file recognises (issue
+#: #2243). Any other key is rejected with its full path rather than ignored
+#: -- see ``docs/cli/power.md``'s "Unrecognised spec keys".
+_SPEC_KEYS = ("power_nets", "stackup", "vias", "devices", "pads", "current_model")
+_POWER_NET_KEYS = ("name", "match")
+_STACKUP_KEYS = (
+    "name",
+    "layer",
+    "label_layer",
+    "sheet_resistance_ohm_per_sq",
+    "current_limit_a_per_um",
+    "current_limit_source",
+)
+_VIA_EXTRA_KEYS = ("resistance_ohm", "current_limit_a", "current_limit_source")
+_PAD_KEYS = ("name", "net", "x_um", "y_um", "voltage_v")
+_CURRENT_MODEL_KEYS = ("supply_net", "ground_net", "vdd_v", "instances")
+_INSTANCE_KEYS = (
+    "name",
+    "supply_net",
+    "ground_net",
+    "x_um",
+    "y_um",
+    "current_a",
+    "activity",
+)
+_ACTIVITY_KEYS = ("toggle_rate_hz", "capacitance_f", "vdd_v")
+
+
 class PowerError(Exception):
     """Raised when ``klt power`` cannot run: a bad layout/spec file, a
     malformed stackup/via/power-net declaration, an unresolvable top cell,
@@ -217,6 +250,9 @@ def _parse_power_net_entry(entry: Any, index: int, spec_path: str) -> tuple[str,
     deliberately share a label.
     """
     if isinstance(entry, dict):
+        _reject_unknown_keys(
+            entry, _POWER_NET_KEYS, spec_path, f"power_nets[{index}]", PowerError
+        )
         name = str(entry.get("name", "")).strip()
         match = str(entry.get("match", _MATCH_MODES[0]))
     elif isinstance(entry, str):
@@ -263,6 +299,9 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise PowerError(f"spec '{spec_path}': stackup[{i}] must be a JSON object")
+        _reject_unknown_keys(
+            entry, _STACKUP_KEYS, spec_path, f"stackup[{i}]", PowerError
+        )
         for key in ("name", "layer", "sheet_resistance_ohm_per_sq"):
             if key not in entry:
                 raise PowerError(f"spec '{spec_path}': stackup[{i}] missing {key!r}")
@@ -360,6 +399,7 @@ def _validate_vias(
         stackup_names,
         PowerError,
         required_keys=("layer", "between", "resistance_ohm"),
+        extra_allowed_keys=_VIA_EXTRA_KEYS,
     ):
         try:
             resistance_ohm = float(entry["resistance_ohm"])
@@ -445,6 +485,7 @@ def _validate_pads(
         field = f"pads[{i}]"
         if not isinstance(entry, dict):
             raise PowerError(f"spec '{spec_path}': {field} must be a JSON object")
+        _reject_unknown_keys(entry, _PAD_KEYS, spec_path, field, PowerError)
         if "net" not in entry:
             raise PowerError(f"spec '{spec_path}': {field} missing 'net'")
         net = str(entry["net"])
@@ -494,6 +535,9 @@ def _validate_activity(
     activity = entry["activity"]
     if not isinstance(activity, dict):
         raise PowerError(f"spec '{spec_path}': {field}.activity must be a JSON object")
+    _reject_unknown_keys(
+        activity, _ACTIVITY_KEYS, spec_path, f"{field}.activity", PowerError
+    )
     activity_field = f"{field}.activity"
 
     toggle_rate_hz = _require_number(
@@ -553,6 +597,9 @@ def _validate_current_model(
         return None
     if not isinstance(raw, dict):
         raise PowerError(f"spec '{spec_path}': 'current_model' must be a JSON object")
+    _reject_unknown_keys(
+        raw, _CURRENT_MODEL_KEYS, spec_path, "current_model", PowerError
+    )
 
     def _default_net(key: str) -> str | None:
         value = raw.get(key)
@@ -601,6 +648,7 @@ def _validate_current_model(
         field = f"current_model.instances[{i}]"
         if not isinstance(entry, dict):
             raise PowerError(f"spec '{spec_path}': {field} must be a JSON object")
+        _reject_unknown_keys(entry, _INSTANCE_KEYS, spec_path, field, PowerError)
 
         name = str(entry.get("name", f"inst{i}"))
         if name in names:
@@ -2189,6 +2237,7 @@ def run_power(
     to at least one island).
     """
     spec = _load_spec_json(spec_path, PowerError)
+    _reject_unknown_keys(spec, _SPEC_KEYS, spec_path, "", PowerError)
     power_net_entries = _validate_power_nets(spec, spec_path)
     power_nets = [entry["name"] for entry in power_net_entries]
     stackup = _validate_stackup(spec, spec_path)

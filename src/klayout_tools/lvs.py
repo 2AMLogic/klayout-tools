@@ -612,6 +612,19 @@ class LvsError(Exception):
     """
 
 
+class _ReferenceNetlistParseError(LvsError):
+    """The reference netlist's final ``NetlistSpiceReader`` read raised
+    (issue #2250).
+
+    A private :class:`LvsError` subclass -- message and exception chain are
+    byte-identical to the plain ``LvsError`` it replaces, so every existing
+    caller, the CLI, and the JSON error envelope see no difference. It exists
+    only so :func:`rerun_lvs_report` can recognise *this* failure (and no
+    other layout/deck/engine failure) and add ``--rerun``-specific context
+    about the omitted ``reference.form``.
+    """
+
+
 _REQUIRED_REQUEST_FIELDS = ("layout", "reference")
 
 
@@ -2783,11 +2796,14 @@ def _reconstruct_lvs_request(
     :class:`LvsError` from the layout loader, not a silent wrong answer)
     since ``committed["layout"]`` is actually a SPICE netlist, not a
     layout stream, in that case. ``reference.form`` (a non-default
-    ``"subckt-call"`` reference), ``reference.device_map``/``device_bulk``
+    ``"subckt-call"`` or ``"gate-level-verilog"`` reference),
+    ``reference.device_map``/``device_bulk``
     and ``layout.top_cell_pins``/``declared_pins``/``pin_source_cells`` are
     never echoed anywhere in the response and are always omitted
     (reconstructed as each option's own default). Use ``--check`` (cheap
-    mode) instead when any of these apply.
+    mode) instead when any of these apply. When the omitted form makes the
+    plain-element re-read of the reference fail to parse,
+    :func:`_run_reconstructed_lvs` says so in the error (issue #2250).
     """
     deck = get_path(committed, ("provenance", "deck"))
     has_deck = isinstance(deck, dict) and deck.get("name") is not None
@@ -2966,6 +2982,36 @@ _LVS_RERUN_EXCLUDE_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS
 }
 
 
+def _run_reconstructed_lvs(request: dict[str, Any]) -> dict[str, Any]:
+    """:func:`run_lvs` on a :func:`_reconstruct_lvs_request` result, adding
+    ``--rerun`` context to a reference-netlist parse failure (issue #2250).
+
+    The reconstruction always omits ``reference.form`` (it is never echoed in
+    a report), so the reference is re-read as the default ``"plain-element"``
+    SPICE. When the original request used a non-default form (e.g. a
+    ``"gate-level-verilog"`` ``.v`` reference), that read fails with the
+    generic "could not parse reference netlist" error, which on its own does
+    not point at the cause. The original form is unknowable from the report
+    -- the reference's extension is only a hint -- so the added context says
+    it *may* have been non-default, and names cheap ``--check`` (without
+    ``--rerun``) as the workaround. The underlying message is kept verbatim
+    and chained via ``raise ... from``. Every other failure (layout, deck,
+    engine, or any other reference error) propagates unchanged.
+    """
+    try:
+        return run_lvs(json.dumps(request))
+    except _ReferenceNetlistParseError as exc:
+        raise LvsError(
+            f"{exc}. Note: --rerun reconstructs the request from the committed "
+            "report, which never records reference.form, so the reference "
+            'netlist was re-read as the default "plain-element" SPICE form; the '
+            "original request may have used a non-default reference.form "
+            '(e.g. "gate-level-verilog" or "subckt-call"). If so, verify this '
+            "report with cheap mode instead: klt lvs --check <report> (without "
+            '--rerun) -- see docs/cli/lvs.md, "Full mode (--rerun)".'
+        ) from exc
+
+
 def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     """``klt lvs --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt lvs --format json`` report at
@@ -3025,7 +3071,7 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
             f"{report_path}"
         )
     request = _reconstruct_lvs_request(committed, report_path=report_path)
-    fresh = run_lvs(json.dumps(request))
+    fresh = _run_reconstructed_lvs(request)
     exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
     exclude.update(
         (field,)
@@ -3586,7 +3632,9 @@ def _read_reference_netlist(
     try:
         netlist.read(read_path, reader)
     except Exception as exc:
-        raise LvsError(f"could not parse reference netlist '{path}': {exc}") from exc
+        raise _ReferenceNetlistParseError(
+            f"could not parse reference netlist '{path}': {exc}"
+        ) from exc
     finally:
         if tmp_path is not None:
             try:
