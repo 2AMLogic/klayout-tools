@@ -2145,6 +2145,37 @@ def _cut_fixed_size_um(family: str, layer: Any) -> float:
     return min(bounds) if bounds else 0.0
 
 
+def _mfg_grid_um(family: str, layer: Any) -> float:
+    """The manufacturing grid (um) ``family``'s curated deck requires vertices
+    on ``layer`` to sit on (issue #2648), or ``0.0`` when the deck declares no
+    ``"ongrid"`` rule there (or ``family`` has no registered deck) -- "draw the
+    generator's own coordinates unchanged".
+
+    Read from the deck's own ``check="ongrid"`` rule (issue #2642) rather than
+    restated here, so the generator and ``klt drc`` cannot disagree. ``layer``
+    is a ``(layer, datatype)`` pair or a ``kdb.LayerInfo``; the coarsest
+    declared grid wins."""
+    if layer is None:
+        return 0.0
+    from .decks import UnknownDeckError, get_deck
+
+    pair = (
+        (layer.layer, layer.datatype)
+        if hasattr(layer, "datatype")
+        else (int(layer[0]), int(layer[1]))
+    )
+    try:
+        rules = get_deck(family)
+    except UnknownDeckError:
+        return 0.0
+    grids = [
+        rule.grid_um
+        for rule in rules
+        if rule.check == "ongrid" and rule.layer == pair and rule.grid_um
+    ]
+    return max(grids) if grids else 0.0
+
+
 #: Per-PDK-family ``res_array`` ``metal_level`` -> the exact ``klt extract``
 #: device-class name that level draws (issue #1731) -- the class-*name*
 #: sibling of :data:`_PDK_METAL_RES_LEVELS` (which resolves the same
@@ -2564,6 +2595,7 @@ def _device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -2673,6 +2705,7 @@ def _resistor_layer_params(
         resolved: dict[str, Any] = {
             "poly_layer": kdb.LayerInfo(*levels["body"]),
             "contact_layer": kdb.LayerInfo(*levels["via"]),
+            "mfg_grid_um": _mfg_grid_um(family, levels["via"]),
             "contact_fixed_size_um": _cut_fixed_size_um(family, levels["via"]),
             "metal_layer": kdb.LayerInfo(*levels["landing"]),
             "res_mark_layer": kdb.LayerInfo(*levels["marker"]),
@@ -2702,6 +2735,7 @@ def _resistor_layer_params(
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -2921,6 +2955,7 @@ def _ring_layer_params(
     return {
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -3045,6 +3080,7 @@ def _bjt_layer_params(
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -3163,6 +3199,7 @@ def _esd_device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),

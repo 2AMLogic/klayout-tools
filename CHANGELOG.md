@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2648, `klt gen`; no JSON field changes): sky130 generator cuts
+  are now snapped onto the 0.005um manufacturing grid the curated deck's
+  `*.ongrid.1` rule declares (resolved from the deck by
+  `gen_layer_params._mfg_grid_um`, applied in `_clamp_cut_boxes`), so
+  `diff_pair`/`esd_device` gate-contact `licon1` cuts no longer trip
+  `licon1.ongrid.1`. Cuts move by at most 2.5nm; the committed dogbone
+  example GDS were regenerated.
+
 - **Changed** (#2388, `klt drc`; no JSON field changes): sg13g2's
   `cont.width.1`, `via1.width.1`-`via4.width.1` and sky130's `via.width.1`
   now also enforce their fixed-size maximum (`threshold_max_dbu` equal to

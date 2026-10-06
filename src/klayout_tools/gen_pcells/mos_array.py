@@ -373,6 +373,14 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "generator's own cut size unchanged",
                 default=0.0,
             )
+            self.param(
+                "mfg_grid_um",
+                self.TypeDouble,
+                "Manufacturing grid (um) every cut on contact_layer is "
+                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
+                "unchanged",
+                default=0.0,
+            )
 
         def display_text_impl(self) -> str:
             return f"mos_array({self.rows}x{self.cols},w={self.w_um},l={self.l_um})"
@@ -595,6 +603,12 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
-            _clamp_cut_boxes(self.cell, li_contact, dbu, self.contact_fixed_size_um)
+            _clamp_cut_boxes(
+                self.cell,
+                li_contact,
+                dbu,
+                self.contact_fixed_size_um,
+                self.mfg_grid_um,
+            )
 
     return {"mos_array": _MosArrayPCell}
