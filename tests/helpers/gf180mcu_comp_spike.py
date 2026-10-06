@@ -557,29 +557,22 @@ def _tap_gap_fixture(
     return Fixture(name, dbu, layers)
 
 
-def build_fixtures(dbu: float) -> list[Fixture]:
-    """The fixture matrix (see design note). All coordinates derived from ``dbu``."""
+def _df12_fixtures(dbu: float) -> list[Fixture]:
+    """DF.12 implant/marker coverage of COMP."""
     u = _um(dbu)
-    fxs: list[Fixture] = []
-
-    # ---- DF.12 ----
     big = (0, 0, u(4), u(2))
-    fxs.append(Fixture("df12_absent_implants", dbu, {"comp": [big]}))
-    fxs.append(
+    return [
+        Fixture("df12_absent_implants", dbu, {"comp": [big]}),
         Fixture(
             "df12_full_nplus",
             dbu,
             _merge({"comp": [big]}, {"nplus": [(-u(1), -u(1), u(5), u(3))]}),
-        )
-    )
-    fxs.append(
+        ),
         Fixture(
             "df12_partial_nplus",
             dbu,
             _merge({"comp": [big]}, {"nplus": [(-u(1), -u(1), u(2), u(3))]}),
-        )
-    )
-    fxs.append(
+        ),
         Fixture(
             "df12_joint_n_p",
             dbu,
@@ -588,9 +581,7 @@ def build_fixtures(dbu: float) -> list[Fixture]:
                 "nplus": [(-u(1), -u(1), u(2), u(3))],
                 "pplus": [(u(2), -u(1), u(5), u(3))],
             },
-        )
-    )
-    fxs.append(
+        ),
         Fixture(
             "df12_partial_marker",
             dbu,
@@ -599,117 +590,84 @@ def build_fixtures(dbu: float) -> list[Fixture]:
                 "nplus": [(-u(1), -u(1), u(1), u(3))],
                 "schottky_diode": [(u(3), -u(1), u(5), u(3))],
             },
-        )
-    )
-    fxs.append(
+        ),
         Fixture(
             "df12_marker_edge_touch",
             dbu,
             {"comp": [big], "schottky_diode": [(u(4), -u(1), u(6), u(3))]},
+        ),
+    ]
+
+
+def _qualitative_domain_fixtures(dbu: float, dom: str, tag: str) -> list[Fixture]:
+    """DF.13 (``dom="inside"``) / DF.14 (``"outside"``) qualitative cases."""
+    u = _um(dbu)
+    tk, ak = ("n", "p") if dom == "inside" else ("p", "n")
+
+    def wrap(layers, x2):
+        if dom == "inside":
+            layers["nwell"] = [(-u(2), -u(2), x2 + u(2), u(10))]
+        return layers
+
+    def tap_and_active(ax1, ax2):
+        return _merge(
+            _active(tk, u, 0, 0, u(2), u(2)), _active(ak, u, ax1, 0, ax2, u(2))
         )
-    )
 
-    # ---- DF.13 / DF.14 qualitative ----
-    for dom, tag in (("inside", "13"), ("outside", "14")):
-        tk, ak = ("n", "p") if dom == "inside" else ("p", "n")
-
-        def wrap(layers, x2, dom=dom):
-            if dom == "inside":
-                layers["nwell"] = [(-u(2), -u(2), x2 + u(2), u(10))]
-            return layers
-
+    return [
         # zero taps: active exists, tap layer absent entirely
-        fxs.append(
-            Fixture(
-                f"df{tag}_zero_taps",
-                dbu,
-                wrap(_active(ak, u, u(5), 0, u(7), u(2)), u(7)),
-            )
-        )
+        Fixture(
+            f"df{tag}_zero_taps", dbu, wrap(_active(ak, u, u(5), 0, u(7), u(2)), u(7))
+        ),
         # valid nearby tap (5 um)
-        fxs.append(
-            Fixture(
-                f"df{tag}_near_tap",
-                dbu,
-                wrap(
-                    _merge(
-                        _active(tk, u, 0, 0, u(2), u(2)),
-                        _active(ak, u, u(7), 0, u(9), u(2)),
-                    ),
-                    u(9),
-                ),
-            )
-        )
+        Fixture(f"df{tag}_near_tap", dbu, wrap(tap_and_active(u(7), u(9)), u(9))),
         # remote tap (30 um)
-        fxs.append(
-            Fixture(
-                f"df{tag}_remote_tap",
-                dbu,
-                wrap(
-                    _merge(
-                        _active(tk, u, 0, 0, u(2), u(2)),
-                        _active(ak, u, u(32), 0, u(34), u(2)),
-                    ),
-                    u(34),
-                ),
-            )
-        )
+        Fixture(f"df{tag}_remote_tap", dbu, wrap(tap_and_active(u(32), u(34)), u(34))),
         # long active, only the left end within 20 um of the tap
-        fxs.append(
-            Fixture(
-                f"df{tag}_long_active_one_end",
-                dbu,
-                wrap(
-                    _merge(
-                        _active(tk, u, 0, 0, u(2), u(2)),
-                        _active(ak, u, u(5), 0, u(45), u(2)),
-                    ),
-                    u(45),
-                ),
-            )
-        )
+        Fixture(
+            f"df{tag}_long_active_one_end",
+            dbu,
+            wrap(tap_and_active(u(5), u(45)), u(45)),
+        ),
         # absent checked active: nothing to check even though a tap exists
-        fxs.append(
-            Fixture(
-                f"df{tag}_no_active", dbu, wrap(_active(tk, u, 0, 0, u(2), u(2)), u(2))
-            )
+        Fixture(
+            f"df{tag}_no_active", dbu, wrap(_active(tk, u, 0, 0, u(2), u(2)), u(2))
+        ),
+    ]
+
+
+def _well_topology_fixtures(dbu: float) -> list[Fixture]:
+    """DF.13 well-connectivity cases: split islands, joined control, U-notch."""
+    u = _um(dbu)
+
+    def tap_act() -> dict[str, list]:
+        return _merge(
+            _active("n", u, 0, 0, u(2), u(2)),
+            _active("p", u, u(12), 0, u(14), u(2)),
         )
 
-    # disconnected wells with the minimum legal 0.6 um gap: tap in A, pactive in B
-    fxs.append(
-        Fixture(
-            "df13_island_gap_0p6",
-            dbu,
-            {
-                "nwell": [(-u(2), -u(2), u(10), u(6)), (u(10.6), -u(2), u(24), u(6))],
-                **_merge(
-                    _active("n", u, 0, 0, u(2), u(2)),
-                    _active("p", u, u(12), 0, u(14), u(2)),
-                ),
-            },
-        )
-    )
-    # same but one well (no gap): clean control
-    fxs.append(
-        Fixture(
-            "df13_island_control_joined",
-            dbu,
-            {
-                "nwell": [(-u(2), -u(2), u(24), u(6))],
-                **_merge(
-                    _active("n", u, 0, 0, u(2), u(2)),
-                    _active("p", u, u(12), 0, u(14), u(2)),
-                ),
-            },
-        )
-    )
     # U-shaped well: Euclid-near but well-path-far (notch 1 um wide, 12 um deep)
     u_well = [
         (-u(2), -u(2), u(7), u(1)),
         (-u(2), u(1), u(1), u(16)),
         (u(4), u(1), u(7), u(16)),
     ]
-    fxs.append(
+    return [
+        # disconnected wells with the minimum legal 0.6 um gap: tap in A, pactive in B
+        Fixture(
+            "df13_island_gap_0p6",
+            dbu,
+            {
+                "nwell": [(-u(2), -u(2), u(10), u(6)), (u(10.6), -u(2), u(24), u(6))],
+                **tap_act(),
+            },
+        ),
+        # same but one well (no gap): clean control
+        Fixture(
+            "df13_island_control_joined",
+            dbu,
+            {"nwell": [(-u(2), -u(2), u(24), u(6))], **tap_act()},
+        ),
         Fixture(
             "df13_u_well_notch",
             dbu,
@@ -720,99 +678,120 @@ def build_fixtures(dbu: float) -> list[Fixture]:
                     _active("p", u, u(4.5), u(14), u(5.5), u(15)),
                 ),
             },
-        )
-    )
-    # resistor marker over the only tap: tap removed -> flagged
-    for dom, tag in (("inside", "13"), ("outside", "14")):
-        tk, ak = ("n", "p") if dom == "inside" else ("p", "n")
-        lay = _merge(
+        ),
+    ]
+
+
+def _marker_and_deep_well_fixtures(dbu: float) -> list[Fixture]:
+    """Resistor marker over the only tap, and dnwell/lvpwell well contexts."""
+    u = _um(dbu)
+
+    def pair(tk, ak):
+        return _merge(
             _active(tk, u, 0, 0, u(2), u(2)), _active(ak, u, u(7), 0, u(9), u(2))
         )
+
+    well_box = (-u(2), -u(2), u(11), u(4))
+    fxs: list[Fixture] = []
+    # resistor marker over the only tap: tap removed -> flagged
+    for dom, tag in (("inside", "13"), ("outside", "14")):
+        lay = pair(*(("n", "p") if dom == "inside" else ("p", "n")))
         lay["res_mk"] = [(-u(1), -u(1), u(3), u(3))]
         if dom == "inside":
-            lay["nwell"] = [(-u(2), -u(2), u(11), u(4))]
+            lay["nwell"] = [well_box]
         fxs.append(Fixture(f"df{tag}_res_mk_over_tap", dbu, lay))
     # deep-well context: well = dnwell only (no nwell); DF.13 clips with `nwell`
-    lay = _merge(
-        _active("n", u, 0, 0, u(2), u(2)), _active("p", u, u(7), 0, u(9), u(2))
-    )
-    lay["dnwell"] = [(-u(2), -u(2), u(11), u(4))]
+    lay = pair("n", "p")
+    lay["dnwell"] = [well_box]
     fxs.append(Fixture("df13_dnwell_only", dbu, lay))
-    lay = _merge(
-        _active("n", u, 0, 0, u(2), u(2)), _active("p", u, u(7), 0, u(9), u(2))
-    )
-    lay["dnwell"] = [(-u(2), -u(2), u(11), u(4))]
-    lay["nwell"] = [(-u(2), -u(2), u(11), u(4))]
+    lay = pair("n", "p")
+    lay["dnwell"] = [well_box]
+    lay["nwell"] = [well_box]
     fxs.append(Fixture("df13_dnwell_plus_nwell", dbu, lay))
     # dnwell fully under lvpwell: not a well -> pcomp is a substrate tap
-    lay = _merge(
-        _active("p", u, 0, 0, u(2), u(2)), _active("n", u, u(7), 0, u(9), u(2))
-    )
-    lay["dnwell"] = [(-u(2), -u(2), u(11), u(4))]
-    lay["lvpwell"] = [(-u(2), -u(2), u(11), u(4))]
+    lay = pair("p", "n")
+    lay["dnwell"] = [well_box]
+    lay["lvpwell"] = [well_box]
     fxs.append(Fixture("df14_dnwell_under_lvpwell", dbu, lay))
+    return fxs
 
-    # voltage selection: active 25 um from tap, so a violation only if checked.
-    def v_fx(name, dg_kind):
+
+_VOLTAGE_CASES = (
+    ("df13_v_none", ()),
+    ("df13_v_dualgate", ("dualgate",)),
+    ("df13_v_v5_only", ("v5_xtor",)),
+    ("df13_v_dualgate_and_v5", ("dualgate", "v5_xtor")),
+)
+
+
+def _voltage_fixtures(dbu: float) -> list[Fixture]:
+    """Voltage selection: active 25 um from tap, so a violation only if checked."""
+    u = _um(dbu)
+
+    def base(name: str) -> tuple[Fixture, tuple[int, int, int, int]]:
         f = _tap_gap_fixture(
             name, dbu, well_domain="inside", gap_dbu_offset=u(5), d_um=20.0, mv=False
         )
-        act = f.layers["comp"][1]
+        return f, f.layers["comp"][1]
+
+    fxs: list[Fixture] = []
+    for name, marker_layers in _VOLTAGE_CASES:
+        f, act = base(name)
         box = (act[0] - u(1), act[1] - u(1), act[2] + u(1), act[3] + u(1))
-        if dg_kind == "dualgate":
-            f.layers["dualgate"] = [box]
-        elif dg_kind == "v5_only":
-            f.layers["v5_xtor"] = [box]
-        elif dg_kind == "both":
-            f.layers["dualgate"] = [box]
-            f.layers["v5_xtor"] = [box]
-        elif dg_kind == "dg_touch":
-            f.layers["dualgate"] = [
-                (act[2], act[1], act[2] + u(1), act[3])
-            ]  # edge touch only
-        return f
+        for lname in marker_layers:
+            f.layers[lname] = [box]
+        fxs.append(f)
+    f, act = base("df13_v_dualgate_edge_touch")
+    f.layers["dualgate"] = [(act[2], act[1], act[2] + u(1), act[3])]  # edge touch only
+    fxs.append(f)
+    return fxs
 
-    fxs.append(v_fx("df13_v_none", "none"))
-    fxs.append(v_fx("df13_v_dualgate", "dualgate"))
-    fxs.append(v_fx("df13_v_v5_only", "v5_only"))
-    fxs.append(v_fx("df13_v_dualgate_and_v5", "both"))
-    fxs.append(v_fx("df13_v_dualgate_edge_touch", "dg_touch"))
 
-    # boundary probes: D-1, D, D+1 DBU; axial + diagonal; LV/MV; DF.13/DF.14
-    for dom, tag in (("inside", "13"), ("outside", "14")):
-        for mv, dval, vt in ((False, 20.0, "lv"), (True, 15.0, "mv")):
-            for geom in ("axial", "diag"):
-                for k, kn in ((-1, "dm1"), (0, "d0"), (1, "dp1")):
-                    fxs.append(
-                        _tap_gap_fixture(
-                            f"df{tag}_{vt}_{geom}_{kn}",
-                            dbu,
-                            well_domain=dom,
-                            gap_dbu_offset=k,
-                            d_um=dval,
-                            mv=mv,
-                            geometry="axial" if geom == "axial" else "diagonal",
-                        )
-                    )
+_DOMAINS = (("inside", "13"), ("outside", "14"))
+_VOLTAGE_CLASSES = ((False, 20.0, "lv"), (True, 15.0, "mv"))
 
-    # diagonal over-reach: corner-to-corner Euclidean distance = pct% of D
-    for dom, tag in (("inside", "13"), ("outside", "14")):
-        for mv, dval, vt in ((False, 20.0, "lv"), (True, 15.0, "mv")):
-            for pct in (104, 110):
-                fxs.append(
-                    _tap_gap_fixture(
-                        f"df{tag}_{vt}_diag_x{pct}",
-                        dbu,
-                        well_domain=dom,
-                        gap_dbu_offset=0,
-                        d_um=dval,
-                        mv=mv,
-                        geometry="diagonal",
-                        diag_pct=pct,
-                    )
-                )
 
-    # hierarchy: tap and active in a child instantiated twice vs flat twin
+def _boundary_fixtures(dbu: float) -> list[Fixture]:
+    """Boundary probes: D-1, D, D+1 DBU; axial + diagonal; LV/MV; DF.13/DF.14."""
+    return [
+        _tap_gap_fixture(
+            f"df{tag}_{vt}_{geom}_{kn}",
+            dbu,
+            well_domain=dom,
+            gap_dbu_offset=k,
+            d_um=dval,
+            mv=mv,
+            geometry="axial" if geom == "axial" else "diagonal",
+        )
+        for dom, tag in _DOMAINS
+        for mv, dval, vt in _VOLTAGE_CLASSES
+        for geom in ("axial", "diag")
+        for k, kn in ((-1, "dm1"), (0, "d0"), (1, "dp1"))
+    ]
+
+
+def _diagonal_overreach_fixtures(dbu: float) -> list[Fixture]:
+    """Diagonal over-reach: corner-to-corner Euclidean distance = pct% of D."""
+    return [
+        _tap_gap_fixture(
+            f"df{tag}_{vt}_diag_x{pct}",
+            dbu,
+            well_domain=dom,
+            gap_dbu_offset=0,
+            d_um=dval,
+            mv=mv,
+            geometry="diagonal",
+            diag_pct=pct,
+        )
+        for dom, tag in _DOMAINS
+        for mv, dval, vt in _VOLTAGE_CLASSES
+        for pct in (104, 110)
+    ]
+
+
+def _hierarchy_fixtures(dbu: float) -> list[Fixture]:
+    """Hierarchy: tap and active in a child instantiated twice vs flat twin."""
+    u = _um(dbu)
     flat_layers = _merge(
         _active("n", u, 0, 0, u(2), u(2)),
         _active("p", u, u(7), 0, u(9), u(2)),
@@ -820,7 +799,6 @@ def build_fixtures(dbu: float) -> list[Fixture]:
         _active("p", u, u(137), 0, u(139), u(2)),  # 35 um away -> violation in 2nd copy
         {"nwell": [(-u(2), -u(2), u(11), u(4)), (u(98), -u(2), u(141), u(4))]},
     )
-    fxs.append(Fixture("df13_hier_flat", dbu, flat_layers))
     top_extra = _merge(
         _active("p", u, u(7), 0, u(9), u(2)), _active("p", u, u(137), 0, u(139), u(2))
     )
@@ -833,7 +811,24 @@ def build_fixtures(dbu: float) -> list[Fixture]:
         ),
         sub_offsets=((0, 0), (u(100), 0)),
     )
-    fxs.append(sub_f)
+    return [Fixture("df13_hier_flat", dbu, flat_layers), sub_f]
+
+
+def build_fixtures(dbu: float) -> list[Fixture]:
+    """The fixture matrix (see design note). All coordinates derived from ``dbu``.
+
+    Assembled from per-family builders; order is significant (it is the order
+    the design-note matrix and the tests enumerate fixtures in).
+    """
+    fxs = _df12_fixtures(dbu)
+    for dom, tag in _DOMAINS:
+        fxs += _qualitative_domain_fixtures(dbu, dom, tag)
+    fxs += _well_topology_fixtures(dbu)
+    fxs += _marker_and_deep_well_fixtures(dbu)
+    fxs += _voltage_fixtures(dbu)
+    fxs += _boundary_fixtures(dbu)
+    fxs += _diagonal_overreach_fixtures(dbu)
+    fxs += _hierarchy_fixtures(dbu)
     return fxs
 
 

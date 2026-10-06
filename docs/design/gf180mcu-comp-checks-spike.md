@@ -170,6 +170,13 @@ oracle path calls the candidate evaluator. A second, hand-derived tier of assert
 (`KLT_KLAYOUT_BIN`, `PATH`, or the macOS app path) the differential tier is **skipped**;
 a skip is not agreement.
 
+**In repository CI the differential tier skips.** The `Tests (Python 3.x)` jobs install
+only the `klayout` Python wheel, which ships no `klayout` executable, and no workflow
+installs the KLayout application or sets `KLT_KLAYOUT_BIN`. CI therefore runs the
+hand-derived tier only; the "98 passed, 0 skipped" figure above is from a local run with
+the KLayout app installed, and it is the only evidence that the oracle agrees. Making the
+differential tier run in CI is step 8 of section 9.
+
 **Fixture matrix** (`build_fixtures(dbu)`, run at DBU 0.001 and 0.0005; "port" =
 `evaluate_port_upstream_clip`, "orig" = the original proposal):
 
@@ -307,7 +314,9 @@ bookkeeping, `_rule_vacuity_layers`, `_rule_input_layer_tuples`,
    `decks/_history.json` **only in the PR that actually adds the rules**
    (`test_golden_manifest_covers_every_width_space_rule` enforces coverage).
 8. **Differential gate in CI**: keep the oracle tests; where a KLayout binary is available
-   they must run (not skip) as a release gate.
+   they must run (not skip) as a release gate. Current CI has no binary (see section 6), so
+   this step needs a CI job that installs the KLayout application (or sets
+   `KLT_KLAYOUT_BIN`) and fails if the oracle tests skip.
 
 Suggested split: PR-A steps 1-3 + DF.12 (no distance semantics); PR-B DF.13/DF.14 + steps
 4-5; PR-C step 7 consolidation if the golden regeneration is noisy. Each PR is
