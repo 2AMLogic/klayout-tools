@@ -2049,9 +2049,9 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #: :func:`~klayout_tools.gen._fixed_cut_side_um`).
 #:
 #: This table only carries the fixed-size rules the curated decks do **not**
-#: yet encode as ``DrcRule.threshold_max_dbu`` (issue #2370) -- the six rules
-#: issue #2388 deferred behind this issue. :func:`_cut_fixed_size_um` reads a
-#: deck-declared ``threshold_max_dbu`` directly, so gf180mcu's
+#: yet encode as ``DrcRule.threshold_max_dbu`` (issue #2370) -- the rules
+#: issue #2388 still defers (sky130 ``licon1``/``mcon``).
+#: :func:`_cut_fixed_size_um` reads a deck-declared ``threshold_max_dbu`` directly, so gf180mcu's
 #: ``contact``/``via1``-``via4`` (and any rule a later backfill adds) need no
 #: entry here; ``tests/test_gen.py`` asserts that any layer present in *both*
 #: sources agrees, so an entry can be deleted once its deck rule carries the
@@ -2082,29 +2082,17 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #:   handles ring-shaped mcon separately (``ct.3``/``ct.3_a``); ``sky130.lydrc``
 #:   applies the same 0.17um unconditionally, and no generator draws an
 #:   ``areaid`` layer or a ring-shaped cut, so the clamp is unconditional here.
-#: - ``sky130`` ``via`` (68/44) 0.15um -- ``sky130A_mr.drc`` ``via.1a_b``
-#:   ("maximum length of via : 0.15um"), alongside ``via.1a_a``'s 0.15um
-#:   minimum (this deck's ``via.width.1``).
-#: - ``sg13g2`` ``Cont`` (6/0) 0.16um -- ``5_14_cont.drc`` ``Cnt.a``
-#:   (``cont_sq.without_bbox_width(0.16um)``, "Min. and max. Cont width").
-#: - ``sg13g2`` ``Via1`` (19/0) 0.19um -- ``5_19_via1.drc`` ``V1.a``
-#:   (``without_bbox_min/max(0.19um)``).
-#: - ``sg13g2`` ``Via2``/``Via3``/``Via4`` (29/0, 49/0, 66/0) 0.19um --
-#:   ``5_20_vian.drc`` ``V2.a``/``V3.a``/``V4.a`` (the templated ``Vn.a``).
+#: - sky130 ``via`` (68/44) 0.15um and sg13g2 ``Cont``/``Via1``-``Via4``
+#:   (``Cnt.a``, ``V1.a``-``V4.a``) used to be listed here; issue #2388's
+#:   backfill moved them into the deck as ``threshold_max_dbu``, which
+#:   :func:`_cut_fixed_size_um` reads directly.
 _PDK_CUT_FIXED_SIZE_UM: dict[str, dict[tuple[int, int], float]] = {
     "sky130": {
         (66, 44): 0.17,  # licon1.drawing -- licon.1 (issue #2594)
         (67, 44): 0.17,  # mcon.drawing -- ct.1 / ct.1_a+ct.1_b (issue #2594)
-        (68, 44): 0.15,  # via.drawing -- via.1a_a/via.1a_b
-    },
-    "sg13g2": {
-        (6, 0): 0.16,  # Cont.drawing -- Cnt.a
-        (19, 0): 0.19,  # Via1.drawing -- V1.a
-        (29, 0): 0.19,  # Via2.drawing -- V2.a (Vn.a)
-        (49, 0): 0.19,  # Via3.drawing -- V3.a (Vn.a)
-        (66, 0): 0.19,  # Via4.drawing -- V4.a (Vn.a)
     },
 }
+
 
 
 def _deck_cut_max_size_um(family: str, layer: tuple[int, int]) -> float | None:
