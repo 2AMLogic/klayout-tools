@@ -3906,6 +3906,12 @@ def _resolve_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
     family = variant
     if len(family) > 1 and family[-1].isupper():
         family = family[:-1]
+    # IHP-Open-PDK (issue #2444): the install variant is ``ihp-sg13g2`` but
+    # the shipped map is named after the process, ``sg13g2.map`` -- without
+    # this the DEF->GDS merge silently fell back to KLayout's sequential
+    # default layer numbering (Via1 cuts on 8/0, Metal2 pads on 9/0, ...).
+    if family.startswith("ihp-"):
+        family = family[len("ihp-") :]
     if family != variant:
         family_candidate = os.path.join(tech_dir, f"{family}.map")
         if os.path.isfile(family_candidate):

@@ -8023,6 +8023,24 @@ def test_resolve_layer_map_falls_back_to_family_level_file(tmp_path):
     assert resolution == "family"
 
 
+def test_resolve_layer_map_strips_ihp_prefix_for_family_file(tmp_path):
+    """IHP-Open-PDK shape (issue #2444): the variant is `ihp-sg13g2` but the
+    shipped map is named after the process, `sg13g2.map`. Missing it made the
+    DEF->GDS merge use KLayout's sequential default layer numbers."""
+    klayout_dir = tmp_path / "klayout"
+    tech_dir = klayout_dir / "tech"
+    tech_dir.mkdir(parents=True)
+    (tech_dir / "sg13g2.map").write_text("family\n", encoding="utf-8")
+
+    pdk_info = _fake_pdk_info(tmp_path, variant="ihp-sg13g2")
+    pdk_info["assets"]["klayout"] = str(klayout_dir)
+
+    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+
+    assert path == str(tech_dir / "sg13g2.map")
+    assert resolution == "family"
+
+
 def test_resolve_layer_map_returns_none_when_neither_file_exists(tmp_path):
     klayout_dir = tmp_path / "klayout"
     tech_dir = klayout_dir / "tech"
