@@ -3929,28 +3929,29 @@ def test_run_drc_sky130_met2_clean(tmp_path):
 
 def test_run_drc_sky130_via_width_violation(tmp_path):
     """A via1 (`via.drawing`, 68/44) shape narrower than the 150 dbu
-    (0.15 um) `via.width.1` threshold trips exactly one violation.
+    (0.15 um) `via.width.1` threshold trips the rule.
 
-    Elongated (not square), mirroring `_make_violation_layout`'s own note:
-    an elongated shape's `width_check` reports one edge pair per narrow run,
-    while a square shape reports one pair per violating edge direction (two,
-    for a uniformly-undersized square)."""
+    Square, not elongated: `via.width.1` also carries a fixed-size maximum
+    (`threshold_max_dbu`, issue #2388), so an elongated 100 x 2000 bar would
+    additionally trip the bounding-box cap. A uniformly-undersized square
+    reports one edge pair per violating direction (two) and stays under the
+    cap."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
-    top.shapes(via).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 150
+    top.shapes(via).insert(kdb.Box(0, 0, 100, 100))  # 100 dbu < 150
     path = tmp_path / "via_width_violation.gds"
     layout.write(str(path))
 
     report = run_drc(str(path), "sky130")
 
     assert report["status"] == "violations"
-    assert report["rule_counts"] == {"via.width.1": 1}
-    (violation,) = report["violations"]
-    assert violation["rule"] == "via.width.1"
-    assert violation["check"] == "width"
-    assert violation["layer"] == "via.drawing"
+    assert report["rule_counts"] == {"via.width.1": 2}
+    for violation in report["violations"]:
+        assert violation["rule"] == "via.width.1"
+        assert violation["check"] == "width"
+        assert violation["layer"] == "via.drawing"
 
 
 def test_run_drc_sky130_via_width_clean(tmp_path):
@@ -4002,8 +4003,8 @@ def test_run_drc_sky130_met1_enclosing_via_violation(tmp_path):
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
     top.shapes(met1).insert(kdb.Box(0, 0, 1000, 1000))
-    # 400 dbu margin on 3 sides, only 10 dbu (< 55) margin on the right.
-    top.shapes(via).insert(kdb.Box(400, 400, 990, 600))
+    # >= 400 dbu margin on 3 sides, only 5 dbu (< 55) margin on the right.
+    top.shapes(via).insert(kdb.Box(845, 400, 995, 550))
     path = tmp_path / "met1_enclosing_via_violation.gds"
     layout.write(str(path))
 
@@ -4027,7 +4028,7 @@ def test_run_drc_sky130_met1_enclosing_via_clean(tmp_path):
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
     top.shapes(met1).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 55
+    top.shapes(via).insert(kdb.Box(400, 400, 550, 550))  # 400 margin >= 55
     path = tmp_path / "met1_enclosing_via_clean.gds"
     layout.write(str(path))
 
@@ -4048,8 +4049,8 @@ def test_run_drc_sky130_met2_enclosing_via_violation(tmp_path):
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
     top.shapes(met2).insert(kdb.Box(0, 0, 1000, 1000))
-    # 400 dbu margin on 3 sides, only 10 dbu (< 55) margin on the right.
-    top.shapes(via).insert(kdb.Box(400, 400, 990, 600))
+    # >= 400 dbu margin on 3 sides, only 5 dbu (< 55) margin on the right.
+    top.shapes(via).insert(kdb.Box(845, 400, 995, 550))
     path = tmp_path / "met2_enclosing_via_violation.gds"
     layout.write(str(path))
 
@@ -4073,7 +4074,7 @@ def test_run_drc_sky130_met2_enclosing_via_clean(tmp_path):
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
     top.shapes(met2).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 55
+    top.shapes(via).insert(kdb.Box(400, 400, 550, 550))  # 400 margin >= 55
     path = tmp_path / "met2_enclosing_via_clean.gds"
     layout.write(str(path))
 
@@ -4099,7 +4100,7 @@ def test_run_drc_sky130_met2_via_layers_now_covered(tmp_path):
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
     top.shapes(met1).insert(kdb.Box(0, 0, 1000, 1000))
     top.shapes(met2).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via).insert(kdb.Box(400, 400, 600, 600))
+    top.shapes(via).insert(kdb.Box(400, 400, 550, 550))
     path = tmp_path / "met2_via_covered.gds"
     layout.write(str(path))
 
@@ -7058,7 +7059,7 @@ def test_run_drc_sg13g2_activ_enclosing_cont_violation(tmp_path):
     layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
     top.shapes(activ).insert(kdb.Box(0, 0, 1000, 1000))
     # 400 dbu margin on 3 sides, only 10 dbu (< 70) margin on the right.
-    top.shapes(cont).insert(kdb.Box(400, 400, 990, 600))
+    top.shapes(cont).insert(kdb.Box(830, 400, 990, 560))
     path = tmp_path / "sg13g2_activ_enclosing_cont_violation.gds"
     layout.write(str(path))
 
@@ -7082,7 +7083,7 @@ def test_run_drc_sg13g2_activ_enclosing_cont_clean(tmp_path):
     cont = layout.layer(6, 0)
     layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
     top.shapes(activ).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(cont).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 70
+    top.shapes(cont).insert(kdb.Box(400, 400, 560, 560))  # 400 margin >= 70
     path = tmp_path / "sg13g2_activ_enclosing_cont_clean.gds"
     layout.write(str(path))
 
@@ -7103,7 +7104,7 @@ def test_run_drc_sg13g2_gatpoly_enclosing_cont_violation(tmp_path):
     cont = layout.layer(6, 0)
     layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
     top.shapes(gatpoly).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(cont).insert(kdb.Box(400, 400, 990, 600))  # 10 dbu margin < 70
+    top.shapes(cont).insert(kdb.Box(830, 400, 990, 560))  # 10 dbu margin < 70
     path = tmp_path / "sg13g2_gatpoly_enclosing_cont_violation.gds"
     layout.write(str(path))
 
@@ -7127,7 +7128,7 @@ def test_run_drc_sg13g2_gatpoly_enclosing_cont_clean(tmp_path):
     cont = layout.layer(6, 0)
     layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
     top.shapes(gatpoly).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(cont).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 70
+    top.shapes(cont).insert(kdb.Box(400, 400, 560, 560))  # 400 margin >= 70
     path = tmp_path / "sg13g2_gatpoly_enclosing_cont_clean.gds"
     layout.write(str(path))
 
@@ -7148,7 +7149,7 @@ def test_run_drc_sg13g2_metal1_enclosing_via1_violation(tmp_path):
     via1 = layout.layer(19, 0)
     layout.set_info(via1, kdb.LayerInfo(19, 0, "Via1.drawing"))
     top.shapes(metal1).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via1).insert(kdb.Box(400, 400, 995, 600))  # 5 dbu margin < 10
+    top.shapes(via1).insert(kdb.Box(805, 400, 995, 590))  # 5 dbu margin < 10
     path = tmp_path / "sg13g2_metal1_enclosing_via1_violation.gds"
     layout.write(str(path))
 
@@ -7172,7 +7173,7 @@ def test_run_drc_sg13g2_metal1_enclosing_via1_clean(tmp_path):
     via1 = layout.layer(19, 0)
     layout.set_info(via1, kdb.LayerInfo(19, 0, "Via1.drawing"))
     top.shapes(metal1).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via1).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 10
+    top.shapes(via1).insert(kdb.Box(400, 400, 590, 590))  # 400 margin >= 10
     path = tmp_path / "sg13g2_metal1_enclosing_via1_clean.gds"
     layout.write(str(path))
 
@@ -7193,7 +7194,7 @@ def test_run_drc_sg13g2_metal2_enclosing_via2_violation(tmp_path):
     via2 = layout.layer(29, 0)
     layout.set_info(via2, kdb.LayerInfo(29, 0, "Via2.drawing"))
     top.shapes(metal2).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via2).insert(kdb.Box(400, 400, 998, 600))  # 2 dbu margin < 5
+    top.shapes(via2).insert(kdb.Box(808, 400, 998, 590))  # 2 dbu margin < 5
     path = tmp_path / "sg13g2_metal2_enclosing_via2_violation.gds"
     layout.write(str(path))
 
@@ -7217,7 +7218,7 @@ def test_run_drc_sg13g2_metal2_enclosing_via2_clean(tmp_path):
     via2 = layout.layer(29, 0)
     layout.set_info(via2, kdb.LayerInfo(29, 0, "Via2.drawing"))
     top.shapes(metal2).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via2).insert(kdb.Box(400, 400, 600, 600))  # 400 margin >= 5
+    top.shapes(via2).insert(kdb.Box(400, 400, 590, 590))  # 400 margin >= 5
     path = tmp_path / "sg13g2_metal2_enclosing_via2_clean.gds"
     layout.write(str(path))
 
@@ -7241,10 +7242,8 @@ def test_run_drc_sg13g2_metal2_enclosing_via2_clean(tmp_path):
 # TopVia2 a fixed min=max size, so the cut box below must be drawn as an
 # exact `cut_max_size_dbu` square or those two cases would also trip the
 # cut's own `width.1` rule alongside the enclosure rule under test. Via3/
-# Via4 are only min-bounded today (their max half is deferred behind issue
-# #2585), but they are drawn the same exact-size way here so the whole
-# family stays one uniform fixture -- and so they need no further change
-# when #2585 unblocks them.
+# Via4 (190 dbu) are fixed-size too since #2388's cont/via1-4 backfill, so
+# the whole family is one uniform exact-size fixture.
 # `conductor_min_width_dbu` is the conductor's own `<conductor>.width.1`
 # minimum (Metal3/Metal4/Metal5 200 dbu, TopMetal1 1640 dbu, TopMetal2
 # 2000 dbu) -- the conductor box must stay at or above it too, independent
@@ -7452,18 +7451,17 @@ def test_run_drc_sg13g2_metal_stack_enclosure_clean(
 # Issue #2370 added `DrcRule.threshold_max_dbu` and used it to close
 # gf180mcu's `CO.1`/`Vn.1` min-only gap (see
 # `test_run_drc_gf180mcu_contact_fixed_size_boundaries` above). Issue #2388
-# backfills the identical treatment onto sg13g2 -- but only onto these two
-# rules for now. sg13g2's five *other* fixed-size cut rules
-# (`cont.width.1`, `via1.width.1`-`via4.width.1`) have the same
-# `without_bbox_min/max` upstream shape and belong here too, but are
-# deferred behind issue #2585: every `klt gen` sg13g2 generator currently
-# draws those cuts at the PDK-generic `gen.CONTACT_SIZE_UM` (0.22um), over
-# the foundry maximum, so enforcing the max half would (correctly) fail
-# twenty generator tests. TopVia1/TopVia2 have no such blocker -- their
-# per-family via floor already equals the fixed size. See each rule's own
-# note in `decks/sg13g2.py`. (rule id, layer, layer name, fixed size in
-# dbu.)
+# backfills the identical treatment onto sg13g2's seven fixed-size cut rules:
+# TopVia1/TopVia2 first, then `cont.width.1` and `via1.width.1`-
+# `via4.width.1` once issue #2585's generator clamp stopped `klt gen` drawing
+# those cuts over the foundry maximum. See each rule's own note in
+# `decks/sg13g2.py`. (rule id, layer, layer name, fixed size in dbu.)
 _SG13G2_FIXED_SIZE_CUT_RULES = [
+    ("cont.width.1", (6, 0), "Cont.drawing", 160),
+    ("via1.width.1", (19, 0), "Via1.drawing", 190),
+    ("via2.width.1", (29, 0), "Via2.drawing", 190),
+    ("via3.width.1", (49, 0), "Via3.drawing", 190),
+    ("via4.width.1", (66, 0), "Via4.drawing", 190),
     ("topvia1.width.1", (125, 0), "TopVia1.drawing", 420),
     ("topvia2.width.1", (133, 0), "TopVia2.drawing", 900),
 ]
@@ -7508,7 +7506,7 @@ _SG13G2_FIXED_SIZE_CUT_BOUNDARY_CASES = [
 def test_run_drc_sg13g2_fixed_size_cut_boundaries(
     rule_id, layer, layer_name, case_id, cut_box, expected_count, tmp_path
 ):
-    """Each of sg13g2's two newly-max-bounded top-via rules is checked as a
+    """Each of sg13g2's newly-max-bounded cut/via rules is checked as a
     fixed size, mirroring `test_run_drc_gf180mcu_contact_fixed_size_boundaries`
     (issue #2388)."""
     layout = kdb.Layout()
@@ -7533,7 +7531,7 @@ def test_run_drc_sg13g2_fixed_size_cut_boundaries(
 
 
 def test_run_drc_sg13g2_fixed_size_cut_rules_declare_both_bounds():
-    """Structural half of the above: each of the two sg13g2 rules #2388
+    """Structural half of the above: each of the sg13g2 rules #2388
     covers carries a `threshold_max_dbu` equal to its own `threshold_dbu` --
     a *fixed* size, not a range."""
     deck = get_deck("sg13g2")
@@ -7826,8 +7824,8 @@ def test_run_drc_sg13cmos5l_fixed_size_cut_boundaries(
     as a fixed size, mirroring
     `test_run_drc_gf180mcu_contact_fixed_size_boundaries`/
     `test_run_drc_sg13g2_fixed_size_cut_boundaries` (issue #2388). Unlike
-    sg13g2's cont/via1-4, none of these needed the issue #2585 deferral --
-    no sg13cmos5l generator draws these cuts."""
+    sg13g2's cont/via1-4, none of these ever needed issue #2585's generator
+    clamp -- no sg13cmos5l generator draws these cuts."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     cut = layout.layer(*layer)
@@ -7863,6 +7861,42 @@ def test_run_drc_sg13cmos5l_fixed_size_cut_rules_declare_both_bounds():
         assert rule.check == "width"
         assert rule.threshold_max_dbu == rule.threshold_dbu, rule.id
     assert seen == fixed_size_rule_ids
+
+
+def test_run_drc_sky130_via_fixed_size_rule_declares_both_bounds():
+    """Structural half of the via.width.1 fixed-size boundaries below: the
+    rule declares `threshold_max_dbu == threshold_dbu` (0.15um, via.1a_b)."""
+    (rule,) = [r for r in get_deck("sky130") if r.id == "via.width.1"]
+    assert rule.check == "width"
+    assert rule.threshold_dbu == 150
+    assert rule.threshold_max_dbu == rule.threshold_dbu
+
+
+@pytest.mark.parametrize(
+    "case_id,cut_box,expected_count",
+    _fixed_size_cut_boundary_cases(150),
+    ids=[case[0] for case in _fixed_size_cut_boundary_cases(150)],
+)
+def test_run_drc_sky130_via_fixed_size_boundaries(
+    case_id, cut_box, expected_count, tmp_path
+):
+    """sky130's `via.width.1` is a fixed 0.15um size (`via.1a_a` minimum,
+    `via.1a_b` maximum length; issue #2388), mirroring
+    `test_run_drc_gf180mcu_contact_fixed_size_boundaries`. Rectangularity
+    (`via.1a`) is a documented residual approximation: not tested here."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    via = layout.layer(68, 44)
+    layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
+    top.shapes(via).insert(cut_box)
+    path = tmp_path / f"via_fixed_{case_id}.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["rule_counts"].get("via.width.1", 0) == expected_count
+    if expected_count == 0:
+        assert report["status"] == "clean"
 
 
 def test_run_drc_sg13g2_coverage_deck_scope_matches_rule_scopes(tmp_path):

@@ -6168,11 +6168,11 @@ def test_cut_fixed_size_table_agrees_with_every_curated_deck():
 @pytest.mark.parametrize(
     ("family", "layer", "expected_um"),
     [
-        ("sky130", (68, 44), 0.15),  # via -- table (via.1a_b)
+        ("sky130", (68, 44), 0.15),  # via -- deck threshold_max_dbu (via.1a_b)
         ("sky130", (66, 44), 0.17),  # licon1 -- table (licon.1), issue #2594
         ("sky130", (67, 44), 0.17),  # mcon -- table (ct.1_b), issue #2594
         ("sky130", (69, 44), 0.0),  # via2 -- no curated size bound (#2449)
-        ("sg13g2", (6, 0), 0.16),  # Cont -- Cnt.a
+        ("sg13g2", (6, 0), 0.16),  # Cont -- deck threshold_max_dbu (Cnt.a)
         ("sg13g2", (19, 0), 0.19),  # Via1 -- V1.a
         ("sg13g2", (66, 0), 0.19),  # Via4 -- V4.a
         ("gf180mcu", (33, 0), 0.22),  # contact -- deck threshold_max_dbu
