@@ -273,6 +273,17 @@ exploration) starves the daemon.
   counts calls per identity role: `reader` (a reader App's pool), `writer`,
   `writer-fallback` (a read a reader failed on, re-run on the writer) and
   `unknown` (a call recorded outside the `gh` facade, or by an older binary).
+- Calls by billed bucket (W1): `loom-daemon forge calls --by bucket` (or
+  `--by caller|role|repo`, `--since 90m|3h`) rolls up this host's forge-call
+  sink per `(account, cred_owner, resource, reset)`. Each row shows what this
+  host was charged (`ok` rows × pages; the free `rate_limit` probe is counted
+  as `free`, never charged), its `304`s and its rate-limited calls,
+  and the table is followed by the bucket book's newest `used`/`limit`/reset
+  per App installation. The credential is classified by its `GH_CONFIG_DIR`
+  shape alone (`gh-config` / `gh-config-by-owner/<owner>` = the writer,
+  `gh-config-by-owner/<owner>/<app-id>` = a reader); an env token is booked
+  `env-token` and anything else `ambient`. It reads local files only, so it
+  is safe to run on a rate-limited host.
 
 ## GitHub App identity (#4430)
 
@@ -435,10 +446,39 @@ Every host is configured the same way. There is no per-host pinning:
   history is not recognised until the host moves to `forge.identities`.
   With no readers configured at all, reads share the writer, as before.
 - **Read routing**: each repo's reads go to `hash(owner/repo) mod N`, the same
-  reader on every host. A reader that hits a rate limit or an auth/coverage
-  error is withdrawn (until the reported reset, where GitHub gives one) and
-  the read is retried once on the writer. Reads fall back to the writer when
-  no reader is usable.
+  reader on every host. A reader entry may carry `"owners": ["acme"]` to
+  serve only those owners; `N` then counts only the readers serving the
+  repo's owner. A hot repo listed in `forge.readPool.routing.splitRepos` is
+  split per request (one URL, one reader), and a reader whose bucket is
+  projected to run dry spills part or all of its repo's reads to a reader
+  with headroom until its reset (W4-B) — see
+  [daemon-reference](daemon-reference.md#read-pool-routing-forgereadpoolrouting).
+  A failed read is retried once on the writer, and the
+  reader is withdrawn only from what failed (W4-A), because GitHub meters each
+  App installation per owner and per resource:
+  - a **rate limit** withdraws the reader from that owner's refused pool
+    (`core`, `graphql` or `search`) until the pool's reset — the refusal's own
+    `x-ratelimit-reset`, else a free on-demand `gh api rate_limit` probe of
+    that reader (at most one per App and owner per minute), else 5 minutes —
+    clamped to between 30 s and 61 minutes. Its other owners and that owner's
+    other pools keep serving;
+  - a **secondary limit** (the message, or a `403`/`429` carrying
+    `Retry-After`) withdraws that owner's every pool for `Retry-After`, else
+    60 s, never until the hourly reset;
+  - **bad credentials** (`401`) withdraw that owner's every pool for 5 minutes;
+  - a **coverage** error (`403`/`404` the writer can read) withdraws the
+    reader for that one repo for an hour;
+  - only a **mint or key** failure withdraws the reader App-wide.
+
+  Each withdrawal is exported as a `forge.reader.withdrawn` span
+  ([`telemetry-schema.md`](telemetry-schema.md)), and `loom-daemon status`
+  lists the live scoped ones under `reader withdrawals (scoped)`. Reads fall
+  back to the writer when no reader is usable.
+  `LOOM_READ_ROUTING=legacy` restores the earlier behaviour (every rate limit
+  or credential failure withdraws the App everywhere, for 5 minutes or until
+  the reported reset). It is read on every call with no cache, so it needs no
+  new release; the daemon sees it from its next start
+  ([`daemon-reference.md`](daemon-reference.md#reader-withdrawal-kill-switch-loom_read_routing)).
 - **CI telemetry** reads its repos' runs, jobs, logs and artifacts on each
   repo's reader. GitHub's `Link` header spells page 2+ of a repo listing as
   `repositories/<id>/…`, which names no repo, so the poller reads every page
