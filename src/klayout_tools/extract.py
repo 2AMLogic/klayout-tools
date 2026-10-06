@@ -2283,6 +2283,7 @@ def run_extract(
         subcircuit_cell, subcircuit_output, abstract_cell_patterns
     )
     subcircuit_info: dict[str, Any] = {}
+    missing_flavour_markers: list[dict[str, Any]] = []
 
     (
         netlist,
@@ -2328,6 +2329,7 @@ def run_extract(
         # lookup (see that function's docstring); `None` unless `--pdk`/
         # `--pdk-root` resolved one above.
         pdk_info=pdk_info,
+        missing_flavour_markers=missing_flavour_markers,
     )
 
     # `--subcircuit` (issue #2245), layout-dependent half: both rejections
@@ -3072,6 +3074,10 @@ def run_extract(
         # extracted MOS geometry -- see run_extract's docstring and
         # `_detect_voltage_domain_overlap` for the field's full meaning.
         "voltage_domain_warnings": voltage_domain_warnings,
+        # Additive field (issue #2417): always a list, empty unless a deck
+        # declares `mos_flavours` whose marker layer has zero shapes in the
+        # whole layout -- see `_detect_missing_flavour_markers`.
+        "missing_flavour_markers": missing_flavour_markers,
         # Additive field (issue #555): always a list, empty when no PMOS
         # device's body net is the anonymous, KLayout-synthesized kind -- see
         # run_extract's docstring and `_detect_unbiased_pmos_body_nets` for
@@ -3767,6 +3773,7 @@ def extract_netlist_from_layout(
     subcircuit_info: dict[str, Any] | None = None,
     substrate_spreading_net: str | None = None,
     pdk_info: dict[str, Any] | None = None,
+    missing_flavour_markers: list[dict[str, Any]] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -4166,6 +4173,25 @@ def extract_netlist_from_layout(
         voltage_domain_warnings,
     ) = _detect_voltage_domain_overlap(layout, top_cell, deck, deck_name)
     warnings = warnings + voltage_domain_prose_warnings
+
+    # Missing flavour markers (issue #2417): additive diagnostic, reported
+    # through the optional `missing_flavour_markers` out-parameter (same
+    # idiom as `subcircuit_info`) so this function's return tuple -- and its
+    # other callers' unpacking -- stays unchanged. Only evaluated under
+    # `--pdk`: flavour selection only changes the bound model name when a PDK
+    # resolves the binding, so without it the default-flavour substitution
+    # is harmless and warning would be noise on every core-only layout.
+    (
+        missing_marker_prose_warnings,
+        missing_marker_entries,
+    ) = (
+        _detect_missing_flavour_markers(layout, top_cell, deck, deck_name)
+        if pdk_info is not None
+        else ([], [])
+    )
+    warnings = warnings + missing_marker_prose_warnings
+    if missing_flavour_markers is not None:
+        missing_flavour_markers.extend(missing_marker_entries)
 
     return (
         netlist,
@@ -6818,6 +6844,46 @@ def _detect_unmodelled_poly_bodies(
             "'Known limitation: unmodelled device geometry'."
         )
     return warnings, unmodelled_poly
+
+
+def _detect_missing_flavour_markers(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    deck_name: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Flag each ``deck.mos_flavours`` marker layer with zero shapes anywhere
+    in the layout (issue #2417).
+
+    With no marker geometry, flavour selection never fires and every MOS
+    device silently binds to the deck's default flavour. This is distinct
+    from the marker being present but not overlapping active (a legitimate
+    layout), which is *not* flagged.
+
+    Returns ``(warnings, entries)``; each entry is ``{"deck": str,
+    "flavour": str, "marker": "<layer>/<datatype>"}``. Both empty when the
+    deck declares no flavour or every marker has geometry.
+    """
+    warnings: list[str] = []
+    entries: list[dict[str, Any]] = []
+    for flavour in deck.mos_flavours:
+        if not _region(layout, top_cell, flavour.marker).is_empty():
+            continue
+        marker_label = f"{flavour.marker[0]}/{flavour.marker[1]}"
+        warnings.append(
+            f"deck '{deck_name}' declares MOS flavour '{flavour.flavour}' "
+            f"scoped by marker layer {marker_label}, but that layer has no "
+            "shapes in the layout; every MOS device binds to the deck's "
+            "default flavour"
+        )
+        entries.append(
+            {
+                "deck": deck_name,
+                "flavour": flavour.flavour,
+                "marker": marker_label,
+            }
+        )
+    return warnings, entries
 
 
 def _detect_voltage_domain_overlap(
