@@ -430,6 +430,24 @@ disagree about a finding with nothing in either payload to say why, and a
 box over empty space is indistinguishable from one that bit. See
 [`docs/cli/erc.md`](cli/erc.md)'s "The remainder gates".
 
+Issue #2415 adds a fourth, `provenance.label_layers`: one entry per
+`stackup` role that declares a `label_layer`, in stackup order (`{name,
+label_layer, label_text_count}`), `[]` when no role declares one. Always
+present on a successful report. `label_text_count` counts text
+*occurrences* on that layer across the analysed top-cell hierarchy (each
+repeated string and each child-cell instance separately), before any
+conductor-overlap filtering. A declared label layer carrying no text
+otherwise surfaces in the JSON only as `erc.unconnected_net` and `null`
+gate nets — indistinguishable from a real supply defect — while its
+issue #2401 warning goes to stderr, which a committed report does not
+capture. `0` means no text was present (usually, not provably, a
+mis-transcribed layer/datatype); a positive count does not show that the
+labels touch the intended conductor. Evidence only — no finding, status
+or exit-code change. Additive, no `schema_version` bump; a report
+predating #2415 lacks the key, and a reader must treat that absence as
+"evidence not recorded", not as an empty array. See
+[`docs/cli/erc.md`](cli/erc.md)'s `provenance.label_layers` row.
+
 `klt power` (issue #2349) emits the block for the same two-input reason
 `klt erc` does — its IR/EM verdict is a joint function of the layout
 *and* the spec's `stackup`/`vias` sheet-resistance and EM declarations,

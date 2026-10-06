@@ -530,6 +530,12 @@ from .extract import (
 #: neither selects nothing and produces byte-identical output, and the
 #: existing :data:`REASON_DEGENERATE_WELL_SELECTION` token is reused rather
 #: than joined by a new one. No bump.
+#: Issue #2415 adds one always-present ``provenance`` key, ``label_layers``
+#: (one ``{name, label_layer, label_text_count}`` entry per stackup role
+#: declaring a ``label_layer`` -- see :func:`_register_label_layer`), so the
+#: #2401 empty-label-layer condition is visible in JSON, not only on stderr.
+#: Evidence only: no finding, status or coverage value changes. A new key on
+#: an existing object is additive. No bump.
 SCHEMA_VERSION = 1
 
 
@@ -3811,12 +3817,14 @@ def _warn_label_layer_empty(verb: str, name: str, label_layer: str) -> None:
     ``label_layer`` carries **zero** text objects in the analysed top cell
     (issue #2401).
 
-    An empty label layer is silent everywhere else in the report: every
-    ``gates[].net`` on that role reads ``null`` (indistinguishable from a
-    spec with no ``label_layer`` at all) and every ``nets[]`` entry that
-    expects to match through it resolves zero islands and is reported as
-    ``erc.unconnected_net`` -- which reads as "this net is not in the
-    layout", i.e. a blocking supply-connectivity defect. In practice that
+    In the report's findings an empty label layer is indistinguishable
+    from a real defect: every ``gates[].net`` on that role reads ``null``
+    (as with a spec with no ``label_layer`` at all) and every ``nets[]``
+    entry that expects to match through it resolves zero islands and is
+    reported as ``erc.unconnected_net`` -- which reads as "this net is not
+    in the layout", i.e. a blocking supply-connectivity defect. The only
+    JSON evidence of the cause is ``provenance.label_layers[]``'s
+    ``label_text_count: 0`` for that role (issue #2415). In practice that
     combination is almost always a mis-transcribed layer/datatype (a
     ``.pin`` polygon layer named where the PDK's ``.label`` text layer was
     meant) rather than a real connectivity failure. Printed to stderr,
@@ -3842,6 +3850,7 @@ def _register_label_layer(
     entry: dict[str, Any],
     conductor_region: Any,
     verb: str | None,
+    label_layers: list[dict[str, Any]] | None = None,
 ) -> None:
     """Register a ``stackup`` entry's declared ``label_layer`` text onto its
     conductor region in the ``LayoutToNetlist`` graph -- and warn when that
@@ -3853,12 +3862,29 @@ def _register_label_layer(
     of ``None`` registers the text but skips the warning: the tie-graph
     re-extraction (:func:`_extract_connectivity`'s second caller) walks the
     same ``stackup`` again, and the warning is printed once per affected
-    entry, not once per extraction."""
+    entry, not once per extraction.
+
+    ``label_layers`` (issue #2415), when given, receives one
+    ``provenance.label_layers[]`` entry for this role: the role ``name``, its
+    normalized ``label_layer`` string and ``label_text_count`` -- the number
+    of text *occurrences* in the very collection registered below (flattened
+    over the top-cell hierarchy, so each child-cell instance and each
+    repeated string counts separately; before any conductor-overlap
+    filtering). Only the primary extraction passes a collector, so the tie
+    re-extraction never duplicates an entry."""
     if entry["label_layer"] is None:
         return
     label_texts = _texts(layout, top_cell, entry["label_layer"])
+    layer, datatype = entry["label_layer"]
+    if label_layers is not None:
+        label_layers.append(
+            {
+                "name": entry["name"],
+                "label_layer": f"{layer}/{datatype}",
+                "label_text_count": label_texts.count(),
+            }
+        )
     if verb is not None and label_texts.is_empty():
-        layer, datatype = entry["label_layer"]
         _warn_label_layer_empty(verb, entry["name"], f"{layer}/{datatype}")
     l2n.register(label_texts, f"{entry['name']}_label")
     l2n.connect(conductor_region, label_texts)
@@ -3872,6 +3898,7 @@ def _extract_connectivity(
     ties: list[dict[str, Any]],
     device_cuts: dict[str, Any],
     verb: str | None,
+    label_layers: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
     """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
     over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
@@ -3881,7 +3908,11 @@ def _extract_connectivity(
     objects in the analysed top cell additionally gets a one-line stderr
     warning (:func:`_warn_label_layer_empty`, issue #2401) -- the
     mis-transcribed-layer case the report alone renders as
-    ``erc.unconnected_net`` on every net matched through it.
+    ``erc.unconnected_net`` without that warning. ``label_layers``, when
+    given, collects the measured text count of every declared label layer
+    in stackup order (``provenance.label_layers``, issue #2415; see
+    :func:`_register_label_layer`), so a JSON consumer sees the same
+    condition without reading stderr.
 
     Returns ``(l2n, circuit, layer_index, tie_layers)``.
 
@@ -3958,7 +3989,9 @@ def _extract_connectivity(
         regions[entry["name"]] = conductor_region
         layer_index[entry["name"]] = l2n.register(conductor_region, entry["name"])
         l2n.connect(conductor_region)
-        _register_label_layer(l2n, layout, top_cell, entry, conductor_region, verb)
+        _register_label_layer(
+            l2n, layout, top_cell, entry, conductor_region, verb, label_layers
+        )
 
     for via in vias:
         via_region = _cut_device_bodies(
@@ -4352,8 +4385,18 @@ def run_erc(
             for entry in devices_applied
         ] + deck_devices_applied
 
+    # `provenance.label_layers` (issue #2415): measured by the primary
+    # extraction only -- the tie re-extraction below passes no collector.
+    label_layers: list[dict[str, Any]] = []
     l2n, circuit, layer_index, _ = _extract_connectivity(
-        layout, top_cell, stackup, vias, [], device_cuts, verb="klt erc"
+        layout,
+        top_cell,
+        stackup,
+        vias,
+        [],
+        device_cuts,
+        verb="klt erc",
+        label_layers=label_layers,
     )
 
     gate_role = stackup[0]["name"]
@@ -4715,6 +4758,15 @@ def run_erc(
     # that bit, exactly as `provenance.devices[].body_area_um2 == 0.0` is.
     # Always present; `[]` when no declared net asked for one.
     provenance["net_exclusions"] = net_exclusions
+
+    # `provenance.label_layers` (issue #2415): the measured effect of every
+    # `stackup[].label_layer` declaration, in stackup order -- the same
+    # auditability contract as `provenance.devices[].body_area_um2`. A
+    # declared label layer carrying zero text otherwise reaches the JSON
+    # only as `erc.unconnected_net` / `gates[].net: null`, which reads like
+    # a real supply defect; its #2401 warning is stderr-only. Always
+    # present; `[]` when no stackup role declares a `label_layer`.
+    provenance["label_layers"] = label_layers
 
     return {
         "schema_version": SCHEMA_VERSION,
