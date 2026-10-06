@@ -578,6 +578,14 @@ written to every block.
       disclosed class is still the caller's word, so it establishes
       nothing; what it establishes is *legibility*, which is the whole
       point of the disclosure vocabulary.
+      **An asserted substrate region must be re-measured, not trusted**
+      (issue #2427): when a cited tie rests on `well_boxes`, quote that
+      tie's `erc_coverage.well_assertion_coverage` entry
+      (`uncovered_tap_area_um2` / `uncovered_tap_fraction`). Zero
+      `erc.missing_tie` covers only what the assertion covers; tap geometry
+      outside it was never examined, and a non-zero uncovered fraction means
+      the assertion no longer spans the drawn device contacts. Reporting
+      only — `klt signoff` does not grade it.
       **The spec's own coverage of the layout must be disclosed, not
       assumed** (issue #2389), on the same principle item 3 applies to a
       DRC deck's rule-free layers: `klt erc` scopes its connectivity model

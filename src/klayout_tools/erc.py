@@ -880,6 +880,7 @@ def _connectivity_coverage(
     ties_disclosure: dict[str, Any] | None = None,
     well_asserted_ties: set[str] | None = None,
     undeclared_stream_layers: list[str] | None = None,
+    well_assertion_coverage: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -1072,6 +1073,8 @@ def _connectivity_coverage(
         "checked_by_assertion": sorted(checked_by_assertion),
         "checked_by_well_assertion": sorted(checked_by_well_assertion),
         "layers_in_stream_without_declaration": list(undeclared_stream_layers or []),
+        # Issue #2427: reported, never graded -- see `_well_assertion_coverage`.
+        "well_assertion_coverage": list(well_assertion_coverage or []),
     }
 
 
@@ -3623,6 +3626,53 @@ def _boxes_region(
     return region.merged()
 
 
+def _well_assertion_coverage_entry(
+    kdb: Any,
+    layout: Any,
+    top_cell: Any,
+    tie: dict[str, Any],
+    asserted: Any,
+) -> dict[str, Any]:
+    """Issue #2427: how much of the stream's drawn tap geometry a
+    ``well_boxes`` assertion leaves outside every asserted polygon.
+
+    The degeneracy test (:func:`_tie_well_region`) only asks whether the
+    assertion is indistinguishable from the whole top-cell extent. It cannot
+    see an assertion going *stale* as a layout grows devices outside it --
+    those fall outside every asserted polygon, so ``_tie_findings`` never
+    examines them. This is the number that makes that visible across
+    revisions. Reporting only: it feeds no verdict and no skip.
+
+    ``drawn_tap_area_um2`` is the merged drawn area of the tie's declared
+    ``tap_layer`` (before any ``tap_requires``/``tap_boxes`` narrowing -- the
+    drawn device-contact geometry, independent of the caller's claims);
+    ``uncovered_tap_area_um2`` the part of it outside the asserted region.
+    ``uncovered_tap_fraction`` is ``null`` when no tap geometry is drawn.
+    ``extent_uncovered_fraction`` is the same ratio the degeneracy test uses
+    (top-cell extent outside the assertion), for context.
+    """
+    scale = layout.dbu * layout.dbu
+    drawn = _region(layout, top_cell, tie["tap_layer"]).merged()
+    drawn_area = drawn.area()
+    uncovered_area = (drawn - asserted).area()
+    extent = kdb.Region(top_cell.bbox())
+    extent_area = extent.area()
+    return {
+        "id": work_id("erc.missing_tie", tie["name"]),
+        "tap_layer": f"{tie['tap_layer'][0]}/{tie['tap_layer'][1]}",
+        "drawn_tap_area_um2": round(drawn_area * scale, 6),
+        "uncovered_tap_area_um2": round(uncovered_area * scale, 6),
+        "uncovered_tap_fraction": (
+            round(uncovered_area / drawn_area, 6) if drawn_area > 0 else None
+        ),
+        "extent_uncovered_fraction": (
+            round((extent - asserted).area() / extent_area, 6)
+            if extent_area > 0
+            else None
+        ),
+    }
+
+
 def _tie_well_region(
     kdb: Any,
     layout: Any,
@@ -3927,6 +3977,12 @@ def _extract_connectivity(
         # that assertion is degenerate (issue #2255). Everything below is
         # identical either way: the well is the well, however it was named.
         well_region, well_degenerate = _tie_well_region(kdb, layout, top_cell, tie)
+        # Issue #2427: disclosure-only staleness measure for `well_boxes`.
+        well_assertion_entry = (
+            _well_assertion_coverage_entry(kdb, layout, top_cell, tie, well_region)
+            if tie["well_boxes"]
+            else None
+        )
         # Issue #2377: a *drawn* `well_layer` (never `well_boxes` -- an
         # asserted region cannot be empty, see `_tie_well_region`) that
         # draws no geometry at all in this stream. Measured here, before
@@ -3998,6 +4054,9 @@ def _extract_connectivity(
                 # extent -- always `False` for a drawn `well_layer`. Read by
                 # `_degenerate_tie_reasons`.
                 "well_degenerate": well_degenerate,
+                # Issue #2427: see `_well_assertion_coverage_entry`; `None`
+                # unless this tie asserted `well_boxes`.
+                "well_assertion_entry": well_assertion_entry,
                 # Issue #2377: whether this tie names a *drawn* `well_layer`
                 # that draws no geometry at all in this stream -- always
                 # `False` for an asserted (`well_boxes`) tie, since an
@@ -4430,6 +4489,7 @@ def run_erc(
     degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
+    well_assertion_coverage: list[dict[str, Any]] = []
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
             layout, top_cell, stackup, vias, ties, device_cuts, verb=None
@@ -4461,6 +4521,15 @@ def run_erc(
             for tie in tie_layers
             if tie["well_asserted"] and tie["name"] not in degenerate_ties
         }
+        well_assertion_coverage = sorted(
+            (
+                tie["well_assertion_entry"]
+                for tie in tie_layers
+                if tie["well_assertion_entry"] is not None
+                and tie["name"] not in degenerate_ties
+            ),
+            key=lambda entry: entry["id"],
+        )
     erc_findings.sort(
         key=lambda f: (
             f["rule"],
@@ -4556,6 +4625,7 @@ def run_erc(
             _spec_declared_layers(stackup, vias, ties, devices),
             deck_obj,
         ),
+        well_assertion_coverage,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)

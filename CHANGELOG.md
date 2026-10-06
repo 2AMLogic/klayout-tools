@@ -1699,6 +1699,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   parent wire reaches still resolves its body pin onto an island. See
   `docs/cli/extract.md`'s "A macro's own well tie is restored as a
   connectivity bridge".
+- **Added** (#2427, `klt erc`, additive — **no** `schema_version` bump: one
+  new `erc_coverage` key, no new spec key, no change to any existing value):
+  `erc_coverage.well_assertion_coverage` reports, per non-degenerate tie that
+  asserted `well_boxes`, the drawn `tap_layer` area left outside every
+  asserted polygon (`drawn_tap_area_um2`, `uncovered_tap_area_um2`,
+  `uncovered_tap_fraction`, `extent_uncovered_fraction`), so a stale
+  assertion shows as a number. Reporting only; no grading change. See
+  `docs/cli/erc.md`.
 - **Added** (#2389, `klt erc`, additive — **no** `schema_version` bump: one
   new `erc_coverage` key, no new spec key, no new finding kind, and no
   change to any existing field's value for any input): a new
