@@ -1672,6 +1672,17 @@ reports `hold`, not `stop`. `status --json` carries `fleet_store.state`
 (`proceed` / `hold` / `stop`); a transition — never the steady state — is also
 published on the event bus as `fleet.sync.state`.
 
+### ETA fit publication branch (#10395)
+
+Besides the reviewed state on `fleet.ref`, the store carries one machine
+artifact on its own branch, `fleet.etaFitRef` (default `eta-fit`): the fleet
+captain's fitted ETA coefficients (`eta/fit/<fit_id>.json` plus the
+`eta-fit-pub/v1` envelope `eta/fit/latest.json`). The captain's writer App needs
+`contents: write` on the store and the branch must be exempt from the `main`
+ruleset; other hosts read it with the App they already use. `fleet.etaFitMaxAgeDays`
+(default 3) bounds how old a publication may be. Contract, verification and
+fallback: [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263).
+
 ## Fleet model A/B — `sweep-experiment plan` (#8055 phase 1)
 
 `loom-daemon sweep-experiment` already randomizes **per issue**, by parity
@@ -2293,6 +2304,29 @@ a key. Only the six keys below order the queue.
    issue that leaves the listing — every `loom:building` claim — is read again
    when it returns. Both affect ordering among starred issues only; see
    `StarredAtCache`'s "Accepted staleness" doc comment.
+
+   **Restart store.** Known starred-ats also persist across a daemon restart or
+   roll, so a roll does not re-read every starred issue's timeline at once. The
+   file is `starred-<sha16(cwd|repo)>.json` in the daemon's private listing-cache
+   dir (`${TMPDIR:-/tmp}/loom-forge-listing-cache`, or `LOOM_LISTING_CACHE_DIR`),
+   one per workspace key, written atomically and deleted after 7 days untouched.
+   It is consulted only on an in-process miss, after a loom-ui intent's
+   `requested_at` (which always wins), and a persisted value is reused only when
+   the issue's level-label set is unchanged, the value was seen within the
+   last 30 minutes (`last_seen`, rewritten at most every 5 minutes), and the
+   issue's listed `updated_at` is no later than the one the value was confirmed
+   under (a missing `updated_at` reads). Label events advance `updated_at`, so
+   an unstar and re-star made while the daemon was down is read, not masked.
+   The same `updated_at` check applies in process: a known starred-at is read
+   again on the first tick whose listing shows the issue updated. Unknown
+   starred-ats are never persisted, so the 10-minute retry still applies. Every
+   in-process drop is mirrored: an issue that leaves the starred set loses its
+   entry and a nothing-starred tick deletes the file, so an unstar and re-star
+   reads the new time. **`LOOM_STARRED_AT_PERSIST=0`** (also `false`/`off`/`no`)
+   turns the store off: nothing is read or written. `status` shows how lookups
+   were answered under `last_work_finder_tick.starred_at_cache` (`mem_hit`,
+   `disk_hit`, `intent_hit`, `read_known`, `read_none`, `read_err`, cumulative
+   since start); the `read_*` rows are the timeline reads that remain.
 3. **Red-main fixes first**: an issue whose body carries
    `<!-- loom:main-red-fix -->` at the start of a line, **only while its repo's
    `main` is verified red** (`WorkspaceHealthStates::is_halted`). A marker on a
@@ -2932,7 +2966,7 @@ rules with `git check-ignore`.
 | `autonomous.eta.historyScope` | `LOOM_ETA_HISTORY_SCOPE` | `augment` — `local` (this host's journals), `augment` (plus the cached fleet snapshot) or `fleet` (the snapshot alone). A no-op until a snapshot is cached (#9343); since #10263 the fleet refresh task below caches one by default, so live estimates switch to `scope = fleet` on a host with reader Apps. `local` opts out |
 | `autonomous.eta.fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily coefficient refit (#10245). It checks hourly, fits at most once per UTC day into `.loom/state/eta/fit/`, makes no forge call, and runs only with `autonomous.eta.enabled`. A no-op until a snapshot is cached. With `fleetRefresh.enabled` (below, #10263) the check runs at the end of every fleet refresh cycle instead of on its own task, so it always sees fresh snapshots. Read at start |
 | `autonomous.eta.current.{finish,land}` | none | `finish-v1` / `land-v1` |
-| `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. **Restart required**. **Multi-host fleets must declare `fleet.captain`** (#10329): only the captain refreshes, and with no captain every host with a reader does, against the same shared reader budgets — see [Fleet captain](#fleet-captain-8848) |
+| `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. **Restart required**. **On a multi-host fleet declare `fleet.captain` together with `fleet.repo`** (#10329, #10395): only the captain refreshes and fits, and it publishes the fit through the store for every other host to serve. With no captain every host with a reader refreshes, against the same shared reader budgets; with a captain but no `fleet.repo` the other hosts cannot learn the fit and drift to `no_model`, so do not declare one there — see [Fleet captain](#fleet-captain-8848) and [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263) |
 | `autonomous.eta.fleetRefresh.intervalSecs` | `LOOM_ETA_FLEET_REFRESH_INTERVAL_SECS` | `3600` (floor `900`); first cycle 120 s after start |
 | `autonomous.eta.fleetRefresh.maxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_MAX_CALLS` | `300` forge calls per cycle for refresh passes, host-wide (`304`s and errors count) |
 | `autonomous.eta.fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `600` per cycle for backfill passes, host-wide (was `1500`, most of a 5,000/h installation, #10329); a larger backfill resumes next cycle. Spend per hour is `budget × 3600 / intervalSecs`, so a lowered `intervalSecs` multiplies it |
@@ -7296,6 +7330,74 @@ carries each repo's own `token_pool_dir`/`ranking_present`/
 this loop uses), and `health --json`'s `tokens.detail.per_repo` surfaces it —
 see [token-pool.md's `loom-daemon health` distinction](token-pool.md#loom-daemon-healths-daemon-cwd-vs-operator-repo-distinction-5269)
 for the full incident writeup and the now-obsolete `$HOME`-refresh workaround.
+
+### Repo facts: base repo and canonical owner without a call per use (`LOOM_REPO_FACTS`)
+
+Several hot paths used to ask the forge the same static question on every
+pass: the worktree and primary-checkout reapers, `landed` and `clean` ran
+`gh api repos/{owner}/{repo} --jq .owner.login` (`clean.repo_owner`), and the
+open-linked-PR probe, the dispatch guards and the telemetry collector ran
+`gh repo view` (`worktree.resolve_repo`, `guard.repo_nwo`,
+`collector.repo_slug`). The answer changes only on a rename, a transfer or a
+remote edit. `loom-daemon/src/forge_repo_facts.rs` now answers it from two
+layers:
+
+1. **The base repo**, resolved locally the way gh resolves it (`GH_REPO` >
+   `gh repo set-default` > `upstream` > `github` > `origin`, the same port
+   write scoping uses). Each site keeps its own `GH_REPO` rule: placeholder
+   (`gh api`) sites honour `LOOM_REPO`/`GH_REPO`, `gh repo view` sites ignore
+   it. The answer is memoised until any git config file that defines it
+   changes. The fingerprint is `(dev, inode, length, mtime)` of every file
+   `git config --list --show-origin` read (system, global, includes),
+   `<common-dir>/config` and `<git-dir>/config.worktree` (presence counts),
+   plus the effective `GH_REPO`. A memo hit re-stats those files and forks
+   nothing. The ETag store's `origin` identity uses the same fingerprint, so a
+   `git remote set-url` is seen without a restart.
+2. **The canonical record**: the post-redirect `owner/name` from one
+   conditional `GET repos/<nwo>` (reader-first, call row `repo_facts.verify`,
+   op `repo.view`). It is kept in the private ETag store directory as
+   `repofacts-<hash>.json` (`0700` directory, atomic writes) and is re-read at
+   most every `LOOM_REPO_FACTS_VERIFY_SECS`. First-hand responses that name
+   the repo (issue listings' `repository_url`, pulls rows'
+   `base.repo.full_name`) refresh it for free when they match. When they do
+   not match, the record is marked suspect and re-read before its next use.
+   It is never rewritten from an observed body. A failed read backs off for
+   300 s. A 404, a 410 or "Could not resolve to a Repository" from a call that
+   used the fact marks the record suspect.
+
+**Ambiguous roots.** A checkout whose local answer may differ from gh's is
+cross-checked once per fingerprint against gh itself, using the command the
+site replaced (`repo_facts.crosscheck`). Such checkouts have more than one
+remote, a `gh-resolved` pin, a non-`github.com` or ssh-alias host, a
+`GH_REPO`/`LOOM_REPO` that differs from origin, or a `url.*.insteadOf` rewrite.
+On disagreement the root keeps its legacy forge calls for the life of the
+process, the counter `repo_facts.resolver_disagree` is bumped and a warning is
+logged. A remote that names a pre-rename slug bumps `repo_facts.redirected`
+and logs once per root. Fix it with `git remote set-url`.
+
+**Verified negatives are confirmed.** A `head=<owner>:<branch>` filter built
+from a stale owner returns `[]`, which reads as "no PR". So, for an owner that
+came from a record:
+
+- every row of a non-empty pulls answer must name the canonical repo as its
+  `base.repo.full_name`, else the status is `Unknown`;
+- an empty answer is `NoPr` only after a forced re-read of the record
+  (`repo_facts.confirm`) says the owner is unchanged. That costs at most one
+  read per root per reaper pass. A changed owner or a failed read gives
+  `Unknown`, which the reapers map to `SkipUnknownPrStatus`;
+- the open-linked-PR probe's `NoneOpen` gets the same confirm unless the
+  record was read in this lookup or this pass. A failed confirm is
+  `ProbeFailed`, so orphan recovery and check-claim never reset a claim on an
+  unconfirmed negative.
+
+`classify_worktree`, `classify_primary_checkout` and the landed ladder are
+unchanged. With a reachable forge the set of removals and switches is the same
+as before, and after a transfer it can only shrink.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `LOOM_REPO_FACTS` | on | `0` makes every migrated site issue exactly its previous forge call and restores the ETag store's process-lifetime `origin` memo (the rollback switch). |
+| `LOOM_REPO_FACTS_VERIFY_SECS` | `21600` | How long a verified record is used before one conditional re-read. |
 
 ### Merged-PR worktree reaper (#4876)
 

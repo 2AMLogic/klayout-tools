@@ -561,7 +561,9 @@ order of snapshots, episodes or flag changes.
 - Failures and panics are logged at `warn` and retried on the next check.
 - **Every check emits one `eta.fit` record** (#10391), skips included, from
   both callers (the refresh tick's end-of-cycle check and the standalone
-  task), so the records are the fit loop's heartbeat. `outcome` is `written`,
+  task), so the records are the fit loop's heartbeat. The exception: a
+  non-captain serving the captain's published fit (#10395) runs no check and
+  emits none; `fit-pub/status.json` holds its outcome. `outcome` is `written`,
   `skipped`, `error` or `panic`; a skip's `skip_reason` is one of `disabled`,
   `held`, `today_exists`, `no_snapshots`, `stale_before_grace`. The last record
   is also kept at `.loom/state/eta/health/fit-check.json` (and each refresh
@@ -728,6 +730,41 @@ it links whose link **and** star were both known before `cutoff`.
   Using `starred_any` as the model input changes the coefficient's meaning and
   needs a new datestamped heuristic (follow-up #10379).
 
+### Priority-aware queue features (#10333)
+
+`eta::priority_features` computes candidate inputs for the next model
+version. The fit (`Assembled::priority`, one per training row) and serving
+(`Tracker::priority_features_of`) compute them the same way:
+
+| Feature | Meaning |
+|---------|---------|
+| `ahead_dispatch` | Other PRs in the repo and stage that dispatch order puts first (the dispatch-ordered sibling of FIFO `ahead`) |
+| `ahead_starred` | How many of those are starred |
+| `n_starred_repo` / `n_starred_fleet` | Other starred PRs in the stage, in the repo / fleet scope |
+| `starred_age_sec` | Time since the PR's current level was set (`null` when not starred or the instant is unknown) |
+| `star_changed_in_stage` | Whether the level changed after the PR entered its stage: its own labels, or a linked issue's star turning on or off (one that has since ended still counts) |
+| `priority_level` | Effective level: 0 none, 1 star, 2 `loom:operator-high-priority` (#10307) |
+
+- **One ordering.** Each PR is mapped to a work-finder `PriorityCandidate`
+  and compared on `work_finder::ordering::candidate_keys`
+  (`keyed_cmp` over `ETA_POSITION_KEYS`: level, star, starred-at, age, number).
+  The PR's stage entry stands in for `createdAt`. ETA ignores `main_red_fix`
+  (no point-in-time record) and `workspace_priority` (constant within a repo).
+  These are listed in `ETA_IGNORED_KEYS`.
+- **A PR's level** comes from its own labels (operator or inherited level
+  labels). It is at least 1 while a linked issue is starred, by the
+  #10372 rule above (fit: `build_with_star`; serving: the star book). The fit
+  reads levels from the flag timeline: `pr_flags` bit 6 (`FLAG_LEVEL_2`)
+  records level 2. A level 3 needs one more bit.
+- **Knowable-at.** The fit reads flag changes before `t - 120 s`. Serving
+  dates a level change from the first pass that showed it. A PR that serving
+  first saw already starred has an unknown starred-at, so it orders by age,
+  as dispatch does.
+- **Not a model input.** These features are not in `eta-fit/v1`'s `FEATURES`,
+  so twin-otter rows, coefficient files and explanations are unchanged.
+  Before a new datestamped heuristic adopts them, a walk-forward in
+  2AMLogic/loom-experiments must show they help (item 4 of #10333).
+
 ## The explanation (`eta-explanation/v1`)
 
 The heuristic builds the explanation first and computes the numbers from it,
@@ -779,7 +816,7 @@ an explanation recorded before it still parses.
 
 A feature is `null` when it was not measured, with a `features_omitted`
 reason; never a default ([Features](#features) lists the definitions and
-the reasons). An explanation stays near 8 KiB; over 32 KiB it
+the reasons). An explanation stays near 10 KiB; over 32 KiB it
 drops `features`, then `twin_otter.model` (only when present; then nothing
 recomputes), then the stage grids, then the stage marks, then every
 remaining list (`detail`), stopping as soon as it fits, and names each drop
@@ -1031,6 +1068,115 @@ refusal reason on a ready row the plan gives no position.
 new features `null` (the precedent is `result.stage_marks`, #9366).
 Omission reasons are free-form strings.
 
+### Read features: PR size, checks, issue markers (#10232)
+
+These need their own forge reads, so they have their own budget: at most
+**12 feature forge calls per pass** (`eta::pr_features::FEATURE_READ_BUDGET`),
+separate from the 8 outcome reads, so neither delays the other. Each read
+is a conditional GET through the shared ETag store (an unchanged answer is
+a free `304` that reuses the stored body), under the repo's reader App when
+one is usable, and counted in the forge-call accounting (caller
+`eta_feature_read`). While the rate-limit breaker suppresses polling the
+budget is zero. The budget is charged per forge call: a checks read is two
+(check runs plus the head's combined legacy status) and a required-context
+lookup is two (ruleset plus classic protection), charged in full even if the
+first call fails.
+
+| Stored | Read | Applies to |
+|---|---|---|
+| `pr_additions`, `pr_deletions`, `pr_changed_files`, `pr_commits` | `pulls/{n}` | items with a PR |
+| `checks_pending`, `checks_failed` | `commits/{head}/check-runs` and `commits/{head}/status` (legacy statuses; if either read fails the features are omitted as `read_failed`) for the head the PR read shows, counted over the base branch's **required** contexts only (the `forge wait-checks` lookup and rollup): a required context still running or not yet registered is pending; one concluded other than `success`, `neutral` or `skipped` is failed. Optional checks never count; a branch that requires nothing gives `0`, `0` | items with an open PR |
+| `complexity_marker`, `points_marker`, `author` | `issues/{n}`: the `<!-- loom:complexity=… -->` and `<!-- loom:points=… -->` markers (the work finder's parsers) and `user.login` | every item |
+
+Each pass plans the reads that are due (`pulls` and checks older than
+15 min, `issues` and each base branch's required-context set older than
+1 h): never-read first, then oldest. The rest wait for the next pass. The
+required set is the lookup `forge wait-checks` uses (rulesets plus classic
+branch protection); it is not a conditional GET, so it is read once per base
+branch, not per PR. Legacy commit statuses are not read, so a required
+context reported only as a status counts as pending.
+
+**Point in time.** A read returns the current value, so a value is used at
+`as_of` only when it was known then: the read happened before `as_of`, or
+it happened later but the PR or issue was last updated before `as_of`.
+Check runs change without touching the PR's `updated_at`, so they need a
+read before `as_of`. A PR that was closed or merged when read never records
+a size: its final size is not its size at `as_of`. A failed read keeps the
+previous answer, within the max age (1 h for PR reads, 6 h for the
+required set, 24 h for issue reads). The required set, like check runs,
+needs a read before `as_of`.
+
+| reason | when |
+|---|---|
+| `no_pr_yet` | PR and check features: the item has no PR |
+| `not_read_yet` | no pass has wanted the read yet (a new item, or its repo was not listed) |
+| `budget_exhausted` | the read was over this pass's budget and there is no earlier answer |
+| `read_failed` | the read failed and there is no earlier answer |
+| `read_stale` | the newest answer is older than the max age |
+| `pr_not_open` | the PR was closed or merged when read |
+| `pr_changed_after_as_of` / `issue_changed_after_as_of` | read after `as_of`, and updated after `as_of` |
+| `checks_read_after_as_of` | the check runs were read at or after `as_of` |
+| `checks_for_other_head` | the check runs read are for another commit than the PR's head |
+| `checks_truncated` | the head has more than 100 check runs |
+| `required_unknown` | check features: the base branch's required set is not known at `as_of` (no lookup has answered before it, or the PR read shows no base) |
+| `required_lookup_failed` | check features: the required-context lookup failed and there is no earlier answer. Never replaced by a count over all checks |
+| `marker_absent` / `marker_invalid` | the body has no such marker / the points value is outside `1, 2, 3, 5, 8, 13` |
+
+A PR feature's null reason is the PR read's reason; a check feature's is the
+PR read's when that one has no value.
+
+### Stall signals (#10232, for #10210)
+
+Host-wide, so one snapshot per pass serves every item. Taking it makes no
+forge call: the budget comes from the forge-call sink's `x-ratelimit-*`
+header readings (or the breaker's probe, when newer), the breaker from its
+in-process state, the pool from the token directory.
+
+| Stored | Definition |
+|---|---|
+| `ratelimit_core_remaining`, `ratelimit_core_reset_at` | the item's reader App's freshest REST budget reading (≤ 15 min old) and its reset |
+| `ratelimit_graphql_remaining`, `ratelimit_graphql_reset_at` | the same for GraphQL |
+| `breaker_state`, `breaker_cooldown_until` | the rate-limit breaker: `closed` or `cooldown`, and when an active cooldown releases |
+| `pool_usable_accounts`, `pool_exhausted` | spawnable accounts in the pool the workspace resolves to (neither bad-marked nor hard-excluded), and whether that is zero |
+
+The sink keeps each reader's readings under a public bucket label
+(`reader:<app id>@<owner>`, never a credential), because two reader Apps
+share the `reader` role but not a budget. An item's budget is the reading of
+the reader App that serves its repo; the writer's and any other reader's
+readings are never borrowed. A repo with no reader App (it reads on the
+writer) has no budget features, and neither does a reader with no fresh
+reading.
+
+Null reasons: `no_stall_snapshot` (no snapshot taken before `as_of`),
+`stale_inputs` (the snapshot is over 15 min old), `no_reader_for_repo`,
+`no_identity_reading` (the serving reader has no fresh reading),
+`no_reset_in_reading` (a breaker probe carries none), `breaker_not_registered`,
+`breaker_closed` (`breaker_cooldown_until` only) and `no_token_pool`.
+
+**Coverage check (post-deploy).** The share of `land` estimates with each
+feature non-null, over estimates where it applies (the applicability
+reasons `no_pr_yet`, `no_stage` and `not_applicable_stage` excluded), from
+the explanation body in SigNoz. Set `since` to the deploy instant and read
+it after at least 6 h; the target is ≥ 95%:
+
+```sql
+SELECT kv.1 AS feature,
+       countIf(kv.2 != 'null') AS non_null,
+       count() AS applicable,
+       round(non_null / applicable, 3) AS share
+FROM signoz_logs.distributed_logs_v2
+ARRAY JOIN JSONExtractKeysAndValuesRaw(body, 'features') AS kv
+WHERE mapContains(attributes_string, 'loom.eta.trigger')
+  AND attributes_string['loom.eta.kind'] = 'land'
+  AND timestamp >= toUInt64(toUnixTimestamp({since:DateTime})) * 1000000000
+  AND NOT arrayExists(
+        o -> JSONExtractString(o, 'name') = kv.1
+             AND JSONExtractString(o, 'reason') IN ('no_pr_yet', 'no_stage', 'not_applicable_stage'),
+        JSONExtractArrayRaw(body, 'features_omitted'))
+GROUP BY feature
+ORDER BY share;
+```
+
 ## No-estimate reasons
 
 | reason | when |
@@ -1061,7 +1207,8 @@ triggers:
   review-label listings (ETag-cached, so an unchanged listing is free), at
   most 8 forge reads (`pulls/{n}` for PRs that left review, `issues/{n}` for
   issues whose outcome only the issue can settle — anything over the budget is
-  retried next pass), a history reload, and a refresh of every live estimate.
+  retried next pass), at most 12 feature reads and the stall snapshot
+  (#10232, above), a history reload, and a refresh of every live estimate.
   The estimation step runs on a blocking thread behind a `catch_unwind`, so an
   ETA failure costs only ETA and never the observability collector.
 
@@ -1526,15 +1673,55 @@ them with a daemon restart.
   ([daemon-reference → Fleet captain](daemon-reference.md#fleet-captain-8848)).
   Pick a captain with reader Apps, the OTLP exporter, and every fleet repo
   provisioned or already snapshotted. Every other host makes **no** forge call
-  and emits no record, but still runs the daily fit on the snapshots it has.
-  Those are the captain's only when `LOOM_ETA_FLEET_SNAPSHOT_DIR` is shared
-  with it; otherwise they are its own older ones, or none. With **no** captain
+  and emits no record. With `fleet.repo` set it instead takes the captain's
+  **published fit** (below); without it, it fits only on the snapshots it has,
+  which are the captain's only when `LOOM_ETA_FLEET_SNAPSHOT_DIR` is shared
+  with it, otherwise its own older ones, or none. With **no** captain
   declared, every host with a reader refreshes, as before, and logs a hint
   once. That keeps a single-host install's fit, but N hosts spend N times the
   shared reader budgets. The gate is re-read every tick, so editing
   `fleet.captain` needs no restart. The opt-in
   [SigNoz in-sweep half](#signoz-in-sweep-half-fleetrefreshsignoz-9758) is not
   gated: it spends no reader budget.
+
+- **When to declare `fleet.captain`: once `fleet.repo` is set** (#10395). The
+  captain fits once and publishes the coefficient file to a dedicated branch of
+  the fleet store; every other host fetches, verifies and installs it, so all
+  hosts serve the same `fit_id` (byte-identical estimates, and consistent
+  shadow scoring). So on a multi-host fleet declare `fleet.captain` **and** set
+  `fleet.repo`. With `fleet.captain` but no `fleet.repo`, non-captain hosts
+  cannot learn the fit and drift to `no_model`: do not declare a captain
+  there. On a single host, or with no captain, nothing changes.
+  - **Branch.** `fleet.etaFitRef` (default `eta-fit`), created from `fleet.ref`
+    on first publish; a `fleet.etaFitRef` equal to `fleet.ref` or `main` is
+    refused, never written. Files: `eta/fit/<fit_id>.json` (the coefficient file, byte
+    for byte) and `eta/fit/latest.json` (the `eta-fit-pub/v1` envelope:
+    `schema`, `fit_id`, `as_of`, `window{start,end}`, `captain_host`, `fitter`,
+    `file`, `sha256`, `published_at`), written last. Commit history is the audit
+    trail; nothing prunes the branch yet.
+  - **Prerequisites.** The captain's writer App needs `contents: write` on the
+    store repo, and the `eta-fit` branch must be exempt from the `main`
+    ruleset. Other hosts need nothing new: they read through the reader or
+    writer App they already use for `fleet.repo`, one conditional request (a
+    free 304 in the steady state) per refresh interval.
+  - **Verification** (any failure keeps the previous fit and is recorded):
+    envelope schema and a bare `<16 hex>.json` file name; sha256 of the exact
+    fetched bytes; `eta-fit/v1` parse; file `id`/`as_of`/window equal the
+    envelope's; `captain_host` equals the declared `fleet.captain` (a former
+    captain's file is refused); same feature set; `as_of` not in the future,
+    not older than `fleet.etaFitMaxAgeDays` (default 3), and not older than the
+    newest local fit.
+  - **Captain change.** A publication is the fit *and* its captain and
+    destination: after a failover the new captain republishes the fit it
+    installed under its own name (same file, new envelope), and so does a
+    captain publishing to a new `fleet.repo` or `fleet.etaFitRef`. Until it
+    does, hosts refuse the former captain's envelope and keep their fit.
+  - **Fallback.** No `fleet.repo`, no branch, a fetch error, a refusal or a
+    stale publication: the host keeps its newest local fit (or `no_model`), and,
+    when it has fresh snapshots, fits itself as before. A publish failure on
+    the captain is logged and never fails the fit or the cycle. State for
+    `eta doctor`: `fit-pub/status.json` beside the fit directory (last outcome,
+    refusal code, published `fit_id`, captain, age, `publish_error`).
 
 - **Cadence.** The first cycle runs 120 s after start, then every
   `intervalSecs`, skipping missed ticks. Each cycle runs off the tick in a
