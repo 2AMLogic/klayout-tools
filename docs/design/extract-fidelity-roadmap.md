@@ -596,8 +596,13 @@ below exist in `src/klayout_tools/extract_parasitics.py`
 `_compute_parasitics`, `_distributed_rc_segments`), and the ladder
 total-conservation tests (`test_distributed_rc_replaces_star_with_two_segment_ladder`,
 `test_distributed_rc_order_and_segments_three_point_conservation`) and fragment
-tests (`test_region_n_squares_*`) exist in `tests/test_extract.py`. Re-check
-the sha before starting any increment below. #2391 covers within-role
+tests (`test_region_n_squares_*`) exist in `tests/test_extract.py`. The
+existing resistor-network infrastructure this design reuses is also verified
+at that sha: `solve_ir_drop` in `src/klayout_tools/ir_solver.py` (tests in
+`tests/test_ir_solver.py` and `tests/test_power_ir_cross_check.py`) and
+`_decompose_manhattan_polygon`, `_model_mesh_polygon`, `_rails_under_via` and
+`_build_island_network` in `src/klayout_tools/power.py`. Re-check the sha
+before starting any increment below. #2391 covers within-role
 branches; #2458 is the cross-level (via-stitched) consumer and keeps its own
 implementation/regression scope.
 
@@ -628,7 +633,7 @@ implementation/regression scope.
   copper depending on a label.
 - **Rejected: reciprocal fragment sums** (`1 / sum(1/R_i)` over fragments).
   It is right only when every fragment connects the same two equipotential
-  endpoints. Fixtures F3, F5 and F7 break it: a shared series stub, a
+  endpoints. Fixtures F3, F5 and F8 break it: a shared series stub, a
   single-landing strap pair and a three-terminal star all contain fragments
   that are not between common endpoints. It also overstates the benefit for
   fragments that are tap stubs (dead ends carry no current).
@@ -650,30 +655,56 @@ implementation/regression scope.
    regions) and `_fragment_port_points_um` (contact/via landings plus
    device-body cut edges) to find where current can enter or leave a
    fragment.
-3. *Segmentation.* Cut each fragment into rectilinear pieces (strip
-   decomposition of the polygon, e.g. `Region.decompose_trapezoids_to_region`
-   or horizontal slicing on the dbu grid) and additionally cut at every port
-   and at every junction (a piece boundary where three or more pieces meet).
-   A straight uniform-width run between two cut lines is one edge.
+3. *Segmentation.* Reuse `power._decompose_manhattan_polygon`, which cuts
+   each merged Manhattan polygon on the grid formed by extending every vertex
+   x/y across it. Two cells that share a boundary always share the whole
+   side. Non-Manhattan input, degenerate input, or input over the cell cap
+   (`MAX_DECOMPOSITION_CELLS = 4096`) returns a reason instead of guessing.
+   The one extension it needs is an optional set of extra cut coordinates,
+   used to cut at every port position (contact/via landing edges,
+   device-body cut edges, terminal patch edges). With no extra cuts it
+   produces today's grid, so `klt power` is unaffected. A cell is one
+   piece. Junctions need no special handling because the vertex grid
+   already places a cell boundary wherever three or more cells meet.
 4. *Nodes.* One node per piece (lumped at the piece centre) plus one node per
    terminal/port. Node ids are `"<role>:<k>"` with `k` the rank of the piece in
    the deterministic order below; a port node is `"port:<k>"`.
 5. *In-plane edges.* Two pieces sharing an interface of length `w` get an edge
    of `R = sheet_res * (d1/(2*w1) + d2/(2*w2))` with `d_i` the piece extent
-   normal to the interface and `w_i` its width, which is exactly
-   `sheet_res * L / W` for a uniform strip however finely it is cut. At bends
-   and T-junctions this is the usual first-order approximation (current
-   crowding is not modelled); fixtures with bends carry a looser tolerance
-   (3.D4).
+   normal to the interface and `w_i` its width. A port node on a piece's
+   boundary (a terminal, or a strip end joined to a via or an ideal node)
+   connects to that piece by the **half-piece edge**
+   `R = sheet_res * d/(2*w)`, which runs from the piece centre to the port.
+   This is the same centre-to-side edge `power._model_mesh_polygon` already
+   uses (`sheet_r * half_um / cross_um`). Interior edges contribute two
+   halves per piece and each end port contributes one half, so a uniform
+   strip of length `L` and width `W` cut into pieces `d_1..d_n` sums to
+   `sheet_res * (d_1/2 + (d_1+d_2)/2 + ... + (d_{n-1}+d_n)/2 + d_n/2) / W =
+   sheet_res * L / W`. That holds exactly however finely it is cut, and it
+   holds for a single piece (`n = 1`: `d/2 + d/2 = L`). At bends and
+   T-junctions inside one fragment this is the usual first-order
+   approximation (current crowding is not modelled), and fixtures with such
+   junctions carry a looser tolerance (3.D4).
 6. *Via/contact edges.* Each via/contact landing joins the piece(s) under it
    on role *k* to the piece(s) above on role *k+1* by an edge of
    `R = r_cut / n_cut` where `n_cut = max(1, round(landing_area / cut_area))`
    and `r_cut` is the deck's per-cut resistance. `r_cut = 0` (explicitly
    curated, not merely absent) merges the two nodes (ideal via). Overlap
-   without a landing creates no edge.
-7. *Zero-resistance edges* (below `1e-9` ohm, or ideal vias/ties) are contracted
-   with union-find before the matrix is built, so they never enter the
-   conductance matrix. Ideal rails in the fixtures are expressed this way.
+   without a landing creates no edge. The search for the pieces a landing
+   touches reuses `power._rails_under_via`. That helper scopes the search to
+   the merged polygon(s) the cut physically lands on and never searches
+   net-wide (issue #2259), and the graph then picks the cells under the
+   landing within that polygon. Two parts of power's via model are **not**
+   reused, on purpose. Power snaps a via to the nearest endpoint of a
+   box rail, which is its documented tap approximation; here the extra cuts
+   in step 3 put a port at the landing's real position. Power also prices a
+   via as one resistor per merged via shape; here it is per cut, because
+   extraction decks give a per-cut resistance.
+7. *Zero-resistance edges* (below `1e-9` ohm, or ideal vias/ties) are emitted
+   with `resistance_ohm` exactly `0.0`. `solve_ir_drop` merges those
+   endpoints with union-find into one supernode before it assembles the
+   system, so they never enter the conductance matrix. The ideal nodes in
+   the fixtures (3.D4) are expressed this way.
 
 **Terminals and boundary conditions.** A *terminal* is an ideal equipotential
 node: all pieces under one device-terminal port, pin, or caller-designated
@@ -685,16 +716,56 @@ is a boundary condition, not a topology change). `R_st = v_s`. For `T >= 3`
 terminals the primary output is the full `T x T` terminal-pair matrix
 (equivalently the Schur complement of `G` onto the terminals); a single
 scalar per net exists only when exactly two terminals are specified. Fixture
-F7 shows why: the scalar changes with the endpoints and the boundary
+F8 shows why: the scalar changes with the endpoints and the boundary
 condition.
+
+**Solver: reuse `ir_solver.solve_ir_drop`, do not add a second one.** The
+formulation above is exactly what `solve_ir_drop(node_ids, edges, pads=...,
+injections=...)` already solves. It takes `pads={t: 0.0}` and
+`injections={s: 1.0}`, and then `R_st = voltages[s]`. Floating terminals are
+simply nodes with no pad and no injection. A tied terminal is a `0.0` ohm edge,
+which the solver merges. `solve_ir_drop` is geometry-free, pure Python and
+already the repo's validated DC network solver: it has closed-form ladder,
+parallel, bridge and lattice tests in `tests/test_ir_solver.py` and an ngspice
+operating-point cross-check in `tests/test_power_ir_cross_check.py`. Writing
+a second solver would go against the wrap-vs-rewrite rule in
+`docs/ARCHITECTURE.md`. Its method is
+Jacobi-preconditioned CG to a relative residual of `1e-12`. The achieved
+residual is reported, and anything worse than `UNSOLVED_RESIDUAL = 1e-6` is
+`not_converged`. Neither of the earlier reasons for a direct method holds up
+against the code:
+
+- *Determinism.* CG over a fixed node/edge input order performs the same
+  floating-point operations every run, so the result is byte-identical
+  run to run. The builder supplies that fixed order (see Determinism
+  below).
+- *Precision.* Every graph-level fixture in 3.D4 was run through
+  `solve_ir_drop` at `d28f13f0`, with each strip cut into four pieces plus
+  half-piece port edges. The values covered F1, F2 (N = 2, 4, 8), F2v
+  (N = 3, 4), F3, F4v, F7b, the F8 matrix and tied F8. The worst relative
+  error was `5e-15`, far inside the `1e-9` fixture tolerance.
+
+If a later measured layout shows CG is too slow or too imprecise, the remedy
+is to add a direct method *inside* `ir_solver.py` behind the same interface,
+so `klt power` benefits too. A parallel solver in the extract module is not
+the remedy.
+
+The `T x T` matrix takes `T - 1` solves, not one solve per pair. Ground
+terminal `t_0`, inject 1 A at each other terminal `i` in turn and read every
+terminal voltage. That gives the symmetric transfer matrix `Z` (with
+`Z_ij = v_j` when injecting at `i`). Then `R_{i,t0} = Z_ii` and
+`R_ij = Z_ii + Z_jj - 2*Z_ij`.
 
 **Degenerate cases.**
 
 - *Disconnected terminals* (different components): `R_st = null` with
-  diagnostic `terminals_disconnected`; never `inf` or `0` in JSON.
+  diagnostic `terminals_disconnected`; never `inf` or `0` in JSON. With the
+  reused solver this is the case where `s`'s component reports
+  `reason: "no_pad"` and `voltages[s]` is `None`.
 - *Floating components with no terminal*: dropped, diagnostic
-  `floating_component` (count and area). Dead-end stubs naturally carry no
-  current and drop out of `R_st` without special-casing.
+  `floating_component` (count and area). These are the other `no_pad`
+  components, the ones with no terminal at all. Dead-end stubs naturally
+  carry no current and drop out of `R_st` without special-casing.
 - *Fewer than two terminals*: no graph result, diagnostic `too_few_terminals`;
   legacy scalar remains.
 - *Zero-resistance path* (terminals contracted into one node): `R_st = 0.0`
@@ -705,27 +776,29 @@ condition.
 bbox.left, bbox.top, bbox.right, area)` in integer dbu; ports by `(role,
 bottom, left)`; edges by `(min(node_id), max(node_id), kind)` where kind is
 `in_plane < via`. Ids derive from those ranks only, never from Python
-iteration order of sets/dicts or klayout object identity. Solving uses a fixed
-elimination order (ids ascending) and the same arithmetic order every run, so
-two runs on the same layout are byte-identical in JSON (the repo's artifact
-determinism gate applies).
+iteration order of sets/dicts or klayout object identity. Nodes and edges are
+passed to `solve_ir_drop` in id order, and the solver numbers supernodes and
+components in first-seen order. So CG runs the same arithmetic in the same
+order every time, and two runs on the same layout are byte-identical in JSON
+(the repo's artifact determinism gate applies).
 
 **Resource bounds.** Defaults: at most 5000 nodes and 20000 edges per net
-before contraction, at most 64 terminals. The runtime has no numpy/scipy
-dependency (`pyproject.toml` keeps numpy test-only), so the solver is a
-pure-Python direct method on the contracted graph: series/degree-1 reduction
-first, then banded or sparse Cholesky in the fixed order. Exceeding a bound
-yields diagnostic `graph_too_large` (with the counts) and the legacy scalar
-stands; the solver never truncates silently.
+before contraction, and at most 64 terminals, so at most 63 solves per net.
+Each polygon also keeps its own `MAX_DECOMPOSITION_CELLS` cap from step 3.
+The runtime has no numpy/scipy dependency (`pyproject.toml` keeps numpy
+test-only). The solve is `solve_ir_drop`'s pure-Python sparse CG over
+adjacency lists, and its default iteration cap is `max(500, 10*n)`.
+Exceeding a bound yields diagnostic `graph_too_large` (with the counts) and
+the legacy scalar stands; the builder never truncates silently.
 
 **Failure behaviour.** Geometry or coefficient problems never raise and never
 change the legacy output. Each produces a diagnostic with a stable code and
 `status: "unsupported"` for that net: `sheet_resistance_unknown`,
 `via_resistance_unknown` (absent coefficient; an unknown coefficient is *not*
-silently treated as ideal), `unsupported_geometry` (e.g. non-rectilinear
-pieces the strip decomposition cannot represent), `graph_too_large`,
-`singular_system` (numerical failure after contraction; reported, not
-guessed). Only invalid CLI usage is an `ExtractError`.
+silently treated as ideal), `unsupported_geometry` (the step-3 decomposition returned a reason, e.g.
+a non-Manhattan polygon), `graph_too_large` (also used when the step-3 cell
+cap is hit), and `singular_system` (`solve_ir_drop` reports `not_converged`
+for the terminals' component; reported, not guessed). Only invalid CLI usage is an `ExtractError`.
 
 ##### 3.D3 Mapping to existing code, JSON and the ladder
 
@@ -736,6 +809,11 @@ guessed). Only invalid CLI usage is an `ExtractError`.
 | Ports and device-body cut edges | `_fragment_port_points_um` | Terminal and segmentation cut positions. |
 | Per-role sheet R, per-net orchestration | `_compute_parasitics` | Call site: build graph beside the existing accumulation; keep `base_r_ohm` untouched. |
 | Ladder | `_distributed_rc_segments` | Unchanged consumer of the scalar `resistance_ohm`. |
+| DC resistor-network solve | `ir_solver.solve_ir_drop` | **Reused as the solver** (3.D2 "Solver"). `pads={t: 0.0}` and `injections={s: 1.0}` give `R_st = voltages[s]`. `0.0` ohm edges are merged by union-find. `no_pad` maps to `terminals_disconnected` / `floating_component`, and `not_converged` maps to `singular_system`. No change to the module. |
+| Manhattan segmentation | `power._decompose_manhattan_polygon` (+ `_polygon_cut_coordinates`, `_decomposition_grid`) | **Reused** for step 3, plus one backward-compatible extension: optional extra cut coordinates for port positions. Its failure reasons map to `unsupported_geometry` / `graph_too_large`. |
+| Piece edge model | `power._model_mesh_polygon` | **Same formula, reused as specification**: centre-to-side `Rs * half / cross` edges (3.D2 step 5). Its free-end terminal rule is not reused, because extraction ports come from landings and terminals rather than from the major axis of the cell. |
+| Via landing scope | `power._rails_under_via` | **Reused**: restricts a landing to the merged polygon(s) it physically touches (issue #2259). |
+| Geometry to network for `klt power` | `power._build_island_network` | **Not reused as a whole**, for three reasons. It is keyed to the `klt power` spec (stackup/vias with EM limits, an `LayoutToNetlist` island). It models a rectangular polygon as a single end-to-end edge and snaps vias to the nearest endpoint, while extraction needs ports at their true position along a strip. And it prices a via per merged via shape, not per cut. The extract builder is a sibling of it that calls the shared lower-level helpers above. |
 
 **Additive opt-in output.** A new flag (proposed `--resistance-graph`; final
 spelling is chosen in increment 3) adds, per net, an object
@@ -784,26 +862,83 @@ geometry. Every value was recomputed independently from series (`R1+R2`) and
 parallel (`R1*R2/(R1+R2)`) equations. Tolerance: relative `1e-9` for exactly
 representable cases (uniform strips, any segmentation), `1e-6` where a divide
 is inexact, and `3%` absolute-relative for any variant with a bend or T where
-first-order junction treatment applies (none of the rows below needs it; it
-is stated for future bent variants).
+first-order junction treatment applies.
 
 Strip names: **S** = 20 x 2 um (10 sq, 100 ohm); **H** = 10 x 2 um (5 sq,
 50 ohm); **L** = 60 x 2 um (30 sq, 300 ohm).
+
+**Roles and ideal nodes (this is what makes the Legacy column well-defined).**
+
+- *Conducting pieces.* Every strip, branch and arm named in a row is a
+  straight rectangle on **level 1**. The only exceptions are the level-2
+  strips in F4, F4v, F5, F5v and F6. Within one role, no two strips touch or
+  overlap, so each strip is **its own connected fragment**. Legacy therefore
+  equals the sum over strips of `_n_squares` per fragment, which is exact
+  (`L/W`) for a rectangle, times `Rs`.
+- *Ideal nodes.* Rails (F2, F2v, F3, F7a, F7b), the F3 junction and the F8 hub
+  are **abstract ideal nodes**: equipotential, zero resistance, and not drawn on
+  any conducting role. They contribute no squares to Legacy and no pieces
+  to the graph. A strip reaches an ideal node through a `0.0` ohm edge from its
+  end-edge port, and `solve_ir_drop` merges these (3.D2 step 7). The one
+  exception is the F2v branch via, which is the finite `Rv` edge.
+- *Ports.* Every terminal, via and ideal-node connection attaches at a strip's
+  **end edge**, so it has zero landing length. It is joined to the end piece by
+  the half-piece edge `Rs*d/(2w)` from 3.D2 step 5. With this rule the
+  conducting length of each strip is its full drawn length, which is why
+  the analytic column uses `L/W` for each strip.
+- *No in-plane junctions.* Every point where three or more conductors meet
+  is an ideal node, never a T or bend inside one fragment. So **none of the
+  rows below needs the 3% tolerance**. All of them use `1e-9` or `1e-6`. The
+  3% tier applies only to variants drawn as a single same-role comb or
+  star. In such a variant Legacy becomes one `_n_squares` fit of the whole
+  shape, and the junction is a real in-plane T. Those variants are future
+  rows and are not in this matrix.
+- *Layout realisation (increment 3).* Graph-level inputs (pieces plus declared
+  ports) realise these rows exactly. A layout-level fixture instead draws
+  finite via landings and rail shapes, which adds landing squares to
+  *both* columns. Such a fixture must state its landing geometry and
+  recompute both values from it. It must not reuse the numbers below.
+
+Per-row realisation, with all strips on level 1 unless stated:
+
+- **F1**: S. The terminals are the end-edge ports at its two ends.
+- **F2, F7a, F7b**: N (or 2, or 3) parallel, separated strips. Ideal node
+  `RAIL_A` joins every strip's left end, and ideal node `RAIL_B` joins
+  every right end. The terminals are `RAIL_A` and `RAIL_B`.
+- **F2v**: as F2. On each branch, the left end joins `RAIL_A` through a via
+  edge of `Rv = 10` ohm, and the right end joins `RAIL_B` ideally. The via
+  is not charged by Legacy.
+- **F3**: H plus four separated S. Ideal node `J` (the explicit junction rail)
+  joins H's far end to the near ends of all four S. Ideal node `RAIL` joins
+  the four far ends. The terminals are H's free end and `RAIL`.
+- **F4, F4v**: S on level 1 and S on level 2 with the same footprint. At each
+  end, the two strips' end-edge ports are joined by a via edge, which is
+  ideal in F4 and `Rv = 10` in F4v. The terminals are the level-1 end ports.
+- **F5, F5v**: the level-1 S far end is joined to the level-2 S near end by one
+  via edge, which is ideal in F5 and `Rv = 10` in F5v. The terminals are the
+  level-1 near end and the level-2 far end.
+- **F6**: as F4 but with no via edge. Level 2 is a separate component with no
+  terminal, which gives the `floating_component` diagnostic, and the net is
+  joined by label only.
+- **F8**: arms a, b and c are separated strips. Ideal node `HUB` joins their
+  inner ends, and the terminals A, B and C are their outer ends. Each arm's
+  length is its full drawn length, because there is no in-plane junction
+  square to share.
 
 | ID | Geometry and endpoints | Analytic result | Legacy |
 |---|---|---|---|
 | F1 | Single strip S; terminals at the two ends | 100 ohm | 100 |
 | F2 | N identical S branches between two ideal rails; terminals on the rails. N = 2, 4, 8 | `100/N` = 50, 25, 12.5 ohm | 200, 400, 800 |
-| F2v | As F2 with N = 4, each branch also has one via of `Rv = 10` ohm in series | `(100+10)/4` = 27.5 ohm | 400 |
-| F3 | Shared strip H in series with N = 4 S branches to an ideal rail; terminals at H's free end and the rail | `50 + 100/4` = 75 ohm | 450 |
+| F2v | As F2, each branch also has one via of `Rv = 10` ohm in series. N = 4 (and N = 3 for the monotonicity check) | `(100+10)/N` = 27.5 ohm (N = 4); 110/3 = 36.666667 ohm (N = 3) | 400 (N = 4); 300 (N = 3) |
+| F3 | Shared strip H, ideal junction `J`, then N = 4 S branches in parallel to ideal `RAIL`; terminals at H's free end and `RAIL` | `50 + 100/4` = 75 ohm | 450 |
 | F4 | Two levels: S on level 1 and S on level 2 stacked, ideal vias at **both** ends; terminals at level-1 ends | `100/2` = 50 ohm | 200 |
-| F4v | As F4 with `Rv = 10` per end (one via each end) | `100 || (10+100+10)` = 12000/220 = 54.5454545 ohm | 200 |
+| F4v | As F4 with `Rv = 10` per end (one via each end) | `100 \|\| (10+100+10)` = 12000/220 = 54.5454545 ohm | 200 |
 | F5 | Level-1 S then ideal via then level-2 S; the levels share **one** landing; terminals at the two outer ends | `100 + 100` = 200 ohm | 200 |
 | F5v | As F5 with `Rv = 10` at the single via | 210 ohm | 200 |
 | F6 | Level-1 S and level-2 S fully overlapping, **no via/contact** between them (net joined by label only); terminals at level-1 ends | 100 ohm (level 2 is not on the current path) | 200 |
 | F7a | Unequal branches S (100) and L (300) between ideal rails | `100*300/400` = 75 ohm | 400 |
 | F7b | Three unequal branches 100, 200, 400 ohm (S, 2S, 4S in length at equal width) between ideal rails | `1/(1/100+1/200+1/400)` = 400/7 = 57.142857 ohm | 700 |
-| F8 | Three-terminal star: arms `a` = S (100), `b` = H (50), `c` = 30 x 2 um (15 sq, 150 ohm) meeting at a junction; terminals A, B, C at the arm ends | see below | 300 |
+| F8 | Three-terminal star: arms `a` = S (100), `b` = H (50), `c` = 30 x 2 um (15 sq, 150 ohm), separate level-1 fragments joined at ideal node `HUB`; terminals A, B, C at the outer arm ends | see below | 300 |
 
 F8 pair resistances (the other terminal floating): `R_AB = a+b = 150`,
 `R_AC = a+c = 250`, `R_BC = b+c = 200` ohm. Equivalent delta network with
@@ -817,8 +952,12 @@ passes when the full matrix matches to `1e-6` and the tied variant to `1e-6`.
 **Monotonicity note (scope).** Adding a passive edge (non-negative
 conductance) in parallel between two *existing* nodes cannot increase the
 effective resistance between the *same fixed* endpoints under the *same*
-boundary conditions (Rayleigh monotonicity; F2 vs. F1, F4 vs. F1, and F2v vs.
-F2 with one branch removed all follow it). Tests may assert
+boundary conditions (Rayleigh monotonicity). Examples that are exactly this
+case: F2 N=2 (50) vs. F1 (100); F4 (50) vs. F1; F7a (75) vs. F1; and F2v N=4
+(`110/4` = 27.5) vs. F2v N=3 (`110/3` = 36.667). The last one adds a fourth
+`Rv`+S branch between the same two rails, and every existing branch keeps
+its `Rv`. A comparison that also changes the series content of the existing
+branches, such as F2v vs. F2, is not an instance of the rule. Tests may assert
 `R_graph <= R_without_the_edge` only under that exact condition. It must not
 be generalised: changing endpoints can raise R (F8: `R_AC` 250 > `R_AB` 150),
 adding a terminal changes the boundary condition (a *tied* terminal can lower
@@ -826,7 +965,7 @@ R, a floating one leaves it unchanged), and adding a series element raises R
 (F5v > F5).
 
 For the ideal-via fixtures the sanity relation `R_graph <= legacy` holds (the
-roadmap's direction check), and F1/F5/F6-style rows show equality is
+roadmap's direction check), and the F1 and F5 rows show equality is
 legitimate: the graph can also *confirm* the series sum. It is **not** a
 universal invariant: the legacy scalar charges no via resistance, so F5v
 (210 ohm) exceeds its legacy 200 ohm by exactly `Rv`.
@@ -836,19 +975,35 @@ universal invariant: the legacy scalar charges no via resistance, so F5v
 Each increment is separately mergeable; none changes default output.
 
 1. **Graph construction.** New module `src/klayout_tools/extract_resistance_graph.py`
-   (pure data and builder: segmentation, node/edge ids, via/contact edges,
-   contraction, diagnostics). Reads, does not modify,
+   (pure data and builder: node/edge ids, port cuts, via/contact edges,
+   zero-edge emission, diagnostics). Reads, does not modify,
    `_region_n_squares` / `_net_port_regions` / `_fragment_port_points_um`
-   outputs. Tests in a new `tests/test_extract_resistance_graph.py`: node/edge
-   counts and determinism (two runs identical, input order shuffled) on F1,
-   F2, F4, F5, F6; diagnostics on missing coefficient, oversized graph.
-   Acceptance: edge resistances of F1/F5 sum exactly to the analytic values.
-2. **DC solver.** Same module (or `extract_resistance_solve.py`): contraction,
-   reduction and pure-Python Cholesky, two-terminal and Schur-matrix outputs,
-   `null` handling for disconnected terminals. Acceptance: every fixture row
-   F1-F8 including F2v, F4v, F5v, the tied F8 variant, and the monotonicity
-   assertion, at the stated tolerances; disconnected, floating-component and
-   singular cases return the documented diagnostics.
+   outputs. Segmentation and landing scope reuse `power.py`'s helpers:
+   `_polygon_cut_coordinates`, `_decomposition_grid`,
+   `_decompose_manhattan_polygon` and `_rails_under_via` move **unchanged** into
+   a shared geometry module (proposed `src/klayout_tools/resistor_mesh.py`),
+   `power.py` re-imports them, and `_decompose_manhattan_polygon` gains an
+   optional extra-cut-coordinates argument that defaults to none. Tests in
+   a new `tests/test_extract_resistance_graph.py`: node/edge counts and
+   determinism (two runs identical, input order shuffled) on F1, F2, F4, F5,
+   F6; port cuts placed at landing positions; diagnostics on missing
+   coefficient, non-Manhattan polygon, oversized graph. Acceptance: the
+   edge resistances along F1's and F5's single path, including the two
+   half-piece port edges (3.D2 step 5), sum to the analytic 100 and 200 ohm
+   to `1e-9` for 1, 2 and 7 pieces per strip. The existing `klt power` tests
+   pass unchanged, which shows the helper move and the defaulted argument are
+   behaviour-neutral.
+2. **DC solve.** A thin adapter in the same module over
+   `ir_solver.solve_ir_drop`, with **no new solver**. It produces the
+   two-terminal `R_st` (`pads={t: 0.0}`, `injections={s: 1.0}`), builds
+   the `T x T` matrix from `T - 1` solves (3.D2 "Solver"), maps `no_pad` /
+   `not_converged` to `terminals_disconnected` / `floating_component` /
+   `singular_system`, and turns `None` voltages into JSON `null`.
+   `ir_solver.py` itself is unchanged. Acceptance: every fixture row F1-F8,
+   including F2v (N = 3 and 4), F4v, F5v and the tied F8 variant, at the
+   stated tolerances, plus the monotonicity assertion (F2v N=4 <= F2v N=3, and
+   F2/F4/F7a <= F1). Disconnected, floating-component and not-converged cases
+   return the documented diagnostics.
 3. **Integration.** `_compute_parasitics` calls the builder/solver when the
    opt-in flag is set and attaches `resistance_graph`; CLI flag in
    `src/klayout_tools/cli/` plus `docs/cli/extract.md` and the JSON schema
