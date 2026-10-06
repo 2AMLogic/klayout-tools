@@ -586,6 +586,283 @@ one lumped R and one lumped C.
   ladder's node placement means anything, and §1.5's decomposition says the
   capacitance error is currently the larger of the two.
 
+#### Stage 3 design spike: terminal-aware resistance graph (issues #2391, #2458)
+
+**Status: design and fixture specification only (2026-10-06).** No solver is
+implemented by this section and no extraction number changes. Verified against
+`origin/main` @ `d28f13f0265cd5c397f136821ca58718d34402c5`: the helpers named
+below exist in `src/klayout_tools/extract_parasitics.py`
+(`_fragment_port_points_um`, `_region_n_squares`, `_net_port_regions`,
+`_compute_parasitics`, `_distributed_rc_segments`), and the ladder
+total-conservation tests (`test_distributed_rc_replaces_star_with_two_segment_ladder`,
+`test_distributed_rc_order_and_segments_three_point_conservation`) and fragment
+tests (`test_region_n_squares_*`) exist in `tests/test_extract.py`. Re-check
+the sha before starting any increment below. #2391 covers within-role
+branches; #2458 is the cross-level (via-stitched) consumer and keeps its own
+implementation/regression scope.
+
+##### 3.D1 Decision record
+
+- **Legacy limitation.** `_region_n_squares` sums per-fragment squares and
+  `_compute_parasitics` accumulates the per-role result into one
+  `resistance_ohm` per net. That is a *series* combination. It is a fair model
+  of a net traversed fragment after fragment, and wrong for fragments that
+  carry current side by side (per-device supply taps on one rail; two levels
+  strapped together). The scalar grows with fragment count while the real
+  resistance between any fixed pair of points does not. The bandgap `VSS`
+  `metal0` observation (619 fragments, 25037.04 ohm after #2359) is retained
+  as **historical motivation only**; it was not reproduced in this curation.
+  Before any future measurement, establish that
+  `blocks/sky130-bandgap/output/bandgap_core_routed.gds` is available and
+  record its SHA-256 alongside the number.
+- **Decision.** Parallel resistance is modelled by an **opt-in,
+  geometry-derived, terminal-aware resistor graph** that covers within-role
+  branches (#2391) and via-stitched levels (#2458) with one model. Effective
+  resistance is defined only for *specified* source/sink terminals and
+  boundary conditions (3.D2). N taps are not assumed to be N branches between
+  common endpoints; the graph decides.
+- **Rejected: supply-name heuristics** (treat `VSS`/`VDD`/`GND` as parallel).
+  Names are not geometry: a supply net can contain a genuine series run, a
+  signal net can contain parallel straps, and naming conventions differ per
+  PDK and per designer. It also produces a different model for the same
+  copper depending on a label.
+- **Rejected: reciprocal fragment sums** (`1 / sum(1/R_i)` over fragments).
+  It is right only when every fragment connects the same two equipotential
+  endpoints. Fixtures F3, F5 and F7 break it: a shared series stub, a
+  single-landing strap pair and a three-terminal star all contain fragments
+  that are not between common endpoints. It also overstates the benefit for
+  fragments that are tap stubs (dead ends carry no current).
+- **Rejected: overlap-only classification** (two levels overlapping implies a
+  strap). Overlap without a via/contact is no conduction path (F6); a strap
+  connected at a single landing is in series, not parallel (F5). Connectivity
+  must come from cut geometry, not from shadow area.
+- **Separation of concerns.** This work is DC resistance only. Capacitance
+  attribution to graph nodes and netlist integration of the full graph
+  remain the rest of Stage 3 and are not prerequisites for the DC increments.
+
+##### 3.D2 Model definition
+
+**Graph construction (per net, per conductor role).**
+
+1. *Fragments.* Reuse the connected-fragment split `_region_n_squares` already
+   performs on the net's merged region for each metal/poly role.
+2. *Port geometry.* Reuse `_net_port_regions` (this net's contact/via
+   regions) and `_fragment_port_points_um` (contact/via landings plus
+   device-body cut edges) to find where current can enter or leave a
+   fragment.
+3. *Segmentation.* Cut each fragment into rectilinear pieces (strip
+   decomposition of the polygon, e.g. `Region.decompose_trapezoids_to_region`
+   or horizontal slicing on the dbu grid) and additionally cut at every port
+   and at every junction (a piece boundary where three or more pieces meet).
+   A straight uniform-width run between two cut lines is one edge.
+4. *Nodes.* One node per piece (lumped at the piece centre) plus one node per
+   terminal/port. Node ids are `"<role>:<k>"` with `k` the rank of the piece in
+   the deterministic order below; a port node is `"port:<k>"`.
+5. *In-plane edges.* Two pieces sharing an interface of length `w` get an edge
+   of `R = sheet_res * (d1/(2*w1) + d2/(2*w2))` with `d_i` the piece extent
+   normal to the interface and `w_i` its width, which is exactly
+   `sheet_res * L / W` for a uniform strip however finely it is cut. At bends
+   and T-junctions this is the usual first-order approximation (current
+   crowding is not modelled); fixtures with bends carry a looser tolerance
+   (3.D4).
+6. *Via/contact edges.* Each via/contact landing joins the piece(s) under it
+   on role *k* to the piece(s) above on role *k+1* by an edge of
+   `R = r_cut / n_cut` where `n_cut = max(1, round(landing_area / cut_area))`
+   and `r_cut` is the deck's per-cut resistance. `r_cut = 0` (explicitly
+   curated, not merely absent) merges the two nodes (ideal via). Overlap
+   without a landing creates no edge.
+7. *Zero-resistance edges* (below `1e-9` ohm, or ideal vias/ties) are contracted
+   with union-find before the matrix is built, so they never enter the
+   conductance matrix. Ideal rails in the fixtures are expressed this way.
+
+**Terminals and boundary conditions.** A *terminal* is an ideal equipotential
+node: all pieces under one device-terminal port, pin, or caller-designated
+patch are contracted into one node. Effective resistance between terminals
+`s` and `t` solves `G v = i` with `v_t = 0`, unit current injected at `s`
+(a Dirichlet/Neumann pair), every other terminal **floating** unless the
+request says otherwise (a terminal may be declared `tied` to `s` or `t`; tying
+is a boundary condition, not a topology change). `R_st = v_s`. For `T >= 3`
+terminals the primary output is the full `T x T` terminal-pair matrix
+(equivalently the Schur complement of `G` onto the terminals); a single
+scalar per net exists only when exactly two terminals are specified. Fixture
+F7 shows why: the scalar changes with the endpoints and the boundary
+condition.
+
+**Degenerate cases.**
+
+- *Disconnected terminals* (different components): `R_st = null` with
+  diagnostic `terminals_disconnected`; never `inf` or `0` in JSON.
+- *Floating components with no terminal*: dropped, diagnostic
+  `floating_component` (count and area). Dead-end stubs naturally carry no
+  current and drop out of `R_st` without special-casing.
+- *Fewer than two terminals*: no graph result, diagnostic `too_few_terminals`;
+  legacy scalar remains.
+- *Zero-resistance path* (terminals contracted into one node): `R_st = 0.0`
+  exactly.
+- *Zero-area / degenerate pieces*: dropped with a diagnostic.
+
+**Determinism.** Pieces are ordered by `(role order from the deck, bbox.bottom,
+bbox.left, bbox.top, bbox.right, area)` in integer dbu; ports by `(role,
+bottom, left)`; edges by `(min(node_id), max(node_id), kind)` where kind is
+`in_plane < via`. Ids derive from those ranks only, never from Python
+iteration order of sets/dicts or klayout object identity. Solving uses a fixed
+elimination order (ids ascending) and the same arithmetic order every run, so
+two runs on the same layout are byte-identical in JSON (the repo's artifact
+determinism gate applies).
+
+**Resource bounds.** Defaults: at most 5000 nodes and 20000 edges per net
+before contraction, at most 64 terminals. The runtime has no numpy/scipy
+dependency (`pyproject.toml` keeps numpy test-only), so the solver is a
+pure-Python direct method on the contracted graph: series/degree-1 reduction
+first, then banded or sparse Cholesky in the fixed order. Exceeding a bound
+yields diagnostic `graph_too_large` (with the counts) and the legacy scalar
+stands; the solver never truncates silently.
+
+**Failure behaviour.** Geometry or coefficient problems never raise and never
+change the legacy output. Each produces a diagnostic with a stable code and
+`status: "unsupported"` for that net: `sheet_resistance_unknown`,
+`via_resistance_unknown` (absent coefficient; an unknown coefficient is *not*
+silently treated as ideal), `unsupported_geometry` (e.g. non-rectilinear
+pieces the strip decomposition cannot represent), `graph_too_large`,
+`singular_system` (numerical failure after contraction; reported, not
+guessed). Only invalid CLI usage is an `ExtractError`.
+
+##### 3.D3 Mapping to existing code, JSON and the ladder
+
+| Need | Existing helper | Role in the graph |
+|---|---|---|
+| Fragment split, squares | `_region_n_squares` | Fragment enumeration; legacy squares kept as the `legacy_resistance_ohm` cross-check. |
+| Contact/via regions per net | `_net_port_regions` | Source of via/contact edges and per-cut counts. |
+| Ports and device-body cut edges | `_fragment_port_points_um` | Terminal and segmentation cut positions. |
+| Per-role sheet R, per-net orchestration | `_compute_parasitics` | Call site: build graph beside the existing accumulation; keep `base_r_ohm` untouched. |
+| Ladder | `_distributed_rc_segments` | Unchanged consumer of the scalar `resistance_ohm`. |
+
+**Additive opt-in output.** A new flag (proposed `--resistance-graph`; final
+spelling is chosen in increment 3) adds, per net, an object
+`parasitics.nets[].resistance_graph`:
+
+```json
+{
+  "status": "ok",
+  "terminals": ["M1.D", "M2.S"],
+  "pair_resistance_ohm": [[0.0, 75.0], [75.0, 0.0]],
+  "legacy_resistance_ohm": 450.0,
+  "nodes": 12, "edges": 11,
+  "diagnostics": []
+}
+```
+
+`status` is `ok`, `unsupported` or `skipped`; `nodes`/`edges` are counts
+(full node/edge lists are a separate, later, `--format json` detail option
+to keep default output size flat). Without the flag, no key is added and
+output is byte-identical to today. With it, `resistance_ohm`,
+`terminals[].resistance_ohm`, the star/ladder netlist and every other existing
+field keep their legacy meaning; any decision to *replace* the scalar with a
+graph-derived value is a separate, explicit, documented change (and is where
+#2458's cross-level fix lands), never a side effect of this flag. No field is
+removed, renamed or retyped (`docs/json-contract.md`).
+
+**Fallback.** `unsupported` or `skipped` nets keep the legacy scalar exactly.
+
+**Coexistence with the ladder.** `--distributed-rc` redistributes
+whatever scalar `resistance_ohm` it is given along the terminal order; it
+conserves that total and cannot create or remove parallel structure. While the
+scalar is the series sum, the ladder inherits the bias. If a graph-derived
+scalar is later substituted, the ladder consumes it unchanged and its
+conservation tests stay valid; a graph-aware ladder (segments taken from graph
+edges) is the later Stage 3 netlist step, not part of the DC increments.
+
+##### 3.D4 Fixture matrix
+
+Assumptions for every row: illustrative sheet resistance `Rs = 10 ohm/sq` for
+every conducting role (not PDK data; real runs use deck coefficients),
+rectilinear strips of uniform width, rails/vias/terminals **ideal
+(equipotential, zero resistance)** unless a finite via resistance `Rv` is
+given, current-crowding not modelled. `n_sq = length / width`, strip
+`R = Rs * n_sq`. "Legacy" is the current series-sum scalar for the same
+geometry. Every value was recomputed independently from series (`R1+R2`) and
+parallel (`R1*R2/(R1+R2)`) equations. Tolerance: relative `1e-9` for exactly
+representable cases (uniform strips, any segmentation), `1e-6` where a divide
+is inexact, and `3%` absolute-relative for any variant with a bend or T where
+first-order junction treatment applies (none of the rows below needs it; it
+is stated for future bent variants).
+
+Strip names: **S** = 20 x 2 um (10 sq, 100 ohm); **H** = 10 x 2 um (5 sq,
+50 ohm); **L** = 60 x 2 um (30 sq, 300 ohm).
+
+| ID | Geometry and endpoints | Analytic result | Legacy |
+|---|---|---|---|
+| F1 | Single strip S; terminals at the two ends | 100 ohm | 100 |
+| F2 | N identical S branches between two ideal rails; terminals on the rails. N = 2, 4, 8 | `100/N` = 50, 25, 12.5 ohm | 200, 400, 800 |
+| F2v | As F2 with N = 4, each branch also has one via of `Rv = 10` ohm in series | `(100+10)/4` = 27.5 ohm | 400 |
+| F3 | Shared strip H in series with N = 4 S branches to an ideal rail; terminals at H's free end and the rail | `50 + 100/4` = 75 ohm | 450 |
+| F4 | Two levels: S on level 1 and S on level 2 stacked, ideal vias at **both** ends; terminals at level-1 ends | `100/2` = 50 ohm | 200 |
+| F4v | As F4 with `Rv = 10` per end (one via each end) | `100 || (10+100+10)` = 12000/220 = 54.5454545 ohm | 200 |
+| F5 | Level-1 S then ideal via then level-2 S; the levels share **one** landing; terminals at the two outer ends | `100 + 100` = 200 ohm | 200 |
+| F5v | As F5 with `Rv = 10` at the single via | 210 ohm | 200 |
+| F6 | Level-1 S and level-2 S fully overlapping, **no via/contact** between them (net joined by label only); terminals at level-1 ends | 100 ohm (level 2 is not on the current path) | 200 |
+| F7a | Unequal branches S (100) and L (300) between ideal rails | `100*300/400` = 75 ohm | 400 |
+| F7b | Three unequal branches 100, 200, 400 ohm (S, 2S, 4S in length at equal width) between ideal rails | `1/(1/100+1/200+1/400)` = 400/7 = 57.142857 ohm | 700 |
+| F8 | Three-terminal star: arms `a` = S (100), `b` = H (50), `c` = 30 x 2 um (15 sq, 150 ohm) meeting at a junction; terminals A, B, C at the arm ends | see below | 300 |
+
+F8 pair resistances (the other terminal floating): `R_AB = a+b = 150`,
+`R_AC = a+c = 250`, `R_BC = b+c = 200` ohm. Equivalent delta network with
+`ab+bc+ca = 5000+7500+15000 = 27500`: `R_AB' = 27500/c = 183.333`,
+`R_BC' = 27500/a = 275`, `R_AC' = 27500/b = 550` ohm (check: `183.333 ||
+(550+275)` = 150, as above). Endpoint/boundary dependence: with C **tied** to B,
+`R_A,(B=C) = a + b||c = 100 + 37.5 = 137.5` ohm, not 150. There is no unique
+scalar for the net; the series sum 300 matches no terminal pair. A fixture
+passes when the full matrix matches to `1e-6` and the tied variant to `1e-6`.
+
+**Monotonicity note (scope).** Adding a passive edge (non-negative
+conductance) in parallel between two *existing* nodes cannot increase the
+effective resistance between the *same fixed* endpoints under the *same*
+boundary conditions (Rayleigh monotonicity; F2 vs. F1, F4 vs. F1, and F2v vs.
+F2 with one branch removed all follow it). Tests may assert
+`R_graph <= R_without_the_edge` only under that exact condition. It must not
+be generalised: changing endpoints can raise R (F8: `R_AC` 250 > `R_AB` 150),
+adding a terminal changes the boundary condition (a *tied* terminal can lower
+R, a floating one leaves it unchanged), and adding a series element raises R
+(F5v > F5).
+
+For the ideal-via fixtures the sanity relation `R_graph <= legacy` holds (the
+roadmap's direction check), and F1/F5/F6-style rows show equality is
+legitimate: the graph can also *confirm* the series sum. It is **not** a
+universal invariant: the legacy scalar charges no via resistance, so F5v
+(210 ohm) exceeds its legacy 200 ohm by exactly `Rv`.
+
+##### 3.D5 Implementation increments
+
+Each increment is separately mergeable; none changes default output.
+
+1. **Graph construction.** New module `src/klayout_tools/extract_resistance_graph.py`
+   (pure data and builder: segmentation, node/edge ids, via/contact edges,
+   contraction, diagnostics). Reads, does not modify,
+   `_region_n_squares` / `_net_port_regions` / `_fragment_port_points_um`
+   outputs. Tests in a new `tests/test_extract_resistance_graph.py`: node/edge
+   counts and determinism (two runs identical, input order shuffled) on F1,
+   F2, F4, F5, F6; diagnostics on missing coefficient, oversized graph.
+   Acceptance: edge resistances of F1/F5 sum exactly to the analytic values.
+2. **DC solver.** Same module (or `extract_resistance_solve.py`): contraction,
+   reduction and pure-Python Cholesky, two-terminal and Schur-matrix outputs,
+   `null` handling for disconnected terminals. Acceptance: every fixture row
+   F1-F8 including F2v, F4v, F5v, the tied F8 variant, and the monotonicity
+   assertion, at the stated tolerances; disconnected, floating-component and
+   singular cases return the documented diagnostics.
+3. **Integration.** `_compute_parasitics` calls the builder/solver when the
+   opt-in flag is set and attaches `resistance_graph`; CLI flag in
+   `src/klayout_tools/cli/` plus `docs/cli/extract.md` and the JSON schema
+   notes. Acceptance: with the flag off, existing `tests/test_extract.py`
+   output is byte-identical; with it on, `resistance_ohm` and the ladder
+   conservation tests are unchanged and `resistance_graph` matches F-fixture
+   layouts built with the existing test helpers; artifact-determinism gate
+   passes.
+4. **Out of this design (not scheduled here).** Substituting the graph value
+   for `resistance_ohm` (owned by #2458 for cross-level cases, with its
+   regression on measured layouts), graph-aware ladder segments, and
+   per-node capacitance. Measurement against magic `extresist` and the
+   bandgap `VSS` artefact (with hash) belong to that follow-on.
+
 ### Stage 4 — quasi-static field solve (Epic #701's direction)
 
 - **Engine choice is already spiked and is not re-opened here.** #103's

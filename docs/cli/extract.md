@@ -4143,6 +4143,21 @@ per-net lumped model would produce.
   > *parallel* are still charged in series; that limitation is unchanged by
   > #2359 and is tracked as Stage 3 in
   > `docs/design/extract-fidelity-roadmap.md`.
+  >
+  > **Known limitations of the series sum (issues #2391, #2458).** Within one
+  > role, fragments that carry current side by side (for example one tap per
+  > device on a supply rail) are summed, so the net's `resistance_ohm` grows
+  > with tap count even though the real resistance between two fixed points
+  > does not. Across levels, two strapped layers joined at both ends are
+  > charged as the sum of both, not their parallel combination, while two
+  > levels joined at a single landing correctly add. The true value depends
+  > on which terminals carry current and on the boundary conditions, and a
+  > net with three or more terminals has no single scalar. `--distributed-rc`
+  > does **not** repair this: the ladder redistributes the *same*
+  > `resistance_ohm` along the terminal order and conserves its total, so it
+  > inherits the bias. The planned fix is an opt-in terminal-aware resistance
+  > graph, specified (design only, not implemented) in Stage 3 of
+  > `docs/design/extract-fidelity-roadmap.md`.
 - **per-terminal leg R** — the net's total series R distributed across its
   terminals, weighted by each terminal's Euclidean distance from the
   centroid of all of the net's terminal positions (a terminal farther from
@@ -4447,7 +4462,11 @@ klt extract cell.gds --deck sky130 --parasitics --critical-net MID --distributed
   single hub.
 - **Conservation.** The ladder redistributes the *same* `resistance_ohm`/
   `capacitance_ff` totals `--parasitics` already computes for that net — it
-  changes **where** the R/C sits, not **how much** exists. `N` terminals
+  changes **where** the R/C sits, not **how much** exists. Consequently the ladder
+  cannot repair parallel resistance: if the series-sum total overstates a
+  net with parallel fragments or strapped levels (see the "Known limitations
+  of the series sum" note under "Parasitic (RC) extraction"), the ladder
+  carries the same overstated total. `N` terminals
   become `N - 1` series segment resistors (summing back to the net's total
   resistance, split proportional to each segment's inter-terminal distance)
   and `N` per-terminal ground capacitors (summing back to the net's total
