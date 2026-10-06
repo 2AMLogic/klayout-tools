@@ -6413,6 +6413,165 @@ def test_populated_label_layer_does_not_warn_on_stderr(tmp_path, capsys):
     assert "warning" not in capsys.readouterr().err
 
 
+# --- provenance.label_layers (issue #2415) -----------------------------------
+
+
+#: The `ties[]` declaration the #2401 "warns once even with ties" test uses,
+#: reused so the tie re-extraction runs over the same stackup.
+_LABEL_LAYER_TIES = [
+    {
+        "well_layer": "10/0",
+        "tap_layer": "11/0",
+        "tap_boxes": [[1.0, 2.0, 3.0, 4.0]],
+        "connect_to": "li1",
+        "net": "VDD",
+    }
+]
+
+
+def _write_nets_fixture(tmp_path, name, *, labelled: bool):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    if labelled:
+        top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    gds = tmp_path / f"{name}.gds"
+    layout.write(str(gds))
+    return gds
+
+
+def test_label_layer_provenance_populated(tmp_path):
+    gds = _write_nets_fixture(tmp_path, "populated", labelled=True)
+    spec = tmp_path / "populated.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["provenance"]["label_layers"] == [
+        {"name": "li1", "label_layer": "3/5", "label_text_count": 1}
+    ]
+
+
+def test_label_layer_provenance_empty_declared_layer_reports_zero(tmp_path, capsys):
+    gds = _write_nets_fixture(tmp_path, "empty", labelled=False)
+    spec = tmp_path / "empty.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["provenance"]["label_layers"] == [
+        {"name": "li1", "label_layer": "3/5", "label_text_count": 0}
+    ]
+    # Evidence only: the #2401 finding and warning are unchanged.
+    assert any(
+        f["rule"] == "erc.unconnected_net" and f["net"] == "VDD"
+        for f in report["erc_findings"]
+    )
+    assert capsys.readouterr().err.count("klt erc: warning:") == 1
+
+
+def test_label_layer_provenance_undeclared_is_empty_list(tmp_path):
+    gds = _write_nets_fixture(tmp_path, "undeclared", labelled=True)
+    spec = tmp_path / "undeclared.erc.json"
+    spec_dict = _nets_spec()
+    del spec_dict["stackup"][1]["label_layer"]
+    _write_spec(spec, spec_dict)
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["provenance"]["label_layers"] == []
+
+
+def test_label_layer_provenance_counts_occurrences_across_hierarchy(tmp_path, capsys):
+    """Mixed declared/undeclared roles, two roles sharing one label layer,
+    an empty declared layer, a repeated label string and a labelled child
+    cell instantiated three times -- every text *occurrence* counts, in
+    stackup order, before any conductor-overlap filtering."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    met1 = layout.layer(5, 0)
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+
+    child = layout.create_cell("LABELLED")
+    child.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    # The same string twice at the same spot: two occurrences, one value.
+    child.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(0.5), _um(0.5))))
+    child.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(0.5), _um(0.5))))
+    for x in (10, 20, 30):
+        top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(_um(x), 0)))
+    # A top-level text over no conductor at all: still counted.
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(50), _um(50))))
+
+    gds = tmp_path / "hier.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "hier.erc.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0", "label_layer": "3/5"},
+                {"name": "met1", "layer": "5/0", "label_layer": "3/5"},
+                {"name": "met2", "layer": "7/0", "label_layer": "7/5"},
+            ],
+        },
+    )
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["provenance"]["label_layers"] == [
+        {"name": "li1", "label_layer": "3/5", "label_text_count": 7},
+        {"name": "met1", "label_layer": "3/5", "label_text_count": 7},
+        {"name": "met2", "label_layer": "7/5", "label_text_count": 0},
+    ]
+    err = capsys.readouterr().err
+    assert err.count("klt erc: warning:") == 1
+    assert "'met2'" in err
+
+
+@pytest.mark.parametrize("labelled", [True, False])
+def test_label_layer_provenance_identical_across_ties_and_findings_only(
+    tmp_path, capsys, labelled
+):
+    """The tie re-extraction must not duplicate entries, and a
+    `findings_only` run reports the same label-layer evidence as a full one.
+    The once-per-empty-role stderr warning is unchanged in every mode."""
+    gds = _write_nets_fixture(tmp_path, "modes", labelled=labelled)
+    nets = [{"name": "VDD", "kind": "supply"}]
+    plain = tmp_path / "plain.erc.json"
+    _write_spec(plain, _nets_spec(nets=nets))
+    tied = tmp_path / "tied.erc.json"
+    _write_spec(tied, _nets_spec(nets=nets, ties=_LABEL_LAYER_TIES))
+
+    expected = [
+        {"name": "li1", "label_layer": "3/5", "label_text_count": int(labelled)}
+    ]
+    warnings_per_run = 0 if labelled else 1
+    for spec_path in (plain, tied):
+        for findings_only in (False, True):
+            report = run_erc(str(gds), str(spec_path), findings_only=findings_only)
+            assert report["provenance"]["label_layers"] == expected
+            err = capsys.readouterr().err
+            assert err.count("klt erc: warning:") == warnings_per_run
+
+
+def test_label_layer_provenance_empty_layer_visible_on_cli_stdout(tmp_path, capsys):
+    """Through the CLI JSON path: the empty declared layer is visible in the
+    stdout report, while the warning stays on stderr only."""
+    gds = _write_nets_fixture(tmp_path, "cli-empty", labelled=False)
+    spec = tmp_path / "cli-empty.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    main(["erc", str(gds), str(spec), "--format", "json"])
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+
+    assert data["schema_version"] == 1
+    assert data["provenance"]["label_layers"] == [
+        {"name": "li1", "label_layer": "3/5", "label_text_count": 0}
+    ]
+    assert "warning" not in captured.out
+    assert captured.err.count("klt erc: warning:") == 1
+
+
 def test_devices_omitted_reports_an_empty_provenance_list(tmp_path):
     report = _run_resistor_divider(tmp_path)
 
