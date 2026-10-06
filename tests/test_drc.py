@@ -4003,7 +4003,7 @@ def test_run_drc_sky130_met1_enclosing_via_violation(tmp_path):
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
     top.shapes(met1).insert(kdb.Box(0, 0, 1000, 1000))
-    # 400 dbu margin on 3 sides, only 10 dbu (< 55) margin on the right.
+    # >= 400 dbu margin on 3 sides, only 5 dbu (< 55) margin on the right.
     top.shapes(via).insert(kdb.Box(845, 400, 995, 550))
     path = tmp_path / "met1_enclosing_via_violation.gds"
     layout.write(str(path))
@@ -4049,7 +4049,7 @@ def test_run_drc_sky130_met2_enclosing_via_violation(tmp_path):
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
     top.shapes(met2).insert(kdb.Box(0, 0, 1000, 1000))
-    # 400 dbu margin on 3 sides, only 10 dbu (< 55) margin on the right.
+    # >= 400 dbu margin on 3 sides, only 5 dbu (< 55) margin on the right.
     top.shapes(via).insert(kdb.Box(845, 400, 995, 550))
     path = tmp_path / "met2_enclosing_via_violation.gds"
     layout.write(str(path))
@@ -7824,8 +7824,8 @@ def test_run_drc_sg13cmos5l_fixed_size_cut_boundaries(
     as a fixed size, mirroring
     `test_run_drc_gf180mcu_contact_fixed_size_boundaries`/
     `test_run_drc_sg13g2_fixed_size_cut_boundaries` (issue #2388). Unlike
-    sg13g2's cont/via1-4, none of these ever needed issue #2585's generator clamp -- no
-    sg13cmos5l generator draws these cuts."""
+    sg13g2's cont/via1-4, none of these ever needed issue #2585's generator
+    clamp -- no sg13cmos5l generator draws these cuts."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     cut = layout.layer(*layer)

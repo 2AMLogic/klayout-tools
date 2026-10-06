@@ -2051,11 +2051,11 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #: This table only carries the fixed-size rules the curated decks do **not**
 #: yet encode as ``DrcRule.threshold_max_dbu`` (issue #2370) -- the rules
 #: issue #2388 still defers (sky130 ``licon1``/``mcon``).
-#: :func:`_cut_fixed_size_um` reads a deck-declared ``threshold_max_dbu`` directly, so gf180mcu's
-#: ``contact``/``via1``-``via4`` (and any rule a later backfill adds) need no
-#: entry here; ``tests/test_gen.py`` asserts that any layer present in *both*
-#: sources agrees, so an entry can be deleted once its deck rule carries the
-#: bound.
+#: :func:`_cut_fixed_size_um` reads a deck-declared ``threshold_max_dbu``
+#: directly, so gf180mcu's ``contact``/``via1``-``via4`` (and any rule a later
+#: backfill adds) need no entry here; ``tests/test_gen.py`` asserts that any
+#: layer present in *both* sources agrees, so an entry can be deleted once its
+#: deck rule carries the bound.
 #:
 #: - ``sky130`` ``licon1`` (66/44) 0.17um -- ``sky130A_mr.drc`` ``licon.1``
 #:   ("min/max. licon length : 0.17um",
@@ -2092,7 +2092,6 @@ _PDK_CUT_FIXED_SIZE_UM: dict[str, dict[tuple[int, int], float]] = {
         (67, 44): 0.17,  # mcon.drawing -- ct.1 / ct.1_a+ct.1_b (issue #2594)
     },
 }
-
 
 
 def _deck_cut_max_size_um(family: str, layer: tuple[int, int]) -> float | None:
