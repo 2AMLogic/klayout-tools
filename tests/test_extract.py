@@ -5687,9 +5687,7 @@ def test_pdk_binding_reports_no_warnings_for_pure_mos_layout(tmp_path):
     )
     # The layout draws no `hvi` marker, so the issue #2417 missing-marker
     # warning is expected; this test is about "parameter dropped" warnings.
-    assert [
-        w for w in report["warnings"] if "no shapes in the layout" not in w
-    ] == []
+    assert [w for w in report["warnings"] if "no shapes in the layout" not in w] == []
 
 
 def test_pdk_binding_warns_when_bipolar_geometry_params_are_dropped(tmp_path):
@@ -5706,9 +5704,7 @@ def test_pdk_binding_warns_when_bipolar_geometry_params_are_dropped(tmp_path):
         pdk_root=_make_pdk_install(tmp_path, "sky130A"),
         output=str(tmp_path / "bjt.spice"),
     )
-    (warning,) = [
-        w for w in report["warnings"] if "no shapes in the layout" not in w
-    ]
+    (warning,) = [w for w in report["warnings"] if "no shapes in the layout" not in w]
     assert "'pnp'" in warning
     assert "PE" in warning and "AB" in warning and "NE" in warning
 
