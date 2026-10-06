@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2378, `klt place-and-route`; no JSON field changes): every
+  post-floorplan OpenROAD stage script now emits `set_dont_use` for the same
+  per-`cell_library` globs `klt synthesize` passes to ABC, after liberty is
+  loaded and before timing-driven placement, repair, CTS and hold repair, so
+  the resizer/CTS are no longer free to insert cells synthesis already
+  excludes (a source of `DRT-0085` in `detailed_route`). Reapplied in each
+  OpenROAD process; libraries without a table entry get no exclusions. Not
+  engine-verified here (no `openroad` available); it is not claimed to
+  eliminate every `DRT-0085` failure.
+
 - **Added** (#2721, `klt sim --backend batch` + shared error envelope;
   `schema_version` unchanged, additive): the error envelope gains an optional
   `error.code`, emitted only when a command classifies the failure (every
