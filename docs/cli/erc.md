@@ -2638,6 +2638,22 @@ any other checked, non-degenerate tie:
   `erc_status` (nor `status`), emits no finding, and is narrowed to the
   curated deck's conducting layers when `--deck` is given. See "Layers this
   stream draws that the spec never declared" above.
+- `well_assertion_coverage` (array\<object\>, issue #2427) — one entry per
+  non-degenerate tie that asserted its substrate region (`well_layer: null` +
+  `well_boxes`), sorted by `id`, `[]` when no tie used that form. Each entry:
+  `id` (the tie's `erc.missing_tie` work identity), `tap_layer`
+  (`"<layer>/<datatype>"`), `drawn_tap_area_um2` (merged drawn area of that
+  layer, before any `tap_requires`/`tap_boxes` narrowing),
+  `uncovered_tap_area_um2` (the part outside every asserted polygon),
+  `uncovered_tap_fraction` (their ratio, `null` when no tap geometry is
+  drawn) and `extent_uncovered_fraction` (the share of the top-cell extent the
+  assertion leaves out — the quantity the degeneracy test thresholds). It
+  makes an assertion that has gone *stale* — devices added outside it since it
+  was written, which `erc.missing_tie` then never examines — visible as a
+  number trending upward across revisions instead of as silence. Pure
+  disclosure, like `layers_in_stream_without_declaration`: no threshold, no
+  skip, no finding, no effect on `erc_status`/`status`. Additive; absent from
+  evidence produced before it existed.
 
 `status` is derived by applying the [common rollup rule](../coverage-contract.md)
 (#2109) to `coverage`, with any connectivity/antenna finding reported as

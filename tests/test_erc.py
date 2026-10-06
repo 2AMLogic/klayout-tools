@@ -7424,6 +7424,47 @@ def test_cli_findings_only_with_pdk_exits_1(tmp_path, capsys):
     assert "--findings-only" in capsys.readouterr().err
 
 
+# --- `erc_coverage.well_assertion_coverage` (issue #2427) -------------------
+#
+# A `well_boxes` assertion is re-measured against the drawn tap geometry so a
+# stale (shrinking) assertion shows as a number, not as silence. Disclosure
+# only: no verdict moves.
+
+
+def test_well_assertion_coverage_reports_tap_area_outside_the_assertion(tmp_path):
+    report = _run_native_substrate(
+        tmp_path, "wac_band", [_substrate_tie([_SUBSTRATE_BAND])]
+    )
+    (entry,) = report["erc_coverage"]["well_assertion_coverage"]
+    assert entry["id"] == 'erc.missing_tie:["substrate_tie"]'
+    assert entry["tap_layer"] == "11/0"
+    assert entry["drawn_tap_area_um2"] > 0
+    assert 0 <= entry["uncovered_tap_area_um2"] <= entry["drawn_tap_area_um2"]
+    assert 0 < entry["extent_uncovered_fraction"] < 1
+
+    # Shrinking the assertion to a sliver can only raise the uncovered tap
+    # area, and never moves the tie into `skipped` (reported, not graded).
+    narrow = _run_native_substrate(
+        tmp_path,
+        "wac_narrow",
+        [_substrate_tie([(0.0, 0.0, 1.0, 1.0)])],
+    )
+    (narrow_entry,) = narrow["erc_coverage"]["well_assertion_coverage"]
+    assert narrow_entry["drawn_tap_area_um2"] == entry["drawn_tap_area_um2"]
+    assert narrow_entry["uncovered_tap_area_um2"] >= entry["uncovered_tap_area_um2"]
+    assert narrow_entry["uncovered_tap_area_um2"] > 0
+    assert narrow_entry["uncovered_tap_fraction"] > 0
+    assert narrow["erc_coverage"]["skipped"] == report["erc_coverage"]["skipped"]
+
+
+def test_well_assertion_coverage_empty_without_well_boxes(tmp_path):
+    report = _run_native_substrate(
+        tmp_path, "wac_whole", [_substrate_tie([_WHOLE_EXTENT])]
+    )
+    # Degenerate (skipped) assertions are not reported as checked coverage.
+    assert report["erc_coverage"]["well_assertion_coverage"] == []
+
+
 # --- `erc_coverage.layers_in_stream_without_declaration` (issue #2389) ------
 #
 # The inverse-direction disclosure `klt drc`'s
