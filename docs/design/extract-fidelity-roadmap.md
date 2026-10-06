@@ -743,29 +743,76 @@ against the code:
   `solve_ir_drop` at `d28f13f0`, with each strip cut into four pieces plus
   half-piece port edges. The values covered F1, F2 (N = 2, 4, 8), F2v
   (N = 3, 4), F3, F4v, F7b, the F8 matrix and tied F8. The worst relative
-  error was `5e-15`, far inside the `1e-9` fixture tolerance.
+  error was `5e-15`, far inside the `1e-9` fixture tolerance. F9 and F8
+  were then re-run with the per-component construction below (one
+  reference per component, all references pinned in every solve). F9
+  gave `R_BC = 100` (relative error `6e-16`) with A's entries `null`. F8
+  gave 150, 250 and 200 ohm (worst `3e-15`). With an extra terminal-free
+  strip added to F8, that strip alone reported `no_pad`.
 
 If a later measured layout shows CG is too slow or too imprecise, the remedy
 is to add a direct method *inside* `ir_solver.py` behind the same interface,
 so `klt power` benefits too. A parallel solver in the extract module is not
 the remedy.
 
-The `T x T` matrix takes `T - 1` solves, not one solve per pair. Ground
-terminal `t_0`, inject 1 A at each other terminal `i` in turn and read every
-terminal voltage. That gives the symmetric transfer matrix `Z` (with
-`Z_ij = v_j` when injecting at `i`). Then `R_{i,t0} = Z_ii` and
-`R_ij = Z_ii + Z_jj - 2*Z_ij`.
+**Terminal matrix: one reference terminal per connected component.** The
+`T x T` matrix is assembled per connected component, not from a single
+grounded terminal. A single global reference does not work.
+`solve_ir_drop` reports `no_pad` for every component that has no pad and
+leaves all of its voltages `None`. So once the terminals span more than one
+component, grounding one terminal loses every pair in the other components.
+For example, take terminal A isolated and B, C joined by 100 ohm, with
+`pads={A: 0.0}`. Injecting at B or at C returns
+`{'A': 0.0, 'B': None, 'C': None}`, and the valid `R_BC = 100` cannot be
+recovered (fixture F9). The adapter does the following:
+
+1. *Group the terminals.* One call `solve_ir_drop(nodes, edges, pads={},
+   injections={})` returns `node_component`. With no pads, every component
+   returns `no_pad` at once, without running CG. This partitions the `T`
+   terminals into terminal-bearing components `c` of `T_c` terminals each.
+   Components are numbered in first-seen order (see Determinism).
+2. *Pick references.* In each terminal-bearing component, the terminal
+   with the lowest id is its reference `r_c`. Every solve passes
+   `pads={r_c: 0.0 for every c}`, so every terminal-bearing component is
+   pinned in every solve. A component with no injection then solves to
+   all zeros, and `no_pad` is left to mean only a component with no
+   terminal at all (`floating_component`).
+3. *Solve.* For each component and each non-reference terminal `i` in it,
+   inject 1 A at `i` and read the voltages of that component's terminals.
+   That gives the component's symmetric transfer matrix `Z` (`Z_ij = v_j`
+   when injecting at `i`, and `Z` is 0 in any row or column of `r_c`).
+   Then `R_{i,r_c} = Z_ii` and `R_ij = Z_ii + Z_jj - 2*Z_ij` for `i`, `j` in
+   the same component.
+4. *Cross-component entries.* When `i` and `j` are in different components,
+   `R_ij` is JSON `null`, with diagnostic `terminals_disconnected`. No solve
+   is spent on these entries.
+
+This takes `sum_c (T_c - 1)` solves in total, which is at most `T - 1` and
+equals `T - 1` only when all terminals share one component. A component
+with exactly one terminal contributes only its diagonal entry (`0.0`) and
+**no solves**. F9 takes one solve (component {B, C}) and F8 takes two. The
+diagonal is always `0.0`.
 
 **Degenerate cases.**
 
-- *Disconnected terminals* (different components): `R_st = null` with
-  diagnostic `terminals_disconnected`; never `inf` or `0` in JSON. With the
-  reused solver this is the case where `s`'s component reports
-  `reason: "no_pad"` and `voltages[s]` is `None`.
+- *Disconnected terminals* (different components): `R_st = null` for
+  that pair only. It is never `inf` or `0` in JSON. Pairs inside each
+  component are still computed (F9). The net emits **one**
+  `terminals_disconnected` diagnostic, which lists the terminal groups
+  (one sorted list of terminal ids per terminal-bearing component, for
+  example `[["A"], ["B", "C"]]`). The net's `status` stays `ok`, because
+  every non-null entry is exact. The grouping comes from `node_component`
+  ("Terminal matrix" step 1), not from a `no_pad` report: every terminal-bearing
+  component is pinned in every solve.
+- *Single-terminal components*: the terminal's diagonal is `0.0` and every
+  off-diagonal entry in its row and column is `null` (covered by
+  `terminals_disconnected`). Such a component costs no solve. Its pieces
+  are a dead end, not a floating component.
 - *Floating components with no terminal*: dropped, diagnostic
-  `floating_component` (count and area). These are the other `no_pad`
-  components, the ones with no terminal at all. Dead-end stubs naturally
-  carry no current and drop out of `R_st` without special-casing.
+  `floating_component` (count and area). These are exactly the components
+  `solve_ir_drop` reports as `no_pad` once every terminal-bearing component
+  is pinned (F6). Dead-end stubs naturally carry no current and drop out of
+  `R_st` without special-casing.
 - *Fewer than two terminals*: no graph result, diagnostic `too_few_terminals`;
   legacy scalar remains.
 - *Zero-resistance path* (terminals contracted into one node): `R_st = 0.0`
@@ -783,7 +830,9 @@ order every time, and two runs on the same layout are byte-identical in JSON
 (the repo's artifact determinism gate applies).
 
 **Resource bounds.** Defaults: at most 5000 nodes and 20000 edges per net
-before contraction, and at most 64 terminals, so at most 63 solves per net.
+before contraction, and at most 64 terminals, so at most
+`sum_c (T_c - 1) <= 63` solves per net, plus the one grouping call, which
+runs no CG.
 Each polygon also keeps its own `MAX_DECOMPOSITION_CELLS` cap from step 3.
 The runtime has no numpy/scipy dependency (`pyproject.toml` keeps numpy
 test-only). The solve is `solve_ir_drop`'s pure-Python sparse CG over
@@ -795,10 +844,18 @@ the legacy scalar stands; the builder never truncates silently.
 change the legacy output. Each produces a diagnostic with a stable code and
 `status: "unsupported"` for that net: `sheet_resistance_unknown`,
 `via_resistance_unknown` (absent coefficient; an unknown coefficient is *not*
-silently treated as ideal), `unsupported_geometry` (the step-3 decomposition returned a reason, e.g.
-a non-Manhattan polygon), `graph_too_large` (also used when the step-3 cell
-cap is hit), and `singular_system` (`solve_ir_drop` reports `not_converged`
-for the terminals' component; reported, not guessed). Only invalid CLI usage is an `ExtractError`.
+silently treated as ideal), `unsupported_geometry` (the step-3
+decomposition returned a reason, e.g. a non-Manhattan polygon),
+`graph_too_large` (also used when the step-3 cell cap is hit), and
+`singular_system` (`solve_ir_drop` reports `not_converged` for a
+terminal-bearing component; reported, not guessed). Only invalid CLI usage
+is an `ExtractError`. The full diagnostic taxonomy is therefore: per-net
+`status: "unsupported"` codes `sheet_resistance_unknown`,
+`via_resistance_unknown`, `unsupported_geometry`, `graph_too_large` and
+`singular_system`; informational codes with `status: "ok"`, namely
+`terminals_disconnected` (terminal groups; cross-component entries `null`)
+and `floating_component` (count and area); and `too_few_terminals`, which
+yields no graph result and keeps the legacy scalar.
 
 ##### 3.D3 Mapping to existing code, JSON and the ladder
 
@@ -809,7 +866,7 @@ for the terminals' component; reported, not guessed). Only invalid CLI usage is 
 | Ports and device-body cut edges | `_fragment_port_points_um` | Terminal and segmentation cut positions. |
 | Per-role sheet R, per-net orchestration | `_compute_parasitics` | Call site: build graph beside the existing accumulation; keep `base_r_ohm` untouched. |
 | Ladder | `_distributed_rc_segments` | Unchanged consumer of the scalar `resistance_ohm`. |
-| DC resistor-network solve | `ir_solver.solve_ir_drop` | **Reused as the solver** (3.D2 "Solver"). `pads={t: 0.0}` and `injections={s: 1.0}` give `R_st = voltages[s]`. `0.0` ohm edges are merged by union-find. `no_pad` maps to `terminals_disconnected` / `floating_component`, and `not_converged` maps to `singular_system`. No change to the module. |
+| DC resistor-network solve | `ir_solver.solve_ir_drop` | **Reused as the solver** (3.D2 "Solver"). `pads={t: 0.0}` and `injections={s: 1.0}` give `R_st = voltages[s]`. `0.0` ohm edges are merged by union-find. `node_component` groups the terminals by component, and every solve pins one reference terminal per terminal-bearing component, for `sum_c (T_c - 1)` solves. Cross-component pairs are `null` with `terminals_disconnected`; a remaining `no_pad` component (no terminal) maps to `floating_component`; `not_converged` maps to `singular_system`. No change to the module. |
 | Manhattan segmentation | `power._decompose_manhattan_polygon` (+ `_polygon_cut_coordinates`, `_decomposition_grid`) | **Reused** for step 3, plus one backward-compatible extension: optional extra cut coordinates for port positions. Its failure reasons map to `unsupported_geometry` / `graph_too_large`. |
 | Piece edge model | `power._model_mesh_polygon` | **Same formula, reused as specification**: centre-to-side `Rs * half / cross` edges (3.D2 step 5). Its free-end terminal rule is not reused, because extraction ports come from landings and terminals rather than from the major axis of the cell. |
 | Via landing scope | `power._rails_under_via` | **Reused**: restricts a landing to the merged polygon(s) it physically touches (issue #2259). |
@@ -832,10 +889,12 @@ spelling is chosen in increment 3) adds, per net, an object
 
 `status` is `ok`, `unsupported` or `skipped`; `nodes`/`edges` are counts
 (full node/edge lists are a separate, later, `--format json` detail option
-to keep default output size flat). Without the flag, no key is added and
-output is byte-identical to today. With it, `resistance_ohm`,
-`terminals[].resistance_ohm`, the star/ladder netlist and every other existing
-field keep their legacy meaning; any decision to *replace* the scalar with a
+to keep default output size flat). A `pair_resistance_ohm` entry is `null`
+when its two terminals lie in different components (with
+`terminals_disconnected` in `diagnostics`, as in F9). Without the flag,
+no key is added and output is byte-identical to today. With it,
+`resistance_ohm`, `terminals[].resistance_ohm`, the star/ladder netlist and
+every other existing field keep their legacy meaning; any decision to *replace* the scalar with a
 graph-derived value is a separate, explicit, documented change (and is where
 #2458's cross-level fix lands), never a side effect of this flag. No field is
 removed, renamed or retyped (`docs/json-contract.md`).
@@ -924,6 +983,12 @@ Per-row realisation, with all strips on level 1 unless stated:
   inner ends, and the terminals A, B and C are their outer ends. Each arm's
   length is its full drawn length, because there is no in-plane junction
   square to share.
+- **F9**: two separated level-1 strips joined by label only, with no via
+  edge or ideal node between them. Strip H, 10 x 2 um, carries terminal A
+  at its left end-edge port, and its right end is free. Strip S, 20 x 2 um,
+  carries terminals B and C at its two end-edge ports. The net therefore
+  has two terminal-bearing components, {A} and {B, C}, and no terminal-free
+  component.
 
 | ID | Geometry and endpoints | Analytic result | Legacy |
 |---|---|---|---|
@@ -939,6 +1004,7 @@ Per-row realisation, with all strips on level 1 unless stated:
 | F7a | Unequal branches S (100) and L (300) between ideal rails | `100*300/400` = 75 ohm | 400 |
 | F7b | Three unequal branches 100, 200, 400 ohm (S, 2S, 4S in length at equal width) between ideal rails | `1/(1/100+1/200+1/400)` = 400/7 = 57.142857 ohm | 700 |
 | F8 | Three-terminal star: arms `a` = S (100), `b` = H (50), `c` = 30 x 2 um (15 sq, 150 ohm), separate level-1 fragments joined at ideal node `HUB`; terminals A, B, C at the outer arm ends | see below | 300 |
+| F9 | Disconnected terminals: H (50) with terminal A at one end, and a separate S (100) with terminals B and C at its ends; net joined by label only | `R_BC = 100` ohm; `R_AB = R_AC = null` (see below) | 150 |
 
 F8 pair resistances (the other terminal floating): `R_AB = a+b = 150`,
 `R_AC = a+c = 250`, `R_BC = b+c = 200` ohm. Equivalent delta network with
@@ -948,6 +1014,26 @@ F8 pair resistances (the other terminal floating): `R_AB = a+b = 150`,
 `R_A,(B=C) = a + b||c = 100 + 37.5 = 137.5` ohm, not 150. There is no unique
 scalar for the net; the series sum 300 matches no terminal pair. A fixture
 passes when the full matrix matches to `1e-6` and the tied variant to `1e-6`.
+
+F9 terminal matrix, in terminal order A, B, C:
+
+```
+        A     B      C
+  A [ 0.0,  null,  null ]
+  B [ null, 0.0,   100.0 ]
+  C [ null, 100.0, 0.0  ]
+```
+
+`R_BC` is the full S strip, `Rs * 20/2 = 100` ohm, and must match to
+relative `1e-9`. The diagonal is exactly `0.0`. `R_AB`, `R_AC` and their
+transposes are exactly JSON `null`, never `inf`, `0` or a number. The
+diagnostics are exactly one `terminals_disconnected` with groups
+`[["A"], ["B", "C"]]` and no `floating_component`, because H carries
+terminal A and is a dead end, not a floating component. `status` is `ok`.
+The construction makes exactly **one** solve (component {B, C}, reference
+B, injection at C) and none for {A}. A single-reference construction
+(`pads={A: 0.0}`) fails this fixture: it returns `None` for B and C.
+Legacy charges both fragments, `50 + 100 = 150`.
 
 **Monotonicity note (scope).** Adding a passive edge (non-negative
 conductance) in parallel between two *existing* nodes cannot increase the
@@ -986,7 +1072,7 @@ Each increment is separately mergeable; none changes default output.
    optional extra-cut-coordinates argument that defaults to none. Tests in
    a new `tests/test_extract_resistance_graph.py`: node/edge counts and
    determinism (two runs identical, input order shuffled) on F1, F2, F4, F5,
-   F6; port cuts placed at landing positions; diagnostics on missing
+   F6, F9; port cuts placed at landing positions; diagnostics on missing
    coefficient, non-Manhattan polygon, oversized graph. Acceptance: the
    edge resistances along F1's and F5's single path, including the two
    half-piece port edges (3.D2 step 5), sum to the analytic 100 and 200 ohm
@@ -995,15 +1081,24 @@ Each increment is separately mergeable; none changes default output.
    behaviour-neutral.
 2. **DC solve.** A thin adapter in the same module over
    `ir_solver.solve_ir_drop`, with **no new solver**. It produces the
-   two-terminal `R_st` (`pads={t: 0.0}`, `injections={s: 1.0}`), builds
-   the `T x T` matrix from `T - 1` solves (3.D2 "Solver"), maps `no_pad` /
-   `not_converged` to `terminals_disconnected` / `floating_component` /
-   `singular_system`, and turns `None` voltages into JSON `null`.
-   `ir_solver.py` itself is unchanged. Acceptance: every fixture row F1-F8,
-   including F2v (N = 3 and 4), F4v, F5v and the tied F8 variant, at the
-   stated tolerances, plus the monotonicity assertion (F2v N=4 <= F2v N=3, and
-   F2/F4/F7a <= F1). Disconnected, floating-component and not-converged cases
-   return the documented diagnostics.
+   two-terminal `R_st` (`pads={t: 0.0}`, `injections={s: 1.0}`). It
+   builds the `T x T` matrix per connected component (3.D2 "Terminal
+   matrix"): it groups terminals via `node_component`, pins one reference
+   per terminal-bearing component in every solve, and makes
+   `sum_c (T_c - 1)` solves. It fills cross-component entries with JSON
+   `null` plus one `terminals_disconnected` diagnostic, maps the remaining
+   `no_pad` components to `floating_component` and `not_converged` to
+   `singular_system`. `ir_solver.py` itself is unchanged. Acceptance:
+   - every fixture row F1-F9, including F2v (N = 3 and 4), F4v, F5v and the
+     tied F8 variant, at the stated tolerances;
+   - F9's full matrix (diagonal `0.0`, `R_BC = 100` to `1e-9`, A's
+     off-diagonals `null`) and its exact diagnostics;
+   - the solve count, asserted by counting the adapter's injection
+     solves (the grouping call is not counted): 1 for F9, 2 for F8, and 1
+     for each connected two-terminal row;
+   - the monotonicity assertion (F2v N=4 <= F2v N=3, and F2/F4/F7a <= F1);
+   - F6 returns `floating_component`, and a not-converged case returns
+     `singular_system`.
 3. **Integration.** `_compute_parasitics` calls the builder/solver when the
    opt-in flag is set and attaches `resistance_graph`; CLI flag in
    `src/klayout_tools/cli/` plus `docs/cli/extract.md` and the JSON schema
