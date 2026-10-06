@@ -2501,6 +2501,36 @@ def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:
     return side_um
 
 
+def _clamp_span(lo: int, hi: int, fixed_dbu: int) -> tuple[int, int]:
+    """Clamp one axis ``[lo, hi]`` (integer dbu) of a cut down to
+    ``fixed_dbu`` about its own centre, for :func:`_clamp_cut_boxes`. The
+    odd-dbu remainder goes on the high side. A no-op for ``fixed_dbu <= 0``
+    or a span already at or under ``fixed_dbu``."""
+    span = hi - lo
+    if fixed_dbu > 0 and span > fixed_dbu:
+        lo += (span - fixed_dbu) // 2
+        hi = lo + fixed_dbu
+    return lo, hi
+
+
+def _snap_span(lo: int, hi: int, grid_dbu: int) -> tuple[int, int]:
+    """Snap one axis ``[lo, hi]`` (integer dbu) of a cut onto a ``grid_dbu``
+    manufacturing grid, for :func:`_clamp_cut_boxes`: *translate* the span to
+    the nearest grid-aligned origin when its length is a grid multiple (size
+    preserved), else round each edge to the grid independently. A no-op for
+    ``grid_dbu == 0``."""
+    if not grid_dbu:
+        return lo, hi
+
+    def _snap(v: int) -> int:
+        return int(round(v / grid_dbu)) * grid_dbu
+
+    if (hi - lo) % grid_dbu == 0:
+        shift = _snap(lo) - lo
+        return lo + shift, hi + shift
+    return _snap(lo), _snap(hi)
+
+
 def _clamp_cut_boxes(
     cell: Any,
     layer_index: int,
@@ -2548,34 +2578,12 @@ def _clamp_cut_boxes(
     if fixed_dbu <= 0 and grid_dbu == 0:
         return
 
-    def _snap(v: int) -> int:
-        return int(round(v / grid_dbu)) * grid_dbu
-
     shapes = cell.shapes(layer_index)
     boxes = [s for s in shapes.each() if s.is_box()]
     for shape in boxes:
         box = shape.box
-        left, bottom, right, top = box.left, box.bottom, box.right, box.top
-        w = box.width()
-        h = box.height()
-        if fixed_dbu > 0:
-            if w > fixed_dbu:
-                left += (w - fixed_dbu) // 2
-                right = left + fixed_dbu
-            if h > fixed_dbu:
-                bottom += (h - fixed_dbu) // 2
-                top = bottom + fixed_dbu
-        if grid_dbu:
-            if (right - left) % grid_dbu == 0:
-                shift = _snap(left) - left
-                left, right = left + shift, right + shift
-            else:
-                left, right = _snap(left), _snap(right)
-            if (top - bottom) % grid_dbu == 0:
-                shift = _snap(bottom) - bottom
-                bottom, top = bottom + shift, top + shift
-            else:
-                bottom, top = _snap(bottom), _snap(top)
+        left, right = _snap_span(*_clamp_span(box.left, box.right, fixed_dbu), grid_dbu)
+        bottom, top = _snap_span(*_clamp_span(box.bottom, box.top, fixed_dbu), grid_dbu)
         new_box = kdb.Box(left, bottom, right, top)
         if new_box != box:
             shape.box = new_box
