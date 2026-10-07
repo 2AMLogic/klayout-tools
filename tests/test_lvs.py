@@ -11875,9 +11875,16 @@ def test_build_device_binding_map_derived_entries_match_deck_declarations():
     # `reference.deck`, with no per-class table edit. Asserted against the
     # deck objects themselves so a newly declared class fails here rather
     # than silently regressing `klt lvs`'s reference side.
+    from klayout_tools.extract_finfet import is_finfet_deck
+
     for deck_name in known_extraction_deck_names():
-        binding_map = build_device_binding_map(deck_name)
         deck = get_extraction_deck(deck_name)
+        # A FinFET deck (asap7, issue #2761) names compact models directly
+        # in plain M-cards: there is no subcircuit-call form to resolve, and
+        # `klt lvs` refuses it until #2813.
+        if is_finfet_deck(deck):
+            continue
+        binding_map = build_device_binding_map(deck_name)
         resolvable_classes = {lookup.device_class for lookup in binding_map.values()}
         for resistor in deck.resistors:
             if resistor.name in _SUBCKT_LESS_DEVICE_CLASSES:
@@ -15030,6 +15037,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
     assert report["options"] == {
         "combine_devices": True,
         "combine_devices_per_circuit": None,
+        "combine_devices_max_attempts": lvs._COMBINE_DEVICES_MAX_ATTEMPTS,
         "flatten_layout": False,
         "flatten_reference": False,
         "netgen_setup": None,
@@ -15157,6 +15165,180 @@ def test_rerun_lvs_report_legacy_report_without_request_echo_fields(tmp_path):
     # diffed against a committed report that predates them.
     assert result["fresh"]["reference_top"] == "INV"
     assert result["fresh"]["options"]["parameter_tolerance"] == 0.01
+
+
+@pytest.mark.parametrize("budget", [None, 1, 25])
+@pytest.mark.parametrize("combine", [True, False])
+def test_run_lvs_echoes_resolved_combine_devices_max_attempts(
+    tmp_path, monkeypatch, budget, combine
+):
+    """Issue #2682: the resolved retry budget (default when omitted) is
+    echoed, matches what the combine helper received, and is present even
+    when combining is disabled."""
+    seen = []
+    real = lvs._combine_devices_safely
+
+    def _spy(*args, **kwargs):
+        seen.append(args[2] if len(args) > 2 else kwargs.get("max_attempts"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lvs, "_combine_devices_safely", _spy)
+    request = _folded_request(tmp_path)
+    request["options"] = {"combine_devices": combine}
+    if budget is not None:
+        request["options"]["combine_devices_max_attempts"] = budget
+    report = run_lvs(json.dumps(request))
+    expected = lvs._COMBINE_DEVICES_MAX_ATTEMPTS if budget is None else budget
+    assert report["options"]["combine_devices_max_attempts"] == expected
+    assert all(value == expected for value in seen)
+    assert bool(seen) == combine
+
+
+def test_run_lvs_echoes_max_attempts_with_per_circuit_combine(tmp_path):
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+        "options": {
+            "combine_devices_per_circuit": {"*": True},
+            "combine_devices_max_attempts": 7,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["options"]["combine_devices_max_attempts"] == 7
+
+
+@pytest.mark.parametrize("budget", [1, 25])
+def test_reconstruct_lvs_request_preserves_max_attempts(budget):
+    committed = {
+        "layout": "l.spice",
+        "reference": "r.spice",
+        "top": "inv",
+        "options": {
+            "combine_devices": ["nmos"],
+            "combine_devices_per_circuit": {"*": True},
+            "combine_devices_max_attempts": budget,
+        },
+    }
+    options = lvs._reconstruct_lvs_request(committed)["options"]
+    assert options["combine_devices_max_attempts"] == budget
+    assert type(options["combine_devices_max_attempts"]) is int
+    assert options["combine_devices"] == ["nmos"]
+    assert options["combine_devices_per_circuit"] == {"*": True}
+
+
+def test_reconstruct_lvs_request_legacy_options_have_no_max_attempts():
+    committed = {
+        "layout": "l.spice",
+        "reference": "r.spice",
+        "top": "inv",
+        "options": {"combine_devices": True},
+    }
+    options = lvs._reconstruct_lvs_request(committed)["options"]
+    assert "combine_devices_max_attempts" not in options
+
+
+def test_reconstruct_lvs_request_keeps_malformed_max_attempts_malformed():
+    committed = {
+        "layout": "l.spice",
+        "reference": "r.spice",
+        "top": "inv",
+        "options": {"combine_devices_max_attempts": True},
+    }
+    options = lvs._reconstruct_lvs_request(committed)["options"]
+    with pytest.raises(LvsError, match="combine_devices_max_attempts"):
+        lvs._parse_combine_devices_max_attempts(options)
+
+
+def test_rerun_lvs_report_replays_recorded_max_attempts(tmp_path, monkeypatch):
+    request = _folded_request(tmp_path)
+    request["options"]["combine_devices_max_attempts"] = 25
+    committed = run_lvs(json.dumps(request))
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    captured = []
+    real = lvs._run_reconstructed_lvs
+
+    def _spy(req):
+        captured.append(req)
+        return real(req)
+
+    monkeypatch.setattr(lvs, "_run_reconstructed_lvs", _spy)
+    result = rerun_lvs_report(str(report_path))
+
+    assert captured[0]["options"]["combine_devices_max_attempts"] == 25
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_lvs_report_without_max_attempts_key_is_not_drift(tmp_path):
+    request = _folded_request(tmp_path)
+    committed = run_lvs(json.dumps(request))
+    committed["options"].pop("combine_devices_max_attempts")
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert "combine_devices_max_attempts" in result["fresh"]["options"]
+
+    # Whole options block absent (pre-#1205 report): still no drift.
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    legacy = run_lvs(
+        json.dumps(
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            }
+        )
+    )
+    legacy.pop("options")
+    _write_report(report_path, legacy)
+    assert rerun_lvs_report(str(report_path))["drift"] == []
+
+
+def test_rerun_lvs_report_detects_max_attempts_difference_in_modern_report(
+    tmp_path, monkeypatch
+):
+    """A report that records the budget still diffs it: if the replay were to
+    run at a different budget, that is drift (the key is not excluded)."""
+    request = _folded_request(tmp_path)
+    request["options"]["combine_devices_max_attempts"] = 25
+    committed = run_lvs(json.dumps(request))
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    real = lvs._reconstruct_lvs_request
+
+    def _drop_budget(report, **kwargs):
+        req = real(report, **kwargs)
+        req["options"].pop("combine_devices_max_attempts")
+        return req
+
+    monkeypatch.setattr(lvs, "_reconstruct_lvs_request", _drop_budget)
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    assert "options.combine_devices_max_attempts" in {
+        entry["field"] for entry in result["drift"]
+    }
+
+
+def test_rerun_lvs_report_legacy_report_still_detects_real_change(tmp_path):
+    request = _folded_request(tmp_path)
+    committed = run_lvs(json.dumps(request))
+    committed["options"].pop("combine_devices_max_attempts")
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+    _write(tmp_path / "ref.spice", _INVERTER_SPICE.replace("W=0.65U", "W=0.70U"))
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    assert "status" in {entry["field"] for entry in result["drift"]}
 
 
 def test_check_lvs_report_cheap_mode_unaffected_by_asymmetric_top(tmp_path):
@@ -20698,3 +20880,342 @@ def test_lvs_text_output_renders_the_layout_envelope_not_a_dict_repr(
     assert "layout: layout.spice\n" in inside
     assert f"reference: {reference_path}\n" in inside
     assert "layout: <outside repo>\n" in outside_text
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2673: the netgen engine applies the same disclosed placeholder-value
+# exclusion the klayout engine does (#1907)
+# --------------------------------------------------------------------------- #
+
+_PH_CAP_LAYOUT = (
+    ".subckt cap_net A B C\n"
+    "C1 A B 1e-14 sky130_fd_pr__model__cap_mim A=1e-12 P=4e-06\n"
+    "C2 B C 4e-14 sky130_fd_pr__model__cap_mim A=4e-12 P=8e-06\n"
+    ".ends\n"
+)
+_PH_CAP_REFERENCE = (
+    ".subckt cap_net A B C\n"
+    "XC1 A B sky130_fd_pr__cap_mim_m3_1 l=1u w=1u\n"
+    "XC2 B C sky130_fd_pr__cap_mim_m3_1 l=2u w=2u\n"
+    ".ends\n"
+)
+
+
+def _ph_request(tmp_path, layout, reference, top, engine, **options):
+    request = _placeholder_request(tmp_path, layout, reference, top)
+    request["engine"] = engine
+    if options:
+        request["options"] = options
+    return json.dumps(request)
+
+
+def _ph_entries(report):
+    return [
+        e for e in report["mismatches"] if e["category"] == "device.placeholder_value"
+    ]
+
+
+@_SKIP_NO_NETGEN
+@pytest.mark.parametrize(
+    "layout,reference,top,parameter,kind",
+    [
+        (
+            _PLACEHOLDER_RESISTOR_LAYOUT,
+            _PLACEHOLDER_RESISTOR_REFERENCE,
+            "res_net",
+            "R",
+            "resistor",
+        ),
+        (_PH_CAP_LAYOUT, _PH_CAP_REFERENCE, "cap_net", "C", "capacitor"),
+    ],
+)
+def test_placeholder_engines_agree_real_netgen(
+    tmp_path, layout, reference, top, parameter, kind
+):
+    reports = {
+        engine: run_lvs(_ph_request(tmp_path, layout, reference, top, engine))
+        for engine in ("klayout", "netgen")
+    }
+    for report in reports.values():
+        assert report["status"] == "match"
+        assert report["error_count"] == 0
+        (entry,) = _ph_entries(report)
+        assert entry["severity"] == "warning"
+        assert entry["details"]["parameter"] == parameter
+        assert entry["details"]["device_kind"] == kind
+    assert reports["netgen"]["device_parameter_coverage"] is None
+    # `--check` re-hashes the inputs; the generated setup is not an input
+    # (it is rebuilt on every run), so nothing about it can go stale.
+    report_path = _write(tmp_path / "report.json", json.dumps(reports["netgen"]))
+    assert all(c["match"] for c in check_lvs_report(report_path)["checks"])
+
+
+@_SKIP_NO_NETGEN
+def test_placeholder_netgen_real_value_difference_still_mismatches(tmp_path):
+    # Mixed real/placeholder values: no exclusion, property error stays.
+    report = run_lvs(
+        _ph_request(
+            tmp_path,
+            ".subckt res_net A B C\n"
+            "R1 A B 120000 res_xhigh_po L=48.2U W=1U\n"
+            "R2 B C 60000 res_xhigh_po L=24.1U W=1U\n"
+            ".ends\n",
+            ".subckt res_net A B C\n"
+            "XR1 A B sky130_fd_pr__res_xhigh_po l=48.2u w=1u\n"
+            "R2 B C 70000 res_xhigh_po L=24.1U W=1U\n"
+            ".ends\n",
+            "res_net",
+            "netgen",
+        )
+    )
+    assert report["status"] == "mismatch"
+    assert not _ph_entries(report)
+
+
+@_SKIP_NO_NETGEN
+def test_placeholder_netgen_plain_element_zero_still_compared(tmp_path):
+    request = {
+        "engine": "netgen",
+        "layout": {
+            "netlist": _write(
+                tmp_path / "l.spice",
+                ".subckt r A B\nR1 A B 100 res_xhigh_po\n.ends\n",
+            ),
+            "top": "r",
+        },
+        "reference": {
+            "netlist": _write(
+                tmp_path / "r.spice",
+                ".subckt r A B\nR1 A B 0 res_xhigh_po\n.ends\n",
+            ),
+            "top": "r",
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "mismatch"
+    assert not _ph_entries(report)
+
+
+@_SKIP_NO_NETGEN
+def test_placeholder_netgen_topology_defect_still_mismatches(tmp_path):
+    report = run_lvs(
+        _ph_request(
+            tmp_path,
+            _PLACEHOLDER_RESISTOR_LAYOUT,
+            _PLACEHOLDER_RESISTOR_REFERENCE.replace("XR4 D E", "XR4 D D"),
+            "res_net",
+            "netgen",
+        )
+    )
+    assert report["status"] == "mismatch"
+
+
+@_SKIP_NO_NETGEN
+def test_placeholder_netgen_caller_setup_stays_effective(tmp_path):
+    marker = tmp_path / "marker.txt"
+    setup = _write(
+        tmp_path / "setup.tcl", f'set f [open "{marker}" w]\nputs $f hi\nclose $f\n'
+    )
+    report = run_lvs(
+        _ph_request(
+            tmp_path,
+            _PLACEHOLDER_RESISTOR_LAYOUT,
+            _PLACEHOLDER_RESISTOR_REFERENCE,
+            "res_net",
+            "netgen",
+            netgen_setup=setup,
+        )
+    )
+    assert report["status"] == "match"
+    assert marker.read_text().strip() == "hi"
+    assert report["options"]["netgen_setup"] == setup
+
+
+def test_placeholder_netgen_generated_setup_stubbed(tmp_path, monkeypatch):
+    # Mocked subprocess: the generated setup names both circuits, composes
+    # the caller setup, and the temp dir is gone afterwards (incl. failure).
+    seen: dict = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        seen["setup"] = Path(cmd[-2]).read_text()
+        seen["dir"] = os.path.dirname(cmd[-1])
+        if seen.get("fail"):
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        Path(cmd[-1]).write_text(_NETGEN_MATCH_LOG)
+        return fake_completed(_NETGEN_STDOUT_BANNER)
+
+    _stub_netgen_which(monkeypatch)
+    monkeypatch.setattr(lvs_netgen.subprocess, "run", fake_run)
+    caller = _write(tmp_path / "my setup.tcl", "# caller\n")
+    text = _ph_request(
+        tmp_path,
+        _PLACEHOLDER_RESISTOR_LAYOUT,
+        _PLACEHOLDER_RESISTOR_REFERENCE,
+        "res_net",
+        "netgen",
+        netgen_setup=caller,
+    )
+    report = run_lvs(text)
+    assert report["status"] == "match"
+    assert len(_ph_entries(report)) == 1
+    assert "source " + str(tmp_path) in seen["setup"]
+    assert "my\\ setup.tcl" in seen["setup"]
+    assert "property [list -circuit1 RES_XHIGH_PO] delete value" in seen["setup"]
+    assert "property [list -circuit2 RES_XHIGH_PO] delete value" in seen["setup"]
+    assert seen["setup"].index("source") < seen["setup"].index("property")
+    assert not os.path.exists(seen["dir"])
+
+    seen["fail"] = True
+    with pytest.raises(LvsError, match="did not complete"):
+        run_lvs(text)
+    assert not os.path.exists(seen["dir"])
+
+
+def test_placeholder_netgen_no_exclusion_leaves_setup_untouched(tmp_path, monkeypatch):
+    captured: list = []
+    _stub_netgen_subprocess(monkeypatch, captured_cmds=captured)
+    run_lvs(_netgen_request(tmp_path))
+    assert captured[0][-2] == ""
+
+
+def test_tcl_word_quotes_special_characters():
+    from klayout_tools.lvs_netgen import _tcl_word
+
+    assert _tcl_word("a b") == "a\\ b"
+    assert _tcl_word('x[y]$z{w};#\\"') == r"x\[y\]\$z\{w\}\;\#\\\""
+    assert _tcl_word("a\nb") == "a\\nb"
+
+
+@_SKIP_NO_NETGEN
+def test_tcl_quoted_class_name_roundtrips_in_real_netgen(tmp_path):
+    from klayout_tools.lvs_netgen import _tcl_word
+
+    # A hostile class name must reach `property` as one literal word.
+    setup = tmp_path / "s.tcl"
+    setup.write_text(f'set n {_tcl_word("a b$[x]{y}")}\nputs "NAME=$n"\n')
+    out = subprocess.run(
+        [
+            shutil.which("netgen") or shutil.which("netgen-lvs"),
+            "-batch",
+            "source",
+            str(setup),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "NAME=a b$[x]{y}" in out.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2673: `--check --rerun` replays a `subckt-call` reference, including
+# its proven placeholder exclusions, on both engines
+# --------------------------------------------------------------------------- #
+
+_PH_REPLAY_CASES = [
+    pytest.param(
+        _PLACEHOLDER_RESISTOR_LAYOUT,
+        _PLACEHOLDER_RESISTOR_REFERENCE,
+        "res_net",
+        "R",
+        id="resistor",
+    ),
+    pytest.param(_PH_CAP_LAYOUT, _PH_CAP_REFERENCE, "cap_net", "C", id="capacitor"),
+]
+
+
+def _commit_report(tmp_path, report):
+    return _write(tmp_path / "committed.json", json.dumps(report))
+
+
+def _assert_replay_unchanged(tmp_path, report, parameter):
+    result = rerun_lvs_report(_commit_report(tmp_path, report))
+    assert result["status"] == "match", result
+    assert report["status"] == "match"
+    (entry,) = _ph_entries(report)
+    assert entry["severity"] == "warning"
+    assert entry["details"]["parameter"] == parameter
+
+
+@pytest.mark.parametrize("layout,reference,top,parameter", _PH_REPLAY_CASES)
+def test_rerun_replays_subckt_call_placeholder_klayout(
+    tmp_path, layout, reference, top, parameter
+):
+    report = run_lvs(_ph_request(tmp_path, layout, reference, top, "klayout"))
+    assert report["reference_conversion"] == {
+        "form": "subckt-call",
+        "deck": "sky130",
+        "device_map": None,
+    }
+    _assert_replay_unchanged(tmp_path, report, parameter)
+
+
+@pytest.mark.parametrize("layout,reference,top,parameter", _PH_REPLAY_CASES)
+def test_rerun_replays_subckt_call_placeholder_netgen_stubbed(
+    tmp_path, monkeypatch, layout, reference, top, parameter
+):
+    # Without and with caller setup: the replayed run must rebuild the
+    # exclusions and, when given, compose the caller's setup ahead of them.
+    seen: list[str] = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        seen.append(Path(cmd[-2]).read_text())
+        Path(cmd[-1]).write_text(_NETGEN_MATCH_LOG)
+        return fake_completed(_NETGEN_STDOUT_BANNER)
+
+    _stub_netgen_which(monkeypatch)
+    monkeypatch.setattr(lvs_netgen.subprocess, "run", fake_run)
+    caller = _write(tmp_path / "caller.tcl", "# caller\n")
+    for options in ({}, {"netgen_setup": caller}):
+        seen.clear()
+        report = run_lvs(
+            _ph_request(tmp_path, layout, reference, top, "netgen", **options)
+        )
+        assert len(seen) == 1
+        _assert_replay_unchanged(tmp_path, report, parameter)
+        assert len(seen) == 2
+        original, replayed = seen
+        assert "delete value" in replayed
+        assert ("source" in replayed) == bool(options)
+        assert replayed.replace(str(tmp_path), "") == original.replace(
+            str(tmp_path), ""
+        )
+
+
+@_SKIP_NO_NETGEN
+@pytest.mark.parametrize("layout,reference,top,parameter", _PH_REPLAY_CASES)
+@pytest.mark.parametrize("with_setup", [False, True])
+def test_rerun_replays_subckt_call_placeholder_real_netgen(
+    tmp_path, layout, reference, top, parameter, with_setup
+):
+    options = {}
+    marker = tmp_path / "marker.txt"
+    if with_setup:
+        options["netgen_setup"] = _write(
+            tmp_path / "setup.tcl",
+            f'set f [open "{marker}" a]\nputs $f hi\nclose $f\n',
+        )
+    report = run_lvs(_ph_request(tmp_path, layout, reference, top, "netgen", **options))
+    _assert_replay_unchanged(tmp_path, report, parameter)
+    if with_setup:
+        # Once for the original run, once for the replay.
+        assert marker.read_text().split() == ["hi", "hi"]
+
+
+def test_rerun_report_without_reference_conversion_is_not_drift(tmp_path):
+    # Older compat: a plain-element report never carried the echo, and a
+    # `subckt-call` report committed before it existed must not report the
+    # new field as drift (it stays best-effort, as documented).
+    report = run_lvs(
+        _ph_request(
+            tmp_path,
+            _PLACEHOLDER_RESISTOR_LAYOUT,
+            _PLACEHOLDER_RESISTOR_REFERENCE,
+            "res_net",
+            "klayout",
+        )
+    )
+    old = {k: v for k, v in report.items() if k != "reference_conversion"}
+    with pytest.raises(LvsError):
+        # Replayed as plain-element SPICE, exactly as before this change.
+        rerun_lvs_report(_commit_report(tmp_path, old))

@@ -1623,6 +1623,55 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
 
+  asap7-drc-deck:
+    name: ASAP7 DRC deck fixtures (klayout binary)
+    # The in-repo ASAP7 deck (src/klayout_tools/decks/asap7.drc, issue #2760)
+    # is a KLayout DRC-DSL script, which only the standalone `klayout`
+    # application binary can run -- the pip `klayout` wheel the `test` job
+    # installs has no DSL runner, so there tests/test_drc_asap7_deck.py's
+    # per-rule fixture tier skips. This job installs the binary (Ubuntu
+    # 24.04's apt package, KLayout 0.28.16, the version the deck was
+    # validated against) and runs only that module, so every rule's failing
+    # and boundary-passing fixture is checked in CI. The shipped-cell clean
+    # run in the same module still skips here: it needs scripts/fetch-pdks.sh's
+    # lambdapdk payload, which CI does not fetch.
+    #
+    # Its own job rather than an apt step in `test`: installing the binary
+    # there would also switch on every other real-binary tier of the suite
+    # across the whole matrix.
+    #
+    # No row in .github/ci-wall-clock-budget.json yet: an unbudgeted job
+    # falls back to `default_job_budget_seconds` (600 s), the documented path
+    # for a job with no measured baseline (docs/guides/ci-wall-clock-budget.md).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Install the klayout binary
+        # Same bounded, mirror-tolerant apt wrapper as the `test` job's
+        # ngspice step (issues #1204, #1219).
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: scripts/ci-apt-install.sh klayout
+
+      - name: ASAP7 deck fixtures
+        run: |
+          klayout -v
+          uv run --frozen --extra dev pytest tests/test_drc_asap7_deck.py -q -rs
+
   wall-clock-budget:
     name: CI wall-clock budget
     # Issue #1971 measured CI wall clock across the 2AM Logic repos and found
@@ -1647,6 +1696,7 @@ jobs:
       - native-techmap
       - native-wave
       - signoff-example
+      - asap7-drc-deck
       - site
       - test
       - test-numerical
