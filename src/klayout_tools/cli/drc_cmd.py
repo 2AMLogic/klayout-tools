@@ -144,6 +144,7 @@ _REQUEST_FIELD_DESTS = {
     "timeout_s": "timeout_s",
     "allow_deck_errors": "allow_deck_errors",
     "allow_missing_host_tools": "allow_missing_host_tools",
+    "expect_rule_categories": "expect_rule_categories",
     "pdk": "pdk",
     "pdk_root": "pdk_root",
 }
@@ -205,10 +206,25 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "allow_missing_host_tools": reqdoc.get_bool(
                 request, "allow_missing_host_tools", verb="drc", error_cls=DrcError
             ),
+            "expect_rule_categories": _expect_rule_categories(request),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
         }
     )
+
+
+def _expect_rule_categories(request: dict) -> int | None:
+    """``request["expect_rule_categories"]`` as a positive int, or ``None``
+    (issue #2697). Booleans, floats and strings are rejected."""
+    value = request.get("expect_rule_categories")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise DrcError(
+            "`klt drc` request field 'expect_rule_categories' must be a "
+            f"positive integer (got {value!r})"
+        )
+    return value
 
 
 def _run(args: argparse.Namespace) -> dict:
@@ -232,6 +248,7 @@ def _run(args: argparse.Namespace) -> dict:
             pdk_root=args.pdk_root,
             allow_deck_errors=args.allow_deck_errors,
             allow_missing_host_tools=args.allow_missing_host_tools,
+            expected_rule_categories=args.expect_rule_categories,
         )
 
     if not args.deck:

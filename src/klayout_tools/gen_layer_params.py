@@ -571,6 +571,19 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # `"via2"` ladder, with a landing pad on met1 in between.
         "metal3": (69, 20),  # met2.drawing -- EXTRACTION_DECK.metals[2]
         "via2": (68, 44),  # via.drawing -- EXTRACTION_DECK.vias[1] (met1<->met2)
+        # Upper routing planes (issue #2738, mirroring gf180mcu's #1670): the
+        # role numbering counts li1 as `"metal"`, so `"metalN"` is physical
+        # met(N-2) from `"metal3"` up -- `"metal4"` is met3, `"metal5"` is
+        # met4, `"metal6"` is met5 -- and `"viaN"` joins `"metalN"` to the
+        # plane below it (`"via3"` is via2, met2<->met3). These match
+        # EXTRACTION_DECK.metals[3:6]/.vias[2:5] (issue #619). `"top_metal"`
+        # below is an unchanged alias of `"metal6"` (met5).
+        "metal4": (70, 20),  # met3.drawing -- EXTRACTION_DECK.metals[3]
+        "via3": (69, 44),  # via2.drawing -- EXTRACTION_DECK.vias[2] (met2<->met3)
+        "metal5": (71, 20),  # met4.drawing -- EXTRACTION_DECK.metals[4]
+        "via4": (70, 44),  # via3.drawing -- EXTRACTION_DECK.vias[3] (met3<->met4)
+        "metal6": (72, 20),  # met5.drawing -- EXTRACTION_DECK.metals[5]
+        "via5": (71, 44),  # via4.drawing -- EXTRACTION_DECK.vias[4] (met4<->met5)
         # Label/pin purpose of the *base* routing metal role above (`metal`,
         # li1) -- the same pair `klayout_tools.decks.sky130`'s
         # `EXTRACTION_DECK.metal_labels[0]` declares, never a second private
@@ -610,11 +623,9 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # fossi-foundation/open-pdks source as `LAYER_NAMES`):
         # `pad.drawing : 76/20`, `met5.drawing : 72/20`.
         "pad": (76, 20),  # pad.drawing -- passivation opening (bond pad)
-        "top_metal": (72, 20),  # met5.drawing -- this curated deck models no
-        # via role between this and `metal3` (met2) above -- sky130.lyt also
-        # defines met3/met4/via3/via4, none of which this deck curates -- so
-        # `bond_pad`'s own `down_to` param only ever supports `"top_metal"`
-        # today (see `_bond_pad_validate`).
+        "top_metal": (72, 20),  # met5.drawing -- same layer as `metal6` above
+        # (kept as the bond-pad-facing name). `bond_pad`'s own `down_to`
+        # param still only supports `"top_metal"` (see `_bond_pad_validate`).
         #
         # No `"esd_mark"`/`"salicide_block"` entry (issue #569, `esd_device`):
         # this repo's curated sky130 deck cites no numbered layer for either

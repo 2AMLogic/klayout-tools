@@ -5,7 +5,7 @@ report violations as structured data.
 
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--expect-rule-categories <N>] [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
@@ -55,6 +55,11 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   runs, and the error the deck itself produces names something else entirely
   — see "Engine" → `"klayout"` → "A driver's host assumptions are not rule
   checking".
+- `--expect-rule-categories N` — opt-in coverage assertion (`--engine
+  klayout` only, issue #2697; ignored for `--engine curated`). `N` must be a
+  positive integer; `0`, negatives and non-integers are rejected before
+  `klayout` is launched. See "Engine" → `"klayout"` → "Opt-in rule-category
+  assertion".
 - `--check` — verify a previously committed `--format json` report instead
   of running a fresh check (issue #1106). Mutually exclusive with `<file>`
   (the input path is read from the report itself) — see "`--check` /
@@ -109,6 +114,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `timeout_s` | number | `--timeout-s` |
 | `allow_deck_errors` | boolean | `--allow-deck-errors` |
 | `allow_missing_host_tools` | boolean | `--allow-missing-host-tools` |
+| `expect_rule_categories` | positive integer | `--expect-rule-categories` (booleans, floats, strings, `0` and negatives are rejected) |
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
 
@@ -382,6 +388,31 @@ real open_pdks install never pays for the extra probe.
   contains only rules with actual findings. `coverage.known` is false and
   `unknown` names `unmeasured_rule_execution`. No findings means
   `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Opt-in rule-category assertion (issue #2697).** The conservative default
+  above means a layout that is genuinely clean under its PDK's own deck can
+  never earn `clean` on its own. A caller who knows how many unique rule
+  categories the deck declares for the given inputs (e.g. from a prior
+  reviewed run) may vouch for it with `--expect-rule-categories N` (Python:
+  `expected_rule_categories`; request field `expect_rule_categories`). This
+  is *caller-supplied evidence*, not proof inferred from the RDB: it is only
+  as trustworthy as the count you supply. After a successful run, `N` is
+  compared with the number of **unique** names in `coverage.rule_categories`
+  (duplicate declarations count once):
+  - exact match: every declared category is recorded as checked, `coverage.known`
+    is `true`, the `unmeasured_rule_execution` sentinel is absent, and zero
+    findings give `status: "clean"` (exit 0). Findings still give
+    `"violations"` (exit 3).
+  - mismatch: the run fails (exit 1) with an error naming the expected and
+    observed counts; no report is emitted.
+  - a run that tolerated deck errors (`--allow-deck-errors`) can never
+    satisfy the assertion, even if its partial RDB has `N` categories: the
+    report stays `coverage_unknown` and records `satisfied: false`.
+  - the assertion is recorded in the additive top-level `coverage_assertion`
+    field: `{"kind": "expected_rule_categories", "expected": N, "observed": M,
+    "satisfied": true|false}`. It is absent when the option is not given, and
+    `--rerun` replays it from the committed report. Example:
+    `klt drc layout.gds --engine klayout --deck-file deck.lydrc
+    --expect-rule-categories 42 --format json`.
 - **Partial layer coverage information.** External scripts are opaque to
   the curated rule table, so layer/deck-specific legacy coverage arrays
   remain empty. They do not claim that nothing or everything was checked.
@@ -622,7 +653,7 @@ sizes, not ranges.
 |---|---|---|
 | `sg13cmos5l` | `via1.width.1`–`via3.width.1`, `topvia1.width.1` | `<layer>_nseal.without_bbox_min/max(...)` |
 | `sg13g2` | `cont.width.1`, `via1.width.1`–`via4.width.1`, `topvia1.width.1`, `topvia2.width.1` | `cont_sq.without_bbox_width(0.16um)` / `<layer>_nseal.without_bbox_min/max(...)` |
-| `sky130` | `via.width.1` | `via_not_mt.drc(length > 0.15)` (`via.1a_b`) |
+| `sky130` | `via.width.1`, `via2.width.1`, `via3.width.1`, `via4.width.1` | `via_not_mt.drc(length > 0.15)` (`via.1a_b`) / the `via2.1a_b`, `via3.1_b`, `via4.1_b` max-length halves (0.2 / 0.2 / 0.8 um) |
 
 sg13g2's `cont.width.1`/`via1.width.1`–`via4.width.1` and sky130's
 `via.width.1` were first deferred behind issue #2585: `klt gen` and
@@ -634,9 +665,11 @@ layers to their fixed size (`_cut_fixed_size_um` in `gen_layer_params.py`,
 which now reads the deck's `threshold_max_dbu` directly), and the six rules
 then took the field.
 
-Sky130's `via.width.1` still carries one residual approximation: the official rule also requires the cut be **rectangular** (`via.1a`),
+Issue #2443 backfilled the four rules #2388's scope left min-only: sg13g2's `topvia2.width.1` (already carrying the field on main by then) and sky130's `via2.width.1`/`via3.width.1`/`via4.width.1`.
+
+Sky130's `via.width.1`/`via2.width.1`/`via3.width.1`/`via4.width.1` each still carry one residual approximation: the official rule also requires the cut be **rectangular** (`via.1a`/`via2.1a`/`via3.1`/`via4.1`),
 which a bounding-box bound cannot express — an L-shaped or cross-shaped cut
-fitting inside a 0.15 um box would pass. See that rule's own docstring in
+fitting inside its fixed-size box would pass. See that rule's own docstring in
 `sky130.py`.
 
 **Two more rules joined this deferral list in issue #2594**, which found
@@ -914,13 +947,14 @@ more (`via.width.1` — rectangularity only —
 that additionally bounds a max length/rectangularity or a periphery-scoped/
 corner-relaxed refinement our single-layer/two-layer check primitives don't
 support — the same class of approximation `met1.enclosing.mcon.1` already
-makes. `via.width.1`'s max-size half is now enforced:
+makes. The max-size halves of `via.width.1`/`via2.width.1`/`via3.width.1`/`via4.width.1` are now enforced (`via2`-`via4` as of issue #2443):
 `DrcRule.threshold_max_dbu` (issue #2370/#2388) encodes `via.1a_b`'s 0.15 um
 cap exactly, after issue #2585 stopped `klt gen compose` drawing that cut
 oversized — see "Fixed-size rules" above. The rectangularity requirement
 (the cut must be square, not merely bounded in size) stays a residual,
 documented approximation: a bounding-box bound cannot reject an L-shaped cut
-that fits inside a 0.15 um box. approximation. `met1.enclosing.via.1`/`met2.enclosing.via.1`'s
+that fits inside the cap's box (0.15 um for `via`, 0.2/0.2/0.8 um for
+`via2`/`via3`/`via4`). `met1.enclosing.via.1`/`met2.enclosing.via.1`'s
 periphery-scoped/corner-relaxed refinement (`via.5a`/`m2.5`) remains
 approximated indefinitely — `threshold_max_dbu` only applies to
 `check: "width"` rules, not `"enclosing"`. (`met2.width.1` was previously

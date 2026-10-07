@@ -96,6 +96,7 @@ def _describe_devices(
         _PARAM_PRECISION_FARAD,
         _PARAM_PRECISION_OHM,
         _PARAM_PRECISION_UM,
+        MOM_FEED_TOKENS,
     )
 
     devices: list[dict[str, Any]] = []
@@ -114,8 +115,19 @@ def _describe_devices(
             )
 
         params: dict[str, float] = {}
+        feed_token: str | None = None
         for param in device_class.parameter_definitions():
-            if param.name == "W":
+            if param.name == "FEED":
+                # Issue #2445, `cap_cmomi` only: the feed variant is a
+                # *string* token (`none`/`same`/`double`), which `params` (an
+                # object of numbers) cannot carry without breaking typed
+                # consumers, so it is reported as an additive optional
+                # top-level device field instead -- present only when
+                # measured (the integer code `0` is "unmeasured").
+                feed_token = MOM_FEED_TOKENS.get(
+                    int(round(device.parameter(param.id())))
+                )
+            elif param.name == "W":
                 params["w_um"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
@@ -209,6 +221,7 @@ def _describe_devices(
                 # both (see `docs/json-contract.md`).
                 params[param.name.lower()] = int(round(device.parameter(param.id())))
 
+        feed_field = {"feed": feed_token} if feed_token is not None else {}
         devices.append(
             {
                 # expanded_name() yields a bare $<n> for anonymous devices:
@@ -227,6 +240,7 @@ def _describe_devices(
                 # docstrings. `[]` when it resolved to none (drawn directly
                 # in the top cell) or `device_instance_paths` was not given.
                 "instance_path": instance_paths.get(device.id(), []),
+                **feed_field,
             }
         )
         device_counts[class_name] = device_counts.get(class_name, 0) + 1

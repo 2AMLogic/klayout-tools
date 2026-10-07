@@ -4802,7 +4802,7 @@ def test_run_drc_sky130_via2_width_violation(tmp_path):
     top = layout.create_cell("TOP")
     via2 = layout.layer(69, 44)
     layout.set_info(via2, kdb.LayerInfo(69, 44, "via2.drawing"))
-    top.shapes(via2).insert(kdb.Box(0, 0, 100, 4000))  # 100 dbu < 200
+    top.shapes(via2).insert(kdb.Box(0, 0, 100, 200))  # 100 dbu < 200
     path = tmp_path / "via2_width_violation.gds"
     layout.write(str(path))
 
@@ -4823,8 +4823,8 @@ def test_run_drc_sky130_via2_space_violation(tmp_path):
     top = layout.create_cell("TOP")
     via2 = layout.layer(69, 44)
     layout.set_info(via2, kdb.LayerInfo(69, 44, "via2.drawing"))
-    top.shapes(via2).insert(kdb.Box(0, 0, 300, 300))
-    top.shapes(via2).insert(kdb.Box(400, 0, 700, 300))  # 100 dbu gap < 200
+    top.shapes(via2).insert(kdb.Box(0, 0, 200, 200))
+    top.shapes(via2).insert(kdb.Box(300, 0, 500, 200))  # 100 dbu gap < 200
     path = tmp_path / "via2_space_violation.gds"
     layout.write(str(path))
 
@@ -4850,7 +4850,7 @@ def test_run_drc_sky130_met2_enclosing_via2_violation(tmp_path):
     layout.set_info(via2, kdb.LayerInfo(69, 44, "via2.drawing"))
     top.shapes(met2).insert(kdb.Box(0, 0, 1000, 1000))
     # 400 dbu margin on 3 sides, only 10 dbu (< 40) margin on the right.
-    top.shapes(via2).insert(kdb.Box(400, 400, 990, 600))
+    top.shapes(via2).insert(kdb.Box(790, 400, 990, 600))
     path = tmp_path / "met2_enclosing_via2_violation.gds"
     layout.write(str(path))
 
@@ -4876,7 +4876,7 @@ def test_run_drc_sky130_met3_enclosing_via2_violation(tmp_path):
     layout.set_info(via2, kdb.LayerInfo(69, 44, "via2.drawing"))
     top.shapes(met3).insert(kdb.Box(0, 0, 1000, 1000))
     # 400 dbu margin on 3 sides, only 10 dbu (< 65) margin on the right.
-    top.shapes(via2).insert(kdb.Box(400, 400, 990, 600))
+    top.shapes(via2).insert(kdb.Box(790, 400, 990, 600))
     path = tmp_path / "met3_enclosing_via2_violation.gds"
     layout.write(str(path))
 
@@ -4940,7 +4940,7 @@ def test_run_drc_sky130_via3_width_violation(tmp_path):
     top = layout.create_cell("TOP")
     via3 = layout.layer(70, 44)
     layout.set_info(via3, kdb.LayerInfo(70, 44, "via3.drawing"))
-    top.shapes(via3).insert(kdb.Box(0, 0, 100, 4000))  # 100 dbu < 200
+    top.shapes(via3).insert(kdb.Box(0, 0, 100, 200))  # 100 dbu < 200
     path = tmp_path / "via3_width_violation.gds"
     layout.write(str(path))
 
@@ -4961,8 +4961,8 @@ def test_run_drc_sky130_via3_space_violation(tmp_path):
     top = layout.create_cell("TOP")
     via3 = layout.layer(70, 44)
     layout.set_info(via3, kdb.LayerInfo(70, 44, "via3.drawing"))
-    top.shapes(via3).insert(kdb.Box(0, 0, 300, 300))
-    top.shapes(via3).insert(kdb.Box(400, 0, 700, 300))  # 100 dbu gap < 200
+    top.shapes(via3).insert(kdb.Box(0, 0, 200, 200))
+    top.shapes(via3).insert(kdb.Box(300, 0, 500, 200))  # 100 dbu gap < 200
     path = tmp_path / "via3_space_violation.gds"
     layout.write(str(path))
 
@@ -4988,7 +4988,7 @@ def test_run_drc_sky130_met3_enclosing_via3_violation(tmp_path):
     layout.set_info(via3, kdb.LayerInfo(70, 44, "via3.drawing"))
     top.shapes(met3).insert(kdb.Box(0, 0, 1000, 1000))
     # 400 dbu margin on 3 sides, only 10 dbu (< 60) margin on the right.
-    top.shapes(via3).insert(kdb.Box(400, 400, 990, 600))
+    top.shapes(via3).insert(kdb.Box(790, 400, 990, 600))
     path = tmp_path / "met3_enclosing_via3_violation.gds"
     layout.write(str(path))
 
@@ -5014,7 +5014,7 @@ def test_run_drc_sky130_met4_enclosing_via3_violation(tmp_path):
     layout.set_info(via3, kdb.LayerInfo(70, 44, "via3.drawing"))
     top.shapes(met4).insert(kdb.Box(0, 0, 1000, 1000))
     # 400 dbu margin on 3 sides, only 10 dbu (< 65) margin on the right.
-    top.shapes(via3).insert(kdb.Box(400, 400, 990, 600))
+    top.shapes(via3).insert(kdb.Box(790, 400, 990, 600))
     path = tmp_path / "met4_enclosing_via3_violation.gds"
     layout.write(str(path))
 
@@ -5078,7 +5078,7 @@ def test_run_drc_sky130_via4_width_violation(tmp_path):
     top = layout.create_cell("TOP")
     via4 = layout.layer(71, 44)
     layout.set_info(via4, kdb.LayerInfo(71, 44, "via4.drawing"))
-    top.shapes(via4).insert(kdb.Box(0, 0, 400, 8000))  # 400 dbu < 800
+    top.shapes(via4).insert(kdb.Box(0, 0, 400, 800))  # 400 dbu < 800
     path = tmp_path / "via4_width_violation.gds"
     layout.write(str(path))
 
@@ -5099,8 +5099,8 @@ def test_run_drc_sky130_via4_space_violation(tmp_path):
     top = layout.create_cell("TOP")
     via4 = layout.layer(71, 44)
     layout.set_info(via4, kdb.LayerInfo(71, 44, "via4.drawing"))
-    top.shapes(via4).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via4).insert(kdb.Box(1400, 0, 2400, 1000))  # 400 dbu gap < 800
+    top.shapes(via4).insert(kdb.Box(0, 0, 800, 800))
+    top.shapes(via4).insert(kdb.Box(1200, 0, 2000, 800))  # 400 dbu gap < 800
     path = tmp_path / "via4_space_violation.gds"
     layout.write(str(path))
 
@@ -5125,9 +5125,9 @@ def test_run_drc_sky130_met4_enclosing_via4_violation(tmp_path):
     via4 = layout.layer(71, 44)
     layout.set_info(via4, kdb.LayerInfo(71, 44, "via4.drawing"))
     top.shapes(met4).insert(kdb.Box(0, 0, 3000, 3000))
-    # via4 is wide enough (900 >= 800) to avoid via4.width.1; 1200 dbu
+    # via4 is wide enough (800 >= 800) to avoid via4.width.1; 1200 dbu
     # margin on 3 sides, only 50 dbu (< 190) margin on the right.
-    top.shapes(via4).insert(kdb.Box(1200, 1200, 2950, 2100))
+    top.shapes(via4).insert(kdb.Box(2150, 1200, 2950, 2000))
     path = tmp_path / "met4_enclosing_via4_violation.gds"
     layout.write(str(path))
 
@@ -5152,9 +5152,9 @@ def test_run_drc_sky130_met5_enclosing_via4_violation(tmp_path):
     via4 = layout.layer(71, 44)
     layout.set_info(via4, kdb.LayerInfo(71, 44, "via4.drawing"))
     top.shapes(met5).insert(kdb.Box(0, 0, 3000, 3000))
-    # via4 is wide enough (900 >= 800) to avoid via4.width.1; 1200 dbu
+    # via4 is wide enough (800 >= 800) to avoid via4.width.1; 1200 dbu
     # margin on 3 sides, only 50 dbu (< 310) margin on the right.
-    top.shapes(via4).insert(kdb.Box(1200, 1200, 2950, 2100))
+    top.shapes(via4).insert(kdb.Box(2150, 1200, 2950, 2000))
     path = tmp_path / "met5_enclosing_via4_violation.gds"
     layout.write(str(path))
 
@@ -5250,7 +5250,7 @@ def test_run_drc_sky130_capm_enclosing_via3_violation(tmp_path):
     layout.set_info(via3, kdb.LayerInfo(70, 44, "via3.drawing"))
     top.shapes(capm).insert(kdb.Box(0, 0, 2000, 2000))
     # 800 dbu margin on 3 sides, only 50 dbu (< 140) margin on the right.
-    top.shapes(via3).insert(kdb.Box(800, 800, 1950, 1200))
+    top.shapes(via3).insert(kdb.Box(1750, 800, 1950, 1000))
     path = tmp_path / "capm_enclosing_via3_violation.gds"
     layout.write(str(path))
 
@@ -5277,9 +5277,9 @@ def test_run_drc_sky130_capm_separation_via3_violation(tmp_path):
     via3 = layout.layer(70, 44)
     layout.set_info(via3, kdb.LayerInfo(70, 44, "via3.drawing"))
     top.shapes(capm).insert(kdb.Box(0, 0, 1000, 1000))
-    # via3 is wide enough (250 >= 200) to avoid via3.width.1, and sits
+    # via3 is wide enough (200 >= 200) to avoid via3.width.1, and sits
     # entirely outside capm with only a 50 dbu (< 140) gap.
-    top.shapes(via3).insert(kdb.Box(1050, 0, 1300, 1000))
+    top.shapes(via3).insert(kdb.Box(1050, 0, 1250, 200))
     path = tmp_path / "capm_separation_via3_violation.gds"
     layout.write(str(path))
 
@@ -5303,7 +5303,7 @@ def test_run_drc_sky130_capm_separation_via3_clean(tmp_path):
     via3 = layout.layer(70, 44)
     layout.set_info(via3, kdb.LayerInfo(70, 44, "via3.drawing"))
     top.shapes(capm).insert(kdb.Box(0, 0, 1000, 1000))
-    top.shapes(via3).insert(kdb.Box(1200, 0, 1450, 1000))  # 200 dbu gap >= 140
+    top.shapes(via3).insert(kdb.Box(1200, 0, 1400, 200))  # 200 dbu gap >= 140
     path = tmp_path / "capm_separation_via3_clean.gds"
     layout.write(str(path))
 
@@ -5395,7 +5395,7 @@ def test_run_drc_sky130_capm2_enclosing_via4_violation(tmp_path):
     layout.set_info(via4, kdb.LayerInfo(71, 44, "via4.drawing"))
     top.shapes(capm2).insert(kdb.Box(0, 0, 3000, 3000))
     # 1000 dbu margin on 3 sides, only 50 dbu (< 200) margin on the right.
-    top.shapes(via4).insert(kdb.Box(1000, 1000, 2950, 1900))
+    top.shapes(via4).insert(kdb.Box(2150, 1000, 2950, 1800))
     path = tmp_path / "capm2_enclosing_via4_violation.gds"
     layout.write(str(path))
 
@@ -5420,9 +5420,9 @@ def test_run_drc_sky130_capm2_separation_via4_violation(tmp_path):
     via4 = layout.layer(71, 44)
     layout.set_info(via4, kdb.LayerInfo(71, 44, "via4.drawing"))
     top.shapes(capm2).insert(kdb.Box(0, 0, 1000, 1000))
-    # via4 is wide enough (900 >= 800) to avoid via4.width.1, and sits
+    # via4 is wide enough (800 >= 800) to avoid via4.width.1, and sits
     # entirely outside capm2 with only a 100 dbu (< 200) gap.
-    top.shapes(via4).insert(kdb.Box(1100, 0, 2000, 900))
+    top.shapes(via4).insert(kdb.Box(1100, 0, 1900, 800))
     path = tmp_path / "capm2_separation_via4_violation.gds"
     layout.write(str(path))
 
@@ -6227,14 +6227,14 @@ def test_run_drc_sky130_upper_stack_layers_now_covered(tmp_path):
     # Upper-right quadrant: via2/via3 landing under a capm top plate, all
     # margins comfortably >= every applicable enclosure/separation
     # threshold (max 140 dbu).
-    top.shapes(via2).insert(kdb.Box(2700, 2700, 3100, 3100))
-    top.shapes(via3).insert(kdb.Box(2700, 2700, 3100, 3100))
+    top.shapes(via2).insert(kdb.Box(2700, 2700, 2900, 2900))
+    top.shapes(via3).insert(kdb.Box(2700, 2700, 2900, 2900))
     top.shapes(capm).insert(kdb.Box(2300, 2300, 3800, 3800))
 
     # Lower-left quadrant: via4 landing under a capm2 top plate, all
     # margins comfortably >= every applicable enclosure/separation
     # threshold (max 310 dbu).
-    top.shapes(via4).insert(kdb.Box(700, 700, 1600, 1600))
+    top.shapes(via4).insert(kdb.Box(700, 700, 1500, 1500))
     top.shapes(capm2).insert(kdb.Box(200, 200, 1900, 1900))
 
     path = tmp_path / "upper_stack_covered.gds"
@@ -7938,6 +7938,56 @@ def test_run_drc_sky130_via_fixed_size_boundaries(
     report = run_drc(str(path), "sky130")
 
     assert report["rule_counts"].get("via.width.1", 0) == expected_count
+    if expected_count == 0:
+        assert report["status"] == "clean"
+
+
+_SKY130_FIXED_SIZE_VIA_RULES = [
+    ("via2.width.1", (69, 44), "via2.drawing", 200),
+    ("via3.width.1", (70, 44), "via3.drawing", 200),
+    ("via4.width.1", (71, 44), "via4.drawing", 800),
+]
+_SKY130_FIXED_SIZE_VIA_CASES = [
+    (rule_id, layer, layer_name, case_id, box, expected)
+    for rule_id, layer, layer_name, size_dbu in _SKY130_FIXED_SIZE_VIA_RULES
+    for case_id, box, expected in _fixed_size_cut_boundary_cases(size_dbu)
+]
+
+
+def test_run_drc_sky130_via2_to_via4_fixed_size_rules_declare_both_bounds():
+    """Structural half (issue #2443): `via2/3/4.width.1` carry
+    `threshold_max_dbu == threshold_dbu`."""
+    deck = {r.id: r for r in get_deck("sky130")}
+    for rule_id, _layer, _name, size_dbu in _SKY130_FIXED_SIZE_VIA_RULES:
+        rule = deck[rule_id]
+        assert rule.check == "width"
+        assert rule.threshold_dbu == size_dbu
+        assert rule.threshold_max_dbu == rule.threshold_dbu
+
+
+@pytest.mark.parametrize(
+    "rule_id,layer,layer_name,case_id,cut_box,expected_count",
+    _SKY130_FIXED_SIZE_VIA_CASES,
+    ids=[f"{entry[0]}-{entry[3]}" for entry in _SKY130_FIXED_SIZE_VIA_CASES],
+)
+def test_run_drc_sky130_via2_to_via4_fixed_size_boundaries(
+    rule_id, layer, layer_name, case_id, cut_box, expected_count, tmp_path
+):
+    """sky130's `via2/3/4.width.1` are fixed sizes (`via2.1a_b`/`via3.1_b`/
+    `via4.1_b` maximum length; issue #2443), mirroring
+    `test_run_drc_sky130_via_fixed_size_boundaries`. Rectangularity stays a
+    documented residual approximation: not tested here."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    cut = layout.layer(*layer)
+    layout.set_info(cut, kdb.LayerInfo(layer[0], layer[1], layer_name))
+    top.shapes(cut).insert(cut_box)
+    path = tmp_path / f"{rule_id}_{case_id}.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["rule_counts"].get(rule_id, 0) == expected_count
     if expected_count == 0:
         assert report["status"] == "clean"
 

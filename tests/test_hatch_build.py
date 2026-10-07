@@ -288,3 +288,35 @@ def test_pyproject_registers_the_build_hook():
     # `pip install klayout-tools==X.Y.Z` must keep reporting bare `X.Y.Z`).
     assert re.search(r'(?m)^version = "\d', pyproject)
     assert not re.search(r'(?m)^dynamic = .*"version"', pyproject)
+
+
+def test_deck_hashes_records_each_deck_module(tmp_path):
+    import hashlib
+
+    module = _load_hatch_build()
+    decks = tmp_path / "src" / "klayout_tools" / "decks"
+    decks.mkdir(parents=True)
+    (decks / "sky130.py").write_bytes(b"DECK = []\n")
+    (decks / "notes.txt").write_text("ignored")
+
+    assert module.deck_hashes(str(tmp_path)) == {
+        "sky130": "sha256:" + hashlib.sha256(b"DECK = []\n").hexdigest()
+    }
+    assert module.deck_hashes(str(tmp_path / "missing")) is None
+
+
+def test_render_build_info_includes_deck_hashes(tmp_path):
+    module = _load_hatch_build()
+    generated = tmp_path / "_build_info.py"
+    hashes = {"sky130": "sha256:" + "e" * 64}
+    generated.write_text(
+        module.render_build_info(
+            {"commit": "a" * 40, "tag": "v9.9.9", "dirty": False}, None, hashes
+        )
+    )
+    spec = importlib.util.spec_from_file_location(
+        "klt_generated_deck_hashes", generated
+    )
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    assert loaded.DECK_HASHES == hashes

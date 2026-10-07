@@ -73,14 +73,20 @@ install --user` and installed to `~/.local/bin/yosys`, shadowing a native
 distro-packaged `yosys` later on `$PATH` — the run fails with a confusing
 `Can't open script file '<path>' for reading: No such file or directory`
 error for the generated `.ys` script even though the file demonstrably
-exists on disk. This is because the WASI sandbox only preopens a fixed set
-of directories and rejects the absolute paths `klt synthesize` always
-writes into its generated script, regardless of the invoking process's
-cwd. `klt synthesize` detects this exact shape (an existing script path
-reported as missing) and appends a hint naming the WASI sandbox as the
-likely cause; the fix is to ensure a native `yosys` build precedes the
-WASI-sandboxed one on `$PATH` (e.g. `PATH=/usr/bin:$PATH klt synthesize
-...`).
+exists on disk. The likely cause is that the WASI runtime mounts its own
+private scratch directory over `/tmp`, shadowing the host temp directory —
+so the failure appears when the request file (and therefore its
+request-relative `.klt/synthesize/` run tree) lives under the host temp dir
+(a `tempfile.mkdtemp()` scratch area, a pytest `tmp_path`, a CI harness
+staging requests in `/tmp`). `klt synthesize` (and `klt equiv`) detects this
+exact shape (an existing script path reported as missing) and appends a hint
+naming the WASI sandbox as the likely cause. When the script is under the
+host temp dir, the hint leads with moving the request file outside it (e.g.
+into your checkout or under `$HOME`), which keeps a deliberately pinned
+engine; ensuring a native `yosys` build precedes the WASI-sandboxed one on
+`$PATH` (e.g. `PATH=/usr/bin:$PATH klt synthesize ...`) is only the fallback,
+since it swaps out the engine build. For a script outside the host temp dir
+the hint keeps the generic native-`yosys` advice.
 
 One post-processing stage is **not** Yosys: after `write_verilog` produces
 the mapped netlist, `klt-statime-native` (a compiled Rust extension, called

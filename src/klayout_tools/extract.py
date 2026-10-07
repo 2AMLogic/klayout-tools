@@ -6369,6 +6369,110 @@ def _exclude_capacitor_top_via_overlap(
     ]
 
 
+#: ``FEED`` parameter codes (issue #2445) -- the ``cap_cmomi`` PCell's
+#: feed-structure variant carried through a KLayout ``DeviceParameterDefinition``
+#: (a ``double``) as a small integer enum, mapped back to the upstream
+#: ``.subckt``'s own ``none``/``same``/``double`` token only when a card is
+#: written (:data:`MOM_FEED_TOKENS`, consumed by ``pdk_models.py``) and when
+#: ``devices[].feed`` is reported. ``0`` is **not** a variant: it is the
+#: class's own default and means "this side never measured/stated the feed"
+#: (the same sentinel role ``0`` plays for ``MMIN``/``MMAX``, issue #2435),
+#: so an unrecognised port layout is left off the card rather than guessed
+#: at. The codes are deliberately *not* the ``.lib``'s own ``none/same/double
+#: -> 0/1/2`` numbering, precisely so ``0`` stays free for "unmeasured".
+MOM_FEED_UNMEASURED = 0
+MOM_FEED_NONE = 1
+MOM_FEED_SAME = 2
+MOM_FEED_DOUBLE = 3
+MOM_FEED_TOKENS: dict[int, str] = {
+    MOM_FEED_NONE: "none",
+    MOM_FEED_SAME: "same",
+    MOM_FEED_DOUBLE: "double",
+}
+
+#: Device-class names whose upstream ``.subckt`` declares a ``feed``
+#: parameter. Exactly ``cap_cmomi`` -- ``cap_cmomf`` has no ``feed`` at all
+#: (``IHP-GmbH/ihp-sg13cmos5l`` ``libs.tech/ngspice/models/cap_cmomf.lib:53``),
+#: so it must never gain the ``FEED`` parameter or token.
+_MOM_FEED_CLASS_NAMES = frozenset({"cap_cmomi"})
+
+
+def mom_capacitor_has_feed(name: str) -> bool:
+    """Whether the MoM-capacitor device class ``name`` carries the ``FEED``
+    parameter (issue #2445) -- only ``cap_cmomi`` does."""
+    return name in _MOM_FEED_CLASS_NAMES
+
+
+def _mom_feed_variant(ports: list[tuple[Any, int]], marker_bbox: kdb.Box) -> int:
+    """Classify the ``cap_cmomi`` PCell's ``feed`` variant (issue #2445) from
+    the two recognised port polygons and the recognition marker's bounding
+    box, returning a ``MOM_FEED_*`` code, or ``MOM_FEED_UNMEASURED`` when the
+    port layout matches none of the three PCell signatures.
+
+    What each ``feed`` value draws (IHP ``cap_cmomi_code.py`` at
+    ``607e18d4bd9214a52575c194b4181ef449f9252f``, ``genLayout`` /
+    ``_place_pins``), and so what is separable:
+
+    * ``same`` -- two **stacked** pads, PLUS on ``mmax`` and MINUS on
+      ``mmax-1``, with both pins placed at the *same* pad centre. The two
+      ports sit on different metals and overlap in x/y.
+    * ``double`` -- PLUS pad left, MINUS pad right, both on ``mmax``, both
+      pins at the pad centre height. The two ports sit on one metal, at the
+      same y (mid-height of the marker), far apart in x.
+    * ``none`` -- no feed pads; pins sit inside the outer ``mmax`` bars, PLUS
+      on the bottom bar and MINUS on the top bar. The two ports sit on one
+      metal at *opposite* y edges of the marker.
+
+    So the three are told apart by port metal levels and the ports' relative
+    placement inside the marker, all of which this step already has. The
+    thresholds are wide (``0.25``/``0.75`` of the marker height (the PCell's
+    ``none`` pins are centred on the marker's own y edges, so a pin clipped to
+    the marker lands slightly inside them), ``0.5`` of its
+    width) because the PCell's own geometry sits at the extremes (``dy`` is
+    exactly ``0`` or the whole marker height); a port layout in between --
+    typically a hand-drawn abstraction, not this PCell's output -- is left
+    unmeasured rather than forced into the nearest variant, the same "never
+    guess" rule issue #2408 set.
+    """
+    (poly_a, metal_a), (poly_b, metal_b) = ports
+    box_a, box_b = poly_a.bbox(), poly_b.bbox()
+    if metal_a != metal_b:
+        return MOM_FEED_SAME if box_a.overlaps(box_b) else MOM_FEED_UNMEASURED
+    height, width = marker_bbox.height(), marker_bbox.width()
+    if height <= 0 or width <= 0:
+        return MOM_FEED_UNMEASURED
+    dx = abs(box_a.center().x - box_b.center().x)
+    dy = abs(box_a.center().y - box_b.center().y)
+    if dx < 0.5 * width:
+        return MOM_FEED_UNMEASURED
+    if dy <= 0.25 * height:
+        return MOM_FEED_DOUBLE
+    if dy >= 0.75 * height:
+        return MOM_FEED_NONE
+    return MOM_FEED_UNMEASURED
+
+
+def _set_mom_feed_parameter(
+    device: kdb.Device,
+    param_feed: int | None,
+    ports: list[tuple[Any, int]],
+    marker_bbox: kdb.Box,
+) -> None:
+    """Write the ``FEED`` parameter (issue #2445) onto one extracted MoM
+    capacitor ``device`` -- a no-op when ``param_feed`` is ``None`` (the
+    device class carries no ``FEED`` parameter; see
+    :func:`mom_capacitor_has_feed`).
+
+    Module-level rather than inline in the extractor's ``extract_devices``
+    so the ``None`` guard does not count against
+    ``_build_mom_capacitor_extractor``'s own baselined cyclomatic complexity
+    (``complexity-baseline.json``).
+    """
+    if param_feed is None:
+        return
+    device.set_parameter(param_feed, float(_mom_feed_variant(ports, marker_bbox)))
+
+
 def mom_capacitor_device_class(name: str) -> kdb.DeviceClass:
     """Build the ``kdb.DeviceClass`` one
     :class:`~klayout_tools.decks.MomCapacitorDevice` entry named ``name``
@@ -6391,7 +6495,14 @@ def mom_capacitor_device_class(name: str) -> kdb.DeviceClass:
     geometry by :func:`_build_mom_capacitor_extractor` and reported as
     ``devices[].params``' ``mmin``/``mmax`` (see ``_describe_devices``).
 
-    Both are declared **non-primary** (``is_primary=False``, KLayout's
+    ``cap_cmomi`` alone additionally carries ``FEED`` (issue #2445): the
+    PCell's feed variant, an integer enum (``MOM_FEED_*``) in the parameter's
+    ``double``, ``0`` meaning unmeasured. ``cap_cmomf`` has no ``feed`` in its
+    upstream ``.subckt`` and so never registers it
+    (:func:`mom_capacitor_has_feed`).
+
+    ``MMIN``/``MMAX`` (and ``FEED``) are declared **non-primary**
+    (``is_primary=False``, KLayout's
     "secondary parameter" flag): they are extracted and written, but never
     compared by ``kdb.NetlistComparer``. A reference netlist's own
     ``cap_cmom*`` instantiation is free to leave ``mmin``/``mmax`` at the
@@ -6436,6 +6547,16 @@ def mom_capacitor_device_class(name: str) -> kdb.DeviceClass:
         "MMAX", "Highest metal index carrying finger geometry", 0.0, False
     )
     device_class.add_parameter(param_mmax)
+    if mom_capacitor_has_feed(name):
+        # Issue #2445: also non-primary, for the same reason -- a reference
+        # card is free to leave `feed` at the `.subckt` default.
+        param_feed = kdb.DeviceParameterDefinition(
+            "FEED",
+            "Feed variant code (1=none, 2=same, 3=double, 0=unmeasured)",
+            0.0,
+            False,
+        )
+        device_class.add_parameter(param_feed)
     return device_class
 
 
@@ -6649,13 +6770,16 @@ def _build_mom_capacitor_extractor(
             terminal_a, terminal_b = device_class.terminal_definitions()
             self._terminal_a = terminal_a.id()
             self._terminal_b = terminal_b.id()
-            param_w, param_l, param_mmin, param_mmax = (
-                device_class.parameter_definitions()
-            )
-            self._param_w = param_w.id()
-            self._param_l = param_l.id()
-            self._param_mmin = param_mmin.id()
-            self._param_mmax = param_mmax.id()
+            param_ids = {
+                definition.name: definition.id()
+                for definition in device_class.parameter_definitions()
+            }
+            self._param_w = param_ids["W"]
+            self._param_l = param_ids["L"]
+            self._param_mmin = param_ids["MMIN"]
+            self._param_mmax = param_ids["MMAX"]
+            # Issue #2445: `cap_cmomi` only (`mom_capacitor_has_feed`).
+            self._param_feed = param_ids.get("FEED")
             self.register_device_class(device_class)
 
         def get_connectivity(
@@ -6755,6 +6879,13 @@ def _build_mom_capacitor_extractor(
                 )
                 device.set_parameter(self._param_mmin, float(mmin))
                 device.set_parameter(self._param_mmax, float(mmax))
+
+                # Issue #2445: the PCell's `feed` variant, from the two
+                # ports' placement inside the marker (see
+                # `_mom_feed_variant`). Left at the class default `0`
+                # ("unmeasured") when the layout matches no PCell signature;
+                # a no-op for classes without `FEED` (`cap_cmomf`).
+                _set_mom_feed_parameter(device, self._param_feed, ports, bbox)
 
                 # Deterministic pick of two ports (by x, then y, then metal
                 # index) -- which of the two ends up on terminal A is

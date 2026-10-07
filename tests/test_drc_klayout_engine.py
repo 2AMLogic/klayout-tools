@@ -1790,3 +1790,263 @@ def test_klayout_engine_file_is_external_outside_any_repo(tmp_path, monkeypatch)
     report = run_drc_klayout_engine(gds, deck_file)
 
     assert report["file"] == {"path": None, "scope": "external"}
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in rule-category coverage assertion (issue #2697)
+# --------------------------------------------------------------------------- #
+
+# Two unique categories declared, one of them twice (duplicate declaration
+# pins the unique-count definition).
+_DUPLICATE_CATEGORIES_RDB = _CLEAN_WITH_CATEGORIES_RDB.replace(
+    " </categories>",
+    "  <category>\n   <name>W.1</name>\n  </category>\n </categories>",
+)
+
+
+def _assert_setup(tmp_path):
+    return (
+        _write_gds(tmp_path / "test.gds"),
+        _write_deck_file(tmp_path / "deck.lydrc"),
+    )
+
+
+@pytest.mark.parametrize("rdb", [_CLEAN_WITH_CATEGORIES_RDB, _DUPLICATE_CATEGORIES_RDB])
+def test_expected_rule_categories_exact_match_is_clean(tmp_path, monkeypatch, rdb):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=rdb)
+    gds, deck = _assert_setup(tmp_path)
+
+    report = run_drc_klayout_engine(gds, deck, expected_rule_categories=2)
+
+    assert report["status"] == "clean"
+    cov = report["coverage"]
+    assert cov["known"] is True
+    assert cov["unknown"] == []
+    assert cov["checked"] == ["S.1", "W.1"]
+    assert report["coverage_assertion"] == {
+        "kind": "expected_rule_categories",
+        "expected": 2,
+        "observed": 2,
+        "satisfied": True,
+    }
+    assert drc_module.drc_exit_code(report) == 0
+
+
+@pytest.mark.parametrize("expected", [1, 3])
+def test_expected_rule_categories_mismatch_raises(tmp_path, monkeypatch, expected):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    gds, deck = _assert_setup(tmp_path)
+
+    with pytest.raises(DrcError) as exc:
+        run_drc_klayout_engine(gds, deck, expected_rule_categories=expected)
+
+    assert f"expected {expected}" in str(exc.value)
+    assert "declared 2" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, False, 2.0, 1.5, "2", "abc"])
+def test_expected_rule_categories_invalid_rejected_before_subprocess(
+    tmp_path, monkeypatch, bad
+):
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+    gds, deck = _assert_setup(tmp_path)
+
+    with pytest.raises(DrcError, match="positive integer"):
+        run_drc_klayout_engine(gds, deck, expected_rule_categories=bad)
+
+    assert captured == []
+
+
+def test_expected_rule_categories_omitted_keeps_coverage_unknown(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    gds, deck = _assert_setup(tmp_path)
+
+    report = run_drc_klayout_engine(gds, deck)
+
+    assert report["status"] == "coverage_unknown"
+    assert report["coverage"]["known"] is False
+    assert "coverage_assertion" not in report
+
+
+def test_expected_rule_categories_findings_still_violations(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EDGE_PAIR_RDB)
+    gds, deck = _assert_setup(tmp_path)
+
+    report = run_drc_klayout_engine(gds, deck, expected_rule_categories=1)
+
+    assert report["status"] == "violations"
+    assert report["coverage_assertion"]["satisfied"] is True
+    assert drc_module.drc_exit_code(report) == 3
+
+
+def test_expected_rule_categories_refused_after_tolerated_deck_errors(
+    tmp_path, monkeypatch
+):
+    _stub_klayout_drc_subprocess(
+        monkeypatch,
+        rdb_xml=_CLEAN_WITH_CATEGORIES_RDB,
+        returncode=1,
+        stderr=_DECK_ABORT_STDERR,
+    )
+    gds, deck = _assert_setup(tmp_path)
+
+    report = run_drc_klayout_engine(
+        gds, deck, allow_deck_errors=True, expected_rule_categories=2
+    )
+
+    assert report["status"] == "coverage_unknown"
+    assert report["coverage"]["known"] is False
+    assert report["coverage_assertion"]["satisfied"] is False
+    assert report["coverage_assertion"]["observed"] == 2
+
+
+def _expect_cli(tmp_path, extra):
+    gds, deck = _assert_setup(tmp_path)
+    return ["drc", gds, "--engine", "klayout", "--deck-file", deck, *extra]
+
+
+def test_cli_expect_rule_categories_clean_exit_zero(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+
+    code = main(
+        _expect_cli(tmp_path, ["--expect-rule-categories", "2", "--format", "json"])
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "clean"
+    assert payload["coverage_assertion"]["satisfied"] is True
+
+
+def test_cli_expect_rule_categories_text_output(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+
+    code = main(
+        _expect_cli(tmp_path, ["--expect-rule-categories", "2", "--format", "text"])
+    )
+
+    assert code == 0
+    assert "status: clean" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_cli_expect_rule_categories_invalid_exit_one(
+    tmp_path, monkeypatch, capsys, value
+):
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+
+    code = main(
+        _expect_cli(tmp_path, [f"--expect-rule-categories={value}", "--format", "json"])
+    )
+
+    assert code == 1
+    assert captured == []
+
+
+def test_cli_expect_rule_categories_malformed_text_rejected(
+    tmp_path, monkeypatch, capsys
+):
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+
+    with pytest.raises(SystemExit) as exc:
+        main(_expect_cli(tmp_path, ["--expect-rule-categories", "two"]))
+
+    assert exc.value.code == 2
+    assert captured == []
+
+
+def test_cli_expect_rule_categories_mismatch_exit_one(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+
+    code = main(
+        _expect_cli(tmp_path, ["--expect-rule-categories", "5", "--format", "json"])
+    )
+
+    assert code == 1
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "expected 5" in out and "declared 2" in out
+
+
+def test_cli_expect_rule_categories_ignored_for_curated_engine(tmp_path, capsys):
+    gds = _write_gds(tmp_path / "test.gds")
+
+    code = main(
+        [
+            "drc",
+            gds,
+            "--deck",
+            "sky130",
+            "--expect-rule-categories",
+            "9",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code in (0, 3, 4)
+    assert "coverage_assertion" not in json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("value", [2, 0, True, 2.5, "2"])
+def test_request_document_expect_rule_categories(tmp_path, monkeypatch, capsys, value):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    gds, deck = _assert_setup(tmp_path)
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.drc.request/1",
+                "file": gds,
+                "engine": "klayout",
+                "deck_file": deck,
+                "expect_rule_categories": value,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(["drc", str(request), "--format", "json"])
+
+    if value == 2:
+        assert code == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "clean"
+    else:
+        assert code == 1
+
+
+def test_expect_rule_categories_report_check_and_rerun(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    # Issue #2659: a bare `tmp_path` input records `scope: "external"` (no
+    # locatable path), which `--check`/`--rerun` cannot verify; a `.git`
+    # marker makes it a repo-scoped input, as committed evidence always is.
+    (tmp_path / ".git").mkdir()
+    gds, deck = _assert_setup(tmp_path)
+    report_path = tmp_path / "report.json"
+    assert (
+        main(
+            [
+                "drc",
+                gds,
+                "--engine",
+                "klayout",
+                "--deck-file",
+                deck,
+                "--expect-rule-categories",
+                "2",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    report_path.write_text(capsys.readouterr().out, encoding="utf-8")
+
+    assert main(["drc", "--check", str(report_path), "--format", "json"]) == 0
+    capsys.readouterr()
+    assert (
+        main(["drc", "--check", str(report_path), "--rerun", "--format", "json"]) == 0
+    )

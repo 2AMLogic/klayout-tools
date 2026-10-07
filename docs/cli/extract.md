@@ -1443,22 +1443,49 @@ range that does not match the drawn one is a wrong modelled capacitance, not
 just missing metadata. That is exactly why #2408 declined to write the
 defaults out and #2435 measured them instead.
 
-**Still omitted: `feed`, `subblock`, `mm_ok`.** These three take their
-`.subckt` defaults above, deliberately rather than by oversight — the same
-#2408 rule applies unchanged to a value that is still not measured:
+**Feed variant: `FEED` (issue #2445, `cap_cmomi` only).** `feed`
+(`none`/`same`/`double`) is **recoverable from the drawn port placement** —
+settled against the PCell generator itself (`cap_cmomi_code.py`,
+`genLayout`/`_place_pins`, at `607e18d4bd9214a52575c194b4181ef449f9252f`),
+which draws:
 
-- **`feed`** (`cap_cmomi` only — the feed-structure variant,
-  `none`/`same`/`double`) is only *partly* recoverable. The `same` variant
-  stacks the device's two pins on adjacent metal levels, so the two
-  recognised ports carry different metal indices — visible to this
-  recognition step. But `double` and `none` both place two ports on the top
-  metal and are told apart only by where those feed structures sit relative
-  to the finger core, which one marker plus two port polygons does not
-  encode. Writing `feed=double` for a layout drawn `feed=none` would be
-  exactly the invisible wrong answer #2408 rejected, and `none` is
-  upstream's own documented *not a standalone two-terminal device*
-  configuration. Tracked as issue #2445, which settles the question against
-  the PCell generator itself rather than guessing here.
+| `feed`   | feed structure drawn                                   | the two recognised ports                                        |
+|----------|--------------------------------------------------------|------------------------------------------------------------------|
+| `same`   | two **stacked** left pads, PLUS on `mmax`, MINUS on `mmax-1` | different metals, overlapping in x/y (same pad centre)        |
+| `double` | PLUS pad left, MINUS pad right, both on `mmax`         | same metal, same y (pad centre height), far apart in x          |
+| `none`   | no pads; pins inside the outer `mmax` bars             | same metal, at *opposite* y edges of the marker                 |
+
+`klt extract` classifies from exactly that (`extract.py`'s
+`_mom_feed_variant`): different port metals that overlap → `same`; same
+metal and ≥ 50% of the marker width apart in x, then ports within 25% of the
+marker height in y → `double`, or ≥ 75% → `none`. A port layout matching none
+of these (typically a hand-drawn abstraction rather than PCell output) is
+left **unmeasured**: no `feed` field, no `FEED=` token, the PDK default
+applies — never forced onto the nearest variant (the #2408 rule). `none` is
+upstream's own *not a standalone two-terminal device* configuration; it is
+reported faithfully as `none`, not promoted to `double`.
+
+- **`devices[].feed`** is an additive optional **string** field
+  (`"none"`/`"same"`/`"double"`) on a `cap_cmomi` device whose variant was
+  measured. It is a top-level device key rather than a `params` entry because
+  `params` is an object of numbers; no `schema_version` bump (additive).
+  `cap_cmomf` never has it.
+- The written card carries `FEED=<token>` after `MMAX=` (e.g. `XD_$1 A B
+  cap_cmomi W=4U L=10U MMIN=1 MMAX=4 FEED=none`), `cap_cmomi` only; `cap_cmomf`'s
+  `.subckt` declares no `feed`.
+- **Carrier decision.** KLayout's `DeviceParameterDefinition` carries a
+  `double`, so internally `FEED` is an integer enum (`1` none, `2` same,
+  `3` double) mapped back to the string token only when a card is written or
+  `devices[].feed` is reported. `0` is the class default and means
+  "unmeasured/unstated" (it is why the enum does not reuse the `.lib`'s own
+  `0/1/2` numbering). Like `MMIN`/`MMAX` it is non-primary: `klt lvs` never
+  compares it, and a reference card that omits `feed` still matches.
+- The recovery reads `FEED=<token>` back off an `X` card (round trip).
+
+**Still omitted: `subblock`, `mm_ok`.** These two take their `.subckt`
+defaults above, deliberately rather than by oversight — the same #2408 rule
+applies unchanged to a value that is still not measured:
+
 - **`subblock`** is a PCell layout switch (substrate isolation block) with
   no counterpart in the recognition geometry at all.
 - **`mm_ok`** is a documented no-op in this release for both devices
@@ -1469,10 +1496,10 @@ defaults out and #2435 measured them instead.
 **What this means for a consumer.** A `--pdk`-bound extraction's MoM-cap
 card is value-accurate for `W`/`L` and for the drawn finger stack's
 `MMIN`/`MMAX`, and relies on the PDK subcircuit's own defaults for
-`feed`/`subblock`/`mm_ok`. Diffing an extracted card against a design's own
+`subblock`/`mm_ok` (and for `feed` when the port layout matches no PCell
+variant). Diffing an extracted card against a design's own
 instantiation will therefore *not* show a mismatch when the design chose a
-non-default `feed` or `subblock`: the extracted card is simply silent on
-those. If your design overrides either, rewrite the card (or supply your own
+non-default `subblock`: the extracted card is simply silent on that. If your design overrides it, rewrite the card (or supply your own
 wrapper `.subckt`) before simulating. Note this also means an extracted card
 and a hand-written reference card can legitimately disagree on
 `mmin`/`mmax` — a reference that omits them is *not* asserting `1`/`4`, it

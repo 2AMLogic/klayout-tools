@@ -19784,6 +19784,70 @@ def test_mom_capacitor_reference_may_omit_the_measured_metal_range(tmp_path):
     ]
 
 
+def test_mom_capacitor_feed_round_trips_and_reference_may_omit_it(tmp_path):
+    """Issue #2445: `FEED=<none|same|double>` on a `cap_cmomi` card is read
+    back as the class's integer enum (`1`/`2`/`3`), a card without it stays at
+    the `0` "unstated" default, and -- exactly like `MMIN`/`MMAX` -- a
+    reference that omits `FEED` still matches a layout card that measured it
+    (the `.subckt` default is silence, not a claim of `feed=double`)."""
+    import klayout.db as kdb
+
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+    )
+
+    text = (
+        ".SUBCKT TOP A B\n"
+        "XD1 A B cap_cmomi W=1U L=2U FEED=none\n"
+        "XD2 A B cap_cmomi W=1U L=2U FEED=same\n"
+        "XD3 A B cap_cmomi W=1U L=2U FEED=double\n"
+        "XD4 A B cap_cmomi W=1U L=2U\n"
+        ".ENDS TOP\n"
+    )
+    path = _write(tmp_path / "feed.spice", text)
+    netlist = kdb.Netlist()
+    netlist.read(
+        path,
+        make_capacitor_class_recovery_reader(
+            {}, custom_device_classes={"CAP_CMOMI": "cap_cmomi"}
+        ),
+    )
+    top = next(c for c in netlist.each_circuit() if c.name == "TOP")
+    feeds = {}
+    for device in top.each_device():
+        by_name = {p.name: p for p in device.device_class().parameter_definitions()}
+        feeds[device.name] = device.parameter(by_name["FEED"].id())
+    assert feeds == {"D1": 1.0, "D2": 2.0, "D3": 3.0, "D4": 0.0}
+
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        ".subckt capblock PLUS_NET MINUS_NET\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi W=4U L=10U MMIN=2 MMAX=3 FEED=none\n"
+        ".ends capblock\n",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt capblock PLUS_NET MINUS_NET\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi W=4U L=10U\n"
+        ".ends capblock\n",
+    )
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": layout_path, "deck": "sg13g2", "top": "capblock"},
+                "reference": {
+                    "netlist": reference_path,
+                    "top": "capblock",
+                    "deck": "sg13g2",
+                },
+            },
+        )
+    )
+    assert report["status"] == "match"
+    assert not [e for e in report["mismatches"] if "feed" in json.dumps(e).lower()]
+
+
 def test_custom_class_recovery_x_cards_share_one_device_class(tmp_path):
     """Same one-class-object-per-name discipline as the #1157 resistor
     recovery (PR #2336), asserted for the #1942 custom-class path: cards

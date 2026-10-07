@@ -16,10 +16,13 @@ two backend job builders that consume this module are covered in
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 
 import pytest
 
+from klayout_tools import sim
 from klayout_tools import sim_staging as st
 
 
@@ -376,3 +379,381 @@ def test_stage_sim_netlist_reraises_as_a_sim_error_naming_the_backend(tmp_path):
         )
     assert "backend 'batch'" in str(excinfo.value)
     assert "missing.spice" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in model staging: `options.stage_model_inputs` (issue #2668)
+# --------------------------------------------------------------------------- #
+
+
+def _job(request, netlist_path, request_dir, **overrides):
+    fields = dict(
+        request_dir=str(request_dir),
+        netlist_staged_name="netlist.cir",
+        reserved_names=("request.json",),
+        backend="batch",
+    )
+    fields.update(overrides)
+    return st.stage_sim_job(request, str(netlist_path), **fields)
+
+
+def _model_request(**overrides):
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "models": {"lib": "models/top.lib"},
+        "corners": {"process": ["tt"]},
+        "options": {"stage_model_inputs": True},
+    }
+    request.update(overrides)
+    return request
+
+
+def _by_name(job):
+    return {item.staged_name: item for item in job.files}
+
+
+def _bytes_of(item):
+    if item.content is not None:
+        return item.content.encode("utf-8")
+    with open(item.local_path, "rb") as handle:
+        return handle.read()
+
+
+def _materialize(job, job_dir):
+    """What the executing host's job directory holds after the upload."""
+    job_dir.mkdir(parents=True, exist_ok=True)
+    for item in job.files:
+        (job_dir / item.staged_name).write_bytes(_bytes_of(item))
+
+
+def _model_tree(tmp_path):
+    """A model library with nested includes, a file-bearing `.lib`, a shared
+    dependency, section definitions and a self-referencing `.lib`."""
+    _write(tmp_path, "body.spice", "R1 a b 1k\n")
+    _write(tmp_path, "models/common.spice", ".param common=1\n")
+    _write(
+        tmp_path,
+        "models/sub/nested.spice",
+        '.include "../common.spice"\n.param nested=2\n',
+    )
+    _write(
+        tmp_path,
+        "models/corners.lib",
+        ".lib fast\n.param speed=2\n.endl fast\n",
+    )
+    _write(
+        tmp_path,
+        "models/top.lib",
+        "* top\n"
+        ".lib tt\n"
+        ".include sub/nested.spice\n"
+        '.lib "corners.lib" fast\n'
+        ".endl tt\n"
+        ".lib ss\n"
+        ".lib top.lib tt\n"
+        ".endl ss\n",
+    )
+    return tmp_path / "body.spice"
+
+
+def test_stage_model_inputs_off_returns_the_request_untouched(tmp_path):
+    netlist = _model_tree(tmp_path)
+    request = _model_request(options={})
+
+    job = _job(request, netlist, tmp_path)
+
+    assert job.request is request
+    assert job.model_files == ()
+    assert job.model_assets == ()
+    assert [item.staged_name for item in job.files] == ["netlist.cir"]
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None, [True]])
+def test_stage_model_inputs_must_be_a_boolean(tmp_path, value):
+    netlist = _model_tree(tmp_path)
+    with pytest.raises(sim.SimError, match="stage_model_inputs must be a boolean"):
+        _job(_model_request(options={"stage_model_inputs": value}), netlist, tmp_path)
+
+
+def test_model_closure_is_staged_rewritten_and_self_contained(tmp_path):
+    netlist = _model_tree(tmp_path)
+    request = _model_request()
+    snapshot = json.loads(json.dumps(request))
+
+    job = _job(request, netlist, tmp_path)
+
+    assert request == snapshot  # the caller's request is never mutated
+    names = _by_name(job)
+    assert set(names) == {
+        "netlist.cir",
+        "top.lib",
+        "nested.spice",
+        "corners.lib",
+        "common.spice",
+    }
+    top = names["top.lib"].content
+    # Section definitions and `.endl` stay intact; file-bearing references
+    # (including the self-reference) point at staged names.
+    assert ".lib tt\n" in top and ".endl tt\n" in top and ".lib ss\n" in top
+    assert '.include "nested.spice"\n' in top
+    assert '.lib "corners.lib" fast\n' in top
+    assert '.lib "top.lib" tt\n' in top
+    assert str(tmp_path) not in top
+    assert names["nested.spice"].content == '.include "common.spice"\n.param nested=2\n'
+    # Unmodified files ship byte-for-byte from their own path.
+    assert names["corners.lib"].local_path == str(tmp_path / "models/corners.lib")
+    assert names["common.spice"].local_path is not None
+
+    worker = job.request
+    assert worker["models"]["lib"] == "top.lib"
+    assert worker[st.STAGED_MODEL_INPUTS_FIELD] is True
+    assert worker["options"]["stage_model_inputs"] is True
+
+    kinds = {asset.name: (asset.kind, asset.field) for asset in job.model_assets}
+    assert kinds["top.lib"] == ("library", "models.lib")
+    assert kinds["common.spice"] == ("dependency", "models.lib")
+    for asset in job.model_assets:
+        assert asset.sha256 == _sha(_bytes_of(names[asset.name]))
+        assert asset.rewritten is (names[asset.name].content is not None)
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_section_libraries_and_explicit_points_share_staged_names(tmp_path):
+    netlist = _model_tree(tmp_path)
+    _write(
+        tmp_path,
+        "fam/mos.lib",
+        '.lib tt\n.include "../models/common.spice"\n.endl tt\n',
+    )
+    _write(
+        tmp_path,
+        "fam/res.lib",
+        '.lib tt\n.include "../models/common.spice"\n.endl tt\n',
+    )
+    request = _model_request(
+        corners={
+            "process": [
+                {
+                    "name": "tt",
+                    "sections": [
+                        {"lib": "fam/mos.lib", "section": "tt"},
+                        {"lib": "fam/res.lib", "section": "tt"},
+                        "tt",
+                    ],
+                }
+            ]
+        },
+        _explicit_points=[
+            {
+                "process": "tt",
+                "process_sections": ["tt", "tt", "tt"],
+                "process_section_libs": ["fam/mos.lib", "fam/res.lib", None],
+            }
+        ],
+    )
+
+    job = _job(request, netlist, tmp_path)
+
+    names = _by_name(job)
+    # The shared dependency is staged once.
+    assert [
+        n for n in names if n.startswith("common") or n.endswith("common.spice")
+    ] == ["common.spice"]
+    sections = job.request["corners"]["process"][0]["sections"]
+    assert sections == [
+        {"lib": "mos.lib", "section": "tt"},
+        {"lib": "res.lib", "section": "tt"},
+        "tt",
+    ]
+    assert job.request["_explicit_points"][0]["process_section_libs"] == [
+        "mos.lib",
+        "res.lib",
+        None,
+    ]
+    fields = {asset.name: asset.field for asset in job.model_assets}
+    assert fields["mos.lib"] == "corners.process[0].sections[0].lib"
+
+
+def test_osdi_binaries_keep_bytes_order_and_get_collision_safe_names(tmp_path):
+    netlist = _model_tree(tmp_path)
+    first = tmp_path / "a" / "psp103.osdi"
+    second = tmp_path / "b" / "psp103.osdi"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    payload_a = bytes(range(256)) + b"\x00\xff\xfe"
+    payload_b = b"\x7fELF" + bytes(range(255, -1, -1))
+    first.write_bytes(payload_a)
+    second.write_bytes(payload_b)
+    request = _model_request(
+        options={
+            "stage_model_inputs": True,
+            "osdi_preload": ["b/psp103.osdi", "a/psp103.osdi", "b/psp103.osdi"],
+        }
+    )
+
+    job = _job(request, netlist, tmp_path)
+
+    preload = job.request["options"]["osdi_preload"]
+    assert preload == ["psp103.osdi", "inc1_psp103.osdi", "psp103.osdi"]
+    names = _by_name(job)
+    assert _bytes_of(names["psp103.osdi"]) == payload_b
+    assert _bytes_of(names["inc1_psp103.osdi"]) == payload_a
+    assert names["psp103.osdi"].content is None  # never parsed or re-encoded
+    osdi_assets = [a for a in job.model_assets if a.kind == "osdi"]
+    assert [a.field for a in osdi_assets] == [
+        "options.osdi_preload[0]",
+        "options.osdi_preload[1]",
+    ]
+    assert osdi_assets[0].sha256 == _sha(payload_b)
+
+
+def test_reserved_names_and_spaces_are_never_reused_verbatim(tmp_path):
+    _write(tmp_path, "body.spice", "R1 a b 1k\n")
+    _write(tmp_path, "m dir/request.json", ".param x=1\n")
+    _write(
+        tmp_path, "m dir/netlist.cir", '.lib tt\n.include "request.json"\n.endl tt\n'
+    )
+    _write(tmp_path, "m dir/my models.lib", '.lib "netlist.cir" tt\n')
+    request = _model_request(models={"lib": "m dir/my models.lib"})
+
+    job = _job(request, tmp_path / "body.spice", tmp_path)
+
+    names = _by_name(job)
+    assert job.request["models"]["lib"] == "my_models.lib"
+    assert "inc1_netlist.cir" in names and "inc1_request.json" in names
+    assert names["my_models.lib"].content == '.lib "inc1_netlist.cir" tt\n'
+    assert '.include "inc1_request.json"' in names["inc1_netlist.cir"].content
+    assert names["netlist.cir"].label == "netlist"
+
+
+def test_model_cycle_terminates(tmp_path):
+    _write(tmp_path, "body.spice", "R1 a b 1k\n")
+    _write(tmp_path, "models/a.lib", '.lib tt\n.include "b.inc"\n.endl tt\n')
+    _write(tmp_path, "models/b.inc", '.lib "a.lib" tt\n')
+    job = _job(
+        _model_request(models={"lib": "models/a.lib"}),
+        tmp_path / "body.spice",
+        tmp_path,
+    )
+    assert sorted(item.staged_name for item in job.model_files) == ["a.lib", "b.inc"]
+
+
+def test_missing_declared_inputs_name_their_field(tmp_path):
+    netlist = _model_tree(tmp_path)
+    with pytest.raises(
+        sim.SimError, match=r"backend 'batch': models.lib: model library not found"
+    ):
+        _job(_model_request(models={"lib": "nope.lib"}), netlist, tmp_path)
+    with pytest.raises(
+        sim.SimError, match=r"options.osdi_preload\[0\]: osdi_preload file not found"
+    ):
+        _job(
+            _model_request(
+                options={"stage_model_inputs": True, "osdi_preload": ["x.osdi"]}
+            ),
+            netlist,
+            tmp_path,
+        )
+
+
+def test_missing_dependency_names_field_file_and_line(tmp_path):
+    netlist = _model_tree(tmp_path)
+    _write(tmp_path, "models/top.lib", ".lib tt\n.endl tt\n.include missing.inc\n")
+    with pytest.raises(sim.SimError) as excinfo:
+        _job(_model_request(), netlist, tmp_path, backend="remote")
+    message = str(excinfo.value)
+    assert message.startswith("backend 'remote': models.lib:")
+    assert "missing.inc" in message and "line 3" in message
+
+
+def test_unset_environment_variable_in_a_model_dependency_is_an_error(
+    tmp_path, monkeypatch
+):
+    netlist = _model_tree(tmp_path)
+    monkeypatch.delenv("KLT_TEST_UNSET_ROOT", raising=False)
+    _write(tmp_path, "models/top.lib", '.include "$KLT_TEST_UNSET_ROOT/x.spice"\n')
+    with pytest.raises(sim.SimError, match="environment variable that is not set"):
+        _job(_model_request(), netlist, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "line", [".lib a.lib tt extra\n", ".lib\n", '.lib "unterminated tt\n']
+)
+def test_unsupported_lib_forms_are_named_errors(tmp_path, line):
+    netlist = _model_tree(tmp_path)
+    _write(tmp_path, "models/top.lib", line)
+    with pytest.raises(sim.SimError, match="unsupported `.lib` directive form"):
+        _job(_model_request(), netlist, tmp_path)
+
+
+def test_model_closure_file_cap(tmp_path, monkeypatch):
+    netlist = _model_tree(tmp_path)
+    monkeypatch.setattr(st, "MAX_STAGED_MODEL_FILES", 2)
+    with pytest.raises(
+        sim.SimError, match="models.lib: staged job closure exceeds 2 files"
+    ):
+        _job(_model_request(), netlist, tmp_path)
+
+
+def test_model_closure_byte_cap(tmp_path, monkeypatch):
+    netlist = _model_tree(tmp_path)
+    monkeypatch.setattr(st, "MAX_STAGED_MODEL_BYTES", 64)
+    with pytest.raises(sim.SimError, match="staged job closure exceeds"):
+        _job(_model_request(), netlist, tmp_path)
+
+
+def test_model_sources_resolve_against_the_request_dir_not_the_netlist_dir(tmp_path):
+    request_dir = tmp_path / "req"
+    _model_tree(request_dir)
+    netlist = _write(tmp_path / "elsewhere", "tb.spice", "R1 a b 1k\n")
+    job = _job(_model_request(), netlist, request_dir)
+    assert _by_name(job)["top.lib"].content is not None
+    with pytest.raises(sim.SimError, match="model library not found"):
+        _job(_model_request(), netlist, netlist.parent)
+
+
+def test_pdk_rooted_model_sources_are_staged_when_opted_in(tmp_path, monkeypatch):
+    install = tmp_path / "pdk"
+    ngspice = install / "sky130A" / "libs.tech" / "ngspice"
+    ngspice.mkdir(parents=True)
+    (install / "sky130A" / "libs.tech" / "klayout").mkdir()
+    (ngspice / "models").mkdir()
+    (ngspice / "models" / "all.spice").write_text(".param pdk=1\n")
+    (ngspice / "sky130.lib.spice").write_text(
+        ".lib tt\n"
+        '.include "$PDK_ROOT/sky130A/libs.tech/ngspice/models/all.spice"\n'
+        ".endl tt\n"
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install))
+    netlist = _write(
+        tmp_path,
+        "body.spice",
+        '.include "$PDK_ROOT/sky130A/libs.ref/cells.spice"\nR1 a b 1k\n',
+    )
+    request = _model_request(
+        models={
+            "pdk": "sky130A",
+            "pdk_root": str(install),
+            "lib": "libs.tech/ngspice/sky130.lib.spice",
+        }
+    )
+
+    job = _job(request, netlist, tmp_path)
+
+    names = _by_name(job)
+    assert names["sky130.lib.spice"].content == (
+        '.lib tt\n.include "all.spice"\n.endl tt\n'
+    )
+    assert "all.spice" in names
+    # Image selection is untouched; only the library reference moved.
+    assert job.request["models"] == {
+        "pdk": "sky130A",
+        "pdk_root": str(install),
+        "lib": "sky130.lib.spice",
+    }
+    # The netlist's own PDK-rooted include keeps its #2485 behaviour.
+    assert job.netlist.host_resolved == ("$PDK_ROOT/sky130A/libs.ref/cells.spice",)
