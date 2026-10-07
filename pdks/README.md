@@ -37,6 +37,18 @@ for the resolver's scope. Point tools at paths under `pdks/lambdapdk/`
 directly instead, e.g.
 `klt stats pdks/lambdapdk/.../sky130_sram_1rw1r_64x256_8.gds`.
 
+**Shared process roots and ASAP7 (issue #2759).** `klt pdk` also searches the
+shared root `~/pdks` (after `$PDK_ROOT` and `~/.ciel`/`~/.volare`) and
+recognises one structurally-marked ASAP7 process tree
+(`<process>/base/setup/klayout`, `<process>/base/apr`, `<process>/libs`),
+e.g. `~/pdks/asap7`, or that directory passed as `--pdk-root`. Point it at a
+single lambdapdk process directory rather than the whole `lambdapdk/` tree.
+The result carries a `compatibility` object comparing like version identities
+only: the `0.2.17` pin from `scripts/fetch-pdks.sh` is a **lambdapdk wrapper
+release** (read from `.fetched-version`), not an upstream ASAP7 revision, and
+open_pdks `SOURCES` stamps are a separate namespace. See
+[`docs/cli/pdk.md`](../docs/cli/pdk.md#package-compatibility-compatibility-issue-2759).
+
 **`sky130-liberty/` is the exception**: unlike `lambdapdk/`, it *is* laid
 out as an open_pdks variant (`sky130A/libs.tech/`, `sky130A/libs.ref/`) so
 `klt pdk`/`klt synthesize` discover it the normal way once

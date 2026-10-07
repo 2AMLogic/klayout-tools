@@ -172,6 +172,7 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     monkeypatch.setattr(pdk, "STORE_DIRS", [])
+    monkeypatch.setattr(pdk, "SHARED_ROOTS", [])
     monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
 
 
@@ -2655,3 +2656,195 @@ def test_real_ihp_sg13g2_stdcell_resolves_lef_and_cell_library():
     )
     assert library["nominal_corner"] == "typ_1p20V_25C"
     assert library["nominal_supply_v"] == pytest.approx(1.2)
+
+
+# --------------------------------------------------------------------------- #
+# Shared root (~/pdks), ASAP7 layout, package compatibility (issue #2759)
+# --------------------------------------------------------------------------- #
+
+
+def _make_asap7(parent, name="asap7", *, libs=True, apr=True, klayout=True):
+    """Fabricate the supported lambdapdk-shaped ASAP7 tree under ``parent``."""
+    tree = parent / name
+    tree.mkdir(parents=True, exist_ok=True)
+    if klayout:
+        (tree / "base" / "setup" / "klayout").mkdir(parents=True)
+    if apr:
+        (tree / "base" / "apr").mkdir(parents=True)
+    if libs:
+        (tree / "libs").mkdir(parents=True)
+    return tree
+
+
+@pytest.fixture
+def shared_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(pdk, "SHARED_ROOTS", ["~/pdks"])
+    shared = tmp_path / "home" / "pdks"
+    shared.mkdir()
+    return shared
+
+
+def test_asap7_resolved_from_shared_root(shared_home):
+    tree = _make_asap7(shared_home)
+    report = pdk.find_pdk(variant="asap7")
+    assert report["root"] == str(shared_home)
+    assert report["variant"] == "asap7"
+    assert report["resolved_via"] == "search root: ~/pdks"
+    assert report["assets"]["klayout"] == str(tree / "base" / "setup" / "klayout")
+    assert report["assets"]["libs_ref"] == str(tree / "libs")
+    for key in ("ngspice", "xschem", "magic", "netgen"):
+        assert report["assets"][key] is None
+    assert report["has_pcell_library"] is False
+    installs = pdk.list_pdks()["installs"]
+    assert [v["name"] for v in installs[0]["variants"]] == ["asap7"]
+
+
+def test_asap7_cli_find_json(shared_home, capsys):
+    _make_asap7(shared_home)
+    assert main(["pdk", "find", "--pdk", "asap7", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["resolved_via"] == "search root: ~/pdks"
+    assert payload["compatibility"]["status"] == "unknown"
+
+
+def test_unrelated_asap7_directory_rejected(shared_home):
+    (shared_home / "asap7").mkdir()
+    (shared_home / "asap7" / "README").write_text("x")
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="asap7")
+    _make_asap7(shared_home, "asap7", libs=False)  # missing a marker
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="asap7")
+
+
+def test_asap7_flat_explicit_root(tmp_path):
+    tree = _make_asap7(tmp_path / "x")
+    report = pdk.find_pdk(root=str(tree))
+    assert report["variant"] == "asap7"
+    assert report["resolved_via"] == "--pdk-root flag"
+    assert report["ambiguous_roots"] == []
+
+
+def test_mixed_open_pdks_and_asap7_shared_root(shared_home):
+    _make_install(shared_home, "sky130A", sources="open_pdks abc")
+    _make_asap7(shared_home)
+    names = [v["name"] for v in pdk.list_pdks()["installs"][0]["variants"]]
+    assert names == ["asap7", "sky130A"]
+    assert pdk.find_pdk(variant="sky130A")["compatibility"]["status"] == "not_declared"
+
+
+def test_shared_root_precedence(tmp_path, monkeypatch, shared_home):
+    store = tmp_path / "store"
+    monkeypatch.setattr(pdk, "STORE_DIRS", [str(store)])
+    _make_install(store, "sky130A")
+    _make_install(shared_home, "sky130A")
+    report = pdk.find_pdk(variant="sky130A")
+    assert report["root"] == str(store)
+    assert [a["resolved_via"] for a in report["ambiguous_roots"]] == [
+        "search root: ~/pdks"
+    ]
+    env_root = tmp_path / "envroot"
+    _make_install(env_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(env_root))
+    assert pdk.find_pdk(variant="sky130A")["root"] == str(env_root)
+    explicit = tmp_path / "explicit"
+    _make_install(explicit, "sky130A")
+    report = pdk.find_pdk(variant="sky130A", root=str(explicit))
+    assert report["root"] == str(explicit)
+    assert report["ambiguous_roots"] == []
+
+
+def test_shared_root_missing_preserves_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(pdk, "SHARED_ROOTS", ["~/pdks"])  # does not exist
+    root = tmp_path / "prefix"
+    _make_install(root, "sky130A")
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [str(root)])
+    assert pdk.find_pdk()["root"] == str(root)
+
+
+def test_duplicate_shared_root_not_ambiguous(tmp_path, monkeypatch, shared_home):
+    _make_install(shared_home, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(shared_home))
+    report = pdk.find_pdk(variant="sky130A")
+    assert report["resolved_via"] == "PDK_ROOT environment variable"
+    assert report["ambiguous_roots"] == []
+
+
+def test_symlinked_shared_root_not_crash(tmp_path, monkeypatch, shared_home):
+    _make_asap7(shared_home)
+    link = tmp_path / "link"
+    link.symlink_to(shared_home)
+    monkeypatch.setenv("PDK_ROOT", str(link))
+    report = pdk.find_pdk(variant="asap7")
+    assert report["variant"] == "asap7"
+
+
+def _lambdapdk_asap7(shared_home, stamp):
+    tree = _make_asap7(shared_home)
+    if stamp is not None:
+        (shared_home / ".fetched-version").write_text(stamp, encoding="utf-8")
+    return tree
+
+
+@pytest.mark.parametrize(
+    ("stamp", "status"),
+    [
+        ("0.2.17\n", "match"),
+        ("0.2.16", "mismatch"),
+        (None, "unknown"),
+        ("  \n", "unknown"),
+    ],
+)
+def test_compatibility_states(shared_home, stamp, status):
+    _lambdapdk_asap7(shared_home, stamp)
+    compat = pdk.find_pdk(variant="asap7")["compatibility"]
+    assert compat["status"] == status
+    assert compat["package"] == "lambdapdk-asap7"
+    assert compat["expected"] == {"namespace": "lambdapdk-release", "value": "0.2.17"}
+    assert compat["source"] == "scripts/fetch-pdks.sh LAMBDAPDK_VERSION"
+    if status in ("match", "mismatch"):
+        assert compat["installed"]["namespace"] == "lambdapdk-release"
+        assert compat["installed_source"] == ".fetched-version"
+    else:
+        assert compat["installed"] is None
+
+
+def test_compatibility_not_declared_and_namespace_isolation(tmp_path):
+    from klayout_tools import pdk_compat
+
+    root = tmp_path / "r"
+    _make_install(root, "sky130A", sources="open_pdks 0.2.17")
+    compat = pdk.find_pdk(root=str(root))["compatibility"]
+    assert compat["status"] == "not_declared"
+    assert compat["package"] is None and compat["expected"] is None
+    assert (
+        pdk_compat.compare_identities(
+            {"namespace": "lambdapdk-release", "value": "0.2.17"},
+            {"namespace": "open_pdks-sources", "value": "0.2.17"},
+        )
+        == "unknown"
+    )
+    assert pdk_compat.compare_identities(None, None) == "unknown"
+
+
+def test_sources_formatting_preserved(tmp_path):
+    root = tmp_path / "r"
+    _make_install(root, "sky130A", sources="open_pdks abc\n\n  sky130 def  \n")
+    assert pdk.find_pdk(root=str(root))["version"] == "open_pdks abc; sky130 def"
+
+
+def test_cli_text_warning_and_exit_codes(shared_home, capsys):
+    _lambdapdk_asap7(shared_home, "0.0.1")
+    assert main(["pdk", "check", "--pdk", "asap7"]) == 0
+    captured = capsys.readouterr()
+    assert "compatibility: mismatch" in captured.out
+    assert "warning" in captured.err
+    assert main(["pdk", "env", "--pdk", "asap7"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == [f"export PDK_ROOT={shared_home}", "export PDK=asap7"]
+
+
+def test_check_broken_symlink_exit_unchanged_with_asap7(shared_home):
+    tree = _make_asap7(shared_home)
+    (tree / "libs" / "dangling").symlink_to(tree / "nope")
+    assert main(["pdk", "check", "--pdk", "asap7"]) == 4
