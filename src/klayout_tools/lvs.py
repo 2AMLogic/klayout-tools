@@ -1969,6 +1969,18 @@ def run_lvs(request: str) -> dict[str, Any]:
                 '"Engine")'
             )
         setup_file = _resolve_netgen_setup(options, request_dir)
+        # Issue #2673: the same conversion-provenance + all-reference-
+        # instances-zero proof the klayout branch applies, but with the
+        # exclusion carried into netgen's own setup (`property ... delete`)
+        # instead of a `klayout.db` hook. The disclosure is identical.
+        netgen_exclusions: list[tuple[str, str, str]] = []
+        placeholder_warnings = _apply_reference_placeholder_values(
+            reference_placeholder_classes,
+            layout_netlist,
+            reference_netlist,
+            mutate_classes=False,
+            netgen_exclusions=netgen_exclusions,
+        )
         timeout_s = float(options.get("netgen_timeout_s", _NETGEN_DEFAULT_TIMEOUT_S))
         # Issue #2373: resolve *which* netgen binary to run before launching
         # it (`options.netgen_binary` > `$KLT_NETGEN_BINARY` > `netgen` >
@@ -1984,6 +1996,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             setup_file=setup_file,
             timeout_s=timeout_s,
             binary=netgen_binary,
+            excluded_properties=netgen_exclusions,
         )
         layout_net_count = sum(1 for _ in layout_circuit.each_net())
         reference_net_count = sum(1 for _ in reference_circuit.each_net())
@@ -5830,6 +5843,9 @@ def _apply_reference_placeholder_values(
     layout_netlist: Any,
     reference_netlist: Any,
     excluded_parameters: set[tuple[str, str]] | None = None,
+    *,
+    mutate_classes: bool = True,
+    netgen_exclusions: list[tuple[str, str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Exclude a converted reference class's placeholder ``0`` value from the
     compare, so the class can still pair on topology (issue #1907).
@@ -5888,6 +5904,15 @@ def _apply_reference_placeholder_values(
     :data:`~klayout_tools.lvs_mismatch.ExcludedParameters`. Nothing
     downstream may then report that parameter as a ``device.property`` error
     in the same run that discloses it as excluded here.
+
+    ``mutate_classes=False`` (issue #2673) runs the identical eligibility
+    proof and disclosure but leaves the ``klayout.db`` device classes
+    untouched -- the ``engine: "netgen"`` branch, which has no
+    ``equal_parameters`` hook and instead carries the proven exclusions into
+    its generated setup file. ``netgen_exclusions``, when given, collects one
+    ``(layout class name, reference class name, parameter)`` triple per
+    excluded class for that purpose; nothing is ever inferred from netgen's
+    reported ``value ... 0`` text.
     """
     entries: list[dict[str, Any]] = []
     if not spec:
@@ -5930,12 +5955,17 @@ def _apply_reference_placeholder_values(
             if device.device_class().name == layout_class.name
         ]
 
-        reference_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
-            reference_parameter_id
-        )
-        layout_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
-            layout_parameter_id
-        )
+        if mutate_classes:
+            reference_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
+                reference_parameter_id
+            )
+            layout_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
+                layout_parameter_id
+            )
+        if netgen_exclusions is not None:
+            netgen_exclusions.append(
+                (layout_class.name, reference_class.name, parameter)
+            )
 
         if excluded_parameters is not None:
             # Issue #2461: record it under *both* sides' own class spelling

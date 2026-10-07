@@ -133,6 +133,13 @@ with `"engine": "netgen"` is an application error (exit 1) rather than a
 silent no-op — an opted-in tolerance the caller believes is in force but is
 not would be worse than not supporting it at all.
 
+**Placeholder-value parity (issue #2673).** For a `reference.form:
+"subckt-call"` reference this engine excludes a converted resistor/capacitor
+class's placeholder `0` value exactly as the `klayout` engine does, via a
+generated setup composed after `options.netgen_setup`, and discloses it as the
+same `device.placeholder_value` warning — see "`device.placeholder_value`"
+below.
+
 Three additional `options` apply only to this engine:
 
 - `options.netgen_setup` — an explicit path to a netgen LVS setup `.tcl`
@@ -2168,8 +2175,8 @@ Notes on the semantics:
 
 #### `device.placeholder_value`: a converted resistor/capacitor class's value was excluded from the compare
 
-Only possible with `reference.form: "subckt-call"` (issue #1907,
-`"engine": "klayout"` only). The conversion writes a literal `0` into a
+Only possible with `reference.form: "subckt-call"` (issue #1907; both
+engines since issue #2673 — see "Engine parity" below). The conversion writes a literal `0` into a
 converted `R`/`C` card's positional *value* slot — `klt lvs` has no PDK
 sheet-resistance / capacitance-per-area table to compute a real resistance or
 capacitance from a call's `l`/`w` geometry (that data lives in the extraction
@@ -2248,6 +2255,30 @@ Notes on the semantics:
   genuinely cannot distinguish (e.g. three layout resistors against two
   reference ones on the same net pair) still reports `device.unmatched` and
   `status: "mismatch"`, with this disclosure alongside rather than instead.
+- **Engine parity (issue #2673).** `"engine": "netgen"` applies the same
+  proof (conversion provenance **and** every reference instance of the class
+  reading `0`) and emits the same warning, so one request returns `match`
+  with this disclosure on both engines. The `klayout` engine excludes the
+  parameter through `equal_parameters`; the `netgen` engine has no such hook,
+  so `klt lvs` writes a temporary netgen setup file that first `source`s the
+  caller's `options.netgen_setup` (when given — it stays fully effective) and
+  then runs `property [list -circuit1 <class>] delete value` and the
+  `-circuit2` twin (netgen reports a property present on only one side as an
+  error, so both are deleted). Class names are Tcl-quoted; the file lives in
+  the run's temporary directory and is removed on success and on failure.
+  The exclusion is decided from the proven class/parameter, never inferred
+  from netgen's `value circuit1: … circuit2: 0` text, so a real value
+  difference, a mixed real/placeholder class, a plain-element zero, or any
+  topology/pin/count defect still yields `mismatch`, and a property-error
+  declaration netgen makes that klt cannot parse remains fail-closed.
+  `device_parameter_coverage` stays `null` for the netgen engine (it
+  describes KLayout device classes and this engine claims no full parameter
+  coverage); the `device.placeholder_value` entry is the netgen-side record.
+  **A topology match does not verify the excluded resistance/capacitance.**
+  `--check` is unaffected (the generated setup is not an input and is rebuilt
+  on every run); `--rerun` cannot replay a `subckt-call` reference on either
+  engine (`reference.form` is not echoed — see the `--rerun` limitations), but
+  the caller's `options.netgen_setup` is replayed as usual.
 - **To verify the value dimension**, supply the reference in the plain-element
   form with real `R`/`C` values (`details.layout_values` reports what the
   layout side measured, so a reference can be written against it), or compare

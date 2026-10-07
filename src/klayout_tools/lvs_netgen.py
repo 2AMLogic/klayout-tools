@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._paths import _resolve_relative
@@ -323,6 +324,65 @@ def _resolve_netgen_setup(options: dict[str, Any], request_dir: str) -> str | No
     return resolved
 
 
+#: Issue #2673: the netgen property key each excludable klt parameter maps to.
+#: A SPICE `R`/`C` card carrying a model name is read by netgen as a device
+#: whose single compared property is `value` (verified against netgen
+#: 1.5.133).
+_NETGEN_PROPERTY_FOR_PARAMETER = {"R": "value", "C": "value"}
+
+_TCL_SPECIAL = frozenset(' \t\r\n\\"$[]{};#')
+
+
+def _tcl_word(text: str) -> str:
+    """Backslash-quote ``text`` into a single literal Tcl word."""
+    out = []
+    for ch in text:
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch in _TCL_SPECIAL:
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out) or '""'
+
+
+def _write_exclusion_setup(
+    work_dir: str,
+    caller_setup: str | None,
+    exclusions: Sequence[tuple[str, str, str]],
+) -> str:
+    """Write a netgen setup file under ``work_dir`` that first sources the
+    caller's ``options.netgen_setup`` (when given, so it stays effective) and
+    then deletes each proven placeholder property from *both* circuits' device
+    class -- netgen reports a property present on only one side as an error,
+    so a one-sided delete would not suppress anything. Returns its path."""
+    from .lvs import LvsError
+
+    lines = ["# klt lvs -- generated placeholder-value exclusions (issue #2673)"]
+    if caller_setup:
+        lines.append(f"source {_tcl_word(os.path.abspath(caller_setup))}")
+    for layout_class, reference_class, parameter in exclusions:
+        key = _NETGEN_PROPERTY_FOR_PARAMETER.get(parameter)
+        if key is None:
+            raise LvsError(
+                f"no netgen property known for excluded parameter '{parameter}'"
+            )
+        lines.append(
+            f"property [list -circuit1 {_tcl_word(layout_class)}] delete {key}"
+        )
+        lines.append(
+            f"property [list -circuit2 {_tcl_word(reference_class)}] delete {key}"
+        )
+    path = os.path.join(work_dir, "klt_setup.tcl")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    return path
+
+
 def _run_netgen_lvs(
     *,
     layout_netlist: kdb.Netlist,
@@ -332,6 +392,7 @@ def _run_netgen_lvs(
     setup_file: str | None,
     timeout_s: float,
     binary: str,
+    excluded_properties: Sequence[tuple[str, str, str]] = (),
 ) -> tuple[str, list[dict[str, Any]], str | None]:
     """Invoke ``netgen -batch lvs`` headlessly in netlist-vs-netlist mode and
     return ``(status, mismatches, engine_version)``.
@@ -378,6 +439,10 @@ def _run_netgen_lvs(
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-netgen-")
     try:
+        if excluded_properties:
+            setup_file = _write_exclusion_setup(
+                work_dir, setup_file, excluded_properties
+            )
         layout_path = os.path.join(work_dir, "layout.spice")
         reference_path = os.path.join(work_dir, "reference.spice")
         log_path = os.path.join(work_dir, "comp.out")
