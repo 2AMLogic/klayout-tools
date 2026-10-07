@@ -414,6 +414,118 @@ def _union_inputs_all_absent(rule: DrcRule, layout: Any) -> bool:
     return all(layout.find_layer(*layer) is None for layer in inputs)
 
 
+def _derived_inputs_absent(
+    rule: DrcRule, base_index: int | None, intersect_index: int | None
+) -> bool:
+    """Whether a ``derived_layer`` rule's resolved inputs make its checked
+    region provably empty, so :func:`run_drc` skips it like any other
+    missing-layer rule. ``base_index``/``intersect_index`` are the
+    ``layout.find_layer`` results for ``derived_layer.base`` /
+    ``derived_layer.intersect_with`` (``None`` = absent from the stream).
+
+    - ``"union"`` (#2688) joins its two inputs: either one alone is a
+      complete enclosing region (a mask-only HBT contact window draws no
+      ``base`` geometry at all), so it is skipped only when *both* are
+      absent. An absent input contributes an empty region instead.
+    - Every other mode: an absent ``base`` means the derived region's own
+      source shapes are missing -> no violations possible, skip.
+    - An absent second input empties both the ``"sized_intersection"`` and
+      ``"overlapping"`` derivations, so there is nothing to check.
+      ``"not_interacting"`` is the exception: "base polygons that touch no
+      marker" is every base polygon when the marker layer was never drawn,
+      so that rule must still run against the full base region (see
+      ``DerivedLayer``'s docstring) -- the ordinary thin-oxide-only layout,
+      which must stay checked against the unmarked column. ``"holes"`` is
+      the other exception: it never reads a second layer at all
+      (``intersect_with`` is always ``None`` for it), so ``intersect_index``
+      being ``None`` is expected, not a missing-layer condition.
+    """
+    mode = rule.derived_layer.mode
+    if mode == "union":
+        return base_index is None and intersect_index is None
+    if base_index is None:
+        return True
+    return intersect_index is None and mode not in ("not_interacting", "holes")
+
+
+def _cell_region_or_empty(cell: Any, layer_index: int | None) -> Any:
+    """``cell``'s recursive shapes on ``layer_index`` as a ``kdb.Region``,
+    or an empty ``kdb.Region`` when the layer is absent (``None``) -- only
+    reachable for a ``"union"`` input or an unused ``intersect_with``; see
+    :func:`_derived_inputs_absent`."""
+    import klayout.db as kdb
+
+    if layer_index is None:
+        return kdb.Region()
+    return kdb.Region(cell.begin_shapes_rec(layer_index))
+
+
+def _derived_region(
+    rule: DrcRule, base_region: Any, intersect_region: Any, dbu: float
+) -> Any:
+    """Build the checked region for a ``derived_layer`` rule (#345, marker-
+    scoped modes #1110, ``"holes"`` #1976, ``"union"`` #2688) from its two
+    input regions -- see ``DerivedLayer``'s docstring for each mode's full
+    derivation and why an unscoped check against either raw input layer
+    would be wrong, not just conservative. ``sized_by_um`` is a real
+    micrometre distance, rescaled against this layout's own ``dbu``
+    directly (unlike ``rule.threshold_dbu``, which is rescaled via
+    ``dbu_scale`` against the deck's nominal dbu). Always returns a new
+    Region; neither input (nor the source layout) is modified.
+    """
+    derived = rule.derived_layer
+    size_dbu = round(derived.sized_by_um / dbu)
+    if derived.mode == "holes":
+        # Interior voids of the merged `base` region (#1976) --
+        # `intersect_with`/`sized_by_um` are unused for this mode. Explicit
+        # `.merged()` before `.holes()` documents the requirement even though
+        # `Region.holes()` already applies merged semantics itself -- a hole
+        # formed by several abutting drawn rectangles (the common GDS idiom
+        # for a slotted plate) is only visible once merged. A `base` region
+        # with no holes at all derives an empty region, which is simply
+        # nothing to report -- not an error.
+        return base_region.merged().holes()
+    if derived.mode == "union":
+        # Boolean join of both inputs (#2688), e.g. sg13g2's `Cnt.c`
+        # enclosing region `activ.join(activ_mask)`. `_run_check` merges it
+        # before measuring, so a contact window assembled across both layers
+        # is measured against the joined outline, not either layer's seam.
+        return base_region + intersect_region
+    if derived.mode in ("overlapping", "not_interacting"):
+        # Marker-scoped whole-polygon selection (#1110): here `sized_by_um`
+        # is a guard band around the *marker* (`intersect_with`), not around
+        # `base`.
+        marker_region = (
+            intersect_region.sized(size_dbu) if size_dbu else intersect_region
+        )
+        if derived.mode == "overlapping":
+            # Whole `base` polygons sharing area with the marker -- the
+            # marked ("_MV") half of a rule pair.
+            return base_region.overlapping(marker_region)
+        # Whole `base` polygons touching no marker geometry at all -- the
+        # unmarked ("_LV") half of the pair.
+        return base_region.not_interacting(marker_region)
+    # "sized_intersection" (the default, issue #345): shapes of
+    # `intersect_with` that already touch the *unsized* `base` region
+    # somewhere, clipped to `base`'s outline oversized by `sized_by_um`.
+    return intersect_region.interacting(base_region) & (base_region.sized(size_dbu))
+
+
+def _select_other_region(rule: DrcRule, other_region: Any) -> Any:
+    """Apply ``rule.other_layer_selection`` to the resolved ``other_layer``
+    region; returned unchanged when no selection is set.
+
+    ``"squares"`` (#2688) is whole-polygon square selection: the complement
+    of the DRC-DSL ``non_squares`` selector, applied to the *merged* layer
+    so two abutting squares forming a bar count as the bar they are.
+    Non-square shapes (contact bars) are dropped from both the margin check
+    and the #318 escape term.
+    """
+    if rule.other_layer_selection == "squares":
+        return other_region.merged().squares()
+    return other_region
+
+
 def _rule_outside_voltage_gate(
     rule: DrcRule, marker: tuple[int, int], skipped_rule_ids: set[str]
 ) -> bool:
@@ -908,37 +1020,8 @@ def run_drc(
                 if rule.derived_layer.intersect_with is not None
                 else None
             )
-            if rule.derived_layer.mode == "union":
-                # `"union"` (#2688) joins its two inputs: either one alone is
-                # a complete enclosing region (a mask-only HBT contact window
-                # draws no `base` geometry at all), so the rule is skipped
-                # only when *both* are absent. An absent input contributes an
-                # empty region below.
-                if base_index is None and intersect_index is None:
-                    rules_skipped.append(rule.id)
-                    continue
-            elif base_index is None:
-                # The derived region's own source shapes are absent from this
-                # stream -> no violations possible in any mode, skip like any
-                # other missing-layer rule.
-                rules_skipped.append(rule.id)
-                continue
-            elif intersect_index is None and rule.derived_layer.mode not in (
-                "not_interacting",
-                "holes",
-            ):
-                # The second input layer is absent -> both the
-                # "sized_intersection" and "overlapping" derivations yield an
-                # empty region, so there is nothing to check. "not_interacting"
-                # is the exception: "base polygons that touch no marker" is
-                # every base polygon when the marker layer was never drawn, so
-                # that rule must still run against the full base region (see
-                # `DerivedLayer`'s docstring) -- the ordinary thin-oxide-only
-                # layout, which must stay checked against the unmarked column.
-                # "holes" is the other exception: it never reads a second
-                # layer at all (`intersect_with` is always `None` for it), so
-                # `intersect_index` being `None` here is expected, not a
-                # missing-layer condition.
+            if _derived_inputs_absent(rule, base_index, intersect_index):
+                # See `_derived_inputs_absent` for each mode's skip condition.
                 rules_skipped.append(rule.id)
                 continue
         else:
@@ -976,75 +1059,22 @@ def run_drc(
                 # against this layout's own `dbu` directly (unlike
                 # `rule.threshold_dbu`, which is rescaled via `dbu_scale`
                 # against the deck's nominal dbu).
-                base_region = (
-                    kdb.Region(cell.begin_shapes_rec(base_index))
-                    if base_index is not None
-                    else kdb.Region()
+                base_region = _cell_region_or_empty(cell, base_index)
+                region = _derived_region(
+                    rule,
+                    base_region,
+                    _cell_region_or_empty(cell, intersect_index),
+                    layout.dbu,
                 )
-                intersect_region = (
-                    kdb.Region(cell.begin_shapes_rec(intersect_index))
-                    if intersect_index is not None
-                    else kdb.Region()
-                )
-                size_dbu = round(rule.derived_layer.sized_by_um / layout.dbu)
-                if rule.derived_layer.mode == "holes":
-                    # Interior voids of the merged `base` region (#1976) --
-                    # `intersect_with`/`sized_by_um` are unused for this mode.
-                    # Explicit `.merged()` before `.holes()` documents the
-                    # requirement even though `Region.holes()` already applies
-                    # merged semantics itself -- a hole formed by several
-                    # abutting drawn rectangles (the common GDS idiom for a
-                    # slotted plate) is only visible once merged. A `base`
-                    # region with no holes at all derives an empty region,
-                    # which is simply nothing to report -- not an error.
-                    region = base_region.merged().holes()
-                elif rule.derived_layer.mode == "union":
-                    # Boolean join of both inputs (#2688), e.g. sg13g2's
-                    # `Cnt.c` enclosing region `activ.join(activ_mask)`.
-                    # `_run_check` merges it before measuring, so a contact
-                    # window assembled across both layers is measured
-                    # against the joined outline, not either layer's seam.
-                    # Built into a new Region -- neither input (nor the
-                    # source layout) is modified.
-                    region = base_region + intersect_region
-                elif rule.derived_layer.mode in ("overlapping", "not_interacting"):
-                    # Marker-scoped whole-polygon selection (#1110): here
-                    # `sized_by_um` is a guard band around the *marker*
-                    # (`intersect_with`), not around `base`.
-                    marker_region = (
-                        intersect_region.sized(size_dbu)
-                        if size_dbu
-                        else intersect_region
-                    )
-                    if rule.derived_layer.mode == "overlapping":
-                        # Whole `base` polygons sharing area with the marker
-                        # -- the marked ("_MV") half of a rule pair.
-                        region = base_region.overlapping(marker_region)
-                    else:
-                        # Whole `base` polygons touching no marker geometry
-                        # at all -- the unmarked ("_LV") half of the pair.
-                        region = base_region.not_interacting(marker_region)
-                else:  # "sized_intersection" (the default, issue #345)
-                    # Shapes of `intersect_with` that already touch the
-                    # *unsized* `base` region somewhere, clipped to `base`'s
-                    # outline oversized by `sized_by_um`.
-                    region = intersect_region.interacting(base_region) & (
-                        base_region.sized(size_dbu)
-                    )
             else:
                 region = kdb.Region(cell.begin_shapes_rec(layer_index))
             other_region = (
-                kdb.Region(cell.begin_shapes_rec(other_index))
+                _select_other_region(
+                    rule, kdb.Region(cell.begin_shapes_rec(other_index))
+                )
                 if other_index is not None
                 else None
             )
-            if other_region is not None and rule.other_layer_selection == "squares":
-                # Whole-polygon square selection (#2688): the complement of
-                # the DRC-DSL `non_squares` selector, applied to the *merged*
-                # layer so two abutting squares forming a bar count as the
-                # bar they are. Non-square shapes (contact bars) are dropped
-                # from both the margin check and the #318 escape term.
-                other_region = other_region.merged().squares()
 
             # Supplementary edge pairs reported under the same rule id,
             # alongside whatever `_run_check` returns -- the same additive
@@ -1784,12 +1814,23 @@ def _validate_derived_layer(rule: DrcRule) -> None:
     mode would otherwise fall through to the default ``"sized_intersection"``
     derivation and quietly check a completely different region than the deck
     author asked for.
+
+    Also rejects a ``"union"`` derivation with no ``intersect_with``
+    (issue #2688), which would silently degrade to a plain ``base`` check.
     """
     derived = rule.derived_layer
     if derived is not None and derived.mode not in _DERIVED_LAYER_MODES:
         raise DrcError(
             f"rule '{rule.id}': unknown derived_layer mode "
             f"'{derived.mode}' (known: {', '.join(sorted(_DERIVED_LAYER_MODES))})"
+        )
+    if (
+        derived is not None
+        and derived.mode == "union"
+        and derived.intersect_with is None
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer mode 'union' requires intersect_with"
         )
 
 
@@ -1798,9 +1839,9 @@ def _validate_other_layer_selection(rule: DrcRule) -> None:
     ``other_layer_selection`` this engine cannot apply (issue #2688): an
     unknown value, or one set on a rule with no ``other_layer`` to select
     from. Same "fail loudly with the rule id" contract as
-    :func:`_validate_derived_layer`; also rejects a ``"union"``
-    ``derived_layer`` with no ``intersect_with``, which would silently
-    degrade to a plain ``base`` check.
+    :func:`_validate_derived_layer` (which owns the ``"union"``-needs-
+    ``intersect_with`` check alongside the other ``derived_layer`` mode
+    validation).
     """
     selection = rule.other_layer_selection
     if selection is not None:
@@ -1813,15 +1854,6 @@ def _validate_other_layer_selection(rule: DrcRule) -> None:
             raise DrcError(
                 f"rule '{rule.id}': other_layer_selection requires other_layer"
             )
-    derived = rule.derived_layer
-    if (
-        derived is not None
-        and derived.mode == "union"
-        and derived.intersect_with is None
-    ):
-        raise DrcError(
-            f"rule '{rule.id}': derived_layer mode 'union' requires intersect_with"
-        )
 
 
 def _validate_threshold_max(rule: DrcRule) -> None:
