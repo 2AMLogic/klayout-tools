@@ -11477,11 +11477,15 @@ def test_integration_precision_default_meas_is_coarser_than_solver(
     assert m["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-6, rel=0)
 
 
-def _ngspice_major() -> int:
-    """Major version of the `ngspice` on PATH, read from its own banner --
-    independent of anything a simulated result printed."""
+def _ngspice_major(tmp_path: Path) -> int:
+    """Major version of the ngspice `klt sim` will actually run, read from its
+    own banner -- independent of anything a simulated result printed. Uses
+    the runner's own resolution (`$KLT_NGSPICE_BINARY` before `ngspice` on
+    PATH), so pointing `KLT_NGSPICE_BINARY` at a 46 build selects the strict
+    case rather than probing whatever older ngspice is on PATH."""
+    binary = sim._resolve_ngspice_binary({}, str(tmp_path))
     out = subprocess.run(
-        ["ngspice", "--version"], capture_output=True, text=True, timeout=60
+        [binary, "--version"], capture_output=True, text=True, timeout=60
     ).stdout
     match = re.search(r"ngspice-(\d+)", out)
     assert match, f"cannot read ngspice version from:\n{out}"
@@ -11499,7 +11503,7 @@ _MEAS_PREC_INIT = ["set measureprec=12", "set numdgt=12"]
 def test_integration_precision_measureprec_honoured_on_meas_card(tmp_path, monkeypatch):
     """On an engine that supports `measureprec`, the request must emit the
     requested digits -- a silently ignored setting fails this test."""
-    if _ngspice_major() < _MEASUREPREC_MIN_MAJOR:
+    if _ngspice_major(tmp_path) < _MEASUREPREC_MIN_MAJOR:
         pytest.skip(f"ngspice < {_MEASUREPREC_MIN_MAJOR} ignores measureprec")
     corner, log = _run_precision_request(
         tmp_path,
@@ -11523,7 +11527,7 @@ def test_integration_precision_measureprec_ignored_on_legacy_engine(
     """On an engine without `measureprec` (ngspice 42), the request is
     accepted and the `.meas` value is identical to a measured default run --
     not silently "improved" and not merely close to the analytic value."""
-    if _ngspice_major() >= _MEASUREPREC_MIN_MAJOR:
+    if _ngspice_major(tmp_path) >= _MEASUREPREC_MIN_MAJOR:
         pytest.skip(f"ngspice >= {_MEASUREPREC_MIN_MAJOR} honours measureprec")
     (tmp_path / "default").mkdir()
     base, base_log = _run_precision_request(

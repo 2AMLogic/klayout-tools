@@ -202,7 +202,12 @@ from `~/.local/bin/ngspice`, each via `klt sim`'s `run_sim` with
 `6.66678e-01` and `measureprec=12` alone leaves an `expr` value at
 `6.666778e-01`; the JSON `value` is the parsed raw token in every case
 (46 `.meas` + `measureprec=12`: `0.6666777774074`; 46 `expr` +
-`numdgt=12`: `0.6666777774074`).
+`numdgt=12`: `0.6666777774074`). The 46 row was reproduced independently
+with ngspice 46 built from the upstream `ngspice-46.tar.gz` (sha256
+`a0d1699a…4d64c19b`) and selected via `$KLT_NGSPICE_BINARY`, running the CLI
+(`klt sim <request> --backend local --format json`) with identical tokens
+and JSON values. Note that 46's `.meas` default is 5 decimals, one fewer than
+42's 6.
 
 On ngspice 42, `measureprec`, `measure_precision` and the
 `NGSPICE_MEAS_PRECISION` environment variable were all tried and none changed
@@ -212,10 +217,13 @@ of mantissa (7 significant figures). On such an engine, declare the quantity
 as an `expr` (with `numdgt`) when more digits are needed, for any form that
 `expr` can reduce to a scalar. The regression suite
 (`tests/test_sim.py`, "Measurement output precision") selects its `.meas`
-assertion from the engine's own `ngspice --version` banner: on 46 or later it
-requires 12 emitted decimals and agreement with the analytic value within
-`1e-10`; on older engines it pins that the value is identical to a measured
-default run. The report does not record the
+assertion from the `--version` banner of the binary `klt sim` will run
+(resolved like the runner: `$KLT_NGSPICE_BINARY`, then `ngspice` on `PATH`),
+never from what it printed: on 46 or later it requires 12 emitted decimals
+and agreement with the analytic value within `1e-10` (`rel=0`); on older
+engines a separate test pins that the value is identical to a measured
+default run. Set `KLT_NGSPICE_BINARY` to a 46 build to run the strict case
+on a host whose `PATH` ngspice is older. The report does not record the
 requested or effective formatting digits (no precision field); that is
 deliberately deferred, since requested settings do not prove the effective
 ones for arbitrary netlists or ambient init files.
