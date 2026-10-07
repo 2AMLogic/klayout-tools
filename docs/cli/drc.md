@@ -5,7 +5,7 @@ report violations as structured data.
 
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--expect-rule-categories <N>] [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
@@ -55,6 +55,11 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   runs, and the error the deck itself produces names something else entirely
   — see "Engine" → `"klayout"` → "A driver's host assumptions are not rule
   checking".
+- `--expect-rule-categories N` — opt-in coverage assertion (`--engine
+  klayout` only, issue #2697; ignored for `--engine curated`). `N` must be a
+  positive integer; `0`, negatives and non-integers are rejected before
+  `klayout` is launched. See "Engine" → `"klayout"` → "Opt-in rule-category
+  assertion".
 - `--check` — verify a previously committed `--format json` report instead
   of running a fresh check (issue #1106). Mutually exclusive with `<file>`
   (the input path is read from the report itself) — see "`--check` /
@@ -109,6 +114,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `timeout_s` | number | `--timeout-s` |
 | `allow_deck_errors` | boolean | `--allow-deck-errors` |
 | `allow_missing_host_tools` | boolean | `--allow-missing-host-tools` |
+| `expect_rule_categories` | positive integer | `--expect-rule-categories` (booleans, floats, strings, `0` and negatives are rejected) |
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
 
@@ -382,6 +388,31 @@ real open_pdks install never pays for the extra probe.
   contains only rules with actual findings. `coverage.known` is false and
   `unknown` names `unmeasured_rule_execution`. No findings means
   `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Opt-in rule-category assertion (issue #2697).** The conservative default
+  above means a layout that is genuinely clean under its PDK's own deck can
+  never earn `clean` on its own. A caller who knows how many unique rule
+  categories the deck declares for the given inputs (e.g. from a prior
+  reviewed run) may vouch for it with `--expect-rule-categories N` (Python:
+  `expected_rule_categories`; request field `expect_rule_categories`). This
+  is *caller-supplied evidence*, not proof inferred from the RDB: it is only
+  as trustworthy as the count you supply. After a successful run, `N` is
+  compared with the number of **unique** names in `coverage.rule_categories`
+  (duplicate declarations count once):
+  - exact match: every declared category is recorded as checked, `coverage.known`
+    is `true`, the `unmeasured_rule_execution` sentinel is absent, and zero
+    findings give `status: "clean"` (exit 0). Findings still give
+    `"violations"` (exit 3).
+  - mismatch: the run fails (exit 1) with an error naming the expected and
+    observed counts; no report is emitted.
+  - a run that tolerated deck errors (`--allow-deck-errors`) can never
+    satisfy the assertion, even if its partial RDB has `N` categories: the
+    report stays `coverage_unknown` and records `satisfied: false`.
+  - the assertion is recorded in the additive top-level `coverage_assertion`
+    field: `{"kind": "expected_rule_categories", "expected": N, "observed": M,
+    "satisfied": true|false}`. It is absent when the option is not given, and
+    `--rerun` replays it from the committed report. Example:
+    `klt drc layout.gds --engine klayout --deck-file deck.lydrc
+    --expect-rule-categories 42 --format json`.
 - **Partial layer coverage information.** External scripts are opaque to
   the curated rule table, so layer/deck-specific legacy coverage arrays
   remain empty. They do not claim that nothing or everything was checked.

@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2697, `klt drc --engine klayout`): opt-in
+  `--expect-rule-categories N` (Python `expected_rule_categories`, request
+  field `expect_rule_categories`). An exact match with the deck's unique RDB
+  category count lets a zero-finding run report `clean` (exit 0) instead of
+  `coverage_unknown`, and is recorded in a new additive top-level
+  `coverage_assertion` field. Default behavior without the option is
+  unchanged.
 - **Changed** (#2453, `klt synthesize`/`klt equiv`; no JSON field changes):
   the WASI-sandboxed-yosys hint appended to a `Can't open script file`
   error now branches on where the (existing) script lives. Under the host
