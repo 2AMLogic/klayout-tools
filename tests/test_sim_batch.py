@@ -1965,6 +1965,7 @@ def test_model_closure_cap_fails_before_any_s3_write(tmp_path, monkeypatch):
         sim.run_sim(str(_write_request(tmp_path, _staged_batch_request(tmp_path))))
     assert runner.calls == []
 
+
 def test_run_sim_batch_rejects_waveform_supply_before_any_submission(
     tmp_path, monkeypatch
 ):

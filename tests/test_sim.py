@@ -11296,6 +11296,7 @@ def test_staged_worker_directory_reproduces_model_cards_and_provenance(
     ]
     assert [e["name"] for e in worker_env["corner_section_libs"]] == ["res.lib"]
 
+
 # --- #2706: supply override vs. waveform sources (PDK-free) ---------------- #
 
 
