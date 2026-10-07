@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-07
 
+- **PR #2820**: feat(drc): opt-in --min-klayout-version preflight for --engine klayout (#2689)
+- **PR #2819**: feat(lvs,pex): accept the --label-layer label-purpose override
+- **Issue #2689** (closed): drc --engine klayout: cannot use the bundled KLayout, and does not preflight the PATH one's DSL feature level
+- **Issue #2686** (closed): klt lvs / klt pex cannot override a deck's label purpose: --label-layer is klt extract-only
 - **Issue #2453** (closed): synthesize under a WASI-sandboxed engine build fails when the run dir is under the host temp dir, and the error's remedy advises unpinning the engine
 - **Issue #2445** (closed): extract: decide whether cap_cmomi's feed variant (none/same/double) is recoverable from drawn geometry
 - **Issue #2668** (closed): klt sim: stage explicit model libraries and OSDI assets for batch/remote jobs
