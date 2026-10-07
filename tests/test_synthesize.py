@@ -1588,6 +1588,157 @@ def test_run_synthesize_stubbed_missing_script_no_hint(tmp_path, monkeypatch):
     assert "WASI" not in message
 
 
+# Issue #2453: the WASI hint branches on whether the unreadable script lies
+# inside the host temp dir (likely shadowed by the sandbox's private /tmp
+# mount -> "relocate the request" advice) or outside it (generic advice).
+# ``tmp_path`` itself lives under the real temp dir, so these cases patch
+# ``tempfile.gettempdir()`` to a dedicated child of ``tmp_path`` and stage
+# the "outside" scripts in sibling directories.
+_WASI_TEMPDIR_CASES = [
+    # case ids; see _stage_wasi_script for layout and expected branch
+    "inside",
+    "outside_sibling",
+    "prefix_sharing_sibling",
+    "symlink_into_temp",
+]
+
+
+def _stage_wasi_script(tmp_path, monkeypatch, case, name):
+    """Create the fake host temp root and the script for ``case``; return
+    ``(script_path, fake_tempdir, expect_tempdir_hint)``."""
+    fake_tempdir = tmp_path / "hosttmp"
+    fake_tempdir.mkdir()
+    monkeypatch.setattr(
+        "klayout_tools._provenance.tempfile.gettempdir", lambda: str(fake_tempdir)
+    )
+    if case == "inside":
+        script = fake_tempdir / "run" / name
+        expect = True
+    elif case == "outside_sibling":
+        script = tmp_path / "checkout" / name
+        expect = False
+    elif case == "prefix_sharing_sibling":
+        # Shares the string prefix "<tmp_path>/hosttmp" but is a sibling.
+        script = tmp_path / "hosttmp-foo" / name
+        expect = False
+    elif case == "symlink_into_temp":
+        real = fake_tempdir / "real" / name
+        real.parent.mkdir(parents=True)
+        real.write_text("read_verilog x.v\n", encoding="utf-8")
+        link_dir = tmp_path / "checkout"
+        link_dir.mkdir()
+        script = link_dir / name
+        script.symlink_to(real)
+        return script, fake_tempdir, True
+    else:  # pragma: no cover
+        raise AssertionError(case)
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("read_verilog x.v\n", encoding="utf-8")
+    return script, fake_tempdir, expect
+
+
+def _assert_wasi_hint(message, fake_tempdir, expect_tempdir_hint):
+    assert "WASI-sandboxed build" in message
+    assert "yowasp-yosys" in message
+    if expect_tempdir_hint:
+        assert "under the host temp directory" in message
+        assert str(fake_tempdir) in message
+        assert "private scratch directory over /tmp" in message
+        assert "likely" in message
+        # Relocation is the headline; native yosys only the fallback.
+        relocate = message.index("Move the request file outside the host temp")
+        fallback = message.index("prepend a native yosys build")
+        assert relocate < fallback
+        assert "only as a fallback" in message
+        assert "keep your pinned engine" in message
+        assert "does not preopen this path" not in message
+    else:
+        assert "does not preopen this path" in message
+        assert "host temp directory" not in message
+        assert "Try prepending a native yosys build's directory to $PATH." in message
+
+
+@pytest.mark.parametrize("case", _WASI_TEMPDIR_CASES)
+def test_run_synthesize_stubbed_wasi_hint_tempdir_branch(tmp_path, monkeypatch, case):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    script, fake_tempdir, expect = _stage_wasi_script(
+        tmp_path, monkeypatch, case, "synth_gcd.ys"
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
+        assert cmd[:2] == ["yosys", "-s"]
+        return fake_completed(
+            returncode=1,
+            stderr=(
+                f"ERROR: Can't open script file `{script}' for "
+                "reading: No such file or directory\n"
+            ),
+        )
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+
+    with pytest.raises(SynthesizeError) as exc_info:
+        run_synthesize(request_path)
+
+    message = str(exc_info.value)
+    assert message.startswith("yosys synthesis failed: ERROR: Can't open script")
+    _assert_wasi_hint(message, fake_tempdir, expect)
+
+
+def test_run_synthesize_stubbed_missing_script_inside_tempdir_no_hint(
+    tmp_path, monkeypatch
+):
+    """A missing script under the host temp dir is an unrelated failure: the
+    file-exists guard still suppresses every WASI hint (issue #2453)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    fake_tempdir = tmp_path / "hosttmp"
+    fake_tempdir.mkdir()
+    monkeypatch.setattr(
+        "klayout_tools._provenance.tempfile.gettempdir", lambda: str(fake_tempdir)
+    )
+    missing_script = fake_tempdir / "does-not-exist" / "synth_gcd.ys"
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
+        return fake_completed(
+            returncode=1,
+            stderr=(
+                f"ERROR: Can't open script file `{missing_script}' for "
+                "reading: No such file or directory\n"
+            ),
+        )
+
+    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+
+    with pytest.raises(SynthesizeError) as exc_info:
+        run_synthesize(request_path)
+
+    assert "WASI" not in str(exc_info.value)
+    assert "temp directory" not in str(exc_info.value)
+
+
+def test_wasi_hint_consistent_between_synthesize_and_equiv(tmp_path, monkeypatch):
+    """Both verbs append the identical temp-dir hint (issue #1755/#2453)."""
+    from klayout_tools import equiv as equiv_module
+
+    script, _, _ = _stage_wasi_script(tmp_path, monkeypatch, "inside", "x.ys")
+    error = (
+        f"ERROR: Can't open script file `{script}' for reading: "
+        "No such file or directory"
+    )
+    equiv_msg = equiv_module._yosys_error_message("", error + "\n", 1)
+    synth_msg = synthesize._synthesis_error_message(
+        fake_completed(returncode=1, stderr=error + "\n")
+    )
+    assert equiv_msg.removeprefix("yosys equivalence check failed: ") == (
+        synth_msg.removeprefix("yosys synthesis failed: ")
+    )
+    assert "Move the request file outside the host temp" in synth_msg
+
+
 def test_run_synthesize_stubbed_generic_engine_failure(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
 

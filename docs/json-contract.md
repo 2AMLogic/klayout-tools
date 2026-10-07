@@ -132,6 +132,14 @@ breaking regardless of the key's name and type staying put. Recorded in
 `CHANGELOG.md` and documented in `docs/cli/extract.md`'s "MoM capacitor
 devices" section, as every additive change is.
 
+**A new optional *top-level* device member is additive too.** Issue #2445
+added `devices[].feed` (`"none"`/`"same"`/`"double"`) to `cap_cmomi` devices
+whose PCell feed variant was measured. It is a string, and `params` is an
+object of numbers, so it sits beside `params` rather than inside it; it is
+absent (not `null`) when unmeasured and always absent on `cap_cmomf`. No
+existing member changed, so **no `schema_version` bump**. See
+`docs/cli/extract.md`'s "MoM capacitor devices" section.
+
 **A new opt-in flag adding `null`-by-default fields to an already-shipped
 per-entry shape is likewise additive** — the field exists on every entry
 regardless of whether the flag was given, but only carries a real value when
@@ -638,6 +646,15 @@ stability statement, concrete precedents, and drift-detection guidance, and
     never fails the run; it only makes an otherwise-invisible reproducibility
     gap visible in the output. No warning (`released: true`) is emitted for
     an ordinary run against a deck unchanged since its last release.
+    A release build (built on this version's tag from a clean tree) also
+    vouches for its **own** decks (issue #2451): the history table is
+    regenerated after tagging and so never lists the release that ships it,
+    so a hash equal to the deck hash this build recorded *at build time*
+    resolves to `true` instead of `false`. An installed distribution compares
+    against those recorded hashes, not the current on-disk deck bytes, so a
+    deck module edited after install does not self-identify. `klt deck resolve` reports such a hit with an additive
+    `self_identified: true` field (absent otherwise). Source, dirty, or
+    untagged builds never self-identify and still report `false`.
     Both `content_hash` and `released` require a run against an actual input
     layout to see; `klt deck info` (issue #1209) reports this install's own
     deck `content_hash` plus its structural device-class coverage

@@ -121,6 +121,113 @@ the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
 own). ngspice-only: the `xyce` engine has no equivalent init-file lookup, so
 `options.ngspice_init` is accepted but has no effect when `engine: "xyce"`.
 
+### Measurement output precision (`measureprec` / `numdgt`)
+
+ngspice prints a measurement with a fixed number of digits, and `klt sim`
+reports exactly the token ngspice printed (the parser converts the whole
+matched token with `float()`; it never truncates). The digit count is a
+property of ngspice's **output formatting**, not of solver accuracy, and it is
+controlled by two *different* settings that `options.ngspice_init` can set
+(each line lands in the corner's `.spiceinit`):
+
+| Setting | Governs | Reaches |
+|---|---|---|
+| `set measureprec=N` | digits ngspice prints for `.meas` results (`%.*e`: N counts digits **after the decimal point** of the mantissa, not total significant figures) | `measurements[].spice` cards |
+| `set numdgt=N` | digits of a `print`ed scalar | `measurements[].expr` entries (the `let`/`print` pairs) |
+
+Consequences:
+
+- `.options numdgt=N` in a netlist does **not** establish `.meas` precision;
+  `numdgt` and `measureprec` are separate. Set both when a request mixes
+  `spice` and `expr` measurements.
+- Neither setting makes the solver more accurate. They only stop ngspice from
+  rounding a value it already holds. Solver tolerance (`reltol`, `abstol`,
+  ...) is a separate matter.
+- A derived `expr` reads the engine's stored vector, not the rounded text
+  printed for an earlier `expr`: with default digits `vout` prints as
+  `0.6666778`, yet `(vout - 0.6666778) * 1e9` evaluates to `-22.59...`, not `0`.
+- Defaults are unchanged: with no `ngspice_init`, formatting is whatever the
+  installed ngspice defaults to.
+- `expr` reduces a vector analysis to a **scalar** (`vecmax()`, `mean()`,
+  `<expr>[0]`, ...); it is not a point-interpolation facility. To read a
+  transient value at a time, use a `.meas ... FIND ... AT=` card.
+
+Tested recipe (PDK-free; exact value `2000.1 / 3000.1 = 0.6666777774074197`).
+`divider.spice`:
+
+```
+Vin in 0 DC 1
+R1 in out 1k
+R2 out 0 2.0001k
+C1 out 0 1f
+```
+
+Transient `.meas` (separate request from the OP one, since a corner runs one
+analysis):
+
+```json
+{
+  "netlist": "divider.spice",
+  "analysis": { "kind": "tran", "args": "1n 10n" },
+  "measurements": [
+    { "name": "vout", "spice": ".meas tran vout FIND v(out) AT=5n", "unit": "V" }
+  ],
+  "options": { "ngspice_init": ["set measureprec=12", "set numdgt=12"] }
+}
+```
+
+Operating-point scalar:
+
+```json
+{
+  "netlist": "divider.spice",
+  "analysis": { "kind": "op", "args": "" },
+  "measurements": [ { "name": "vout", "expr": "v(out)", "unit": "V" } ],
+  "options": { "ngspice_init": ["set numdgt=12"] }
+}
+```
+
+**Verified behaviour, by ngspice version.** Digits observed in the raw log
+(`keep_artifacts`), isolated `HOME`, `NGSPICE_MEAS_PRECISION` unset:
+
+| ngspice | `.meas` default | `.meas` + `measureprec=12` | `expr` default | `expr` + `numdgt=12` |
+|---|---|---|---|---|
+| 42 | `6.666778e-01` | `6.666778e-01` (**ignored**) | `6.666778e-01` | `6.666777774074e-01` |
+| 46 | `6.66678e-01` (5 decimals) | `6.666777774074e-01` (**honoured**, 12 decimals) | `6.666778e-01` | `6.666777774074e-01` |
+
+Both rows were measured live (ngspice 42 from `/usr/bin/ngspice`, ngspice 46
+from `~/.local/bin/ngspice`, each via `klt sim`'s `run_sim` with
+`backend="local"` and the two requests above, varying only
+`options.ngspice_init`). On 46, `numdgt=12` alone leaves a `.meas` value at
+`6.66678e-01` and `measureprec=12` alone leaves an `expr` value at
+`6.666778e-01`; the JSON `value` is the parsed raw token in every case
+(46 `.meas` + `measureprec=12`: `0.6666777774074`; 46 `expr` +
+`numdgt=12`: `0.6666777774074`). The 46 row was reproduced independently
+with ngspice 46 built from the upstream `ngspice-46.tar.gz` (sha256
+`a0d1699a…4d64c19b`) and selected via `$KLT_NGSPICE_BINARY`, running the CLI
+(`klt sim <request> --backend local --format json`) with identical tokens
+and JSON values. Note that 46's `.meas` default is 5 decimals, one fewer than
+42's 6.
+
+On ngspice 42, `measureprec`, `measure_precision` and the
+`NGSPICE_MEAS_PRECISION` environment variable were all tried and none changed
+a `.meas` result (neither as a `.meas` card nor as a `meas` command), and
+`numdgt` does not either; so on 42 a `.meas` value is capped at 6 decimals
+of mantissa (7 significant figures). On such an engine, declare the quantity
+as an `expr` (with `numdgt`) when more digits are needed, for any form that
+`expr` can reduce to a scalar. The regression suite
+(`tests/test_sim.py`, "Measurement output precision") selects its `.meas`
+assertion from the `--version` banner of the binary `klt sim` will run
+(resolved like the runner: `$KLT_NGSPICE_BINARY`, then `ngspice` on `PATH`),
+never from what it printed: on 46 or later it requires 12 emitted decimals
+and agreement with the analytic value within `1e-10` (`rel=0`); on older
+engines a separate test pins that the value is identical to a measured
+default run. Set `KLT_NGSPICE_BINARY` to a 46 build to run the strict case
+on a host whose `PATH` ngspice is older. The report does not record the
+requested or effective formatting digits (no precision field); that is
+deliberately deferred, since requested settings do not prove the effective
+ones for arbitrary netlists or ambient init files.
+
 ## Xyce engine
 
 `engine: "xyce"` runs the same corner matrix through Sandia's
@@ -400,8 +507,11 @@ longer wall-clock the extra waves take. `remote_launcher.resolve_ami()` resolves
 `scripts/aws/build-remote-sim-ami.sh` — ngspice, the curated `sky130A`/
 `gf180mcu`/`sg13g2` model decks (`sg13g2`'s recipe additionally bakes
 compiled OSDI models — see that script's SG13G2 branch), and `klt` itself
-are baked into the AMI, never fetched per job. Only the netlist and a generated request document
-(kilobytes to low megabytes) are pushed per job, by
+are baked into the AMI, never fetched per job. Only the netlist (with its
+`.include` closure) and a generated request document
+(kilobytes to low megabytes) are pushed per job — plus, when the request opts
+in with `options.stage_model_inputs`, its own model inputs (see "Staging the
+request's model inputs" below) — by
 `klayout_tools.remote_transport` — no IAM instance profile is attached to
 the guest by default (baked AMI + SSH/SCP transport means the guest never
 calls an AWS API); network posture is SSH-inbound-only from the launcher's
@@ -1142,6 +1252,9 @@ relying on `print`:
 { "name": "swing", "expr": "vecmax(v(out)) - vecmin(v(out))", "unit": "V" }
 ```
 
+A `print`ed scalar uses ngspice's `numdgt` digit count; see "Measurement
+output precision" above for widening it via `options.ngspice_init`.
+
 Worked `op` example — the case that had no expression at all before:
 
 ```json
@@ -1241,9 +1354,10 @@ netlist's resolved include closure**, not just the netlist file
   request already forwards (`models.pdk_root`, else this host's `$PDK_ROOT`)
   — the model library is baked into the fleet image and is never pushed per
   job (see "Remote backend" above).
-- `.lib` cards are not followed: `.lib` is the model-library channel, which
-  `models`/`models.pdk` already resolve on the executing host (see "Model
-  library resolution" below).
+- `.lib` cards in the netlist are not followed: `.lib` is the model-library
+  channel, which `models`/`models.pdk` resolve on the executing host by
+  default (see "Model library resolution" below) — or, with
+  `options.stage_model_inputs: true`, ship with the job (next section).
 
 A closure larger than 64 files or 32 MiB is refused with the same named
 error rather than silently pushed — a closure that big is a host-resident
@@ -1252,6 +1366,99 @@ variable.
 
 `local`/`local-parallel` are unaffected: they run on the host that resolved
 the paths in the first place.
+
+## Staging the request's model inputs (`options.stage_model_inputs`)
+
+By default the off-host backends treat the runner image as the PDK
+contract: `models.lib`, per-section corner libraries and `.osdi` binaries
+are resolved **on the executing host**, so the PDKs `remote`/`batch` can run
+are exactly the ones baked into the image. A request whose models are not
+in the image — a PDK outside the baked set, a locally-modified library, or
+OSDI binaries built on top of the distributed sources — opts in to shipping
+them with the job
+([#2668](https://github.com/2AMLogic/klayout-tools/issues/2668)):
+
+```json
+{
+  "netlist": "tb.spice",
+  "backend": "batch",
+  "models": {"pdk": "sg13g2", "lib": "libs.tech/ngspice/models/cornerMOSlv.lib"},
+  "corners": {"process": ["mos_tt", "mos_ss"]},
+  "options": {
+    "stage_model_inputs": true,
+    "osdi_preload": ["build/osdi/psp103.osdi", "build/osdi/r3_cmc.osdi"]
+  }
+}
+```
+
+- **Opt-in, boolean.** Absent or `false` is exactly the behaviour above
+  (nothing model-related is uploaded). Any non-boolean value is an
+  application error (exit `1`) on every backend. On `local`/`local-parallel`
+  the option is accepted and has no effect — those backends already read the
+  files where they are.
+- **What is staged.** `models.lib`, every per-section `lib` of a
+  `corners.process` bundle (and the same refs inside a fleet shard's
+  internal `_explicit_points`), and every `options.osdi_preload` entry.
+  Sources are resolved **on the submitting host** with the same rules a
+  local run uses — a relative `lib` joins the PDK variant directory when
+  `models.pdk`/`models.pdk_root` is set, otherwise the request file's
+  directory; `osdi_preload` entries join the request file's directory — and
+  are then uploaded beside `netlist.cir` (`inputs/` for `batch`) under flat,
+  sanitized, collision-safe names (`inc1_<name>` on a basename clash; the
+  generated `netlist.cir`/`request.json` names are never reused).
+- **Self-contained model closure.** Each staged library's own dependencies
+  are followed recursively: `.include`/`.inc` targets and **file-bearing**
+  `.lib <file> <section>` references are staged and rewritten to their
+  staged names. `.lib <section>` … `.endl` section *definitions* are left
+  intact. Unlike the netlist's own closure, nothing is left for the
+  executing host: `$VAR` targets are expanded here, and targets under the
+  PDK root are staged like any other file. A dependency that does not
+  resolve to a readable file, a `$VAR` that is unset here, or an
+  unsupported `.lib` form (no arguments, more than two, unbalanced quotes)
+  is a named error. Shared dependencies are uploaded once; cycles
+  (including a library that `.lib`-references itself) terminate.
+- **Binaries are opaque.** `.osdi` files are uploaded byte-for-byte, never
+  parsed or re-encoded, and `options.osdi_preload` keeps its declared order
+  (repeated entries stay repeated). A text file that needs a rewrite must be
+  UTF-8; unmodified files ship byte-for-byte from their own path.
+- **The caller's request is not modified.** The worker receives a rewritten
+  *copy*: model references become job-relative staged names, and an
+  internal `_staged_model_inputs: true` marker tells the worker's `klt sim`
+  to resolve them against the job directory instead of joining them onto its
+  image's PDK directory. `models.pdk` stays in that request — it still
+  selects the image.
+- **Limits.** The complete staged closure (netlist includes plus every model
+  file and binary; the netlist itself is not counted) is capped at **512
+  files / 256 MiB**; the netlist's own include closure keeps its 64-file /
+  32 MiB cap above. Exceeding either is a named error.
+- **Fails before anything is spent.** Every missing file, unresolvable
+  dependency and exceeded cap is reported — naming the request field it was
+  reached from (`models.lib`, `corners.process[1].sections[0].lib`,
+  `options.osdi_preload[2]`, …) plus the file and line of a failing
+  dependency — before any S3 write, SSH push, instance launch or fleet
+  launch, including for sharded (`remote.hosts > 1`) runs.
+- **Image selection is unchanged.** `remote` still requires `models.pdk` to
+  pick its AMI, and both backends still refuse a `models.pdk` the fleet has
+  no image for (see "Both off-host backends validate `models.pdk` up
+  front"). A `batch` request with no `models.pdk` at all runs on the fleet's
+  default image with no `pdk_variant` in `job.json`. `environment.remote`
+  still records the image that ran (`ami_id`).
+- **Runner compatibility is still yours to guarantee.** Staging moves files,
+  not toolchains: an `.osdi` must be built for the runner's platform (the
+  fleet images are Linux x86-64) **and** the runner's ngspice OSDI ABI, and
+  the model files must parse under the runner's ngspice. `klt` does not
+  compile binaries or publish images; opting in is the caller's statement
+  that the binaries are compatible.
+- **Provenance.** The submitter's report carries an additive
+  `environment.staged_model_inputs` array — one
+  `{name, field, kind, sha256, rewritten}` per staged model file, where
+  `kind` is `"library"`, `"osdi"` or `"dependency"`, and `sha256` hashes the
+  bytes the worker actually received (a library whose directives were
+  rewritten hashes differently from its source; `rewritten` says so; an
+  `.osdi` never does). On the worker, the existing `models_lib_sha256`,
+  `osdi_preload[].sha256` and `corner_section_libs[].sha256` hash those same
+  staged files. The array is present only when the option staged inputs for
+  an off-host backend.
 
 ## OSDI (Verilog-A) model preload
 
@@ -1299,8 +1506,12 @@ fails with `Unable to find definition of model …` and every corner errors.
   declares the option. A resumable sweep's checkpoint fingerprint also keys
   on these hashes, so a rebuilt `.osdi` invalidates the checkpoint like an
   edited model library does.
-- **Off-host backends refuse it.** `remote`/`batch` fail the request with a
-  named error (exit `1`) rather than staging the files. Unlike the
+- **Off-host backends refuse it by default.** `remote`/`batch` fail the
+  request with a named error (exit `1`) rather than staging the files —
+  unless the request sets `options.stage_model_inputs: true`, which uploads
+  the binaries byte-for-byte in preload order (see "Staging the request's
+  model inputs" above; compatibility with the runner's platform and ngspice
+  is then the caller's responsibility). Unlike the
   `.include` closure (text files, staged per #2485 above), an `.osdi` is a
   host-architecture shared library compiled against one ngspice build's OSDI
   interface: a macOS arm64 `.osdi` staged onto the fleet's Linux x86-64
@@ -1434,6 +1645,20 @@ fails with `Unable to find definition of model …` and every corner errors.
   generated `.control` block, so `<key>` must name either a voltage source or
   a `.param` the netlist body defines and its sources reference (e.g.
   `.param vdd=1.8` / `Vdd vdd 0 DC {vdd}`).
+  **Scalar sources only.** ngspice's `alter` silently has no effect on an
+  independent voltage source with an explicit transient waveform
+  (`PWL`/`PULSE`/`SIN`/`EXP`/`SFFM`/`AM`), so `klt sim` rejects such a request
+  up front with a `SimError` naming the target, the waveform and the
+  unsupported override -- before any probe, local run or off-host
+  (`remote`/`batch`) submission. A mixed grid fails as a whole; a waveform
+  source with no `supply_v` entry is unaffected, and bare-value/`DC` sources
+  keep the scalar override. The check covers the actual expanded corner points
+  (including a fleet shard's `_explicit_points`). It is a lexical inspection of
+  the netlist body only (case-insensitive names, `+` continuations, comments
+  ignored, `.subckt`-local declarations ignored), **not** a complete SPICE
+  parser: `.include`d/`.lib` files and hierarchical targets are not resolved,
+  so a waveform declared there is not detected, and an unresolved declaration
+  is never assumed to be DC. Rewriting waveform sources is out of scope.
 - **`corners.temperature_c`** (`array<number>`, optional) — degrees Celsius,
   one `.temp <value>` card per point. Defaults to `[27]` when omitted.
 - **`exclude`** (`array<object>`, optional) — partial corner specs
@@ -1510,8 +1735,10 @@ emits, in declaration order:
   forward the refs **as declared** (this host's absolute paths would be
   meaningless there) and the remote host resolves them against its own
   `$PDK_ROOT`/request directory, exactly as it already resolves
-  `models.lib`. Per-section libraries are *not* staged — same as
-  `models.lib`, and unlike the netlist's `.include` closure — so express
+  `models.lib`. Per-section libraries are *not* staged by default — same as
+  `models.lib`, and unlike the netlist's `.include` closure (set
+  `options.stage_model_inputs: true` to ship them; see "Staging the
+  request's model inputs" above) — so express
   them PDK-relative (`models.pdk` + a relative `lib`) rather than as an
   operator-local absolute path if the request may run off-host. The
   *orchestrator* still resolves and existence-checks every ref locally to run
@@ -2528,7 +2755,8 @@ the *response* echoes back.
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
 | `options.fail_on_diagnostic` | array\<string\> | Issue #2492. Diagnostic `code`s whose presence makes a corner `status: "inconclusive"` rather than `pass`/`fail` — matched on the code *before* the recovered-stepping severity downgrade, so it is how a caller says they do not trust a solve that needed gmin/source stepping to converge. Defaults to unset/`[]` (no behavior change: every count, status and statistic is exactly as before). An unrecognized code is an application error (exit 1); a valid code this run never emits is a no-op. Repeatable `--fail-on-diagnostic <code>` CLI flag overrides it. See "Grading a recovered diagnostic as inconclusive" above. |
-| `options.osdi_preload`   | array\<string\>   | Issue #2513. Compiled OSDI (Verilog-A) shared libraries to load with `pre_osdi`, emitted in declared order at the top of the generated `.control` block. `$VAR`/`~` expand; relative paths resolve against the request file's directory. Each must exist (checked before any corner runs; exit 1 otherwise). Refused for `backend: "remote"`/`"batch"` and for `engine: "xyce"`. Defaults to unset (no `pre_osdi` lines — the deck is unchanged). See "OSDI (Verilog-A) model preload" above. |
+| `options.osdi_preload`   | array\<string\>   | Issue #2513. Compiled OSDI (Verilog-A) shared libraries to load with `pre_osdi`, emitted in declared order at the top of the generated `.control` block. `$VAR`/`~` expand; relative paths resolve against the request file's directory. Each must exist (checked before any corner runs; exit 1 otherwise). Refused for `backend: "remote"`/`"batch"` unless `options.stage_model_inputs` is `true`, and always for `engine: "xyce"`. Defaults to unset (no `pre_osdi` lines — the deck is unchanged). See "OSDI (Verilog-A) model preload" above. |
+| `options.stage_model_inputs` | boolean       | Issue #2668. For `backend: "remote"`/`"batch"`, upload `models.lib`, per-section corner libraries and `options.osdi_preload` binaries — with their full `.include`/file-bearing `.lib` closure — and point the worker request at the staged copies. Defaults to `false` (models resolve on the runner image, unchanged). A non-boolean is an application error (exit 1); no effect on `local`/`local-parallel`. See "Staging the request's model inputs" above. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
@@ -2648,7 +2876,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `diagnostic_counts` | object      | Rollup of every `corners[].diagnostics[]` entry across the whole grid (issue #2491), counted regardless of each corner's final `status` — a `pass`ed corner with a recovered `severity: "warning"` diagnostic is still counted, as are the `inconclusive`/`implausible_solution` grading markers (issues #2492/#2493), which is how the two reasons for an `inconclusive` corner stay distinguishable. `{by_code: {<code>: N, ...}, by_severity: {<severity>: N, ...}, corners_with_diagnostics: N}`. Always present; `by_code`/`by_severity` are `{}` and `corners_with_diagnostics` is `0` for a diagnostic-free grid, never omitted. See "Failure classification" below for the `code`/`severity` vocabulary. |
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored`/`inconclusive` (issues #1849, #2492). See below. |
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
-| `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when nothing made one necessary — either no process axis at all, or a `corners.process` bundle whose every section named its own `lib` (issue #2522); never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `corner_section_libs` (issue #2522 — one `{name, path, scope, sha256}` per distinct per-section corner library a `corners.process` bundle named, in first-appearance order; see "Per-section corner libraries" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
+| `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when nothing made one necessary — either no process axis at all, or a `corners.process` bundle whose every section named its own `lib` (issue #2522); never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `osdi_preload` (issue #2513 — one `{name, path, scope, sha256}` per preloaded `.osdi`, in load order; see "OSDI (Verilog-A) model preload" above), `corner_section_libs` (issue #2522 — one `{name, path, scope, sha256}` per distinct per-section corner library a `corners.process` bundle named, in first-appearance order; see "Per-section corner libraries" above), `staged_model_inputs` (issue #2668 — only when `options.stage_model_inputs` staged model files for an off-host backend: one `{name, field, kind, sha256, rewritten}` per file the worker received; see "Staging the request's model inputs" above), `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`), and carries the additional `ambiguous_sources` key when the resolved variant was installed more than once on this host (issue #2564 — see "Model library resolution" above); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |

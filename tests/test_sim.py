@@ -10969,3 +10969,698 @@ def test_build_remote_request_max_workers_only_pinned_when_given():
     assert "max_workers" not in default["options"]
     pinned = sim_remote._build_remote_request(request, max_workers=20, **kwargs)
     assert pinned["options"]["max_workers"] == 20
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in model staging for the off-host backends (issue #2668):
+# `options.stage_model_inputs`. Transports are always faked.
+# --------------------------------------------------------------------------- #
+
+
+def _staged_model_fixture(src: Path) -> dict:
+    """A submitter tree: a fake PDK install whose model library has nested
+    includes, a file-bearing `.lib` and section definitions; a per-section
+    family library; two `.osdi` binaries; and a request that opts in."""
+    install = src / "pdk"
+    ngspice_dir = install / "sky130A" / "libs.tech" / "ngspice"
+    (ngspice_dir / "models").mkdir(parents=True)
+    (install / "sky130A" / "libs.tech" / "klayout").mkdir()
+    (ngspice_dir / "models" / "common.spice").write_text(".param common=1\n")
+    (ngspice_dir / "corners.lib").write_text(".lib fast\n.param f=1\n.endl fast\n")
+    (ngspice_dir / "sky130.lib.spice").write_text(
+        ".lib tt\n"
+        '.include "models/common.spice"\n'
+        ".lib corners.lib fast\n"
+        ".endl tt\n"
+        ".lib ss\n"
+        '.include "models/common.spice"\n'
+        ".endl ss\n"
+    )
+    # A per-section family library inside the PDK variant (resolved like
+    # models.lib, PDK-relative), sharing a dependency with the main library.
+    (install / "sky130A" / "fam").mkdir()
+    (install / "sky130A" / "fam" / "res.lib").write_text(
+        ".lib res_tt\n"
+        '.include "../libs.tech/ngspice/models/common.spice"\n'
+        ".endl res_tt\n"
+    )
+    (src / "osdi").mkdir()
+    (src / "osdi" / "psp103.osdi").write_bytes(b"\x7fELF\x00\x01psp\xff")
+    (src / "osdi" / "r3_cmc.osdi").write_bytes(b"\x7fELF\x00\x02r3\xfe")
+    _write_body(src)
+    request = _base_remote_request(
+        models={
+            "pdk": "sky130A",
+            "pdk_root": str(install),
+            "lib": "libs.tech/ngspice/sky130.lib.spice",
+        },
+        corners={
+            "process": [
+                "ss",
+                {
+                    "name": "tt_mix",
+                    "sections": ["tt", {"lib": "fam/res.lib", "section": "res_tt"}],
+                },
+            ],
+            "temperature_c": [27, 85],
+        },
+        measurements=[{"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}],
+        options={
+            "stage_model_inputs": True,
+            "osdi_preload": ["osdi/psp103.osdi", "osdi/r3_cmc.osdi"],
+        },
+    )
+    return request
+
+
+def _model_cards(deck: str) -> list[str]:
+    return [
+        line
+        for line in deck.splitlines()
+        if line.startswith(".lib ") or line.startswith("pre_osdi ")
+    ]
+
+
+def _job_input_bytes(item) -> bytes:
+    if item.content is not None:
+        return item.content.encode("utf-8")
+    return Path(item.local_path).read_bytes()
+
+
+def test_stage_model_inputs_is_validated_for_every_backend(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"stage_model_inputs": "true"},
+        },
+    )
+    with pytest.raises(sim.SimError, match="stage_model_inputs must be a boolean"):
+        sim.run_sim(str(request))
+
+
+def test_staged_marker_must_be_boolean(tmp_path):
+    _write_body(tmp_path)
+    _write_corner_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "corner.lib"},
+            "corners": {"process": ["tt"]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "_staged_model_inputs": "yes",
+        },
+    )
+    with pytest.raises(sim.SimError, match="_staged_model_inputs is internal"):
+        sim.run_sim(str(request))
+
+
+def test_stage_model_inputs_leaves_local_decks_unchanged(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    request = _staged_model_fixture(src)
+    request.pop("remote")
+    request["backend"] = "local"
+    decks_on = _capture_decks(monkeypatch)
+    on = sim.run_sim(str(_write_request(src, request)))
+    request["options"] = {
+        key: value
+        for key, value in request["options"].items()
+        if key != "stage_model_inputs"
+    }
+    decks_off = _capture_decks(monkeypatch)
+    off = sim.run_sim(str(_write_request(src, request)))
+
+    assert decks_on == decks_off
+    assert "staged_model_inputs" not in on["environment"]
+    assert (
+        on["environment"]["models_lib_sha256"]
+        == off["environment"]["models_lib_sha256"]
+    )
+
+
+def test_remote_backend_stages_model_inputs_and_keeps_image_selection(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "src"
+    src.mkdir()
+    request_path = _write_request(src, _staged_model_fixture(src))
+    state = _install_fake_remote_transport(monkeypatch)
+
+    report = sim.run_sim(str(request_path))
+
+    # The AMI is still chosen from models.pdk.
+    assert _FakeRemoteLauncher.last_instance.kwargs["pdk"] == "sky130A"
+    assert report["environment"]["remote"]["ami_id"] == "ami-fake"
+    by_name = {item.remote_name: item for item in state["job"].inputs}
+    assert {
+        "netlist.cir",
+        "request.json",
+        "sky130.lib.spice",
+        "common.spice",
+        "corners.lib",
+        "res.lib",
+        "psp103.osdi",
+        "r3_cmc.osdi",
+    } == set(by_name)
+    pushed = state["remote_request"]
+    assert pushed["models"]["lib"] == "sky130.lib.spice"
+    assert pushed["models"]["pdk"] == "sky130A"
+    assert pushed["options"]["osdi_preload"] == ["psp103.osdi", "r3_cmc.osdi"]
+    assert pushed["corners"]["process"][1]["sections"][1] == {
+        "lib": "res.lib",
+        "section": "res_tt",
+    }
+    assert pushed["_staged_model_inputs"] is True
+    assert str(src) not in by_name["sky130.lib.spice"].content
+    assert (
+        _job_input_bytes(by_name["psp103.osdi"])
+        == (src / "osdi" / "psp103.osdi").read_bytes()
+    )
+
+    staged = report["environment"]["staged_model_inputs"]
+    assert {entry["name"] for entry in staged} == set(by_name) - {
+        "netlist.cir",
+        "request.json",
+    }
+    for entry in staged:
+        assert (
+            entry["sha256"]
+            == (
+                __import__("hashlib").sha256(_job_input_bytes(by_name[entry["name"]]))
+            ).hexdigest()
+        )
+    # The caller's request document is untouched.
+    assert json.loads(request_path.read_text())["models"]["lib"] == (
+        "libs.tech/ngspice/sky130.lib.spice"
+    )
+
+
+def test_remote_backend_refuses_an_unstageable_model_dependency_before_launch(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "src"
+    src.mkdir()
+    request = _staged_model_fixture(src)
+    (src / "pdk" / "sky130A" / "fam" / "res.lib").write_text(
+        '.lib res_tt\n.include "gone.spice"\n.endl res_tt\n'
+    )
+    request_path = _write_request(src, request)
+    state = _install_fake_remote_transport(monkeypatch)
+    _FakeRemoteLauncher.last_instance = None
+
+    with pytest.raises(sim.SimError) as excinfo:
+        sim.run_sim(str(request_path))
+
+    message = str(excinfo.value)
+    assert "corners.process[1].sections[1].lib" in message
+    assert "gone.spice" in message
+    assert state["push_job_calls"] == 0
+    assert _FakeRemoteLauncher.last_instance is None
+
+
+@pytest.mark.parametrize("backend", ["remote", "batch"])
+def test_stage_model_inputs_lets_osdi_preload_go_offhost(
+    tmp_path, monkeypatch, backend
+):
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, backend, fake_backend)
+    _write_osdi(tmp_path)
+    request = _osdi_request(
+        tmp_path,
+        ["psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+    document = json.loads(request.read_text())
+    document["options"]["stage_model_inputs"] = True
+    request.write_text(json.dumps(document))
+
+    report = sim.run_sim(str(request), backend=backend)
+
+    assert seen["request_dir"] == str(tmp_path)
+    assert "osdi_preload" not in seen  # never a local-engine kwarg off-host
+    assert [
+        entry["name"] for entry in report["environment"]["staged_model_inputs"]
+    ] == ["psp103.osdi"]
+
+
+def test_staged_worker_directory_reproduces_model_cards_and_provenance(
+    tmp_path, monkeypatch
+):
+    """Reconstruct the job directory both transports would produce for one
+    fleet shard (`_explicit_points`), delete the submitter tree, and run the
+    worker request there: the generated model/preload cards are the
+    submitter's, re-pointed at staged names, and the worker's own provenance
+    hashes the files it actually read."""
+    src = tmp_path / "src"
+    src.mkdir()
+    request = _staged_model_fixture(src)
+    request.pop("remote")
+    request["backend"] = "local"
+    request_path = _write_request(src, request)
+    local_decks = _capture_decks(monkeypatch)
+    local_report = sim.run_sim(str(request_path))
+
+    points = sim._expand_corners(request["corners"], [])
+    worker_seed = sim._build_remote_request(
+        request,
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        explicit_points=points,
+    )
+    remote_job = sim._build_remote_job_description(
+        worker_seed, str(src / "body.spice"), request_dir=str(src)
+    )
+    batch_seed = dict(worker_seed)
+    batch_seed.pop("batch", None)
+    batch_spec = sim_batch._build_batch_job_spec(
+        batch_seed,
+        str(src / "body.spice"),
+        corner_count=len(points),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        request_dir=str(src),
+    )
+    # Both transports ship the same assets, in the same order, with the same
+    # bytes and the same worker request.
+    remote_inputs = [(i.remote_name, _job_input_bytes(i)) for i in remote_job.inputs]
+    batch_inputs = [(i.name, _job_input_bytes(i)) for i in batch_spec.inputs]
+    assert remote_inputs == batch_inputs
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    for name, data in remote_inputs:
+        (job_dir / name).write_bytes(data)
+    source_by_name = {
+        asset.name: asset.source_path
+        for asset in sim.sim_staging.stage_sim_job(
+            worker_seed,
+            str(src / "body.spice"),
+            request_dir=str(src),
+            netlist_staged_name="netlist.cir",
+            reserved_names=("request.json",),
+            backend="remote",
+        ).model_assets
+    }
+    shutil.rmtree(src)
+
+    worker_decks = _capture_decks(monkeypatch)
+    worker_report = sim.run_sim(str(job_dir / "request.json"), backend="local")
+
+    assert len(worker_decks) == len(local_decks) == 4
+    for local_deck, worker_deck in zip(local_decks, worker_decks, strict=True):
+        expected = []
+        for line in _model_cards(local_deck):
+            for name, source in source_by_name.items():
+                line = line.replace(source, str(job_dir / name))
+            expected.append(line)
+        assert _model_cards(worker_deck) == expected
+        assert str(src) not in worker_deck
+
+    worker_env = worker_report["environment"]
+    staged_lib = (job_dir / "sky130.lib.spice").read_bytes()
+    assert worker_env["models_lib_sha256"] == (
+        __import__("hashlib").sha256(staged_lib).hexdigest()
+    )
+    assert [e["sha256"] for e in worker_env["osdi_preload"]] == [
+        e["sha256"] for e in local_report["environment"]["osdi_preload"]
+    ]
+    assert [e["name"] for e in worker_env["corner_section_libs"]] == ["res.lib"]
+
+
+# --- #2706: supply override vs. waveform sources (PDK-free) ---------------- #
+
+
+def _supply_deck_request(tmp_path, body, supply_v, **extra):
+    (tmp_path / "body.spice").write_text(body)
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "corners": {"supply_v": supply_v},
+    }
+    request.update(extra)
+    return _write_request(tmp_path, request)
+
+
+def _boom(*args, **kwargs):
+    raise AssertionError("simulation must not start for a rejected request")
+
+
+@pytest.mark.parametrize(
+    "decl,wave",
+    [
+        ("Vdd vdd 0 PWL(0 0 1u 5)", "PWL"),
+        ("vdd vdd 0 pulse (0 1.8 0 1n 1n 1u 2u)", "PULSE"),
+        ("VDD vdd 0 dc 0 SIN(0 1 1k)", "SIN"),
+        ("Vdd vdd 0\n+ PWL(0 0\n+ 1u 5)", "PWL"),
+    ],
+)
+def test_supply_override_on_waveform_source_is_rejected(
+    tmp_path, monkeypatch, decl, wave
+):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    monkeypatch.setattr(sim.subprocess, "Popen", _boom)
+    path = _supply_deck_request(tmp_path, f"{decl}\nR1 vdd 0 1k\n", {"vdd": [1.0, 1.8]})
+    with pytest.raises(sim.SimError) as exc:
+        sim.run_sim(str(path))
+    message = str(exc.value)
+    assert "'vdd'" in message and wave in message and "alter" in message
+
+
+def test_supply_override_mixed_grid_fails_as_a_whole(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    body = "Vdd vdd 0 DC 1\nVref vref 0 PWL(0 0 1u 1)\nR1 vdd vref 1k\n"
+    path = _supply_deck_request(tmp_path, body, {"vdd": [1, 2], "vref": [1, 2]})
+    with pytest.raises(sim.SimError, match="'vref'"):
+        sim.run_sim(str(path))
+
+
+def test_supply_override_scalar_sources_and_lexical_non_matches(tmp_path):
+    body = (
+        "* Vdd vdd 0 PWL(0 0 1 1)\n"
+        "Vdd vdd 0 1.8 ; PWL(0 0 1 1)\n"
+        "Vclk clk 0 PULSE(0 1 0 1n 1n 1u 2u)\n"
+        "Vsig sig 0 dc 1\n"
+        ".subckt blk a b\nVdd a b PWL(0 0 1 1)\n.ends\n"
+        "Vdc dc 0 DC 1.2\n"
+    )
+    (tmp_path / "n.spice").write_text(body)
+    points = [sim.CornerPoint(None, {"vdd": 1.0, "vdc": 1.1, "sig": 2.0}, 27)]
+    sim._validate_supply_override_targets(str(tmp_path / "n.spice"), points)
+    # Waveform source without an override remains usable.
+    sim._validate_supply_override_targets(
+        str(tmp_path / "n.spice"), [sim.CornerPoint(None, {}, 27)]
+    )
+
+
+def test_supply_override_node_named_like_waveform_is_not_waveform(tmp_path):
+    (tmp_path / "n.spice").write_text("Vdd pwl 0 DC 1\n")
+    sim._validate_supply_override_targets(
+        str(tmp_path / "n.spice"), [sim.CornerPoint(None, {"vdd": 1.0}, 27)]
+    )
+
+
+def test_supply_override_explicit_points_are_validated(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    (tmp_path / "body.spice").write_text("Vdd vdd 0 PWL(0 0 1u 5)\nR1 vdd 0 1k\n")
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "_explicit_points": [
+            {"process": None, "supply_v": {"vdd": 1.2}, "temperature_c": 27}
+        ],
+    }
+    with pytest.raises(sim.SimError, match="PWL"):
+        sim.run_sim(str(_write_request(tmp_path, request)))
+
+
+# --------------------------------------------------------------------------- #
+# Measurement output precision (issue #2681)
+#
+# ngspice formats `.meas` results with `measureprec` and scalar `print`
+# output with `numdgt`; both are *formatting* controls, reachable through
+# `options.ngspice_init`. These cases pin what `klt sim` reports under each.
+# The divider's analytic value is 2000.1 / 3000.1 = 0.6666777774074197
+# --------------------------------------------------------------------------- #
+
+_DIVIDER_ANALYTIC = 2000.1 / 3000.1
+
+
+def _write_precision_divider(tmp_path: Path) -> None:
+    """1 V across 1k / 2.0001k: v(out) = 2000.1 / 3000.1, no PDK, no models."""
+    (tmp_path / "divider.spice").write_text(
+        "Vin in 0 DC 1\nR1 in out 1k\nR2 out 0 2.0001k\nC1 out 0 1f\n"
+    )
+
+
+def _run_precision_request(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    analysis: dict,
+    measurements: list[dict],
+    ngspice_init: list[str] | None = None,
+) -> tuple[dict, str]:
+    """Run a single-corner request against real ngspice with ambient
+    precision configuration neutralised; return `(corner, raw_log_text)`."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("NGSPICE_MEAS_PRECISION", raising=False)
+    _write_precision_divider(tmp_path)
+    options: dict = {"keep_artifacts": True}
+    if ngspice_init is not None:
+        options["ngspice_init"] = ngspice_init
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "divider.spice",
+            "analysis": analysis,
+            "measurements": measurements,
+            "options": options,
+        },
+    )
+    report = sim.run_sim(
+        str(request), artifacts_dir=str(tmp_path / "art"), backend="local"
+    )
+    assert report["status"] == "pass"
+    (corner,) = report["corners"]
+    assert corner["diagnostics"] == []
+    return corner, Path(corner["artifacts"]["log"]).read_text()
+
+
+def _raw_value_token(log_text: str, name: str) -> str:
+    """The unparsed numeric token ngspice printed for `name`."""
+    match = re.search(
+        rf"^{name}\s*=\s*([+-]?[\d.]+(?:e[+-]?\d+)?)", log_text, re.M | re.I
+    )
+    assert match, f"no `{name} = <value>` line in log:\n{log_text}"
+    return match.group(1)
+
+
+def _mantissa_decimals(token: str) -> int:
+    mantissa = token.lower().split("e")[0]
+    return len(mantissa.split(".")[1]) if "." in mantissa else 0
+
+
+_TRAN_FIND = {"kind": "tran", "args": "1n 10n"}
+_VOUT_FIND = [
+    {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=5n", "unit": "V"}
+]
+_OP = {"kind": "op", "args": ""}
+_VOUT_EXPR = [{"name": "vout", "expr": "v(out)", "unit": "V"}]
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_default_meas_is_coarser_than_solver(
+    tmp_path, monkeypatch
+):
+    corner, log = _run_precision_request(
+        tmp_path, monkeypatch, analysis=_TRAN_FIND, measurements=_VOUT_FIND
+    )
+    (m,) = corner["measurements"]
+    assert m["name"] == "vout" and m["status"] == "pass"
+    token = _raw_value_token(log, "vout")
+    assert _mantissa_decimals(token) <= 6
+    # The JSON value is the full printed token, and it is visibly rounded.
+    assert m["value"] == float(token)
+    assert abs(m["value"] - _DIVIDER_ANALYTIC) > 1e-10
+    assert m["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-6, rel=0)
+
+
+def _ngspice_major(tmp_path: Path) -> int:
+    """Major version of the ngspice `klt sim` will actually run, read from its
+    own banner -- independent of anything a simulated result printed. Uses
+    the runner's own resolution (`$KLT_NGSPICE_BINARY` before `ngspice` on
+    PATH), so pointing `KLT_NGSPICE_BINARY` at a 46 build selects the strict
+    case rather than probing whatever older ngspice is on PATH."""
+    binary = sim._resolve_ngspice_binary({}, str(tmp_path))
+    out = subprocess.run(
+        [binary, "--version"], capture_output=True, text=True, timeout=60
+    ).stdout
+    match = re.search(r"ngspice-(\d+)", out)
+    assert match, f"cannot read ngspice version from:\n{out}"
+    return int(match.group(1))
+
+
+#: First ngspice release that honours `set measureprec` for `.meas` output
+#: (verified live on 46; 42 ignores it -- see docs/cli/sim.md).
+_MEASUREPREC_MIN_MAJOR = 46
+
+_MEAS_PREC_INIT = ["set measureprec=12", "set numdgt=12"]
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_measureprec_honoured_on_meas_card(tmp_path, monkeypatch):
+    """On an engine that supports `measureprec`, the request must emit the
+    requested digits -- a silently ignored setting fails this test."""
+    if _ngspice_major(tmp_path) < _MEASUREPREC_MIN_MAJOR:
+        pytest.skip(f"ngspice < {_MEASUREPREC_MIN_MAJOR} ignores measureprec")
+    corner, log = _run_precision_request(
+        tmp_path,
+        monkeypatch,
+        analysis=_TRAN_FIND,
+        measurements=_VOUT_FIND,
+        ngspice_init=_MEAS_PREC_INIT,
+    )
+    (m,) = corner["measurements"]
+    assert m["status"] == "pass"
+    token = _raw_value_token(log, "vout")
+    assert _mantissa_decimals(token) >= 12
+    assert m["value"] == float(token)
+    assert m["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-10, rel=0)
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_measureprec_ignored_on_legacy_engine(
+    tmp_path, monkeypatch
+):
+    """On an engine without `measureprec` (ngspice 42), the request is
+    accepted and the `.meas` value is identical to a measured default run --
+    not silently "improved" and not merely close to the analytic value."""
+    if _ngspice_major(tmp_path) >= _MEASUREPREC_MIN_MAJOR:
+        pytest.skip(f"ngspice >= {_MEASUREPREC_MIN_MAJOR} honours measureprec")
+    (tmp_path / "default").mkdir()
+    base, base_log = _run_precision_request(
+        tmp_path / "default",
+        monkeypatch,
+        analysis=_TRAN_FIND,
+        measurements=_VOUT_FIND,
+    )
+    (tmp_path / "wide").mkdir()
+    wide, wide_log = _run_precision_request(
+        tmp_path / "wide",
+        monkeypatch,
+        analysis=_TRAN_FIND,
+        measurements=_VOUT_FIND,
+        ngspice_init=_MEAS_PREC_INIT,
+    )
+    assert _raw_value_token(wide_log, "vout") == _raw_value_token(base_log, "vout")
+    (bm,) = base["measurements"]
+    (wm,) = wide["measurements"]
+    assert wm["status"] == "pass"
+    assert wm["value"] == bm["value"]
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_numdgt_widens_expr_scalar(tmp_path, monkeypatch):
+    (tmp_path / "default").mkdir()
+    base, base_log = _run_precision_request(
+        tmp_path / "default", monkeypatch, analysis=_OP, measurements=_VOUT_EXPR
+    )
+    assert _mantissa_decimals(_raw_value_token(base_log, "vout")) <= 6
+    (bm,) = base["measurements"]
+    assert abs(bm["value"] - _DIVIDER_ANALYTIC) > 1e-10
+
+    (tmp_path / "wide").mkdir()
+    wide, wide_log = _run_precision_request(
+        tmp_path / "wide",
+        monkeypatch,
+        analysis=_OP,
+        measurements=_VOUT_EXPR,
+        ngspice_init=["set numdgt=12"],
+    )
+    assert _mantissa_decimals(_raw_value_token(wide_log, "vout")) >= 11
+    (wm,) = wide["measurements"]
+    assert wm["status"] == "pass"
+    assert wm["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-10, rel=0)
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_measureprec_alone_does_not_widen_expr(
+    tmp_path, monkeypatch
+):
+    """The two controls are independent: `measureprec` never changes a
+    `print`ed scalar, so an `expr` needs `numdgt`."""
+    corner, log = _run_precision_request(
+        tmp_path,
+        monkeypatch,
+        analysis=_OP,
+        measurements=_VOUT_EXPR,
+        ngspice_init=["set measureprec=12"],
+    )
+    assert _mantissa_decimals(_raw_value_token(log, "vout")) <= 6
+    (m,) = corner["measurements"]
+    assert abs(m["value"] - _DIVIDER_ANALYTIC) > 1e-10
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_derived_expr_uses_stored_vector_not_print(
+    tmp_path, monkeypatch
+):
+    """With default digits `vout` prints as 0.6666778, but the vector the next
+    `let` reads is the solver's double: `(vout - 0.6666778) * 1e9` is
+    -22.59..., not the 0 that the rounded printed operand would give."""
+    corner, log = _run_precision_request(
+        tmp_path,
+        monkeypatch,
+        analysis=_OP,
+        measurements=[
+            {"name": "vout", "expr": "v(out)", "unit": "V"},
+            {"name": "resid_nv", "expr": "(vout - 0.6666778) * 1e9", "unit": "nV"},
+        ],
+    )
+    values = {m["name"]: m["value"] for m in corner["measurements"]}
+    assert float(_raw_value_token(log, "vout")) == pytest.approx(0.6666778, abs=0)
+    expected = (_DIVIDER_ANALYTIC - 0.6666778) * 1e9
+    assert expected == pytest.approx(-22.59, abs=0.01)
+    assert values["resid_nv"] == pytest.approx(expected, abs=1e-3, rel=0)
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_non_scalar_expr_still_diagnosed(tmp_path, monkeypatch):
+    """Raising `numdgt` does not turn a multi-point vector into a scalar: the
+    existing `measurement` diagnostic still fires."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("NGSPICE_MEAS_PRECISION", raising=False)
+    _write_precision_divider(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "divider.spice",
+            "analysis": _TRAN_FIND,
+            "measurements": [{"name": "wave", "expr": "v(out)", "unit": "V"}],
+            "options": {"ngspice_init": ["set numdgt=12"]},
+        },
+    )
+    report = sim.run_sim(str(request), backend="local")
+    (corner,) = report["corners"]
+    (m,) = corner["measurements"]
+    assert m["status"] == "error"
+    assert any(d["code"] == "measurement" for d in corner["diagnostics"])
+
+
+def test_parse_measurements_keeps_long_scientific_tokens_exactly():
+    log = (
+        "vout                =  6.666777774074e-01\n"
+        "big                 = -1.23456789012345e+03\n"
+        "tiny                =  9.87654321098765e-15\n"
+    )
+    values = sim._parse_measurements(log)
+    assert values["vout"] == 6.666777774074e-01
+    assert values["big"] == -1.23456789012345e03
+    assert values["tiny"] == 9.87654321098765e-15
+
+
+def test_parse_measurements_long_token_with_trailer():
+    log = (
+        "tphl                =  4.020000000001e-11 targ=  1.090000000001e-09"
+        " trig=  1.050000000002e-09\n"
+        "avgv                =  6.666777774074e-01 from=  0.000000000000e+00"
+        " to=  1.000000000000e-08\n"
+    )
+    values = sim._parse_measurements(log)
+    assert values["tphl"] == 4.020000000001e-11
+    assert values["avgv"] == 6.666777774074e-01
+    assert set(values) == {"tphl", "avgv"}

@@ -4627,6 +4627,24 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     drc_parser.add_argument(
+        "--expect-rule-categories",
+        dest="expect_rule_categories",
+        type=int,
+        metavar="N",
+        default=None,
+        help=(
+            "opt-in coverage assertion (--engine klayout only; ignored for "
+            "--engine curated): vouch that the deck declares exactly N "
+            "unique RDB rule categories (positive integer). A mismatch "
+            "fails the run naming both counts; an exact match with zero "
+            "findings is reported as clean (exit 0) instead of "
+            "coverage_unknown (exit 4), and the assertion is recorded in "
+            "the report's coverage_assertion field. Never satisfied by a "
+            "run that tolerated deck errors (--allow-deck-errors). "
+            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_parser.add_argument(
         "--allow-missing-host-tools",
         dest="allow_missing_host_tools",
         action="store_true",

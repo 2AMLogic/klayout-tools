@@ -188,6 +188,7 @@ from ._openroad_engine import (
     _OpenRoadResult,
     _run_openroad,
     _timing_status,
+    _timing_violation_report_lines,
 )
 from ._paths import (
     _count_spef_nets_annotated,
@@ -1413,14 +1414,25 @@ def _parasitic_annotation_lines() -> list[str]:
 
 
 def _violation_count_lines() -> list[str]:
-    return [
-        f'puts "{_SETUP_VIOLATIONS_BEGIN}"',
-        "report_check_types -max_delay -violators -format end",
-        f'puts "{_SETUP_VIOLATIONS_END}"',
-        f'puts "{_HOLD_VIOLATIONS_BEGIN}"',
-        "report_check_types -min_delay -violators -format end",
-        f'puts "{_HOLD_VIOLATIONS_END}"',
-    ]
+    """Marker-delimited setup/hold violator reports for this module's
+    standalone ``klt sta`` session (single corner and each
+    ``corners[]`` entry -- every per-corner session calls this).
+
+    Delegates the check-family policy to
+    :func:`~klayout_tools._openroad_engine._timing_violation_report_lines`
+    (issue #2741): the setup side counts data setup + recovery + clock-gating
+    setup and the hold side data hold + removal + clock-gating hold -- the
+    same populations ``report_worst_slack_metric``/``report_tns_metric``
+    measure -- so ``setup_violation_count``/``hold_violation_count`` agree
+    with the WNS/TNS fields next to them. Unit: violating endpoints (one
+    ``-format end`` row per endpoint per path group), not enumerated paths.
+    """
+    return _timing_violation_report_lines(
+        setup_begin=_SETUP_VIOLATIONS_BEGIN,
+        setup_end=_SETUP_VIOLATIONS_END,
+        hold_begin=_HOLD_VIOLATIONS_BEGIN,
+        hold_end=_HOLD_VIOLATIONS_END,
+    )
 
 
 def _sta_script_lines(
