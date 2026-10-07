@@ -43,9 +43,8 @@ class DerivedLayer:
     "``Metal4`` must enclose every ``Via4`` by the MiM margin" check has
     nothing to do with routing vias at all.
 
-    ``mode`` selects *which* derivation is applied (see the three values
-    below). The default, ``"sized_intersection"``, is the original
-    (issue #345) one:
+    ``mode`` selects *which* derivation is applied (see the values below).
+    The default, ``"sized_intersection"``, is the original (issue #345) one:
     ``intersect_with_region.interacting(base_region) & base_region.sized(sized_by_um)``
     -- i.e. only shapes of ``intersect_with`` that already touch the *unsized*
     ``base`` region somewhere, clipped to ``base``'s oversized outline. This
@@ -146,6 +145,35 @@ class DerivedLayer:
     express a holes-area rule like ``m1.7``: the checked "region" becomes
     each hole polygon, and the area threshold applies to each one
     individually, exactly matching ``with_area``'s official semantics.
+
+    **``"union"`` mode (issue #2688).** A fourth need, and the first one
+    that *enlarges* the checked region rather than scoping it down: a DRM
+    rule whose enclosing region is the boolean ``join`` of two drawn layers.
+    sg13g2's ``Cnt.c`` measures Cont enclosure against
+    ``act_nsram.join(activ_mask)`` -- ``Activ.drawing`` (1/0) **or**
+    ``Activ.mask`` (1/20), the latter being how IHP's own HBT PCell
+    (``npn13G2``) draws its emitter/base contact windows. ``"union"``
+    derives ``base_region + intersect_with_region`` (``Region.__add__``,
+    i.e. a ``join``; the checked side is merged before measuring, see
+    ``drc.py``'s ``_run_check``). ``sized_by_um`` is unused (conventionally
+    ``0.0``).
+
+    This is why a dropped ``join`` term is not interchangeable with a
+    dropped ``not`` term when approximating a compound official rule: for
+    an enclosing/overlap region, omitting ``.not(X)`` only widens the
+    rule's *scope* (conservative -- more geometry is held to the threshold),
+    but omitting ``.join(X)`` shrinks the enclosing region itself, so
+    geometry the official rule passes is reported as under-enclosed (an
+    unsound false positive in the PDK's own PCells, which the caller cannot
+    edit). Transcribe ``join`` terms with this mode rather than dropping
+    them.
+
+    Because the two inputs are alternatives rather than a scope, a
+    ``"union"`` rule is skipped only when **both** ``base`` and
+    ``intersect_with`` are absent from the stream: a mask-only layout (no
+    ``base`` geometry at all) is still fully checked against
+    ``intersect_with`` alone, and vice versa. ``intersect_with`` is
+    required for this mode.
     """
 
     base: tuple[int, int]
@@ -550,6 +578,22 @@ class DrcRule:
     rules on ``dualgate``/``v5_xtor`` either. Defaults to ``False`` -- the
     conservative value every pre-existing rule keeps, so the gate's
     behaviour is unchanged for them.
+
+    ``other_layer_selection`` (issue #2688) narrows the ``other_layer``
+    side of a two-layer rule to a whole-polygon sub-population of that
+    drawn layer, the same way a ``.not(...)``-free official selector does.
+    The only supported value is ``"squares"``: ``other_layer``'s *merged*
+    polygons filtered by ``klayout.db.Region.squares()`` -- the complement
+    of the DRC-DSL ``non_squares`` selector sg13g2's runset uses to split
+    square contacts from contact bars (``contbar = cont_nseal.non_squares;
+    cont_sq = cont_nseal.not(contbar)``, ``ihp-sg13g2.drc``). A contact bar
+    (or any non-square merged contact shape) is therefore neither measured
+    for margin nor reported by the #318 zero-overlap escape term of a rule
+    using this selection -- matching ``Cnt.c``, which never applied to
+    bars (those are ``CntB.*``'s job). ``None`` (the default, every
+    pre-existing rule) reads ``other_layer``'s full drawn shapes exactly as
+    before this field existed. Any other value is a deck-authoring mistake
+    :func:`~klayout_tools.drc.run_drc` rejects loudly with the rule id.
     """
 
     id: str
@@ -572,6 +616,7 @@ class DrcRule:
     threshold_max_dbu: int | None = None
     voltage_independent: bool = False
     requires_any_layer: tuple[tuple[int, int], ...] | None = None
+    other_layer_selection: str | None = None
 
 
 class UnknownDeckError(Exception):

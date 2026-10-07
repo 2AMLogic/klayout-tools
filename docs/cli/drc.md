@@ -498,9 +498,34 @@ identity (`violations[].layer`, `coverage`), independent of
 | `"sized_intersection"` (default) | `intersect_with.interacting(base) & base.sized(sized_by_um)` — only shapes of `intersect_with` that already touch the *unsized* `base` region somewhere, clipped to `base`'s outline oversized by `sized_by_um` | gf180mcu `mim.enclosing.via4.1`, `mim.space.1` |
 | `"overlapping"` | `base.overlapping(intersect_with.sized(sized_by_um))` — whole `base` polygons that share **area** with the (optionally guard-banded) second layer | gf180mcu `comp.width.mv.1`, `comp.space.mv.1` |
 | `"not_interacting"` | `base.not_interacting(intersect_with.sized(sized_by_um))` — whole `base` polygons that do not touch it at all | gf180mcu `comp.width.1`, `comp.space.1` |
+| `"union"` | `base + intersect_with` — the boolean join of both layers (`sized_by_um` unused); the rule is skipped only when **both** inputs are absent, so geometry on either layer alone is still checked | sg13g2 `activ.enclosing.cont.1` |
 
 An unknown `mode` is a `DrcError` naming the rule id, not a silent fallback
 to the default.
+
+`"union"` (issue #2688) is the one mode that *enlarges* the checked region.
+It exists because dropping a `.join(X)` term from an official rule's
+enclosing region is not a conservative approximation the way dropping a
+`.not(X)` carve-out is: sg13g2's `Cnt.c` measures Cont enclosure against
+`Activ.drawing` (1/0) joined with `Activ.mask` (1/20), and IHP's own HBT
+PCell (`npn13G2`) supplies its contact enclosure on `Activ.mask`. Checking
+`Activ.drawing` alone reported two violations per HBT instance inside a
+vendor PCell the caller cannot edit. A stream drawing only `Activ.mask` is
+now checked (and reports `Activ.mask` geometry under the rule's stable
+`layer: "Activ.drawing"` identity); a stream drawing neither Activ layer
+skips the rule as `inapplicable` (`no_applicable_geometry`). The input
+stream is never modified — the join is computed in memory.
+
+`DrcRule.other_layer_selection` (also issue #2688) narrows a two-layer rule's
+`other_layer` side to a whole-polygon sub-population. Its only value,
+`"squares"`, keeps the *merged* `other_layer` polygons that are squares
+(`Region.squares()`, the complement of the DRC-DSL `non_squares` selector),
+so contact bars are neither margin-checked nor reported as escapes by that
+rule. `activ.enclosing.cont.1` uses it to match `Cnt.c`'s `cont_sq`
+selection. It remains a **corrected subset** of `Cnt.c`, not an equivalent:
+the official rule's `DigiBnd`/`SRAM` (separate 0.05um/0.006um rules),
+`svaricap`, and `EdgeSeal` carve-outs are not modelled, so this rule can
+still over-report (never under-report) contacts inside those regions.
 
 This exists because an *unscoped* version of some rules would be actively
 wrong, not merely conservative: gf180mcu's `mim.enclosing.via4.1`

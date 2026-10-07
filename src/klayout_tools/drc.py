@@ -147,7 +147,13 @@ _DERIVED_LAYER_MODES = {
     "overlapping",
     "not_interacting",
     "holes",
+    "union",
 }
+
+# Every `DrcRule.other_layer_selection` value `run_drc()` knows how to apply
+# (issue #2688) -- validated per rule for the same "fail loudly, never
+# silently check a different population" reason as `_DERIVED_LAYER_MODES`.
+_OTHER_LAYER_SELECTIONS = {"squares"}
 
 # `run_drc()`'s own field name -> its declared METRICS2.1-style name in
 # `metrics.py`'s registry (issue #1847, adopting the #247 registry beyond its
@@ -365,7 +371,11 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     the region by intersecting it (``"sized_intersection"``,
     ``"overlapping"``). ``"not_interacting"`` and ``"holes"`` derive from
     ``base`` alone and are never skipped for an absent marker in the first
-    place (see :class:`~klayout_tools.decks.DerivedLayer`).
+    place (see :class:`~klayout_tools.decks.DerivedLayer`). ``"union"``
+    (issue #2688) contributes *neither* input here: its region is empty
+    only when **both** are absent, an "all absent" condition a set of
+    "any absent" layers cannot express -- :func:`_union_inputs_all_absent`
+    answers it instead.
 
     A new check kind must decide its own entry here deliberately: the
     fallthrough treats ``other_layer`` as vacuity-forcing, matching every
@@ -374,7 +384,9 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     :data:`_ANTENNA_CHECKS` is excluded below, or it will report a real gap
     as inapplicable.
     """
-    if rule.derived_layer is not None:
+    if rule.derived_layer is not None and rule.derived_layer.mode == "union":
+        layers: set[tuple[int, int]] = set()
+    elif rule.derived_layer is not None:
         layers = {rule.derived_layer.base}
         if rule.derived_layer.intersect_with is not None and (
             rule.derived_layer.mode in ("sized_intersection", "overlapping")
@@ -385,6 +397,21 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     if rule.other_layer is not None and rule.check not in _ANTENNA_CHECKS:
         layers.add(rule.other_layer)
     return layers
+
+
+def _union_inputs_all_absent(rule: DrcRule, layout: Any) -> bool:
+    """Whether ``rule`` is a ``"union"``-mode derived rule (issue #2688) none
+    of whose union inputs is present in ``layout`` -- the only way its
+    checked region can be empty, and so the only way an absent enclosing
+    input makes it vacuous (see :func:`_vacuity_layers`). ``False`` for
+    every other rule."""
+    derived = rule.derived_layer
+    if derived is None or derived.mode != "union":
+        return False
+    inputs = [derived.base]
+    if derived.intersect_with is not None:
+        inputs.append(derived.intersect_with)
+    return all(layout.find_layer(*layer) is None for layer in inputs)
 
 
 def _rule_outside_voltage_gate(
@@ -413,7 +440,12 @@ def _rule_outside_voltage_gate(
         return True
     if rule.voltage_independent:
         return True
-    return rule.derived_layer is not None and marker in (
+    # A `"union"` derivation (issue #2688) *adds* its inputs to the checked
+    # region rather than scoping it, so reading the marker as one of them
+    # does not mean the rule applied the marker's column.
+    return (
+        rule.derived_layer is not None and rule.derived_layer.mode != "union"
+    ) and marker in (
         rule.derived_layer.base,
         rule.derived_layer.intersect_with,
     )
@@ -487,8 +519,9 @@ def _classify_skipped_rules(
     for rule in deck:
         if rule.id not in skipped_ids:
             continue
-        vacuous = any(
-            layout.find_layer(*layer) is None for layer in _vacuity_layers(rule)
+        vacuous = (
+            any(layout.find_layer(*layer) is None for layer in _vacuity_layers(rule))
+            or _union_inputs_all_absent(rule, layout)
         ) or (
             # `requires_any_layer` (issue #2634) is a second, independent way
             # a rule can be provably vacuous: its own checked geometry
@@ -846,6 +879,7 @@ def run_drc(
         # (below) and the check itself never runs -- see
         # `_validate_threshold_max`.
         _validate_threshold_max(rule)
+        _validate_other_layer_selection(rule)
 
         # Gates that skip a rule before any layer resolution below -- see
         # `_rule_skipped_before_evaluation` for each one and why. Like a
@@ -874,13 +908,22 @@ def run_drc(
                 if rule.derived_layer.intersect_with is not None
                 else None
             )
-            if base_index is None:
+            if rule.derived_layer.mode == "union":
+                # `"union"` (#2688) joins its two inputs: either one alone is
+                # a complete enclosing region (a mask-only HBT contact window
+                # draws no `base` geometry at all), so the rule is skipped
+                # only when *both* are absent. An absent input contributes an
+                # empty region below.
+                if base_index is None and intersect_index is None:
+                    rules_skipped.append(rule.id)
+                    continue
+            elif base_index is None:
                 # The derived region's own source shapes are absent from this
                 # stream -> no violations possible in any mode, skip like any
                 # other missing-layer rule.
                 rules_skipped.append(rule.id)
                 continue
-            if intersect_index is None and rule.derived_layer.mode not in (
+            elif intersect_index is None and rule.derived_layer.mode not in (
                 "not_interacting",
                 "holes",
             ):
@@ -933,7 +976,11 @@ def run_drc(
                 # against this layout's own `dbu` directly (unlike
                 # `rule.threshold_dbu`, which is rescaled via `dbu_scale`
                 # against the deck's nominal dbu).
-                base_region = kdb.Region(cell.begin_shapes_rec(base_index))
+                base_region = (
+                    kdb.Region(cell.begin_shapes_rec(base_index))
+                    if base_index is not None
+                    else kdb.Region()
+                )
                 intersect_region = (
                     kdb.Region(cell.begin_shapes_rec(intersect_index))
                     if intersect_index is not None
@@ -951,6 +998,15 @@ def run_drc(
                     # region with no holes at all derives an empty region,
                     # which is simply nothing to report -- not an error.
                     region = base_region.merged().holes()
+                elif rule.derived_layer.mode == "union":
+                    # Boolean join of both inputs (#2688), e.g. sg13g2's
+                    # `Cnt.c` enclosing region `activ.join(activ_mask)`.
+                    # `_run_check` merges it before measuring, so a contact
+                    # window assembled across both layers is measured
+                    # against the joined outline, not either layer's seam.
+                    # Built into a new Region -- neither input (nor the
+                    # source layout) is modified.
+                    region = base_region + intersect_region
                 elif rule.derived_layer.mode in ("overlapping", "not_interacting"):
                     # Marker-scoped whole-polygon selection (#1110): here
                     # `sized_by_um` is a guard band around the *marker*
@@ -982,6 +1038,13 @@ def run_drc(
                 if other_index is not None
                 else None
             )
+            if other_region is not None and rule.other_layer_selection == "squares":
+                # Whole-polygon square selection (#2688): the complement of
+                # the DRC-DSL `non_squares` selector, applied to the *merged*
+                # layer so two abutting squares forming a bar count as the
+                # bar they are. Non-square shapes (contact bars) are dropped
+                # from both the margin check and the #318 escape term.
+                other_region = other_region.merged().squares()
 
             # Supplementary edge pairs reported under the same rule id,
             # alongside whatever `_run_check` returns -- the same additive
@@ -1727,6 +1790,37 @@ def _validate_derived_layer(rule: DrcRule) -> None:
         raise DrcError(
             f"rule '{rule.id}': unknown derived_layer mode "
             f"'{derived.mode}' (known: {', '.join(sorted(_DERIVED_LAYER_MODES))})"
+        )
+
+
+def _validate_other_layer_selection(rule: DrcRule) -> None:
+    """Reject a :class:`~klayout_tools.decks.DrcRule` whose
+    ``other_layer_selection`` this engine cannot apply (issue #2688): an
+    unknown value, or one set on a rule with no ``other_layer`` to select
+    from. Same "fail loudly with the rule id" contract as
+    :func:`_validate_derived_layer`; also rejects a ``"union"``
+    ``derived_layer`` with no ``intersect_with``, which would silently
+    degrade to a plain ``base`` check.
+    """
+    selection = rule.other_layer_selection
+    if selection is not None:
+        if selection not in _OTHER_LAYER_SELECTIONS:
+            raise DrcError(
+                f"rule '{rule.id}': unknown other_layer_selection "
+                f"'{selection}' (known: {', '.join(sorted(_OTHER_LAYER_SELECTIONS))})"
+            )
+        if rule.other_layer is None:
+            raise DrcError(
+                f"rule '{rule.id}': other_layer_selection requires other_layer"
+            )
+    derived = rule.derived_layer
+    if (
+        derived is not None
+        and derived.mode == "union"
+        and derived.intersect_with is None
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer mode 'union' requires intersect_with"
         )
 
 

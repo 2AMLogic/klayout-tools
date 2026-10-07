@@ -95,12 +95,24 @@ arbitrary boolean/derived expression):
   NWell, and the thick-gate-oxide marker) and ``Gat.g`` (45-degree bent
   GatPoly width) -- ``Act.a``/``Gat.a`` above already cover the
   layer-general minimum-width floor these refine.
-- ``Cnt.c``/``Cnt.c.digibnd``/``Cnt.c.SRAM``/``Cnt.e``/``Cnt.g1``/``Cnt.g2``
-  -- each scoped to a compound derivation (``act_nsram.join(activ_mask)
-  .not(digibnd_drw)``, SRAM/DigiBnd-region carve-outs, pSD-vs-nSD Activ
-  splits) this curated deck does not otherwise model; ``Cnt.c``/``Cnt.d``
-  below transcribe the *general-case* Activ/GatPoly enclosure-of-Cont floor
-  each of those refines.
+- ``Cnt.c.digibnd``/``Cnt.c.SRAM``/``Cnt.e``/``Cnt.g1``/``Cnt.g2``
+  -- each scoped to a compound derivation (SRAM/DigiBnd-region carve-outs,
+  pSD-vs-nSD Activ splits) this curated deck does not otherwise model;
+  ``Cnt.c``/``Cnt.d`` below transcribe the *general-case* Activ/GatPoly
+  enclosure-of-Cont floor each of those refines. ``Cnt.c`` itself
+  (``activ.enclosing.cont.1``) is a *corrected subset* since issue #2688: its
+  ``.join(activ_mask)`` enclosing-region term and square-contact
+  (``cont_sq``) selection are modelled, but its ``.not(digibnd_drw)``,
+  SRAM, ``svaricap`` and ``EdgeSeal`` carve-outs are not -- so inside those
+  regions it can over-report against the official deck (never under-report).
+
+  A general transcription rule this deck learned the hard way (#2688): when
+  approximating a compound official rule, dropping a ``.not(X)`` carve-out
+  is conservative, but dropping a ``.join(X)`` from an enclosing/overlap
+  region is **not** -- it shrinks the region the rule measures against, so
+  correct geometry (here, every HBT contact in IHP's own ``npn13G2`` PCell)
+  reports as violating. Model ``join`` terms (``DerivedLayer(mode="union")``)
+  rather than dropping them.
 - ``M1.e``/``M1.f``/``M1.g``/``M1.i`` and their per-metal-level ``Mn.*``
   analogues (wide-line/45-degree-bend spacing refinements, ``Metal2``
   through ``Metal5``) and ``TopMetal2``'s own ``TM2.bR`` (a
@@ -442,6 +454,7 @@ from __future__ import annotations
 
 from . import (
     CapacitorDevice,
+    DerivedLayer,
     DiodeDevice,
     DrcRule,
     ExtractionDeck,
@@ -644,24 +657,56 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="activ.enclosing.cont.1",
         description=(
-            "minimum Activ enclosure of Cont (approximates the official "
-            "rule's SRAM/DigiBnd-scoped compound-layer derivation as a "
-            "plain, unconditional Activ-encloses-Cont floor -- the same "
-            "class of approximation sky130.py's diff.enclosing.licon.1 "
-            "makes for its own compound-layer official rule)"
+            "minimum Activ enclosure of square Cont (Activ.drawing joined "
+            "with Activ.mask, as the official rule's enclosing region is; "
+            "approximates the official rule's SRAM/DigiBnd/svaricap/"
+            "EdgeSeal carve-outs as an unconditional 0.07 um floor)"
         ),
-        layer=(1, 0),  # Activ.drawing
+        layer=(1, 0),  # Activ.drawing -- reporting identity only, see below
         other_layer=(6, 0),  # Cont.drawing
         check="enclosing",
         threshold_dbu=70,  # 0.07 um
         # 5_14_cont.drc rule "Cnt.c":
-        # cont_nsvaricap.enclosed(act_nsram.join(activ_mask).not(digibnd_drw),
-        #                         0.07um, euclidian)
-        # -> "5.14. Cnt.c : Min. Activ enclosure of Cont : 0.07 um"
-        # (sg13g2_tech_default.json: drc_rules.Cnt_c == 0.07; the SRAM
-        # (0.006um)/DigiBnd (0.05um) region-specific refinements -- Cnt.c.SRAM/
-        # Cnt.c.digibnd -- are not modelled here, see the module docstring's
-        # "Scope guard" section)
+        #   cnt_c_act = act_nsram.join(activ_mask).not(digibnd_drw)
+        #   cnt_c_l   = cont_nsvaricap.enclosed(cnt_c_act, 0.07um, euclidian)
+        # -> "5.14. Cnt.c Min. Activ enclosure of Cont is 0.07 um"
+        # (sg13g2_tech_default.json: drc_rules.Cnt_c == 0.07), with, from
+        # the same pinned v0.3.0 tree: `activ_mask = get_polygons(1, 20)`
+        # (`layers_def.drc`), `act_nsram = activ_drw.not(sram_drw)`,
+        # `cont_nsvaricap = cont_sq.not(svaricap)` (`5_14_cont.drc`), and
+        # `cont_nseal = cont_drw.not(edgeseal_drw)`, `contbar =
+        # cont_nseal.non_squares`, `cont_sq = cont_nseal.not(contbar)`
+        # (`ihp-sg13g2.drc`'s "cont/contbar general derivations").
+        #
+        # Modelled (issue #2688):
+        # - the `.join(activ_mask)` term, via `DerivedLayer(mode="union")`
+        #   over Activ.drawing (1/0) + Activ.mask (1/20). This term *enlarges*
+        #   the enclosing region, so dropping it (as this rule did before
+        #   #2688) was not a conservative approximation: every contact whose
+        #   enclosure IHP's own HBT PCell (`npn13G2`) supplies on Activ.mask
+        #   reported a false positive the caller could not fix. The rule runs
+        #   whenever *either* Activ layer is present.
+        # - the square-contact selection (`cont_sq`), via
+        #   `other_layer_selection="squares"`: contact bars are `CntB.*`'s
+        #   business, never `Cnt.c`'s.
+        #
+        # Not modelled -- each is a `.not(...)` carve-out that only *narrows*
+        # which geometry the official rule applies 0.07 um to, so omitting
+        # it can over-report (never under-report) inside that region:
+        # - `.not(digibnd_drw)` / `sram_drw` (16/0, 25/0): inside DigiBnd/
+        #   SRAM the official deck applies `Cnt.c.digibnd` (0.05 um) /
+        #   `Cnt.c.SRAM` (0.006 um) instead; this rule still applies 0.07 um
+        #   there (see the module docstring's "Scope guard" section).
+        # - `.not(svaricap)` (contacts inside the sg13_hv_svaricap device)
+        #   and `.not(edgeseal_drw)` (seal-ring contacts): still checked.
+        # So this is a corrected subset of `Cnt.c`, not an equivalent of it.
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ.drawing
+            intersect_with=(1, 20),  # Activ.mask
+            sized_by_um=0.0,
+            mode="union",
+        ),
+        other_layer_selection="squares",
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.c"),
     ),
@@ -1305,6 +1350,9 @@ DECK: list[DrcRule] = [
 
 LAYER_NAMES: dict[tuple[int, int], str] = {
     (1, 0): "Activ.drawing",
+    # `layers_def.drc`'s `activ_mask = get_polygons(1, 20)` -- read by
+    # `activ.enclosing.cont.1`'s `Cnt.c` enclosing-region union (#2688).
+    (1, 20): "Activ.mask",
     (5, 0): "GatPoly.drawing",
     (6, 0): "Cont.drawing",
     (8, 0): "Metal1.drawing",
