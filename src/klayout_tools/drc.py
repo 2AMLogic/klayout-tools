@@ -2664,6 +2664,106 @@ def _missing_deck_host_commands(deck_file: str) -> dict[str, str]:
     }
 
 
+_KLAYOUT_EXECUTABLE = "klayout"
+
+KLAYOUT_VERSION_PROBE_TIMEOUT_S = 15.0
+"""Wall-clock budget for the ``klayout -v`` version probe (issue #2689)."""
+
+_REQUESTED_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
+_REPORTED_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
+
+
+def _parse_requested_klayout_version(value: str) -> tuple[int, ...]:
+    """Validate a caller-declared ``min_klayout_version`` (issue #2689): dotted
+    decimal components only (``0.30.12``). Raises :class:`DrcError` otherwise."""
+    text = value.strip() if isinstance(value, str) else value
+    if not isinstance(text, str) or not _REQUESTED_VERSION_RE.match(text):
+        raise DrcError(
+            f"invalid minimum KLayout version {value!r}: expected dotted "
+            "decimal components such as '0.30.12'"
+        )
+    return tuple(int(part) for part in text.split("."))
+
+
+def _klayout_version_at_least(
+    found: tuple[int, ...], required: tuple[int, ...]
+) -> bool:
+    """Numeric component-wise comparison (``0.30.12 > 0.30.9``); missing
+    trailing components count as zero."""
+    width = max(len(found), len(required))
+    pad = lambda v: v + (0,) * (width - len(v))  # noqa: E731
+    return pad(found) >= pad(required)
+
+
+def _preflight_klayout_version(executable: str, min_version: str | None) -> None:
+    """Refuse to run a deck on a standalone ``klayout`` application older than
+    the caller-declared minimum (issue #2689).
+
+    A no-op when ``min_version`` is ``None`` (existing behaviour: no
+    compatibility is claimed or checked). Otherwise probes the *same*
+    executable the deck will run with (``<executable> -v``, bounded by
+    :data:`KLAYOUT_VERSION_PROBE_TIMEOUT_S`) and raises :class:`DrcError` for
+    an invalid minimum, a missing/failed/timed-out/unparseable probe, or a
+    detected version below the minimum. Never bypassed by
+    ``allow_deck_errors`` or ``allow_missing_host_tools``. Passing proves only
+    the version, not that an arbitrary deck is compatible.
+    """
+    if min_version is None:
+        return
+    required = _parse_requested_klayout_version(min_version)
+    required_text = ".".join(str(c) for c in required)
+    try:
+        probe = subprocess.run(
+            [executable, "-v"],
+            capture_output=True,
+            text=True,
+            timeout=KLAYOUT_VERSION_PROBE_TIMEOUT_S,
+        )
+    except FileNotFoundError as exc:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"{executable!r} binary not found on PATH. Install KLayout "
+            f">= {required_text} (https://www.klayout.de/build.html) or omit "
+            f"the minimum version. ({exc})"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"'{executable} -v' did not complete within "
+            f"{KLAYOUT_VERSION_PROBE_TIMEOUT_S}s. Check the installation."
+        ) from exc
+    except OSError as exc:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"could not launch '{executable} -v' ({exc}). Check that the "
+            f"binary is executable and install KLayout >= {required_text}."
+        ) from exc
+    output = ((probe.stdout or "") + "\n" + (probe.stderr or "")).strip()
+    if probe.returncode != 0:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"'{executable} -v' exited with status {probe.returncode}. "
+            f"Reinstall or update KLayout. Output:\n{output}"
+        )
+    match = _REPORTED_VERSION_RE.search(output)
+    if match is None:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"could not parse a version from '{executable} -v' output. "
+            f"Check the installation. Output:\n{output}"
+        )
+    found = tuple(int(part) for part in match.group(0).split("."))
+    if not _klayout_version_at_least(found, required):
+        raise DrcError(
+            f"the standalone KLayout application on PATH is version "
+            f"{match.group(0)}, but this run requires >= {required_text}. "
+            f"Install or update the KLayout application to {required_text} "
+            "or newer (https://www.klayout.de/build.html); the pip `klayout` "
+            "package is a separate install and is not used by --engine "
+            "klayout. See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        )
+
+
 def _preflight_deck_host_tools(deck_file: str, allow_missing_host_tools: bool) -> None:
     """Raise :class:`DrcError` if the deck script shells out to a command
     this host does not have (issue #2333), naming the command and where it is
@@ -2803,6 +2903,7 @@ def run_drc_klayout_engine(
     allow_deck_errors: bool = False,
     allow_missing_host_tools: bool = False,
     expected_rule_categories: int | None = None,
+    min_klayout_version: str | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -2890,6 +2991,13 @@ def run_drc_klayout_engine(
     ``PATH`` fail the run with a :class:`DrcError` naming them and where they
     are used (``deck requires 'pmap' (not found on PATH)``), instead of
     letting the deck surface an unrelated downstream traceback.
+    ``min_klayout_version`` (CLI: ``--min-klayout-version``, issue #2689)
+    declares the minimum standalone application version; the same executable
+    is probed with ``-v`` before the deck launches and an older, missing or
+    unparseable probe raises :class:`DrcError`. Omitted: no probe. Neither
+    allow flag bypasses it, and passing proves nothing about deck
+    compatibility beyond the version.
+
     ``allow_missing_host_tools=True`` (CLI: ``--allow-missing-host-tools``)
     skips the check, for a driver whose shell-out is on a branch this run
     never takes. The scan is static and deliberately conservative -- it
@@ -3018,6 +3126,10 @@ def run_drc_klayout_engine(
     # names the wrong thing. Fail before the subprocess, naming the utility.
     _preflight_deck_host_tools(deck_file, allow_missing_host_tools)
 
+    # Issue #2689: opt-in application-version floor, probed on the very
+    # executable launched below, before any deck work.
+    _preflight_klayout_version(_KLAYOUT_EXECUTABLE, min_klayout_version)
+
     # Validates `path` (missing/directory/unreadable) before the subprocess
     # is launched, the same fail-fast order `run_drc` uses -- and gives this
     # engine the input layout's own `dbu`, needed to convert the RDB report's
@@ -3030,7 +3142,7 @@ def run_drc_klayout_engine(
     try:
         report_path = os.path.join(work_dir, "report.lyrdb")
         cmd = [
-            "klayout",
+            _KLAYOUT_EXECUTABLE,
             "-b",
             "-r",
             deck_file,

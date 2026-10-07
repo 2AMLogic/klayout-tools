@@ -5,7 +5,7 @@ report violations as structured data.
 
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--expect-rule-categories <N>] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--expect-rule-categories <N>] [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
@@ -56,6 +56,11 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   runs, and the error the deck itself produces names something else entirely
   — see "Engine" → `"klayout"` → "A driver's host assumptions are not rule
   checking".
+- `--min-klayout-version X.Y.Z` — declare the minimum standalone `klayout`
+  *application* version the native deck needs (`--engine klayout` only,
+  issue #2689; ignored for `--engine curated`). Omitted (the default), no
+  version check runs. See "Engine" → `"klayout"` → "Declaring a minimum
+  application version".
 - `--expect-rule-categories N` — opt-in coverage assertion (`--engine
   klayout` only, issue #2697; ignored for `--engine curated`). `N` must be a
   positive integer; `0`, negatives and non-integers are rejected before
@@ -115,6 +120,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `timeout_s` | number | `--timeout-s` |
 | `allow_deck_errors` | boolean | `--allow-deck-errors` |
 | `allow_missing_host_tools` | boolean | `--allow-missing-host-tools` |
+| `min_klayout_version` | string | `--min-klayout-version` (dotted decimal, e.g. `"0.30.12"`) |
 | `expect_rule_categories` | positive integer | `--expect-rule-categories` (booleans, floats, strings, `0` and negatives are rejected) |
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
@@ -323,6 +329,36 @@ is a false positive with a one-flag answer: `--allow-missing-host-tools`
 skips the preflight entirely. klt deliberately does **not** substitute
 stand-ins for whatever a driver shells out to: that does not generalise, and
 it would silently change what the run measured.
+
+#### Declaring a minimum application version
+
+The standalone `klayout` application on `PATH` and the pip `klayout` package
+(which the curated engine and `klt extract` use, and which bundles its own
+KLayout library) are **separate installs and are not interchangeable**:
+`--engine klayout` only ever launches the application, and the pip package's
+version says nothing about whether that application can run a given deck. A
+deck using a DRC-DSL method newer than the installed application otherwise
+aborts part-way through with a Ruby `NameError` (e.g. ``undefined local
+variable or method `absolute'``).
+
+Pass `--min-klayout-version 0.30.12` (request field `min_klayout_version`;
+Python `run_drc_klayout_engine(..., min_klayout_version="0.30.12")`) to
+declare the application version your deck needs. Before the deck is
+launched, `klt drc` runs `klayout -v` — the same executable the deck will
+use, bounded by a 15 s timeout — and compares numeric components (`0.30.12`
+is newer than `0.30.9`; decorations around the number such as `KLayout
+0.28.16` or a trailing `-1` are tolerated). A detected version below the
+minimum fails with exit `1`, naming the detected and required versions and
+asking you to install or update the application; the deck is never launched.
+A malformed minimum, or a missing, failing, timed-out or unparseable probe,
+is also an error once a minimum is declared. Neither `--allow-deck-errors`
+nor `--allow-missing-host-tools` bypasses it. Omitting the option preserves
+the previous behaviour exactly: no probe, no compatibility claim.
+
+Passing the preflight proves only the version. It does **not** prove an
+arbitrary deck is compatible with that application; klt ships no built-in
+per-PDK minimum because none has a checkable vendor requirement tied to a
+deck revision.
 
 Note what this does *not* fix: the rule tables a PDK ships are the portable
 part, and there is still no way to run them **without** the vendor's driver.
