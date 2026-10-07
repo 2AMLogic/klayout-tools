@@ -153,6 +153,7 @@ test-merge-pr-chain-lock.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-daemon-version-floor.sh
 test-merge-pr-rate-limit-fallback.sh
+test-merge-pr-stacked-child-branch-delete.sh
 test-merge-pr-tree-checks.sh
 test-merge-pr-ci-result.sh
 test-nextest-daemon-guard.sh
@@ -196,7 +197,6 @@ test-script-helper-version-floor.sh
 test-session-mode.sh
 test-spawn-codex-sandbox-noop.sh
 test-spawn-codex-session-down.sh
-test-spawn-codex-session-mount-stale.sh
 test-stale-claim-standdown-suppression.sh
 test-stop-hook-subcommand-skew.sh
 test-sweep-auto-stack.sh
