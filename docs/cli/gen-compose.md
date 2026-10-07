@@ -218,6 +218,15 @@ cleanly.
   own connecting via role (`"via2"`, the Metal2↔Metal3 via, `38/0`) — usable
   the same way, including the two-hop ladder down to the base `"metal"` role
   (Metal1). gf180mcu's deck exposes one level further still (#1670):
+  sky130's upper routing planes (#2738): the role numbering counts li1 as
+  `"metal"`, so the roles are offset from the physical metal names —
+  `"metal4"` = met3 `70/20`, `"metal5"` = met4 `71/20`, `"metal6"` = met5
+  `72/20`, with `"via3"` = via2 `69/44` (met2↔met3), `"via4"` = via3 `70/44`
+  (met3↔met4), `"via5"` = via4 `71/44` (met4↔met5). The via-drop ladder walks
+  met2 → met5 through the extraction deck's stack. `"top_metal"` remains an
+  unchanged alias of `"metal6"` (met5); both get the same met5
+  width/spacing and via4 enclosure/landing-pad handling. Existing role names
+  are not renamed.
   `"metal4"` (Metal4 `46/0`) plus its own connecting via role (`"via3"`, the
   Metal3↔Metal4 via, `40/0`) — the layer a `klt place-and-route`-produced
   macro's own top-level pins routinely land on (OpenROAD's global router

@@ -7795,6 +7795,110 @@ def test_resolve_route_layer_metal3_and_via2_roles_gf180mcu():
     assert gen_compose._resolve_route_layer("gf180mcuA", "via2") == (38, 0)
 
 
+@pytest.mark.parametrize("variant", ["sky130A", "sky130B"])
+@pytest.mark.parametrize(
+    ("role", "pair"),
+    [
+        ("metal4", (70, 20)),  # met3
+        ("metal5", (71, 20)),  # met4
+        ("metal6", (72, 20)),  # met5
+        ("via3", (69, 44)),  # via2 (met2<->met3)
+        ("via4", (70, 44)),  # via3 (met3<->met4)
+        ("via5", (71, 44)),  # via4 (met4<->met5)
+        # Unchanged pre-existing roles.
+        ("metal3", (69, 20)),
+        ("via2", (68, 44)),
+        ("top_metal", (72, 20)),
+    ],
+)
+def test_resolve_route_layer_sky130_upper_stack_roles(variant, role, pair):
+    # Issue #2738: li1 counts as "metal", so "metal4" is met3, etc.
+    assert gen_compose._resolve_route_layer(variant, role) == pair
+
+
+def test_resolve_route_layer_sky130_unknown_upper_role_still_rejected():
+    with pytest.raises(GenComposeError, match="not a known layer role"):
+        gen_compose._resolve_route_layer("sky130A", "metal7")
+
+
+def test_resolve_route_layer_sky130_metal6_is_top_metal_alias():
+    assert gen_compose._resolve_route_layer(
+        "sky130A", "metal6"
+    ) == gen_compose._resolve_route_layer("sky130A", "top_metal")
+
+
+@pytest.mark.parametrize(
+    ("route", "port", "ladder"),
+    [
+        # met3 route -> met2 pin
+        ((70, 20), (69, 20), (((69, 44), (69, 20), (70, 20)),)),
+        # met4 route -> met2 pin: landing pad on met3 between
+        (
+            (71, 20),
+            (69, 20),
+            (
+                ((69, 44), (69, 20), (70, 20)),
+                ((70, 44), (70, 20), (71, 20)),
+            ),
+        ),
+        # met5 route -> met2 pin
+        (
+            (72, 20),
+            (69, 20),
+            (
+                ((69, 44), (69, 20), (70, 20)),
+                ((70, 44), (70, 20), (71, 20)),
+                ((71, 44), (71, 20), (72, 20)),
+            ),
+        ),
+    ],
+)
+def test_resolve_via_drop_layer_sky130_upper_stack_ladders(route, port, ladder):
+    deck = get_extraction_deck("sky130")
+    got, error = _resolve_via_drop_layer(deck, route, port)
+    assert error is None
+    assert got == ladder
+
+
+def test_resolve_via_drop_layer_sky130_same_layer_needs_no_via():
+    deck = get_extraction_deck("sky130")
+    got, error = _resolve_via_drop_layer(deck, (70, 20), (70, 20))
+    assert error is None
+    assert not got
+
+
+def test_resolve_via_drop_layer_sky130_metal6_matches_top_metal():
+    deck = get_extraction_deck("sky130")
+    a = _resolve_via_drop_layer(
+        deck,
+        gen_compose._resolve_route_layer("sky130A", "metal6"),
+        (69, 20),
+    )
+    b = _resolve_via_drop_layer(
+        deck,
+        gen_compose._resolve_route_layer("sky130A", "top_metal"),
+        (69, 20),
+    )
+    assert a == b
+
+
+@pytest.mark.parametrize(
+    ("src", "dst", "cross", "vias"),
+    [
+        ("metal3", "metal4", (70, 20), ((69, 44),)),
+        ("metal3", "metal5", (71, 20), ((69, 44), (70, 44))),
+        ("metal3", "metal6", (72, 20), ((69, 44), (70, 44), (71, 44))),
+        ("metal3", "top_metal", (72, 20), ((69, 44), (70, 44), (71, 44))),
+    ],
+)
+def test_resolve_cross_block_route_layer_sky130_upper_stack(src, dst, cross, vias):
+    got_layer, got_vias = gen_compose._resolve_cross_block_route_layer(
+        "sky130A", src, dst
+    )
+    assert got_layer == cross
+    assert got_vias == vias
+
+
 def test_resolve_via_drop_layer_metal4_to_metal3_resolves_the_via_gf180mcu():
     # Issue #1670: a route on Metal4 (metals[3], "metal4") to a pin on
     # Metal3 (metals[2], "metal3") is exactly one via hop apart -- resolves
