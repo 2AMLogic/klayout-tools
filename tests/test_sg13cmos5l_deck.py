@@ -121,7 +121,8 @@ def test_sg13cmos5l_deck_registered_with_six_width_space_rules():
 def test_sg13cmos5l_deck_has_30_rules_after_metal_stack_extension():
     """Issue #1417 extends the curated deck past its #1400 Activ/GatPoly/
     Metal1-only starter to cover the full Metal1-TopMetal1 stack and its
-    Via1/Via2/Via3/TopVia1 vias -- 30 rules total (27 + 3 upper-landing containment rules, #2726) across 11 layers, and now
+    Via1/Via2/Via3/TopVia1 vias -- 30 rules total (27 + 3 upper-landing containment
+    rules, #2726) across 11 layers, and now
     an `"enclosing"` check kind (the via/metal enclosure rules) alongside
     `"width"`/`"space"`."""
     deck = get_deck("sg13cmos5l")
