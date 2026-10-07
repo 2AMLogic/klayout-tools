@@ -1983,3 +1983,77 @@ def test_run_sim_batch_rejects_waveform_supply_before_any_submission(
     )
     with pytest.raises(sim.SimError, match="'vramp'.*PWL"):
         sim.run_sim(str(_write_request(tmp_path, request)))
+
+
+# --------------------------------------------------------------------------- #
+# Sequential single-probe campaigns (issue #2716)
+# --------------------------------------------------------------------------- #
+
+
+def _probe_report(vdd: float, vout: float) -> str:
+    document = json.loads(_sim_report())
+    document["corners"][0]["supply_v"] = {"vdd": vdd}
+    document["corners"][0]["measurements"] = [
+        {"name": "vout_v", "value": vout, "unit": "V", "status": "pass"}
+    ]
+    return json.dumps(document)
+
+
+def test_sequential_single_unit_probes_adapt_to_the_collected_result(
+    tmp_path, monkeypatch
+):
+    """Two `run_sim(backend="batch")` calls from a driver: the second request's
+    singleton source value is derived from the first collected measurement, the
+    first job is collected before the second is submitted, and the jobs are
+    distinct single-unit submissions."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    (tmp_path / "top.lib").write_text(".lib tt\n.endl tt\n")
+
+    lo, hi, target = 0.8, 1.8, 0.9
+    reports = []
+    values = []
+    for probe, vout in enumerate((1.2, 0.5)):  # fake fleet measurements
+        value = (lo + hi) / 2.0
+        values.append(value)
+        request = _batch_request(
+            tmp_path,
+            models={"lib": "top.lib"},
+            corners={
+                "process": ["tt"],
+                "supply_v": {"vdd": [value]},
+                "temperature_c": [27],
+            },
+        )
+        path = tmp_path / f"probe-{probe}.request.json"
+        path.write_text(json.dumps(request))
+        runner.outputs = {"report.json": _probe_report(value, vout)}
+        report = sim.run_sim(str(path), backend="batch")
+        reports.append(report)
+        assert len(report["corners"]) == 1
+        measured = report["corners"][0]["measurements"][0]["value"]
+        if measured >= target:
+            hi = value
+        else:
+            lo = value
+
+    # Probe 2 depends on probe 1's result (1.2 >= 0.9 moved `hi` down).
+    assert values == [1.3, 1.05]
+    jobs = [r["environment"]["remote"]["job_id"] for r in reports]
+    assert len(set(jobs)) == 2
+    launches = runner.argvs_matching("launch", "--apply")
+    assert [argv[3] for argv in launches] == jobs
+
+    # Each job's output was collected before the next job was uploaded.
+    collects = [
+        i
+        for i, a in enumerate(runner.calls)
+        if "outputs/" in " ".join(a) and "--recursive" in a
+    ]
+    uploads = [
+        i for i, a in enumerate(runner.calls) if "inputs/request.json" in " ".join(a)
+    ]
+    assert len(collects) == len(uploads) == 2
+    assert collects[0] < uploads[1]
