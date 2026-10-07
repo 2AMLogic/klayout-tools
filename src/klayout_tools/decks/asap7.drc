@@ -1,0 +1,334 @@
+# ASAP7 DRC deck for KLayout (klayout-tools, issue #2760) -- phase 1: FEOL + MOL
+#
+# Run headless through klt:
+#
+#   klt drc <layout.gds> --engine klayout \
+#       --deck-file src/klayout_tools/decks/asap7.drc \
+#       --expect-rule-categories 106 --format json
+#
+# or directly:
+#
+#   klayout -b -r asap7.drc -rd input=<layout.gds> -rd report=<out.lyrdb>
+#
+# SOURCE. Every rule below is transcribed from the ASAP7 PDK Design Rule
+# Manual, "PDK Release 1p7" (asap7_drm_201207a.pdf, shipped by lambdapdk
+# v0.2.17 at lambdapdk/asap7/base/docs/, BSD-3-Clause, (c) 2020 L. T. Clark,
+# V. Vashishtha, Arizona State University). The DRM is cited, not copied:
+# each rule's report description starts with the DRM table it came from.
+#
+# RULE IDS. Each output category is the DRM's own rule name, verbatim
+# (DRM section 1.2.3, "Rule Name Convention"), e.g. "GATE.W.1". Where the
+# DRM states a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
+# well" (section 3.7), the mirrored rule substitutes the layer name
+# (PSELECT.W.1, LVT.W.2, ...). The id list is a public contract, declared in
+# src/klayout_tools/decks/asap7_rules.py and listed in docs/cli/drc.md; a
+# test fails if this script and that list drift apart.
+#
+# DRAWING SCALE. Thresholds are the DRM's nanometre values at 1x, applied
+# in micrometres (x.nm). This matches the pinned standard cells
+# (asap7sc7p5t_28_R.gds.gz is drawn at 1x: FIN 7 nm tall, GATE 20 nm wide,
+# 54 nm gate pitch, 270 nm cell height). Some ASAP7 distributions draw at
+# 4x; this deck does NOT support 4x layouts -- a 4x layout trips the exact
+# width rules (FIN.W.1, GATE.W.1) wholesale. Database unit 0.00025 um
+# (asap7.lyt) represents every DRM value, including the 13.5 nm SRAM ones.
+#
+# LAYERS. GDS layer/datatype numbers are those of the pinned asap7.lyp
+# ("<name> drawing - L/0"); they equal the DRM mask IDs (Tables 2.1.1,
+# 2.2.1, 2.3.1, 2.4.1). A test cross-checks them against the fetched .lyp.
+#
+# SCOPE. Phase 1 covers FEOL (Tables 3.1.1-3.8.1) and the MOL layers LISD,
+# LIG (Tables 3.9.1-3.10.3) and V0 width/connectivity (Tables 3.11.1-2).
+# DRM rules not implemented here, and rules only approximated, are listed
+# with reasons in asap7_rules.py and docs/cli/drc.md.
+#
+# The whole layout is checked flat.
+
+source($input)
+report("ASAP7 DRC (klayout-tools deck, DRM release 1p7; phase 1: FEOL/MOL)", $report)
+
+# --------------------------------------------------------------------------
+# Layers (asap7.lyp; DRM Tables 2.1.1 / 2.2.1 / 2.3.1 / 2.4.1)
+# --------------------------------------------------------------------------
+well    = input(1, 0)
+fin     = input(2, 0)
+gate    = input(7, 0)
+gcut    = input(10, 0)
+active  = input(11, 0)
+nselect = input(12, 0)
+pselect = input(13, 0)
+lig     = input(16, 0)
+lisd    = input(17, 0)
+v0      = input(18, 0)
+m1      = input(19, 0)
+sdt     = input(88, 0)
+slvt    = input(97, 0)
+lvt     = input(98, 0)
+sramdrc = input(99, 0)
+sramvt  = input(110, 0)
+
+# --------------------------------------------------------------------------
+# Derived layers and direction helpers
+# --------------------------------------------------------------------------
+# DRM 3.4 note 3: "GATE not cut by GCUT" is the GATE region without GCUT.
+gate_nc = gate - gcut
+# DRM 1.2.2 note 6: the channel is the intersection of ACTIVE and GATE.
+channel = active & gate
+# DRM 1.2.2 note 7: rules apply to geometry not interacting with SRAMDRC
+# unless stated otherwise.
+active_ns = active.not_interacting(sramdrc)
+
+# DRM 1.2.2 note 5: "horizontal"/"vertical" restrict the direction in which a
+# distance is measured. A horizontal width/space is measured between
+# vertical edges, a vertical one between horizontal edges.
+def vert(l)
+  l.edges.with_angle(90)
+end
+
+def horz(l)
+  l.edges.with_angle(0)
+end
+
+def hwidth(l, d)
+  vert(l).width(d, projection)
+end
+
+def vwidth(l, d)
+  horz(l).width(d, projection)
+end
+
+def hspace(l, d)
+  vert(l).space(d, projection)
+end
+
+def vspace(l, d)
+  horz(l).space(d, projection)
+end
+
+# Area thresholds are given in nm^2; KLayout areas are in um^2.
+def nm2(v)
+  v * 1.0e-6
+end
+
+# An edge lying inside, or coinciding with, a polygon of another layer
+# (the GATE.ACTIVE.AUX.3 / GCUT.AUX.2 / LIG.GATE.AUX.1 pattern).
+def inside_or_on(edges, other)
+  edges.inside_part(other) + (edges & other.edges)
+end
+
+# --------------------------------------------------------------------------
+# Table 3.1.1 -- Geometry check
+# --------------------------------------------------------------------------
+# GEOMETRY.NONORTHOGONAL: non-orthogonal shapes are not allowed (phase 1
+# applies it to the FEOL/MOL layers this deck reads).
+[well, fin, gate, gcut, active, nselect, pselect, slvt, lvt, sramvt,
+ sdt, lisd, lig, v0].map { |l| l.non_rectilinear }.inject(:+)
+  .output("GEOMETRY.NONORTHOGONAL", "Table 3.1.1: non-orthogonal shapes are not allowed")
+
+# --------------------------------------------------------------------------
+# Table 3.2.1 -- WELL
+# --------------------------------------------------------------------------
+hwidth(well, 108.nm).output("WELL.W.1", "Table 3.2.1: min horizontal WELL width 108 nm")
+vwidth(well, 54.nm).output("WELL.W.2", "Table 3.2.1: min vertical WELL width 54 nm")
+vspace(well, 108.nm).output("WELL.S.1", "Table 3.2.1: min vertical WELL spacing 108 nm")
+hspace(well, 54.nm).output("WELL.S.2", "Table 3.2.1: min horizontal WELL spacing 54 nm")
+well.with_area(nil, nm2(5832)).output("WELL.A.1A", "Table 3.2.1: min WELL area 5832 nm^2")
+well.holes.with_area(nil, nm2(5832)).output("WELL.A.1B", "Table 3.2.1: min WELL enclosed area 5832 nm^2")
+vert(well).enclosing(vert(gate_nc), 7.nm, projection)
+  .output("WELL.GATE.EX.1", "Table 3.2.1: min horizontal extension of WELL past GATE (not cut by GCUT) 7 nm")
+horz(well).enclosing(horz(gate_nc.not_interacting(sramdrc)), 7.nm, projection)
+  .output("WELL.GATE.EX.2", "Table 3.2.1: min vertical extension of WELL past GATE (not cut by GCUT, not interacting with SRAMDRC) 7 nm")
+
+# --------------------------------------------------------------------------
+# Table 3.3.1 -- FIN
+# --------------------------------------------------------------------------
+# FIN.W.1 is an exact width (DRM 1.2.2 note 3): any other value violates.
+fin.without_bbox_height(7.nm).output("FIN.W.1", "Table 3.3.1: exact vertical FIN width 7 nm")
+hwidth(fin, 108.nm).output("FIN.W.2", "Table 3.3.1: min horizontal FIN width 108 nm")
+# FIN.S.1 (exact vertical pitch 27 nm) is APPROXIMATED as an edge-to-edge
+# check for 7 nm fins: neighbouring fins closer than one empty track
+# (spacing < 47 nm) must be exactly 20 nm apart. Fins two or more tracks
+# apart are not checked for grid alignment.
+vspace(fin, 47.nm).without_distance(20.nm)
+  .output("FIN.S.1", "Table 3.3.1: exact vertical FIN pitch 27 nm (approximated: spacing < 47 nm must be 20 nm)")
+fin.non_rectangles.output("FIN.AUX.1", "Table 3.3.1: FIN may not bend")
+
+# --------------------------------------------------------------------------
+# Table 3.4.1 -- GATE
+# --------------------------------------------------------------------------
+gate.without_bbox_width(20.nm).output("GATE.W.1", "Table 3.4.1: exact horizontal GATE width 20 nm")
+vwidth(gate, 40.nm).output("GATE.W.2", "Table 3.4.1: min vertical GATE width 40 nm")
+# GATE.S.1 (exact horizontal pitch 54 nm) is APPROXIMATED like FIN.S.1:
+# spacings strictly between 34 nm (one pitch) and 88 nm (two pitches) are
+# off-pitch. Spacings below 34 nm are GATE.S.2.
+hspace(gate, 88.nm).with_distance(34.25.nm, nil)
+  .output("GATE.S.1", "Table 3.4.1: exact horizontal GATE pitch 54 nm (approximated: spacing in (34, 88) nm)")
+hspace(gate, 34.nm).output("GATE.S.2", "Table 3.4.1: min horizontal GATE spacing 34 nm")
+# GATE.S.3: a 20 nm GATE whose centre is within 54 nm of another GATE's
+# centre has a horizontal neighbour no more than 34 nm away, edge to edge.
+gate_neighbour = hspace(gate, 34.25.nm).polygons
+gate_nc.not_interacting(sramdrc).not_interacting(gate_neighbour)
+  .output("GATE.S.3", "Table 3.4.1: every GATE (not cut by GCUT, outside SRAMDRC) needs another GATE within 54 nm centre-to-centre horizontally")
+gate.non_rectangles.output("GATE.AUX.1", "Table 3.4.1: GATE may not bend")
+inside_or_on(vert(active), gate)
+  .output("GATE.ACTIVE.AUX.3", "Table 3.4.1: ACTIVE vertical edge may not lie inside, or coincide with, GATE")
+horz(gate_nc).enclosing(horz(active), 4.nm, projection)
+  .output("GATE.ACTIVE.EX.1", "Table 3.4.1: min vertical extension of GATE (not cut by GCUT) past ACTIVE 4 nm")
+vert(active.interacting(gate_nc)).enclosing(vert(gate_nc), 25.nm, projection)
+  .output("GATE.ACTIVE.EX.2", "Table 3.4.1: min horizontal extension of ACTIVE past GATE (not cut by GCUT) 25 nm")
+vert(gate_nc.not_interacting(active)).separation(vert(active), 9.nm, projection)
+  .output("GATE.ACTIVE.S.4", "Table 3.4.1: min horizontal spacing ACTIVE to GATE (not cut by GCUT, not interacting with ACTIVE) 9 nm")
+
+# --------------------------------------------------------------------------
+# Tables 3.5.1 / 3.5.2 -- ACTIVE
+# --------------------------------------------------------------------------
+horz(active).enclosing(horz(fin), 10.nm, projection)
+  .output("ACTIVE.FIN.EX.1", "Table 3.5.1: min vertical extension of ACTIVE past FIN 10 nm")
+vwidth(active, 27.nm).output("ACTIVE.W.1", "Table 3.5.1: min vertical ACTIVE width 27 nm")
+hwidth(active, 16.nm).output("ACTIVE.W.3", "Table 3.5.1: min horizontal ACTIVE width 16 nm")
+vspace(active, 27.nm).output("ACTIVE.S.1", "Table 3.5.1: min vertical ACTIVE spacing 27 nm")
+hspace(active, 38.nm).output("ACTIVE.S.2B", "Table 3.5.1: min horizontal ACTIVE spacing 38 nm")
+active_ns.separation(well, 27.nm)
+  .output("ACTIVE.WELL.S.4", "Table 3.5.1: min spacing ACTIVE (outside SRAMDRC) to WELL 27 nm")
+well.enclosing(active_ns.interacting(well), 27.nm)
+  .output("ACTIVE.WELL.EN.1", "Table 3.5.1: min enclosure of ACTIVE (outside SRAMDRC) by WELL 27 nm")
+active_ns.with_area(nil, nm2(864)).output("ACTIVE.A.1A", "Table 3.5.2: min ACTIVE area 864 nm^2")
+active_ns.holes.with_area(nil, nm2(864)).output("ACTIVE.A.1B", "Table 3.5.2: min ACTIVE enclosed area 864 nm^2")
+# ACTIVE.AUX.1: enclosed by NSELECT or by PSELECT with no coincident edge.
+# Shrinking each select by one database unit (0.25 nm) turns a coincident
+# edge into an "outside" one.
+active.not_inside(nselect.sized(-0.25.nm)).not_inside(pselect.sized(-0.25.nm))
+  .output("ACTIVE.AUX.1", "Table 3.5.2: ACTIVE must be enclosed by NSELECT or PSELECT with no coincident edges")
+
+# --------------------------------------------------------------------------
+# Table 3.6.1 -- GCUT
+# --------------------------------------------------------------------------
+vwidth(gcut, 17.nm).output("GCUT.W.1", "Table 3.6.1: min vertical GCUT width 17 nm")
+horz(gcut).separation(horz(channel), 4.nm, projection)
+  .output("GCUT.ACTIVE.S.1", "Table 3.6.1: min vertical spacing GCUT to channel 4 nm")
+vert(gcut).enclosing(vert(gate), 17.nm, projection)
+  .output("GCUT.GATE.EX.1", "Table 3.6.1: min horizontal extension of GCUT past GATE 17 nm")
+gcut.separation(gate.not_interacting(gcut), 17.nm)
+  .output("GCUT.GATE.S.2", "Table 3.6.1: min spacing GCUT to a GATE it does not cut 17 nm")
+vspace(gcut, 35.nm).output("GCUT.S.3", "Table 3.6.1: min vertical GCUT spacing 35 nm")
+gcut.not_interacting(gate).output("GCUT.AUX.1", "Table 3.6.1: GCUT may not exist without GATE")
+inside_or_on(vert(gcut), gate)
+  .output("GCUT.AUX.2", "Table 3.6.1: GCUT vertical edge may not lie inside, or coincide with, GATE")
+gcut.interacting(channel).output("GCUT.AUX.3", "Table 3.6.1: GCUT may not interact with channel")
+
+# --------------------------------------------------------------------------
+# Table 3.7.1 -- NSELECT / PSELECT / SLVT / LVT / SRAMVT
+# --------------------------------------------------------------------------
+# Section 3.7: rules stated for NSELECT apply to PSELECT, SLVT, LVT and
+# SRAMVT as well, unless otherwise stated.
+{ "NSELECT" => nselect, "PSELECT" => pselect,
+  "SLVT" => slvt, "LVT" => lvt, "SRAMVT" => sramvt }.each do |name, sel|
+  hwidth(sel, 108.nm).output("#{name}.W.1", "Table 3.7.1: min horizontal #{name} width 108 nm")
+  vwidth(sel, 54.nm).output("#{name}.W.2", "Table 3.7.1: min vertical #{name} width 54 nm")
+  # Enclosure is measured for the ACTIVE shapes the layer covers; whether a
+  # given ACTIVE must be covered at all is ACTIVE.AUX.1 (selects only).
+  inner = active_ns.inside(sel)
+  vert(sel).enclosing(vert(inner), 46.nm, projection)
+    .output("#{name}.ACTIVE.EN.1", "Table 3.7.1: min horizontal enclosure of ACTIVE (not interacting with SRAMDRC) by #{name} 46 nm")
+  horz(sel).enclosing(horz(inner), 27.nm, projection)
+    .output("#{name}.ACTIVE.EN.2", "Table 3.7.1: min vertical enclosure of ACTIVE (not interacting with SRAMDRC) by #{name} 27 nm")
+  vert(sel).enclosing(vert(gate_nc), 7.nm, projection)
+    .output("#{name}.GATE.EX.1", "Table 3.7.1: min horizontal extension of #{name} past GATE (not cut by GCUT) 7 nm")
+  horz(sel).enclosing(horz(gate_nc), 7.nm, projection)
+    .output("#{name}.GATE.EX.2", "Table 3.7.1: min vertical extension of #{name} past GATE (not cut by GCUT) 7 nm")
+end
+(nselect & pselect).output("NSELECT.PSELECT.AUX.1", "Table 3.7.1: NSELECT and PSELECT may not overlap")
+((slvt & lvt) + (slvt & sramvt) + (lvt & sramvt))
+  .output("VT.AUX.2", "Table 3.7.1: VT layers (LVT, SLVT, SRAMVT) may not overlap")
+
+# --------------------------------------------------------------------------
+# Table 3.8.1 -- SDT
+# --------------------------------------------------------------------------
+sdt_ns = sdt.not_interacting(sramdrc)
+hwidth(sdt, 24.nm).output("SDT.W.1", "Table 3.8.1: min horizontal SDT width 24 nm")
+vwidth(sdt_ns, 27.nm).output("SDT.W.2", "Table 3.8.1: min vertical SDT width (not interacting with SRAMDRC) 27 nm")
+hspace(sdt, 30.nm).output("SDT.S.1", "Table 3.8.1: min horizontal SDT spacing 30 nm")
+vert(sdt).separation(vert(gate), 5.nm, projection)
+  .output("SDT.GATE.S.2", "Table 3.8.1: min horizontal spacing SDT to GATE 5 nm")
+horz(sdt_ns & active).width(27.nm, projection)
+  .output("SDT.ACTIVE.OV.1", "Table 3.8.1: min vertical overlap SDT and ACTIVE 27 nm")
+horz(sdt_ns & lisd).width(27.nm, projection)
+  .output("SDT.LISD.OV.2", "Table 3.8.1: min vertical overlap SDT and LISD 27 nm")
+sdt.interacting(gate).output("SDT.GATE.AUX.1", "Table 3.8.1: SDT and GATE may not overlap or touch")
+# "Coincide" is read as "lies on, and overlaps, an ACTIVE horizontal edge":
+# the shipped cells draw SDT 4 nm past ACTIVE's vertical edge (SDT x 42..66
+# nm against ACTIVE x 46..116 nm in INVx1_ASAP7_75t_R), so a pointwise
+# reading would flag every conforming cell.
+horz(sdt_ns).not_interacting(horz(active))
+  .output("SDT.ACTIVE.AUX.2","Table 3.8.1: SDT (not interacting with SRAMDRC) horizontal edges must coincide with ACTIVE horizontal edges")
+# Abutting ACTIVE is still "entirely outside" it, so area overlap is required.
+sdt.not_overlapping(active).output("SDT.ACTIVE.AUX.3", "Table 3.8.1: SDT may not be entirely outside ACTIVE")
+sdt.not_inside(lisd).output("SDT.LISD.AUX.4", "Table 3.8.1: SDT must always be inside LISD")
+
+# --------------------------------------------------------------------------
+# Table 3.9.1 -- LISD
+# --------------------------------------------------------------------------
+# The spacing rules are conditioned on the lengths of the two facing edges:
+# "> 36 nm" is a long (side) edge, "<= 36 nm" a short (tip) edge.
+lisd_long = lisd.edges.with_length(36.25.nm, nil)
+lisd_short = lisd.edges.with_length(nil, 36.25.nm)
+lisd_tip = lisd.not_interacting(sramdrc).edges.with_length(24.nm, 36.25.nm)
+lisd.width(24.nm).output("LISD.W.1", "Table 3.9.1: min LISD width 24 nm")
+lisd_long.space(18.nm, projection)
+  .output("LISD.S.1", "Table 3.9.1: min side-to-side LISD spacing (both edges > 36 nm) 18 nm")
+lisd_short.separation(lisd_long, 25.nm, projection)
+  .output("LISD.S.2", "Table 3.9.1: min tip-to-side LISD spacing (one edge <= 36 nm, other > 36 nm) 25 nm")
+lisd_tip.space(27.nm, projection)
+  .output("LISD.S.3", "Table 3.9.1: min tip-to-tip LISD spacing (outside SRAMDRC, both edges 24..36 nm) 27 nm")
+lisd.with_area(nil, nm2(648)).output("LISD.A.1", "Table 3.9.1: min LISD area 648 nm^2")
+
+# --------------------------------------------------------------------------
+# Tables 3.10.1 / 3.10.2 / 3.10.3 -- LIG
+# --------------------------------------------------------------------------
+lig_ns = lig.not_interacting(sramdrc)
+lig_long = lig.edges.with_length(36.25.nm, nil)
+lig_short = lig.edges.with_length(nil, 36.25.nm)
+lig_tip = lig_ns.edges.with_length(24.nm, 36.25.nm)
+lig_narrow_tip = lig_ns.edges.with_length(nil, 24.nm)
+lig.width(16.nm).output("LIG.W.1", "Table 3.10.1: min LIG width 16 nm")
+lig_long.space(18.nm, projection)
+  .output("LIG.S.1", "Table 3.10.1: min side-to-side LIG spacing (both edges > 36 nm) 18 nm")
+lig_short.separation(lig_long, 25.nm, projection)
+  .output("LIG.S.2", "Table 3.10.1: min tip-to-side LIG spacing (one edge <= 36 nm, other > 36 nm) 25 nm")
+lig_tip.space(27.nm, projection)
+  .output("LIG.S.3", "Table 3.10.1: min tip-to-tip LIG spacing (outside SRAMDRC, both edges 24..36 nm) 27 nm")
+lig_narrow_tip.space(31.nm, projection)
+  .output("LIG.S.4", "Table 3.10.1: min tip-to-tip LIG spacing (outside SRAMDRC, both edges < 24 nm) 31 nm")
+lig_tip.separation(lig_narrow_tip, 31.nm, projection)
+  .output("LIG.S.5", "Table 3.10.1: min tip-to-tip LIG spacing (outside SRAMDRC, one edge 24..36 nm, other < 24 nm) 31 nm")
+horz(lig).separation(horz(gate_nc), 14.nm, projection)
+  .output("LIG.GATE.S.9A", "Table 3.10.2: min vertical spacing LIG to GATE (not cut by GCUT) 14 nm")
+vert(lig).separation(vert(gate_nc), 17.nm, projection)
+  .output("LIG.GATE.S.9B", "Table 3.10.2: min horizontal spacing LIG to GATE (not cut by GCUT) 17 nm")
+lig.separation(gate_nc.interacting(active), 5.nm)
+  .output("LIG.GATE.S.10", "Table 3.10.2: min spacing LIG to GATE (not cut by GCUT) forming a channel 5 nm")
+horz(lig).separation(horz(gcut), 5.nm, projection)
+  .output("LIG.GCUT.S.11", "Table 3.10.2: min vertical spacing LIG to GCUT 5 nm")
+lig.with_area(nil, nm2(324)).output("LIG.A.1", "Table 3.10.2: min LIG area 324 nm^2")
+(lig & lisd).with_area(nil, nm2(128))
+  .output("LIG.LISD.A.2", "Table 3.10.2: min area of overlap LIG and LISD 128 nm^2")
+(lig_ns & gate_nc).with_area(nil, nm2(320))
+  .output("LIG.GATE.A.3", "Table 3.10.2: min area of overlap LIG (outside SRAMDRC) and GATE (not cut by GCUT) 320 nm^2")
+# LIG.LISD.OV.1 is stated for LIG and LISD "connected together"; any overlap
+# connects them, so the overlap region itself is measured.
+(lig & lisd).width(8.nm)
+  .output("LIG.LISD.OV.1", "Table 3.10.3: min overlap LIG and LISD connected together 8 nm")
+inside_or_on(vert(lig_ns), gate)
+  .output("LIG.GATE.AUX.1", "Table 3.10.2: LIG (outside SRAMDRC) vertical edge may not lie inside, or coincide with, GATE")
+vert(lig_ns).enclosing(vert(gate_nc), 1.nm, projection)
+  .output("LIG.GATE.EX.1", "Table 3.10.3: min extension of LIG (outside SRAMDRC) over GATE (not cut by GCUT) on both sides 1 nm")
+
+# --------------------------------------------------------------------------
+# Tables 3.11.1 / 3.11.2 -- V0 (phase 1: width and connectivity only)
+# --------------------------------------------------------------------------
+# V0.W.1 is stated along the M1 length; it is APPROXIMATED in both
+# directions. V0.M1.AUX.3 makes V0 as wide as M1 across the track, and the
+# shipped cells draw 18 x 18 nm V0, so the stricter form does not over-flag
+# conforming layouts.
+v0.width(18.nm).output("V0.W.1", "Table 3.11.1: min V0 width 18 nm (approximated: checked in both directions)")
+(v0.not_interacting(m1) + v0.not_interacting(lisd + lig))
+  .output("V0.AUX.1", "Table 3.11.2: V0 must always interact with M1 and LISD or LIG")
