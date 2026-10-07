@@ -6342,6 +6342,27 @@ def _mom_feed_variant(ports: list[tuple[Any, int]], marker_bbox: kdb.Box) -> int
     return MOM_FEED_UNMEASURED
 
 
+def _set_mom_feed_parameter(
+    device: kdb.Device,
+    param_feed: int | None,
+    ports: list[tuple[Any, int]],
+    marker_bbox: kdb.Box,
+) -> None:
+    """Write the ``FEED`` parameter (issue #2445) onto one extracted MoM
+    capacitor ``device`` -- a no-op when ``param_feed`` is ``None`` (the
+    device class carries no ``FEED`` parameter; see
+    :func:`mom_capacitor_has_feed`).
+
+    Module-level rather than inline in the extractor's ``extract_devices``
+    so the ``None`` guard does not count against
+    ``_build_mom_capacitor_extractor``'s own baselined cyclomatic complexity
+    (``complexity-baseline.json``).
+    """
+    if param_feed is None:
+        return
+    device.set_parameter(param_feed, float(_mom_feed_variant(ports, marker_bbox)))
+
+
 def mom_capacitor_device_class(name: str) -> kdb.DeviceClass:
     """Build the ``kdb.DeviceClass`` one
     :class:`~klayout_tools.decks.MomCapacitorDevice` entry named ``name``
@@ -6752,12 +6773,9 @@ def _build_mom_capacitor_extractor(
                 # Issue #2445: the PCell's `feed` variant, from the two
                 # ports' placement inside the marker (see
                 # `_mom_feed_variant`). Left at the class default `0`
-                # ("unmeasured") when the layout matches no PCell signature.
-                if self._param_feed is not None:
-                    device.set_parameter(
-                        self._param_feed,
-                        float(_mom_feed_variant(ports, bbox)),
-                    )
+                # ("unmeasured") when the layout matches no PCell signature;
+                # a no-op for classes without `FEED` (`cap_cmomf`).
+                _set_mom_feed_parameter(device, self._param_feed, ports, bbox)
 
                 # Deterministic pick of two ports (by x, then y, then metal
                 # index) -- which of the two ends up on terminal A is
