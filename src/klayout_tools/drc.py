@@ -2712,6 +2712,75 @@ def _cleanup_klayout_drc_work_dir(work_dir: str) -> None:
     shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def _evaluate_category_assertion(
+    expected: int | None, rule_categories: list[str], deck_errored: bool
+) -> dict[str, Any] | None:
+    """Evaluate the opt-in ``expected_rule_categories`` assertion (issue
+    #2697) against the deduplicated declared categories. ``None`` when not
+    requested; raises :class:`DrcError` on a count mismatch of a run that did
+    not tolerate deck errors; a tolerated-error run is never satisfied."""
+    if expected is None:
+        return None
+    observed = len(set(rule_categories))
+    if observed != expected and not deck_errored:
+        raise DrcError(
+            "rule-category coverage assertion failed: expected "
+            f"{expected} unique rule categories "
+            f"(--expect-rule-categories) but the deck's report "
+            f"declared {observed} -- the deck did not declare the "
+            "rule set you vouched for (a gated-off rule group, a "
+            "missing --deck-var, or a changed deck?). Fix the deck "
+            "invocation or update the expected count."
+        )
+    return {
+        "kind": "expected_rule_categories",
+        "expected": expected,
+        "observed": observed,
+        "satisfied": observed == expected and not deck_errored,
+    }
+
+
+def _klayout_engine_coverage(
+    rule_counts: dict[str, int],
+    rule_categories: list[str],
+    coverage_assertion: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The klayout engine's ``coverage`` block. Categories are declarations,
+    not execution instrumentation, unless the caller's satisfied
+    ``expected_rule_categories`` assertion vouches for them (issue #2697);
+    otherwise only finding-producing rules are checked and the
+    ``unmeasured_rule_execution`` sentinel keeps coverage unknown."""
+    asserted = bool(coverage_assertion and coverage_assertion["satisfied"])
+    checked = (
+        sorted(set(rule_counts) | set(rule_categories))
+        if asserted
+        else sorted(rule_counts)
+    )
+    unknown = (
+        []
+        if asserted
+        else [
+            {
+                # `work_id` namespaces this sentinel so it cannot collide
+                # with a real (caller-chosen) RDB category name.
+                "id": work_id("engine_execution", "klayout"),
+                "reason": "unmeasured_rule_execution",
+            }
+        ]
+    )
+    return {
+        "deck_layers": [],
+        "layers_checked": [],
+        "rule_categories": rule_categories,
+        "rules_checked": checked,
+        "layers_in_stream_without_rules": [],
+        "rules_skipped": [],
+        "voltage_domain_warnings": [],
+        "deck_scope": [],
+        **build_check_coverage(checked=checked, unknown=unknown),
+    }
+
+
 def _validate_expected_rule_categories(value: Any) -> None:
     """Reject anything but ``None`` or a positive ``int`` (issue #2697)."""
     if value is None:
@@ -3029,26 +3098,9 @@ def run_drc_klayout_engine(
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
         )
-        coverage_assertion: dict[str, Any] | None = None
-        if expected_rule_categories is not None:
-            observed = len(set(rule_categories))
-            satisfied = observed == expected_rule_categories and not deck_errored
-            if observed != expected_rule_categories and not deck_errored:
-                raise DrcError(
-                    "rule-category coverage assertion failed: expected "
-                    f"{expected_rule_categories} unique rule categories "
-                    f"(--expect-rule-categories) but the deck's report "
-                    f"declared {observed} -- the deck did not declare the "
-                    "rule set you vouched for (a gated-off rule group, a "
-                    "missing --deck-var, or a changed deck?). Fix the deck "
-                    "invocation or update the expected count."
-                )
-            coverage_assertion = {
-                "kind": "expected_rule_categories",
-                "expected": expected_rule_categories,
-                "observed": observed,
-                "satisfied": satisfied,
-            }
+        coverage_assertion = _evaluate_category_assertion(
+            expected_rule_categories, rule_categories, deck_errored
+        )
     finally:
         _cleanup_klayout_drc_work_dir(work_dir)
 
@@ -3063,43 +3115,9 @@ def run_drc_klayout_engine(
         )
     )
 
-    asserted = bool(coverage_assertion and coverage_assertion["satisfied"])
-    checked = (
-        sorted(set(rule_counts) | set(rule_categories))
-        if asserted
-        else sorted(rule_counts)
+    coverage = _klayout_engine_coverage(
+        rule_counts, rule_categories, coverage_assertion
     )
-    coverage = {
-        "deck_layers": [],
-        "layers_checked": [],
-        # Categories are declarations, not execution instrumentation, unless
-        # the caller opted into `expected_rule_categories` (issue #2697).
-        # An actual finding proves only that finding's rule ran.
-        "rule_categories": rule_categories,
-        "rules_checked": checked,
-        "layers_in_stream_without_rules": [],
-        "rules_skipped": [],
-        "voltage_domain_warnings": [],
-        "deck_scope": [],
-        **build_check_coverage(
-            checked=checked,
-            # `work_id` namespaces this sentinel (via its JSON-encoded
-            # parts) so it cannot collide with a real RDB category name
-            # in `rule_counts` -- an external deck's rule names are
-            # caller-chosen and could otherwise coincidentally match a
-            # bare literal like "klayout:execution".
-            unknown=(
-                []
-                if asserted
-                else [
-                    {
-                        "id": work_id("engine_execution", "klayout"),
-                        "reason": "unmeasured_rule_execution",
-                    }
-                ]
-            ),
-        ),
-    }
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     return {
         "schema_version": 2,
