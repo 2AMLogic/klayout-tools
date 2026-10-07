@@ -2,8 +2,17 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-07
+
+- **PR #2790**: fix(decks): release build resolves its own deck hash
+- **PR #2789**: feat(drc): backfill threshold_max_dbu on sky130 via2/via3/via4 width rules (#2443)
+- **Issue #2451** (closed): klt deck resolve: a release's own deck hash is never in its own history table, so the newest release always self-reports released: false
+- **Issue #2443** (closed): Backfill threshold_max_dbu on the four fixed-size cut rules #2388's scope left min-only
+
 ### 2026-10-06
 
+- **PR #2788**: feat(erc): report label-layer text counts in provenance.label_layers
+- **Issue #2415** (closed): klt erc: the empty-label_layer condition is stderr-only, so a signoff consumer still cannot detect a report resting on an empty label layer
 - **PR #2785**: feat(extract): warn when a MOS flavour marker layer has no shapes (#2417)
 - **PR #2784**: feat(erc): disclose how much drawn tap geometry a well_boxes assertion covers
 - **PR #2779**: fix(place-and-route): use IHP sg13g2.map in DEF->GDS merge; routed sg13g2 GDS now klt-drc clean (#2444)
