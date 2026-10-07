@@ -1758,6 +1758,7 @@ section this engine buckets rather than fully structures:
 | `reference` | string | Echo of `reference.netlist`, exactly as provided. |
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
 | `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
+| `reference_conversion` | object | Issue #2673. Present **only** for `reference.form: "subckt-call"` (omitted for every other form): `{"form": "subckt-call", "deck": <string\|null>, "device_map": <object\|null>}`, the request-side context the reference conversion depends on, echoed as given. It lets `--check --rerun` re-convert the reference and rebuild its placeholder-value exclusions; a report without it replays the reference as plain-element SPICE, as before. |
 | `parameter_tolerance` | number \| `null` | Echo of the effective `options.parameter_tolerance` (issue #589) — `null` when the option was omitted (the default exact compare). Always present, never omitted, so a consumer reading only the response can always tell whether a `"match"` was reached under a caller-supplied design tolerance at all. |
 | `options` | object | Echo of every request option that shapes *what was compared*, as resolved (issue #1205): `combine_devices` (boolean, or the normalised array of device-class names when the array shape was used — issue #1370), `combine_devices_per_circuit` (object \| `null`, issue #1552 — the resolved `{"<circuit-name-glob>": <boolean>}` mapping, or `null` when the option was omitted), `flatten_layout`, `flatten_reference` (booleans), `netgen_setup` (string \| `null`, echoed exactly as given, not resolved against the request file's directory), `parameter_tolerance` (number \| `null`, the same value as the top-level field above, repeated here so this block is a complete request-side view), `compare_parameters` (object \| `null`, issue #1928 — the resolved `{"<device-class>": [<parameter>, ...]}` mapping, or `null` when the option was omitted), and `power_connectivity` (boolean \| object \| `null`, issue #1952 — the caller's own `options.power_connectivity` value verbatim, or `null` when the option was omitted; note that `null` here means the check ran under its default-on setting, *not* that it was skipped — read `power_connectivity.status` for that), and `anchor_top_level_pins` (boolean \| `null`, issue #2692 — the caller's own value verbatim, or `null` when the option was omitted, which means the form-dependent default applied: on for `reference.form: "gate-level-verilog"`, off for every other form; read the `topology.top_level_pins_anchored` entry in `mismatches[]` to see whether anchoring actually ran, and which pins it anchored). Every key is always present, never omitted — so a consumer reading only the response can tell which compare the verdict belongs to, and `--check --rerun` can re-run *that* compare rather than a differently-shaped one whose difference it would then report as drift. `options.keep_extracted` is deliberately not echoed here (it is an output-side flag that cannot change a verdict, and is already visible as `environment.extracted_netlist`), nor is `options.netgen_timeout_s` (a runtime guard, not a compare input), nor `options.netgen_binary` (issue #2373 — host-side binary selection, already visible in its *resolved* form as `environment.netgen_binary`, which is strictly more informative than an echo of the raw request value; `--rerun` re-resolves it on the verifying host rather than replaying a path that may not exist there, and `environment.netgen_binary` is excluded from that mode's drift diff for the same reason — see "Full mode (`--rerun`)" below).  Also echoes the resolved `supply_nets` list, including `[]`, so `--rerun` preserves the chosen supply-name policy. |
 | `hints_applied` | object\<string, array\<array\<string\>\>\> \| `null` | Issue #1998. Every `hints.equivalent_pins` grouping actually passed to `NetlistComparer.equivalent_pins()` for this run, keyed by the (reference-side) subcircuit name it was declared against, with each group echoed verbatim as the caller wrote it — e.g. `{"ota_5t": [["inp", "inn"]]}`. `null` when the request supplied no `hints.equivalent_pins` (including a request with only a `hints.same_nets` hint, or no `hints` at all) — the same always-present-but-nullable convention `options.compare_parameters` follows for an optional dict-shaped echo, never a spuriously present empty `{}`. This is the only visibility a report gives into an applied `equivalent_pins` hint: unlike `hints.same_nets` (a hard assertion the comparer can refuse, surfaced as a `hints.rejected` mismatch entry — see below), a swappable-pin group has no "rejected" outcome, so without this field a reader could not tell whether — or how broadly — an `equivalent_pins` hint reshaped the verdict. Does not itself change `status`, `mismatch_count`, or any other verdict field; it only discloses that the hint was applied. A request naming an unknown subcircuit or pin fails the run outright (`LvsError`, exit 1, per `hints.equivalent_pins`'s own field description above) before any report is produced, so this field is never populated with a partial or invalid entry from a failed application. |
@@ -2276,9 +2277,9 @@ Notes on the semantics:
   coverage); the `device.placeholder_value` entry is the netgen-side record.
   **A topology match does not verify the excluded resistance/capacitance.**
   `--check` is unaffected (the generated setup is not an input and is rebuilt
-  on every run); `--rerun` cannot replay a `subckt-call` reference on either
-  engine (`reference.form` is not echoed — see the `--rerun` limitations), but
-  the caller's `options.netgen_setup` is replayed as usual.
+  on every run); `--rerun` replays the `subckt-call` reference on either engine
+  from the report's `reference_conversion` echo, rebuilding the same
+  exclusions and replaying the caller's `options.netgen_setup` as usual.
 - **To verify the value dimension**, supply the reference in the plain-element
   form with real `R`/`C` values (`details.layout_values` reports what the
   layout side measured, so a reference can be written against it), or compare
@@ -3823,9 +3824,15 @@ request): the pre-extracted-netlist-with-deck combo (`layout.netlist` +
 inline extraction from the response alone — both populate `provenance.deck`
 — so `--rerun` always reconstructs `layout.file`; in that specific combo it
 fails loudly (a clean error, not a silent wrong answer) since the named path
-is actually a SPICE netlist, not a layout stream. A non-default
-`reference.form` (`"subckt-call"` or `"gate-level-verilog"`),
-`reference.device_map`/`device_bulk`, and
+is actually a SPICE netlist, not a layout stream. A `"subckt-call"`
+reference **is** replayed (issue #2673): the report's `reference_conversion`
+echo carries `form`, `deck` and `device_map`, so `--rerun` re-converts the
+reference and rebuilds the proven placeholder-value exclusions on both
+engines, with `options.netgen_setup` still composed ahead of them. A
+`subckt-call` report committed before that echo existed has no
+`reference_conversion` (excluded from its drift diff) and stays best-effort.
+A `"gate-level-verilog"` `reference.form`,
+`reference.device_bulk`, and
 `layout.top_cell_pins`/`declared_pins`/`pin_source_cells` are never echoed
 anywhere in the response and are always reconstructed as each option's own
 default. Use cheap mode instead when any of these apply to the original

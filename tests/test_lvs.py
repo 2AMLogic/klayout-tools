@@ -20512,3 +20512,117 @@ def test_tcl_quoted_class_name_roundtrips_in_real_netgen(tmp_path):
         timeout=60,
     )
     assert "NAME=a b$[x]{y}" in out.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2673: `--check --rerun` replays a `subckt-call` reference, including
+# its proven placeholder exclusions, on both engines
+# --------------------------------------------------------------------------- #
+
+_PH_REPLAY_CASES = [
+    pytest.param(
+        _PLACEHOLDER_RESISTOR_LAYOUT,
+        _PLACEHOLDER_RESISTOR_REFERENCE,
+        "res_net",
+        "R",
+        id="resistor",
+    ),
+    pytest.param(_PH_CAP_LAYOUT, _PH_CAP_REFERENCE, "cap_net", "C", id="capacitor"),
+]
+
+
+def _commit_report(tmp_path, report):
+    return _write(tmp_path / "committed.json", json.dumps(report))
+
+
+def _assert_replay_unchanged(tmp_path, report, parameter):
+    result = rerun_lvs_report(_commit_report(tmp_path, report))
+    assert result["status"] == "match", result
+    assert report["status"] == "match"
+    (entry,) = _ph_entries(report)
+    assert entry["severity"] == "warning"
+    assert entry["details"]["parameter"] == parameter
+
+
+@pytest.mark.parametrize("layout,reference,top,parameter", _PH_REPLAY_CASES)
+def test_rerun_replays_subckt_call_placeholder_klayout(
+    tmp_path, layout, reference, top, parameter
+):
+    report = run_lvs(_ph_request(tmp_path, layout, reference, top, "klayout"))
+    assert report["reference_conversion"] == {
+        "form": "subckt-call",
+        "deck": "sky130",
+        "device_map": None,
+    }
+    _assert_replay_unchanged(tmp_path, report, parameter)
+
+
+@pytest.mark.parametrize("layout,reference,top,parameter", _PH_REPLAY_CASES)
+def test_rerun_replays_subckt_call_placeholder_netgen_stubbed(
+    tmp_path, monkeypatch, layout, reference, top, parameter
+):
+    # Without and with caller setup: the replayed run must rebuild the
+    # exclusions and, when given, compose the caller's setup ahead of them.
+    seen: list[str] = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        seen.append(Path(cmd[-2]).read_text())
+        Path(cmd[-1]).write_text(_NETGEN_MATCH_LOG)
+        return fake_completed(_NETGEN_STDOUT_BANNER)
+
+    _stub_netgen_which(monkeypatch)
+    monkeypatch.setattr(lvs_netgen.subprocess, "run", fake_run)
+    caller = _write(tmp_path / "caller.tcl", "# caller\n")
+    for options in ({}, {"netgen_setup": caller}):
+        seen.clear()
+        report = run_lvs(
+            _ph_request(tmp_path, layout, reference, top, "netgen", **options)
+        )
+        assert len(seen) == 1
+        _assert_replay_unchanged(tmp_path, report, parameter)
+        assert len(seen) == 2
+        original, replayed = seen
+        assert "delete value" in replayed
+        assert ("source" in replayed) == bool(options)
+        assert replayed.replace(str(tmp_path), "") == original.replace(
+            str(tmp_path), ""
+        )
+
+
+@_SKIP_NO_NETGEN
+@pytest.mark.parametrize("layout,reference,top,parameter", _PH_REPLAY_CASES)
+@pytest.mark.parametrize("with_setup", [False, True])
+def test_rerun_replays_subckt_call_placeholder_real_netgen(
+    tmp_path, layout, reference, top, parameter, with_setup
+):
+    options = {}
+    marker = tmp_path / "marker.txt"
+    if with_setup:
+        options["netgen_setup"] = _write(
+            tmp_path / "setup.tcl",
+            f'set f [open "{marker}" a]\nputs $f hi\nclose $f\n',
+        )
+    report = run_lvs(_ph_request(tmp_path, layout, reference, top, "netgen", **options))
+    _assert_replay_unchanged(tmp_path, report, parameter)
+    if with_setup:
+        # Once for the original run, once for the replay.
+        assert marker.read_text().split() == ["hi", "hi"]
+
+
+def test_rerun_report_without_reference_conversion_is_not_drift(tmp_path):
+    # Older compat: a plain-element report never carried the echo, and a
+    # `subckt-call` report committed before it existed must not report the
+    # new field as drift (it stays best-effort, as documented).
+    report = run_lvs(
+        _ph_request(
+            tmp_path,
+            _PLACEHOLDER_RESISTOR_LAYOUT,
+            _PLACEHOLDER_RESISTOR_REFERENCE,
+            "res_net",
+            "klayout",
+        )
+    )
+    old = {k: v for k, v in report.items() if k != "reference_conversion"}
+    with pytest.raises(LvsError):
+        # Replayed as plain-element SPICE, exactly as before this change.
+        rerun_lvs_report(_commit_report(tmp_path, old))
