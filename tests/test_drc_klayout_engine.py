@@ -2050,3 +2050,238 @@ def test_expect_rule_categories_report_check_and_rerun(tmp_path, monkeypatch, ca
     assert (
         main(["drc", "--check", str(report_path), "--rerun", "--format", "json"]) == 0
     )
+
+
+# --------------------------------------------------------------------------- #
+# Application-version preflight (issue #2689)
+# --------------------------------------------------------------------------- #
+
+
+def _stub_versioned_klayout(
+    monkeypatch,
+    *,
+    version_stdout="KLayout 0.30.12\n",
+    probe_returncode=0,
+    probe_side_effect=None,
+):
+    """Stub `drc.subprocess.run`: `-v` probes answer `version_stdout`; any
+    other call is a deck launch writing an empty report. Records both."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        calls.append(list(cmd))
+        if cmd[1:] == ["-v"]:
+            if probe_side_effect is not None:
+                raise probe_side_effect
+            return fake_completed(stdout=version_stdout, returncode=probe_returncode)
+        report = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
+        with open(report, "w", encoding="utf-8") as handle:
+            handle.write(_EMPTY_RDB)
+        return fake_completed()
+
+    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    return calls
+
+
+def _inputs(tmp_path):
+    return (
+        _write_gds(tmp_path / "test.gds"),
+        _write_deck_file(tmp_path / "deck.lydrc"),
+    )
+
+
+def _deck_launches(calls):
+    return [c for c in calls if "-b" in c]
+
+
+@pytest.mark.parametrize(
+    "reported, minimum",
+    [
+        ("KLayout 0.30.12", "0.30.12"),
+        ("KLayout 0.30.12", "0.30.9"),
+        ("KLayout 0.31.0\n", "0.30.12"),
+        ("KLayout 0.30.12-1", "0.30.12"),
+        ("0.30.12", "0.30"),
+        ("KLayout 1.0", "0.30.12"),
+    ],
+)
+def test_min_version_satisfied_runs_deck_on_same_executable(
+    tmp_path, monkeypatch, reported, minimum
+):
+    calls = _stub_versioned_klayout(monkeypatch, version_stdout=reported)
+    gds, deck = _inputs(tmp_path)
+
+    run_drc_klayout_engine(gds, deck, min_klayout_version=minimum)
+
+    assert calls[0] == ["klayout", "-v"]
+    launches = _deck_launches(calls)
+    assert len(launches) == 1
+    assert launches[0][0] == calls[0][0]
+
+
+@pytest.mark.parametrize(
+    "reported, minimum",
+    [
+        ("KLayout 0.28.16", "0.30.0"),
+        ("KLayout 0.30.9", "0.30.12"),
+        ("KLayout 0.30", "0.30.1"),
+    ],
+)
+def test_min_version_unmet_fails_before_deck(tmp_path, monkeypatch, reported, minimum):
+    calls = _stub_versioned_klayout(monkeypatch, version_stdout=reported)
+    gds, deck = _inputs(tmp_path)
+
+    with pytest.raises(DrcError) as info:
+        run_drc_klayout_engine(
+            gds,
+            deck,
+            min_klayout_version=minimum,
+            allow_deck_errors=True,
+            allow_missing_host_tools=True,
+        )
+
+    message = str(info.value)
+    assert reported.split()[-1] in message and minimum in message
+    assert "update" in message
+    assert _deck_launches(calls) == []
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "abc", "0.30.x", "v0.30", "0..3", "-1.0", ">=0.30"]
+)
+def test_min_version_malformed_request_rejected(tmp_path, monkeypatch, bad):
+    calls = _stub_versioned_klayout(monkeypatch)
+    gds, deck = _inputs(tmp_path)
+
+    with pytest.raises(DrcError, match="invalid minimum KLayout version"):
+        run_drc_klayout_engine(gds, deck, min_klayout_version=bad)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"version_stdout": "no digits here"}, "could not parse"),
+        ({"version_stdout": ""}, "could not parse"),
+        ({"probe_returncode": 2}, "exited with status 2"),
+        ({"probe_side_effect": FileNotFoundError("nope")}, "not found on PATH"),
+        (
+            {"probe_side_effect": subprocess.TimeoutExpired(cmd="klayout", timeout=1)},
+            "did not complete within",
+        ),
+        (
+            {"probe_side_effect": PermissionError(13, "Permission denied", "klayout")},
+            "could not launch 'klayout -v'.*Permission denied",
+        ),
+    ],
+)
+def test_min_version_probe_failures_are_actionable(
+    tmp_path, monkeypatch, kwargs, match
+):
+    calls = _stub_versioned_klayout(monkeypatch, **kwargs)
+    gds, deck = _inputs(tmp_path)
+
+    with pytest.raises(DrcError, match=match):
+        run_drc_klayout_engine(
+            gds, deck, min_klayout_version="0.30.0", allow_deck_errors=True
+        )
+    assert _deck_launches(calls) == []
+
+
+def test_min_version_omitted_never_probes(tmp_path, monkeypatch):
+    calls = _stub_versioned_klayout(monkeypatch, version_stdout="garbage")
+    gds, deck = _inputs(tmp_path)
+
+    run_drc_klayout_engine(gds, deck)
+
+    assert all(c[1:] != ["-v"] for c in calls)
+    assert len(_deck_launches(calls)) == 1
+
+
+def test_cli_min_klayout_version_text_and_json_errors(tmp_path, monkeypatch, capsys):
+    calls = _stub_versioned_klayout(monkeypatch, version_stdout="KLayout 0.28.16")
+    gds, deck = _inputs(tmp_path)
+    argv = [
+        "drc", gds, "--engine", "klayout", "--deck-file", deck,
+        "--min-klayout-version", "0.30.12",
+    ]  # fmt: skip
+
+    assert main(argv) == 1
+    captured = capsys.readouterr()
+    assert "0.28.16" in captured.err + captured.out
+    assert "0.30.12" in captured.err + captured.out
+
+    assert main([*argv, "--format", "json"]) == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert "0.28.16" in json.dumps(payload) and "0.30.12" in json.dumps(payload)
+    assert _deck_launches(calls) == []
+
+
+def test_cli_min_klayout_version_permission_denied_probe_emits_json_error(
+    tmp_path, monkeypatch, capsys
+):
+    calls = _stub_versioned_klayout(
+        monkeypatch,
+        probe_side_effect=PermissionError(13, "Permission denied", "klayout"),
+    )
+    gds, deck = _inputs(tmp_path)
+
+    code = main(
+        [
+            "drc", gds, "--engine", "klayout", "--deck-file", deck,
+            "--min-klayout-version", "0.30.12", "--format", "json",
+        ]
+    )  # fmt: skip
+
+    assert code == 1
+    text = capsys.readouterr().err
+    assert "Permission denied" in json.loads(text)["error"]["message"]
+    assert _deck_launches(calls) == []
+
+
+def test_cli_min_klayout_version_satisfied_runs(tmp_path, monkeypatch, capsys):
+    calls = _stub_versioned_klayout(monkeypatch, version_stdout="KLayout 0.30.12")
+    gds, deck = _inputs(tmp_path)
+
+    main(
+        [
+            "drc", gds, "--engine", "klayout", "--deck-file", deck,
+            "--min-klayout-version", "0.30.9", "--format", "json",
+        ]
+    )  # fmt: skip
+
+    assert len(_deck_launches(calls)) == 1
+
+
+def test_request_document_min_klayout_version(tmp_path, monkeypatch, capsys):
+    calls = _stub_versioned_klayout(monkeypatch, version_stdout="KLayout 0.28.16")
+    gds, deck = _inputs(tmp_path)
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.drc.request/1",
+                "file": gds,
+                "engine": "klayout",
+                "deck_file": deck,
+                "min_klayout_version": "0.30.12",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["drc", str(request), "--format", "json"]) == 1
+    assert _deck_launches(calls) == []
+
+    request.write_text(
+        json.dumps(
+            {
+                "file": gds,
+                "engine": "klayout",
+                "deck_file": deck,
+                "min_klayout_version": 30,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["drc", str(request), "--format", "json"]) == 1

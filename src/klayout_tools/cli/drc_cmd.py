@@ -145,6 +145,7 @@ _REQUEST_FIELD_DESTS = {
     "allow_deck_errors": "allow_deck_errors",
     "allow_missing_host_tools": "allow_missing_host_tools",
     "expect_rule_categories": "expect_rule_categories",
+    "min_klayout_version": "min_klayout_version",
     "pdk": "pdk",
     "pdk_root": "pdk_root",
 }
@@ -207,6 +208,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 request, "allow_missing_host_tools", verb="drc", error_cls=DrcError
             ),
             "expect_rule_categories": _expect_rule_categories(request),
+            "min_klayout_version": _str("min_klayout_version"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
         }
@@ -249,6 +251,7 @@ def _run(args: argparse.Namespace) -> dict:
             allow_deck_errors=args.allow_deck_errors,
             allow_missing_host_tools=args.allow_missing_host_tools,
             expected_rule_categories=args.expect_rule_categories,
+            min_klayout_version=args.min_klayout_version,
         )
 
     if not args.deck:

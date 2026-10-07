@@ -2646,6 +2646,28 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--label-layer",
+        dest="label_layers",
+        action="append",
+        default=None,
+        metavar="ROLE=LAYER/DATATYPE",
+        help=(
+            "read net/pin name text for one label ROLE from the given GDS "
+            "layer/datatype instead of the one this --deck's curated default "
+            "picked (issue #2686), as ROLE=LAYER/DATATYPE; repeatable, passed "
+            "through to `klt extract --label-layer`. ROLE is `well`, `poly`, "
+            "or `metal<i>` (0-based); the value `none` reads no label layer "
+            "for that role. A later entry for the same ROLE wins. Use it when "
+            "the layout's names sit on a text purpose the deck does not read "
+            "(e.g. IHP `Metal1.text` 8/25 under `sg13cmos5l`, which reads "
+            "`Metal1.pin` 8/2) -- otherwise extraction promotes no top-level "
+            "pins and the extracted DUT cannot bind. An unknown ROLE is an "
+            "error. Omitted by default -- byte-identical to today's "
+            "behavior. The applied mapping is echoed in the JSON response's "
+            "`extraction.label_layers`. See docs/cli/pex.md."
+        ),
+    )
+    pex_parser.add_argument(
         "--critical-net",
         dest="critical_nets",
         action="append",
@@ -4624,6 +4646,22 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "known-unrunnable rule; the tolerated exit status and ERROR "
             "lines are recorded in the report's own engine_deck_errors "
             "field. See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_parser.add_argument(
+        "--min-klayout-version",
+        dest="min_klayout_version",
+        metavar="VERSION",
+        default=None,
+        help=(
+            "minimum standalone KLayout application version (e.g. 0.30.12) "
+            "the native deck needs (--engine klayout only; ignored for "
+            "--engine curated). The `klayout` on PATH is probed with -v "
+            "before the deck runs; an older, missing or unparseable "
+            "version fails up front. Omitted: no check. Not bypassed by "
+            "--allow-deck-errors/--allow-missing-host-tools, and passing "
+            "does not prove the deck is compatible. "
+            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
         ),
     )
     drc_parser.add_argument(

@@ -21219,3 +21219,333 @@ def test_rerun_report_without_reference_conversion_is_not_drift(tmp_path):
     with pytest.raises(LvsError):
         # Replayed as plain-element SPICE, exactly as before this change.
         rerun_lvs_report(_commit_report(tmp_path, old))
+
+
+# --------------------------------------------------------------------------- #
+# `layout.label_layers` (issue #2686): `klt extract --label-layer`'s per-request
+# label-purpose override (issue #2656), adopted by inline-extraction LVS.
+#
+# Fixture: `_write_flat_inverter_gds` draws every li1 net name on `li1.pin`
+# (67/5), the purpose `decks.sky130` reads for `metal0`. Moving those labels to
+# an unread li1 purpose (67/10) reproduces the "names on the other text
+# purpose" layout: extraction succeeds but promotes no li1-named pin, so the
+# compare against a reference with those ports cannot match -- unless the
+# override points `metal0` at 67/10.
+# --------------------------------------------------------------------------- #
+
+#: An li1 purpose `decks.sky130` does not read for anything (its
+#: `metal_labels[0]` is `li1.pin`, 67/5).
+_LVS_UNREAD_LI1_PURPOSE = [67, 10]
+
+
+def _write_flat_inverter_on_unread_purpose(path: Path) -> str:
+    """``_write_flat_inverter_gds``'s layout with every ``li1.pin`` (67/5)
+    label moved to the unread ``(67, 10)`` purpose; geometry unchanged."""
+    import klayout.db as kdb
+
+    source = _write_flat_inverter_gds(path.with_name(path.stem + "_default.gds"))
+    layout = kdb.Layout()
+    layout.read(source)
+    src = layout.layer(67, 5)
+    dst = layout.layer(*_LVS_UNREAD_LI1_PURPOSE)
+    for cell in layout.each_cell():
+        cell.shapes(dst).insert(cell.shapes(src))
+        cell.shapes(src).clear()
+    layout.write(str(path))
+    return str(path)
+
+
+def _label_layers_fixture(tmp_path: Path) -> tuple[str, str]:
+    """``(moved_gds, reference_spice)``: the moved-label layout, and a
+    reference extracted from the *default*-labelled layout -- the netlist a
+    correctly-named extraction of the moved layout must match."""
+    from klayout_tools.extract import run_extract
+
+    moved = _write_flat_inverter_on_unread_purpose(tmp_path / "moved.gds")
+    reference = str(tmp_path / "ref.spice")
+    run_extract(str(tmp_path / "moved_default.gds"), "sky130", output=reference)
+    return moved, reference
+
+
+def _label_layers_request(
+    gds: str, reference: str, label_layers: object = None, *, omit: bool = False
+) -> dict:
+    layout: dict = {"file": gds, "deck": "sky130", "top": "TOP"}
+    if not omit:
+        layout["label_layers"] = label_layers
+    return {"layout": layout, "reference": {"netlist": reference, "top": "TOP"}}
+
+
+#: A name-dependent assertion for the compare: `NetlistComparer` pairs nets
+#: by topology, so a layout with anonymous nets still *structurally* matches
+#: this symmetric inverter (issue #2473's pinned behaviour). `hints.same_nets`
+#: needs the layout nets to actually carry these names.
+_NAMED_NET_HINTS = {"same_nets": [["A", "A"], ["Y", "Y"], ["VPWR", "VPWR"]]}
+
+
+def _layout_named_nets(report: dict) -> set[str]:
+    return {entry["layout"] for entry in report["net_correspondence"]}
+
+
+def test_label_layers_override_promotes_pins_from_the_alternate_purpose(tmp_path):
+    """The fix: with `metal0` pointed at the purpose the names actually sit
+    on, inline extraction recovers the named pins, a name-anchored compare
+    matches, and the layout side agrees with a direct `klt extract` using the
+    same mapping (issue #2686)."""
+    from klayout_tools.extract import run_extract
+
+    moved, reference = _label_layers_fixture(tmp_path)
+    request = _label_layers_request(
+        moved, reference, {"metal0": _LVS_UNREAD_LI1_PURPOSE}
+    )
+    request["hints"] = _NAMED_NET_HINTS
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "match", report["mismatches"]
+    assert report["label_layers"] == {"metal0": [67, 10]}
+    assert report["counts"]["pins"]["layout"] == report["counts"]["pins"]["reference"]
+    assert {"A", "Y", "VPWR", "VGND", "VPB"} <= _layout_named_nets(report)
+
+    direct = run_extract(
+        moved,
+        "sky130",
+        output=str(tmp_path / "direct.spice"),
+        label_layers={"metal0": (67, 10)},
+    )
+    assert direct["label_layers"] == report["label_layers"]
+    assert report["counts"]["pins"]["layout"] == direct["pin_count"]
+    assert sorted(net["name"] for net in direct["nets"] if net["pin"]) == sorted(
+        entry["layout"] for entry in report["net_correspondence"] if entry["pin"]
+    )
+
+
+def test_label_layers_omitted_null_or_empty_keeps_default_extraction(tmp_path):
+    """Omitting the field, `null`, and `{}` all extract exactly as before the
+    field existed: the moved names stay unread (fewer layout pins, anonymous
+    nets), and no `label_layers` key appears in the report. The compare still
+    pairs structurally, but a name-anchored compare cannot run at all."""
+    moved, reference = _label_layers_fixture(tmp_path)
+    reports = [
+        run_lvs(json.dumps(_label_layers_request(moved, reference, omit=True))),
+        run_lvs(json.dumps(_label_layers_request(moved, reference, None))),
+        run_lvs(json.dumps(_label_layers_request(moved, reference, {}))),
+    ]
+    for report in reports:
+        assert "label_layers" not in report
+        pins = report["counts"]["pins"]
+        assert pins["layout"] < pins["reference"]
+        assert not {"A", "Y", "VPWR", "VGND"} & _layout_named_nets(report)
+    assert reports[0]["counts"] == reports[1]["counts"] == reports[2]["counts"]
+    assert reports[0]["mismatches"] == reports[1]["mismatches"]
+
+    anchored = _label_layers_request(moved, reference, omit=True)
+    anchored["hints"] = _NAMED_NET_HINTS
+    with pytest.raises(LvsError, match="layout net 'A' not found"):
+        run_lvs(json.dumps(anchored))
+
+
+def test_label_layers_override_on_default_layout_is_per_request(tmp_path):
+    """The default-labelled layout keeps matching with no override, in the
+    same process as an overridden run -- the deck's default is not mutated."""
+    moved, reference = _label_layers_fixture(tmp_path)
+    default_gds = str(tmp_path / "moved_default.gds")
+    run_lvs(json.dumps(_label_layers_request(moved, reference, {"metal0": [67, 10]})))
+    report = run_lvs(
+        json.dumps(_label_layers_request(default_gds, reference, omit=True))
+    )
+    assert report["status"] == "match", report["mismatches"]
+
+
+def test_label_layers_multiple_roles_and_cleared_role(tmp_path):
+    """Several roles at once, including a `null` (cleared) role, are all
+    applied and echoed sorted by role with the `null` preserved. `poly` and
+    `metal1` carry no labels in this fixture, so clearing/moving them leaves
+    the match intact."""
+    moved, reference = _label_layers_fixture(tmp_path)
+    report = run_lvs(
+        json.dumps(
+            _label_layers_request(
+                moved,
+                reference,
+                {"poly": None, "metal1": [68, 10], "metal0": [67, 10]},
+            )
+        )
+    )
+    assert report["status"] == "match", report["mismatches"]
+    assert report["label_layers"] == {
+        "metal0": [67, 10],
+        "metal1": [68, 10],
+        "poly": None,
+    }
+    assert list(report["label_layers"]) == ["metal0", "metal1", "poly"]
+
+
+def test_label_layers_clearing_the_read_role_drops_the_names(tmp_path):
+    """`null` really clears: on the default-labelled layout, clearing
+    `metal0` loses every li1 name, exactly like the moved-label layout."""
+    _moved, reference = _label_layers_fixture(tmp_path)
+    default_gds = str(tmp_path / "moved_default.gds")
+    report = run_lvs(
+        json.dumps(_label_layers_request(default_gds, reference, {"metal0": None}))
+    )
+    assert report["label_layers"] == {"metal0": None}
+    assert report["counts"]["pins"]["layout"] < report["counts"]["pins"]["reference"]
+    assert "A" not in _layout_named_nets(report)
+
+
+def test_label_layers_unknown_role_is_a_clean_lvs_error(tmp_path):
+    moved, reference = _label_layers_fixture(tmp_path)
+    with pytest.raises(LvsError, match="no label-layer role"):
+        run_lvs(
+            json.dumps(_label_layers_request(moved, reference, {"metal9": [67, 10]}))
+        )
+
+
+@pytest.mark.parametrize(
+    "value, match",
+    [
+        ("metal0=67/10", "must be a JSON object"),
+        ([["metal0", 67, 10]], "must be a JSON object"),
+        ({"metal0": "67/10"}, r"label_layers\.metal0 must be a \[layer, datatype\]"),
+        ({"metal0": [67]}, r"label_layers\.metal0 must be"),
+        ({"metal0": [67, 10, 0]}, r"label_layers\.metal0 must be"),
+        ({"metal0": [67.0, 10]}, r"label_layers\.metal0 must be"),
+        ({"metal0": [True, 10]}, r"label_layers\.metal0 must be"),
+        ({"metal0": [67, -1]}, r"label_layers\.metal0 must be"),
+        ({"metal0": {"layer": 67}}, r"label_layers\.metal0 must be"),
+    ],
+)
+def test_label_layers_malformed_value_is_a_clean_lvs_error(tmp_path, value, match):
+    """Wrong-shaped values are rejected without coercion, before any
+    extraction runs (the layout file need not even exist)."""
+    with pytest.raises(LvsError, match=match):
+        run_lvs(
+            json.dumps(
+                _label_layers_request(
+                    str(tmp_path / "absent.gds"), str(tmp_path / "ref.spice"), value
+                )
+            )
+        )
+
+
+def test_label_layers_without_deck_is_a_clean_lvs_error(tmp_path):
+    request = {
+        "layout": {
+            "file": str(tmp_path / "absent.gds"),
+            "label_layers": {"metal0": [67, 10]},
+        },
+        "reference": {"netlist": str(tmp_path / "ref.spice")},
+    }
+    with pytest.raises(LvsError, match="label_layers requires request.layout.deck"):
+        run_lvs(json.dumps(request))
+
+
+@pytest.mark.parametrize("with_deck", [False, True])
+def test_label_layers_on_pre_extracted_netlist_is_rejected(tmp_path, with_deck):
+    """A pre-extracted netlist's names are already fixed, so a non-empty
+    override is an actionable error on that shape -- with or without
+    `layout.deck` -- rather than a silent no-op."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    layout: dict = {
+        "netlist": layout_path,
+        "top": "inv",
+        "label_layers": {"metal0": [67, 10]},
+    }
+    if with_deck:
+        layout["deck"] = "sky130"
+    request = {"layout": layout, "reference": {"netlist": reference_path, "top": "inv"}}
+    with pytest.raises(LvsError, match="applies only to inline extraction"):
+        run_lvs(json.dumps(request))
+
+
+def test_label_layers_empty_or_null_on_pre_extracted_netlist_is_accepted(tmp_path):
+    """`{}`/`null` request no override, so they are as harmless on the
+    pre-extracted shape as omitting the field."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    for value in ({}, None):
+        request = {
+            "layout": {"netlist": layout_path, "top": "inv", "label_layers": value},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        }
+        report = run_lvs(json.dumps(request))
+        assert report["status"] == "match"
+        assert "label_layers" not in report
+
+
+def test_label_layers_reconstructed_request_preserves_mapping_and_nulls(tmp_path):
+    moved, reference = _label_layers_fixture(tmp_path)
+    report = run_lvs(
+        json.dumps(
+            _label_layers_request(moved, reference, {"metal0": [67, 10], "poly": None})
+        )
+    )
+    # Issue #2659: `layout` is a repo-relative envelope, resolved against the
+    # repo root of the committed report's own location.
+    request = lvs._reconstruct_lvs_request(
+        report, report_path=str(tmp_path / "report.json")
+    )
+    assert request["layout"]["label_layers"] == {"metal0": [67, 10], "poly": None}
+    assert request["layout"]["file"] == moved
+    assert request["layout"]["deck"] == "sky130"
+
+
+def test_label_layers_reconstruction_omits_field_for_report_without_echo(tmp_path):
+    moved, reference = _label_layers_fixture(tmp_path)
+    report = run_lvs(json.dumps(_label_layers_request(moved, reference, omit=True)))
+    assert "label_layers" not in lvs._reconstruct_lvs_request(report)["layout"]
+
+
+def test_label_layers_report_reruns_clean(tmp_path):
+    """A modern report with an override replays it under `--check --rerun`:
+    no drift, and the fresh run carries the identical echo."""
+    moved, reference = _label_layers_fixture(tmp_path)
+    report = run_lvs(
+        json.dumps(
+            _label_layers_request(moved, reference, {"metal0": [67, 10], "poly": None})
+        )
+    )
+    report_path = _write_report(tmp_path / "lvs.json", report)
+
+    result = rerun_lvs_report(report_path)
+
+    assert result["status"] == "match", result["drift"]
+    assert result["drift"] == []
+    assert result["fresh"]["label_layers"] == {"metal0": [67, 10], "poly": None}
+
+
+def test_label_layers_historical_report_without_field_reruns_clean(tmp_path):
+    """A report from a request without the field (byte-identical to one
+    committed before the field existed) reruns with no override and no
+    drift -- the additive echo is never introduced by the rerun."""
+    _moved, reference = _label_layers_fixture(tmp_path)
+    default_gds = str(tmp_path / "moved_default.gds")
+    report = run_lvs(
+        json.dumps(_label_layers_request(default_gds, reference, omit=True))
+    )
+    assert "label_layers" not in report
+    report_path = _write_report(tmp_path / "lvs.json", report)
+
+    result = rerun_lvs_report(report_path)
+
+    assert result["status"] == "match", result["drift"]
+    assert "label_layers" not in result["fresh"]
+
+
+def test_label_layers_genuine_drift_is_still_detected(tmp_path):
+    """Removing the echo from a report whose pins depended on the override
+    replays without it, so the fresh run loses the named pins -- that is real
+    drift and is reported, not suppressed by the compatibility rule."""
+    moved, reference = _label_layers_fixture(tmp_path)
+    report = run_lvs(
+        json.dumps(_label_layers_request(moved, reference, {"metal0": [67, 10]}))
+    )
+    assert report["status"] == "match"
+    del report["label_layers"]
+    report_path = _write_report(tmp_path / "lvs.json", report)
+
+    result = rerun_lvs_report(report_path)
+
+    assert result["status"] == "drifted"
+    drifted = {entry["field"] for entry in result["drift"]}
+    assert "counts.pins.layout" in drifted
+    assert "label_layers" not in result["fresh"]

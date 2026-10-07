@@ -10,6 +10,9 @@ Judge-approved PRs stuck under a `loom:operator` merge-risk hold — implementat
 - **#2645**: feat(synthesize,sta,place-and-route): shared request.macros hard-macro declaration
 - **#2701**: feat(drc,extract,lvs): emit echoed input paths as the portable {path, scope} envelope
 - **#2711**: feat(loom): frozen-timeline guard in claim-staleness.sh + pin (#1966, PR 1 of 2)
+- **#2795**: drc: model sg13g2 Cnt.c activ_mask join and square-contact selection
+- **#2797**: fix(lvs): parse netgen property blocks with colonless device identifiers
+- **#2801**: feat(drc): opt-in required containment for cuts; sg13cmos5l via-stack coverage
 
 ## Operator Priority
 
@@ -23,14 +26,7 @@ Human-approved issues ready for implementation (`loom:issue`).
 
 - **#1966**: Re-evaluate the .loom/resync-ignore pin on curator.md (#668) — it may be freezing this repo against upstream Curator fixes
 - **#2340**: signoff: input_verified is always null for drc/extract envelopes that recorded an absolute host path
-- **#2415**: klt erc: the empty-label_layer condition is stderr-only, so a signoff consumer still cannot detect a report resting on an empty label layer
-- **#2443**: Backfill threshold_max_dbu on the four fixed-size cut rules #2388's scope left min-only
-- **#2445**: extract: decide whether cap_cmomi's feed variant (none/same/double) is recoverable from drawn geometry
-- **#2451**: klt deck resolve: a release's own deck hash is never in its own history table, so the newest release always self-reports released: false
-- **#2453**: synthesize under a WASI-sandboxed engine build fails when the run dir is under the host temp dir, and the error's remedy advises unpinning the engine
 - **#2620**: Stale-verdict reconciliation cleared a fresh approval whose head SHA had not moved (PR #2571)
-- **#2668**: klt sim: stage explicit model libraries and OSDI assets for batch/remote jobs
-- **#2673**: Friction: device.placeholder_value exclusion is klayout-engine-only, so the same request verdicts differently on engine: "netgen"
 
 ## In Progress
 
@@ -51,6 +47,9 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#2645**: feat(synthesize,sta,place-and-route): shared request.macros hard-macro declaration
 - **#2701**: feat(drc,extract,lvs): emit echoed input paths as the portable {path, scope} envelope
 - **#2711**: feat(loom): frozen-timeline guard in claim-staleness.sh + pin (#1966, PR 1 of 2)
+- **#2795**: drc: model sg13g2 Cnt.c activ_mask join and square-contact selection
+- **#2797**: fix(lvs): parse netgen property blocks with colonless device identifiers
+- **#2801**: feat(drc): opt-in required containment for cuts; sg13cmos5l via-stack coverage
 
 ## Proposed
 
@@ -64,13 +63,8 @@ Issues carrying `loom:curated`.
 - **#2281**: Track synthesis memory-mapping reporting and the observability design spike *(curated)*
 - **#2340**: signoff: input_verified is always null for drc/extract envelopes that recorded an absolute host path *(curated)*
 - **#2388**: Backfill threshold_max_dbu on sky130/sg13g2/sg13cmos5l fixed-size cut/via rules *(curated)*
-- **#2415**: klt erc: the empty-label_layer condition is stderr-only, so a signoff consumer still cannot detect a report resting on an empty label layer *(curated)*
 - **#2437**: dep-recheck-fingerprint.sh named-dependency mis-resolves cross-repo owner/repo#N refs *(curated)*
-- **#2443**: Backfill threshold_max_dbu on the four fixed-size cut rules #2388's scope left min-only *(curated)*
-- **#2445**: extract: decide whether cap_cmomi's feed variant (none/same/double) is recoverable from drawn geometry *(curated)*
 - **#2449**: klt gen draws one PDK-independent 0.22um cut: illegal on sg13g2/sg13cmos5l Cont+Via and sky130 via *(curated)*
-- **#2451**: klt deck resolve: a release's own deck hash is never in its own history table, so the newest release always self-reports released: false *(curated)*
-- **#2453**: synthesize under a WASI-sandboxed engine build fails when the run dir is under the host temp dir, and the error's remedy advises unpinning the engine *(curated)*
 - **#2458**: klt extract --parasitics sums a net's per-level lumped R in series, so via-stitched strapping raises the reported resistance instead of lowering it *(curated)*
 - **#2489**: sim: a corner whose solve emitted singular-matrix/gmin warnings, or returned physically implausible node voltages, is still graded as a normal measurement *(curated)*
 - **#2490**: sim: document that monte_carlo.seed is reproducible per engine build, not across them -- ngspice 42 vs 46 draw differently from the same seed *(curated)*
@@ -80,23 +74,18 @@ Issues carrying `loom:curated`.
 - **#2620**: Stale-verdict reconciliation cleared a fresh approval whose head SHA had not moved (PR #2571) *(curated)*
 - **#2635**: synthesize / sta / place-and-route: no way to declare a hard macro (LEF + liberty + GDS) in any request schema *(curated)*
 - **#2659**: drc/extract responses embed the producing host's absolute input path; signoff's input_verified gate cannot re-verify them from another checkout *(curated)*
-- **#2668**: klt sim: stage explicit model libraries and OSDI assets for batch/remote jobs *(curated)*
-- **#2673**: Friction: device.placeholder_value exclusion is klayout-engine-only, so the same request verdicts differently on engine: "netgen" *(curated)*
 - **#2674**: netgen engine: property-error block header without a `class:index` colon is not parsed, so every per-parameter detail degrades to one opaque details.raw blob *(curated)*
 - **#2675**: Friction: klt yield reports lost censored/inconclusive keys, breaking 5 native-extension tests on main *(curated)*
 - **#2679**: decks/sg13g2: poly-resistor body/marker are inverted vs the PDK's own PCell convention, so no drawn rsil/rppd/rhigh is ever recognized *(curated)*
-- **#2681**: klt sim: document and regression-test configurable measurement output precision *(curated)*
-- **#2682**: lvs: options.combine_devices_max_attempts (#1413) is never echoed in the report, so a committed report cannot state its retry budget and --check --rerun replays at the default *(curated)*
 - **#2686**: klt lvs / klt pex cannot override a deck's label purpose: --label-layer is klt extract-only *(curated)*
 - **#2688**: drc: curated sg13g2 Cnt.c drops the activ_mask join, so every HBT contact false-positives *(curated)*
 - **#2689**: drc --engine klayout: cannot use the bundled KLayout, and does not preflight the PATH one's DSL feature level *(curated)*
 - **#2690**: ring-check: no way to scope the layer set to the ring, so a shared layer can report continuous from unrelated geometry *(curated)*
-- **#2697**: drc --engine klayout: zero-finding external-deck runs can never be labelled clean - add an opt-in coverage assertion *(curated)*
 - **#2704**: lvs: a tie-net (or any interior-node) swap on a black-box macro still compares clean -- top-level pin anchoring cannot reach it *(curated)*
-- **#2706**: klt sim: per-corner supply_v override (alter) has no effect on PWL/PULSE/SIN sources *(curated)*
 - **#2716**: sim batch: document and regression-test adaptive single-probe campaigns *(curated)*
 - **#2718**: klt signoff: T1 items 1/2/9/10 accept any passing envelope and reject generic, so a cited 'met' carries no information about the item *(curated)*
 - **#2719**: klt sim --backend batch: an older klt on the fleet image silently ignores request options the submitting klt accepted (e.g. options.ngspice_init) *(curated)*
+- **#2720**: Repoint SG13CMOS5L PDK fetch to IHP-Open-PDK (the ihp-sg13cmos5l repo is archived) *(curated)*
 - **#2722**: Friction: klt extract has no hierarchical (per-cell subcircuit) output, so per-circuit LVS options cannot scope a composed layout *(curated)*
 - **#2723**: Friction: klt JSON reports (drc, extract) embed the caller's absolute invocation path, so identical analyses are never byte-identical *(curated)*
 - **#2724**: klt sim: no AC measurement over a two-node complex ratio (loop gain / phase margin) *(curated)*
@@ -107,12 +96,18 @@ Issues carrying `loom:curated`.
 - **#2733**: klt sim batch: fleet klt version skew and gf180mcu model-bin failure only visible via S3 *(curated)*
 - **#2734**: Epic: STA completeness, P&R density coverage, repair validation and iteration cost *(curated)*
 - **#2736**: design-agent: add an unscored sky130 analog charge-pump PLL alongside the behavioral reference *(curated)*
-- **#2738**: Friction: gen-compose sky130 routing roles stop at met2, so a P&R macro's met3 pins and met4/met5 PDN are unreachable by connectivity[]/routing *(curated)*
 - **#2739**: klt sta times a routed post-CTS DEF with an ideal clock, so boundary hold checks miss the clock-tree insertion delay *(curated)*
 - **#2740**: Friction: klt sta I/O delays are one scalar for all ports (no per-port, no min/max) and no worst-path identity, so a block-to-block boundary check cannot be expressed *(curated)*
-- **#2741**: klt sta: hold_violation_count is 0 while worst_hold_slack_ns is negative (removal checks counted in WNS/TNS but not in the violator count) *(curated)*
 - **#2744**: design-agent: assemble and validate the unscored sky130 device charge-pump PLL *(curated)*
 - **#2745**: synthesize: report memory-mapping evidence and pin the gf180 area regression *(curated)*
+- **#2746**: Design spike: define a reproducible synthesis observability negative control *(curated)*
+- **#2751**: klt erc: active_layer gate-area intersection is O(nets x active polygons) and dominates runtime on dense layouts *(curated)*
+- **#2753**: Allow sampled ERC walk attribution without a full profiling run *(curated)*
+- **#2760**: ASAP7 DRC deck for KLayout *(curated)*
+- **#2761**: ASAP7 LVS / FinFET device extraction (nfin) *(curated)*
+- **#2764**: pex: per-net parasitic RC network integrity report (opens, islands, short candidates, bad R, C delta) *(curated)*
+- **#2765**: pex: point-to-point resistance query over a net's RC network *(curated)*
+- **#2766**: ci: monotonic per-file size ratchet checked against the merge-base *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -137,14 +132,13 @@ Issues carrying `loom:curated`.
 
 | Tier | Count |
 |------|-------|
-| Operator merge-risk holds | 3 |
+| Operator merge-risk holds | 6 |
 | Operator priority | 0 |
-| Ready (`loom:issue`) | 10 |
+| Ready (`loom:issue`) | 3 |
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 3 |
-| Curated | 57 |
+| Approved PRs awaiting merge | 6 |
+| Curated | 53 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 8 |
-
 <!-- guide:plan-body:end -->

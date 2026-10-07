@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2686, `klt lvs`/`klt pex`): the `klt extract --label-layer`
+  label-purpose override (#2656) now reaches both verbs. `klt lvs` accepts
+  `layout.label_layers` (`{"<role>": [layer, datatype] | null}`) for inline
+  extraction only -- a non-empty value on the pre-extracted `layout.netlist`
+  shape, or without `layout.deck`, is an error -- echoes an applied override
+  as an additive top-level `label_layers` field (omitted otherwise) and
+  replays it under `--check --rerun`. `klt pex` accepts a repeatable
+  `--label-layer ROLE=LAYER/DATATYPE` (Python `run_pex(label_layers=...)`)
+  and records it as the additive `extraction.label_layers` (`null` when not
+  given). Omitting either leaves behavior and existing reports unchanged.
 - **Added** (#2697, `klt drc --engine klayout`): opt-in
   `--expect-rule-categories N` (Python `expected_rule_categories`, request
   field `expect_rule_categories`). An exact match with the deck's unique RDB

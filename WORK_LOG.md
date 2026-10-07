@@ -4,6 +4,33 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-07
 
+- **Issue #2453** (closed): synthesize under a WASI-sandboxed engine build fails when the run dir is under the host temp dir, and the error's remedy advises unpinning the engine
+- **Issue #2445** (closed): extract: decide whether cap_cmomi's feed variant (none/same/double) is recoverable from drawn geometry
+- **Issue #2668** (closed): klt sim: stage explicit model libraries and OSDI assets for batch/remote jobs
+- **Issue #2738** (closed): Friction: gen-compose sky130 routing roles stop at met2, so a P&R macro's met3 pins and met4/met5 PDN are unreachable by connectivity[]/routing
+- **Issue #2706** (closed): klt sim: per-corner supply_v override (alter) has no effect on PWL/PULSE/SIN sources
+- **Issue #2741** (closed): klt sta: hold_violation_count is 0 while worst_hold_slack_ns is negative (removal checks counted in WNS/TNS but not in the violator count)
+- **Issue #2697** (closed): drc --engine klayout: zero-finding external-deck runs can never be labelled clean - add an opt-in coverage assertion
+- **Issue #2681** (closed): klt sim: document and regression-test configurable measurement output precision
+- **Issue #2673** (closed): Friction: device.placeholder_value exclusion is klayout-engine-only, so the same request verdicts differently on engine: "netgen"
+- **Issue #2759** (closed): Shared PDK root (~/pdks) and per-technology PDK version check
+- **Issue #2682** (closed): lvs: options.combine_devices_max_attempts (#1413) is never echoed in the report, so a committed report cannot state its retry budget and --check --rerun replays at the default
+- **Issue #2758** (closed): Validate and document the pinned ASAP7 KLayout technology package
+- **PR #2793**: fix(synthesize,equiv): narrow WASI hint for scripts under the host temp dir
+- **PR #2794**: feat(extract): recover cap_cmomi feed variant from drawn port placement
+- **PR #2796**: feat(sim): opt-in staging of model inputs for remote/batch jobs (#2668)
+- **PR #2798**: feat(gen-compose): sky130 metal4/5/6 and via3/4/5 routing roles
+- **PR #2800**: feat(sim): reject supply_v override of PWL/PULSE/SIN sources (#2706)
+- **PR #2802**: fix(sta): count recovery/removal and clock-gating violators with setup/hold
+- **PR #2803**: feat(drc): opt-in --expect-rule-categories coverage assertion for klayout engine
+- **PR #2805**: docs+test(sim): document and regression-test measurement output precision
+- **PR #2791**: feat(lvs): placeholder-value exclusion on the netgen engine (#2673)
+- **PR #2808**: feat(pdk): shared ~/pdks root, ASAP7 probe, PDK version compatibility
+- **PR #2807**: lvs: echo options.combine_devices_max_attempts and replay it on --check --rerun
+- **PR #2809**: Validate and document pinned ASAP7 KLayout technology package
+- **PR #2815**: feat(drc): add ASAP7 FEOL/MOL KLayout DRC deck with per-rule fixtures
+- **PR #2817**: feat(extract): ASAP7 FinFET extraction with geometry-counted nfin
+
 - **PR #2790**: fix(decks): release build resolves its own deck hash
 - **PR #2789**: feat(drc): backfill threshold_max_dbu on sky130 via2/via3/via4 width rules (#2443)
 - **Issue #2451** (closed): klt deck resolve: a release's own deck hash is never in its own history table, so the newest release always self-reports released: false
