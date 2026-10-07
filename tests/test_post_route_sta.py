@@ -1382,6 +1382,269 @@ def test_run_sta_corners_content_hash_invariant_violation_raises(tmp_path, monke
         run_sta(request_path)
 
 
+# --------------------------------------------------------------------------- #
+# Violation-count check families (issue #2741).
+#
+# `report_check_types -max_delay`/`-min_delay` on their own filter to *data*
+# checks, while `report_worst_slack_metric`/`report_tns_metric` measure every
+# setup-side/hold-side check -- including asynchronous recovery/removal and
+# inferred clock-gating checks. The fixture below is real OpenROAD
+# `26Q3-1510-g6cb3f2b704` stdout (one session per scenario on a
+# dfrtp/dfxtp/and2 netlist, sky130_fd_sc_hd tt_025C_1v80), captured with both
+# the new combined report commands (`stdout`) and the legacy data-only ones
+# (`legacy_stdout`), alongside each session's own WNS/TNS metrics.
+# --------------------------------------------------------------------------- #
+
+_CHECK_FAMILY_CAPTURES = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "sta_check_families"
+        / "openroad_26Q3-1510_captures.json"
+    ).read_text(encoding="utf-8")
+)
+
+_LEGACY_SETUP_BEGIN = "===LEGACY_SETUP_BEGIN==="
+_LEGACY_SETUP_END = "===LEGACY_SETUP_END==="
+_LEGACY_HOLD_BEGIN = "===LEGACY_HOLD_BEGIN==="
+_LEGACY_HOLD_END = "===LEGACY_HOLD_END==="
+
+#: scenario -> (setup_violation_count, hold_violation_count) the real engine
+#: reported for the combined check-family commands.
+_EXPECTED_CHECK_FAMILY_COUNTS = {
+    "clean": (0, 0),
+    "removal_only": (0, 2),
+    "recovery_only": (2, 0),
+    "data_hold_only": (0, 3),
+    "data_setup_only": (3, 0),
+    # data + async families failing together: 3 data endpoints (ff/D,
+    # ff2/D, ff3/D) + 2 async endpoints (ff/RESET_B, ff2/RESET_B) -- each
+    # endpoint listed once, no double counting across families.
+    "mixed_hold": (0, 5),
+    "mixed_setup": (5, 0),
+    "clock_gating_setup_only": (1, 0),
+    "clock_gating_hold_only": (0, 1),
+    "unconstrained": (0, 0),
+}
+
+
+def _captured_counts(
+    stdout: str, markers: tuple[str, str, str, str]
+) -> tuple[int, int]:
+    from klayout_tools._openroad_engine import _count_violations
+
+    setup_begin, setup_end, hold_begin, hold_end = markers
+    return (
+        _count_violations(stdout, setup_begin, setup_end),
+        _count_violations(stdout, hold_begin, hold_end),
+    )
+
+
+_STA_MARKERS = (
+    post_route_sta._SETUP_VIOLATIONS_BEGIN,
+    post_route_sta._SETUP_VIOLATIONS_END,
+    post_route_sta._HOLD_VIOLATIONS_BEGIN,
+    post_route_sta._HOLD_VIOLATIONS_END,
+)
+
+
+def test_violation_count_lines_request_every_check_family():
+    """Both sides ask for the same check families their WNS/TNS metric
+    measures: data + recovery + clock-gating setup, and data + removal +
+    clock-gating hold -- one `report_check_types` call per side so each stays
+    one marker-delimited block for `_count_violations`."""
+    assert post_route_sta._violation_count_lines() == [
+        f'puts "{post_route_sta._SETUP_VIOLATIONS_BEGIN}"',
+        "report_check_types -max_delay -recovery -clock_gating_setup"
+        " -violators -format end",
+        f'puts "{post_route_sta._SETUP_VIOLATIONS_END}"',
+        f'puts "{post_route_sta._HOLD_VIOLATIONS_BEGIN}"',
+        "report_check_types -min_delay -removal -clock_gating_hold"
+        " -violators -format end",
+        f'puts "{post_route_sta._HOLD_VIOLATIONS_END}"',
+    ]
+
+
+def test_check_family_capture_used_the_shipped_report_commands():
+    """Guards the fixture against drift: it must have been captured with
+    exactly the report Tcl this module now emits, otherwise the parse tests
+    below would be asserting against a different command's output."""
+    assert (
+        _CHECK_FAMILY_CAPTURES["report_tcl"] == post_route_sta._violation_count_lines()
+    )
+    assert _CHECK_FAMILY_CAPTURES["engine_version"] == "26Q3-1510-g6cb3f2b704"
+
+
+@pytest.mark.parametrize("scenario", sorted(_EXPECTED_CHECK_FAMILY_COUNTS))
+def test_count_violations_on_real_check_family_reports(scenario):
+    captured = _CHECK_FAMILY_CAPTURES["scenarios"][scenario]
+    assert (
+        _captured_counts(captured["stdout"], _STA_MARKERS)
+        == _EXPECTED_CHECK_FAMILY_COUNTS[scenario]
+    )
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "removal_only",
+        "recovery_only",
+        "clock_gating_setup_only",
+        "clock_gating_hold_only",
+        "mixed_hold",
+        "mixed_setup",
+        "data_hold_only",
+        "data_setup_only",
+        "clean",
+    ],
+)
+def test_constrained_failing_side_has_nonzero_count(scenario):
+    """On these constrained fixtures every side whose captured WNS is
+    clearly negative (well beyond the report's 2-digit rounding) also has a
+    nonzero count, and every side with non-negative WNS counts zero. This is
+    a property of these specific captures, not a claim that WNS and the
+    count are interchangeable in general (rounded-to-zero slack and
+    unconstrained designs are deliberately excluded)."""
+    captured = _CHECK_FAMILY_CAPTURES["scenarios"][scenario]
+    metrics = captured["metrics"]
+    setup_count, hold_count = _captured_counts(captured["stdout"], _STA_MARKERS)
+    assert (metrics["timing__setup__ws"] < -0.01) == (setup_count > 0)
+    assert (metrics["timing__hold__ws"] < -0.01) == (hold_count > 0)
+    assert (metrics["timing__setup__tns"] < 0) == (setup_count > 0)
+    assert (metrics["timing__hold__tns"] < 0) == (hold_count > 0)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "legacy_counts"),
+    [
+        ("removal_only", (0, 0)),
+        ("recovery_only", (0, 0)),
+        ("clock_gating_setup_only", (0, 0)),
+        ("clock_gating_hold_only", (0, 0)),
+        ("mixed_hold", (0, 3)),
+        ("mixed_setup", (3, 0)),
+        ("data_hold_only", (0, 3)),
+        ("data_setup_only", (3, 0)),
+    ],
+)
+def test_legacy_data_only_commands_undercount_on_real_engine(scenario, legacy_counts):
+    """Documents the engine behavior behind issue #2741: the pre-fix
+    `-max_delay`/`-min_delay`-only reports miss every recovery/removal and
+    clock-gating violator the WNS/TNS metrics include, while data-only
+    scenarios count identically under the old and new commands."""
+    captured = _CHECK_FAMILY_CAPTURES["scenarios"][scenario]
+    legacy = _captured_counts(
+        captured["legacy_stdout"],
+        (_LEGACY_SETUP_BEGIN, _LEGACY_SETUP_END, _LEGACY_HOLD_BEGIN, _LEGACY_HOLD_END),
+    )
+    assert legacy == legacy_counts
+    if scenario.startswith("data_"):
+        assert legacy == _EXPECTED_CHECK_FAMILY_COUNTS[scenario]
+
+
+def test_unconstrained_capture_counts_zero_with_sentinel_slack():
+    """Unconstrained: the engine reports its 1e39 sentinel WNS and "No paths
+    found." in both blocks -- zero counts, and `timing_status` (not the
+    count) is what flags the design as untimed."""
+    captured = _CHECK_FAMILY_CAPTURES["scenarios"]["unconstrained"]
+    assert captured["metrics"]["timing__setup__ws"] >= 1e29
+    assert captured["stdout"].count("No paths found.") == 2
+    assert _captured_counts(captured["stdout"], _STA_MARKERS) == (0, 0)
+
+
+def _stub_openroad_check_family_engine(
+    monkeypatch, scenario_by_corner: dict[str | None, str]
+) -> list[str]:
+    """Replay the real captured engine output for `scenario_by_corner`
+    (keyed by corner name, or `None` for a single-corner run) -- choosing
+    the combined-command capture only when the generated script actually
+    requests the combined commands, and the legacy data-only capture
+    otherwise, so the replay reproduces what the pinned engine would print
+    for whichever Tcl `run_sta` really generated."""
+    scripts: list[str] = []
+    combined = _CHECK_FAMILY_CAPTURES["report_tcl"]
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="26Q3-1510-g6cb3f2b704 \n")
+        metrics_path, script_path = cmd[4], cmd[5]
+        script_text = Path(script_path).read_text(encoding="utf-8")
+        scripts.append(script_text)
+        corner = next(
+            (c for c in scenario_by_corner if c and f"__{c}.lib" in script_text),
+            None,
+        )
+        captured = _CHECK_FAMILY_CAPTURES["scenarios"][scenario_by_corner[corner]]
+        with open(metrics_path, "w", encoding="utf-8") as handle:
+            json.dump(captured["metrics"], handle)
+        if all(line in script_text.splitlines() for line in combined):
+            stdout = captured["stdout"]
+        else:
+            stdout = (
+                captured["legacy_stdout"]
+                .replace(_LEGACY_SETUP_BEGIN, post_route_sta._SETUP_VIOLATIONS_BEGIN)
+                .replace(_LEGACY_SETUP_END, post_route_sta._SETUP_VIOLATIONS_END)
+                .replace(_LEGACY_HOLD_BEGIN, post_route_sta._HOLD_VIOLATIONS_BEGIN)
+                .replace(_LEGACY_HOLD_END, post_route_sta._HOLD_VIOLATIONS_END)
+            )
+        return fake_completed(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    return scripts
+
+
+def test_run_sta_single_corner_counts_removal_violations(tmp_path, monkeypatch):
+    """The issue's own symptom: negative hold WNS/TNS from a removal-only
+    failure must come with a nonzero `hold_violation_count`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_check_family_engine(monkeypatch, {None: "removal_only"})
+
+    report = run_sta(request_path)
+
+    assert report["worst_hold_slack_ns"] < 0
+    assert report["total_negative_hold_slack_ns"] < 0
+    assert report["hold_violation_count"] == 2
+    assert report["setup_violation_count"] == 0
+
+
+def test_run_sta_single_corner_counts_recovery_violations(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_check_family_engine(monkeypatch, {None: "recovery_only"})
+
+    report = run_sta(request_path)
+
+    assert report["worst_slack_ns"] < 0
+    assert report["setup_violation_count"] == 2
+    assert report["hold_violation_count"] == 0
+
+
+def test_run_sta_multi_corner_counts_check_families_per_corner(tmp_path, monkeypatch):
+    """Each `corners[]` entry gets the same check-family policy, scoped to
+    that corner's own session: one corner fails removal only, the other is
+    a mixed data + recovery setup failure, and neither leaks into the
+    other's counts."""
+    request_path = _setup_multi_corner_env(tmp_path, monkeypatch)
+    scripts = _stub_openroad_check_family_engine(
+        monkeypatch,
+        {"tt_025C_1v80": "removal_only", "ss_100C_1v60": "mixed_setup"},
+    )
+
+    report = run_sta(request_path)
+
+    tt_entry, ss_entry = report["corners"]
+    assert (tt_entry["setup_violation_count"], tt_entry["hold_violation_count"]) == (
+        0,
+        2,
+    )
+    assert tt_entry["worst_hold_slack_ns"] < 0
+    assert (ss_entry["setup_violation_count"], ss_entry["hold_violation_count"]) == (
+        5,
+        0,
+    )
+    assert ss_entry["worst_slack_ns"] < 0
+    assert len(scripts) == 2
+
+
 def test_run_sta_geometry_source_placement_estimate_echoed(tmp_path, monkeypatch):
     """Issue #1826 (gap 1): a caller analysing a pre-route DEF (e.g. `klt
     place-and-route`'s own `unrouted_def_path`) declares that explicitly via

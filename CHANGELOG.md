@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2741, `klt sta`/`klt place-and-route`; no JSON field changes):
+  `setup_violation_count`/`hold_violation_count` now count the same
+  timing-check families their WNS/TNS fields measure. The violator reports
+  were `report_check_types -max_delay`/`-min_delay` only, which OpenSTA
+  filters to data checks, so asynchronous recovery/removal and inferred
+  clock-gating violators were missing -- e.g. a removal-only failure
+  reported `worst_hold_slack_ns < 0` with `hold_violation_count: 0`. Both
+  sides now add `-recovery`/`-removal` and `-clock_gating_setup`/
+  `-clock_gating_hold` (verified against OpenROAD `26Q3-1510-g6cb3f2b704`).
+  Applies to standalone STA (single corner and each `corners[]` entry), the
+  P&R nominal-stage counts and `spef_sta`. Counts can only rise for designs
+  with failing async or clock-gating checks; data-only counts are unchanged.
 - **Changed** (#2453, `klt synthesize`/`klt equiv`; no JSON field changes):
   the WASI-sandboxed-yosys hint appended to a `Can't open script file`
   error now branches on where the (existing) script lives. Under the host
