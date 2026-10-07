@@ -75,15 +75,21 @@ map).
   import pya
   tech = pya.Technology(); tech.load(lyt)
   lay = pya.Layout(); lay.read(gds, tech.load_layout_options)
-  print("OK", tech.name, lay.cells(), lay.dbu)
+  view = pya.LayoutView(); view.show_layout(lay, False)
+  view.load_layer_props(lyp)
+  names = {(n.source_layer, n.source_datatype): n.name
+           for n in view.each_layer() if n.source_layer >= 0}
+  print("OK", tech.name, lay.cells(), lay.dbu, names[(2, 0)])
   PY
   klayout -zz -nc \
     -rd lyt=$A/base/setup/klayout/asap7.lyt \
+    -rd lyp=$A/base/setup/klayout/asap7.lyp \
     -rd gds=$A/libs/asap7sc7p5t_rvt/gds/asap7sc7p5t_28_R.gds.gz \
     -r /tmp/asap7_open.py
   ```
 
-  To view layer names/colours, load `asap7.lyp` (`LayoutView.load_layer_props`).
+  The script applies `asap7.lyp` to a headless `LayoutView` of the opened
+  layout and prints the name of layer 2/0 (a `fin drawing` layer).
 - **Validation:** `pytest tests/test_pdk.py -k asap7` checks the asset paths,
   the license text, representative FEOL/MOL/BEOL layer mappings (including
   `fin`), the std-cell GDS open, and a generated example layout reopening

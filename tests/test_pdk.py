@@ -2849,6 +2849,7 @@ def test_check_broken_symlink_exit_unchanged_with_asap7(shared_home):
     (tree / "libs" / "dangling").symlink_to(tree / "nope")
     assert main(["pdk", "check", "--pdk", "asap7"]) == 4
 
+
 # ---------------------------------------------------------------------------
 # ASAP7 technology package (issue #2758)
 #
@@ -2910,6 +2911,42 @@ def _asap7_lyp_names():
         layer, datatype = (int(x) for x in ld.split("/"))
         out.setdefault((layer, datatype), []).append(name)
     return out
+
+
+def _assert_view_applies_asap7_lyp(klay, layout, layer_datatypes):
+    """Show ``layout`` in a headless view, apply the .lyp, assert name + colour.
+
+    Colours are compared against the ``fill-color`` written in the pinned .lyp
+    itself, so the check follows the file rather than hard-coded values.
+    """
+    import xml.etree.ElementTree as ET
+
+    expected = {}
+    for node in ET.parse(_ASAP7_LYP).getroot().iter("properties"):
+        source = node.findtext("source", "")
+        if "/" in source:
+            ld = tuple(int(x) for x in source.split("@")[0].split("/"))
+            expected.setdefault(
+                ld, (node.findtext("name", ""), node.findtext("fill-color", ""))
+            )
+
+    view = klay.LayoutView()  # needs no display in batch mode
+    view.show_layout(layout, False)
+    view.load_layer_props(str(_ASAP7_LYP))
+    assert view.active_cellview().layout().cells() == layout.cells()
+    nodes = {
+        (n.source_layer, n.source_datatype): n
+        for n in view.each_layer()
+        if n.source_layer >= 0
+    }
+    for ld in layer_datatypes:
+        name, fill = expected[ld]
+        node = nodes[ld]
+        assert node.name == name, f"{ld}: view name {node.name!r} != .lyp {name!r}"
+        assert fill.startswith("#"), f"{ld}: .lyp has no fill-color"
+        assert node.fill_color & 0xFFFFFF == int(fill[1:], 16), (
+            f"{ld}: view fill colour {node.fill_color:#x} != .lyp {fill}"
+        )
 
 
 @_needs_asap7
@@ -2982,22 +3019,14 @@ def test_asap7_stdcell_gds_opens_with_tech_and_lyp():
     for ld in ((2, 0), (7, 0), (19, 0)):
         assert ld in present, f"std-cell GDS has no {ld[0]}/{ld[1]} shapes"
 
-    # Layer properties load and name the fin layer, as seen by the .lyp.
-    # (LayoutView needs no display in batch mode.)
-    view = klay.LayoutView()
-    view.load_layer_props(str(_ASAP7_LYP))
-    by_source = {
-        (n.source_layer, n.source_datatype): n.name
-        for n in view.each_layer()
-        if n.source_layer >= 0
-    }
-    assert by_source[(2, 0)].startswith("fin")
-    assert by_source[(19, 0)].startswith("M1")
+    # Apply the .lyp to a view of this very layout and check names + colours.
+    _assert_view_applies_asap7_lyp(klay, layout, [(2, 0), (7, 0), (19, 0)])
 
 
 @_needs_asap7
 def test_asap7_generated_example_reopens_with_same_layer_mapping(tmp_path):
     kdb = _klayout_db()
+    klay = pytest.importorskip("klayout.lay", reason="klayout.lay unavailable")
     layout = kdb.Layout()
     layout.dbu = 0.00025
     top = layout.create_cell("ASAP7_EXAMPLE")
@@ -3013,6 +3042,7 @@ def test_asap7_generated_example_reopens_with_same_layer_mapping(tmp_path):
     names = _asap7_lyp_names()
     for ld, (_stack, prefix) in _ASAP7_EXPECTED.items():
         assert any(n.startswith(prefix) for n in names[ld])
+    _assert_view_applies_asap7_lyp(klay, reread, list(_ASAP7_EXPECTED))
 
 
 @_needs_asap7
@@ -3029,7 +3059,13 @@ def test_asap7_stdcell_gds_opens_with_klayout_binary_headless(tmp_path):
         "import pya\n"
         "tech = pya.Technology(); tech.load(lyt)\n"
         "lay = pya.Layout(); lay.read(gds, tech.load_layout_options)\n"
-        "print('OK', tech.name, lay.cells(), lay.dbu)\n"
+        "view = pya.LayoutView(); view.show_layout(lay, False)\n"
+        "view.load_layer_props(lyp)\n"
+        "names = {(n.source_layer, n.source_datatype): n.name"
+        " for n in view.each_layer() if n.source_layer >= 0}\n"
+        "assert names[(2, 0)].startswith('fin'), names.get((2, 0))\n"
+        "assert names[(19, 0)].startswith('M1'), names.get((19, 0))\n"
+        "print('OK', tech.name, lay.cells(), lay.dbu, names[(2, 0)])\n"
     )
     proc = subprocess.run(
         [
@@ -3040,6 +3076,8 @@ def test_asap7_stdcell_gds_opens_with_klayout_binary_headless(tmp_path):
             f"lyt={_ASAP7_LYT}",
             "-rd",
             f"gds={_ASAP7_STDCELL_GDS}",
+            "-rd",
+            f"lyp={_ASAP7_LYP}",
             "-r",
             str(script),
         ],
