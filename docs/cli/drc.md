@@ -922,7 +922,8 @@ cap exactly, after issue #2585 stopped `klt gen compose` drawing that cut
 oversized — see "Fixed-size rules" above. The rectangularity requirement
 (the cut must be square, not merely bounded in size) stays a residual,
 documented approximation: a bounding-box bound cannot reject an L-shaped cut
-that fits inside a 0.15 um box. approximation. `met1.enclosing.via.1`/`met2.enclosing.via.1`'s
+that fits inside the cap's box (0.15 um for `via`, 0.2/0.2/0.8 um for
+`via2`/`via3`/`via4`). `met1.enclosing.via.1`/`met2.enclosing.via.1`'s
 periphery-scoped/corner-relaxed refinement (`via.5a`/`m2.5`) remains
 approximated indefinitely — `threshold_max_dbu` only applies to
 `check: "width"` rules, not `"enclosing"`. (`met2.width.1` was previously
