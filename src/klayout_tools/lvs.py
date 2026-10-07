@@ -2376,6 +2376,10 @@ def run_lvs(request: str) -> dict[str, Any]:
             # meaningful default value to echo instead of the option being
             # absent.
             "combine_devices_per_circuit": combine_devices_per_circuit,
+            # Issue #2682: the resolved retry budget (the parser's default
+            # when omitted), echoed even when combining is off -- it
+            # describes the configured budget, not retries consumed.
+            "combine_devices_max_attempts": combine_devices_max_attempts,
             "flatten_layout": flatten_layout,
             "flatten_reference": flatten_reference,
             "netgen_setup": netgen_setup_echo,
@@ -2813,11 +2817,27 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     # `_reconstruct_lvs_request` is complexity-baselined (see
     # `scripts/check_complexity_baseline.py`).
     options.update(_anchor_top_level_pins_replay_options(echoed))
+    # Issue #2682: replay the echoed retry budget verbatim (never through the
+    # boolean flag loop); a malformed recorded value stays malformed so the
+    # parser rejects it rather than it becoming an unrelated valid budget.
+    options.update(_combine_devices_max_attempts_replay_options(echoed))
     # Includes []: explicitly disabling the finding must survive a replay.
     options.update(_supply_nets_replay_options(echoed))
     if options:
         request["options"] = options
     return request
+
+
+def _combine_devices_max_attempts_replay_options(
+    echoed: dict[str, Any],
+) -> dict[str, Any]:
+    """``{"combine_devices_max_attempts": <echoed value>}`` when the committed
+    report recorded one (issue #2682), else ``{}`` so a legacy report replays
+    at the parser's default. The value is passed through unmodified, so a
+    malformed recorded budget is rejected by the parser on replay rather than
+    silently becoming a valid one."""
+    key = "combine_devices_max_attempts"
+    return {key: echoed[key]} if key in echoed else {}
 
 
 def _reference_conversion_echo(
@@ -3031,7 +3051,12 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     # block without that key, and the current build's richer echo is not
     # drift.
     committed_options = committed.get("options")
-    for option in ("power_connectivity", "supply_nets", "anchor_top_level_pins"):
+    for option in (
+        "power_connectivity",
+        "supply_nets",
+        "anchor_top_level_pins",
+        "combine_devices_max_attempts",  # Issue #2682
+    ):
         if not isinstance(committed_options, dict) or option not in committed_options:
             exclude.add(("options", option))
     return build_rerun_result(
