@@ -1593,7 +1593,13 @@ def _values_differ(a_value: float, b_value: float) -> bool:
 #: the PDK ``.subckt``'s own defaults, in which case
 #: :mod:`klayout_tools.netlist_capacitor_recovery` leaves the recovered
 #: device at ``0``.
-_METAL_INDEX_PARAMETER_NAMES = frozenset({"MMIN", "MMAX"})
+#:
+#: Issue #2445 adds ``FEED`` (``cap_cmomi``'s feed variant, an integer enum
+#: ``1..3`` -- see :data:`klayout_tools.extract.MOM_FEED_TOKENS`) for the same
+#: reason: its ``0`` default means "this side never stated it", so a
+#: reference card that omits ``feed`` (taking the ``.subckt`` default) is
+#: silence, not a ``0`` to be compared against the layout's measured variant.
+_METAL_INDEX_PARAMETER_NAMES = frozenset({"MMIN", "MMAX", "FEED"})
 
 
 def _param_pair_is_comparable(

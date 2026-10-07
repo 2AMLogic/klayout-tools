@@ -24,6 +24,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   pinned engine; prepending a native `yosys` to `$PATH` is now only the
   fallback. Scripts outside the temp dir keep the previous generic hint.
 
+- **Added** (#2445, `klt extract`; additive, no `schema_version` bump):
+  `cap_cmomi`'s PCell `feed` variant is now recovered from the drawn port
+  placement (`none`/`same`/`double` are all separable in IHP's
+  `cap_cmomi_code.py`). It is reported as the optional string
+  `devices[].feed` and written as `FEED=<token>` on the `--pdk`-bound `X`
+  card; a port layout matching no PCell signature stays unmeasured (no field,
+  no token). `cap_cmomf` never gains it. Internally an integer enum in the
+  KLayout `double` parameter (non-primary, so `klt lvs` never compares it).
+
 - **Fixed** (#2648, `klt gen`; no JSON field changes): sky130 generator cuts
   are now snapped onto the 0.005um manufacturing grid the curated deck's
   `*.ongrid.1` rule declares (resolved from the deck by

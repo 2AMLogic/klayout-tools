@@ -594,6 +594,10 @@ def _unbound_resistor_card(
 #: own ``PARAMS:`` default writer -- the #2355 bug).
 _MOM_CAPACITOR_TERMINAL_NAMES = frozenset({"A", "B"})
 _MOM_CAPACITOR_PARAMETER_NAMES = frozenset({"W", "L", "MMIN", "MMAX"})
+#: ``cap_cmomi``'s parameter set: the shared one plus ``FEED`` (issue #2445).
+#: ``cap_cmomf`` keeps :data:`_MOM_CAPACITOR_PARAMETER_NAMES` -- its upstream
+#: ``.subckt`` declares no ``feed``, so its class never registers it.
+_MOM_CAPACITOR_FEED_PARAMETER_NAMES = _MOM_CAPACITOR_PARAMETER_NAMES | {"FEED"}
 
 
 def _unbound_mom_capacitor_card(
@@ -604,6 +608,7 @@ def _unbound_mom_capacitor_card(
     length_um: float,
     mmin: int | None = None,
     mmax: int | None = None,
+    feed: str | None = None,
 ) -> str:
     """The plain-element ``X`` card for one *unbound* MoM-capacitor device
     (``cap_cmomi``/``cap_cmomf``), with its measured ``W``/``L`` geometry
@@ -629,8 +634,17 @@ def _unbound_mom_capacitor_card(
     cards, so both geometry parameters parse as microns regardless of the
     caller's ``.option scale``.
 
-    **Four of the upstream subcircuit's parameters are written, three are
-    not.** The subcircuit this card's trailing class-name token binds onto
+    **Issue #2445 -- ``feed`` is written when measured.** ``feed`` (``cap_cmomi``
+    only) is the token ``none``/``same``/``double`` the extractor recovered
+    from the drawn port placement (``extract._mom_feed_variant``); it is
+    written as ``FEED=<token>`` after ``MMAX=`` and omitted entirely when
+    ``None`` (a layout matching no PCell signature, or a ``cap_cmomf``), so an
+    unmeasured feed still falls to the ``.subckt`` default instead of being
+    guessed. See ``extract._mom_feed_variant`` for the settled mapping.
+
+    **Four of the upstream subcircuit's parameters are always written, plus
+    ``feed`` when measured; ``subblock``/``mm_ok`` are never.** The
+    subcircuit this card's trailing class-name token binds onto
     declares (``IHP-GmbH/ihp-sg13cmos5l`` at
     ``607e18d4bd9214a52575c194b4181ef449f9252f``,
     ``libs.tech/ngspice/models/cap_cmomi.lib:60`` /
@@ -658,22 +672,9 @@ def _unbound_mom_capacitor_card(
     tokens rather than writing a fabricated ``0``: the #2408 rule still
     holds for a value that was not measured.
 
-    ``feed``/``subblock``/``mm_ok`` are still left off, taking those
-    ``.subckt`` defaults:
+    ``subblock``/``mm_ok`` are still left off, taking those ``.subckt``
+    defaults:
 
-    - ``feed`` (``cap_cmomi`` only -- ``none``/``same``/``double``) is only
-      *partly* recoverable and is tracked separately rather than guessed
-      at here. The PCell's ``same`` variant is distinguishable (it stacks
-      its two pins on adjacent metals, so the two recognised ports carry
-      different metal indices), but ``double`` and ``none`` both place two
-      ports on the top metal and are told apart only by where those ports
-      sit relative to the core -- which this recognition step, reading one
-      marker plus two port polygons, does not know. Emitting ``double`` for
-      a ``none`` layout would be exactly the invisible wrong answer #2408
-      rejected, and ``none`` is upstream's own documented *not a standalone
-      2-terminal device* configuration. Split out as issue #2445, which
-      settles the question against the PCell generator itself rather than
-      guessing here.
     - ``subblock`` is a PCell layout switch (substrate isolation block) with
       no counterpart in the recognition geometry at all.
     - ``mm_ok`` is a documented no-op in this release ("accepted for
@@ -691,6 +692,8 @@ def _unbound_mom_capacitor_card(
     )
     if mmin is not None and mmax is not None and mmin >= 1 and mmax >= 1:
         card += f" MMIN={mmin} MMAX={mmax}"
+    if feed is not None:
+        card += f" FEED={feed}"
     return card
 
 
@@ -1923,7 +1926,10 @@ def create_model_binding_delegate(
             parameter_names = {
                 param.name for param in device_class.parameter_definitions()
             }
-            if parameter_names != _MOM_CAPACITOR_PARAMETER_NAMES:
+            if parameter_names not in (
+                _MOM_CAPACITOR_PARAMETER_NAMES,
+                _MOM_CAPACITOR_FEED_PARAMETER_NAMES,
+            ):
                 return False
 
             terminal_ids = [terminal.id() for terminal in terminal_defs]
@@ -1947,6 +1953,20 @@ def create_model_binding_delegate(
             mmin = self._device_param(device, "MMIN")
             mmax = self._device_param(device, "MMAX")
 
+            # Issue #2445: `cap_cmomi`'s measured feed variant. The class
+            # carries an integer enum (`extract.MOM_FEED_*`); only a measured
+            # code (1..3) is mapped back to the `.subckt`'s string token, and
+            # `0`/absent (`cap_cmomf`, an unmeasured or pre-#2445 device)
+            # writes nothing.
+            from .extract import MOM_FEED_TOKENS
+
+            feed_code = self._device_param(device, "FEED")
+            feed_token = (
+                MOM_FEED_TOKENS.get(int(round(feed_code)))
+                if feed_code is not None
+                else None
+            )
+
             name = self.format_name(device.expanded_name())
             pins = " ".join(self.net_to_string(net) for net in nets)
             self.emit_line(
@@ -1958,6 +1978,7 @@ def create_model_binding_delegate(
                     length_um,
                     int(round(mmin)) if mmin is not None else None,
                     int(round(mmax)) if mmax is not None else None,
+                    feed_token,
                 )
             )
             return True
