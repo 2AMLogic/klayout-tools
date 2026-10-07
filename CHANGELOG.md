@@ -21,6 +21,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   centreline lengths. Output shape is unchanged; parallel bundles/bars are
   bit-for-bit as before. Branched/disconnected shapes and any winding with
   `frequencies_hz` keep their explicit rejection (#2730).
+- `klt ring-check --cells NAME` (repeatable; library `cells=`): opt-in exact-name
+  cell inclusion scope so a ring on a layer shared with core routing can be
+  checked on its own cells (issue #2690). Additive `cells` JSON field (`null`
+  when unscoped); default behaviour unchanged. Docs now state that an unscoped
+  `continuous` on a shared layer is not evidence of the intended ring.
+
 - **Added** (#2686, `klt lvs`/`klt pex`): the `klt extract --label-layer`
   label-purpose override (#2656) now reaches both verbs. `klt lvs` accepts
   `layout.label_layers` (`{"<role>": [layer, datatype] | null}`) for inline
