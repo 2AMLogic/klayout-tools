@@ -2123,6 +2123,10 @@ def test_min_version_malformed_request_rejected(tmp_path, monkeypatch, bad):
             {"probe_side_effect": subprocess.TimeoutExpired(cmd="klayout", timeout=1)},
             "did not complete within",
         ),
+        (
+            {"probe_side_effect": PermissionError(13, "Permission denied", "klayout")},
+            "could not launch 'klayout -v'.*Permission denied",
+        ),
     ],
 )
 def test_min_version_probe_failures_are_actionable(
@@ -2164,6 +2168,28 @@ def test_cli_min_klayout_version_text_and_json_errors(tmp_path, monkeypatch, cap
     assert main([*argv, "--format", "json"]) == 1
     payload = json.loads(capsys.readouterr().err)
     assert "0.28.16" in json.dumps(payload) and "0.30.12" in json.dumps(payload)
+    assert _deck_launches(calls) == []
+
+
+def test_cli_min_klayout_version_permission_denied_probe_emits_json_error(
+    tmp_path, monkeypatch, capsys
+):
+    calls = _stub_versioned_klayout(
+        monkeypatch,
+        probe_side_effect=PermissionError(13, "Permission denied", "klayout"),
+    )
+    gds, deck = _inputs(tmp_path)
+
+    code = main(
+        [
+            "drc", gds, "--engine", "klayout", "--deck-file", deck,
+            "--min-klayout-version", "0.30.12", "--format", "json",
+        ]
+    )  # fmt: skip
+
+    assert code == 1
+    text = capsys.readouterr().err
+    assert "Permission denied" in json.loads(text)["error"]["message"]
     assert _deck_launches(calls) == []
 
 

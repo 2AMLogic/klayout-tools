@@ -2732,6 +2732,12 @@ def _preflight_klayout_version(executable: str, min_version: str | None) -> None
             f"'{executable} -v' did not complete within "
             f"{KLAYOUT_VERSION_PROBE_TIMEOUT_S}s. Check the installation."
         ) from exc
+    except OSError as exc:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"could not launch '{executable} -v' ({exc}). Check that the "
+            f"binary is executable and install KLayout >= {required_text}."
+        ) from exc
     output = ((probe.stdout or "") + "\n" + (probe.stderr or "")).strip()
     if probe.returncode != 0:
         raise DrcError(
