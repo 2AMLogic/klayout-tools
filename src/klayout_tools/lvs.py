@@ -2799,13 +2799,24 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     # Issue #2682: replay the echoed retry budget verbatim (never through the
     # boolean flag loop); a malformed recorded value stays malformed so the
     # parser rejects it rather than it becoming an unrelated valid budget.
-    if "combine_devices_max_attempts" in echoed:
-        options["combine_devices_max_attempts"] = echoed["combine_devices_max_attempts"]
+    options.update(_combine_devices_max_attempts_replay_options(echoed))
     # Includes []: explicitly disabling the finding must survive a replay.
     options.update(_supply_nets_replay_options(echoed))
     if options:
         request["options"] = options
     return request
+
+
+def _combine_devices_max_attempts_replay_options(
+    echoed: dict[str, Any],
+) -> dict[str, Any]:
+    """``{"combine_devices_max_attempts": <echoed value>}`` when the committed
+    report recorded one (issue #2682), else ``{}`` so a legacy report replays
+    at the parser's default. The value is passed through unmodified, so a
+    malformed recorded budget is rejected by the parser on replay rather than
+    silently becoming a valid one."""
+    key = "combine_devices_max_attempts"
+    return {key: echoed[key]} if key in echoed else {}
 
 
 def _anchor_top_level_pins_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
