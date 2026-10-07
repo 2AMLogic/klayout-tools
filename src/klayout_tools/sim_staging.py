@@ -42,17 +42,51 @@ the executing host's to resolve, not this host's:
    PDK's whole multi-megabyte model closure through the transport on every
    submit.
 
-Scope note: only ``.include``/``.inc`` is followed. ``.lib`` is the
-*model-library* channel (``models``/``models.pdk``), resolved on the
-executing host by the same ``pdk.find_pdk`` path a local run uses -- see
-``docs/cli/sim.md``'s "Model library resolution".
+Scope note: in the netlist's own closure only ``.include``/``.inc`` is
+followed. ``.lib`` is the *model-library* channel (``models``/
+``models.pdk``), by default resolved on the executing host by the same
+``pdk.find_pdk`` path a local run uses -- see ``docs/cli/sim.md``'s "Model
+library resolution".
+
+**Opt-in model staging (issue #2668).** With ``options.stage_model_inputs:
+true`` the request's own model inputs are shipped too, through
+:func:`stage_sim_job` -- the one function both job builders call:
+
+- ``models.lib``, every per-section ``corners.process[].sections[].lib``
+  (and a fleet shard's ``_explicit_points[].process_section_libs``) and
+  every ``options.osdi_preload`` entry are resolved on *this* host with
+  ``sim``'s own resolution rules (PDK-relative libraries through
+  ``find_pdk``, everything else against the request's directory), staged
+  under collision-safe flat names, and rewritten in a deep *copy* of the
+  request (the caller's request is never mutated).
+- Each staged model library's own closure is followed recursively and made
+  **self-contained**: ``.include``/``.inc`` and file-bearing ``.lib <file>
+  <section>`` targets are staged and rewritten (``$VAR`` targets are
+  expanded here, and PDK-rooted targets are staged rather than left to the
+  executing host); ``.lib <section>``/``.endl`` section definitions are left
+  intact. An unresolvable target or an unsupported directive form is a
+  named error.
+- ``.osdi`` binaries are uploaded byte-for-byte, never parsed, and keep
+  their declared preload order.
+- The rewritten worker request carries the internal
+  :data:`STAGED_MODEL_INPUTS_FIELD` marker, which tells the executing
+  host's ``run_sim`` to resolve those (now job-relative) references against
+  the job directory instead of joining them onto its image's PDK directory
+  -- ``models.pdk`` itself stays in the request, because it still selects
+  the image (``remote``'s AMI, ``batch``'s ``pdk_variant``).
+
+The whole closure -- netlist includes plus model inputs -- is bounded by
+:data:`MAX_STAGED_MODEL_FILES`/:data:`MAX_STAGED_MODEL_BYTES`.
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import os
 import re
-from collections.abc import Sequence
+import shlex
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,6 +98,13 @@ from typing import Any
 _INCLUDE_RE = re.compile(
     r"^(?P<prefix>\s*\.(?:include|inc)\s+)(?P<target>\S.*?)\s*$", re.IGNORECASE
 )
+
+#: A ``.lib`` directive line (issue #2668, followed only inside a staged
+#: *model* closure). ``rest`` is tokenized by :meth:`_Stager._parse_lib`:
+#: one token is a section *definition* (``.lib tt`` ... ``.endl``), left
+#: verbatim; two tokens are a file-bearing ``.lib <file> <section>``
+#: reference, staged and rewritten; anything else is refused by name.
+_LIB_RE = re.compile(r"^(?P<prefix>\s*\.lib)(?P<rest>(?:\s.*)?)$", re.IGNORECASE)
 
 #: Characters allowed in a staged job-relative filename. Everything else in
 #: an included file's basename is replaced with ``_`` -- the staged name is
@@ -88,6 +129,30 @@ MAX_STAGED_INCLUDES = 64
 #: :data:`MAX_STAGED_INCLUDES`: bound what one submit can push.
 MAX_STAGED_BYTES = 32 * 1024 * 1024
 
+#: Cap on how many files the **complete** staged closure may hold once
+#: ``options.stage_model_inputs`` is on (issue #2668): netlist includes plus
+#: every model library, per-section library, model dependency and ``.osdi``
+#: binary (the netlist itself is not counted). Larger than
+#: :data:`MAX_STAGED_INCLUDES` because a PDK's model closure is legitimately
+#: a few dozen to a few hundred files; still finite, so a runaway tree is a
+#: named error rather than a silent upload.
+MAX_STAGED_MODEL_FILES = 512
+
+#: Byte cap on the same complete closure (see :data:`MAX_STAGED_MODEL_FILES`).
+MAX_STAGED_MODEL_BYTES = 256 * 1024 * 1024
+
+#: Internal worker-request field set by :func:`stage_sim_job` when it
+#: rewrote the request's model references to job-relative staged names.
+#: ``sim.run_sim`` on the executing host reads it to resolve ``models.lib``
+#: and per-section libraries against the job directory rather than joining
+#: them onto ``models.pdk``'s directory -- like ``_explicit_points``, never
+#: set by an external caller.
+STAGED_MODEL_INPUTS_FIELD = "_staged_model_inputs"
+
+_MODE_NETLIST = "netlist"
+_MODE_MODEL = "model"
+_MODE_BINARY = "binary"
+
 
 class IncludeStagingError(Exception):
     """Raised when a netlist's ``.include``/``.inc`` closure cannot be
@@ -101,6 +166,16 @@ class IncludeStagingError(Exception):
     submitted, billed, and comes back as undiagnosable
     ``unavailable_measurement`` rows.
     """
+
+
+class ModelStagingError(IncludeStagingError):
+    """Raised when ``options.stage_model_inputs`` (issue #2668) cannot build
+    a self-contained model closure: a declared model input or one of its
+    dependencies is missing or unresolvable here, a directive has an
+    unsupported form, or the complete closure exceeds
+    :data:`MAX_STAGED_MODEL_FILES`/:data:`MAX_STAGED_MODEL_BYTES`. The
+    message always names the request field the failing file was reached
+    from. Re-raised as ``sim.SimError`` exactly like its base class."""
 
 
 @dataclass(frozen=True)
@@ -143,6 +218,57 @@ class StagedNetlist:
         """The netlist first, then every staged include -- the order the
         backends upload in (the netlist has always been the first input)."""
         return (self.netlist, *self.includes)
+
+
+@dataclass(frozen=True)
+class StagedModelAsset:
+    """Provenance for one file of a staged model closure (issue #2668).
+
+    ``field`` is the request field the file was reached from (the file's
+    own field for a declared input, the declaring field for a dependency);
+    ``kind`` is ``"library"`` (a declared ``.lib`` source), ``"osdi"`` (an
+    ``options.osdi_preload`` binary) or ``"dependency"`` (reached through a
+    library's ``.include``/``.lib``). ``sha256`` hashes the bytes the worker
+    actually receives -- the rewritten text when ``rewritten`` is true, the
+    source file's own bytes otherwise.
+    """
+
+    name: str
+    field: str
+    kind: str
+    source_path: str
+    sha256: str
+    rewritten: bool
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "field": self.field,
+            "kind": self.kind,
+            "sha256": self.sha256,
+            "rewritten": self.rewritten,
+        }
+
+
+@dataclass(frozen=True)
+class StagedSimJob:
+    """Everything one off-host `klt sim` job ships, computed once and
+    consumed by both job builders (``sim_remote._build_remote_job_description``
+    and ``sim_batch._build_batch_job_spec``): the staged netlist closure,
+    the staged model closure (empty unless ``options.stage_model_inputs``),
+    and the worker ``request`` document to serialize -- the input request
+    itself when nothing was staged, else a rewritten deep copy.
+    """
+
+    netlist: StagedNetlist
+    request: dict[str, Any]
+    model_files: tuple[StagedFile, ...] = ()
+    model_assets: tuple[StagedModelAsset, ...] = ()
+
+    @property
+    def files(self) -> tuple[StagedFile, ...]:
+        """Netlist, its includes, then every staged model file."""
+        return (*self.netlist.files, *self.model_files)
 
 
 def host_resolved_roots(request: dict[str, Any]) -> tuple[str, ...]:
@@ -192,15 +318,20 @@ def stage_netlist(
     stager = _Stager(
         reserved_names=(*reserved_names, netlist_staged_name), roots=tuple(roots)
     )
-    netlist = stager.process(netlist_path, netlist_staged_name, "netlist")
+    return _stage_netlist_with(stager, netlist_path, netlist_staged_name)
 
-    includes: list[StagedFile] = []
-    while stager.pending:
-        local_path, staged_name = stager.pending.pop(0)
-        includes.append(
-            stager.process(local_path, staged_name, f"include {staged_name}")
-        )
 
+def _stage_netlist_with(
+    stager: _Stager, netlist_path: str, netlist_staged_name: str
+) -> StagedNetlist:
+    netlist = stager.process(
+        _Pending(netlist_path, netlist_staged_name, _MODE_NETLIST, "netlist"),
+        label="netlist",
+    )
+    includes = [
+        stager.process(item, label=f"include {item.staged_name}")
+        for item in stager.drain()
+    ]
     return StagedNetlist(
         netlist=netlist,
         includes=tuple(includes),
@@ -221,11 +352,8 @@ def stage_sim_netlist(
     and :class:`IncludeStagingError` re-raised as ``sim.SimError`` naming
     the backend.
 
-    **Both** off-host job builders call exactly this function
-    (``sim_remote._build_remote_job_description`` and
-    ``sim_batch._build_batch_job_spec``), so include staging cannot drift
-    between the two transports the way their independently-written
-    ``inputs`` tuples otherwise could.
+    Netlist-only: model inputs are staged by :func:`stage_sim_job`, which
+    is what both off-host job builders call.
     """
     from .sim import SimError
 
@@ -240,14 +368,304 @@ def stage_sim_netlist(
         raise SimError(f"backend {backend!r}: {exc}") from exc
 
 
+def stage_model_inputs_requested(request: dict[str, Any]) -> bool:
+    """Validate and return ``request.options.stage_model_inputs`` (issue
+    #2668): absent means ``False``; anything but a JSON boolean is a
+    ``SimError`` (``"yes"``/``1`` reading as "stage everything" is never what
+    a request author meant)."""
+    from .sim import SimError
+
+    options = request.get("options") or {}
+    if not isinstance(options, dict):
+        return False
+    value = options.get("stage_model_inputs", False)
+    if not isinstance(value, bool):
+        raise SimError(
+            f"request.options.stage_model_inputs must be a boolean (got {value!r})"
+        )
+    return value
+
+
+def stage_sim_job(
+    request: dict[str, Any],
+    netlist_path: str,
+    *,
+    request_dir: str | None,
+    netlist_staged_name: str,
+    reserved_names: Sequence[str] = (),
+    backend: str,
+) -> StagedSimJob:
+    """Stage one off-host `klt sim` job: the netlist's include closure
+    (always, exactly as :func:`stage_sim_netlist`) and -- only when
+    ``request.options.stage_model_inputs`` is ``true`` -- the request's own
+    model inputs, returning the files to upload and the worker request to
+    serialize beside them (issue #2668).
+
+    ``request`` is the worker-bound request the builder already prepared
+    (``sim_remote._build_remote_request``'s output -- possibly carrying a
+    fleet shard's ``_explicit_points``); it is **never mutated**. Model
+    sources are resolved against ``request_dir`` -- the *original* request
+    file's directory on this host -- with ``sim``'s own rules, before any
+    reference is rewritten.
+
+    Every failure (missing file, unresolvable dependency, unsupported
+    directive, exceeded cap) raises ``sim.SimError`` naming the backend and
+    the offending field/path; callers invoke this before any upload, push
+    or launch.
+    """
+    from .sim import SimError
+
+    opted_in = stage_model_inputs_requested(request)
+    stager = _Stager(
+        reserved_names=(*reserved_names, netlist_staged_name),
+        roots=host_resolved_roots(request),
+    )
+    try:
+        netlist = _stage_netlist_with(stager, netlist_path, netlist_staged_name)
+        if not opted_in:
+            return StagedSimJob(netlist=netlist, request=request)
+        if request_dir is None:
+            raise SimError(
+                f"backend {backend!r}: options.stage_model_inputs needs the "
+                "request file's directory to resolve model sources"
+            )
+        return _stage_model_closure(stager, netlist, request, request_dir)
+    except IncludeStagingError as exc:
+        raise SimError(f"backend {backend!r}: {exc}") from exc
+    except SimError as exc:
+        if str(exc).startswith(f"backend {backend!r}:"):
+            raise
+        raise SimError(f"backend {backend!r}: {exc}", code=exc.code) from exc
+
+
+# --------------------------------------------------------------------------- #
+# Model closure (issue #2668)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class _ModelRoot:
+    """One declared model input: where it was declared, as what, and the
+    local file it resolved to."""
+
+    field: str
+    kind: str  # "library" | "osdi"
+    ref: str
+    path: str
+
+
+def _stage_model_closure(
+    stager: _Stager,
+    netlist: StagedNetlist,
+    request: dict[str, Any],
+    request_dir: str,
+) -> StagedSimJob:
+    roots = _collect_model_roots(request, request_dir)
+    lib_names: dict[str, str] = {}
+    osdi_names: list[str] = []
+    root_by_name: dict[str, _ModelRoot] = {}
+    for root in roots:
+        mode = _MODE_BINARY if root.kind == "osdi" else _MODE_MODEL
+        name = stager.stage(
+            root.path, mode=mode, field=root.field, where=f"declared by {root.field}"
+        )
+        root_by_name.setdefault(name, root)
+        if root.kind == "osdi":
+            osdi_names.append(name)
+        else:
+            lib_names[root.ref] = name
+
+    model_files: list[StagedFile] = []
+    assets: list[StagedModelAsset] = []
+    for item in stager.drain():
+        staged = stager.process(item, label=f"model {item.staged_name}")
+        model_files.append(staged)
+        root = root_by_name.get(item.staged_name)
+        assets.append(
+            StagedModelAsset(
+                name=item.staged_name,
+                field=item.field,
+                kind=root.kind if root is not None else "dependency",
+                source_path=item.local_path,
+                sha256=_staged_sha256(staged),
+                rewritten=staged.content is not None,
+            )
+        )
+
+    worker = _rewrite_worker_request(request, lib_names, osdi_names)
+    return StagedSimJob(
+        netlist=netlist,
+        request=worker,
+        model_files=tuple(model_files),
+        model_assets=tuple(assets),
+    )
+
+
+def _collect_model_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
+    """Every declared model input, resolved with ``sim``'s own rules and
+    existence-checked, in a stable order: ``models.lib``, per-section
+    libraries (``corners.process`` then ``_explicit_points``), then
+    ``options.osdi_preload`` in preload order."""
+    models = request.get("models") or {}
+    resolved_refs: dict[str, str] = {}
+    roots = [
+        _ModelRoot(
+            field_name,
+            "library",
+            ref,
+            _resolve_declared_lib(
+                ref, field_name, label, models, request_dir, resolved_refs
+            ),
+        )
+        for field_name, label, ref in _declared_lib_refs(request)
+    ]
+    roots.extend(_osdi_roots(request, request_dir))
+    return roots
+
+
+def _declared_lib_refs(request: dict[str, Any]) -> Iterator[tuple[str, str, Any]]:
+    """``(field, label, ref)`` for every model-library reference the request
+    declares, in :func:`_collect_model_roots`'s order."""
+    models = request.get("models") or {}
+    if models.get("lib") is not None:
+        yield "models.lib", "model library", models.get("lib")
+    for index, entry in enumerate((request.get("corners") or {}).get("process") or []):
+        sections = entry.get("sections") if isinstance(entry, dict) else None
+        for sec_index, section in enumerate(sections or []):
+            if isinstance(section, dict) and "lib" in section:
+                yield (
+                    f"corners.process[{index}].sections[{sec_index}].lib",
+                    "corner section library",
+                    section.get("lib"),
+                )
+    explicit = request.get("_explicit_points")
+    for index, point in enumerate(explicit if isinstance(explicit, list) else []):
+        libs = point.get("process_section_libs") if isinstance(point, dict) else None
+        for sec_index, ref in enumerate(libs or []):
+            if ref is not None:
+                yield (
+                    f"_explicit_points[{index}].process_section_libs[{sec_index}]",
+                    "corner section library",
+                    ref,
+                )
+
+
+def _resolve_declared_lib(
+    ref: Any,
+    field_name: str,
+    label: str,
+    models: dict[str, Any],
+    request_dir: str,
+    resolved_refs: dict[str, str],
+) -> str:
+    """Resolve one declared library ref exactly as ``sim`` resolves it for a
+    local run (memoized per ref), refusing a missing file by field name."""
+    from .sim import SimError, _resolve_lib_ref
+
+    if not isinstance(ref, str) or not ref:
+        raise ModelStagingError(f"{field_name} must be a non-empty path")
+    if ref in resolved_refs:
+        return resolved_refs[ref]
+    try:
+        path = os.path.abspath(_resolve_lib_ref(ref, models, request_dir))
+    except SimError as exc:
+        raise ModelStagingError(f"{field_name}: {exc}") from exc
+    if not os.path.isfile(path):
+        raise ModelStagingError(
+            f"{field_name}: {label} not found: {path} -- "
+            "options.stage_model_inputs ships every declared model "
+            "input, so each must be readable on the submitting host"
+        )
+    resolved_refs[ref] = path
+    return path
+
+
+def _osdi_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
+    """``options.osdi_preload`` entries, resolved like ``sim`` resolves them
+    (request-relative), in preload order."""
+    from ._paths import _resolve_relative
+
+    raw = (request.get("options") or {}).get("osdi_preload")
+    if raw is None:
+        return []
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise ModelStagingError(
+            "options.osdi_preload must be an array of paths to compiled "
+            "`.osdi` shared libraries"
+        )
+    roots: list[_ModelRoot] = []
+    for index, entry in enumerate(raw):
+        field_name = f"options.osdi_preload[{index}]"
+        if not isinstance(entry, str) or not entry.strip():
+            raise ModelStagingError(f"{field_name} must be a non-empty path")
+        path = os.path.abspath(_resolve_relative(entry, request_dir))
+        if not os.path.isfile(path):
+            raise ModelStagingError(
+                f"{field_name}: osdi_preload file not found: {path}"
+            )
+        roots.append(_ModelRoot(field_name, "osdi", entry, path))
+    return roots
+
+
+def _rewrite_worker_request(
+    request: dict[str, Any], lib_names: dict[str, str], osdi_names: list[str]
+) -> dict[str, Any]:
+    """A deep copy of ``request`` with every model reference replaced by
+    its staged job-relative name, plus :data:`STAGED_MODEL_INPUTS_FIELD`."""
+    worker = copy.deepcopy(request)
+    models = worker.get("models")
+    if isinstance(models, dict) and models.get("lib") in lib_names:
+        models["lib"] = lib_names[models["lib"]]
+    for entry in (worker.get("corners") or {}).get("process") or []:
+        if not isinstance(entry, dict):
+            continue
+        for section in entry.get("sections") or []:
+            if isinstance(section, dict) and section.get("lib") in lib_names:
+                section["lib"] = lib_names[section["lib"]]
+    for point in worker.get("_explicit_points") or []:
+        libs = point.get("process_section_libs") if isinstance(point, dict) else None
+        if isinstance(libs, list):
+            point["process_section_libs"] = [
+                lib_names.get(ref, ref) if ref is not None else None for ref in libs
+            ]
+    if osdi_names:
+        worker.setdefault("options", {})["osdi_preload"] = list(osdi_names)
+    worker[STAGED_MODEL_INPUTS_FIELD] = True
+    return worker
+
+
+def _staged_sha256(staged: StagedFile) -> str:
+    digest = hashlib.sha256()
+    if staged.content is not None:
+        digest.update(staged.content.encode("utf-8"))
+        return digest.hexdigest()
+    assert staged.local_path is not None
+    with open(staged.local_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 # --------------------------------------------------------------------------- #
 # Internals
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class _Pending:
+    """One queued file: where it lives here, the name it ships under, how
+    its directives are treated (``mode``), and the request field it was
+    reached from (for error messages and provenance)."""
+
+    local_path: str
+    staged_name: str
+    mode: str
+    field: str
+
+
 class _Stager:
-    """Mutable bookkeeping for one :func:`stage_netlist` call: which
-    job-relative names are taken, which real paths are already staged (so a
+    """Mutable bookkeeping for one staging call: which job-relative names
+    are taken, which ``(realpath, mode)`` pairs are already staged (so a
     diamond -- or an outright cycle -- resolves to one upload and
     terminates), and the running file/byte totals the caps are checked
     against."""
@@ -255,52 +673,88 @@ class _Stager:
     def __init__(self, *, reserved_names: Sequence[str], roots: Sequence[str]) -> None:
         self.used_names: set[str] = set(reserved_names)
         self.roots = tuple(roots)
-        self.name_by_realpath: dict[str, str] = {}
-        self.pending: list[tuple[str, str]] = []
+        self.name_by_key: dict[tuple[str, str], str] = {}
+        self.pending: list[_Pending] = []
         self.host_resolved: list[str] = []
-        self.staged_bytes = 0
+        self.netlist_files = 0
+        self.netlist_bytes = 0
+        self.total_files = 0
+        self.total_bytes = 0
+
+    def drain(self) -> Iterator[_Pending]:
+        """Yield queued files FIFO until none remain -- including ones queued
+        while the caller processes earlier entries, which is how a closure is
+        followed recursively (and why this is a generator, not a list)."""
+        while self.pending:
+            yield self.pending.pop(0)
 
     # -- staging ---------------------------------------------------------- #
 
-    def stage(self, local_path: str, *, origin: str, line_number: int) -> str:
+    def stage(
+        self,
+        local_path: str,
+        *,
+        mode: str = _MODE_NETLIST,
+        field: str = "netlist",
+        where: str,
+    ) -> str:
         """Return the job-relative name ``local_path`` is staged under,
-        queueing it for processing the first time it is seen."""
-        key = os.path.realpath(local_path)
-        existing = self.name_by_realpath.get(key)
+        queueing it for processing the first time it is seen in ``mode``.
+        ``where`` describes the referencing site for error messages."""
+        key = (os.path.realpath(local_path), mode)
+        existing = self.name_by_key.get(key)
         if existing is not None:
             return existing
 
-        if len(self.name_by_realpath) >= MAX_STAGED_INCLUDES:
-            raise IncludeStagingError(
-                f"netlist include closure exceeds {MAX_STAGED_INCLUDES} files "
-                f"(at '{local_path}', included from '{origin}' line "
-                f"{line_number}) -- an off-host backend stages every "
-                "`.include`/`.inc` target it can resolve; if this closure is a "
-                "library tree that already exists on the executing host, "
-                "reference it under the PDK root or through an environment "
-                "variable (e.g. `$PDK_ROOT/...`) so it is not staged"
-            )
         try:
             size = os.path.getsize(local_path)
         except OSError as exc:  # pragma: no cover - isfile() already passed
             raise IncludeStagingError(
-                f"netlist '{origin}' line {line_number}: cannot stage "
-                f"`.include` target '{local_path}': {exc}"
+                f"{where}: cannot stage '{local_path}': {exc}"
             ) from exc
-        if self.staged_bytes + size > MAX_STAGED_BYTES:
-            raise IncludeStagingError(
-                "netlist include closure exceeds "
-                f"{MAX_STAGED_BYTES // (1024 * 1024)} MiB (at '{local_path}', "
-                f"included from '{origin}' line {line_number}) -- same remedy "
-                "as the file-count cap: keep a host-resident library tree "
-                "under the PDK root or behind an environment variable instead "
-                "of staging it per job"
+
+        if mode == _MODE_NETLIST:
+            if self.netlist_files >= MAX_STAGED_INCLUDES:
+                raise IncludeStagingError(
+                    f"netlist include closure exceeds {MAX_STAGED_INCLUDES} files "
+                    f"(at '{local_path}', {where}) -- an off-host backend "
+                    "stages every `.include`/`.inc` target it can resolve; if "
+                    "this closure is a library tree that already exists on the "
+                    "executing host, reference it under the PDK root or through "
+                    "an environment variable (e.g. `$PDK_ROOT/...`) so it is "
+                    "not staged"
+                )
+            if self.netlist_bytes + size > MAX_STAGED_BYTES:
+                raise IncludeStagingError(
+                    "netlist include closure exceeds "
+                    f"{MAX_STAGED_BYTES // (1024 * 1024)} MiB (at '{local_path}', "
+                    f"{where}) -- same remedy as the file-count cap: keep a "
+                    "host-resident library tree under the PDK root or behind an "
+                    "environment variable instead of staging it per job"
+                )
+        if self.total_files >= MAX_STAGED_MODEL_FILES:
+            raise ModelStagingError(
+                f"{field}: staged job closure exceeds {MAX_STAGED_MODEL_FILES} "
+                f"files (at '{local_path}', {where}) -- "
+                "options.stage_model_inputs ships the complete model closure; "
+                "point models at a smaller library, or leave the option off "
+                "and use a runner image that already carries the PDK"
             )
-        self.staged_bytes += size
+        if self.total_bytes + size > MAX_STAGED_MODEL_BYTES:
+            raise ModelStagingError(
+                f"{field}: staged job closure exceeds "
+                f"{MAX_STAGED_MODEL_BYTES // (1024 * 1024)} MiB (at "
+                f"'{local_path}', {where}) -- same remedy as the file-count cap"
+            )
+        if mode == _MODE_NETLIST:
+            self.netlist_files += 1
+            self.netlist_bytes += size
+        self.total_files += 1
+        self.total_bytes += size
 
         name = self._allocate_name(local_path)
-        self.name_by_realpath[key] = name
-        self.pending.append((local_path, name))
+        self.name_by_key[key] = name
+        self.pending.append(_Pending(local_path, name, mode, field))
         return name
 
     def _allocate_name(self, local_path: str) -> str:
@@ -319,11 +773,17 @@ class _Stager:
 
     # -- rewriting -------------------------------------------------------- #
 
-    def process(self, local_path: str, staged_name: str, label: str) -> StagedFile:
-        """Read ``local_path``, stage every ``.include``/``.inc`` target it
-        names, and return the :class:`StagedFile` for it -- carrying
-        rewritten ``content`` when at least one directive changed, else the
-        original ``local_path`` for a byte-for-byte upload."""
+    def process(self, item: _Pending, *, label: str) -> StagedFile:
+        """Read ``item``'s file, stage every dependency its directives name
+        (per its mode), and return the :class:`StagedFile` for it --
+        carrying rewritten ``content`` when at least one directive changed,
+        else the original ``local_path`` for a byte-for-byte upload. A
+        binary (``.osdi``) is never read here at all."""
+        local_path = item.local_path
+        if item.mode == _MODE_BINARY:
+            return StagedFile(
+                staged_name=item.staged_name, label=label, local_path=local_path
+            )
         text, decodable = _read_text(local_path)
         lines = text.splitlines(keepends=True)
         rewritten: list[str] = []
@@ -332,46 +792,148 @@ class _Stager:
         for index, raw_line in enumerate(lines, start=1):
             body = raw_line.rstrip("\r\n")
             ending = raw_line[len(body) :]
-            match = _INCLUDE_RE.match(body)
-            if match is None:
+            new_body = self._rewrite_line(body, item, index, decodable)
+            if new_body is None:
                 rewritten.append(raw_line)
                 continue
-            target = _unquote(match.group("target"))
-            resolved = self._resolve(target, origin=local_path)
-            if resolved is None:
-                self.host_resolved.append(target)
-                rewritten.append(raw_line)
-                continue
-            if not decodable:
-                raise IncludeStagingError(
-                    f"netlist '{local_path}' is not valid UTF-8, so its "
-                    f"`.include`/`.inc` directive on line {index} cannot be "
-                    "rewritten for an off-host job -- re-save the file as "
-                    "UTF-8, or inline the included file"
-                )
-            if not os.path.isfile(resolved):
-                raise IncludeStagingError(
-                    f"netlist '{local_path}' line {index}: `.include` target "
-                    f"{target!r} does not resolve to a readable file on this "
-                    f"host (looked for '{resolved}'). An off-host backend "
-                    "stages the netlist's whole include closure, so it cannot "
-                    "ship a file it cannot read -- fix the path, inline the "
-                    "file into the netlist, or, if the target is meant to be "
-                    "resolved by the executing host, name it under the PDK "
-                    "root or through an environment variable (e.g. "
-                    "`$PDK_ROOT/...`)"
-                )
-            name = self.stage(resolved, origin=local_path, line_number=index)
-            rewritten.append(f'{match.group("prefix")}"{name}"{ending}')
+            rewritten.append(new_body + ending)
             changed = True
 
         if not changed:
             return StagedFile(
-                staged_name=staged_name, label=label, local_path=local_path
+                staged_name=item.staged_name, label=label, local_path=local_path
             )
         return StagedFile(
-            staged_name=staged_name, label=label, content="".join(rewritten)
+            staged_name=item.staged_name, label=label, content="".join(rewritten)
         )
+
+    def _rewrite_line(
+        self, body: str, item: _Pending, index: int, decodable: bool
+    ) -> str | None:
+        """The rewritten directive line, or ``None`` to keep it verbatim."""
+        local_path = item.local_path
+        match = _INCLUDE_RE.match(body)
+        if match is not None:
+            target = _unquote(match.group("target"))
+            if item.mode == _MODE_MODEL:
+                resolved = self._resolve_model_target(
+                    target, item=item, index=index, directive="`.include`"
+                )
+            else:
+                resolved = self._resolve(target, origin=local_path)
+                if resolved is None:
+                    self.host_resolved.append(target)
+                    return None
+                if not os.path.isfile(resolved):
+                    raise IncludeStagingError(
+                        f"netlist '{local_path}' line {index}: `.include` target "
+                        f"{target!r} does not resolve to a readable file on this "
+                        f"host (looked for '{resolved}'). An off-host backend "
+                        "stages the netlist's whole include closure, so it cannot "
+                        "ship a file it cannot read -- fix the path, inline the "
+                        "file into the netlist, or, if the target is meant to be "
+                        "resolved by the executing host, name it under the PDK "
+                        "root or through an environment variable (e.g. "
+                        "`$PDK_ROOT/...`)"
+                    )
+            self._require_decodable(item, index, decodable)
+            name = self.stage(
+                resolved,
+                mode=item.mode,
+                field=item.field,
+                where=f"included from '{local_path}' line {index}",
+            )
+            return f'{match.group("prefix")}"{name}"'
+
+        if item.mode != _MODE_MODEL:
+            return None
+        lib_match = _LIB_RE.match(body)
+        if lib_match is None:
+            return None
+        tokens = self._parse_lib(lib_match.group("rest"), item=item, index=index)
+        if len(tokens) == 1:
+            return None  # `.lib <section>` -- a section definition, kept intact
+        target, section = tokens
+        resolved = self._resolve_model_target(
+            target, item=item, index=index, directive="`.lib`"
+        )
+        self._require_decodable(item, index, decodable)
+        name = self.stage(
+            resolved,
+            mode=_MODE_MODEL,
+            field=item.field,
+            where=f"referenced by `.lib` in '{local_path}' line {index}",
+        )
+        return f'{lib_match.group("prefix")} "{name}" {section}'
+
+    @staticmethod
+    def _require_decodable(item: _Pending, index: int, decodable: bool) -> None:
+        if decodable:
+            return
+        kind = "model file" if item.mode == _MODE_MODEL else "netlist"
+        raise IncludeStagingError(
+            f"{kind} '{item.local_path}' is not valid UTF-8, so its "
+            f"directive on line {index} cannot be rewritten for an off-host "
+            "job -- re-save the file as UTF-8, or inline the referenced file"
+        )
+
+    @staticmethod
+    def _parse_lib(rest: str, *, item: _Pending, index: int) -> list[str]:
+        """Tokenize a ``.lib`` line's arguments: one token (a section
+        definition) or two (``<file> <section>``); anything else is refused
+        by name rather than guessed at."""
+        try:
+            tokens = shlex.split(rest)
+        except ValueError as exc:
+            tokens = []
+            problem = str(exc)
+        else:
+            problem = f"{len(tokens)} argument(s)"
+        if len(tokens) in (1, 2):
+            return tokens
+        raise ModelStagingError(
+            f"{item.field}: unsupported `.lib` directive form in "
+            f"'{item.local_path}' line {index} ({problem}) -- "
+            "options.stage_model_inputs understands `.lib <section>` "
+            "definitions and `.lib <file> <section>` references only"
+        )
+
+    @staticmethod
+    def _resolve_model_target(
+        target: str, *, item: _Pending, index: int, directive: str
+    ) -> str:
+        """Resolve a dependency of a staged model file on *this* host. A
+        staged model closure is self-contained, so ``$VAR`` targets are
+        expanded here and PDK-rooted targets are staged like any other;
+        anything that does not resolve to a readable file is an error."""
+        where = f"'{item.local_path}' line {index}"
+        if not target:
+            raise ModelStagingError(
+                f"{item.field}: {directive} in {where} names no file"
+            )
+        expanded = os.path.expandvars(target)
+        if "$" in expanded:
+            raise ModelStagingError(
+                f"{item.field}: {directive} target {target!r} in {where} names "
+                "an environment variable that is not set on this host -- "
+                "options.stage_model_inputs resolves the model closure on the "
+                "submitting host, so set the variable or use a literal path"
+            )
+        expanded = os.path.expanduser(expanded)
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(
+                os.path.dirname(os.path.abspath(item.local_path)), expanded
+            )
+        resolved = os.path.abspath(expanded)
+        if not os.path.isfile(resolved):
+            raise ModelStagingError(
+                f"{item.field}: {directive} target {target!r} in {where} does "
+                f"not resolve to a readable file on this host (looked for "
+                f"'{resolved}') -- options.stage_model_inputs ships a "
+                "self-contained model closure, so every dependency must exist "
+                "here"
+            )
+        return resolved
 
     def _resolve(self, target: str, *, origin: str) -> str | None:
         """Absolute local path ``target`` names, or ``None`` when the

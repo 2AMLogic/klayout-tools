@@ -21,6 +21,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   `coverage_unknown`, and is recorded in a new additive top-level
   `coverage_assertion` field. Default behavior without the option is
   unchanged.
+- **Fixed** (#2741, `klt sta`/`klt place-and-route`; no JSON field changes):
+  `setup_violation_count`/`hold_violation_count` now count the same
+  timing-check families their WNS/TNS fields measure. The violator reports
+  were `report_check_types -max_delay`/`-min_delay` only, which OpenSTA
+  filters to data checks, so asynchronous recovery/removal and inferred
+  clock-gating violators were missing -- e.g. a removal-only failure
+  reported `worst_hold_slack_ns < 0` with `hold_violation_count: 0`. Both
+  sides now add `-recovery`/`-removal` and `-clock_gating_setup`/
+  `-clock_gating_hold` (verified against OpenROAD `26Q3-1510-g6cb3f2b704`).
+  Applies to standalone STA (single corner and each `corners[]` entry), the
+  P&R nominal-stage counts and `spef_sta`. Counts can only rise for designs
+  with failing async or clock-gating checks; data-only counts are unchanged.
 - **Changed** (#2453, `klt synthesize`/`klt equiv`; no JSON field changes):
   the WASI-sandboxed-yosys hint appended to a `Can't open script file`
   error now branches on where the (existing) script lives. Under the host
@@ -30,6 +42,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   its request-relative `.klt/` run tree) outside the temp dir, keeping the
   pinned engine; prepending a native `yosys` to `$PATH` is now only the
   fallback. Scripts outside the temp dir keep the previous generic hint.
+- **Added** (#2668, `klt sim`; additive JSON only): opt-in
+  `options.stage_model_inputs: true` lets the `remote`/`batch` backends ship
+  the request's own model inputs -- `models.lib`, per-section corner
+  libraries and `options.osdi_preload` binaries, with their full
+  `.include`/file-bearing `.lib` closure -- instead of relying on the runner
+  image's baked PDK. The worker receives a rewritten copy of the request; the
+  caller's request is never modified, `models.pdk` still selects the image,
+  and every missing input or exceeded cap (512 files / 256 MiB) is refused
+  before any upload, push or launch. New additive
+  `environment.staged_model_inputs` records what the worker received. Absent
+  or `false` keeps today's behaviour, including the off-host
+  `osdi_preload` refusal.
+
+- **Added** (#2445, `klt extract`; additive, no `schema_version` bump):
+  `cap_cmomi`'s PCell `feed` variant is now recovered from the drawn port
+  placement (`none`/`same`/`double` are all separable in IHP's
+  `cap_cmomi_code.py`). It is reported as the optional string
+  `devices[].feed` and written as `FEED=<token>` on the `--pdk`-bound `X`
+  card; a port layout matching no PCell signature stays unmeasured (no field,
+  no token). `cap_cmomf` never gains it. Internally an integer enum in the
+  KLayout `double` parameter (non-primary, so `klt lvs` never compares it).
 
 - **Fixed** (#2648, `klt gen`; no JSON field changes): sky130 generator cuts
   are now snapped onto the 0.005um manufacturing grid the curated deck's

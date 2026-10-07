@@ -1259,6 +1259,12 @@ def test_sg13cmos5l_mom_capacitor_card_drops_params_keyword_and_suffixes_geometr
 #: The three that remain are the ones #2435 deliberately left out -- see
 #: this module's `test_..._card_omits_unmeasured_pdk_subckt_params`
 #: docstring for each one's reason.
+#:
+#: `feed` left this list in issue #2445 (see the per-variant tests below): the
+#: PCell's three variants ARE separable from the drawn port placement, so it
+#: is written -- but only when the layout matches a PCell signature, and never
+#: on `cap_cmomf`. These fixtures draw hand-placed ports that match none of
+#: the signatures, so `feed` is still absent from their cards.
 _MOM_CAPACITOR_UNMEASURED_SUBCKT_PARAMS = ("feed", "subblock", "mm_ok")
 
 #: The parameters a written `cap_cmomi`/`cap_cmomf` card DOES carry, in the
@@ -1285,16 +1291,14 @@ def test_sg13cmos5l_mom_capacitor_card_omits_unmeasured_pdk_subckt_params(
 
     Those three are omitted deliberately, not accidentally:
 
-    - `feed` (`cap_cmomi` only) is only *partly* recoverable, and guessing
-      the rest would be exactly the invisible wrong answer #2408 rejected.
-      The PCell's `same` variant is distinguishable -- it stacks its two
-      pins on adjacent metals, so the two recognised ports carry different
-      metal indices -- but `double` and `none` both place two ports on the
-      top metal, told apart only by where those ports sit relative to the
-      core, which this recognition step does not know. `none` is upstream's
-      own documented *not a standalone 2-terminal device* configuration, so
-      writing `feed=double` for it would misreport a device that is not even
-      complete. Split out as issue #2445 rather than settled here.
+    - `feed` (`cap_cmomi` only): issue #2445 settled that all three PCell
+      variants ARE separable (see `_mom_feed_variant` in `extract.py` and the
+      per-variant tests below), so a layout drawn with the PCell's port
+      placement now gets `FEED=<variant>`. THESE fixtures hand-place two
+      ports at positions matching none of the three PCell signatures, and
+      the extractor leaves such a layout unmeasured rather than forcing it
+      onto the nearest variant -- the #2408 "never guess" rule -- so `feed`
+      is still absent here.
     - `subblock` is a PCell layout switch (substrate isolation block) with no
       counterpart in the recognition geometry at all.
     - `mm_ok` is a documented no-op in this release ("accepted for interface
@@ -1959,3 +1963,127 @@ def test_sg13cmos5l_pin_purpose_labels_still_extract_unchanged(tmp_path: Path):
     assert device["nets"]["d"] == "D"
     assert report["label_layers"] is None
     assert not any("found 0 pin-name label(s)" in w for w in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# cap_cmomi `feed` variant recovery (issue #2445)
+# --------------------------------------------------------------------------- #
+#
+# Separability finding (IHP `cap_cmomi_code.py` at
+# `607e18d4bd9214a52575c194b4181ef449f9252f`, `genLayout`/`_place_pins`):
+#   - `none`   : no feed pads; PLUS pin in the bottom outer `mmax` bar, MINUS pin
+#                in the top one -- two ports, one metal, opposite y edges.
+#   - `same`   : two STACKED pads (PLUS on `mmax`, MINUS on `mmax-1`), both
+#                pins at the same pad centre -- two ports, adjacent metals,
+#                overlapping in x/y.
+#   - `double` : PLUS pad left, MINUS pad right on `mmax`, pins at the pad
+#                centre height -- two ports, one metal, same y, far apart in x.
+# All three are separable from the recognised ports + marker alone.
+
+
+def _make_sg13cmos5l_mom_feed_layout(
+    feed: str, *, marker: tuple[int, int]
+) -> kdb.Layout:
+    """A `cap_cmomi`-shaped marker with its two ports placed the way the PCell
+    places them for `feed` (`none`/`same`/`double`), each carried out to a
+    labelled routing stub that leaves the marker."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: tuple[int, int], box: kdb.Box) -> None:
+        top.shapes(layout.layer(*layer)).insert(box)
+
+    def label(layer: tuple[int, int], text: str, x: float, y: float) -> None:
+        top.shapes(layout.layer(*layer)).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(marker, _box_um(0, 0, 9, 3.56))
+    m4_drawn, m4_pin = (50, 0), (50, 2)
+    m3_drawn, m3_pin = (30, 0), (30, 2)
+    if feed == "none":
+        # pins on the outer bars, at the marker's own bottom/top y edges
+        draw(m4_pin, _box_um(0.1, 0.0, 0.3, 0.2))
+        draw(m4_pin, _box_um(8.7, 3.36, 8.9, 3.56))
+        draw(m4_drawn, _box_um(-2, 0.0, 0.3, 0.2))
+        draw(m4_drawn, _box_um(8.7, 3.36, 11, 3.56))
+        label(m4_pin, "PLUS_NET", -1, 0.1)
+        label(m4_pin, "MINUS_NET", 10, 3.46)
+    elif feed == "double":
+        # left/right pads, pins at the pad centre height
+        draw(m4_pin, _box_um(0.3, 1.68, 0.5, 1.88))
+        draw(m4_pin, _box_um(8.5, 1.68, 8.7, 1.88))
+        draw(m4_drawn, _box_um(-2, 1.68, 0.5, 1.88))
+        draw(m4_drawn, _box_um(8.5, 1.68, 11, 1.88))
+        label(m4_pin, "PLUS_NET", -1, 1.78)
+        label(m4_pin, "MINUS_NET", 10, 1.78)
+    elif feed == "same":
+        # stacked left pads: PLUS on Metal4, MINUS on Metal3, same box
+        draw(m4_pin, _box_um(0.3, 1.68, 0.5, 1.88))
+        draw(m3_pin, _box_um(0.3, 1.68, 0.5, 1.88))
+        draw(m4_drawn, _box_um(-2, 1.68, 0.5, 1.88))
+        draw(m3_drawn, _box_um(0.3, 1.68, 3, 1.88))
+        label(m4_pin, "PLUS_NET", -1, 1.78)
+        label(m3_pin, "MINUS_NET", 2, 1.78)
+    else:  # pragma: no cover - test-authoring guard
+        raise AssertionError(feed)
+    return layout
+
+
+_FEED_CODES = {"none": 1, "same": 2, "double": 3}
+
+
+@pytest.mark.parametrize("feed", ["none", "same", "double"])
+def test_sg13cmos5l_cap_cmomi_feed_variant_is_recovered_from_port_placement(
+    tmp_path: Path, feed: str
+):
+    """Issue #2445: each `cap_cmomi` PCell `feed` variant extracts as its own
+    token -- reported as the additive `devices[].feed` string (kept out of
+    `params`, an object of numbers) and written as `FEED=<token>` on the
+    `--pdk`-bound card. The carrier is an integer enum inside KLayout's
+    `double` parameter, mapped back to the token only at write/report time."""
+    path = _write_gds(
+        _make_sg13cmos5l_mom_feed_layout(feed, marker=(99, 39)), tmp_path / "f.gds"
+    )
+    report = run_extract(
+        path,
+        "sg13cmos5l",
+        pdk_variant="ihp-sg13cmos5l",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=str(tmp_path / "f.spice"),
+    )
+    assert report["device_counts"] == {"cap_cmomi": 1}
+    (device,) = report["devices"]
+    assert device["feed"] == feed
+    assert "feed" not in device["params"]
+    (card,) = [line for line in _device_cards(report) if " cap_cmomi " in line]
+    assert card.endswith(f" FEED={feed}")
+    assert [t.split("=", 1)[0] for t in card.split() if "=" in t] == [
+        "W",
+        "L",
+        "MMIN",
+        "MMAX",
+        "FEED",
+    ]
+
+
+@pytest.mark.parametrize("feed", ["none", "same", "double"])
+def test_sg13cmos5l_cap_cmomf_never_gains_a_feed_token(tmp_path: Path, feed: str):
+    """Issue #2445: `cap_cmomf`'s upstream `.subckt` declares no `feed`, so
+    even a PCell-shaped port placement never produces `devices[].feed` or a
+    `FEED=` card token for it."""
+    path = _write_gds(
+        _make_sg13cmos5l_mom_feed_layout(feed, marker=(99, 40)), tmp_path / "f.gds"
+    )
+    report = run_extract(
+        path,
+        "sg13cmos5l",
+        pdk_variant="ihp-sg13cmos5l",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=str(tmp_path / "f.spice"),
+    )
+    assert report["device_counts"] == {"cap_cmomf": 1}
+    (device,) = report["devices"]
+    assert "feed" not in device
+    (card,) = [line for line in _device_cards(report) if " cap_cmomf " in line]
+    assert "feed=" not in card.lower()

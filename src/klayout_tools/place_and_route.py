@@ -76,9 +76,12 @@ scraping ``report_*`` text output was needed for these fields -- see
 :func:`_extract_stage_metrics` for the exact key mapping. The one exception:
 OpenROAD has **no** ``*_metric`` proc for setup/hold timing-*violation
 counts* (only the scalar WNS/TNS) -- :func:`_count_violations` falls back to
-counting ``"(VIOLATED)"`` lines in ``report_check_types -max_delay/-min_delay
--violators -format end``'s own stdout, exactly the fallback the contract
-spike's build/wrap section authorises. Issue #1709's post-route
+counting ``"(VIOLATED)"`` lines in ``report_check_types ... -violators
+-format end``'s own stdout, exactly the fallback the contract spike's
+build/wrap section authorises (setup side ``-max_delay -recovery
+-clock_gating_setup``, hold side ``-min_delay -removal -clock_gating_hold``
+-- the same check families the WNS/TNS metrics measure, issue #2741; see
+:func:`_violation_count_lines`). Issue #1709's post-route
 max-transition/max-capacitance verdict
 (:func:`_design_rule_check_lines`, ``max_transition_violation_count``/
 ``max_capacitance_violation_count``) reuses that same fallback for the same
@@ -599,6 +602,7 @@ from ._openroad_engine import (
     _OpenRoadResult,
     _run_openroad,
     _timing_status,
+    _timing_violation_report_lines,
 )
 
 # `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
@@ -4095,14 +4099,26 @@ def _metrics_report_lines(
 
 
 def _violation_count_lines() -> list[str]:
-    return [
-        f'puts "{_SETUP_VIOLATIONS_BEGIN}"',
-        "report_check_types -max_delay -violators -format end",
-        f'puts "{_SETUP_VIOLATIONS_END}"',
-        f'puts "{_HOLD_VIOLATIONS_BEGIN}"',
-        "report_check_types -min_delay -violators -format end",
-        f'puts "{_HOLD_VIOLATIONS_END}"',
-    ]
+    """Marker-delimited setup/hold violator reports for this module's
+    nominal-stage report (and, via
+    ``place_and_route_sta._spef_sta_script_lines``, the post-route SPEF
+    re-time).
+
+    Delegates the check-family policy to
+    :func:`~klayout_tools._openroad_engine._timing_violation_report_lines`
+    (issue #2741): the setup side counts data setup + recovery + clock-gating
+    setup and the hold side data hold + removal + clock-gating hold -- the
+    same populations ``report_worst_slack_metric``/``report_tns_metric``
+    measure -- so ``setup_violation_count``/``hold_violation_count`` agree
+    with the WNS/TNS fields next to them. Unit: violating endpoints (one
+    ``-format end`` row per endpoint per path group), not enumerated paths.
+    """
+    return _timing_violation_report_lines(
+        setup_begin=_SETUP_VIOLATIONS_BEGIN,
+        setup_end=_SETUP_VIOLATIONS_END,
+        hold_begin=_HOLD_VIOLATIONS_BEGIN,
+        hold_end=_HOLD_VIOLATIONS_END,
+    )
 
 
 def _design_rule_check_lines(
