@@ -4627,6 +4627,22 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     drc_parser.add_argument(
+        "--min-klayout-version",
+        dest="min_klayout_version",
+        metavar="VERSION",
+        default=None,
+        help=(
+            "minimum standalone KLayout application version (e.g. 0.30.12) "
+            "the native deck needs (--engine klayout only; ignored for "
+            "--engine curated). The `klayout` on PATH is probed with -v "
+            "before the deck runs; an older, missing or unparseable "
+            "version fails up front. Omitted: no check. Not bypassed by "
+            "--allow-deck-errors/--allow-missing-host-tools, and passing "
+            "does not prove the deck is compatible. "
+            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_parser.add_argument(
         "--expect-rule-categories",
         dest="expect_rule_categories",
         type=int,
