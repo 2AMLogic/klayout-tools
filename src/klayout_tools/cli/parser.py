@@ -4903,6 +4903,21 @@ def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
             "Off by default (backward compatible)."
         ),
     )
+    ring_check_parser.add_argument(
+        "--cells",
+        action="append",
+        default=None,
+        metavar="CELL",
+        help=(
+            "repeatable exact cell name; restrict the ring geometry to the "
+            "subtrees of the named cells (every occurrence under each checked "
+            "root, with placement transforms, plus all their descendants), "
+            "excluding other shapes such as core routing on a shared layer. "
+            "Unknown or empty names exit 1. Omit for no scope (backward "
+            "compatible). Selection is coarse and does not imply electrical "
+            "connectivity. See docs/cli/ring-check.md."
+        ),
+    )
     _add_format_arg(ring_check_parser)
     ring_check_parser.set_defaults(func=ring_check_cmd.run)
 
