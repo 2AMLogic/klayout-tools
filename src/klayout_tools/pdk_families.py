@@ -67,7 +67,18 @@ from __future__ import annotations
 #: This is the **authoritative** family set: every other family-keyed
 #: narrowing in this package is declared as a subset of it via
 #: :func:`family_subset`, never as an independent literal.
-KNOWN_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu", "sg13g2", "sg13cmos5l")
+#: ``"asap7"`` (issue #2761) is the ASAP7 predictive FinFET PDK, resolved as
+#: the ``asap7`` process tree ``klt pdk`` discovers (#2759) -- a bare,
+#: prefix-matchable variant name, so it needs no alias. Registering the family
+#: does not by itself advertise any subsystem: see ``pdk_capabilities``
+#: (extraction only, today).
+KNOWN_PDK_FAMILIES: tuple[str, ...] = (
+    "sky130",
+    "gf180mcu",
+    "sg13g2",
+    "sg13cmos5l",
+    "asap7",
+)
 
 #: Resolved ``--pdk`` variant names whose family is *not* a prefix of the
 #: variant name, and so cannot be recovered by :func:`pdk_variant_family`'s

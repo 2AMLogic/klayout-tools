@@ -347,9 +347,11 @@ def test_deck_rules_value_um_is_threshold_times_nominal_dbu_for_every_rule():
     the spot-checked rules above -- a distance rule always reports
     ``threshold_dbu * nominal_dbu``, and a non-distance rule never reports a
     distance at all."""
-    from klayout_tools.decks import deck_names, get_deck, get_nominal_dbu
+    from klayout_tools.decks import _registry, deck_names, get_deck, get_nominal_dbu
 
-    for deck in deck_names():
+    # Only decks with DRC rules: an extraction-only deck (asap7, issue
+    # #2761) is in `deck_names()` but has no rule table to convert.
+    for deck in (name for name in deck_names() if name in _registry()):
         nominal = get_nominal_dbu(deck)
         source = {rule.id: rule for rule in get_deck(deck)}
         for entry in history.deck_rules(deck)["rules"]:

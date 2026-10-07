@@ -1310,6 +1310,8 @@ the exit code alone is authoritative.
   | Command | `error.code` | Meaning |
   |---------|--------------|---------|
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `extract` | `finfet_malformed_geometry` | A FinFET deck (`--deck asap7`) found device geometry it refuses to approximate (no crossing fin, clipped fin, wrong gate length, missing select, VT conflict, ...). `error.message` lists each finding with its bounding box. Not retryable: the layout must change. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
+  | `extract` | `finfet_dbu_mismatch` | A FinFET deck was run on a layout whose database unit differs from the deck's; it is refused rather than rescaled. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
 
 Under `--format text` (the default), errors remain the pre-existing
 plain-text stderr line: `klt <command>: <message>`. Text is a courtesy

@@ -214,6 +214,18 @@ application error (exit 1) rather than guessing; this is the exact failure
 mode ("a bad report parse could silently produce a false match") this
 engine exists to catch, so it is designed to fail loud instead.
 
+### FinFET decks are refused (issue #2761)
+
+A `layout.deck` naming a FinFET extraction deck (today `asap7`) is an
+application error (exit 1). A FinFET device is only correct with its
+geometry-counted fin count compared. The reference reader would read the
+CDL's `nfin=` away and fall back to a planar `W`/`L` compare, which is the
+silent approximation the FinFET extractor exists to avoid. Use `klt extract
+--deck asap7` for `nfin`-carrying netlists (see
+[`docs/cli/extract.md`](extract.md), "ASAP7 FinFET extraction"). FinFET LVS
+(an `nfin`-preserving reference reader, exact `NFIN` comparison and the ASAP7
+standard-cell corpus) is tracked in issue #2813.
+
 ## Scope: schematic-equivalent, topological compare only
 
 Per the phase 1 spike's resolution (section 4, "Resolving the
