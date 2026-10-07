@@ -14,6 +14,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2648, `klt gen`; no JSON field changes): sky130 generator cuts
+  are now snapped onto the 0.005um manufacturing grid the curated deck's
+  `*.ongrid.1` rule declares (resolved from the deck by
+  `gen_layer_params._mfg_grid_um`, applied in `_clamp_cut_boxes`), so
+  `diff_pair`/`esd_device` gate-contact `licon1` cuts no longer trip
+  `licon1.ongrid.1`. Cuts move by at most 2.5nm; the committed dogbone
+  example GDS were regenerated.
+
+- **Changed** (#2388, `klt drc`; no JSON field changes): sg13g2's
+  `cont.width.1`, `via1.width.1`-`via4.width.1` and sky130's `via.width.1`
+  now also enforce their fixed-size maximum (`threshold_max_dbu` equal to
+  `threshold_dbu`, bounding-box semantics), so oversized or elongated cuts
+  are flagged by `width.1` where only undersized ones were before. sky130
+  `via.1a` rectangularity stays approximated. Cut/via geometry drawn by
+  `klt gen` is already clamped to these sizes (#2585).
+
+- **Fixed** (#2378, `klt place-and-route`; no JSON field changes): every
+  post-floorplan OpenROAD stage script now emits `set_dont_use` for the same
+  per-`cell_library` globs `klt synthesize` passes to ABC, after liberty is
+  loaded and before timing-driven placement, repair, CTS and hold repair, so
+  the resizer/CTS are no longer free to insert cells synthesis already
+  excludes (a source of `DRT-0085` in `detailed_route`). Reapplied in each
+  OpenROAD process; libraries without a table entry get no exclusions. Not
+  engine-verified here (no `openroad` available); it is not claimed to
+  eliminate every `DRT-0085` failure.
+
 - **Added** (#2721, `klt sim --backend batch` + shared error envelope;
   `schema_version` unchanged, additive): the error envelope gains an optional
   `error.code`, emitted only when a command classifies the failure (every
@@ -1712,6 +1738,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   parent wire reaches still resolves its body pin onto an island. See
   `docs/cli/extract.md`'s "A macro's own well tie is restored as a
   connectivity bridge".
+- **Added** (#2427, `klt erc`, additive — **no** `schema_version` bump: one
+  new `erc_coverage` key, no new spec key, no change to any existing value):
+  `erc_coverage.well_assertion_coverage` reports, per non-degenerate tie that
+  asserted `well_boxes`, the drawn `tap_layer` area left outside every
+  asserted polygon (`drawn_tap_area_um2`, `uncovered_tap_area_um2`,
+  `uncovered_tap_fraction`, `extent_uncovered_fraction`), so a stale
+  assertion shows as a number. Reporting only; no grading change. See
+  `docs/cli/erc.md`.
 - **Added** (#2389, `klt erc`, additive — **no** `schema_version` bump: one
   new `erc_coverage` key, no new spec key, no new finding kind, and no
   change to any existing field's value for any input): a new

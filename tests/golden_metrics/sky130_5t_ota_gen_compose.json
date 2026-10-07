@@ -32,6 +32,7 @@
     "extract.ignored_layers_count": 0,
     "extract.matched_device_groups_count": 0,
     "extract.merged_net_labels_count": 0,
+    "extract.missing_flavour_markers_count": 0,
     "extract.metrics.extract__device__count": 9,
     "extract.metrics.extract__net__count": 25,
     "extract.metrics.extract__pin__count": 2,

@@ -176,7 +176,11 @@ The spec file is a JSON object:
     islands (`erc.unconnected_net`). The warning is advisory only: a spec
     shared across fixtures where one legitimately doesn't use a given role
     still runs clean, exactly as before (JSON goes to stdout only, so
-    stderr output cannot corrupt a piped report).
+    stderr output cannot corrupt a piped report). The same measurement is
+    in the JSON report as `provenance.label_layers[].label_text_count`
+    (issue #2415) — `0` for exactly the roles that warn — so a consumer
+    reading only stdout can tell an empty label layer from a real supply
+    defect.
   - `active_layer` (string, `"<layer>/<datatype>"`, **optional, `stackup[0]`
     only**, issue #1979) — the diffusion/active layer. When supplied, gate
     identification and the antenna-ratio denominator (`gates[].gate_area_um2`)
@@ -2377,7 +2381,10 @@ the shared envelope (`schema_version`, error shape, exit codes).
     "deck": null,
     "input": { "content_hash": "sha256:<hex>", "role": "layout" },
     "spec": { "content_hash": "sha256:<hex>" },
-    "devices": []
+    "devices": [],
+    "label_layers": [
+      { "name": "met2", "label_layer": "7/5", "label_text_count": 1 }
+    ]
   }
 }
 ```
@@ -2533,6 +2540,7 @@ forward regardless (a `diode_insertion` remedy):
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
 | `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region — `area(marker ∩ on's own drawn region)`, **not** the marker layer's own area (issue #2226), since a device-body marker is conventionally drawn with enclosure past the conductor it marks. `0.0` therefore means this declaration changed nothing at all: its marker layer carries no geometry in this layout, is drawn on a different datatype, or does not touch the role it was declared `on` (that last case also warns on stderr). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
 | `provenance.net_exclusions` | array\<object\> | (issue #2524) One entry per `nets[]` entry that declared `unlabelled_allowed_boxes`, in spec order — `{"net", "boxes", "excluded_islands", "excluded_area_um2"}`, where `boxes` echoes the declaration verbatim (micrometre `[left, bottom, right, top]`) and the two `excluded_*` values are what it **actually** removed from the unlabelled remainder `erc.unlabelled_conductor` is graded on. `[]` when no declared net asked for one. The same auditability contract `provenance.devices` establishes one level down: a declaration that *suppresses a finding* has to be readable from the report, or two runs of the same layout disagree about `erc.unlabelled_conductor` with nothing in either payload to say why. `excluded_islands: 0` with a non-zero `excluded_area_um2` is the per-island rule working as intended (a box that bit into an island without covering it); both zero means the declaration changed nothing at all — a box over empty space, a mis-transcribed coordinate — distinguishable from one that bit, exactly as `provenance.devices[].body_area_um2 == 0.0` is. |
+| `provenance.label_layers` | array\<object\> | (issue #2415) One entry per `stackup` role that declares a `label_layer`, in stackup order — `{"name", "label_layer", "label_text_count"}`, where `name` is the role name, `label_layer` the normalized `"<layer>/<datatype>"` string, and `label_text_count` a non-negative integer: the number of text objects on that layer in the analysed top-cell hierarchy, before any conductor-overlap filtering — the same collection the label is registered onto the connectivity graph from. It counts **occurrences**, not unique strings: a label drawn twice, or a labelled child cell instantiated three times, counts each copy. Roles with no `label_layer` produce no entry; `[]` when no role declares one. Two roles sharing one label layer each keep their own entry (with the same count). Measured once on the primary connectivity graph, so declaring `ties[]` never duplicates entries, and a `--findings-only` run reports the same array as a full one. `0` is exactly the condition the stderr warning names (issue #2401): no text was present — which usually means a mis-transcribed layer/datatype, but does not prove it. A positive count does **not** establish that the labels touch the intended conductor. This is evidence, not a finding: it changes no `erc_findings`, `status`, coverage or exit code. Reports predating issue #2415 lack the key; read its absence as "this evidence was not recorded", **not** as `[]`. |
 
 ## Checked-work coverage
 
@@ -2638,6 +2646,22 @@ any other checked, non-degenerate tie:
   `erc_status` (nor `status`), emits no finding, and is narrowed to the
   curated deck's conducting layers when `--deck` is given. See "Layers this
   stream draws that the spec never declared" above.
+- `well_assertion_coverage` (array\<object\>, issue #2427) — one entry per
+  non-degenerate tie that asserted its substrate region (`well_layer: null` +
+  `well_boxes`), sorted by `id`, `[]` when no tie used that form. Each entry:
+  `id` (the tie's `erc.missing_tie` work identity), `tap_layer`
+  (`"<layer>/<datatype>"`), `drawn_tap_area_um2` (merged drawn area of that
+  layer, before any `tap_requires`/`tap_boxes` narrowing),
+  `uncovered_tap_area_um2` (the part outside every asserted polygon),
+  `uncovered_tap_fraction` (their ratio, `null` when no tap geometry is
+  drawn) and `extent_uncovered_fraction` (the share of the top-cell extent the
+  assertion leaves out — the quantity the degeneracy test thresholds). It
+  makes an assertion that has gone *stale* — devices added outside it since it
+  was written, which `erc.missing_tie` then never examines — visible as a
+  number trending upward across revisions instead of as silence. Pure
+  disclosure, like `layers_in_stream_without_declaration`: no threshold, no
+  skip, no finding, no effect on `erc_status`/`status`. Additive; absent from
+  evidence produced before it existed.
 
 `status` is derived by applying the [common rollup rule](../coverage-contract.md)
 (#2109) to `coverage`, with any connectivity/antenna finding reported as

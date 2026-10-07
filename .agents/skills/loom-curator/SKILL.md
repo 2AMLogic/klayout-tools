@@ -585,6 +585,13 @@ Record format, scoped population, and why the gate sits one stage before you:
 `.loom/docs/premise-gate.md`. Under `/loom:sweep` the orchestrator already ran
 it before dispatching you; re-running is cheap and idempotent.
 
+**REST exhausted mid-pass (#10025)**: GraphQL is a separate quota.
+`premise-check.sh` and `post-comment.sh` fall back to it; `check-duplicate.sh`
+exits `2` naming the rate limit and its reset. If the gate still exits `1`,
+save the body and run `premise-check.sh --body-file <path>`. Waiting on a
+reset? Post your `loom:claim-activity` marker via `post-comment.sh` so the
+claim is not reclaimed as stale.
+
 ## Triage: Ready or Needs Enhancement?
 
 When you find an unlabeled issue, **first assess if it's already implementation-ready**:
@@ -652,9 +659,9 @@ Issue #99: "fix the crash bug"
 
 If, during curation, you determine an issue is too large to be a single Builder PR (>6 hours, >8 files, or >400 LOC) and must be split into sub-issues (size each child per "Backlog Rightsizing" below):
 
-1. **Create each sub-issue with `loom:triage` only.** Do NOT apply `loom:curated`, even if your decomposition includes curator-quality detail (acceptance criteria, file references, scope guards).
-2. **Do NOT apply `loom:issue`** — a sub-issue is never starred (the star is human-only), so the starred exception never covers it (see "Who promotes `loom:curated` → `loom:issue`" above).
-3. **Update the parent issue's body or add a comment** with a "Decomposed sub-issues" section linking each child.
+1. **Create each sub-issue with `create-issue.sh --parent <N> --label loom:triage`** (inherits a starred parent's star). Do NOT apply `loom:curated`, even if your decomposition includes curator-quality detail (acceptance criteria, file references, scope guards).
+2. **Do NOT apply `loom:issue` at creation**, even to an inherited-star child (see "Who promotes `loom:curated` → `loom:issue`" above).
+3. **Skip the prose list** — `--parent` links the children.
 4. **Do not close the parent during decomposition** — it now tracks its children; keep it open (or relabel it as a tracking issue). Closing here would orphan the sub-issues. (Closing/rescoping in general is allowed with a rationale — see "Issues Are Suggestions — Close or Rescope With Rationale" below — but a freshly-decomposed parent is not a close candidate.)
 5. **Do not self-curate your own sub-issues in the same session.** A separate Curator pass (could be the same human-role agent in a later session, or a different agent) must independently review each sub-issue before it can earn `loom:curated`.
 6. **Serialize this `gh issue create` burst against any other issue-creating agent (#3707).** Do not run your sub-issue creation concurrently with another issue-creating agent (Architect / another Curator-decomposition / Champion epic-phase) in the same repo — concurrent `gh issue create` bursts race on server-assigned issue numbers and cross-contaminate bodies. One filer finishes its full burst before the next starts. See `sweep.md` → "Execution Model → Only Builders parallelize" for the invariant.
@@ -984,18 +991,11 @@ each. Full taxonomy: `.loom/docs/label-state-machine.md` →
 TITLE=$(./.loom/scripts/gh-cached issue view <number> --json title --jq .title)
 BODY=$(./.loom/scripts/gh-cached issue view <number> --json body --jq .body)
 
-# Check for similar existing issues, merged PRs, closed issues, AND open
-# issues/PRs that cross-reference this one (--issue, issue #4162)
 ./.loom/scripts/check-duplicate.sh --include-merged-prs --issue "<number>" "$TITLE" "$BODY"
 CHECK_RC=$?
 if [[ $CHECK_RC -eq 1 ]]; then
-    # DUPLICATE_FOUND and/or RELATED_OPEN_WORK found - read the full output
-    # before marking curated
     echo "Potential duplicate or related open work detected - review before curating"
 elif [[ $CHECK_RC -eq 2 ]]; then
-    # Could not check at all (e.g. GraphQL exhaustion with no working
-    # fallback) - this is NOT "duplicate found". Don't block curation on it;
-    # note the inconclusive check in your enhancement comment instead.
     echo "Duplicate check could not complete (forge error) - proceeding without a duplicate verdict"
 fi
 ```

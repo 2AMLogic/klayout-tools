@@ -8023,6 +8023,24 @@ def test_resolve_layer_map_falls_back_to_family_level_file(tmp_path):
     assert resolution == "family"
 
 
+def test_resolve_layer_map_strips_ihp_prefix_for_family_file(tmp_path):
+    """IHP-Open-PDK shape (issue #2444): the variant is `ihp-sg13g2` but the
+    shipped map is named after the process, `sg13g2.map`. Missing it made the
+    DEF->GDS merge use KLayout's sequential default layer numbers."""
+    klayout_dir = tmp_path / "klayout"
+    tech_dir = klayout_dir / "tech"
+    tech_dir.mkdir(parents=True)
+    (tech_dir / "sg13g2.map").write_text("family\n", encoding="utf-8")
+
+    pdk_info = _fake_pdk_info(tmp_path, variant="ihp-sg13g2")
+    pdk_info["assets"]["klayout"] = str(klayout_dir)
+
+    path, resolution = place_and_route._resolve_layer_map(pdk_info)
+
+    assert path == str(tech_dir / "sg13g2.map")
+    assert resolution == "family"
+
+
 def test_resolve_layer_map_returns_none_when_neither_file_exists(tmp_path):
     klayout_dir = tmp_path / "klayout"
     tech_dir = klayout_dir / "tech"
@@ -10680,3 +10698,76 @@ def test_envelope_lint_finds_the_plain_string_path_fields(tmp_path, monkeypatch)
         finding["field"] for finding in env_provenance.find_absolute_path_fields(report)
     }
     assert {"def_path", "gds_path", "verilog_path"} <= flagged
+
+
+# --- Issue #2378: set_dont_use parity with `klt synthesize` -----------------
+
+
+def _dont_use_stage_lines(cell_library, stage):
+    return place_and_route._stage_script_lines(
+        stage=stage,
+        checkpoint_in="/tmp/in.odb",
+        checkpoint_out="/tmp/out.odb",
+        tech_lef="t.lef",
+        cell_lef="c.lef",
+        liberty_path="c.lib",
+        netlist_path="n.v",
+        hdl_toplevel="top",
+        floorplan={},
+        io_spec={"layer_h": "met3", "layer_v": "met2"},
+        macros=[],
+        power=None,
+        clock_port="clk",
+        clock_period_ns=10.0,
+        max_transition_ns=None,
+        max_capacitance_pf=None,
+        max_fanout=None,
+        input_delay_ns=None,
+        output_delay_ns=None,
+        cell_library=cell_library,
+        seed=1,
+        output_dir="/tmp",
+        route_critical_nets_percentage=0,
+        max_antenna_repair_iterations=0,
+    )
+
+
+def test_dont_use_emitted_before_placement_cts_and_hold_repair():
+    expected = [
+        "set_dont_use {sky130_fd_sc_hd__lpflow_*}",
+        "set_dont_use {sky130_fd_sc_hd__probe*}",
+    ]
+    for stage, first_resizer in (
+        ("place", "global_placement"),
+        ("cts", "clock_tree_synthesis"),
+        ("route", None),
+    ):
+        lines = _dont_use_stage_lines("sky130_fd_sc_hd", stage)
+        assert [ln for ln in lines if ln.startswith("set_dont_use")] == expected
+        idx = lines.index(expected[-1])
+        assert lines.index("read_liberty c.lib") < lines.index(expected[0])
+        for i, ln in enumerate(lines):
+            if ln.startswith(("global_placement", "repair_", "clock_tree_synthesis")):
+                assert idx < i, (stage, ln)
+        if first_resizer:
+            assert any(ln.startswith(first_resizer) for ln in lines)
+        if stage == "cts":
+            assert idx < lines.index("repair_timing -hold")
+
+
+def test_dont_use_matches_shared_synthesis_table():
+    from klayout_tools.synthesize import _ABC_DONT_USE_GLOBS
+
+    for lib, globs in _ABC_DONT_USE_GLOBS.items():
+        got = [
+            ln
+            for ln in _dont_use_stage_lines(lib, "place")
+            if ln.startswith("set_dont_use")
+        ]
+        assert got == [f"set_dont_use {{{g}}}" for g in globs]
+
+
+def test_dont_use_absent_for_library_without_entry():
+    assert place_and_route._dont_use_lines("gf180mcu_fd_sc_mcu7t5v0") == []
+    lines = _dont_use_stage_lines("gf180mcu_fd_sc_mcu7t5v0", "place")
+    assert not any("set_dont_use" in ln for ln in lines)

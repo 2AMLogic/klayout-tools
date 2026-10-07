@@ -2049,13 +2049,13 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #: :func:`~klayout_tools.gen._fixed_cut_side_um`).
 #:
 #: This table only carries the fixed-size rules the curated decks do **not**
-#: yet encode as ``DrcRule.threshold_max_dbu`` (issue #2370) -- the six rules
-#: issue #2388 deferred behind this issue. :func:`_cut_fixed_size_um` reads a
-#: deck-declared ``threshold_max_dbu`` directly, so gf180mcu's
-#: ``contact``/``via1``-``via4`` (and any rule a later backfill adds) need no
-#: entry here; ``tests/test_gen.py`` asserts that any layer present in *both*
-#: sources agrees, so an entry can be deleted once its deck rule carries the
-#: bound.
+#: yet encode as ``DrcRule.threshold_max_dbu`` (issue #2370) -- the rules
+#: issue #2388 still defers (sky130 ``licon1``/``mcon``).
+#: :func:`_cut_fixed_size_um` reads a deck-declared ``threshold_max_dbu``
+#: directly, so gf180mcu's ``contact``/``via1``-``via4`` (and any rule a later
+#: backfill adds) need no entry here; ``tests/test_gen.py`` asserts that any
+#: layer present in *both* sources agrees, so an entry can be deleted once its
+#: deck rule carries the bound.
 #:
 #: - ``sky130`` ``licon1`` (66/44) 0.17um -- ``sky130A_mr.drc`` ``licon.1``
 #:   ("min/max. licon length : 0.17um",
@@ -2082,27 +2082,14 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #:   handles ring-shaped mcon separately (``ct.3``/``ct.3_a``); ``sky130.lydrc``
 #:   applies the same 0.17um unconditionally, and no generator draws an
 #:   ``areaid`` layer or a ring-shaped cut, so the clamp is unconditional here.
-#: - ``sky130`` ``via`` (68/44) 0.15um -- ``sky130A_mr.drc`` ``via.1a_b``
-#:   ("maximum length of via : 0.15um"), alongside ``via.1a_a``'s 0.15um
-#:   minimum (this deck's ``via.width.1``).
-#: - ``sg13g2`` ``Cont`` (6/0) 0.16um -- ``5_14_cont.drc`` ``Cnt.a``
-#:   (``cont_sq.without_bbox_width(0.16um)``, "Min. and max. Cont width").
-#: - ``sg13g2`` ``Via1`` (19/0) 0.19um -- ``5_19_via1.drc`` ``V1.a``
-#:   (``without_bbox_min/max(0.19um)``).
-#: - ``sg13g2`` ``Via2``/``Via3``/``Via4`` (29/0, 49/0, 66/0) 0.19um --
-#:   ``5_20_vian.drc`` ``V2.a``/``V3.a``/``V4.a`` (the templated ``Vn.a``).
+#: - sky130 ``via`` (68/44) 0.15um and sg13g2 ``Cont``/``Via1``-``Via4``
+#:   (``Cnt.a``, ``V1.a``-``V4.a``) used to be listed here; issue #2388's
+#:   backfill moved them into the deck as ``threshold_max_dbu``, which
+#:   :func:`_cut_fixed_size_um` reads directly.
 _PDK_CUT_FIXED_SIZE_UM: dict[str, dict[tuple[int, int], float]] = {
     "sky130": {
         (66, 44): 0.17,  # licon1.drawing -- licon.1 (issue #2594)
         (67, 44): 0.17,  # mcon.drawing -- ct.1 / ct.1_a+ct.1_b (issue #2594)
-        (68, 44): 0.15,  # via.drawing -- via.1a_a/via.1a_b
-    },
-    "sg13g2": {
-        (6, 0): 0.16,  # Cont.drawing -- Cnt.a
-        (19, 0): 0.19,  # Via1.drawing -- V1.a
-        (29, 0): 0.19,  # Via2.drawing -- V2.a (Vn.a)
-        (49, 0): 0.19,  # Via3.drawing -- V3.a (Vn.a)
-        (66, 0): 0.19,  # Via4.drawing -- V4.a (Vn.a)
     },
 }
 
@@ -2156,6 +2143,37 @@ def _cut_fixed_size_um(family: str, layer: Any) -> float:
         if bound is not None
     ]
     return min(bounds) if bounds else 0.0
+
+
+def _mfg_grid_um(family: str, layer: Any) -> float:
+    """The manufacturing grid (um) ``family``'s curated deck requires vertices
+    on ``layer`` to sit on (issue #2648), or ``0.0`` when the deck declares no
+    ``"ongrid"`` rule there (or ``family`` has no registered deck) -- "draw the
+    generator's own coordinates unchanged".
+
+    Read from the deck's own ``check="ongrid"`` rule (issue #2642) rather than
+    restated here, so the generator and ``klt drc`` cannot disagree. ``layer``
+    is a ``(layer, datatype)`` pair or a ``kdb.LayerInfo``; the coarsest
+    declared grid wins."""
+    if layer is None:
+        return 0.0
+    from .decks import UnknownDeckError, get_deck
+
+    pair = (
+        (layer.layer, layer.datatype)
+        if hasattr(layer, "datatype")
+        else (int(layer[0]), int(layer[1]))
+    )
+    try:
+        rules = get_deck(family)
+    except UnknownDeckError:
+        return 0.0
+    grids = [
+        rule.grid_um
+        for rule in rules
+        if rule.check == "ongrid" and rule.layer == pair and rule.grid_um
+    ]
+    return max(grids) if grids else 0.0
 
 
 #: Per-PDK-family ``res_array`` ``metal_level`` -> the exact ``klt extract``
@@ -2577,6 +2595,7 @@ def _device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -2686,6 +2705,7 @@ def _resistor_layer_params(
         resolved: dict[str, Any] = {
             "poly_layer": kdb.LayerInfo(*levels["body"]),
             "contact_layer": kdb.LayerInfo(*levels["via"]),
+            "mfg_grid_um": _mfg_grid_um(family, levels["via"]),
             "contact_fixed_size_um": _cut_fixed_size_um(family, levels["via"]),
             "metal_layer": kdb.LayerInfo(*levels["landing"]),
             "res_mark_layer": kdb.LayerInfo(*levels["marker"]),
@@ -2715,6 +2735,7 @@ def _resistor_layer_params(
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -2934,6 +2955,7 @@ def _ring_layer_params(
     return {
         "tap_layer": _role_layer_info(family, "tap"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -3058,6 +3080,7 @@ def _bjt_layer_params(
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),
@@ -3176,6 +3199,7 @@ def _esd_device_layer_params(
         "active_layer": _role_layer_info(family, "active"),
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
+        "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
         "contact_fixed_size_um": _cut_fixed_size_um(
             family, _PDK_ROLE_LAYERS[family].get("contact")
         ),

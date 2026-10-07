@@ -247,6 +247,9 @@ from .gen_layer_params import (
     _metal_res_layers as _metal_res_layers,
 )
 from .gen_layer_params import (
+    _mfg_grid_um as _mfg_grid_um,
+)
+from .gen_layer_params import (
     _mos_array_well_tap_role_layer as _mos_array_well_tap_role_layer,
 )
 from .gen_layer_params import (
@@ -411,6 +414,9 @@ _HIDDEN_PARAMS = {
     # layer with no upper size bound) leaves the drawn cut unchanged.
     "contact_fixed_size_um",
     "cap_top_via_fixed_size_um",
+    # Manufacturing grid (um) the contact layer's curated deck requires cut
+    # vertices on (issue #2648), resolved by `_mfg_grid_um`; `0.0` = no snap.
+    "mfg_grid_um",
 }
 
 #: ``res_array``'s flavour mask slots are generated from
@@ -2495,11 +2501,46 @@ def _fixed_cut_side_um(side_um: float, fixed_size_um: float) -> float:
     return side_um
 
 
+def _clamp_span(lo: int, hi: int, fixed_dbu: int) -> tuple[int, int]:
+    """Clamp one axis ``[lo, hi]`` (integer dbu) of a cut down to
+    ``fixed_dbu`` about its own centre, for :func:`_clamp_cut_boxes`. The
+    odd-dbu remainder goes on the high side. A no-op for ``fixed_dbu <= 0``
+    or a span already at or under ``fixed_dbu``."""
+    span = hi - lo
+    if fixed_dbu > 0 and span > fixed_dbu:
+        lo += (span - fixed_dbu) // 2
+        hi = lo + fixed_dbu
+    return lo, hi
+
+
+def _snap_span(lo: int, hi: int, grid_dbu: int) -> tuple[int, int]:
+    """Snap one axis ``[lo, hi]`` (integer dbu) of a cut onto a ``grid_dbu``
+    manufacturing grid, for :func:`_clamp_cut_boxes`: *translate* the span to
+    the nearest grid-aligned origin when its length is a grid multiple (size
+    preserved), else round each edge to the grid independently. A no-op for
+    ``grid_dbu == 0``."""
+    if not grid_dbu:
+        return lo, hi
+
+    def _snap(v: int) -> int:
+        return int(round(v / grid_dbu)) * grid_dbu
+
+    if (hi - lo) % grid_dbu == 0:
+        shift = _snap(lo) - lo
+        return lo + shift, hi + shift
+    return _snap(lo), _snap(hi)
+
+
 def _clamp_cut_boxes(
-    cell: Any, layer_index: int, dbu: float, fixed_size_um: float
+    cell: Any,
+    layer_index: int,
+    dbu: float,
+    fixed_size_um: float,
+    mfg_grid_um: float = 0.0,
 ) -> None:
     """Clamp every box already drawn on ``layer_index`` in ``cell`` down to
-    ``fixed_size_um`` per side, about its own centre (issue #2585).
+    ``fixed_size_um`` per side, about its own centre (issue #2585), then snap
+    every cut onto the ``mfg_grid_um`` manufacturing grid (issue #2648).
 
     Every generator lays its cuts out around the PDK-generic
     :data:`CONTACT_SIZE_UM` budget (and its per-family *minimum* floors); on a
@@ -2517,28 +2558,35 @@ def _clamp_cut_boxes(
     rule trips the maximum as readily as the minimum). The one odd-dbu
     remainder, when there is one, goes on the high side. A no-op for
     ``fixed_size_um <= 0`` and for any box already at or under the fixed size
-    on that axis."""
-    if fixed_size_um <= 0.0:
-        return
+    on that axis.
+
+    The grid snap is the one place derived cut centres (a gate contact on the
+    poly comb's midpoint, a clamp's half-difference offset, ...) are forced
+    onto the PDK's manufacturing grid, read from the layer-param table
+    (:func:`~klayout_tools.gen_layer_params._mfg_grid_um`) rather than rounded
+    per call site. Each box is *translated* to the nearest grid-aligned
+    origin, preserving its size (so a width rule's margin is untouched) when
+    that size is itself a grid multiple; otherwise each edge is rounded to the
+    grid independently. A no-op for ``mfg_grid_um <= 0`` or a grid that is
+    not a whole number of dbu."""
     import klayout.db as kdb
 
-    fixed_dbu = int(round(fixed_size_um / dbu))
+    fixed_dbu = int(round(fixed_size_um / dbu)) if fixed_size_um > 0.0 else 0
+    grid_dbu = int(round(mfg_grid_um / dbu)) if mfg_grid_um > 0.0 else 0
+    if grid_dbu < 2 or abs(grid_dbu * dbu - mfg_grid_um) > 1e-9:
+        grid_dbu = 0
+    if fixed_dbu <= 0 and grid_dbu == 0:
+        return
+
     shapes = cell.shapes(layer_index)
-    oversized = [s for s in shapes.each() if s.is_box()]
-    for shape in oversized:
+    boxes = [s for s in shapes.each() if s.is_box()]
+    for shape in boxes:
         box = shape.box
-        w = box.width()
-        h = box.height()
-        if w <= fixed_dbu and h <= fixed_dbu:
-            continue
-        left, bottom, right, top = box.left, box.bottom, box.right, box.top
-        if w > fixed_dbu:
-            left += (w - fixed_dbu) // 2
-            right = left + fixed_dbu
-        if h > fixed_dbu:
-            bottom += (h - fixed_dbu) // 2
-            top = bottom + fixed_dbu
-        shape.box = kdb.Box(left, bottom, right, top)
+        left, right = _snap_span(*_clamp_span(box.left, box.right, fixed_dbu), grid_dbu)
+        bottom, top = _snap_span(*_clamp_span(box.bottom, box.top, fixed_dbu), grid_dbu)
+        new_box = kdb.Box(left, bottom, right, top)
+        if new_box != box:
+            shape.box = new_box
 
 
 def _insert_ring(

@@ -169,9 +169,12 @@ module shells out to, reads, or requires an ORFS checkout.
 Deliberately out of scope for this v1 (a core-only block, matching the
 contract's own IO-ring/footprint exclusion): metal fill (density fill, not
 gap-filler cells -- see "Power delivery" below for those) and a
-``DONT_USE_CELLS``-style cell exclusion list -- neither is part of the
-request/response contract this phase implements, and each can be added later
-as an additive request field without a contract-shape change. Tapcell
+*caller-supplied* ``DONT_USE_CELLS``-style cell exclusion field -- neither is
+part of the request/response contract this phase implements, and each can be
+added later as an additive request field without a contract-shape change.
+(The built-in per-``cell_library`` exclusions ``klt synthesize`` already
+applies *are* emitted as ``set_dont_use`` in every post-floorplan stage script,
+before placement/repair/CTS -- issue #2378 -- with no request-contract change.) Tapcell
 insertion and power-grid generation (PDN) were also originally scoped out
 here; see "Power delivery" below for the additive field that closes that gap
 (issue #1091), exactly per this same note's own precedent (the "Hard-macro
@@ -3903,6 +3906,12 @@ def _resolve_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
     family = variant
     if len(family) > 1 and family[-1].isupper():
         family = family[:-1]
+    # IHP-Open-PDK (issue #2444): the install variant is ``ihp-sg13g2`` but
+    # the shipped map is named after the process, ``sg13g2.map`` -- without
+    # this the DEF->GDS merge silently fell back to KLayout's sequential
+    # default layer numbering (Via1 cuts on 8/0, Metal2 pads on 9/0, ...).
+    if family.startswith("ihp-"):
+        family = family[len("ihp-") :]
     if family != variant:
         family_candidate = os.path.join(tech_dir, f"{family}.map")
         if os.path.isfile(family_candidate):
@@ -4440,6 +4449,22 @@ def _row_rail_lines(cell_library: str) -> list[str]:
     ]
 
 
+def _dont_use_lines(cell_library: str) -> list[str]:
+    """``set_dont_use`` lines for ``cell_library`` (issue #2378).
+
+    Reuses the same per-library table ``klt synthesize`` hands to ABC
+    (:data:`~klayout_tools.synthesize._ABC_DONT_USE_GLOBS`) so both commands
+    agree on the usable cell set. Each glob is brace-quoted (Tcl-safe: the
+    ``*``/``?``/``[]`` metacharacters reach OpenROAD's own pattern matcher
+    unexpanded). A library with no entry emits nothing.
+    """
+    from .synthesize import _ABC_DONT_USE_GLOBS
+
+    return [
+        f"set_dont_use {{{glob}}}" for glob in _ABC_DONT_USE_GLOBS.get(cell_library, ())
+    ]
+
+
 def _stage_script_lines(
     *,
     stage: str,
@@ -4521,6 +4546,11 @@ def _stage_script_lines(
     # stage's own `link_design`), so `create_clock` may safely follow
     # `read_liberty` directly here -- unlike the floorplan stage above.
     lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    # Issue #2378: `set_dont_use` must come after liberty is loaded and before
+    # the first resizer-driven step (`global_placement -timing_driven`,
+    # `repair_*`, CTS, hold repair), and is re-emitted in every fresh OpenROAD
+    # process rather than relying on any checkpoint to carry it.
+    lines += _dont_use_lines(cell_library)
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout

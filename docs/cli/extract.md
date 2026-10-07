@@ -2290,6 +2290,16 @@ diagnostic below, never a corrected binding:
   that changes extraction, which still ignores the marker entirely.
 - A matching prose entry in `warnings[]`.
 
+**Missing flavour markers (issue #2417)**: when a deck declares `mos_flavours`
+and a flavour's marker layer has *no shapes at all* in the layout, every MOS
+device binds the deck's default flavour (e.g. a missing `hvi` or `Dualgate`
+extracts high-voltage devices as core devices, surfacing only later as a
+simulator fatal). Extraction reports one `missing_flavour_markers[]` entry
+(`{ "deck", "flavour", "marker" }`) plus a prose line in `warnings[]` per such
+marker. The check runs only under `--pdk`, where the flavour decides the bound model
+name. A marker that is present but does not overlap MOS active geometry is a
+legitimate layout and is not flagged.
+
 **What this field does and does not guarantee**: for a marker with no
 `mos_flavours` coverage, it only flags that the bound model name may be
 wrong — it does not correct the binding. For a marker `mos_flavours` *does*
@@ -4143,6 +4153,21 @@ per-net lumped model would produce.
   > *parallel* are still charged in series; that limitation is unchanged by
   > #2359 and is tracked as Stage 3 in
   > `docs/design/extract-fidelity-roadmap.md`.
+  >
+  > **Known limitations of the series sum (issues #2391, #2458).** Within one
+  > role, fragments that carry current side by side (for example one tap per
+  > device on a supply rail) are summed, so the net's `resistance_ohm` grows
+  > with tap count even though the real resistance between two fixed points
+  > does not. Across levels, two strapped layers joined at both ends are
+  > charged as the sum of both, not their parallel combination, while two
+  > levels joined at a single landing correctly add. The true value depends
+  > on which terminals carry current and on the boundary conditions, and a
+  > net with three or more terminals has no single scalar. `--distributed-rc`
+  > does **not** repair this: the ladder redistributes the *same*
+  > `resistance_ohm` along the terminal order and conserves its total, so it
+  > inherits the bias. The planned fix is an opt-in terminal-aware resistance
+  > graph, specified (design only, not implemented) in Stage 3 of
+  > `docs/design/extract-fidelity-roadmap.md`.
 - **per-terminal leg R** — the net's total series R distributed across its
   terminals, weighted by each terminal's Euclidean distance from the
   centroid of all of the net's terminal positions (a terminal farther from
@@ -4447,7 +4472,11 @@ klt extract cell.gds --deck sky130 --parasitics --critical-net MID --distributed
   single hub.
 - **Conservation.** The ladder redistributes the *same* `resistance_ohm`/
   `capacitance_ff` totals `--parasitics` already computes for that net — it
-  changes **where** the R/C sits, not **how much** exists. `N` terminals
+  changes **where** the R/C sits, not **how much** exists. Consequently the ladder
+  cannot repair parallel resistance: if the series-sum total overstates a
+  net with parallel fragments or strapped levels (see the "Known limitations
+  of the series sum" note under "Parasitic (RC) extraction"), the ladder
+  carries the same overstated total. `N` terminals
   become `N - 1` series segment resistors (summing back to the net's total
   resistance, split proportional to each segment's inter-terminal distance)
   and `N` per-terminal ground capacitors (summing back to the net's total
@@ -6301,6 +6330,7 @@ exit codes).
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. A deliberate poly underpass lands here too unless the deck declares `poly_interconnect` and the shape is marked with it — see "Declaring intentional poly interconnect" below (issue #1425). |
 | `merged_net_labels` | array\<object\>          | One entry per net whose name is a merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`net` uses the same `\|`-joined spelling as `nets[].name` and the written netlist, issue #696; `labels` is `net` split on `\|`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer with **no** matching `mos_flavours` coverage (issue #552, narrowed by issue #1111 — see "Voltage-domain markers and per-flavour MOS binding" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker, a marker fully covered by `mos_flavours` (e.g. gf180mcu's `Dualgate` as of issue #1111 — see the linked section for what "covered" means), or a layout that draws none of the remainder overlapping MOS geometry. |
+| `missing_flavour_markers` | array\<object\> | One entry per `mos_flavours` marker layer the deck declares that has **zero shapes anywhere in the layout** (issue #2417), each `{ "deck": str, "flavour": str, "marker": "<layer>/<datatype>" }`. With no marker geometry flavour selection never fires and every MOS device silently binds the deck's default flavour. A matching prose entry is appended to `warnings[]`. Only evaluated under `--pdk` (flavour selection changes the bound model name only when a PDK resolves the binding). Not raised when the marker is present but overlaps no MOS active area. Always present, empty for a deck with no `mos_flavours` or whose markers all have geometry. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: an anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — i.e. every device whose `nwell` island a drawn or derived well tie reaches (issue #1084). Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |
