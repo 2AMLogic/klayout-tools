@@ -762,6 +762,68 @@ The same 5-corner ring-oscillator matrix as `examples/sim-remote/`, with
 `backend: "batch"` — the live-run report slot is deliberately empty until
 those 2am prerequisites are done.
 
+## Sequential (adaptive) campaigns on the batch backend
+
+`corners`/`monte_carlo` batch a grid that is known up front. When each
+probe's input depends on the previous probe's result (bisection for a
+threshold or boundary), the full request cannot be written ahead of time.
+The intended pattern is an external controller that submits **one
+single-unit request per step** and reads each report before choosing the
+next input. There is no `--wait` flag, adaptive request kind, or resident
+worker to add: `--backend batch` already submits, launches, polls, and
+collects before it returns.
+
+```sh
+klt sim probe-000.request.json --backend batch --format json > probe-000.report.json
+```
+
+or, from Python, `klayout_tools.sim.run_sim(request_path, backend="batch")`.
+The library call returns the report dictionary (and raises `SimError` where
+the CLI would emit an error and exit `1`); the CLI writes that same report
+to stdout and maps `status` to an exit code (see "Exit codes"). A driver must
+parse the report, not gate on the exit code alone: exit `3` (a declared limit
+failed) still carries completed, usable measurements, and may be a perfectly
+good bracket observation, while exit `4` (`error`, `inconclusive`,
+`not_checked`) must stop the campaign.
+
+A single-unit request uses one process, one temperature, and a singleton
+value for a literal DC source, with `monte_carlo` omitted:
+
+```json
+"corners": { "process": ["tt"], "supply_v": { "vdd": [1.05] }, "temperature_c": [27] }
+```
+
+[`examples/sim-batch/adaptive-search.py`](../../examples/sim-batch/adaptive-search.py)
+is a bounded bisection driver built on this (usage in
+[`examples/sim-batch/README.md`](../../examples/sim-batch/README.md)). The
+controller runs on the submitting host; every simulation runs on the fleet,
+via `klt sim --backend batch` only. Before moving the bracket it requires
+exactly one corner, a usable report and corner `status` (`pass` or `fail`),
+the expected source value, and a present, finite named measurement with a
+usable status and a batch job id not seen before. Anything else (an error
+envelope, `error`/`inconclusive`/`not_checked`/`pass_partial`, a missing or
+non-finite value, an unexpected corner count, a repeated job id) stops the
+campaign: a missing value is never replaced by zero. It also stops when
+`--max-probes` is spent.
+
+Caveats:
+
+- **Assumptions.** The example assumes the measurement is monotonic in the
+  source value over the bracket and that the bracket is valid (the crossing
+  lies inside it); the endpoints are not probed.
+- **Overhead.** Each probe is a separate fleet job: it pays launch,
+  Spot-acquisition, and boot latency every time, and there is no resident
+  worker or shared simulator state between probes. Prefer a fixed grid when
+  the points are known in advance.
+- **Timeouts.** `batch.poll_timeout_s` expiring yields a `batch_poll_timeout`
+  diagnostic and does not prove the job stopped. The driver stops and reports
+  the job id (`environment.remote.job_id`) instead of starting a replacement.
+  Bound a probe with `batch.poll_timeout_s` and `batch.capacity_wait_s`
+  (above). The example performs no automatic campaign retries.
+- **Scope.** Arbitrary `.param`/`.nodeset` axes are not covered, and the
+  example does not negotiate features with, or repair, an incompatible fleet
+  image.
+
 ## Fleet sharding (`remote.hosts`)
 
 `request.remote.hosts` (overridable with `--hosts`, same precedence rule as
