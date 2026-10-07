@@ -75,6 +75,50 @@ def known_deck_names() -> list[str]:
     return sorted({str(entry.get("deck")) for entry in entries})
 
 
+def _self_release_entries(
+    content_hash: str, deck: str | None
+) -> list[dict[str, Any]]:
+    """History-shaped entries for *this running build's own* release, when the
+    generated table does not (yet) cover it (issue #2451).
+
+    ``_history.json`` is regenerated after a release is tagged, so the table
+    shipped inside release N stops at N-1. When this build is positively an
+    unmodified release artifact (``build_identity.identity()["is_release"]``)
+    and ``content_hash`` equals the hash of one of its own built-in decks, the
+    build can vouch for itself. Returns ``[]`` for a source/dirty/unknown
+    build, so a genuine post-tag build still reports "unreleased".
+    Never raises.
+    """
+    try:
+        from .. import __version__, build_identity
+        from .._provenance import sha256_file
+        from . import deck_names, deck_source_path
+
+        ident = build_identity.identity()
+        if ident.get("is_release") is not True:
+            return []
+        matches: list[dict[str, Any]] = []
+        for name in deck_names():
+            if deck is not None and name != deck:
+                continue
+            digest = sha256_file(deck_source_path(name))
+            if digest is None or f"sha256:{digest}" != content_hash:
+                continue
+            matches.append(
+                {
+                    "deck": name,
+                    "content_hash": content_hash,
+                    "git_tag": ident.get("git_tag") or f"v{__version__}",
+                    "git_commit": ident.get("git_commit"),
+                    "package_version": __version__,
+                    "self_identified": True,
+                }
+            )
+        return matches
+    except Exception:  # noqa: BLE001 - an identity probe must never break a lookup
+        return []
+
+
 def resolve_deck(
     *,
     content_hash: str | None = None,
@@ -114,6 +158,8 @@ def resolve_deck(
         if deck is not None:
             candidates = [e for e in candidates if e.get("deck") == deck]
         if not candidates:
+            candidates = _self_release_entries(content_hash, deck)
+        if not candidates:
             raise DeckHistoryError(
                 _not_found_message(content_hash=content_hash, deck=deck)
             )
@@ -132,7 +178,7 @@ def resolve_deck(
             raise DeckHistoryError(_not_found_message(deck=deck, version=version))
         match = candidates[-1]
 
-    return {
+    report = {
         "schema_version": 1,
         "query": {"content_hash": content_hash, "deck": deck, "version": version},
         "deck": match["deck"],
@@ -141,6 +187,11 @@ def resolve_deck(
         "git_commit": match["git_commit"],
         "package_version": match["package_version"],
     }
+    if match.get("self_identified"):
+        # Additive (issue #2451): the table did not cover this build's own
+        # release; the build vouched for itself.
+        report["self_identified"] = True
+    return report
 
 
 def is_deck_hash_released(deck: str | None, content_hash: str | None) -> bool | None:
@@ -180,7 +231,12 @@ def is_deck_hash_released(deck: str | None, content_hash: str | None) -> bool | 
     candidates = [e for e in entries if e.get("content_hash") == content_hash]
     if deck is not None:
         candidates = [e for e in candidates if e.get("deck") == deck]
-    return bool(candidates)
+    if candidates:
+        return True
+    # The table is regenerated after tagging, so it never covers the build
+    # that ships it; a verified release build vouches for its own decks
+    # (issue #2451).
+    return bool(_self_release_entries(content_hash, deck))
 
 
 def deck_info(name: str | None = None) -> dict[str, Any]:

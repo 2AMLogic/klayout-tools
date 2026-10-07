@@ -871,3 +871,66 @@ def test_checked_in_history_table_covers_every_release():
             "checked-in _history.json is stale relative to `git tag` -- "
             "rerun scripts/generate_deck_history.py and commit the result"
         )
+
+
+# --------------------------------------------------------------------------- #
+# issue #2451: a release build resolves its own deck hash
+# --------------------------------------------------------------------------- #
+
+
+def _own_hash(name: str) -> str:
+    from klayout_tools._provenance import sha256_file
+    from klayout_tools.decks import deck_source_path
+
+    return f"sha256:{sha256_file(deck_source_path(name))}"
+
+
+def _fake_identity(monkeypatch, is_release):
+    from klayout_tools import build_identity
+
+    monkeypatch.setattr(
+        build_identity,
+        "identity",
+        lambda: {
+            "git_commit": "c" * 40,
+            "git_tag": "v9.9.9",
+            "dirty": False,
+            "is_release": is_release,
+        },
+    )
+
+
+def test_release_build_resolves_own_deck_hash(_history_table, monkeypatch):
+    from klayout_tools import __version__
+
+    _fake_identity(monkeypatch, True)
+    h = _own_hash("sky130")
+    report = history.resolve_deck(content_hash=h, deck="sky130")
+    assert report["package_version"] == __version__
+    assert report["git_tag"] == "v9.9.9"
+    assert report["self_identified"] is True
+    assert history.is_deck_hash_released("sky130", h) is True
+
+
+def test_non_release_build_does_not_self_identify(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, False)
+    h = _own_hash("sky130")
+    with pytest.raises(history.DeckHistoryError):
+        history.resolve_deck(content_hash=h, deck="sky130")
+    assert history.is_deck_hash_released("sky130", h) is False
+
+
+def test_release_build_foreign_hash_still_unreleased(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, True)
+    foreign = "sha256:" + "f" * 64
+    assert history.is_deck_hash_released("sky130", foreign) is False
+    with pytest.raises(history.DeckHistoryError):
+        history.resolve_deck(content_hash=foreign)
+
+
+def test_table_match_takes_precedence_over_self(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, True)
+    report = history.resolve_deck(content_hash="sha256:" + "a" * 64)
+    expected = [e for e in _ENTRIES if e["content_hash"] == "sha256:" + "a" * 64]
+    assert report["package_version"] == expected[-1]["package_version"]
+    assert "self_identified" not in report
