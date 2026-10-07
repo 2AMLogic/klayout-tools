@@ -152,7 +152,7 @@ Consequences:
   `<expr>[0]`, ...); it is not a point-interpolation facility. To read a
   transient value at a time, use a `.meas ... FIND ... AT=` card.
 
-Tested recipe (PDK-free; exact value `2000.1 / 3000.1 = 0.66666777740741...`).
+Tested recipe (PDK-free; exact value `2000.1 / 3000.1 = 0.6666777774074197`).
 `divider.spice`:
 
 ```
@@ -192,8 +192,17 @@ Operating-point scalar:
 
 | ngspice | `.meas` default | `.meas` + `measureprec=12` | `expr` default | `expr` + `numdgt=12` |
 |---|---|---|---|---|
-| 42 (tested) | `6.666778e-01` | `6.666778e-01` (**ignored**) | `6.666778e-01` | `6.666777774074e-01` |
-| 46 | not live-tested here; per its source (`options.c`, `com_measure2.c`) `measureprec` is honoured, default 5 decimals | per source, 12 decimals | | |
+| 42 | `6.666778e-01` | `6.666778e-01` (**ignored**) | `6.666778e-01` | `6.666777774074e-01` |
+| 46 | `6.66678e-01` (5 decimals) | `6.666777774074e-01` (**honoured**, 12 decimals) | `6.666778e-01` | `6.666777774074e-01` |
+
+Both rows were measured live (ngspice 42 from `/usr/bin/ngspice`, ngspice 46
+from `~/.local/bin/ngspice`, each via `klt sim`'s `run_sim` with
+`backend="local"` and the two requests above, varying only
+`options.ngspice_init`). On 46, `numdgt=12` alone leaves a `.meas` value at
+`6.66678e-01` and `measureprec=12` alone leaves an `expr` value at
+`6.666778e-01`; the JSON `value` is the parsed raw token in every case
+(46 `.meas` + `measureprec=12`: `0.6666777774074`; 46 `expr` +
+`numdgt=12`: `0.6666777774074`).
 
 On ngspice 42, `measureprec`, `measure_precision` and the
 `NGSPICE_MEAS_PRECISION` environment variable were all tried and none changed
@@ -202,10 +211,11 @@ a `.meas` result (neither as a `.meas` card nor as a `meas` command), and
 of mantissa (7 significant figures). On such an engine, declare the quantity
 as an `expr` (with `numdgt`) when more digits are needed, for any form that
 `expr` can reduce to a scalar. The regression suite
-(`tests/test_sim.py`, "Measurement output precision") picks its `.meas`
-assertion from what the engine actually printed: at 12 decimals it requires
-agreement with the analytic value within `1e-10`; otherwise it pins that the
-value is unchanged from the default. The report does not record the
+(`tests/test_sim.py`, "Measurement output precision") selects its `.meas`
+assertion from the engine's own `ngspice --version` banner: on 46 or later it
+requires 12 emitted decimals and agreement with the analytic value within
+`1e-10`; on older engines it pins that the value is identical to a measured
+default run. The report does not record the
 requested or effective formatting digits (no precision field); that is
 deliberately deferred, since requested settings do not prove the effective
 ones for arbitrary netlists or ambient init files.

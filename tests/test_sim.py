@@ -11389,7 +11389,7 @@ def test_supply_override_explicit_points_are_validated(tmp_path, monkeypatch):
 # ngspice formats `.meas` results with `measureprec` and scalar `print`
 # output with `numdgt`; both are *formatting* controls, reachable through
 # `options.ngspice_init`. These cases pin what `klt sim` reports under each.
-# The divider's analytic value is 2000.1 / 3000.1 = 0.66666777740741...
+# The divider's analytic value is 2000.1 / 3000.1 = 0.6666777774074197
 # --------------------------------------------------------------------------- #
 
 _DIVIDER_ANALYTIC = 2000.1 / 3000.1
@@ -11477,33 +11477,74 @@ def test_integration_precision_default_meas_is_coarser_than_solver(
     assert m["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-6, rel=0)
 
 
+def _ngspice_major() -> int:
+    """Major version of the `ngspice` on PATH, read from its own banner --
+    independent of anything a simulated result printed."""
+    out = subprocess.run(
+        ["ngspice", "--version"], capture_output=True, text=True, timeout=60
+    ).stdout
+    match = re.search(r"ngspice-(\d+)", out)
+    assert match, f"cannot read ngspice version from:\n{out}"
+    return int(match.group(1))
+
+
+#: First ngspice release that honours `set measureprec` for `.meas` output
+#: (verified live on 46; 42 ignores it -- see docs/cli/sim.md).
+_MEASUREPREC_MIN_MAJOR = 46
+
+_MEAS_PREC_INIT = ["set measureprec=12", "set numdgt=12"]
+
+
 @_SKIP_NO_NGSPICE
-def test_integration_precision_measureprec_and_numdgt_on_meas_card(
-    tmp_path, monkeypatch
-):
-    """`measureprec` governs `.meas` formatting where the engine honours it
-    (ngspice 46 per its source). The ngspice 42 on this repo's CI/dev hosts
-    ignores it -- empirically, for `.meas` cards and `meas` commands alike, and
-    `numdgt` never reaches `.meas` output on either. The branch is chosen by
-    what the engine actually printed, never by version sniffing."""
+def test_integration_precision_measureprec_honoured_on_meas_card(tmp_path, monkeypatch):
+    """On an engine that supports `measureprec`, the request must emit the
+    requested digits -- a silently ignored setting fails this test."""
+    if _ngspice_major() < _MEASUREPREC_MIN_MAJOR:
+        pytest.skip(f"ngspice < {_MEASUREPREC_MIN_MAJOR} ignores measureprec")
     corner, log = _run_precision_request(
         tmp_path,
         monkeypatch,
         analysis=_TRAN_FIND,
         measurements=_VOUT_FIND,
-        ngspice_init=["set measureprec=12", "set numdgt=12"],
+        ngspice_init=_MEAS_PREC_INIT,
     )
     (m,) = corner["measurements"]
     assert m["status"] == "pass"
     token = _raw_value_token(log, "vout")
+    assert _mantissa_decimals(token) >= 12
     assert m["value"] == float(token)
-    if _mantissa_decimals(token) >= 12:
-        assert m["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-10, rel=0)
-    else:
-        # Engine without `measureprec` support: the request is accepted, the
-        # value is unchanged from the default -- not silently "improved".
-        assert _mantissa_decimals(token) <= 6
-        assert m["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-6, rel=0)
+    assert m["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-10, rel=0)
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_measureprec_ignored_on_legacy_engine(
+    tmp_path, monkeypatch
+):
+    """On an engine without `measureprec` (ngspice 42), the request is
+    accepted and the `.meas` value is identical to a measured default run --
+    not silently "improved" and not merely close to the analytic value."""
+    if _ngspice_major() >= _MEASUREPREC_MIN_MAJOR:
+        pytest.skip(f"ngspice >= {_MEASUREPREC_MIN_MAJOR} honours measureprec")
+    (tmp_path / "default").mkdir()
+    base, base_log = _run_precision_request(
+        tmp_path / "default",
+        monkeypatch,
+        analysis=_TRAN_FIND,
+        measurements=_VOUT_FIND,
+    )
+    (tmp_path / "wide").mkdir()
+    wide, wide_log = _run_precision_request(
+        tmp_path / "wide",
+        monkeypatch,
+        analysis=_TRAN_FIND,
+        measurements=_VOUT_FIND,
+        ngspice_init=_MEAS_PREC_INIT,
+    )
+    assert _raw_value_token(wide_log, "vout") == _raw_value_token(base_log, "vout")
+    (bm,) = base["measurements"]
+    (wm,) = wide["measurements"]
+    assert wm["status"] == "pass"
+    assert wm["value"] == bm["value"]
 
 
 @_SKIP_NO_NGSPICE
