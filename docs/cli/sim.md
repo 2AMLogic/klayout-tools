@@ -121,6 +121,113 @@ the invoking directory or `$HOME` happened to carry a `.spiceinit` of its
 own). ngspice-only: the `xyce` engine has no equivalent init-file lookup, so
 `options.ngspice_init` is accepted but has no effect when `engine: "xyce"`.
 
+### Measurement output precision (`measureprec` / `numdgt`)
+
+ngspice prints a measurement with a fixed number of digits, and `klt sim`
+reports exactly the token ngspice printed (the parser converts the whole
+matched token with `float()`; it never truncates). The digit count is a
+property of ngspice's **output formatting**, not of solver accuracy, and it is
+controlled by two *different* settings that `options.ngspice_init` can set
+(each line lands in the corner's `.spiceinit`):
+
+| Setting | Governs | Reaches |
+|---|---|---|
+| `set measureprec=N` | digits ngspice prints for `.meas` results (`%.*e`: N counts digits **after the decimal point** of the mantissa, not total significant figures) | `measurements[].spice` cards |
+| `set numdgt=N` | digits of a `print`ed scalar | `measurements[].expr` entries (the `let`/`print` pairs) |
+
+Consequences:
+
+- `.options numdgt=N` in a netlist does **not** establish `.meas` precision;
+  `numdgt` and `measureprec` are separate. Set both when a request mixes
+  `spice` and `expr` measurements.
+- Neither setting makes the solver more accurate. They only stop ngspice from
+  rounding a value it already holds. Solver tolerance (`reltol`, `abstol`,
+  ...) is a separate matter.
+- A derived `expr` reads the engine's stored vector, not the rounded text
+  printed for an earlier `expr`: with default digits `vout` prints as
+  `0.6666778`, yet `(vout - 0.6666778) * 1e9` evaluates to `-22.59...`, not `0`.
+- Defaults are unchanged: with no `ngspice_init`, formatting is whatever the
+  installed ngspice defaults to.
+- `expr` reduces a vector analysis to a **scalar** (`vecmax()`, `mean()`,
+  `<expr>[0]`, ...); it is not a point-interpolation facility. To read a
+  transient value at a time, use a `.meas ... FIND ... AT=` card.
+
+Tested recipe (PDK-free; exact value `2000.1 / 3000.1 = 0.6666777774074197`).
+`divider.spice`:
+
+```
+Vin in 0 DC 1
+R1 in out 1k
+R2 out 0 2.0001k
+C1 out 0 1f
+```
+
+Transient `.meas` (separate request from the OP one, since a corner runs one
+analysis):
+
+```json
+{
+  "netlist": "divider.spice",
+  "analysis": { "kind": "tran", "args": "1n 10n" },
+  "measurements": [
+    { "name": "vout", "spice": ".meas tran vout FIND v(out) AT=5n", "unit": "V" }
+  ],
+  "options": { "ngspice_init": ["set measureprec=12", "set numdgt=12"] }
+}
+```
+
+Operating-point scalar:
+
+```json
+{
+  "netlist": "divider.spice",
+  "analysis": { "kind": "op", "args": "" },
+  "measurements": [ { "name": "vout", "expr": "v(out)", "unit": "V" } ],
+  "options": { "ngspice_init": ["set numdgt=12"] }
+}
+```
+
+**Verified behaviour, by ngspice version.** Digits observed in the raw log
+(`keep_artifacts`), isolated `HOME`, `NGSPICE_MEAS_PRECISION` unset:
+
+| ngspice | `.meas` default | `.meas` + `measureprec=12` | `expr` default | `expr` + `numdgt=12` |
+|---|---|---|---|---|
+| 42 | `6.666778e-01` | `6.666778e-01` (**ignored**) | `6.666778e-01` | `6.666777774074e-01` |
+| 46 | `6.66678e-01` (5 decimals) | `6.666777774074e-01` (**honoured**, 12 decimals) | `6.666778e-01` | `6.666777774074e-01` |
+
+Both rows were measured live (ngspice 42 from `/usr/bin/ngspice`, ngspice 46
+from `~/.local/bin/ngspice`, each via `klt sim`'s `run_sim` with
+`backend="local"` and the two requests above, varying only
+`options.ngspice_init`). On 46, `numdgt=12` alone leaves a `.meas` value at
+`6.66678e-01` and `measureprec=12` alone leaves an `expr` value at
+`6.666778e-01`; the JSON `value` is the parsed raw token in every case
+(46 `.meas` + `measureprec=12`: `0.6666777774074`; 46 `expr` +
+`numdgt=12`: `0.6666777774074`). The 46 row was reproduced independently
+with ngspice 46 built from the upstream `ngspice-46.tar.gz` (sha256
+`a0d1699a…4d64c19b`) and selected via `$KLT_NGSPICE_BINARY`, running the CLI
+(`klt sim <request> --backend local --format json`) with identical tokens
+and JSON values. Note that 46's `.meas` default is 5 decimals, one fewer than
+42's 6.
+
+On ngspice 42, `measureprec`, `measure_precision` and the
+`NGSPICE_MEAS_PRECISION` environment variable were all tried and none changed
+a `.meas` result (neither as a `.meas` card nor as a `meas` command), and
+`numdgt` does not either; so on 42 a `.meas` value is capped at 6 decimals
+of mantissa (7 significant figures). On such an engine, declare the quantity
+as an `expr` (with `numdgt`) when more digits are needed, for any form that
+`expr` can reduce to a scalar. The regression suite
+(`tests/test_sim.py`, "Measurement output precision") selects its `.meas`
+assertion from the `--version` banner of the binary `klt sim` will run
+(resolved like the runner: `$KLT_NGSPICE_BINARY`, then `ngspice` on `PATH`),
+never from what it printed: on 46 or later it requires 12 emitted decimals
+and agreement with the analytic value within `1e-10` (`rel=0`); on older
+engines a separate test pins that the value is identical to a measured
+default run. Set `KLT_NGSPICE_BINARY` to a 46 build to run the strict case
+on a host whose `PATH` ngspice is older. The report does not record the
+requested or effective formatting digits (no precision field); that is
+deliberately deferred, since requested settings do not prove the effective
+ones for arbitrary netlists or ambient init files.
+
 ## Xyce engine
 
 `engine: "xyce"` runs the same corner matrix through Sandia's
@@ -1144,6 +1251,9 @@ relying on `print`:
 ```json
 { "name": "swing", "expr": "vecmax(v(out)) - vecmin(v(out))", "unit": "V" }
 ```
+
+A `print`ed scalar uses ngspice's `numdgt` digit count; see "Measurement
+output precision" above for widening it via `options.ngspice_init`.
 
 Worked `op` example — the case that had no expression at all before:
 
