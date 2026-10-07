@@ -20,6 +20,12 @@ Assumptions (the caller owns them; nothing here can verify them):
   crossing is outside the bracket the search converges on the nearer edge.
   Probe the edges yourself first if you are unsure.
 
+Paths: only the template's `netlist` is rebased onto the template's
+directory (probe requests are written into `--workdir`). Every other path in
+the template (`models.lib` without `models.pdk`, per-corner process libs, an
+OSDI preload, an ngspice binary override, ...) must be absolute or
+PDK-relative, or it will resolve against `--workdir` and break.
+
 Stop conditions: tolerance reached (`converged`), `--max-probes` spent
 (`exhausted`), or ANY unusable probe (`stopped`): malformed/error envelope,
 unexpected corner count, error/inconclusive/not_checked/partial status, absent
@@ -91,6 +97,83 @@ def build_probe_request(
     return request
 
 
+def _require_usable_envelope(report: Any) -> dict[str, Any]:
+    """The report as a dict, or ProbeError for a malformed/error/unusable one."""
+    if not isinstance(report, dict):
+        raise ProbeError("report is not a JSON object")
+    if "error" in report:
+        raise ProbeError(f"error envelope: {report['error']}")
+    if report.get("status") not in _USABLE_STATUS:
+        # error, inconclusive, not_checked, pass_partial (partial coverage)
+        raise ProbeError(f"report status {report.get('status')!r} is not usable")
+    return report
+
+
+def _single_corner(report: dict[str, Any]) -> dict[str, Any]:
+    """The report's only corner, which must be usable and error-free."""
+    corners = report.get("corners")
+    if not isinstance(corners, list) or len(corners) != 1:
+        count = len(corners) if isinstance(corners, list) else None
+        raise ProbeError(f"expected exactly one corner, got {count}")
+    corner = corners[0]
+    if not isinstance(corner, dict) or corner.get("status") not in _USABLE_STATUS:
+        status = corner.get("status") if isinstance(corner, dict) else None
+        raise ProbeError(f"corner status {status!r} is not usable")
+    for diag in corner.get("diagnostics") or []:
+        if isinstance(diag, dict) and diag.get("severity") == "error":
+            raise ProbeError(f"corner diagnostic {diag.get('code')!r}")
+    return corner
+
+
+def _require_applied_value(corner: dict[str, Any], source: str, value: float) -> None:
+    """The corner must have run `source` at exactly the requested value."""
+    applied = (corner.get("supply_v") or {}).get(source)
+    if not isinstance(applied, (int, float)) or not math.isclose(
+        applied, value, rel_tol=1e-9, abs_tol=1e-12
+    ):
+        raise ProbeError(f"corner ran {source}={applied!r}, expected {value!r}")
+
+
+def _named_measurement(corner: dict[str, Any], name: str) -> float:
+    """The finite value of the one usable measurement called `name`."""
+    matches = [
+        m
+        for m in corner.get("measurements") or []
+        if isinstance(m, dict) and m.get("name") == name
+    ]
+    if len(matches) != 1:
+        raise ProbeError(f"measurement {name!r} present {len(matches)} times")
+    entry = matches[0]
+    measured = entry.get("value")
+    if (
+        isinstance(measured, bool)
+        or not isinstance(measured, (int, float))
+        or not math.isfinite(measured)
+    ):
+        raise ProbeError(f"measurement {name!r} value {measured!r} unusable")
+    if entry.get("status") not in _USABLE_STATUS:
+        raise ProbeError(f"measurement status {entry.get('status')!r} not usable")
+    return float(measured)
+
+
+def _remote_job_id(report: Any) -> Any:
+    """`environment.remote.job_id` if the report carries one, else None."""
+    if not isinstance(report, dict):
+        return None
+    remote = (report.get("environment") or {}).get("remote") or {}
+    return remote.get("job_id") if isinstance(remote, dict) else None
+
+
+def _fresh_job_id(report: dict[str, Any], seen_jobs: set[str]) -> str:
+    """The report's batch job id, which must be present and not seen before."""
+    job_id = _remote_job_id(report)
+    if not isinstance(job_id, str) or not job_id:
+        raise ProbeError("report carries no batch job id")
+    if job_id in seen_jobs:
+        raise ProbeError(f"job id {job_id} repeated; refusing a stale report")
+    return job_id
+
+
 def check_report(
     report: Any,
     *,
@@ -103,53 +186,11 @@ def check_report(
 
     Raises ProbeError on anything that is not a trustworthy single-unit
     observation of `measurement` at `source == value`."""
-    if not isinstance(report, dict):
-        raise ProbeError("report is not a JSON object")
-    if "error" in report:
-        raise ProbeError(f"error envelope: {report['error']}")
-    if report.get("status") not in _USABLE_STATUS:
-        # error, inconclusive, not_checked, pass_partial (partial coverage)
-        raise ProbeError(f"report status {report.get('status')!r} is not usable")
-    corners = report.get("corners")
-    if not isinstance(corners, list) or len(corners) != 1:
-        count = len(corners) if isinstance(corners, list) else None
-        raise ProbeError(f"expected exactly one corner, got {count}")
-    corner = corners[0]
-    if not isinstance(corner, dict) or corner.get("status") not in _USABLE_STATUS:
-        status = corner.get("status") if isinstance(corner, dict) else None
-        raise ProbeError(f"corner status {status!r} is not usable")
-    for diag in corner.get("diagnostics") or []:
-        if isinstance(diag, dict) and diag.get("severity") == "error":
-            raise ProbeError(f"corner diagnostic {diag.get('code')!r}")
-    applied = (corner.get("supply_v") or {}).get(source)
-    if not isinstance(applied, (int, float)) or not math.isclose(
-        applied, value, rel_tol=1e-9, abs_tol=1e-12
-    ):
-        raise ProbeError(f"corner ran {source}={applied!r}, expected {value!r}")
-    matches = [
-        m
-        for m in corner.get("measurements") or []
-        if isinstance(m, dict) and m.get("name") == measurement
-    ]
-    if len(matches) != 1:
-        raise ProbeError(f"measurement {measurement!r} present {len(matches)} times")
-    entry = matches[0]
-    measured = entry.get("value")
-    if (
-        isinstance(measured, bool)
-        or not isinstance(measured, (int, float))
-        or not math.isfinite(measured)
-    ):
-        raise ProbeError(f"measurement {measurement!r} value {measured!r} unusable")
-    if entry.get("status") not in _USABLE_STATUS:
-        raise ProbeError(f"measurement status {entry.get('status')!r} not usable")
-    remote = (report.get("environment") or {}).get("remote") or {}
-    job_id = remote.get("job_id")
-    if not isinstance(job_id, str) or not job_id:
-        raise ProbeError("report carries no batch job id")
-    if job_id in seen_jobs:
-        raise ProbeError(f"job id {job_id} repeated; refusing a stale report")
-    return float(measured), job_id
+    envelope = _require_usable_envelope(report)
+    corner = _single_corner(envelope)
+    _require_applied_value(corner, source, value)
+    measured = _named_measurement(corner, measurement)
+    return measured, _fresh_job_id(envelope, seen_jobs)
 
 
 def run_probe(
@@ -158,11 +199,14 @@ def run_probe(
     workdir: Path,
     runner: Runner,
     klt: list[str],
+    record: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Path, Path]:
     """Write the request, run `klt sim --backend batch`, keep stdout.
 
     The exit code is deliberately not gated on: 3 (a limit failed) can carry
-    a valid observation. Only a non-JSON or error-envelope stdout stops."""
+    a valid observation. Only a non-JSON or error-envelope stdout stops.
+    Once both files are written their paths go into `record` (if given), so
+    they are retained even when stdout then fails to parse."""
     request_path = workdir / f"probe-{index:03d}.request.json"
     report_path = workdir / f"probe-{index:03d}.report.json"
     for path in (request_path, report_path):
@@ -172,12 +216,35 @@ def run_probe(
     argv = [*klt, "sim", str(request_path), "--backend", "batch", "--format", "json"]
     returncode, stdout, stderr = runner(argv)
     report_path.write_text(stdout, encoding="utf-8")
+    if record is not None:
+        record.update(request=str(request_path), report=str(report_path))
     try:
         report = json.loads(stdout)
     except ValueError as exc:
         detail = stderr.strip() or "no stderr"
         raise ProbeError(f"exit {returncode}: stdout is not JSON ({detail})") from exc
     return report, request_path, report_path
+
+
+def _validate_search_args(
+    *,
+    target: float,
+    lo: float,
+    hi: float,
+    tol: float,
+    max_probes: int,
+    direction: str,
+) -> None:
+    """Raise ValueError for arguments that cannot define a bounded search."""
+    values = (target, lo, hi, tol)
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values):
+        raise ValueError("target, lo, hi and tol must be finite numbers")
+    if not lo < hi:
+        raise ValueError("invalid bracket: need lo < hi")
+    if tol <= 0 or max_probes < 1:
+        raise ValueError("tol must be > 0 and max-probes >= 1")
+    if direction not in ("increasing", "decreasing"):
+        raise ValueError("direction must be 'increasing' or 'decreasing'")
 
 
 def bisect(
@@ -201,15 +268,14 @@ def bisect(
 
     `outcome` is `converged`, `exhausted` or `stopped`; `probes` retains each
     probe's input value, measurement, request/report paths and job id."""
-    values = (target, lo, hi, tol)
-    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values):
-        raise ValueError("target, lo, hi and tol must be finite numbers")
-    if not lo < hi:
-        raise ValueError("invalid bracket: need lo < hi")
-    if tol <= 0 or max_probes < 1:
-        raise ValueError("tol must be > 0 and max-probes >= 1")
-    if direction not in ("increasing", "decreasing"):
-        raise ValueError("direction must be 'increasing' or 'decreasing'")
+    _validate_search_args(
+        target=target,
+        lo=lo,
+        hi=hi,
+        tol=tol,
+        max_probes=max_probes,
+        direction=direction,
+    )
     klt = klt or ["klt"]
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -237,8 +303,7 @@ def bisect(
         )
         report: Any = None
         try:
-            report, req_path, rep_path = run_probe(request, index, workdir, runner, klt)
-            probe.update(request=str(req_path), report=str(rep_path))
+            report, _, _ = run_probe(request, index, workdir, runner, klt, probe)
             measured, job_id = check_report(
                 report,
                 source=source,
@@ -247,10 +312,7 @@ def bisect(
                 seen_jobs=seen_jobs,
             )
         except ProbeError as exc:
-            remote = {}
-            if isinstance(report, dict):
-                remote = (report.get("environment") or {}).get("remote") or {}
-            probe["job_id"] = remote.get("job_id")
+            probe["job_id"] = _remote_job_id(report)
             summary.update(outcome="stopped", reason=str(exc))
             break
         seen_jobs.add(job_id)

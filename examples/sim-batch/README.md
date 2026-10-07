@@ -90,8 +90,14 @@ python examples/sim-batch/adaptive-search.py \
 `--direction decreasing` flips the comparison. Per-probe request and report
 files (`probe-NNN.request.json` / `probe-NNN.report.json`) are kept in
 `--workdir`, which must not already contain them, and the JSON summary on
-stdout lists each probe's input, measurement, and batch job id. Exit `0`
+stdout lists each probe's input, measurement, request/report paths, and batch
+job id (the paths are recorded even when a probe stops the search). Exit `0`
 means converged; `2` means stopped on an unusable probe or out of probes.
+
+Because probe requests are written into `--workdir`, only the template's
+`netlist` is rebased onto the template's directory. Every other path in the
+template (`models.lib` without `models.pdk`, per-corner process libs, an OSDI
+preload, an ngspice binary override) must be absolute or PDK-relative.
 
 Assumptions and cost: the measurement must be monotonic in the source value
 and the crossing must lie inside the bracket (the edges are not probed). Each

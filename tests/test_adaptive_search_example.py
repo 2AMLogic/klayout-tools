@@ -219,6 +219,10 @@ def test_stops_on_later_failure_without_further_submission(tmp_path):
 def test_non_json_stdout_stops(tmp_path):
     out = _search(tmp_path, lambda argv: (1, "", "klt sim: boom"))
     assert out["outcome"] == "stopped" and len(out["probes"]) == 1
+    # Input and output files are retained in the summary on the stop path too.
+    probe = out["probes"][0]
+    assert Path(probe["request"]).is_file() and Path(probe["report"]).is_file()
+    assert probe["job_id"] is None
 
 
 def test_max_probe_exhaustion(tmp_path):
