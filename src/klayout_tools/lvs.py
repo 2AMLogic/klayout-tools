@@ -1969,6 +1969,18 @@ def run_lvs(request: str) -> dict[str, Any]:
                 '"Engine")'
             )
         setup_file = _resolve_netgen_setup(options, request_dir)
+        # Issue #2673: the same conversion-provenance + all-reference-
+        # instances-zero proof the klayout branch applies, but with the
+        # exclusion carried into netgen's own setup (`property ... delete`)
+        # instead of a `klayout.db` hook. The disclosure is identical.
+        netgen_exclusions: list[tuple[str, str, str]] = []
+        placeholder_warnings = _apply_reference_placeholder_values(
+            reference_placeholder_classes,
+            layout_netlist,
+            reference_netlist,
+            mutate_classes=False,
+            netgen_exclusions=netgen_exclusions,
+        )
         timeout_s = float(options.get("netgen_timeout_s", _NETGEN_DEFAULT_TIMEOUT_S))
         # Issue #2373: resolve *which* netgen binary to run before launching
         # it (`options.netgen_binary` > `$KLT_NETGEN_BINARY` > `netgen` >
@@ -1984,6 +1996,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             setup_file=setup_file,
             timeout_s=timeout_s,
             binary=netgen_binary,
+            excluded_properties=netgen_exclusions,
         )
         layout_net_count = sum(1 for _ in layout_circuit.each_net())
         reference_net_count = sum(1 for _ in reference_circuit.each_net())
@@ -2324,6 +2337,11 @@ def run_lvs(request: str) -> dict[str, Any]:
         # with "top cell/subcircuit not found in reference netlist" -- see
         # `_reconstruct_lvs_request`.
         "reference_top": reference_circuit.name,
+        # Issue #2673: the reference-conversion context `--rerun` needs to
+        # replay a `reference.form: "subckt-call"` reference -- see
+        # `_reference_conversion_echo`. Absent for every other form, so those
+        # reports stay byte-identical to before.
+        **_reference_conversion_echo(reference_form, reference_spec),
         # Issue #589: the effective `options.parameter_tolerance`, echoed so a
         # consumer reading only the response can tell whether a `"match"` was
         # reached under a caller-supplied design tolerance at all. `null` when
@@ -2683,9 +2701,11 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     ``layout.file``; that combo will fail loudly (a clean
     :class:`LvsError` from the layout loader, not a silent wrong answer)
     since ``committed["layout"]`` is actually a SPICE netlist, not a
-    layout stream, in that case. ``reference.form`` (a non-default
-    ``"subckt-call"`` or ``"gate-level-verilog"`` reference),
-    ``reference.device_map``/``device_bulk``
+    layout stream, in that case. A ``"subckt-call"`` reference is replayed
+    from the report's ``reference_conversion`` echo (issue #2673; a report
+    committed before it existed stays best-effort), but a
+    ``"gate-level-verilog"`` ``reference.form``,
+    ``reference.device_bulk``
     and ``layout.top_cell_pins``/``declared_pins``/``pin_source_cells`` are
     never echoed anywhere in the response and are always omitted
     (reconstructed as each option's own default). Use ``--check`` (cheap
@@ -2719,6 +2739,7 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
     if reference_top:
         reference_spec["top"] = reference_top
+    reference_spec.update(_reference_conversion_replay(committed))
 
     request: dict[str, Any] = {
         "engine": committed.get("engine", "klayout"),
@@ -2797,6 +2818,45 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     if options:
         request["options"] = options
     return request
+
+
+def _reference_conversion_echo(
+    reference_form: str, reference_spec: dict[str, Any]
+) -> dict[str, Any]:
+    """``{"reference_conversion": {"form", "deck", "device_map"}}`` for a
+    ``subckt-call`` reference, else ``{}`` (issue #2673).
+
+    The conversion is a function of the reference file *and* this context, so
+    a report that records only the file cannot be replayed: ``--rerun`` would
+    re-read the simulation-form SPICE as plain-element and never rebuild the
+    proven placeholder exclusions. ``deck``/``device_map`` are echoed as the
+    caller gave them (``null`` when omitted).
+    """
+    if reference_form != "subckt-call":
+        return {}
+    return {
+        "reference_conversion": {
+            "form": reference_form,
+            "deck": reference_spec.get("deck"),
+            "device_map": reference_spec.get("device_map"),
+        }
+    }
+
+
+def _reference_conversion_replay(committed: dict[str, Any]) -> dict[str, Any]:
+    """The ``request.reference`` keys that rebuild a committed report's
+    ``reference_conversion`` echo (issue #2673); ``{}`` for a report without
+    one (every non-``subckt-call`` report, and any committed before the echo
+    existed -- those stay best-effort, as documented)."""
+    echoed = committed.get("reference_conversion")
+    if not isinstance(echoed, dict) or echoed.get("form") != "subckt-call":
+        return {}
+    spec: dict[str, Any] = {"form": "subckt-call"}
+    if echoed.get("deck") is not None:
+        spec["deck"] = echoed["deck"]
+    if isinstance(echoed.get("device_map"), dict):
+        spec["device_map"] = dict(echoed["device_map"])
+    return spec
 
 
 def _anchor_top_level_pins_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
@@ -2955,6 +3015,7 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
         (field,)
         for field in (
             "reference_top",
+            "reference_conversion",
             "options",
             "power_connectivity",
             # Issue #1983: same rule -- a report committed before the
@@ -5830,6 +5891,9 @@ def _apply_reference_placeholder_values(
     layout_netlist: Any,
     reference_netlist: Any,
     excluded_parameters: set[tuple[str, str]] | None = None,
+    *,
+    mutate_classes: bool = True,
+    netgen_exclusions: list[tuple[str, str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Exclude a converted reference class's placeholder ``0`` value from the
     compare, so the class can still pair on topology (issue #1907).
@@ -5888,6 +5952,15 @@ def _apply_reference_placeholder_values(
     :data:`~klayout_tools.lvs_mismatch.ExcludedParameters`. Nothing
     downstream may then report that parameter as a ``device.property`` error
     in the same run that discloses it as excluded here.
+
+    ``mutate_classes=False`` (issue #2673) runs the identical eligibility
+    proof and disclosure but leaves the ``klayout.db`` device classes
+    untouched -- the ``engine: "netgen"`` branch, which has no
+    ``equal_parameters`` hook and instead carries the proven exclusions into
+    its generated setup file. ``netgen_exclusions``, when given, collects one
+    ``(layout class name, reference class name, parameter)`` triple per
+    excluded class for that purpose; nothing is ever inferred from netgen's
+    reported ``value ... 0`` text.
     """
     entries: list[dict[str, Any]] = []
     if not spec:
@@ -5930,12 +6003,17 @@ def _apply_reference_placeholder_values(
             if device.device_class().name == layout_class.name
         ]
 
-        reference_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
-            reference_parameter_id
-        )
-        layout_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
-            layout_parameter_id
-        )
+        if mutate_classes:
+            reference_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
+                reference_parameter_id
+            )
+            layout_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
+                layout_parameter_id
+            )
+        if netgen_exclusions is not None:
+            netgen_exclusions.append(
+                (layout_class.name, reference_class.name, parameter)
+            )
 
         if excluded_parameters is not None:
             # Issue #2461: record it under *both* sides' own class spelling
