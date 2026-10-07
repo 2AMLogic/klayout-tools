@@ -121,6 +121,15 @@ are mapped: `assets.klayout` -> `base/setup/klayout`, `assets.libs_ref` ->
 or PCell support.** Other lambdapdk processes (including `ihp130`, which is
 not SG13G2) are not discovered.
 
+**ASAP7 note (#2758)**: the ASAP7 KLayout technology validated by
+`tests/test_pdk.py -k asap7` is reached through explicit
+`pdks/lambdapdk/lambdapdk/asap7/...` paths rather than through resolver
+discovery; see
+[`pdks/README.md`](../../pdks/README.md#asap7-klayout-technology-issue-2758)
+for the pinned version, license and headless command. The resolver (#2759)
+discovers the ASAP7 process tree but maps only the `klayout` and `libs_ref`
+asset directories, so this validation is separate from that discovery.
+
 **Out of scope**: the repo-local lambdapdk store fetched by
 [`scripts/fetch-pdks.sh`](../../pdks/README.md) into `pdks/lambdapdk/` as a
 whole — its `lambdapdk/<process>` nesting is not probed recursively (point

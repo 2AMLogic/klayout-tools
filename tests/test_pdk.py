@@ -2848,3 +2848,242 @@ def test_check_broken_symlink_exit_unchanged_with_asap7(shared_home):
     tree = _make_asap7(shared_home)
     (tree / "libs" / "dangling").symlink_to(tree / "nope")
     assert main(["pdk", "check", "--pdk", "asap7"]) == 4
+
+
+# ---------------------------------------------------------------------------
+# ASAP7 technology package (issue #2758)
+#
+# The ASAP7 KLayout technology (.lyt/.lyp), LEF layer map and standard-cell
+# GDS all come from the checksum-pinned lambdapdk archive fetched by
+# scripts/fetch-pdks.sh. These tests use explicit repository-relative paths
+# on purpose: `klt pdk` does not resolve the lambdapdk tree (resolver work is
+# #2759). Nothing is written inside the repo; outputs go to tmp_path.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_ASAP7_ROOT = _REPO_ROOT / "pdks" / "lambdapdk" / "lambdapdk" / "asap7"
+_ASAP7_LYT = _ASAP7_ROOT / "base" / "setup" / "klayout" / "asap7.lyt"
+_ASAP7_LYP = _ASAP7_ROOT / "base" / "setup" / "klayout" / "asap7.lyp"
+_ASAP7_LAYERMAP = _ASAP7_ROOT / "base" / "apr" / "asap7.layermap"
+_ASAP7_LICENSE = _ASAP7_ROOT / "base" / "LICENSE"
+_ASAP7_STDCELL_GDS = (
+    _ASAP7_ROOT / "libs" / "asap7sc7p5t_rvt" / "gds" / "asap7sc7p5t_28_R.gds.gz"
+)
+
+_needs_asap7 = pytest.mark.skipif(
+    not all(
+        p.is_file()
+        for p in (_ASAP7_LYT, _ASAP7_LYP, _ASAP7_LAYERMAP, _ASAP7_STDCELL_GDS)
+    ),
+    reason=(
+        "pinned lambdapdk ASAP7 assets not found under pdks/lambdapdk -- "
+        "run scripts/fetch-pdks.sh to enable this test"
+    ),
+)
+
+# (layer, datatype) -> (stack, name prefix in the .lyp); one or more per
+# FEOL / MOL / BEOL group, including the fin layer.
+_ASAP7_EXPECTED = {
+    (1, 0): ("FEOL", "well drawing"),
+    (2, 0): ("FEOL", "fin drawing"),
+    (7, 0): ("FEOL", "Gate drawing"),
+    (11, 0): ("FEOL", "Active drawing"),
+    (16, 0): ("MOL", "LIG drawing"),
+    (17, 0): ("MOL", "LISD drawing"),
+    (18, 0): ("MOL", "V0 drawing"),
+    (19, 0): ("BEOL", "M1 drawing"),
+    (20, 0): ("BEOL", "M2 drawing"),
+    (21, 0): ("BEOL", "V1 drawing"),
+}
+
+
+def _asap7_lyp_names():
+    """Map (layer, datatype) -> list of layer names from the pinned .lyp."""
+    import xml.etree.ElementTree as ET
+
+    out = {}
+    for node in ET.parse(_ASAP7_LYP).getroot().iter("properties"):
+        source = node.findtext("source", "")
+        name = node.findtext("name", "")
+        if not source or "/" not in source:
+            continue
+        ld = source.split("@")[0]
+        layer, datatype = (int(x) for x in ld.split("/"))
+        out.setdefault((layer, datatype), []).append(name)
+    return out
+
+
+def _assert_view_applies_asap7_lyp(klay, layout, layer_datatypes):
+    """Show ``layout`` in a headless view, apply the .lyp, assert name + colour.
+
+    Colours are compared against the ``fill-color`` written in the pinned .lyp
+    itself, so the check follows the file rather than hard-coded values.
+    """
+    import xml.etree.ElementTree as ET
+
+    expected = {}
+    for node in ET.parse(_ASAP7_LYP).getroot().iter("properties"):
+        source = node.findtext("source", "")
+        if "/" in source:
+            ld = tuple(int(x) for x in source.split("@")[0].split("/"))
+            expected.setdefault(
+                ld, (node.findtext("name", ""), node.findtext("fill-color", ""))
+            )
+
+    view = klay.LayoutView()  # needs no display in batch mode
+    view.show_layout(layout, False)
+    view.load_layer_props(str(_ASAP7_LYP))
+    assert view.active_cellview().layout().cells() == layout.cells()
+    nodes = {
+        (n.source_layer, n.source_datatype): n
+        for n in view.each_layer()
+        if n.source_layer >= 0
+    }
+    for ld in layer_datatypes:
+        name, fill = expected[ld]
+        node = nodes[ld]
+        assert node.name == name, f"{ld}: view name {node.name!r} != .lyp {name!r}"
+        assert fill.startswith("#"), f"{ld}: .lyp has no fill-color"
+        assert node.fill_color & 0xFFFFFF == int(fill[1:], 16), (
+            f"{ld}: view fill colour {node.fill_color:#x} != .lyp {fill}"
+        )
+
+
+@_needs_asap7
+def test_asap7_asset_paths_and_license_exist():
+    for path in (_ASAP7_LYT, _ASAP7_LYP, _ASAP7_LAYERMAP, _ASAP7_STDCELL_GDS):
+        assert path.is_file(), f"missing pinned ASAP7 asset: {path}"
+    assert "BSD 3-Clause" in _ASAP7_LICENSE.read_text(), (
+        f"{_ASAP7_LICENSE} no longer states BSD-3-Clause; re-check provenance"
+    )
+
+
+@_needs_asap7
+def test_asap7_lyt_declares_technology_and_dbu():
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(_ASAP7_LYT).getroot()
+    assert root.findtext("name") == "ASAP7"
+    assert float(root.findtext("dbu")) == pytest.approx(0.00025)
+
+
+@_needs_asap7
+def test_asap7_lyp_maps_representative_feol_mol_beol_layers():
+    names = _asap7_lyp_names()
+    for ld, (stack, prefix) in _ASAP7_EXPECTED.items():
+        assert ld in names, (
+            f"{stack} layer {ld[0]}/{ld[1]} ({prefix}) missing from {_ASAP7_LYP}"
+        )
+        assert any(n.startswith(prefix) for n in names[ld]), (
+            f"{stack} layer {ld[0]}/{ld[1]}: expected name starting {prefix!r}, "
+            f"got {names[ld]}"
+        )
+
+
+@_needs_asap7
+def test_asap7_layermap_vias_agree_with_lyp():
+    mapping = {}
+    for line in _ASAP7_LAYERMAP.read_text().splitlines():
+        parts = line.split()
+        if len(parts) == 4 and not line.lstrip().startswith("#") and parts[1] == "VIA":
+            mapping[parts[0]] = (int(parts[2]), int(parts[3]))
+    names = _asap7_lyp_names()
+    assert mapping["V0"] == (18, 0)
+    for layer, ld in mapping.items():
+        assert ld in names, f"layermap {layer} -> {ld} has no .lyp entry"
+
+
+def _klayout_db():
+    return pytest.importorskip(
+        "klayout.db", reason="klayout Python module not installed"
+    )
+
+
+def _read_with_asap7_tech(kdb, gds_path):
+    tech = kdb.Technology()
+    tech.load(str(_ASAP7_LYT))
+    assert tech.name == "ASAP7"
+    layout = kdb.Layout()
+    layout.read(str(gds_path), tech.load_layout_options)
+    return tech, layout
+
+
+@_needs_asap7
+def test_asap7_stdcell_gds_opens_with_tech_and_lyp():
+    kdb = _klayout_db()
+    klay = pytest.importorskip("klayout.lay", reason="klayout.lay unavailable")
+    _tech, layout = _read_with_asap7_tech(kdb, _ASAP7_STDCELL_GDS)
+    assert layout.dbu == pytest.approx(0.00025)
+    assert layout.cells() > 100
+    present = {(li.layer, li.datatype) for li in layout.layer_infos()}
+    for ld in ((2, 0), (7, 0), (19, 0)):
+        assert ld in present, f"std-cell GDS has no {ld[0]}/{ld[1]} shapes"
+
+    # Apply the .lyp to a view of this very layout and check names + colours.
+    _assert_view_applies_asap7_lyp(klay, layout, [(2, 0), (7, 0), (19, 0)])
+
+
+@_needs_asap7
+def test_asap7_generated_example_reopens_with_same_layer_mapping(tmp_path):
+    kdb = _klayout_db()
+    klay = pytest.importorskip("klayout.lay", reason="klayout.lay unavailable")
+    layout = kdb.Layout()
+    layout.dbu = 0.00025
+    top = layout.create_cell("ASAP7_EXAMPLE")
+    for layer, datatype in _ASAP7_EXPECTED:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+    out = tmp_path / "asap7_example.gds"
+    layout.write(str(out))
+
+    _tech, reread = _read_with_asap7_tech(kdb, out)
+    present = {(li.layer, li.datatype) for li in reread.layer_infos()}
+    assert present == set(_ASAP7_EXPECTED)
+    names = _asap7_lyp_names()
+    for ld, (_stack, prefix) in _ASAP7_EXPECTED.items():
+        assert any(n.startswith(prefix) for n in names[ld])
+    _assert_view_applies_asap7_lyp(klay, reread, list(_ASAP7_EXPECTED))
+
+
+@_needs_asap7
+def test_asap7_stdcell_gds_opens_with_klayout_binary_headless(tmp_path):
+    """The exact headless command documented in pdks/README.md."""
+    import shutil
+    import subprocess
+
+    klayout = shutil.which("klayout")
+    if klayout is None:
+        pytest.skip("klayout binary not on PATH")
+    script = tmp_path / "check.py"
+    script.write_text(
+        "import pya\n"
+        "tech = pya.Technology(); tech.load(lyt)\n"
+        "lay = pya.Layout(); lay.read(gds, tech.load_layout_options)\n"
+        "view = pya.LayoutView(); view.show_layout(lay, False)\n"
+        "view.load_layer_props(lyp)\n"
+        "names = {(n.source_layer, n.source_datatype): n.name"
+        " for n in view.each_layer() if n.source_layer >= 0}\n"
+        "assert names[(2, 0)].startswith('fin'), names.get((2, 0))\n"
+        "assert names[(19, 0)].startswith('M1'), names.get((19, 0))\n"
+        "print('OK', tech.name, lay.cells(), lay.dbu, names[(2, 0)])\n"
+    )
+    proc = subprocess.run(
+        [
+            klayout,
+            "-zz",
+            "-nc",
+            "-rd",
+            f"lyt={_ASAP7_LYT}",
+            "-rd",
+            f"gds={_ASAP7_STDCELL_GDS}",
+            "-rd",
+            f"lyp={_ASAP7_LYP}",
+            "-r",
+            str(script),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "OK ASAP7" in proc.stdout
