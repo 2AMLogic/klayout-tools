@@ -622,7 +622,7 @@ sizes, not ranges.
 |---|---|---|
 | `sg13cmos5l` | `via1.width.1`–`via3.width.1`, `topvia1.width.1` | `<layer>_nseal.without_bbox_min/max(...)` |
 | `sg13g2` | `cont.width.1`, `via1.width.1`–`via4.width.1`, `topvia1.width.1`, `topvia2.width.1` | `cont_sq.without_bbox_width(0.16um)` / `<layer>_nseal.without_bbox_min/max(...)` |
-| `sky130` | `via.width.1` | `via_not_mt.drc(length > 0.15)` (`via.1a_b`) |
+| `sky130` | `via.width.1`, `via2.width.1`, `via3.width.1`, `via4.width.1` | `via_not_mt.drc(length > 0.15)` (`via.1a_b`) / the `via2.1a_b`, `via3.1_b`, `via4.1_b` max-length halves (0.2 / 0.2 / 0.8 um) |
 
 sg13g2's `cont.width.1`/`via1.width.1`–`via4.width.1` and sky130's
 `via.width.1` were first deferred behind issue #2585: `klt gen` and
@@ -634,9 +634,11 @@ layers to their fixed size (`_cut_fixed_size_um` in `gen_layer_params.py`,
 which now reads the deck's `threshold_max_dbu` directly), and the six rules
 then took the field.
 
-Sky130's `via.width.1` still carries one residual approximation: the official rule also requires the cut be **rectangular** (`via.1a`),
+Issue #2443 backfilled the four rules #2388's scope left min-only: sg13g2's `topvia2.width.1` (already carrying the field on main by then) and sky130's `via2.width.1`/`via3.width.1`/`via4.width.1`.
+
+Sky130's `via.width.1`/`via2.width.1`/`via3.width.1`/`via4.width.1` each still carry one residual approximation: the official rule also requires the cut be **rectangular** (`via.1a`/`via2.1a`/`via3.1`/`via4.1`),
 which a bounding-box bound cannot express — an L-shaped or cross-shaped cut
-fitting inside a 0.15 um box would pass. See that rule's own docstring in
+fitting inside its fixed-size box would pass. See that rule's own docstring in
 `sky130.py`.
 
 **Two more rules joined this deferral list in issue #2594**, which found
@@ -914,13 +916,14 @@ more (`via.width.1` — rectangularity only —
 that additionally bounds a max length/rectangularity or a periphery-scoped/
 corner-relaxed refinement our single-layer/two-layer check primitives don't
 support — the same class of approximation `met1.enclosing.mcon.1` already
-makes. `via.width.1`'s max-size half is now enforced:
+makes. The max-size halves of `via.width.1`/`via2.width.1`/`via3.width.1`/`via4.width.1` are now enforced (`via2`-`via4` as of issue #2443):
 `DrcRule.threshold_max_dbu` (issue #2370/#2388) encodes `via.1a_b`'s 0.15 um
 cap exactly, after issue #2585 stopped `klt gen compose` drawing that cut
 oversized — see "Fixed-size rules" above. The rectangularity requirement
 (the cut must be square, not merely bounded in size) stays a residual,
 documented approximation: a bounding-box bound cannot reject an L-shaped cut
-that fits inside a 0.15 um box. approximation. `met1.enclosing.via.1`/`met2.enclosing.via.1`'s
+that fits inside the cap's box (0.15 um for `via`, 0.2/0.2/0.8 um for
+`via2`/`via3`/`via4`). `met1.enclosing.via.1`/`met2.enclosing.via.1`'s
 periphery-scoped/corner-relaxed refinement (`via.5a`/`m2.5`) remains
 approximated indefinitely — `threshold_max_dbu` only applies to
 `check: "width"` rules, not `"enclosing"`. (`met2.width.1` was previously
