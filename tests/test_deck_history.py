@@ -934,3 +934,58 @@ def test_table_match_takes_precedence_over_self(_history_table, monkeypatch):
     expected = [e for e in _ENTRIES if e["content_hash"] == "sha256:" + "a" * 64]
     assert report["package_version"] == expected[-1]["package_version"]
     assert "self_identified" not in report
+
+
+def _fake_build_info(monkeypatch, deck_hashes=..., present=True):
+    import sys
+
+    if not present:
+        monkeypatch.delitem(sys.modules, "klayout_tools._build_info", raising=False)
+        return
+    module = type(sys)("klayout_tools._build_info")
+    if deck_hashes is not ...:
+        module.DECK_HASHES = deck_hashes
+    monkeypatch.setitem(sys.modules, "klayout_tools._build_info", module)
+
+
+def test_installed_release_matches_recorded_deck_hash(_history_table, monkeypatch):
+    _fake_identity(monkeypatch, True)
+    recorded = "sha256:" + "d" * 64
+    _fake_build_info(monkeypatch, {"sky130": recorded})
+    report = history.resolve_deck(content_hash=recorded, deck="sky130")
+    assert report["self_identified"] is True
+    assert history.is_deck_hash_released("sky130", recorded) is True
+
+
+def test_installed_release_edited_deck_does_not_self_identify(
+    _history_table, monkeypatch
+):
+    """A deck module hand-edited after a wheel install hashes differently from
+    the hash recorded at build time, so it must not be reported as released
+    even though the frozen build identity still says "clean release"."""
+    _fake_identity(monkeypatch, True)
+    _fake_build_info(monkeypatch, {"sky130": "sha256:" + "d" * 64})
+    on_disk = _own_hash("sky130")
+    assert history.is_deck_hash_released("sky130", on_disk) is False
+    with pytest.raises(history.DeckHistoryError):
+        history.resolve_deck(content_hash=on_disk, deck="sky130")
+
+
+def test_installed_release_without_recorded_hashes_does_not_self_identify(
+    _history_table, monkeypatch
+):
+    """A distribution built before deck hashes were recorded fails closed."""
+    _fake_identity(monkeypatch, True)
+    _fake_build_info(monkeypatch)
+    assert history.is_deck_hash_released("sky130", _own_hash("sky130")) is False
+
+
+def test_release_tag_with_unknown_dirty_state_does_not_self_identify(
+    _history_table, monkeypatch
+):
+    from klayout_tools import __version__, build_identity
+
+    ident = build_identity._resolve("c" * 40, f"v{__version__}", None, __version__)
+    monkeypatch.setattr(build_identity, "identity", lambda: ident)
+    _fake_build_info(monkeypatch, present=False)
+    assert history.is_deck_hash_released("sky130", _own_hash("sky130")) is False

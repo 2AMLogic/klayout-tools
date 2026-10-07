@@ -75,19 +75,42 @@ def known_deck_names() -> list[str]:
     return sorted({str(entry.get("deck")) for entry in entries})
 
 
-def _self_release_entries(
-    content_hash: str, deck: str | None
-) -> list[dict[str, Any]]:
+def _recorded_deck_hashes() -> dict[str, str] | None:
+    """``_build_info.DECK_HASHES`` as recorded by ``hatch_build.py`` at build
+    time, ``{}`` when this install carries a ``_build_info`` record without
+    usable deck hashes (built before issue #2451), or ``None`` when there is
+    no ``_build_info`` at all (an editable/source install, probed live)."""
+    try:
+        from .. import _build_info  # type: ignore[attr-defined]
+    except ImportError:
+        return None
+    recorded = getattr(_build_info, "DECK_HASHES", None)
+    if not isinstance(recorded, dict):
+        return {}
+    return {str(k): v for k, v in recorded.items() if isinstance(v, str)}
+
+
+def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str, Any]]:
     """History-shaped entries for *this running build's own* release, when the
     generated table does not (yet) cover it (issue #2451).
 
     ``_history.json`` is regenerated after a release is tagged, so the table
-    shipped inside release N stops at N-1. When this build is positively an
-    unmodified release artifact (``build_identity.identity()["is_release"]``)
-    and ``content_hash`` equals the hash of one of its own built-in decks, the
-    build can vouch for itself. Returns ``[]`` for a source/dirty/unknown
-    build, so a genuine post-tag build still reports "unreleased".
-    Never raises.
+    shipped inside release N stops at N-1. A build whose identity says it sat
+    on this version's release tag with a clean tree
+    (``build_identity.identity()["is_release"]``) may vouch for ``content_hash``
+    when it equals the hash of one of its own built-in decks *as built*:
+
+    - an installed distribution compares against the per-deck hashes
+      ``hatch_build.py`` recorded in ``_build_info.DECK_HASHES`` at build time,
+      never the current on-disk bytes -- so a deck module hand-edited after
+      install no longer matches and is not reported as released. A
+      distribution with no recorded hashes never self-identifies;
+    - an editable/source install (no ``_build_info``) compares against the
+      on-disk bytes, which the live ``git status`` probe behind ``is_release``
+      already requires to be unmodified.
+
+    Returns ``[]`` for a source/dirty/unknown build, so a genuine post-tag
+    build still reports "unreleased". Never raises.
     """
     try:
         from .. import __version__, build_identity
@@ -97,12 +120,17 @@ def _self_release_entries(
         ident = build_identity.identity()
         if ident.get("is_release") is not True:
             return []
+        recorded = _recorded_deck_hashes()
         matches: list[dict[str, Any]] = []
         for name in deck_names():
             if deck is not None and name != deck:
                 continue
-            digest = sha256_file(deck_source_path(name))
-            if digest is None or f"sha256:{digest}" != content_hash:
+            if recorded is not None:
+                own_hash = recorded.get(name)
+            else:
+                digest = sha256_file(deck_source_path(name))
+                own_hash = f"sha256:{digest}" if digest is not None else None
+            if own_hash is None or own_hash != content_hash:
                 continue
             matches.append(
                 {

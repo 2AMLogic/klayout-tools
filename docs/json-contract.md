@@ -638,11 +638,13 @@ stability statement, concrete precedents, and drift-detection guidance, and
     never fails the run; it only makes an otherwise-invisible reproducibility
     gap visible in the output. No warning (`released: true`) is emitted for
     an ordinary run against a deck unchanged since its last release.
-    A build that is positively an unmodified release artifact also vouches
-    for its **own** decks (issue #2451): the history table is regenerated
-    after tagging and so never lists the release that ships it, so a hash
-    equal to this build's own deck hash resolves to `true` instead of
-    `false`. `klt deck resolve` reports such a hit with an additive
+    A release build (built on this version's tag from a clean tree) also
+    vouches for its **own** decks (issue #2451): the history table is
+    regenerated after tagging and so never lists the release that ships it,
+    so a hash equal to the deck hash this build recorded *at build time*
+    resolves to `true` instead of `false`. An installed distribution compares
+    against those recorded hashes, not the current on-disk deck bytes, so a
+    deck module edited after install does not self-identify. `klt deck resolve` reports such a hit with an additive
     `self_identified: true` field (absent otherwise). Source, dirty, or
     untagged builds never self-identify and still report `false`.
     Both `content_hash` and `released` require a run against an actual input
