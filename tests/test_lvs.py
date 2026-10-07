@@ -11846,9 +11846,16 @@ def test_build_device_binding_map_derived_entries_match_deck_declarations():
     # `reference.deck`, with no per-class table edit. Asserted against the
     # deck objects themselves so a newly declared class fails here rather
     # than silently regressing `klt lvs`'s reference side.
+    from klayout_tools.extract_finfet import is_finfet_deck
+
     for deck_name in known_extraction_deck_names():
-        binding_map = build_device_binding_map(deck_name)
         deck = get_extraction_deck(deck_name)
+        # A FinFET deck (asap7, issue #2761) names compact models directly
+        # in plain M-cards: there is no subcircuit-call form to resolve, and
+        # `klt lvs` refuses it until #2813.
+        if is_finfet_deck(deck):
+            continue
+        binding_map = build_device_binding_map(deck_name)
         resolvable_classes = {lookup.device_class for lookup in binding_map.values()}
         for resistor in deck.resistors:
             if resistor.name in _SUBCKT_LESS_DEVICE_CLASSES:

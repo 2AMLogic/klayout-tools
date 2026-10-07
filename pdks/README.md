@@ -97,8 +97,11 @@ map).
   PDK is not fetched or KLayout is unavailable, and write only to temp paths.
 - **Scope:** these are explicit paths, separate from the `klt pdk` process-tree
   discovery of `~/pdks/asap7` and the version checks shipped in #2759 (which
-  map only the `klayout` and `libs_ref` asset directories). ASAP7 DRC, LVS and
-  PCells are #2760, #2761 and #2762.
+  map only the `klayout` and `libs_ref` asset directories). FinFET
+  extraction (`klt extract --deck asap7`, geometry-counted `nfin`) shipped in
+  #2761 against these explicit paths; see
+  [`docs/cli/extract.md`](../docs/cli/extract.md). ASAP7 DRC, FinFET LVS,
+  BSIM-CMG simulation and PCells are #2760, #2813, #2814 and #2762.
 
 **`sky130-liberty/` is the exception**: unlike `lambdapdk/`, it *is* laid
 out as an open_pdks variant (`sky130A/libs.tech/`, `sky130A/libs.ref/`) so

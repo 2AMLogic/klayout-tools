@@ -2122,6 +2122,14 @@ def run_extract(
             "--abstract-cell-lef only has an effect as a pin-resolution "
             "fallback for a cell type --abstract-cells actually matches"
         )
+    # Issue #2761: a FinFET deck has no `--pdk` subcircuit binding and no
+    # parasitics pass; name that before the PDK lookup / parasitics-deck
+    # resolution below reports a less precise error. No-op for other decks.
+    from .extract_finfet import refuse_run_options
+
+    refuse_run_options(
+        deck_name, parasitics=parasitics, pdk_variant=pdk_variant, pdk_root=pdk_root
+    )
     pdk_info: dict[str, Any] | None = None
     # Populated only when a PDK resolves: `{<deck's device class name>:
     # DeviceBinding}` for every device class this deck extracts that has a
@@ -2985,10 +2993,18 @@ def run_extract(
         substrate_global_nets = [
             entry["net"] for entry in parasitics_report["substrate_dc_tie"]["nets"]
         ]
+    # Issue #2761: a FinFET deck gets its own card writer (`L`/`W`/`NFIN`,
+    # the PDK reference CDL's parameter set); every other deck keeps the
+    # model-binding delegate exactly as before.
+    from .extract_finfet import spice_writer_delegate_for
+
     writer = kdb.NetlistSpiceWriter(
-        create_model_binding_delegate(
-            model_bindings if model_bindings is not None else {},
-            global_nets=substrate_global_nets,
+        spice_writer_delegate_for(
+            deck_name,
+            lambda: create_model_binding_delegate(
+                model_bindings if model_bindings is not None else {},
+                global_nets=substrate_global_nets,
+            ),
         )
     )
     writer.use_net_names = True
@@ -4001,6 +4017,32 @@ def extract_netlist_from_layout(
 
     top_cell = resolve_top_cell(layout, top, ExtractError, path=path)
 
+    # Issue #2761: a FinFET deck runs its own recogniser (see
+    # `extract_finfet`), which implements none of the planar-only options
+    # below -- refuse them by name instead of half-applying them.
+    from .extract_finfet import refuse_layout_options
+
+    refuse_layout_options(
+        deck,
+        deck_name,
+        **{
+            "--parasitics": parasitics_deck is not None,
+            "--top-cell-pins": top_cell_pins_only,
+            "--pins": bool(declared_pins),
+            "--abstract-cells": bool(abstract_cell_patterns),
+            "--abstract-cell-lef": bool(abstract_cell_lef_paths),
+            "--mom-net": mom_net is not None,
+            "--def-net-names": def_net_names,
+            "--critical-net": bool(critical_nets),
+            "--parasitics-net": bool(parasitics_nets),
+            "--def-pins": bool(def_pins),
+            "--pin-source-cells": bool(pin_source_cells),
+            "--subcircuit": subcircuit_cell is not None,
+            "--substrate-spreading": substrate_spreading_net is not None,
+            "--pdk": pdk_info is not None,
+        },
+    )
+
     # `--subcircuit` (issue #2245): the one fact about the slice that needs the
     # live layout hierarchy, reported back through the out-parameter (see this
     # function's docstring). Computed here -- before `--abstract-cells` erasure
@@ -4127,7 +4169,7 @@ def extract_netlist_from_layout(
         device_instance_paths,
         def_pin_promotion,
         substrate_taps,
-    ) = _extract_netlist(
+    ) = _netlist_extractor(deck)(
         layout,
         top_cell,
         deck,
@@ -7383,6 +7425,16 @@ def _deck_complement_well_tie(
         well,
         _region(layout, top_cell, deck.tap_nplus_complement),
     )
+
+
+def _netlist_extractor(deck: ExtractionDeck) -> Callable[..., Any]:
+    """The netlist-extraction function for ``deck``: the FinFET recogniser
+    (:func:`klayout_tools.extract_finfet.extract_netlist_tuple`, issue #2761)
+    for a :class:`~klayout_tools.decks.FinFETExtractionDeck`, else the planar
+    :func:`_extract_netlist` -- both honour the same 13-tuple contract."""
+    from .extract_finfet import extract_netlist_tuple, is_finfet_deck
+
+    return extract_netlist_tuple if is_finfet_deck(deck) else _extract_netlist
 
 
 def _extract_netlist(

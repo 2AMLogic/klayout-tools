@@ -510,7 +510,12 @@ def run(args: argparse.Namespace) -> int:
             subcircuit_output=args.subcircuit_output,
         )
     except ExtractError as exc:
-        return emit_error("extract", str(exc), args.format)
+        # `error.code` is set only for classified failures (issue #2761's
+        # FinFET geometry refusals); every other error keeps the two-field
+        # envelope byte-for-byte.
+        return emit_error(
+            "extract", str(exc), args.format, code=getattr(exc, "code", None)
+        )
 
     emit_success(report, args.format, _print_text)
 

@@ -256,6 +256,26 @@ Add the new family to:
 - This guide's Part 2, if the family reveals differences worth recording
   for whoever ports the *next* one.
 
+### Extraction-only and FinFET families (ASAP7, issue #2761)
+
+A family can be registered for **extraction only**: `asap7` appears in
+`KNOWN_PDK_FAMILIES` and `_extraction_registry()`, and nowhere else. Every
+other capability is declared `unsupported` in `pdk_capabilities.DECISIONS`
+with its own reason (ASAP7's DRC ships separately as a DRC-DSL deck file,
+#2760, not as a curated rule table). That is the
+capability catalog working as designed, not a half-finished port. Do not add
+empty DRC/parasitics registrations just to fill the table.
+
+A FinFET family registers a `decks.FinFETExtractionDeck` (an
+`ExtractionDeck` subclass), which `extract.py` hands to
+`extract_finfet.py` instead of the planar recogniser. Fin counts are
+counted from the fin layer, never derived from `W`. Check the family's
+contact and local-interconnect semantics against the real standard-cell
+corpus before trusting the layer names. ASAP7's `LISD` contacts diffusion
+only through `SDT`, and its `LIG`/`LISD` overlaps conduct; neither fact is
+stated in the pinned `.lyt`/`.lyp`, and both were decided by net-level
+comparison against the reference CDL (see `decks/asap7.py`).
+
 ### Pitfall A: the DRC-deck vs. LVS-deck filename asymmetry
 
 A flat IHP-shaped install's DRC deck and LVS deck do not necessarily

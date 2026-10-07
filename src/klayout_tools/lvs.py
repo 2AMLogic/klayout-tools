@@ -612,6 +612,25 @@ class _ReferenceNetlistParseError(LvsError):
 _REQUIRED_REQUEST_FIELDS = ("layout", "reference")
 
 
+def _refuse_finfet_layout_deck(deck_name: object) -> None:
+    """Raise :class:`LvsError` when ``deck_name`` names a FinFET extraction
+    deck (issue #2761). Comparing one would read the reference CDL's
+    ``nfin`` away and fall back to a planar ``W``/``L`` compare -- exactly
+    the silent approximation the FinFET extractor exists to avoid. LVS
+    integration (nfin-preserving reference reader, exact ``NFIN`` compare,
+    the ASAP7 corpus) is tracked by #2813."""
+    from .extract_finfet import is_finfet_deck_name
+
+    if is_finfet_deck_name(deck_name):
+        raise LvsError(
+            f"layout.deck '{deck_name}' is a FinFET extraction deck; klt lvs "
+            "does not yet compare FinFET devices (the reference reader would "
+            "drop nfin and compare planar W/L only) -- use `klt extract "
+            f"--deck {deck_name}` for nfin-carrying netlists; FinFET LVS is "
+            "tracked in issue #2813"
+        )
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt lvs`` request JSON file.
 
@@ -939,6 +958,11 @@ def run_lvs(request: str) -> dict[str, Any]:
             # (issue #585), so the real requirement is `layout.deck`, not
             # `layout.file` specifically.
             raise LvsError("request.layout.deck_options requires request.layout.deck")
+
+    # Issue #2761: a FinFET extraction deck's devices are only correct with
+    # their geometry-counted `nfin` compared, which the reference reader does
+    # not yet preserve -- refuse rather than silently compare planar W/L.
+    _refuse_finfet_layout_deck(layout_spec.get("deck"))
 
     options = request.get("options") or {}
     keep_extracted = bool(options.get("keep_extracted", False))
