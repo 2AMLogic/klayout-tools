@@ -1964,3 +1964,21 @@ def test_model_closure_cap_fails_before_any_s3_write(tmp_path, monkeypatch):
     with pytest.raises(sim.SimError, match="staged job closure exceeds 1 files"):
         sim.run_sim(str(_write_request(tmp_path, _staged_batch_request(tmp_path))))
     assert runner.calls == []
+
+def test_run_sim_batch_rejects_waveform_supply_before_any_submission(
+    tmp_path, monkeypatch
+):
+    def _never(*args, **kwargs):
+        raise AssertionError("batch submission must not run (issue #2706)")
+
+    monkeypatch.setattr(sb, "_run_subprocess", _never)
+    monkeypatch.setattr(sim, "_run_batch", _never)
+    monkeypatch.setattr(sim, "_run_batch_fleet", _never)
+    (tmp_path / "body.spice").write_text(
+        "Vdd vdd 0 DC 1\nVramp vramp 0 PWL(0 0 1u 1)\nR1 vdd vramp 1k\n"
+    )
+    request = _batch_request(
+        tmp_path, corners={"supply_v": {"vdd": [1.0, 1.8], "vramp": [1.0, 1.8]}}
+    )
+    with pytest.raises(sim.SimError, match="'vramp'.*PWL"):
+        sim.run_sim(str(_write_request(tmp_path, request)))
