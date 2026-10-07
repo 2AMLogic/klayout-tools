@@ -23,6 +23,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   its request-relative `.klt/` run tree) outside the temp dir, keeping the
   pinned engine; prepending a native `yosys` to `$PATH` is now only the
   fallback. Scripts outside the temp dir keep the previous generic hint.
+- **Added** (#2668, `klt sim`; additive JSON only): opt-in
+  `options.stage_model_inputs: true` lets the `remote`/`batch` backends ship
+  the request's own model inputs -- `models.lib`, per-section corner
+  libraries and `options.osdi_preload` binaries, with their full
+  `.include`/file-bearing `.lib` closure -- instead of relying on the runner
+  image's baked PDK. The worker receives a rewritten copy of the request; the
+  caller's request is never modified, `models.pdk` still selects the image,
+  and every missing input or exceeded cap (512 files / 256 MiB) is refused
+  before any upload, push or launch. New additive
+  `environment.staged_model_inputs` records what the worker received. Absent
+  or `false` keeps today's behaviour, including the off-host
+  `osdi_preload` refusal.
 
 - **Fixed** (#2648, `klt gen`; no JSON field changes): sky130 generator cuts
   are now snapped onto the 0.005um manufacturing grid the curated deck's

@@ -10969,3 +10969,329 @@ def test_build_remote_request_max_workers_only_pinned_when_given():
     assert "max_workers" not in default["options"]
     pinned = sim_remote._build_remote_request(request, max_workers=20, **kwargs)
     assert pinned["options"]["max_workers"] == 20
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in model staging for the off-host backends (issue #2668):
+# `options.stage_model_inputs`. Transports are always faked.
+# --------------------------------------------------------------------------- #
+
+
+def _staged_model_fixture(src: Path) -> dict:
+    """A submitter tree: a fake PDK install whose model library has nested
+    includes, a file-bearing `.lib` and section definitions; a per-section
+    family library; two `.osdi` binaries; and a request that opts in."""
+    install = src / "pdk"
+    ngspice_dir = install / "sky130A" / "libs.tech" / "ngspice"
+    (ngspice_dir / "models").mkdir(parents=True)
+    (install / "sky130A" / "libs.tech" / "klayout").mkdir()
+    (ngspice_dir / "models" / "common.spice").write_text(".param common=1\n")
+    (ngspice_dir / "corners.lib").write_text(".lib fast\n.param f=1\n.endl fast\n")
+    (ngspice_dir / "sky130.lib.spice").write_text(
+        ".lib tt\n"
+        '.include "models/common.spice"\n'
+        ".lib corners.lib fast\n"
+        ".endl tt\n"
+        ".lib ss\n"
+        '.include "models/common.spice"\n'
+        ".endl ss\n"
+    )
+    # A per-section family library inside the PDK variant (resolved like
+    # models.lib, PDK-relative), sharing a dependency with the main library.
+    (install / "sky130A" / "fam").mkdir()
+    (install / "sky130A" / "fam" / "res.lib").write_text(
+        ".lib res_tt\n"
+        '.include "../libs.tech/ngspice/models/common.spice"\n'
+        ".endl res_tt\n"
+    )
+    (src / "osdi").mkdir()
+    (src / "osdi" / "psp103.osdi").write_bytes(b"\x7fELF\x00\x01psp\xff")
+    (src / "osdi" / "r3_cmc.osdi").write_bytes(b"\x7fELF\x00\x02r3\xfe")
+    _write_body(src)
+    request = _base_remote_request(
+        models={
+            "pdk": "sky130A",
+            "pdk_root": str(install),
+            "lib": "libs.tech/ngspice/sky130.lib.spice",
+        },
+        corners={
+            "process": [
+                "ss",
+                {
+                    "name": "tt_mix",
+                    "sections": ["tt", {"lib": "fam/res.lib", "section": "res_tt"}],
+                },
+            ],
+            "temperature_c": [27, 85],
+        },
+        measurements=[{"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}],
+        options={
+            "stage_model_inputs": True,
+            "osdi_preload": ["osdi/psp103.osdi", "osdi/r3_cmc.osdi"],
+        },
+    )
+    return request
+
+
+def _model_cards(deck: str) -> list[str]:
+    return [
+        line
+        for line in deck.splitlines()
+        if line.startswith(".lib ") or line.startswith("pre_osdi ")
+    ]
+
+
+def _job_input_bytes(item) -> bytes:
+    if item.content is not None:
+        return item.content.encode("utf-8")
+    return Path(item.local_path).read_bytes()
+
+
+def test_stage_model_inputs_is_validated_for_every_backend(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"stage_model_inputs": "true"},
+        },
+    )
+    with pytest.raises(sim.SimError, match="stage_model_inputs must be a boolean"):
+        sim.run_sim(str(request))
+
+
+def test_staged_marker_must_be_boolean(tmp_path):
+    _write_body(tmp_path)
+    _write_corner_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "corner.lib"},
+            "corners": {"process": ["tt"]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "_staged_model_inputs": "yes",
+        },
+    )
+    with pytest.raises(sim.SimError, match="_staged_model_inputs is internal"):
+        sim.run_sim(str(request))
+
+
+def test_stage_model_inputs_leaves_local_decks_unchanged(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    request = _staged_model_fixture(src)
+    request.pop("remote")
+    request["backend"] = "local"
+    decks_on = _capture_decks(monkeypatch)
+    on = sim.run_sim(str(_write_request(src, request)))
+    request["options"] = {
+        key: value
+        for key, value in request["options"].items()
+        if key != "stage_model_inputs"
+    }
+    decks_off = _capture_decks(monkeypatch)
+    off = sim.run_sim(str(_write_request(src, request)))
+
+    assert decks_on == decks_off
+    assert "staged_model_inputs" not in on["environment"]
+    assert (
+        on["environment"]["models_lib_sha256"]
+        == off["environment"]["models_lib_sha256"]
+    )
+
+
+def test_remote_backend_stages_model_inputs_and_keeps_image_selection(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "src"
+    src.mkdir()
+    request_path = _write_request(src, _staged_model_fixture(src))
+    state = _install_fake_remote_transport(monkeypatch)
+
+    report = sim.run_sim(str(request_path))
+
+    # The AMI is still chosen from models.pdk.
+    assert _FakeRemoteLauncher.last_instance.kwargs["pdk"] == "sky130A"
+    assert report["environment"]["remote"]["ami_id"] == "ami-fake"
+    by_name = {item.remote_name: item for item in state["job"].inputs}
+    assert {
+        "netlist.cir",
+        "request.json",
+        "sky130.lib.spice",
+        "common.spice",
+        "corners.lib",
+        "res.lib",
+        "psp103.osdi",
+        "r3_cmc.osdi",
+    } == set(by_name)
+    pushed = state["remote_request"]
+    assert pushed["models"]["lib"] == "sky130.lib.spice"
+    assert pushed["models"]["pdk"] == "sky130A"
+    assert pushed["options"]["osdi_preload"] == ["psp103.osdi", "r3_cmc.osdi"]
+    assert pushed["corners"]["process"][1]["sections"][1] == {
+        "lib": "res.lib",
+        "section": "res_tt",
+    }
+    assert pushed["_staged_model_inputs"] is True
+    assert str(src) not in by_name["sky130.lib.spice"].content
+    assert (
+        _job_input_bytes(by_name["psp103.osdi"])
+        == (src / "osdi" / "psp103.osdi").read_bytes()
+    )
+
+    staged = report["environment"]["staged_model_inputs"]
+    assert {entry["name"] for entry in staged} == set(by_name) - {
+        "netlist.cir",
+        "request.json",
+    }
+    for entry in staged:
+        assert (
+            entry["sha256"]
+            == (
+                __import__("hashlib").sha256(_job_input_bytes(by_name[entry["name"]]))
+            ).hexdigest()
+        )
+    # The caller's request document is untouched.
+    assert json.loads(request_path.read_text())["models"]["lib"] == (
+        "libs.tech/ngspice/sky130.lib.spice"
+    )
+
+
+def test_remote_backend_refuses_an_unstageable_model_dependency_before_launch(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "src"
+    src.mkdir()
+    request = _staged_model_fixture(src)
+    (src / "pdk" / "sky130A" / "fam" / "res.lib").write_text(
+        '.lib res_tt\n.include "gone.spice"\n.endl res_tt\n'
+    )
+    request_path = _write_request(src, request)
+    state = _install_fake_remote_transport(monkeypatch)
+    _FakeRemoteLauncher.last_instance = None
+
+    with pytest.raises(sim.SimError) as excinfo:
+        sim.run_sim(str(request_path))
+
+    message = str(excinfo.value)
+    assert "corners.process[1].sections[1].lib" in message
+    assert "gone.spice" in message
+    assert state["push_job_calls"] == 0
+    assert _FakeRemoteLauncher.last_instance is None
+
+
+@pytest.mark.parametrize("backend", ["remote", "batch"])
+def test_stage_model_inputs_lets_osdi_preload_go_offhost(
+    tmp_path, monkeypatch, backend
+):
+    seen: dict = {}
+
+    def fake_backend(**kwargs):
+        seen.update(kwargs)
+        return [], "46", None
+
+    monkeypatch.setitem(sim._BACKENDS, backend, fake_backend)
+    _write_osdi(tmp_path)
+    request = _osdi_request(
+        tmp_path,
+        ["psp103.osdi"],
+        corners={"temperature_c": [-40, 27, 125]},
+    )
+    document = json.loads(request.read_text())
+    document["options"]["stage_model_inputs"] = True
+    request.write_text(json.dumps(document))
+
+    report = sim.run_sim(str(request), backend=backend)
+
+    assert seen["request_dir"] == str(tmp_path)
+    assert "osdi_preload" not in seen  # never a local-engine kwarg off-host
+    assert [
+        entry["name"] for entry in report["environment"]["staged_model_inputs"]
+    ] == ["psp103.osdi"]
+
+
+def test_staged_worker_directory_reproduces_model_cards_and_provenance(
+    tmp_path, monkeypatch
+):
+    """Reconstruct the job directory both transports would produce for one
+    fleet shard (`_explicit_points`), delete the submitter tree, and run the
+    worker request there: the generated model/preload cards are the
+    submitter's, re-pointed at staged names, and the worker's own provenance
+    hashes the files it actually read."""
+    src = tmp_path / "src"
+    src.mkdir()
+    request = _staged_model_fixture(src)
+    request.pop("remote")
+    request["backend"] = "local"
+    request_path = _write_request(src, request)
+    local_decks = _capture_decks(monkeypatch)
+    local_report = sim.run_sim(str(request_path))
+
+    points = sim._expand_corners(request["corners"], [])
+    worker_seed = sim._build_remote_request(
+        request,
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        explicit_points=points,
+    )
+    remote_job = sim._build_remote_job_description(
+        worker_seed, str(src / "body.spice"), request_dir=str(src)
+    )
+    batch_seed = dict(worker_seed)
+    batch_seed.pop("batch", None)
+    batch_spec = sim_batch._build_batch_job_spec(
+        batch_seed,
+        str(src / "body.spice"),
+        corner_count=len(points),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        request_dir=str(src),
+    )
+    # Both transports ship the same assets, in the same order, with the same
+    # bytes and the same worker request.
+    remote_inputs = [(i.remote_name, _job_input_bytes(i)) for i in remote_job.inputs]
+    batch_inputs = [(i.name, _job_input_bytes(i)) for i in batch_spec.inputs]
+    assert remote_inputs == batch_inputs
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    for name, data in remote_inputs:
+        (job_dir / name).write_bytes(data)
+    source_by_name = {
+        asset.name: asset.source_path
+        for asset in sim.sim_staging.stage_sim_job(
+            worker_seed,
+            str(src / "body.spice"),
+            request_dir=str(src),
+            netlist_staged_name="netlist.cir",
+            reserved_names=("request.json",),
+            backend="remote",
+        ).model_assets
+    }
+    shutil.rmtree(src)
+
+    worker_decks = _capture_decks(monkeypatch)
+    worker_report = sim.run_sim(str(job_dir / "request.json"), backend="local")
+
+    assert len(worker_decks) == len(local_decks) == 4
+    for local_deck, worker_deck in zip(local_decks, worker_decks, strict=True):
+        expected = []
+        for line in _model_cards(local_deck):
+            for name, source in source_by_name.items():
+                line = line.replace(source, str(job_dir / name))
+            expected.append(line)
+        assert _model_cards(worker_deck) == expected
+        assert str(src) not in worker_deck
+
+    worker_env = worker_report["environment"]
+    staged_lib = (job_dir / "sky130.lib.spice").read_bytes()
+    assert worker_env["models_lib_sha256"] == (
+        __import__("hashlib").sha256(staged_lib).hexdigest()
+    )
+    assert [e["sha256"] for e in worker_env["osdi_preload"]] == [
+        e["sha256"] for e in local_report["environment"]["osdi_preload"]
+    ]
+    assert [e["name"] for e in worker_env["corner_section_libs"]] == ["res.lib"]

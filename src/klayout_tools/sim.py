@@ -101,6 +101,7 @@ from . import env_provenance
 #: `sim_remote._run_remote` for exactly this reason).
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
+from . import sim_staging as sim_staging
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -1424,24 +1425,34 @@ def run_sim(
     # option outright in `_enforce_xyce_support_boundary` below rather than
     # silently dropping it.
     osdi_preload = _resolve_osdi_preload(options, request_dir)
+    # Issue #2668: opt-in staging of the request's own model inputs for the
+    # off-host backends. Validated for every backend (a typo'd value is
+    # always named) but only *acts* off-host -- `local`/`local-parallel`
+    # already read the files where they are. See `sim_staging.stage_sim_job`.
+    stage_model_inputs = sim_staging.stage_model_inputs_requested(request)
     # An `.osdi` is a host-architecture shared library compiled against one
-    # ngspice's OSDI ABI, so the off-host backends refuse the option rather
-    # than stage it (see docs/cli/sim.md's "OSDI (Verilog-A) model preload"
-    # for why staging -- #2485's answer for the `.include` closure -- is the
-    # wrong answer for a binary). A host-default off-host backend steps
-    # aside to `local` instead of refusing, like every other "this run
-    # cannot leave this host" case; an explicit choice is never
-    # second-guessed, so it is refused by name.
+    # ngspice's OSDI ABI, so by default the off-host backends refuse the
+    # option rather than stage it (see docs/cli/sim.md's "OSDI (Verilog-A)
+    # model preload"). `options.stage_model_inputs` (issue #2668) is the
+    # caller's explicit statement that the binaries are built for the
+    # runner's platform and ngspice, so they are staged byte-for-byte
+    # instead. Otherwise a host-default off-host backend steps aside to
+    # `local`, like every other "this run cannot leave this host" case; an
+    # explicit choice is never second-guessed, so it is refused by name.
     backend = _yield_host_default_backend(
-        backend, backend_from_host_default, reason_ok=not osdi_preload
+        backend,
+        backend_from_host_default,
+        reason_ok=not osdi_preload or stage_model_inputs,
     )
-    if osdi_preload and backend in _OFFHOST_BACKENDS:
+    if osdi_preload and backend in _OFFHOST_BACKENDS and not stage_model_inputs:
         raise SimError(
             f"options.osdi_preload is not supported for backend {backend!r}: "
             "an `.osdi` file is a host-architecture shared library compiled "
             "against this host's ngspice, so it is neither staged to nor "
             "resolved on the off-host instance -- run OSDI-model sweeps with "
-            "backend 'local' or 'local-parallel'"
+            "backend 'local' or 'local-parallel', or set "
+            "options.stage_model_inputs: true to upload binaries built for "
+            "the runner's platform and ngspice OSDI ABI"
         )
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     keep_artifacts = bool(options.get("keep_artifacts", False))
@@ -1589,8 +1600,14 @@ def run_sim(
     # per section. Resolved (and existence-checked) per host, from the refs
     # as declared -- a fleet shard resolves the same refs against its own box,
     # exactly as it resolves `models.lib` from the forwarded `models` block.
+    # Issue #2668: a worker request whose model references were rewritten to
+    # staged job-relative names (`sim_staging.STAGED_MODEL_INPUTS_FIELD`)
+    # resolves them against its own request directory -- the job directory
+    # -- never joined onto the image's PDK directory. `models.pdk` stays in
+    # the request for image identity/provenance; only *resolution* ignores it.
+    resolution_models = _model_resolution_models(request, models)
     corner_section_libs = _resolve_corner_section_libs(
-        corner_points, models, request_dir
+        corner_points, resolution_models, request_dir
     )
 
     # Gated on the *actually dispatched* `corner_points`, not `corners_spec`,
@@ -1604,7 +1621,7 @@ def run_sim(
         # Only the process axis needs a model library -- supply/temperature
         # are plain netlist/control-block mutations (see this module's
         # docstring and the spike's "Native PVT sweeping" survey row).
-        models_lib = _resolve_models_lib(models, request_dir)
+        models_lib = _resolve_models_lib(resolution_models, request_dir)
 
     # Resumability (issue #473): only active when the caller opts in, and
     # only for the backends whose corner reports this process itself
@@ -1741,6 +1758,8 @@ def run_sim(
     # document and writes its own `.spiceinit` on its own box -- this
     # process's own resolved lines describe only this host's corner
     # directories.
+    # `request_dir` (issue #2668) rides along to the off-host backends only:
+    # it is where `options.stage_model_inputs` resolves model sources from.
     local_engine_kwargs = (
         {
             "engine": engine,
@@ -1750,7 +1769,21 @@ def run_sim(
             "osdi_preload": osdi_preload,
         }
         if backend not in _OFFHOST_BACKENDS
-        else {}
+        else {"request_dir": request_dir}
+    )
+
+    # Issue #2668: stage the complete job closure once, here, before any
+    # backend runs -- so a missing model input, unresolvable dependency or
+    # exceeded cap is a named SimError before any S3 write, SSH push or
+    # instance launch on every off-host path (single job, remote fleet,
+    # batch shards alike). The result's asset list is also this report's
+    # provenance for what the worker actually received.
+    staged_model_environment = _preflight_staged_model_inputs(
+        request,
+        netlist_path,
+        request_dir=request_dir,
+        backend=backend,
+        enabled=stage_model_inputs,
     )
 
     if hosts == 1:
@@ -1799,6 +1832,7 @@ def run_sim(
             request=request,
             hosts=hosts,
             measurements_spec=measurements_spec,
+            request_dir=request_dir,
         )
     else:
 
@@ -2068,6 +2102,10 @@ def run_sim(
             repo_root=repo_root,
         )
     )
+    # Additive/optional (issue #2668): `staged_model_inputs`, only present
+    # when `options.stage_model_inputs` staged model inputs for an off-host
+    # backend -- see `_preflight_staged_model_inputs`.
+    environment.update(staged_model_environment)
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
@@ -2208,6 +2246,69 @@ def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
     warning = pdk_ambiguity_warning(resolution) if resolution else None
     if warning is not None:
         print(warning, file=sys.stderr)
+
+
+def _preflight_staged_model_inputs(
+    request: dict[str, Any],
+    netlist_path: str,
+    *,
+    request_dir: str,
+    backend: str,
+    enabled: bool,
+) -> dict[str, list[dict[str, Any]]]:
+    """Stage the complete off-host job closure once, before any backend runs
+    (issue #2668), so a missing model input, unresolvable dependency or
+    exceeded cap is a named :class:`SimError` before any S3 write, SSH push
+    or instance launch on every off-host path -- single job, remote fleet
+    and batch shards alike.
+
+    Returns the additive ``environment`` keys describing what the worker
+    receives: ``{"staged_model_inputs": [...]}`` -- one ``{name, field,
+    kind, sha256, rewritten}`` per staged model file, hashing the bytes the
+    worker actually reads (a library whose ``.include``/``.lib`` targets were
+    rewritten hashes differently from its source; an ``.osdi`` never does)
+    -- or ``{}`` when the option is off or the backend runs locally.
+    """
+    if not enabled or backend not in _OFFHOST_BACKENDS:
+        return {}
+    staged_job = sim_staging.stage_sim_job(
+        request,
+        netlist_path,
+        request_dir=request_dir,
+        netlist_staged_name=remote_transport.REMOTE_NETLIST_FILENAME,
+        reserved_names=(remote_transport.REMOTE_REQUEST_FILENAME,),
+        backend=backend,
+    )
+    return {
+        "staged_model_inputs": [asset.to_json() for asset in staged_job.model_assets]
+    }
+
+
+def _model_resolution_models(
+    request: dict[str, Any], models: dict[str, Any]
+) -> dict[str, Any]:
+    """The ``models`` block model *resolution* should see (issue #2668).
+
+    Normally ``models`` itself. A worker request built by
+    :func:`sim_staging.stage_sim_job` carries the internal
+    :data:`sim_staging.STAGED_MODEL_INPUTS_FIELD` marker: its ``models.lib``
+    and per-section libraries are job-relative staged names, so they must
+    resolve against the request (job) directory rather than be joined onto
+    ``models.pdk``'s directory on the image -- which is what dropping
+    ``pdk``/``pdk_root`` from the resolution view achieves, through the
+    unchanged :func:`_resolve_lib_ref` rule.
+    """
+    marker = request.get(sim_staging.STAGED_MODEL_INPUTS_FIELD)
+    if marker is None or marker is False:
+        return models
+    if marker is not True:
+        raise SimError(
+            f"request.{sim_staging.STAGED_MODEL_INPUTS_FIELD} is internal and "
+            "must be a boolean when present"
+        )
+    return {
+        key: value for key, value in models.items() if key not in ("pdk", "pdk_root")
+    }
 
 
 def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
