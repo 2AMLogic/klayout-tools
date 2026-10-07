@@ -185,6 +185,49 @@ def test_unusable_first_probe_stops_the_campaign(tmp_path, mutation):
     _stop_case(tmp_path, mutate)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda r: r.update(environment="bad"),
+        lambda r: r.update(environment=[]),
+        lambda r: r["environment"].update(remote="bad"),
+        lambda r: r["environment"].update(remote=[]),
+        lambda r: r["corners"][0].update(supply_v=[]),
+        lambda r: r["corners"][0].update(supply_v="bad"),
+        lambda r: r["corners"][0]["supply_v"].update(vdd=True),
+        lambda r: r["corners"][0].update(measurements={"vout_v": 1.0}),
+        lambda r: r["corners"][0].update(measurements=5),
+        lambda r: r["corners"][0].update(diagnostics=5),
+        lambda r: r["corners"][0].update(diagnostics="bad"),
+        lambda r: r.update(status=[]),
+        lambda r: r["corners"][0].update(status={}),
+        lambda r: r["corners"][0]["measurements"][0].update(status=[]),
+    ],
+)
+def test_malformed_nested_containers_stop_not_crash(tmp_path, mutation):
+    """Valid JSON with a wrong-typed nested container takes the controlled stop
+    path (ProbeError), never an AttributeError/TypeError traceback."""
+
+    def mutate(n, report):
+        mutation(report)
+        return report
+
+    out = _stop_case(tmp_path, mutate)
+    probe = out["probes"][0]
+    assert Path(probe["request"]).is_file() and Path(probe["report"]).is_file()
+
+
+def test_malformed_nested_container_on_later_probe_stops(tmp_path):
+    def mutate(n, report):
+        if n == 2:
+            report["environment"] = "bad"
+        return report
+
+    out = _stop_case(tmp_path, mutate, probes_expected=2)
+    assert out["probes"][0]["job_id"] == "klt-sim-0001"
+    assert out["probes"][1]["job_id"] is None
+
+
 def test_poll_timeout_stops_and_reports_job_identity(tmp_path):
     def mutate(n, report):
         report["status"] = "error"

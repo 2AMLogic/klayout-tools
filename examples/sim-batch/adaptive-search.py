@@ -71,6 +71,11 @@ class ProbeError(Exception):
     """A probe result that must stop the campaign."""
 
 
+def _usable(status: Any) -> bool:
+    """True for a usable status string (an unhashable value is just unusable)."""
+    return isinstance(status, str) and status in _USABLE_STATUS
+
+
 def _default_runner(argv: list[str]) -> tuple[int, str, str]:
     done = subprocess.run(argv, capture_output=True, text=True, check=False)
     return done.returncode, done.stdout, done.stderr
@@ -97,13 +102,26 @@ def build_probe_request(
     return request
 
 
+def _field(container: dict[str, Any], key: str, kind: type, default: Any) -> Any:
+    """`container[key]` checked to be a `kind`; `default` when absent/null.
+
+    A present value of the wrong JSON type is a malformed report, so it raises
+    ProbeError (never AttributeError/TypeError) and takes the stop path."""
+    value = container.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, kind):
+        raise ProbeError(f"{key!r} is {type(value).__name__}, not {kind.__name__}")
+    return value
+
+
 def _require_usable_envelope(report: Any) -> dict[str, Any]:
     """The report as a dict, or ProbeError for a malformed/error/unusable one."""
     if not isinstance(report, dict):
         raise ProbeError("report is not a JSON object")
     if "error" in report:
         raise ProbeError(f"error envelope: {report['error']}")
-    if report.get("status") not in _USABLE_STATUS:
+    if not _usable(report.get("status")):
         # error, inconclusive, not_checked, pass_partial (partial coverage)
         raise ProbeError(f"report status {report.get('status')!r} is not usable")
     return report
@@ -116,10 +134,10 @@ def _single_corner(report: dict[str, Any]) -> dict[str, Any]:
         count = len(corners) if isinstance(corners, list) else None
         raise ProbeError(f"expected exactly one corner, got {count}")
     corner = corners[0]
-    if not isinstance(corner, dict) or corner.get("status") not in _USABLE_STATUS:
+    if not isinstance(corner, dict) or not _usable(corner.get("status")):
         status = corner.get("status") if isinstance(corner, dict) else None
         raise ProbeError(f"corner status {status!r} is not usable")
-    for diag in corner.get("diagnostics") or []:
+    for diag in _field(corner, "diagnostics", list, []):
         if isinstance(diag, dict) and diag.get("severity") == "error":
             raise ProbeError(f"corner diagnostic {diag.get('code')!r}")
     return corner
@@ -127,9 +145,11 @@ def _single_corner(report: dict[str, Any]) -> dict[str, Any]:
 
 def _require_applied_value(corner: dict[str, Any], source: str, value: float) -> None:
     """The corner must have run `source` at exactly the requested value."""
-    applied = (corner.get("supply_v") or {}).get(source)
-    if not isinstance(applied, (int, float)) or not math.isclose(
-        applied, value, rel_tol=1e-9, abs_tol=1e-12
+    applied = _field(corner, "supply_v", dict, {}).get(source)
+    if (
+        isinstance(applied, bool)
+        or not isinstance(applied, (int, float))
+        or not math.isclose(applied, value, rel_tol=1e-9, abs_tol=1e-12)
     ):
         raise ProbeError(f"corner ran {source}={applied!r}, expected {value!r}")
 
@@ -138,7 +158,7 @@ def _named_measurement(corner: dict[str, Any], name: str) -> float:
     """The finite value of the one usable measurement called `name`."""
     matches = [
         m
-        for m in corner.get("measurements") or []
+        for m in _field(corner, "measurements", list, [])
         if isinstance(m, dict) and m.get("name") == name
     ]
     if len(matches) != 1:
@@ -151,22 +171,30 @@ def _named_measurement(corner: dict[str, Any], name: str) -> float:
         or not math.isfinite(measured)
     ):
         raise ProbeError(f"measurement {name!r} value {measured!r} unusable")
-    if entry.get("status") not in _USABLE_STATUS:
+    if not _usable(entry.get("status")):
         raise ProbeError(f"measurement status {entry.get('status')!r} not usable")
     return float(measured)
 
 
+def _job_id_field(report: dict[str, Any]) -> Any:
+    """`environment.remote.job_id`; ProbeError if a container is malformed."""
+    environment = _field(report, "environment", dict, {})
+    return _field(environment, "remote", dict, {}).get("job_id")
+
+
 def _remote_job_id(report: Any) -> Any:
-    """`environment.remote.job_id` if the report carries one, else None."""
+    """Best-effort job id for the stop path: never raises, None if absent."""
     if not isinstance(report, dict):
         return None
-    remote = (report.get("environment") or {}).get("remote") or {}
-    return remote.get("job_id") if isinstance(remote, dict) else None
+    try:
+        return _job_id_field(report)
+    except ProbeError:
+        return None
 
 
 def _fresh_job_id(report: dict[str, Any], seen_jobs: set[str]) -> str:
     """The report's batch job id, which must be present and not seen before."""
-    job_id = _remote_job_id(report)
+    job_id = _job_id_field(report)
     if not isinstance(job_id, str) or not job_id:
         raise ProbeError("report carries no batch job id")
     if job_id in seen_jobs:
