@@ -87,6 +87,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   no token). `cap_cmomf` never gains it. Internally an integer enum in the
   KLayout `double` parameter (non-primary, so `klt lvs` never compares it).
 
+- **Fixed** (#2674, `klt lvs` `engine: "netgen"`; no JSON field changes):
+  netgen property-error blocks whose header identifiers carry no
+  `class:index` colon (net-derived names and hierarchical paths such as
+  `VSS$29 vs. CELL_NAME/VSSP:`, seen from netgen 1.5.133) are now parsed into
+  one structured `device.property` entry per parameter, with the identifiers
+  kept verbatim and `device.class: null`. Previously every such block fell
+  through to a single marker-only `details.raw` entry. `class:index` headers
+  (`pmos:1`, `sub:i1`) keep the same `class` as before.
+
 - **Fixed** (#2648, `klt gen`; no JSON field changes): sky130 generator cuts
   are now snapped onto the 0.005um manufacturing grid the curated deck's
   `*.ongrid.1` rule declares (resolved from the deck by
