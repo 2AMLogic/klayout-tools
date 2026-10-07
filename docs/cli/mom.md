@@ -462,7 +462,9 @@ boxes share one current-flow axis and axial extent:
   below sit on two *different* current-flow axes (north/south run along one
   axis, east/west along the perpendicular one), so that shape is still
   rejected — see the general Ruehli mesh note below. That remains a
-  follow-up beyond increments (i) and (ii).
+  follow-up beyond increments (i) and (ii). (A *connected, non-branching
+  winding* — an L/U trace or a square spiral — is the exception: see "Series
+  windings" below.)
 - **A true 3-D bar.** All three of a box's extents (x, y, z) must be
   non-zero — a flat, zero-thickness plate (fine for capacitance) has no
   cross-sectional area to carry current.
@@ -546,6 +548,43 @@ section for the measured validation against both.
 DC resistance needs no approximation: `R = length / (conductivity *
 cross_sectional_area)` (Ohm's law), computed directly from the same bar
 geometry.
+
+### Series windings (static solve)
+
+A single conductor whose boxes form one connected, non-branching open chain
+of bars on different axes (an L- or U-shaped trace, the tiled two-turn
+square spiral) is accepted as **one conductor** with `compute_inductance:
+true`
+([issue #2729](https://github.com/2AMLogic/klayout-tools/issues/2729),
+building on the oriented-path classifier of
+[#2728](https://github.com/2AMLogic/klayout-tools/issues/2728)). Its legs
+are in **series**, not parallel branches: the terminal current flows through
+every leg in turn, splitting only across a leg's own cross-section
+filaments (by area). The inductance is `L = sum_i sum_j w_i w_j M_ij` with
+signed Neumann terms `M_ij` — perpendicular legs contribute zero mutual,
+antiparallel legs negative — i.e. exactly the signed-leg reduction
+`sum s_i s_j L_ij` the earlier eight-conductor workaround computed outside
+the solver. `inductance_matrix_nh[j][j]` is the winding's terminal-to-terminal
+partial self inductance; the output shape is unchanged.
+
+- **Resistance** is the series sum of the legs' Ohm's-law resistances over
+  their electrical centreline lengths. **Corner convention:** each corner
+  square of metal belongs to exactly one drawn box, while the electrical
+  legs run centreline to centreline through the corner vertex, so total metal
+  volume is conserved exactly. It is a 1-D model; a 3-D current solver sees
+  the current cut corners slightly (measured 0.77% for the spiral below).
+- **Orientation convention.** The positive current direction is the path's
+  canonical traversal, starting at the lexicographically smaller terminal
+  (x, then y, then z), independent of box order. Reversing the entire path
+  leaves its self `L` and `R` unchanged; its mutual inductance to *another*
+  conductor changes sign. Mutual terms between two conductors each use their
+  own canonical direction.
+- **Still rejected:** branches (T junctions), disconnected or overlapping
+  boxes, closed loops, and ambiguous corner geometry (messages name the
+  failing condition, after the mixed-axis diagnostic above), and **any
+  winding together with `frequencies_hz`** — the retarded sweep has no
+  series-path model yet
+  ([#2730](https://github.com/2AMLogic/klayout-tools/issues/2730)).
 
 ### Reading the inductance matrix
 
