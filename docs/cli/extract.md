@@ -2870,13 +2870,30 @@ answers "which purpose did this run read names from"; `klt extract --check
 <report> --rerun` reads it back and replays the same purposes rather than
 reporting the override itself as drift on every net name at once.
 
-**Getting from here to `klt lvs`.** `--label-layer` is a `klt extract` flag:
-`klt lvs` and `klt pex` do not accept it yet (both resolve their deck through
-the same `get_extraction_deck` path, so adding it there is a follow-on, not a
-redesign). Until they do, extract first and hand `klt lvs` the netlist through
-its pre-extracted `layout.netlist` + `layout.deck` path — which is also the
-cheaper shape for an LVS iteration loop, since the extraction is not re-run per
-comparison:
+**Getting from here to `klt lvs` / `klt pex`.** Both verbs accept the same
+override (issue #2686): `klt lvs` as the inline-extraction request field
+`layout.label_layers` (same `{"<role>": [layer, datatype] | null}` shape as
+this verb's request document), and `klt pex` as the same repeatable
+`--label-layer` flag. Each echoes the applied mapping in its own report — see
+[`lvs.md`](lvs.md) and [`pex.md`](pex.md):
+
+```json
+{
+  "layout": {
+    "file": "routed.gds",
+    "deck": "sg13cmos5l",
+    "top": "TOP",
+    "label_layers": { "metal0": [8, 25], "metal1": [10, 25] }
+  },
+  "reference": { "netlist": "schematic.spice" }
+}
+```
+
+Extracting first and handing `klt lvs` the netlist through its pre-extracted
+`layout.netlist` + `layout.deck` path still works, and is the cheaper shape
+for an LVS iteration loop, since the extraction is not re-run per comparison
+(`layout.label_layers` is rejected on that shape — the netlist's names were
+fixed when it was extracted):
 
 ```json
 {

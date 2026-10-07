@@ -4092,3 +4092,286 @@ def test_cli_pex_unbalanced_quotes_in_measure_command_is_a_clean_error(
     assert exit_code == 1
     err = json.loads(capsys.readouterr().err)
     assert "could not be parsed" in err["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# `--label-layer` (issue #2686): `klt extract --label-layer`'s per-request
+# label-purpose override (issue #2656), passed through `klt pex`.
+# --------------------------------------------------------------------------- #
+
+#: An li1 purpose `decks.sky130` does not read (its `metal0` label layer is
+#: `li1.pin`, 67/5).
+_PEX_UNREAD_LI1_PURPOSE = (67, 10)
+
+
+@pytest.fixture
+def resistor_layout_unread_purpose(tmp_path):
+    """`resistor_layout` with its `RA`/`RB` labels moved from `li1.pin`
+    (67/5) to the unread `(67, 10)` purpose -- geometry unchanged."""
+    layout = _make_sky130_poly_resistor_layout()
+    src = layout.layer(67, 5)
+    dst = layout.layer(*_PEX_UNREAD_LI1_PURPOSE)
+    for cell in layout.each_cell():
+        cell.shapes(dst).insert(cell.shapes(src))
+        cell.shapes(src).clear()
+    return _write_gds(layout, tmp_path / "res_unread.gds")
+
+
+def _capture_run_extract_kwargs(monkeypatch) -> list[dict]:
+    """Wrap `pex.run_extract` (still calling the real one) and record every
+    call's keyword arguments."""
+    import klayout_tools.pex as pex_module
+
+    real = pex_module.run_extract
+    calls: list[dict] = []
+
+    def _recording_run_extract(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pex_module, "run_extract", _recording_run_extract)
+    return calls
+
+
+def test_run_pex_label_layers_promote_pins_from_the_alternate_purpose(
+    tmp_path, resistor_layout_unread_purpose, monkeypatch
+):
+    """Without the override the moved names are unread: extraction promotes
+    neither `RA` nor `RB`, so the extracted side cannot bind the testbench's
+    `Xres RA RB RES` line (`pin_count_mismatch`, extracted side skipped).
+    With `label_layers` pointing `metal0` at the purpose the names sit on,
+    the exact mapping reaches `run_extract`, the pins come back, both sides
+    run, and the report records the override (issue #2686)."""
+    sim_calls = _install_two_call_fake_run_sim(monkeypatch)
+    extract_calls = _capture_run_extract_kwargs(monkeypatch)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    without = run_pex(
+        resistor_layout_unread_purpose,
+        [str(request)],
+        "sky130",
+        output=str(tmp_path / "without.spice"),
+    )
+    assert extract_calls[-1]["label_layers"] is None
+    assert without["extraction"]["label_layers"] is None
+    assert without["pin_count_mismatch"] is not None
+    assert sim_calls["n"] == 1
+
+    with_override = run_pex(
+        resistor_layout_unread_purpose,
+        [str(request)],
+        "sky130",
+        output=str(tmp_path / "with.spice"),
+        label_layers={"metal0": _PEX_UNREAD_LI1_PURPOSE, "poly": None},
+    )
+    assert extract_calls[-1]["label_layers"] == {
+        "metal0": _PEX_UNREAD_LI1_PURPOSE,
+        "poly": None,
+    }
+    assert with_override["pin_count_mismatch"] is None
+    assert with_override["status"] == "pass"
+    assert sim_calls["n"] == 3
+    assert ".SUBCKT RES RA RB\n" in Path(tmp_path / "with.spice").read_text()
+    assert with_override["extraction"]["label_layers"] == {
+        "metal0": [67, 10],
+        "poly": None,
+    }
+
+
+def test_run_pex_without_label_layers_is_unchanged(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Omitting `label_layers` forwards `None` to `run_extract` and echoes
+    `extraction.label_layers: null`, with the deck's default label purposes
+    still read (the ordinary resistor run passes)."""
+    _install_two_call_fake_run_sim(monkeypatch)
+    extract_calls = _capture_run_extract_kwargs(monkeypatch)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout, [str(request)], "sky130", output=str(tmp_path / "r.spice")
+    )
+
+    assert extract_calls[-1]["label_layers"] is None
+    assert report["extraction"]["label_layers"] is None
+    assert report["status"] == "pass"
+
+
+def test_run_pex_unknown_label_layer_role_is_a_pex_error(tmp_path, resistor_layout):
+    """A role the deck has no slot for fails extraction cleanly, before any
+    simulation runs."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError, match="no label-layer role"):
+        run_pex(
+            resistor_layout,
+            [str(request)],
+            "sky130",
+            output=str(tmp_path / "r.spice"),
+            label_layers={"metal9": (67, 10)},
+        )
+
+
+def _fake_run_pex_capturing(monkeypatch, label_layers_echo=None) -> dict:
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    captured: dict = {}
+
+    def _fake_run_pex(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "pass",
+            "layout": {"path": "res.gds", "scope": "repo"},
+            "netlist": {"path": "res.spice", "scope": "repo"},
+            "reference_netlist": {"path": "dut.spice", "scope": "repo"},
+            "corner_count": 0,
+            "delta": [],
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "extraction": {
+                "deck": "sky130",
+                "device_count": 1,
+                "net_count": 2,
+                "label_layers": label_layers_echo,
+            },
+            "testbenches": [],
+        }
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _fake_run_pex)
+    return captured
+
+
+def test_cli_pex_label_layer_reaches_run_pex(tmp_path, resistor_layout, monkeypatch):
+    """`--label-layer` is parsed by the shared `parse_label_layers` helper:
+    repeatable, `none` clears a role, and a later entry for the same role
+    wins (issue #2686)."""
+    captured = _fake_run_pex_capturing(monkeypatch)
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "sky130",
+            "--label-layer",
+            "metal0=67/5",
+            "--label-layer",
+            "poly=NONE",
+            "--label-layer",
+            "metal0=67/10",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["label_layers"] == {"metal0": (67, 10), "poly": None}
+
+
+def test_cli_pex_omitting_label_layer_passes_none(
+    tmp_path, resistor_layout, monkeypatch
+):
+    captured = _fake_run_pex_capturing(monkeypatch)
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "sky130",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["label_layers"] is None
+
+
+def test_cli_pex_text_output_names_the_label_layer_override(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    _fake_run_pex_capturing(
+        monkeypatch, label_layers_echo={"metal0": [67, 10], "poly": None}
+    )
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "sky130",
+            "--label-layer",
+            "metal0=67/10",
+            "--label-layer",
+            "poly=none",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "label_layers: metal0=67/10, poly=none" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("entry", ["metal0", "=67/10", "metal0=67", "metal0=a/b"])
+def test_cli_pex_malformed_label_layer_is_a_clean_error(
+    tmp_path, resistor_layout, capsys, entry
+):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "sky130",
+            "--label-layer",
+            entry,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "pex"
+    assert "LAYER/DATATYPE" in err["error"]["message"]
+
+
+def test_cli_pex_unknown_label_layer_role_is_a_clean_error(
+    tmp_path, resistor_layout, capsys
+):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(request),
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "r.spice"),
+            "--label-layer",
+            "metal9=67/10",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "pex"
+    assert "no label-layer role" in err["error"]["message"]

@@ -1762,6 +1762,7 @@ def run_pex(
     backend: str | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
+    label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     critical_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
     mom_rlc_net: str | None = None,
@@ -1794,7 +1795,17 @@ def run_pex(
     caller resolves a ``pin_count_mismatch`` caused by flat extraction
     promoting more top-level pins than the schematic DUT declares. ``None``
     for both (the default) resolves the deck and promotes pins exactly as
-    before this feature existed. ``critical_nets`` (``klt
+    before this feature existed. ``label_layers`` (``klt pex --label-layer
+    <role>=<layer>/<datatype>``, repeatable, issue #2686) is likewise passed
+    straight through to :func:`~klayout_tools.extract.run_extract` -- it
+    redirects which GDS purpose extraction reads net/pin name text from, per
+    label role, for a layout whose names sit on a text purpose the curated
+    deck does not read (see ``run_extract``'s own ``label_layers`` docstring
+    paragraph, issue #2656). Without it such a layout extracts with no
+    promoted top-level pins and the extracted-side testbench cannot bind the
+    DUT. The applied mapping is echoed as ``extraction.label_layers`` (``None``
+    when no override was given -- the extraction is then byte-identical to
+    before this parameter existed). ``critical_nets`` (``klt
     pex --critical-net``, repeatable, issue #976, Epic #709 Phase 2a) is
     also passed straight through to :func:`~klayout_tools.extract.run_extract`
     -- extracts lateral (same-layer, sidewall) coupling capacitance for any
@@ -1950,6 +1961,9 @@ def run_pex(
             # `run_extract` call this module made before they existed.
             deck_options=deck_options,
             declared_pins=declared_pins,
+            # Issue #2686: `--label-layer` passthrough. `None` when the flag
+            # was never given -- the exact `run_extract` call made before it.
+            label_layers=label_layers,
             critical_nets=critical_nets,
             distributed_rc=distributed_rc,
             mom_rlc_net=mom_rlc_net,
@@ -2335,6 +2349,11 @@ def run_pex(
             # `run_extract`'s `mom_rlc_net` docstring paragraph) --
             # byte-identical to before this feature existed otherwise.
             "mom_rlc_override": parasitics.get("mom_rlc_override"),
+            # Additive field (issue #2686): `klt extract`'s own
+            # `label_layers` echo for this run's extraction -- the applied
+            # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
+            # or `None` when the flag was never given.
+            "label_layers": extract_report.get("label_layers"),
         },
         # Additive field (issue #1983): whether the extracted netlist this
         # run re-simulated has a DC bias path for every device body, reduced
