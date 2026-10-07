@@ -104,10 +104,12 @@ test-guide-docs-pr-exclude-refresh.sh
 test-guide-docs-pr-race.sh
 test-guide-docs-telemetry.sh
 test-guide-operator-attention-fold.sh
+test-guide-blocked-unblock-limit.sh
 test-guide-operator-only-exclude.sh
 test-guide-plan-body-stable-sort.sh
 test-guide-pool-pressure-defer.sh
 test-guide-superseding-block-merge-state.sh
+test-guide-unblock-merged-blocker.sh
 test-guide-work-log-debounce.sh
 test-guide-work-log-issue-out-of-order.sh
 test-guide-work-log-issue-pagination.sh
@@ -193,6 +195,8 @@ test-safehoused-service.sh
 test-script-helper-version-floor.sh
 test-session-mode.sh
 test-spawn-codex-sandbox-noop.sh
+test-spawn-codex-session-down.sh
+test-spawn-codex-session-mount-stale.sh
 test-stale-claim-standdown-suppression.sh
 test-stop-hook-subcommand-skew.sh
 test-sweep-auto-stack.sh
@@ -254,6 +258,7 @@ tests/hooks/test-pre-commit-missing-formatter.sh
 
 # defaults/hooks/tests/ — remaining unwired guard-hook suites, wired since #4451.
 defaults/hooks/tests/test-guard-background-subagents.sh
+defaults/hooks/tests/test-guard-forge-egress.sh
 defaults/hooks/tests/test-guard-installed-file-writes.sh
 defaults/hooks/tests/test-guard-loom-workspace.sh
 defaults/hooks/tests/test-guard-secret-scan.sh

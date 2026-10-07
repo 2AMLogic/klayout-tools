@@ -1443,22 +1443,49 @@ range that does not match the drawn one is a wrong modelled capacitance, not
 just missing metadata. That is exactly why #2408 declined to write the
 defaults out and #2435 measured them instead.
 
-**Still omitted: `feed`, `subblock`, `mm_ok`.** These three take their
-`.subckt` defaults above, deliberately rather than by oversight — the same
-#2408 rule applies unchanged to a value that is still not measured:
+**Feed variant: `FEED` (issue #2445, `cap_cmomi` only).** `feed`
+(`none`/`same`/`double`) is **recoverable from the drawn port placement** —
+settled against the PCell generator itself (`cap_cmomi_code.py`,
+`genLayout`/`_place_pins`, at `607e18d4bd9214a52575c194b4181ef449f9252f`),
+which draws:
 
-- **`feed`** (`cap_cmomi` only — the feed-structure variant,
-  `none`/`same`/`double`) is only *partly* recoverable. The `same` variant
-  stacks the device's two pins on adjacent metal levels, so the two
-  recognised ports carry different metal indices — visible to this
-  recognition step. But `double` and `none` both place two ports on the top
-  metal and are told apart only by where those feed structures sit relative
-  to the finger core, which one marker plus two port polygons does not
-  encode. Writing `feed=double` for a layout drawn `feed=none` would be
-  exactly the invisible wrong answer #2408 rejected, and `none` is
-  upstream's own documented *not a standalone two-terminal device*
-  configuration. Tracked as issue #2445, which settles the question against
-  the PCell generator itself rather than guessing here.
+| `feed`   | feed structure drawn                                   | the two recognised ports                                        |
+|----------|--------------------------------------------------------|------------------------------------------------------------------|
+| `same`   | two **stacked** left pads, PLUS on `mmax`, MINUS on `mmax-1` | different metals, overlapping in x/y (same pad centre)        |
+| `double` | PLUS pad left, MINUS pad right, both on `mmax`         | same metal, same y (pad centre height), far apart in x          |
+| `none`   | no pads; pins inside the outer `mmax` bars             | same metal, at *opposite* y edges of the marker                 |
+
+`klt extract` classifies from exactly that (`extract.py`'s
+`_mom_feed_variant`): different port metals that overlap → `same`; same
+metal and ≥ 50% of the marker width apart in x, then ports within 25% of the
+marker height in y → `double`, or ≥ 75% → `none`. A port layout matching none
+of these (typically a hand-drawn abstraction rather than PCell output) is
+left **unmeasured**: no `feed` field, no `FEED=` token, the PDK default
+applies — never forced onto the nearest variant (the #2408 rule). `none` is
+upstream's own *not a standalone two-terminal device* configuration; it is
+reported faithfully as `none`, not promoted to `double`.
+
+- **`devices[].feed`** is an additive optional **string** field
+  (`"none"`/`"same"`/`"double"`) on a `cap_cmomi` device whose variant was
+  measured. It is a top-level device key rather than a `params` entry because
+  `params` is an object of numbers; no `schema_version` bump (additive).
+  `cap_cmomf` never has it.
+- The written card carries `FEED=<token>` after `MMAX=` (e.g. `XD_$1 A B
+  cap_cmomi W=4U L=10U MMIN=1 MMAX=4 FEED=none`), `cap_cmomi` only; `cap_cmomf`'s
+  `.subckt` declares no `feed`.
+- **Carrier decision.** KLayout's `DeviceParameterDefinition` carries a
+  `double`, so internally `FEED` is an integer enum (`1` none, `2` same,
+  `3` double) mapped back to the string token only when a card is written or
+  `devices[].feed` is reported. `0` is the class default and means
+  "unmeasured/unstated" (it is why the enum does not reuse the `.lib`'s own
+  `0/1/2` numbering). Like `MMIN`/`MMAX` it is non-primary: `klt lvs` never
+  compares it, and a reference card that omits `feed` still matches.
+- The recovery reads `FEED=<token>` back off an `X` card (round trip).
+
+**Still omitted: `subblock`, `mm_ok`.** These two take their `.subckt`
+defaults above, deliberately rather than by oversight — the same #2408 rule
+applies unchanged to a value that is still not measured:
+
 - **`subblock`** is a PCell layout switch (substrate isolation block) with
   no counterpart in the recognition geometry at all.
 - **`mm_ok`** is a documented no-op in this release for both devices
@@ -1469,10 +1496,10 @@ defaults out and #2435 measured them instead.
 **What this means for a consumer.** A `--pdk`-bound extraction's MoM-cap
 card is value-accurate for `W`/`L` and for the drawn finger stack's
 `MMIN`/`MMAX`, and relies on the PDK subcircuit's own defaults for
-`feed`/`subblock`/`mm_ok`. Diffing an extracted card against a design's own
+`subblock`/`mm_ok` (and for `feed` when the port layout matches no PCell
+variant). Diffing an extracted card against a design's own
 instantiation will therefore *not* show a mismatch when the design chose a
-non-default `feed` or `subblock`: the extracted card is simply silent on
-those. If your design overrides either, rewrite the card (or supply your own
+non-default `subblock`: the extracted card is simply silent on that. If your design overrides it, rewrite the card (or supply your own
 wrapper `.subckt`) before simulating. Note this also means an extracted card
 and a hand-written reference card can legitimately disagree on
 `mmin`/`mmax` — a reference that omits them is *not* asserting `1`/`4`, it
@@ -2289,6 +2316,16 @@ diagnostic below, never a corrected binding:
   [`klt drc`](drc.md#voltage-domain-rule-pairs-_lv_mv-issue-1110)); none of
   that changes extraction, which still ignores the marker entirely.
 - A matching prose entry in `warnings[]`.
+
+**Missing flavour markers (issue #2417)**: when a deck declares `mos_flavours`
+and a flavour's marker layer has *no shapes at all* in the layout, every MOS
+device binds the deck's default flavour (e.g. a missing `hvi` or `Dualgate`
+extracts high-voltage devices as core devices, surfacing only later as a
+simulator fatal). Extraction reports one `missing_flavour_markers[]` entry
+(`{ "deck", "flavour", "marker" }`) plus a prose line in `warnings[]` per such
+marker. The check runs only under `--pdk`, where the flavour decides the bound model
+name. A marker that is present but does not overlap MOS active geometry is a
+legitimate layout and is not flagged.
 
 **What this field does and does not guarantee**: for a marker with no
 `mos_flavours` coverage, it only flags that the bound model name may be
@@ -4143,6 +4180,21 @@ per-net lumped model would produce.
   > *parallel* are still charged in series; that limitation is unchanged by
   > #2359 and is tracked as Stage 3 in
   > `docs/design/extract-fidelity-roadmap.md`.
+  >
+  > **Known limitations of the series sum (issues #2391, #2458).** Within one
+  > role, fragments that carry current side by side (for example one tap per
+  > device on a supply rail) are summed, so the net's `resistance_ohm` grows
+  > with tap count even though the real resistance between two fixed points
+  > does not. Across levels, two strapped layers joined at both ends are
+  > charged as the sum of both, not their parallel combination, while two
+  > levels joined at a single landing correctly add. The true value depends
+  > on which terminals carry current and on the boundary conditions, and a
+  > net with three or more terminals has no single scalar. `--distributed-rc`
+  > does **not** repair this: the ladder redistributes the *same*
+  > `resistance_ohm` along the terminal order and conserves its total, so it
+  > inherits the bias. The planned fix is an opt-in terminal-aware resistance
+  > graph, specified (design only, not implemented) in Stage 3 of
+  > `docs/design/extract-fidelity-roadmap.md`.
 - **per-terminal leg R** — the net's total series R distributed across its
   terminals, weighted by each terminal's Euclidean distance from the
   centroid of all of the net's terminal positions (a terminal farther from
@@ -4447,7 +4499,11 @@ klt extract cell.gds --deck sky130 --parasitics --critical-net MID --distributed
   single hub.
 - **Conservation.** The ladder redistributes the *same* `resistance_ohm`/
   `capacitance_ff` totals `--parasitics` already computes for that net — it
-  changes **where** the R/C sits, not **how much** exists. `N` terminals
+  changes **where** the R/C sits, not **how much** exists. Consequently the ladder
+  cannot repair parallel resistance: if the series-sum total overstates a
+  net with parallel fragments or strapped levels (see the "Known limitations
+  of the series sum" note under "Parasitic (RC) extraction"), the ladder
+  carries the same overstated total. `N` terminals
   become `N - 1` series segment resistors (summing back to the net's total
   resistance, split proportional to each segment's inter-terminal distance)
   and `N` per-terminal ground capacitors (summing back to the net's total
@@ -6301,6 +6357,7 @@ exit codes).
 | `unmodelled_poly`  | array\<object\>           | One entry per `poly` shape the unmodelled-device diagnostic flagged (issue #324 — see "Known limitation: unmodelled device geometry" below), each `{ "bbox_um": {"left", "bottom", "right", "top"}, "reason": "unmarked" \| "marked_unrecognised" }`. `reason` mirrors the two `warnings[]` cases below without requiring a consumer to parse the prose string. Sorted by `(left, bottom)` for deterministic output. Always present, empty whenever `warnings[]` carries no unmodelled-device entry. A deliberate poly underpass lands here too unless the deck declares `poly_interconnect` and the shape is marked with it — see "Declaring intentional poly interconnect" below (issue #1425). |
 | `merged_net_labels` | array\<object\>          | One entry per net whose name is a merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`net` uses the same `\|`-joined spelling as `nets[].name` and the written netlist, issue #696; `labels` is `net` split on `\|`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer with **no** matching `mos_flavours` coverage (issue #552, narrowed by issue #1111 — see "Voltage-domain markers and per-flavour MOS binding" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker, a marker fully covered by `mos_flavours` (e.g. gf180mcu's `Dualgate` as of issue #1111 — see the linked section for what "covered" means), or a layout that draws none of the remainder overlapping MOS geometry. |
+| `missing_flavour_markers` | array\<object\> | One entry per `mos_flavours` marker layer the deck declares that has **zero shapes anywhere in the layout** (issue #2417), each `{ "deck": str, "flavour": str, "marker": "<layer>/<datatype>" }`. With no marker geometry flavour selection never fires and every MOS device silently binds the deck's default flavour. A matching prose entry is appended to `warnings[]`. Only evaluated under `--pdk` (flavour selection changes the bound model name only when a PDK resolves the binding). Not raised when the marker is present but overlaps no MOS active area. Always present, empty for a deck with no `mos_flavours` or whose markers all have geometry. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: an anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — i.e. every device whose `nwell` island a drawn or derived well tie reaches (issue #1084). Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |

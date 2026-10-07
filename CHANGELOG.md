@@ -14,6 +14,72 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2697, `klt drc --engine klayout`): opt-in
+  `--expect-rule-categories N` (Python `expected_rule_categories`, request
+  field `expect_rule_categories`). An exact match with the deck's unique RDB
+  category count lets a zero-finding run report `clean` (exit 0) instead of
+  `coverage_unknown`, and is recorded in a new additive top-level
+  `coverage_assertion` field. Default behavior without the option is
+  unchanged.
+- **Fixed** (#2741, `klt sta`/`klt place-and-route`; no JSON field changes):
+  `setup_violation_count`/`hold_violation_count` now count the same
+  timing-check families their WNS/TNS fields measure. The violator reports
+  were `report_check_types -max_delay`/`-min_delay` only, which OpenSTA
+  filters to data checks, so asynchronous recovery/removal and inferred
+  clock-gating violators were missing -- e.g. a removal-only failure
+  reported `worst_hold_slack_ns < 0` with `hold_violation_count: 0`. Both
+  sides now add `-recovery`/`-removal` and `-clock_gating_setup`/
+  `-clock_gating_hold` (verified against OpenROAD `26Q3-1510-g6cb3f2b704`).
+  Applies to standalone STA (single corner and each `corners[]` entry), the
+  P&R nominal-stage counts and `spef_sta`. Counts can only rise for designs
+  with failing async or clock-gating checks; data-only counts are unchanged.
+- **Changed** (#2453, `klt synthesize`/`klt equiv`; no JSON field changes):
+  the WASI-sandboxed-yosys hint appended to a `Can't open script file`
+  error now branches on where the (existing) script lives. Under the host
+  temp dir (`tempfile.gettempdir()`, normalized containment with symlinks
+  resolved) it names the likely cause — the sandbox's private `/tmp` mount
+  shadowing the host temp dir — and leads with moving the request file (and
+  its request-relative `.klt/` run tree) outside the temp dir, keeping the
+  pinned engine; prepending a native `yosys` to `$PATH` is now only the
+  fallback. Scripts outside the temp dir keep the previous generic hint.
+- **Added** (#2668, `klt sim`; additive JSON only): opt-in
+  `options.stage_model_inputs: true` lets the `remote`/`batch` backends ship
+  the request's own model inputs -- `models.lib`, per-section corner
+  libraries and `options.osdi_preload` binaries, with their full
+  `.include`/file-bearing `.lib` closure -- instead of relying on the runner
+  image's baked PDK. The worker receives a rewritten copy of the request; the
+  caller's request is never modified, `models.pdk` still selects the image,
+  and every missing input or exceeded cap (512 files / 256 MiB) is refused
+  before any upload, push or launch. New additive
+  `environment.staged_model_inputs` records what the worker received. Absent
+  or `false` keeps today's behaviour, including the off-host
+  `osdi_preload` refusal.
+
+- **Added** (#2445, `klt extract`; additive, no `schema_version` bump):
+  `cap_cmomi`'s PCell `feed` variant is now recovered from the drawn port
+  placement (`none`/`same`/`double` are all separable in IHP's
+  `cap_cmomi_code.py`). It is reported as the optional string
+  `devices[].feed` and written as `FEED=<token>` on the `--pdk`-bound `X`
+  card; a port layout matching no PCell signature stays unmeasured (no field,
+  no token). `cap_cmomf` never gains it. Internally an integer enum in the
+  KLayout `double` parameter (non-primary, so `klt lvs` never compares it).
+
+- **Fixed** (#2648, `klt gen`; no JSON field changes): sky130 generator cuts
+  are now snapped onto the 0.005um manufacturing grid the curated deck's
+  `*.ongrid.1` rule declares (resolved from the deck by
+  `gen_layer_params._mfg_grid_um`, applied in `_clamp_cut_boxes`), so
+  `diff_pair`/`esd_device` gate-contact `licon1` cuts no longer trip
+  `licon1.ongrid.1`. Cuts move by at most 2.5nm; the committed dogbone
+  example GDS were regenerated.
+
+- **Changed** (#2388, `klt drc`; no JSON field changes): sg13g2's
+  `cont.width.1`, `via1.width.1`-`via4.width.1` and sky130's `via.width.1`
+  now also enforce their fixed-size maximum (`threshold_max_dbu` equal to
+  `threshold_dbu`, bounding-box semantics), so oversized or elongated cuts
+  are flagged by `width.1` where only undersized ones were before. sky130
+  `via.1a` rectangularity stays approximated. Cut/via geometry drawn by
+  `klt gen` is already clamped to these sizes (#2585).
+
 - **Fixed** (#2378, `klt place-and-route`; no JSON field changes): every
   post-floorplan OpenROAD stage script now emits `set_dont_use` for the same
   per-`cell_library` globs `klt synthesize` passes to ABC, after liberty is
@@ -1705,6 +1771,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   parent wire reaches still resolves its body pin onto an island. See
   `docs/cli/extract.md`'s "A macro's own well tie is restored as a
   connectivity bridge".
+- **Added** (#2427, `klt erc`, additive — **no** `schema_version` bump: one
+  new `erc_coverage` key, no new spec key, no change to any existing value):
+  `erc_coverage.well_assertion_coverage` reports, per non-degenerate tie that
+  asserted `well_boxes`, the drawn `tap_layer` area left outside every
+  asserted polygon (`drawn_tap_area_um2`, `uncovered_tap_area_um2`,
+  `uncovered_tap_fraction`, `extent_uncovered_fraction`), so a stale
+  assertion shows as a number. Reporting only; no grading change. See
+  `docs/cli/erc.md`.
 - **Added** (#2389, `klt erc`, additive — **no** `schema_version` bump: one
   new `erc_coverage` key, no new spec key, no new finding kind, and no
   change to any existing field's value for any input): a new

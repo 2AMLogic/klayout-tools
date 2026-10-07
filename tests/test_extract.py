@@ -5685,7 +5685,9 @@ def test_pdk_binding_reports_no_warnings_for_pure_mos_layout(tmp_path):
         pdk_root=root,
         output=str(tmp_path / "inv.spice"),
     )
-    assert report["warnings"] == []
+    # The layout draws no `hvi` marker, so the issue #2417 missing-marker
+    # warning is expected; this test is about "parameter dropped" warnings.
+    assert [w for w in report["warnings"] if "no shapes in the layout" not in w] == []
 
 
 def test_pdk_binding_warns_when_bipolar_geometry_params_are_dropped(tmp_path):
@@ -5702,7 +5704,7 @@ def test_pdk_binding_warns_when_bipolar_geometry_params_are_dropped(tmp_path):
         pdk_root=_make_pdk_install(tmp_path, "sky130A"),
         output=str(tmp_path / "bjt.spice"),
     )
-    (warning,) = report["warnings"]
+    (warning,) = [w for w in report["warnings"] if "no shapes in the layout" not in w]
     assert "'pnp'" in warning
     assert "PE" in warning and "AB" in warning and "NE" in warning
 
@@ -22108,3 +22110,99 @@ def test_rerun_of_a_report_predating_the_field_replays_no_override(tmp_path):
     assert [entry["field"] for entry in result["drift"]] == ["label_layers"]
     assert result["fresh"]["label_layers"] is None
     assert result["fresh"]["pin_count"] == committed["pin_count"]
+
+
+def _make_mos_layout_without_flavour_marker(draw_nmos) -> kdb.Layout:
+    """One NMOS and *no* shape on the flavour marker layer at all (issue
+    #2417) -- distinct from ``*_overlap=False``, which still draws the
+    marker far from the device."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    draw_nmos(top, layout, 0, "S", drain_label="D")
+    return layout
+
+
+def test_sky130_extract_warns_when_hvi_marker_has_no_shapes(tmp_path):
+    """Issue #2417: zero `hvi` shapes in the whole layout is flagged in both
+    `warnings[]` and the structured `missing_flavour_markers[]`."""
+    path = _write_gds(
+        _make_mos_layout_without_flavour_marker(_draw_sky130_nmos),
+        tmp_path / "no_hvi.gds",
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "no_hvi.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    (entry,) = report["missing_flavour_markers"]
+    assert entry["marker"] == "75/20"
+    assert entry["deck"] == "sky130"
+    assert entry["flavour"]
+    assert any("75/20" in w and entry["flavour"] in w for w in report["warnings"])
+
+
+def test_gf180mcu_extract_warns_when_dualgate_marker_has_no_shapes(tmp_path):
+    """Issue #2417: same for gf180mcu's `Dualgate` (55/0)."""
+    path = _write_gds(
+        _make_mos_layout_without_flavour_marker(_draw_gf180mcu_nmos),
+        tmp_path / "no_dualgate.gds",
+    )
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=root,
+        output=str(tmp_path / "no_dualgate.spice"),
+    )
+
+    (entry,) = report["missing_flavour_markers"]
+    assert entry["deck"] == "gf180mcu"
+    assert entry["marker"] == "55/0"
+    assert any("55/0" in w and entry["flavour"] in w for w in report["warnings"])
+
+
+def test_missing_flavour_marker_not_flagged_without_pdk(tmp_path):
+    """Without `--pdk` the flavour never changes a bound model name, so the
+    diagnostic stays empty (no noise on core-only layouts)."""
+    path = _write_gds(
+        _make_mos_layout_without_flavour_marker(_draw_sky130_nmos),
+        tmp_path / "nopdk.gds",
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "nopdk.spice"))
+    assert report["missing_flavour_markers"] == []
+
+
+@pytest.mark.parametrize("overlap", [True, False])
+def test_flavour_marker_present_does_not_warn_missing(tmp_path, overlap):
+    """Marker present (overlapping or not the active area) is not flagged."""
+    path = _write_gds(
+        _make_sky130_hvi_mos_layout(hvi_overlap=overlap), tmp_path / "m.gds"
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "m.spice"),
+    )
+    assert report["missing_flavour_markers"] == []
+    path = _write_gds(
+        _make_gf180mcu_dualgate_mos_layout(dualgate_overlap=overlap),
+        tmp_path / "g.gds",
+    )
+    root = _make_pdk_install(tmp_path, "gf180mcuA")
+    report = run_extract(
+        path,
+        "gf180mcu",
+        pdk_variant="gf180mcuA",
+        pdk_root=root,
+        output=str(tmp_path / "g.spice"),
+    )
+    assert report["missing_flavour_markers"] == []

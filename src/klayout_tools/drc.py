@@ -1513,6 +1513,11 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
             deck,
             top=None,
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
+            # Issue #2697: reproduce the original coverage assertion too,
+            # or a committed `clean` would always drift to `coverage_unknown`.
+            expected_rule_categories=(committed.get("coverage_assertion") or {}).get(
+                "expected"
+            ),
         )
     else:
         fresh = run_drc(file_path, deck, top=None)
@@ -2707,6 +2712,86 @@ def _cleanup_klayout_drc_work_dir(work_dir: str) -> None:
     shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def _evaluate_category_assertion(
+    expected: int | None, rule_categories: list[str], deck_errored: bool
+) -> dict[str, Any] | None:
+    """Evaluate the opt-in ``expected_rule_categories`` assertion (issue
+    #2697) against the deduplicated declared categories. ``None`` when not
+    requested; raises :class:`DrcError` on a count mismatch of a run that did
+    not tolerate deck errors; a tolerated-error run is never satisfied."""
+    if expected is None:
+        return None
+    observed = len(set(rule_categories))
+    if observed != expected and not deck_errored:
+        raise DrcError(
+            "rule-category coverage assertion failed: expected "
+            f"{expected} unique rule categories "
+            f"(--expect-rule-categories) but the deck's report "
+            f"declared {observed} -- the deck did not declare the "
+            "rule set you vouched for (a gated-off rule group, a "
+            "missing --deck-var, or a changed deck?). Fix the deck "
+            "invocation or update the expected count."
+        )
+    return {
+        "kind": "expected_rule_categories",
+        "expected": expected,
+        "observed": observed,
+        "satisfied": observed == expected and not deck_errored,
+    }
+
+
+def _klayout_engine_coverage(
+    rule_counts: dict[str, int],
+    rule_categories: list[str],
+    coverage_assertion: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The klayout engine's ``coverage`` block. Categories are declarations,
+    not execution instrumentation, unless the caller's satisfied
+    ``expected_rule_categories`` assertion vouches for them (issue #2697);
+    otherwise only finding-producing rules are checked and the
+    ``unmeasured_rule_execution`` sentinel keeps coverage unknown."""
+    asserted = bool(coverage_assertion and coverage_assertion["satisfied"])
+    checked = (
+        sorted(set(rule_counts) | set(rule_categories))
+        if asserted
+        else sorted(rule_counts)
+    )
+    unknown = (
+        []
+        if asserted
+        else [
+            {
+                # `work_id` namespaces this sentinel so it cannot collide
+                # with a real (caller-chosen) RDB category name.
+                "id": work_id("engine_execution", "klayout"),
+                "reason": "unmeasured_rule_execution",
+            }
+        ]
+    )
+    return {
+        "deck_layers": [],
+        "layers_checked": [],
+        "rule_categories": rule_categories,
+        "rules_checked": checked,
+        "layers_in_stream_without_rules": [],
+        "rules_skipped": [],
+        "voltage_domain_warnings": [],
+        "deck_scope": [],
+        **build_check_coverage(checked=checked, unknown=unknown),
+    }
+
+
+def _validate_expected_rule_categories(value: Any) -> None:
+    """Reject anything but ``None`` or a positive ``int`` (issue #2697)."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise DrcError(
+            "expected_rule_categories (--expect-rule-categories) must be a "
+            f"positive integer (got {value!r})"
+        )
+
+
 def run_drc_klayout_engine(
     path: str,
     deck_file: str,
@@ -2717,6 +2802,7 @@ def run_drc_klayout_engine(
     pdk_root: str | None = None,
     allow_deck_errors: bool = False,
     allow_missing_host_tools: bool = False,
+    expected_rule_categories: int | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -2872,6 +2958,23 @@ def run_drc_klayout_engine(
     rule's id is recorded as checked, regardless of coverage unknownness
     elsewhere in the same run.
 
+    ``expected_rule_categories`` (CLI ``--expect-rule-categories N``, issue
+    #2697) is an opt-in, caller-supplied coverage assertion: "this deck, with
+    these inputs, declares exactly ``N`` unique RDB rule categories, and I
+    vouch that declaring them means they ran". It must be a positive ``int``
+    (``0``, negatives, ``bool`` and non-integers raise :class:`DrcError`
+    before KLayout is launched). After a successful run the count is compared
+    with ``len(coverage.rule_categories)``: a mismatch raises
+    :class:`DrcError` naming both counts; an exact match marks every declared
+    category as checked, sets ``coverage.known`` and clears the
+    ``unmeasured_rule_execution`` sentinel, so zero findings derive
+    ``status: "clean"`` (exit 0) through the shared rollup. Findings still
+    yield ``"violations"``. The assertion is recorded under the additive
+    top-level ``coverage_assertion`` field. A run that tolerated deck errors
+    (``allow_deck_errors``) can never satisfy it: no mismatch error is raised
+    for such a partial run, but ``coverage_assertion.satisfied`` is ``False``
+    and coverage stays unknown. Omitted, behaviour is unchanged.
+
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
     #1901) are resolved via :func:`klayout_tools.pdk.find_pdk`, when either
     is given, purely so ``provenance.pdk`` can record which PDK revision the
@@ -2887,6 +2990,7 @@ def run_drc_klayout_engine(
     launched, the same fail-fast order :func:`run_drc` uses for ``path``),
     or ``pdk_variant``/``pdk_root`` given but no matching PDK found.
     """
+    _validate_expected_rule_categories(expected_rule_categories)
     if top is not None:
         raise DrcError(
             "the klayout engine does not support --top yet -- omit --top, "
@@ -2994,6 +3098,9 @@ def run_drc_klayout_engine(
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
         )
+        coverage_assertion = _evaluate_category_assertion(
+            expected_rule_categories, rule_categories, deck_errored
+        )
     finally:
         _cleanup_klayout_drc_work_dir(work_dir)
 
@@ -3008,6 +3115,10 @@ def run_drc_klayout_engine(
         )
     )
 
+    coverage = _klayout_engine_coverage(
+        rule_counts, rule_categories, coverage_assertion
+    )
+    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     return {
         "schema_version": 2,
         "file": path,
@@ -3028,36 +3139,16 @@ def run_drc_klayout_engine(
             else {}
         ),
         "dbu_um": dbu,
-        "status": "violations" if violations else "coverage_unknown",
+        "status": rollup_status(rollup, success="clean", failure="violations"),
         "violation_count": len(violations),
         "rule_counts": dict(sorted(rule_counts.items())),
         "violations": violations,
-        "coverage": {
-            "deck_layers": [],
-            "layers_checked": [],
-            # Categories are declarations, not execution instrumentation.
-            # An actual finding proves only that finding's rule ran.
-            "rule_categories": rule_categories,
-            "rules_checked": sorted(rule_counts),
-            "layers_in_stream_without_rules": [],
-            "rules_skipped": [],
-            "voltage_domain_warnings": [],
-            "deck_scope": [],
-            **build_check_coverage(
-                checked=sorted(rule_counts),
-                # `work_id` namespaces this sentinel (via its JSON-encoded
-                # parts) so it cannot collide with a real RDB category name
-                # in `rule_counts` -- an external deck's rule names are
-                # caller-chosen and could otherwise coincidentally match a
-                # bare literal like "klayout:execution".
-                unknown=[
-                    {
-                        "id": work_id("engine_execution", "klayout"),
-                        "reason": "unmeasured_rule_execution",
-                    }
-                ],
-            ),
-        },
+        "coverage": coverage,
+        **(
+            {"coverage_assertion": coverage_assertion}
+            if coverage_assertion is not None
+            else {}
+        ),
         "provenance": build_provenance(
             deck_name=os.path.basename(deck_file),
             deck_path=deck_file,

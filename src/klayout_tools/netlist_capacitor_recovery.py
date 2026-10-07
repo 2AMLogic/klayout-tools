@@ -487,9 +487,29 @@ def _recover_mom_x_card(
     for param_def in device_class.parameter_definitions():
         if param_def.name in ("W", "L") and param_def.name in params:
             device.set_parameter(param_def.id(), params[param_def.name] * 1e6)
+        elif param_def.name == "FEED":
+            # Issue #2445: the card spells `FEED=<none|same|double>`, a string
+            # token; the class carries the integer enum (`MOM_FEED_*`). An
+            # absent or unrecognised value leaves the class default `0`
+            # ("unstated") -- never a guessed variant.
+            device.set_parameter(
+                param_def.id(), float(_mom_feed_code(params.get("FEED")))
+            )
         elif param_def.name in params:
             device.set_parameter(param_def.id(), params[param_def.name])
     return True
+
+
+def _mom_feed_code(value: object) -> int:
+    """The ``MOM_FEED_*`` code for a card's ``FEED=`` value (issue #2445), or
+    ``0`` ("unstated") for an absent/unrecognised one."""
+    from .extract import MOM_FEED_TOKENS
+
+    token = str(value).strip().lower() if value is not None else ""
+    for code, name in MOM_FEED_TOKENS.items():
+        if name == token:
+            return code
+    return 0
 
 
 def _recover_resistor_x_card(

@@ -373,6 +373,7 @@ def _run_remote(
     initial_ppid: int | None = None,
     checkpoint: _Checkpoint | None = None,
     probe_abort: dict[str, Any] | None = None,
+    request_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``remote`` backend: provision one EC2 instance sized for the whole
     corner matrix, push the netlist + a request-specific copy of ``request``
@@ -420,6 +421,10 @@ def _run_remote(
     Wiring the remote backend into the same budget/orphan/resume machinery
     is tracked as follow-up work, not silently promised by this signature.
 
+    ``request_dir`` (issue #2668) is the original request file's directory,
+    used only when ``options.stage_model_inputs`` asks for the request's
+    model inputs to be staged (:func:`sim_staging.stage_sim_job`).
+
     ``probe_abort`` (issue #1694) is likewise accepted but never populated
     for this backend today -- ``run_sim`` only runs the calibration probe
     for ``backend in ("local", "local-parallel")`` (see
@@ -449,7 +454,7 @@ def _run_remote(
             "into the provisioned instance)"
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
-    _preflight_include_closure(request, netlist_path)
+    _preflight_include_closure(request, netlist_path, request_dir)
 
     job_id = f"klt-sim-{uuid.uuid4().hex[:12]}"
     launcher = RemoteLauncher(
@@ -516,6 +521,7 @@ def _run_remote(
                 # wave is exactly that wide. None (within capacity) keeps
                 # the guest's own default, byte-identical to before.
                 max_workers=info.get("wave_capacity"),
+                request_dir=request_dir,
             )
     except (RemoteLaunchError, remote_transport.RemoteTransportError) as exc:
         raise SimError(f"remote backend failed: {exc}") from exc
@@ -556,6 +562,7 @@ def _run_remote_dispatch(
     ssh_run_timeout_s: float,
     explicit_points: list[CornerPoint] | None = None,
     max_workers: int | None = None,
+    request_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Push, run, and (when ``keep_artifacts``) pull one job's worth of
     corners against an already-provisioned, SSH-reachable remote host --
@@ -586,7 +593,9 @@ def _run_remote_dispatch(
         explicit_points=explicit_points,
         max_workers=max_workers,
     )
-    job = _build_remote_job_description(remote_request, netlist_path)
+    job = _build_remote_job_description(
+        remote_request, netlist_path, request_dir=request_dir
+    )
     remote_transport.push_job(
         host=public_ip,
         user=ssh_user,
@@ -712,6 +721,7 @@ def _run_remote_fleet(
     request: dict[str, Any],
     hosts: int,
     measurements_spec: list[dict[str, Any]],
+    request_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``remote`` backend's ``hosts > 1`` dispatch: provision ``hosts``
     real EC2 instances through :func:`remote_fleet.run_fleet` -- the K-host
@@ -769,7 +779,7 @@ def _run_remote_fleet(
             "into every provisioned instance)"
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
-    _preflight_include_closure(request, netlist_path)
+    _preflight_include_closure(request, netlist_path, request_dir)
 
     shards = _shard_corner_points(corner_points, hosts)
     job_id_prefix = f"klt-sim-fleet-{uuid.uuid4().hex[:8]}"
@@ -809,6 +819,7 @@ def _run_remote_fleet(
                 _default_remote_run_timeout_s(len(shard_points), timeout_s),
             ),
             explicit_points=shard_points,
+            request_dir=request_dir,
         )
 
     try:
@@ -871,22 +882,27 @@ def _run_remote_fleet(
 _REMOTE_SIM_SUCCESS_EXIT_CODES: tuple[int, ...] = (0, 3, 4)
 
 
-def _preflight_include_closure(request: dict[str, Any], netlist_path: str) -> None:
-    """Resolve (and discard) the netlist's ``.include``/``.inc`` closure
-    before anything billable is provisioned, so an unstageable include is a
-    submit-time ``SimError`` rather than an EC2 instance launched, SSH'd
-    into, and torn down for a job that could never have run (issue #2485).
+def _preflight_include_closure(
+    request: dict[str, Any], netlist_path: str, request_dir: str | None = None
+) -> None:
+    """Resolve (and discard) the netlist's ``.include``/``.inc`` closure --
+    and, under ``options.stage_model_inputs`` (issue #2668), the request's
+    whole model closure -- before anything billable is provisioned, so an
+    unstageable include or model input is a submit-time ``SimError`` rather
+    than an EC2 instance launched, SSH'd into, and torn down for a job that
+    could never have run (issue #2485).
 
     The same check the job description itself performs later, hoisted to the
     same place :func:`_run_remote`/:func:`_run_remote_fleet` already validate
     ``models.pdk``/``remote.ssh_key_path`` -- the "raise before any billable
     AWS API call" discipline ``remote_launcher.require_cost_config`` applies
-    to cost-relevant fields. It reads only local text files, so running it
+    to cost-relevant fields. It reads only local files, so running it
     twice is cheap.
     """
-    sim_staging.stage_sim_netlist(
+    sim_staging.stage_sim_job(
         request,
         netlist_path,
+        request_dir=request_dir,
         netlist_staged_name=remote_transport.REMOTE_NETLIST_FILENAME,
         reserved_names=(remote_transport.REMOTE_REQUEST_FILENAME,),
         backend="remote",
@@ -894,7 +910,10 @@ def _preflight_include_closure(request: dict[str, Any], netlist_path: str) -> No
 
 
 def _build_remote_job_description(
-    remote_request: dict[str, Any], netlist_path: str
+    remote_request: dict[str, Any],
+    netlist_path: str,
+    *,
+    request_dir: str | None = None,
 ) -> remote_transport.JobDescription:
     """Build the `klt sim` corner-fan-out job as a generic
     :class:`remote_transport.JobDescription` (issue #278, Epic #253 Phase
@@ -914,6 +933,12 @@ def _build_remote_job_description(
     an include that resolves nowhere on this host raises ``SimError`` here,
     before anything is pushed.
 
+    Under ``options.stage_model_inputs`` (issue #2668) the same
+    :func:`sim_staging.stage_sim_job` result also carries the request's
+    staged model closure (resolved against ``request_dir``) and the
+    rewritten worker request that is serialized as ``request.json`` in
+    place of ``remote_request`` -- see that function's docstring.
+
     This is the one and only place `klt sim`'s remote job shape is
     constructed -- :mod:`klayout_tools.remote_transport`'s push/run/collect
     functions accept it as data and hard-code none of it, so a future
@@ -921,9 +946,10 @@ def _build_remote_job_description(
     :class:`remote_transport.JobDescription` here instead (see
     ``docs/design/remote-job-description.md``).
     """
-    staged = sim_staging.stage_sim_netlist(
+    staged = sim_staging.stage_sim_job(
         remote_request,
         netlist_path,
+        request_dir=request_dir,
         netlist_staged_name=remote_transport.REMOTE_NETLIST_FILENAME,
         reserved_names=(remote_transport.REMOTE_REQUEST_FILENAME,),
         backend="remote",
@@ -943,7 +969,7 @@ def _build_remote_job_description(
             remote_transport.JobInput(
                 remote_name=remote_transport.REMOTE_REQUEST_FILENAME,
                 label="request",
-                content=json.dumps(remote_request),
+                content=json.dumps(staged.request),
             ),
         ),
         command=(

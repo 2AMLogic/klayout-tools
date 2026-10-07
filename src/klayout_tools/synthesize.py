@@ -234,6 +234,7 @@ from ._provenance import (
     _content_hash,
     _yosys_version,
     build_provenance,
+    sha256_file,
     wasi_sandbox_hint_if_applicable,
 )
 from ._report_verify import (
@@ -1440,6 +1441,11 @@ def run_synthesize(
         "cell_exclusions": cell_exclusions,
         "warnings": warnings_summary,
         "netlist_path": _report_path(netlist_path, repo_root=repo_root),
+        # Issue #2452: SHA-256 of the exact bytes of the file `netlist_path`
+        # refers to, taken from the internal absolute path (never the
+        # redacted `{path, scope}` object) after signed-qualifier stripping.
+        # Additive field; no `schema_version` bump.
+        "netlist_sha256": sha256_file(netlist_path),
         "script_path": _report_path(script_path, repo_root=repo_root),
         # Issue #1870: the script Yosys was actually handed. Equal to
         # `script_path` whenever no `$PDK_ROOT` token was written (a liberty
@@ -2772,7 +2778,9 @@ def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
     reading: No such file or directory`` shape *and* ``<path>`` verifiably
     exists on the host filesystem, appends a hint that the ``yosys`` on
     ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
-    sandbox does not preopen that path -- see issue #1368. A script path
+    sandbox does not preopen that path -- see issue #1368; for a path under
+    the host temp dir the hint instead names the sandbox's private ``/tmp``
+    mount and leads with relocating the request (issue #2453). A script path
     that genuinely does not exist is a different failure and is left
     unchanged.
     """

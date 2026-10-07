@@ -374,6 +374,62 @@ def _openroad_version() -> str | None:
     return stdout.split()[0]
 
 
+#: ``report_check_types`` flags whose union is the **setup-side** timing-check
+#: population ``report_worst_slack_metric -setup``/``report_tns_metric
+#: -setup`` already measure (issue #2741): data setup (``-max_delay``, which
+#: also covers output-delay checks), asynchronous **recovery**
+#: (``-recovery``), and inferred **clock-gating setup**
+#: (``-clock_gating_setup``). ``-max_delay`` on its own filters to data checks
+#: only, so before issue #2741 a design whose only failing setup-side check was
+#: a recovery or clock-gating check reported a negative WNS/TNS next to a
+#: ``setup_violation_count`` of ``0``. Verified live against OpenROAD
+#: ``26Q3-1510-g6cb3f2b704``: on a ``sky130_fd_sc_hd__dfrtp_1`` fixture the
+#: worst-slack metric picks up the ``asynchronous`` and ``gated clock`` path
+#: groups, ``-max_delay`` alone reports neither, and the combined call lists
+#: each failing endpoint exactly once (the families never share an endpoint
+#: pin: data ``D``, async ``RESET_B``, clock-gating enable).
+_SETUP_CHECK_FAMILY_FLAGS = ("-max_delay", "-recovery", "-clock_gating_setup")
+
+#: Hold-side counterpart of :data:`_SETUP_CHECK_FAMILY_FLAGS`: data hold
+#: (``-min_delay``), asynchronous **removal** (``-removal``), and inferred
+#: **clock-gating hold** (``-clock_gating_hold``) -- the population
+#: ``report_worst_slack_metric -hold``/``report_tns_metric -hold`` measure.
+_HOLD_CHECK_FAMILY_FLAGS = ("-min_delay", "-removal", "-clock_gating_hold")
+
+
+def _timing_violation_report_lines(
+    *, setup_begin: str, setup_end: str, hold_begin: str, hold_end: str
+) -> list[str]:
+    """Tcl emitting the marker-delimited setup-side and hold-side violator
+    reports :func:`_count_violations` scrapes (issue #2741).
+
+    The single source of the check-family policy for every verb that counts
+    setup/hold violations -- ``post_route_sta.py``'s standalone session (single
+    corner and each multi-corner result) and ``place_and_route.py``'s
+    nominal-stage report, which ``place_and_route_sta._spef_sta_script_lines``
+    reuses for the post-route SPEF re-time. Each caller passes its own
+    module-local markers so the stdout regions stay distinct.
+
+    One ``report_check_types`` call per side (rather than one call per
+    family) keeps the output a single block between one marker pair, so the
+    existing ``"(VIOLATED)"`` scrape counts it unchanged. ``-format end``
+    prints one row per failing endpoint per path group, so the count unit is
+    *violating endpoints*, not enumerated timing paths.
+    """
+    return [
+        f'puts "{setup_begin}"',
+        "report_check_types "
+        + " ".join(_SETUP_CHECK_FAMILY_FLAGS)
+        + " -violators -format end",
+        f'puts "{setup_end}"',
+        f'puts "{hold_begin}"',
+        "report_check_types "
+        + " ".join(_HOLD_CHECK_FAMILY_FLAGS)
+        + " -violators -format end",
+        f'puts "{hold_end}"',
+    ]
+
+
 def _count_violations(stdout: str, begin: str, end: str) -> int:
     """Count ``"(VIOLATED)"`` lines between ``begin``/``end`` markers in a
     stage's captured stdout -- OpenROAD has no ``*_metric`` proc for

@@ -307,11 +307,11 @@ this pilot's geometry.
 | `mcon.width.1` | B | `clean` | clean | violations (`ct.1`, `ct.4`) | Same pair as `mcon.space.1` (issue #2594): `ct.1` is an exact min *and* max 0.17um, so any bar wide enough to pass this engine's min-only `width_check` is over the native maximum -- the `via.1a` mismatch one stack level down. |
 | `via.width.1` | B | `clean` | clean | violations (`via.1a`, `m2.via`, `via.4c.5c`) | The native `via.1a` demands an *exact* 0.15um square (`edges.without_length(0.15)`), not a minimum width; any fixture wide enough to pass this engine's min-only `width_check` is by construction wider than the native max. |
 | `via.space.1` | B | `clean` | clean | violations (`m2.5`, `m2.via`, `via.1a`, `via.4c.5c`) | Same exact-size `via.1a` mismatch, plus the native deck's met2-enclosure rules that this single-layer fixture never draws. |
-| `via2.width.1` | B | `clean` | clean | violations (`via2.1a`, `via2`, `m3.via2`, `via2.5`) | Same exact-size mismatch (`via2.1a`), plus met2/met3 enclosure rules and `via2.5`'s 2-adjacent-edges-relaxed refinement this curated deck does not model. |
+| `via2.width.1` | B | `clean` | clean | violations (`via2.1a`, `via2`, `m3.via2`, `via2.5`) | Same rectangularity-only residual (`via2.1a`; the exact-size max half is enforced as of issue #2443), plus met2/met3 enclosure rules and `via2.5`'s 2-adjacent-edges-relaxed refinement this curated deck does not model. |
 | `via2.space.1` | B | `clean` | clean | violations (`via2.1a`, `via2`, `m3.via2`, `via2.5`) | Same as `via2.width.1`. |
-| `via3.width.1` | B | `clean` | clean | violations (`via3.1a`, `via3`, `m4.via3`, `via3.5`) | Same exact-size + enclosure mismatch one layer up (`via3.1a`, met3/met4 enclosure, `via3.5`). |
+| `via3.width.1` | B | `clean` | clean | violations (`via3.1a`, `via3`, `m4.via3`, `via3.5`) | Same rectangularity-only residual + enclosure mismatch one layer up (`via3.1a`; max half enforced as of #2443, met3/met4 enclosure, `via3.5`). |
 | `via3.space.1` | B | `clean` | clean | violations (`via3.1a`, `via3`, `m4.via3`, `via3.5`) | Same as `via3.width.1`. |
-| `via4.width.1` | B | `clean` | clean | violations (`via4.1a`, `via4`, `m5.via4`) | Same exact-size mismatch (`via4.1a`) plus met4/met5 enclosure rules this single-layer fixture never draws a landing pad for. |
+| `via4.width.1` | B | `clean` | clean | violations (`via4.1a`, `via4`, `m5.via4`) | Same rectangularity-only residual (`via4.1a`; max half enforced as of #2443) plus met4/met5 enclosure rules this single-layer fixture never draws a landing pad for. |
 | `via4.space.1` | B | `clean` | clean | violations (`via4.1a`, `via4`, `m5.via4`) | Same as `via4.width.1`. |
 
 Note in particular that `diff.width.1`'s disagreement is **not** about the

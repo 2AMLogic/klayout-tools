@@ -101,6 +101,7 @@ from . import env_provenance
 #: `sim_remote._run_remote` for exactly this reason).
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
+from . import sim_staging as sim_staging
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -1424,24 +1425,34 @@ def run_sim(
     # option outright in `_enforce_xyce_support_boundary` below rather than
     # silently dropping it.
     osdi_preload = _resolve_osdi_preload(options, request_dir)
+    # Issue #2668: opt-in staging of the request's own model inputs for the
+    # off-host backends. Validated for every backend (a typo'd value is
+    # always named) but only *acts* off-host -- `local`/`local-parallel`
+    # already read the files where they are. See `sim_staging.stage_sim_job`.
+    stage_model_inputs = sim_staging.stage_model_inputs_requested(request)
     # An `.osdi` is a host-architecture shared library compiled against one
-    # ngspice's OSDI ABI, so the off-host backends refuse the option rather
-    # than stage it (see docs/cli/sim.md's "OSDI (Verilog-A) model preload"
-    # for why staging -- #2485's answer for the `.include` closure -- is the
-    # wrong answer for a binary). A host-default off-host backend steps
-    # aside to `local` instead of refusing, like every other "this run
-    # cannot leave this host" case; an explicit choice is never
-    # second-guessed, so it is refused by name.
+    # ngspice's OSDI ABI, so by default the off-host backends refuse the
+    # option rather than stage it (see docs/cli/sim.md's "OSDI (Verilog-A)
+    # model preload"). `options.stage_model_inputs` (issue #2668) is the
+    # caller's explicit statement that the binaries are built for the
+    # runner's platform and ngspice, so they are staged byte-for-byte
+    # instead. Otherwise a host-default off-host backend steps aside to
+    # `local`, like every other "this run cannot leave this host" case; an
+    # explicit choice is never second-guessed, so it is refused by name.
     backend = _yield_host_default_backend(
-        backend, backend_from_host_default, reason_ok=not osdi_preload
+        backend,
+        backend_from_host_default,
+        reason_ok=not osdi_preload or stage_model_inputs,
     )
-    if osdi_preload and backend in _OFFHOST_BACKENDS:
+    if osdi_preload and backend in _OFFHOST_BACKENDS and not stage_model_inputs:
         raise SimError(
             f"options.osdi_preload is not supported for backend {backend!r}: "
             "an `.osdi` file is a host-architecture shared library compiled "
             "against this host's ngspice, so it is neither staged to nor "
             "resolved on the off-host instance -- run OSDI-model sweeps with "
-            "backend 'local' or 'local-parallel'"
+            "backend 'local' or 'local-parallel', or set "
+            "options.stage_model_inputs: true to upload binaries built for "
+            "the runner's platform and ngspice OSDI ABI"
         )
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     keep_artifacts = bool(options.get("keep_artifacts", False))
@@ -1585,12 +1596,22 @@ def run_sim(
         if k_sigma is not None:
             monte_carlo_info["k_sigma"] = k_sigma
 
+    # Issue #2706: fail fast (before any probe or backend dispatch) when a
+    # supply override targets a source with an explicit transient waveform.
+    _validate_supply_override_targets(netlist_path, corner_points)
+
     # Issue #2522: a `corners.process` bundle may name its own model library
     # per section. Resolved (and existence-checked) per host, from the refs
     # as declared -- a fleet shard resolves the same refs against its own box,
     # exactly as it resolves `models.lib` from the forwarded `models` block.
+    # Issue #2668: a worker request whose model references were rewritten to
+    # staged job-relative names (`sim_staging.STAGED_MODEL_INPUTS_FIELD`)
+    # resolves them against its own request directory -- the job directory
+    # -- never joined onto the image's PDK directory. `models.pdk` stays in
+    # the request for image identity/provenance; only *resolution* ignores it.
+    resolution_models = _model_resolution_models(request, models)
     corner_section_libs = _resolve_corner_section_libs(
-        corner_points, models, request_dir
+        corner_points, resolution_models, request_dir
     )
 
     # Gated on the *actually dispatched* `corner_points`, not `corners_spec`,
@@ -1604,7 +1625,7 @@ def run_sim(
         # Only the process axis needs a model library -- supply/temperature
         # are plain netlist/control-block mutations (see this module's
         # docstring and the spike's "Native PVT sweeping" survey row).
-        models_lib = _resolve_models_lib(models, request_dir)
+        models_lib = _resolve_models_lib(resolution_models, request_dir)
 
     # Resumability (issue #473): only active when the caller opts in, and
     # only for the backends whose corner reports this process itself
@@ -1741,6 +1762,8 @@ def run_sim(
     # document and writes its own `.spiceinit` on its own box -- this
     # process's own resolved lines describe only this host's corner
     # directories.
+    # `request_dir` (issue #2668) rides along to the off-host backends only:
+    # it is where `options.stage_model_inputs` resolves model sources from.
     local_engine_kwargs = (
         {
             "engine": engine,
@@ -1750,7 +1773,21 @@ def run_sim(
             "osdi_preload": osdi_preload,
         }
         if backend not in _OFFHOST_BACKENDS
-        else {}
+        else {"request_dir": request_dir}
+    )
+
+    # Issue #2668: stage the complete job closure once, here, before any
+    # backend runs -- so a missing model input, unresolvable dependency or
+    # exceeded cap is a named SimError before any S3 write, SSH push or
+    # instance launch on every off-host path (single job, remote fleet,
+    # batch shards alike). The result's asset list is also this report's
+    # provenance for what the worker actually received.
+    staged_model_environment = _preflight_staged_model_inputs(
+        request,
+        netlist_path,
+        request_dir=request_dir,
+        backend=backend,
+        enabled=stage_model_inputs,
     )
 
     if hosts == 1:
@@ -1799,6 +1836,7 @@ def run_sim(
             request=request,
             hosts=hosts,
             measurements_spec=measurements_spec,
+            request_dir=request_dir,
         )
     else:
 
@@ -2068,6 +2106,10 @@ def run_sim(
             repo_root=repo_root,
         )
     )
+    # Additive/optional (issue #2668): `staged_model_inputs`, only present
+    # when `options.stage_model_inputs` staged model inputs for an off-host
+    # backend -- see `_preflight_staged_model_inputs`.
+    environment.update(staged_model_environment)
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
@@ -2208,6 +2250,69 @@ def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
     warning = pdk_ambiguity_warning(resolution) if resolution else None
     if warning is not None:
         print(warning, file=sys.stderr)
+
+
+def _preflight_staged_model_inputs(
+    request: dict[str, Any],
+    netlist_path: str,
+    *,
+    request_dir: str,
+    backend: str,
+    enabled: bool,
+) -> dict[str, list[dict[str, Any]]]:
+    """Stage the complete off-host job closure once, before any backend runs
+    (issue #2668), so a missing model input, unresolvable dependency or
+    exceeded cap is a named :class:`SimError` before any S3 write, SSH push
+    or instance launch on every off-host path -- single job, remote fleet
+    and batch shards alike.
+
+    Returns the additive ``environment`` keys describing what the worker
+    receives: ``{"staged_model_inputs": [...]}`` -- one ``{name, field,
+    kind, sha256, rewritten}`` per staged model file, hashing the bytes the
+    worker actually reads (a library whose ``.include``/``.lib`` targets were
+    rewritten hashes differently from its source; an ``.osdi`` never does)
+    -- or ``{}`` when the option is off or the backend runs locally.
+    """
+    if not enabled or backend not in _OFFHOST_BACKENDS:
+        return {}
+    staged_job = sim_staging.stage_sim_job(
+        request,
+        netlist_path,
+        request_dir=request_dir,
+        netlist_staged_name=remote_transport.REMOTE_NETLIST_FILENAME,
+        reserved_names=(remote_transport.REMOTE_REQUEST_FILENAME,),
+        backend=backend,
+    )
+    return {
+        "staged_model_inputs": [asset.to_json() for asset in staged_job.model_assets]
+    }
+
+
+def _model_resolution_models(
+    request: dict[str, Any], models: dict[str, Any]
+) -> dict[str, Any]:
+    """The ``models`` block model *resolution* should see (issue #2668).
+
+    Normally ``models`` itself. A worker request built by
+    :func:`sim_staging.stage_sim_job` carries the internal
+    :data:`sim_staging.STAGED_MODEL_INPUTS_FIELD` marker: its ``models.lib``
+    and per-section libraries are job-relative staged names, so they must
+    resolve against the request (job) directory rather than be joined onto
+    ``models.pdk``'s directory on the image -- which is what dropping
+    ``pdk``/``pdk_root`` from the resolution view achieves, through the
+    unchanged :func:`_resolve_lib_ref` rule.
+    """
+    marker = request.get(sim_staging.STAGED_MODEL_INPUTS_FIELD)
+    if marker is None or marker is False:
+        return models
+    if marker is not True:
+        raise SimError(
+            f"request.{sim_staging.STAGED_MODEL_INPUTS_FIELD} is internal and "
+            "must be a boolean when present"
+        )
+    return {
+        key: value for key, value in models.items() if key not in ("pdk", "pdk_root")
+    }
 
 
 def _resolve_models_lib(models: dict[str, Any], request_dir: str) -> str:
@@ -3813,6 +3918,101 @@ _BACKENDS = {
 # --------------------------------------------------------------------------- #
 
 _ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
+
+
+_WAVEFORM_KEYWORDS = frozenset(
+    {"pwl", "pulse", "sin", "exp", "sffm", "am", "trnoise", "trrandom", "external"}
+)
+_WAVEFORM_RE = re.compile(r"^([a-z]+)\s*(?:\(|$)")
+
+
+def _logical_netlist_lines(netlist_text: str) -> list[str]:
+    """Netlist lines with ``+`` continuations joined and comments removed.
+
+    Full-line ``*`` comments and inline ``;``/``$`` comments are dropped.
+    Deliberately lexical, not a complete SPICE parser: ``.include``/``.lib``
+    are not followed."""
+    logical: list[str] = []
+    for raw in netlist_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("*"):
+            continue
+        line = re.split(r";|\s\$", line, maxsplit=1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("+"):
+            if logical:
+                logical[-1] += " " + line[1:].strip()
+            continue
+        logical.append(line)
+    return logical
+
+
+def _top_level_waveform_sources(netlist_text: str) -> dict[str, str]:
+    """Map lower-cased top-level independent voltage-source names to the
+    explicit waveform keyword (``pwl``/``pulse``/``sin``/...) they declare.
+    Sources declared inside ``.subckt`` bodies are ignored; sources with no
+    waveform (bare value or ``dc``) are absent from the result."""
+    found: dict[str, str] = {}
+    depth = 0
+    for line in _logical_netlist_lines(netlist_text):
+        lowered = line.lower()
+        if lowered.startswith("."):
+            word = lowered.split(None, 1)[0]
+            if word == ".subckt":
+                depth += 1
+            elif word == ".ends":
+                depth = max(0, depth - 1)
+            continue
+        if depth or lowered[0] != "v":
+            continue
+        # Name, two nodes, then value/DC/waveform specification. Spaces
+        # between a keyword and its "(" are tolerated.
+        tokens = lowered.replace("(", " ( ").split()
+        if len(tokens) < 4:
+            continue
+        spec = " ".join(tokens[3:]).replace(" ( ", "(")
+        for token in spec.split():
+            if token in _WAVEFORM_KEYWORDS or any(
+                token.startswith(k + "(") for k in _WAVEFORM_KEYWORDS
+            ):
+                found[tokens[0]] = re.match(r"[a-z]+", token).group(0)  # type: ignore[union-attr]
+                break
+    return found
+
+
+def _validate_supply_override_targets(
+    netlist_path: str, corner_points: list[CornerPoint]
+) -> None:
+    """Reject a ``supply_v`` override aimed at a waveform source (#2706).
+
+    ngspice's ``alter name=value`` silently has no effect on a
+    PWL/PULSE/SIN source, so the request fails as a whole rather than
+    simulating the wrong voltage. Validates the actual expanded points
+    (including worker ``_explicit_points``). Inspection is lexical over the
+    top-level netlist file only: included files and hierarchical targets are
+    not resolved, and an unresolved declaration is never assumed DC."""
+    targets = sorted({key for point in corner_points for key in point.supply_v})
+    if not targets:
+        return
+    try:
+        with open(netlist_path, encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return
+    waveforms = _top_level_waveform_sources(text)
+    for target in targets:
+        waveform = waveforms.get(target.strip().lower())
+        if waveform is not None:
+            raise SimError(
+                f"corners.supply_v override of source {target!r} is not "
+                f"supported: the netlist declares it with an explicit "
+                f"{waveform.upper()} waveform, and ngspice's `alter "
+                f"{target}=<value>` has no effect on it (the run would "
+                "silently simulate the netlist's own waveform). Declare the "
+                "source as a plain DC value, or remove it from "
+                "corners.supply_v"
+            )
 
 
 def _prepare_corner_run(

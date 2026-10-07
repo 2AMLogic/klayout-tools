@@ -620,9 +620,9 @@ DECK: list[DrcRule] = [
         # had no width rule of any kind here, only enclosure rules), and so
         # the fixed-size table has a deck minimum to agree with.
         #
-        # No `threshold_max_dbu`, for the same reason via.width.1 below
-        # states (issue #2388's deferral): the max half is expressible, but
-        # backfilling it across this deck is that issue's scope, not #2594's.
+        # No `threshold_max_dbu` yet (issue #2388): via.width.1 below has
+        # taken its max half, but this rule's is still deferred -- see the
+        # compound-layer narrowing note below.
         # Two approximations stay even once it lands, both the same shape
         # via.width.1 already documents: the *rectangularity* half
         # ("licon.1_c", "licon should be rectangle") cannot be expressed as a
@@ -763,7 +763,8 @@ DECK: list[DrcRule] = [
         # PDK-generic 0.22um contact budget, over the upstream maximum, and
         # this deck had no mcon width rule of any kind to notice.
         #
-        # No `threshold_max_dbu`, same #2388 deferral as via.width.1 below.
+        # No `threshold_max_dbu` yet: still deferred under issue #2388
+        # (via.width.1 below has taken its own).
         # Approximations that stay regardless, both mirroring via.width.1's:
         # the rectangularity half ("ct.1 : non-ring mcon should be
         # rectangular") is not a bounding-box bound, and sky130A_mr.drc's
@@ -828,36 +829,29 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="via.width.1",
         description=(
-            "minimum via1 (met1<->met2 via) size (approximates the "
-            "official rectangularity + min/max-length rule as a "
-            "minimum-width check)"
+            "min/max via1 (met1<->met2 via) size (fixed 0.15um; "
+            "rectangularity of via.1a stays approximated)"
         ),
         layer=(68, 44),  # via.drawing
         check="width",
         threshold_dbu=150,  # 0.15 um
+        threshold_max_dbu=150,  # 0.15 um -- same value: a *fixed*-size rule
         # sky130A_mr.drc rule "via.1a_a" (part of the "via.1a" family):
         # via_not_mt.width(0.15, euclidian)
         # -> "via.1a_a : min. width of via outside of moduleCut : 0.15um"
-        # (mirrors gf180mcu.py's "contact.width.1" approximation: the
-        # official rule also requires the via be rectangular ("via.1a") and
-        # capped at the same 0.15um length ("via.1a_b") -- our width_check
-        # primitive only supports a minimum-width lower bound, so only the
-        # min-size half of the rule is enforced here.)
+        # Min half: `threshold_dbu` via `Region.width_check`. Max half:
+        # "via.1a_b" (`via_not_mt.drc(length > 0.15)`, "maximum length of via
+        # : 0.15um") is the equal `threshold_max_dbu`, measured as a
+        # bounding-box size (`Region.with_bbox_max`, see `_run_width_max_check`
+        # in `drc.py`) -- the same treatment gf180mcu's `contact.width.1`
+        # gets (issue #2370/#2388). The max half was deferred behind issue
+        # #2585 (`klt gen compose` drew this cut at the PDK-generic 0.22um);
+        # that generator clamp (`_PDK_CUT_FIXED_SIZE_UM`) has landed.
         #
-        # No `threshold_max_dbu` yet, and that is a *deferral*, not a
-        # judgement that the max half is unenforceable (issue #2388). The
-        # max half is expressible -- `DrcRule.threshold_max_dbu` (issue
-        # #2370) would encode "via.1a_b"'s 0.15um cap exactly, the same way
-        # gf180mcu's `contact.width.1` already does. It is held back because
-        # `klt gen compose`'s via-drop ladder draws this cut at the
-        # PDK-generic `gen.CONTACT_SIZE_UM` (0.22um), so enforcing the real
-        # foundry maximum turns eight currently-green composer tests red --
-        # correctly, since that geometry genuinely violates "via.1a_b".
-        # Fixing the generator is issue #2585; this rule gets its
-        # `threshold_max_dbu` once that lands. Even then the *rectangularity*
-        # half ("via.1a") stays approximated: a bounding-box bound cannot
-        # reject an L-shaped cut that fits inside a 0.15um box.
-        # See docs/cli/drc.md's "sky130" approximation notes.
+        # One approximation remains: the official rule also requires the via
+        # be *rectangular* ("via.1a"). A bounding-box bound cannot reject an
+        # L-shaped cut that fits inside a 0.15um box, so rectangularity is
+        # not enforced. See docs/cli/drc.md's "sky130" approximation notes.
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.1a_a"),
     ),
@@ -968,19 +962,26 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="via2.width.1",
         description=(
-            "minimum via2 (met2<->met3 via) size (approximates the "
-            "official rectangularity + max-length rule as a "
-            "minimum-width check)"
+            "min/max via2 (met2<->met3 via) size (fixed 0.2um; "
+            "rectangularity of via2.1a stays approximated)"
         ),
         layer=(69, 44),  # via2.drawing
         check="width",
         threshold_dbu=200,  # 0.2 um
+        threshold_max_dbu=200,  # 0.2 um -- same value: a *fixed*-size rule
         # sky130A_mr.drc rule "via2.1a_a" (part of the "via2.1a" family):
         # via2_not_mt.width(0.2, euclidian)
         # -> "via2.1a_a : min. width of via2 outside of moduleCut : 0.2um"
-        # (mirrors via.width.1's own approximation: the official rule also
-        # requires the via be rectangular ("via2.1a") and capped at the same
-        # 0.2um length ("via2.1a_b") -- only the min-size half is enforced.)
+        # Min half: `threshold_dbu` via `Region.width_check`. Max half:
+        # "via2.1a_b" (maximum length of via2: 0.2um) is the equal
+        # `threshold_max_dbu`, measured as a bounding-box size
+        # (`Region.with_bbox_max`, see `_run_width_max_check` in `drc.py`),
+        # the same treatment via.width.1 gets (issue #2388/#2443).
+        #
+        # One approximation remains, mirroring via.width.1's: the official
+        # rule also requires the via be *rectangular* ("via2.1a"), which a
+        # bounding-box bound cannot reject. See docs/cli/drc.md's "sky130"
+        # approximation notes.
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.1a_a"),
     ),
@@ -1082,18 +1083,25 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="via3.width.1",
         description=(
-            "minimum via3 (met3<->met4 via) size (approximates the "
-            "official rectangularity + max-length rule as a "
-            "minimum-width check)"
+            "min/max via3 (met3<->met4 via) size (fixed 0.2um; "
+            "rectangularity of via3.1 stays approximated)"
         ),
         layer=(70, 44),  # via3.drawing
         check="width",
         threshold_dbu=200,  # 0.2 um
+        threshold_max_dbu=200,  # 0.2 um -- same value: a *fixed*-size rule
         # sky130A_mr.drc rule "via3.1_a": via3_not_mt.width(0.2, euclidian)
         # -> "via3.1_a : min. width of via3 outside of moduleCut : 0.2um"
-        # (mirrors via2.width.1's own approximation: the official rule also
-        # requires the via be rectangular ("via3.1") and capped at the same
-        # 0.2um length ("via3.1_b") -- only the min-size half is enforced.)
+        # Min half: `threshold_dbu` via `Region.width_check`. Max half:
+        # "via3.1_b" (maximum length of via3: 0.2um) is the equal
+        # `threshold_max_dbu`, measured as a bounding-box size
+        # (`Region.with_bbox_max`, see `_run_width_max_check` in `drc.py`),
+        # the same treatment via.width.1 gets (issue #2388/#2443).
+        #
+        # One approximation remains, mirroring via.width.1's: the official
+        # rule also requires the via be *rectangular* ("via3.1"), which a
+        # bounding-box bound cannot reject. See docs/cli/drc.md's "sky130"
+        # approximation notes.
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.1_a"),
     ),
@@ -1192,18 +1200,25 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="via4.width.1",
         description=(
-            "minimum via4 (met4<->met5 via) size (approximates the "
-            "official rectangularity + max-length rule as a "
-            "minimum-width check)"
+            "min/max via4 (met4<->met5 via) size (fixed 0.8um; "
+            "rectangularity of via4.1 stays approximated)"
         ),
         layer=(71, 44),  # via4.drawing
         check="width",
         threshold_dbu=800,  # 0.8 um
+        threshold_max_dbu=800,  # 0.8 um -- same value: a *fixed*-size rule
         # sky130A_mr.drc rule "via4.1_a": rectVIA4.width(0.8, euclidian)
         # -> "via4.1_a : min. width of via4 outside of moduleCut : 0.8um"
-        # (mirrors via3.width.1's own approximation: the official rule also
-        # requires the via be rectangular ("via4.1") and capped at the same
-        # 0.8um length ("via4.1_b") -- only the min-size half is enforced.)
+        # Min half: `threshold_dbu` via `Region.width_check`. Max half:
+        # "via4.1_b" (maximum length of via4: 0.8um) is the equal
+        # `threshold_max_dbu`, measured as a bounding-box size
+        # (`Region.with_bbox_max`, see `_run_width_max_check` in `drc.py`),
+        # the same treatment via.width.1 gets (issue #2388/#2443).
+        #
+        # One approximation remains, mirroring via.width.1's: the official
+        # rule also requires the via be *rectangular* ("via4.1"), which a
+        # bounding-box bound cannot reject. See docs/cli/drc.md's "sky130"
+        # approximation notes.
         scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via4.1_a"),
     ),

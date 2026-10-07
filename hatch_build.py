@@ -15,6 +15,14 @@ This hook closes that by writing a tiny generated module,
     GIT_TAG = "v0.2.0"            # exact-match tag, or None
     GIT_DIRTY = False             # uncommitted changes to *tracked* files at build time
     KLAYOUT_VERSION_EXPECTED = "0.30.10"  # or None
+    DECK_HASHES = {"sky130": "sha256:<hex>", ...}  # or None
+
+``DECK_HASHES`` (issue #2451) records the content hash of every built-in deck
+module (``src/klayout_tools/decks/*.py``, keyed by module stem) *as built*.
+:mod:`klayout_tools.decks.history` lets a release build vouch for its own
+decks only when a queried hash equals the hash recorded here -- never the
+current on-disk bytes, which a post-install edit could change while the
+frozen ``GIT_TAG``/``GIT_DIRTY`` record still says "clean release".
 
 ``KLAYOUT_VERSION_EXPECTED`` (issue #1490) records the ``klayout`` engine
 version this checkout's ``uv.lock`` pins at build time -- the version CI
@@ -63,6 +71,7 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -112,6 +121,38 @@ def klayout_version_expected(root: str) -> str | None:
         return None
     match = _UV_LOCK_KLAYOUT_RE.search(content)
     return match.group(1) if match else None
+
+
+#: Source directory of the built-in deck modules, relative to the build root.
+_DECKS_DIR = os.path.join("src", "klayout_tools", "decks")
+
+
+def deck_hashes(root: str) -> dict[str, str] | None:
+    """``{module_stem: "sha256:<hex>"}`` for every ``*.py`` module in
+    ``<root>/src/klayout_tools/decks``, or ``None`` when that directory is
+    missing/unreadable (issue #2451).
+
+    Hashes every module rather than importing the package to ask which are
+    decks: the build hook must not import the package it is building, and a
+    surplus entry (``rules.py``) is harmless because the runtime only ever
+    looks up real deck names.
+    """
+    directory = os.path.join(root, _DECKS_DIR)
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return None
+    hashes: dict[str, str] = {}
+    for filename in names:
+        if not filename.endswith(".py"):
+            continue
+        try:
+            with open(os.path.join(directory, filename), "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+        except OSError:
+            return None
+        hashes[filename[: -len(".py")]] = f"sha256:{digest}"
+    return hashes or None
 
 
 def _git(root: str, *args: str) -> str | None:
@@ -167,12 +208,15 @@ def git_identity(root: str) -> dict[str, Any] | None:
 
 
 def render_build_info(
-    identity: dict[str, Any], klayout_version_expected: str | None = None
+    identity: dict[str, Any],
+    klayout_version_expected: str | None = None,
+    deck_hashes: dict[str, str] | None = None,
 ) -> str:
     """The source text of the generated ``_build_info.py`` module.
 
-    ``klayout_version_expected`` (issue #1490) defaults to ``None`` so
-    existing callers passing only ``identity`` keep working unchanged.
+    ``klayout_version_expected`` (issue #1490) and ``deck_hashes`` (issue
+    #2451) default to ``None`` so existing callers passing only ``identity``
+    keep working unchanged.
     """
     return (
         '"""Generated at build time by ``hatch_build.py`` -- do not edit.\n'
@@ -185,6 +229,7 @@ def render_build_info(
         f"GIT_TAG = {identity['tag']!r}\n"
         f"GIT_DIRTY = {identity['dirty']!r}\n"
         f"KLAYOUT_VERSION_EXPECTED = {klayout_version_expected!r}\n"
+        f"DECK_HASHES = {deck_hashes!r}\n"
     )
 
 
@@ -210,7 +255,11 @@ class BuildIdentityHook(BuildHookInterface):  # type: ignore[misc,valid-type]
         generated = os.path.join(self._tmp_dir, "_build_info.py")
         with open(generated, "w", encoding="utf-8") as handle:
             handle.write(
-                render_build_info(identity, klayout_version_expected(self.root))
+                render_build_info(
+                    identity,
+                    klayout_version_expected(self.root),
+                    deck_hashes(self.root),
+                )
             )
 
         build_data.setdefault("force_include", {})[generated] = relative_path

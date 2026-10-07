@@ -308,11 +308,9 @@ Two scope notes specific to this platform:
 - **The run above omitted `request.power`** — at the time it was made, a
   PDN run against this library raised. That is no longer true; see the
   `request.power` run recorded immediately below.
-- **The merged GDS was not DRC-checked.** Unlike the gf180mcu entry above,
-  no `klt drc` pass was run against this run's output — the routed-GDS
-  claim here is OpenROAD's own `route__drc_errors`, not a KLayout
-  signoff-deck result. The `request.power` run below closes that gap with
-  measured numbers, for both the with- and without-power GDS.
+- **The merged GDS was not DRC-checked in this run.** The `request.power`
+  run below measured it and root-caused the resulting findings (issue
+  #2444); after that fix the routed GDS is `klt drc --deck sg13g2` clean.
 
 #### `request.power` on `sg13g2_stdcell` (issue #2441)
 
@@ -375,9 +373,10 @@ Three things this run settled that the config alone could not:
    closed every row gap (2343 instances) and the second `global_connect`
    wired them, with no well-tie step ahead of it.
 
-**`klt drc --deck sg13g2` over the merged GDS is *not* clean — and was not
-clean before this change either.** Measured on both GDS files from the two
-runs above, with the same deck:
+**`klt drc --deck sg13g2` over the merged GDS: root-caused and fixed
+(issue #2444).** The first measurement of both GDS files above reported
+2482 violations without `request.power` and 3181 with it, while OpenROAD's
+own route DRC said `0`:
 
 | | without `request.power` | with `request.power` |
 |---|---|---|
@@ -386,17 +385,45 @@ runs above, with the same deck:
 | `metal1.enclosing.via1.1` | 0 | 36 |
 | **total** | **2482** | **3181** |
 
-Every `metal2.width.1` finding is inside an OpenROAD-generated via cell
-(`VIA_Via2_YX`, `VIA_Via1_YY`, `VIA_Via1_XY` at baseline; the PDN's own
-`VIA_via2_3_2200_440_1_5_410_410` adds the extra 640), and every
-`metal1.space.1` finding is inside a standard-cell master
-(`sg13g2_nor2_1`, `sg13g2_nor2b_1`, `sg13g2_buf_16`) — i.e. both predate
-power delivery and are a deck-versus-tech-LEF question, not a PDN one. The
-`metal1.enclosing.via1.1` group is new with the PDN (the followpin rail's
-Via1 landings on standard-cell M1 pins). **This is a standing platform gap,
-tracked in #2444** — it is not a bar `sg13g2_stdcell` cleared before this
-change, so `request.power` support is not gated on it. The gf180mcu entry
-above remains the only platform with a measured 0-violation `klt drc` pass.
+**None of the three groups was a deck defect or a real geometry problem.**
+The `sg13g2` deck's `M1.b`/`M2.a`/`V1.c` transcriptions match IHP's own
+`beol/5_16_metal1.drc`, `5_17_metaln.drc` and `5_19_via1.drc` line for line,
+and the IHP tech LEF's Via1/Via2 pads are all >= 0.20 um wide. The defect
+was in this repo's DEF->GDS merge: `_resolve_layer_map` looked for
+`libs.tech/klayout/tech/<variant>.map`, and for IHP the variant is
+`ihp-sg13g2` while the shipped map is `sg13g2.map` (named after the process).
+It found nothing (`layer_map: {"path": null, "resolution": "none"}`), so
+KLayout's LEF/DEF reader fell back to sequential default layer numbers for
+every OpenROAD-generated via cell. Inspecting `VIA_Via2_YX` in the old GDS
+showed the 0.19 x 0.19 um Via2 *cut* on `10/0` (the deck's Metal2), the
+Metal2 pad on `9/0` and Metal3 on `11/0`; `VIA_Via1_YY` put the Via1 cut on
+`8/0` (Metal1). The "0.19 um Metal2 pad" findings were the via cuts. The
+`metal1.space.1` and `metal1.enclosing.via1.1` groups are consistent with the
+same cause (cut/pad shapes on mis-numbered layers next to the standard cells'
+real Metal1), and both went to 0 with the map fix alone; the per-shape
+mechanism for those two was inferred from the 0 re-measurement, not
+separately inspected. The fix teaches `_resolve_layer_map` (in `place_and_route.py`,
+`lef_abstract.py` and `extract_abstract.py`) to strip an `ihp-` prefix when
+looking for the family-level map file, so IHP's `sg13g2.map` is used
+(`resolution: "family"`).
+
+Re-measured 2026-10-06 (`openroad 26Q3-1510-g6cb3f2b704`, IHP-Open-PDK v0.3.0,
+same GCD request, same floorplan, with and without the `request.power`
+block above), `klt drc --deck sg13g2` over each freshly merged GDS:
+
+| | without `request.power` | with `request.power` |
+|---|---|---|
+| `metal2.width.1` | 0 (was 2464) | 0 (was 3126) |
+| `metal1.space.1` | 0 (was 18) | 0 (was 19) |
+| `metal1.enclosing.via1.1` | 0 (was 0) | 0 (was 36) |
+| **total** | **0** (was 2482) | **0** (was 3181) |
+
+`sg13g2_stdcell` therefore now has a measured 0-violation `klt drc` pass
+on the routed GDS, matching `gf180mcu_fd_sc_mcu9t5v0` above. The new
+measurement is a manual run (not automated): the PDK was a sparse checkout of
+IHP-Open-PDK v0.3.0 and `--pdk-root` pointed at it. The `request.power`
+`Metal1` followpin geometry needs no different width/via strategy on this
+platform.
 
 ## Stage granularity and invocation shape
 
@@ -1157,7 +1184,10 @@ a replacement of it:
    uses — so `spef_sta`'s own `worst_slack_ns`/`total_negative_slack_ns`/
    `setup_violation_count`/`hold_violation_count` are directly comparable to
    the top-level fields on the identical routed design, differing only in
-   parasitics source.
+   parasitics source. Both sessions emit the violator reports from the same
+   shared helper, so `spef_sta`'s counts cover the same check families
+   (data + recovery/removal + clock-gating, issue #2741) as the top-level
+   ones.
 3. **Net-name correlation is explicitly checked, not assumed** (the survey's
    own flagged open risk: does `klt extract`'s net naming correlate with
    OpenSTA's own flat linked-design net list?) — before `read_spef` runs,
@@ -2118,7 +2148,7 @@ plain string" for the full enumeration and rationale.
 | `worst_slack_ns` / `total_negative_slack_ns` | number | WNS/TNS at `stage_reached`. Negative values are expected, not an error — a caller wanting a pass/fail gate on timing composes this contract into `klt eval`. A `target_stage: "floorplan"` request with no `constraints` (a clock is not required until `"place"`, see below) reports OpenROAD's own unconstrained-design sentinel (`1e+39`/`0`) rather than a real number — a `constraints`-less floorplan-only run has no clock to measure slack against, and this field is never fabricated to hide that. **That sentinel is not the only way to reach it** — a fully-constrained, fully-routed run of a design with no register-to-register path reports the identical `1e+39`/`0`. Check `timing_status` below before treating this number as a measurement. |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the slack fields in this response are *measurements* at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever **any** slack field in scope carries the sentinel; `null` when the stage reported no slack metric at all (nothing to classify — not a claim either way). **A pass/fail gate on timing must require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so `worst_slack_ns >= 0` on its own reports "timing closed with maximum confidence" on a design that was never timed. The sentinel values themselves are reported verbatim and unchanged — this field is additive and retypes nothing. Restated per stage in `stages[]` and per corner in `corners[]` (and inside `spef_sta`), each computed from that entry's own slack values. See "I/O timing constraints" below for the most common way to *fix* an `"unconstrained"` result rather than merely detect it. |
 | `fmax_mhz` | number \| null | `null` before placement (floorplan-stage ideal-clock STA reports no `fmax`). |
-| `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). |
+| `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). Nominal-corner count of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group, not every enumerated path) over the same timing-check families as the nominal setup/hold WNS/TNS: setup = data setup + asynchronous **recovery** + clock-gating setup (`-max_delay -recovery -clock_gating_setup`); hold = data hold + asynchronous **removal** + clock-gating hold (`-min_delay -removal -clock_gating_hold`) (issue #2741). Not swept: the corner-swept `worst_setup_slack_ns`/`worst_hold_slack_ns` below have no count counterpart. See [`docs/cli/sta.md`](sta.md)'s "Violation counts: check families" for the engine evidence and the gating caveats. |
 | `nominal_hold_slack_ns` | number \| null | Additive field (issue #1826). The single, nominal-corner hold WNS (`report_worst_slack_metric -hold`), mirroring `worst_slack_ns` above's setup-side value — a real slack-in-ns margin, not just the pass/fail count `hold_violation_count` already provides. `null` at the floorplan stage, matching `hold_violation_count`'s own gating. Named `nominal_hold_slack_ns` (not `worst_hold_slack_ns`) specifically to avoid colliding with the corner-swept `worst_hold_slack_ns` aggregate below — the two are independent fields that never replace one another, the same way `worst_slack_ns` and `worst_setup_slack_ns` already coexist (issue #949). |
 | `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
 | `route_drc_violation_count` | integer \| null | The violation count from `detailed_route -output_drc <rpt>`'s own report (TritonRoute's routing-legality check — short/spacing/via/etc. violations, distinct from the antenna check above), counting distinct complete `(type, sources, bbox, layer)` records from the **final** routing pass. Identical repeated records count once; incomplete records count individually. `0` for a DRC-clean route (a real `-output_drc` report is a 0-byte file in that case, not absent). `null` before the `"route"` stage — no `detailed_route` call has run yet (issue #938). |

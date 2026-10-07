@@ -1813,3 +1813,173 @@ def test_examples_sim_batch_live_run_slot_is_explicitly_empty():
     assert not (SIM_BATCH_EXAMPLES_DIR / "matrix-batch.report.json").exists()
     readme = (SIM_BATCH_EXAMPLES_DIR / "README.md").read_text()
     assert "Live-run slot: deliberately empty" in readme
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in model staging (issue #2668): `options.stage_model_inputs`
+# --------------------------------------------------------------------------- #
+
+
+def _write_staged_models(tmp_path: Path) -> None:
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "shared.spice").write_text(".param shared=1\n")
+    (tmp_path / "models" / "top.lib").write_text(
+        '.lib tt\n.include "shared.spice"\n.endl tt\n'
+        '.lib ss\n.include "shared.spice"\n.endl ss\n'
+    )
+    (tmp_path / "psp103.osdi").write_bytes(b"\x7fELF\x00\xffbinary")
+
+
+def _staged_batch_request(tmp_path: Path, **overrides) -> dict:
+    request = _batch_request(
+        tmp_path,
+        models={"lib": "models/top.lib"},
+        corners={"process": ["tt", "ss"]},
+        options={"stage_model_inputs": True, "osdi_preload": ["psp103.osdi"]},
+    )
+    request.update(overrides)
+    return request
+
+
+def _capture_uploads(monkeypatch, runner: _FakeRunner) -> dict[str, bytes]:
+    """Read every `inputs/<name>` upload's bytes while the temp file exists."""
+    uploaded: dict[str, bytes] = {}
+
+    def _capture(argv, timeout_s):
+        if "cp" in argv:
+            destination = argv[argv.index("cp") + 2]
+            if "/inputs/" in destination or destination.endswith("/job.json"):
+                key = destination.rsplit("/inputs/", 1)[-1].rsplit("/", 1)[-1]
+                with open(argv[argv.index("cp") + 1], "rb") as handle:
+                    uploaded[key] = handle.read()
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+    return uploaded
+
+
+def test_build_batch_job_spec_without_opt_in_uploads_no_model_inputs(tmp_path):
+    _write_staged_models(tmp_path)
+    request = {"models": {"pdk": "sky130A", "lib": "models/top.lib"}}
+    spec = sb._build_batch_job_spec(
+        request,
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+        request_dir=str(tmp_path),
+    )
+    assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
+    assert json.loads(spec.inputs[-1].content) == request
+    assert spec.pdk_variant == "sky130A"
+
+
+def test_run_sim_batch_uploads_the_staged_model_closure(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    uploaded = _capture_uploads(monkeypatch, runner)
+    _write_body(tmp_path)
+    _write_staged_models(tmp_path)
+
+    report = sim.run_sim(str(_write_request(tmp_path, _staged_batch_request(tmp_path))))
+
+    job_json = json.loads(uploaded.pop("job.json"))
+    assert set(uploaded) == {
+        "netlist.cir",
+        "top.lib",
+        "shared.spice",
+        "psp103.osdi",
+        "request.json",
+    }
+    assert list(uploaded)[-1] == "request.json"  # still after every input
+    assert uploaded["psp103.osdi"] == (tmp_path / "psp103.osdi").read_bytes()
+    worker = json.loads(uploaded["request.json"])
+    assert worker["models"] == {"lib": "top.lib"}
+    assert worker["options"]["osdi_preload"] == ["psp103.osdi"]
+    assert worker["_staged_model_inputs"] is True
+    assert b"models/" not in uploaded["top.lib"]
+    # No models.pdk: any compatible fleet image, no pdk_variant in job.json.
+    assert "pdk_variant" not in job_json
+    names = [entry["name"] for entry in report["environment"]["staged_model_inputs"]]
+    assert names == ["top.lib", "psp103.osdi", "shared.spice"]
+
+
+def test_run_sim_batch_keeps_pdk_variant_when_staging(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    job_json: dict = {}
+
+    def _capture(argv, timeout_s):
+        if "cp" in argv and argv[argv.index("cp") + 2].endswith("/job.json"):
+            with open(argv[argv.index("cp") + 1], encoding="utf-8") as handle:
+                job_json.update(json.load(handle))
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+    _write_body(tmp_path)
+    _write_staged_models(tmp_path)
+    # models.pdk still selects the image; models.lib is a request-relative
+    # literal path here (no pdk_root), so resolution needs no local PDK.
+    request = _staged_batch_request(tmp_path)
+    request["models"] = {"pdk": "sky130A", "lib": str(tmp_path / "models/top.lib")}
+
+    sim.run_sim(str(_write_request(tmp_path, request)))
+
+    assert job_json["pdk_variant"] == "sky130A"
+
+
+@pytest.mark.parametrize("hosts", [1, 2])
+def test_unstageable_model_input_fails_before_any_s3_write(
+    tmp_path, monkeypatch, hosts
+):
+    runner = _FakeRunner()
+    monkeypatch.setattr(sb, "_run_subprocess", runner)
+    _write_body(tmp_path)
+    _write_staged_models(tmp_path)
+    (tmp_path / "models" / "top.lib").write_text('.lib "missing.lib" tt\n')
+    request = _staged_batch_request(tmp_path, remote={"hosts": hosts})
+
+    with pytest.raises(sim.SimError) as excinfo:
+        sim.run_sim(str(_write_request(tmp_path, request)))
+
+    message = str(excinfo.value)
+    assert message.startswith("backend 'batch': models.lib:")
+    assert "missing.lib" in message
+    assert runner.calls == []  # nothing uploaded, nothing launched
+
+
+def test_model_closure_cap_fails_before_any_s3_write(tmp_path, monkeypatch):
+    from klayout_tools import sim_staging
+
+    runner = _FakeRunner()
+    monkeypatch.setattr(sb, "_run_subprocess", runner)
+    monkeypatch.setattr(sim_staging, "MAX_STAGED_MODEL_FILES", 1)
+    _write_body(tmp_path)
+    _write_staged_models(tmp_path)
+
+    with pytest.raises(sim.SimError, match="staged job closure exceeds 1 files"):
+        sim.run_sim(str(_write_request(tmp_path, _staged_batch_request(tmp_path))))
+    assert runner.calls == []
+
+
+def test_run_sim_batch_rejects_waveform_supply_before_any_submission(
+    tmp_path, monkeypatch
+):
+    def _never(*args, **kwargs):
+        raise AssertionError("batch submission must not run (issue #2706)")
+
+    monkeypatch.setattr(sb, "_run_subprocess", _never)
+    monkeypatch.setattr(sim, "_run_batch", _never)
+    monkeypatch.setattr(sim, "_run_batch_fleet", _never)
+    (tmp_path / "body.spice").write_text(
+        "Vdd vdd 0 DC 1\nVramp vramp 0 PWL(0 0 1u 1)\nR1 vdd vramp 1k\n"
+    )
+    request = _batch_request(
+        tmp_path, corners={"supply_v": {"vdd": [1.0, 1.8], "vramp": [1.0, 1.8]}}
+    )
+    with pytest.raises(sim.SimError, match="'vramp'.*PWL"):
+        sim.run_sim(str(_write_request(tmp_path, request)))

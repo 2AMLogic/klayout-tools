@@ -1395,7 +1395,9 @@ def _yosys_error_message(stdout: str, stderr: str, returncode: int | None) -> st
     reading: No such file or directory`` shape *and* ``<path>`` verifiably
     exists on the host filesystem, appends a hint that the ``yosys`` on
     ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
-    sandbox does not preopen that path -- see issue #1368/#1755. A script
+    sandbox does not preopen that path -- see issue #1368/#1755; for a path under
+    the host temp dir the hint instead names the sandbox's private ``/tmp``
+    mount and leads with relocating the request (issue #2453). A script
     path that genuinely does not exist is a different failure and is left
     unchanged.
     """

@@ -194,7 +194,7 @@ string" for the full enumeration and rationale.
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
 | `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
-| `setup_violation_count` / `hold_violation_count` | integer | Parsed from `report_check_types -max_delay/-min_delay -violators` stdout. |
+| `setup_violation_count` / `hold_violation_count` | integer | Number of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group — not every enumerated timing path), counted over the **same timing-check families** the WNS/TNS fields above measure: setup side = data setup (`-max_delay`, incl. output-delay checks) + asynchronous **recovery** + inferred **clock-gating setup**; hold side = data hold (`-min_delay`) + asynchronous **removal** + inferred **clock-gating hold** (issue #2741). See "Violation counts: check families" below. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
@@ -233,6 +233,51 @@ views only, never Verilog or GDS.
 See `docs/cli/synthesize.md`'s and `docs/cli/place-and-route.md`'s own
 "Hard macros"/"Hard-macro placement" sections for how the other two verbs
 consume the same declaration.
+
+## Violation counts: check families (issue #2741)
+
+`setup_violation_count`/`hold_violation_count` are scraped from
+`report_check_types ... -violators -format end` (OpenROAD has no metric proc
+for a violation *count*), and that command only reports the check types it
+is asked for. Before issue #2741 it was asked for `-max_delay`/`-min_delay`
+only — which OpenSTA filters to **data** checks — while
+`report_worst_slack_metric`/`report_tns_metric` measure every setup-side /
+hold-side check. A design whose only failing hold check was an asynchronous
+**removal** check (reset port → flop `RESET_B`) therefore reported a
+negative `worst_hold_slack_ns` next to `hold_violation_count: 0`.
+
+Each side is now one combined call covering the same population as its
+WNS/TNS fields:
+
+| Count | `report_check_types` flags | Path groups it covers |
+| --- | --- | --- |
+| `setup_violation_count` | `-max_delay -recovery -clock_gating_setup` | data setup (incl. output delays), `asynchronous` recovery, `gated clock` setup |
+| `hold_violation_count` | `-min_delay -removal -clock_gating_hold` | data hold, `asynchronous` removal, `gated clock` hold |
+
+Verified against OpenROAD `26Q3-1510-g6cb3f2b704` on a small
+`sky130_fd_sc_hd__dfrtp_1` + AND-gated-clock fixture (real captured output in
+`tests/fixtures/sta_check_families/`): removal-only, recovery-only,
+clock-gating-only, mixed data+async, data-only, clean and unconstrained
+scenarios all report a count consistent with their WNS/TNS, and a mixed
+failure lists each endpoint once (data `D`, async `RESET_B` and gating-enable
+pins are distinct endpoints, so the families never double-count).
+
+**Count unit.** One row per violating *endpoint* per path group, not per
+timing path: a flop `D` pin reached by 100 failing paths counts once. An
+endpoint constrained by more than one clock can appear once per clock's path
+group.
+
+**What to gate on.** `hold_violation_count == 0` and `worst_hold_slack_ns >=
+0` now measure the same check population, but they are not
+interchangeable numbers: the count is an endpoint tally, WNS/TNS are slack
+magnitudes. The report prints slack rounded to two decimals — on the
+probe of the same netlist a `-0.0049` ns setup slack is printed as `0.00 (VIOLATED)` and
+is counted, because the count keys on OpenSTA's own `(VIOLATED)` verdict,
+never on the printed number. An unconstrained design reports the `1e+39`
+sentinel WNS with a count of `0` — check `timing_status == "constrained"`
+first. The same policy applies to every `corners[]` entry of a
+`pdk.corners` response, and to `klt place-and-route`'s nominal-stage and
+`spef_sta` counts (one shared Tcl helper).
 
 ## Multi-corner characterization (`pdk.corners`, issue #1871)
 

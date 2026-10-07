@@ -530,6 +530,12 @@ from .extract import (
 #: neither selects nothing and produces byte-identical output, and the
 #: existing :data:`REASON_DEGENERATE_WELL_SELECTION` token is reused rather
 #: than joined by a new one. No bump.
+#: Issue #2415 adds one always-present ``provenance`` key, ``label_layers``
+#: (one ``{name, label_layer, label_text_count}`` entry per stackup role
+#: declaring a ``label_layer`` -- see :func:`_register_label_layer`), so the
+#: #2401 empty-label-layer condition is visible in JSON, not only on stderr.
+#: Evidence only: no finding, status or coverage value changes. A new key on
+#: an existing object is additive. No bump.
 SCHEMA_VERSION = 1
 
 
@@ -880,6 +886,7 @@ def _connectivity_coverage(
     ties_disclosure: dict[str, Any] | None = None,
     well_asserted_ties: set[str] | None = None,
     undeclared_stream_layers: list[str] | None = None,
+    well_assertion_coverage: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -1072,6 +1079,8 @@ def _connectivity_coverage(
         "checked_by_assertion": sorted(checked_by_assertion),
         "checked_by_well_assertion": sorted(checked_by_well_assertion),
         "layers_in_stream_without_declaration": list(undeclared_stream_layers or []),
+        # Issue #2427: reported, never graded -- see `_well_assertion_coverage`.
+        "well_assertion_coverage": list(well_assertion_coverage or []),
     }
 
 
@@ -3623,6 +3632,53 @@ def _boxes_region(
     return region.merged()
 
 
+def _well_assertion_coverage_entry(
+    kdb: Any,
+    layout: Any,
+    top_cell: Any,
+    tie: dict[str, Any],
+    asserted: Any,
+) -> dict[str, Any]:
+    """Issue #2427: how much of the stream's drawn tap geometry a
+    ``well_boxes`` assertion leaves outside every asserted polygon.
+
+    The degeneracy test (:func:`_tie_well_region`) only asks whether the
+    assertion is indistinguishable from the whole top-cell extent. It cannot
+    see an assertion going *stale* as a layout grows devices outside it --
+    those fall outside every asserted polygon, so ``_tie_findings`` never
+    examines them. This is the number that makes that visible across
+    revisions. Reporting only: it feeds no verdict and no skip.
+
+    ``drawn_tap_area_um2`` is the merged drawn area of the tie's declared
+    ``tap_layer`` (before any ``tap_requires``/``tap_boxes`` narrowing -- the
+    drawn device-contact geometry, independent of the caller's claims);
+    ``uncovered_tap_area_um2`` the part of it outside the asserted region.
+    ``uncovered_tap_fraction`` is ``null`` when no tap geometry is drawn.
+    ``extent_uncovered_fraction`` is the same ratio the degeneracy test uses
+    (top-cell extent outside the assertion), for context.
+    """
+    scale = layout.dbu * layout.dbu
+    drawn = _region(layout, top_cell, tie["tap_layer"]).merged()
+    drawn_area = drawn.area()
+    uncovered_area = (drawn - asserted).area()
+    extent = kdb.Region(top_cell.bbox())
+    extent_area = extent.area()
+    return {
+        "id": work_id("erc.missing_tie", tie["name"]),
+        "tap_layer": f"{tie['tap_layer'][0]}/{tie['tap_layer'][1]}",
+        "drawn_tap_area_um2": round(drawn_area * scale, 6),
+        "uncovered_tap_area_um2": round(uncovered_area * scale, 6),
+        "uncovered_tap_fraction": (
+            round(uncovered_area / drawn_area, 6) if drawn_area > 0 else None
+        ),
+        "extent_uncovered_fraction": (
+            round((extent - asserted).area() / extent_area, 6)
+            if extent_area > 0
+            else None
+        ),
+    }
+
+
 def _tie_well_region(
     kdb: Any,
     layout: Any,
@@ -3761,12 +3817,14 @@ def _warn_label_layer_empty(verb: str, name: str, label_layer: str) -> None:
     ``label_layer`` carries **zero** text objects in the analysed top cell
     (issue #2401).
 
-    An empty label layer is silent everywhere else in the report: every
-    ``gates[].net`` on that role reads ``null`` (indistinguishable from a
-    spec with no ``label_layer`` at all) and every ``nets[]`` entry that
-    expects to match through it resolves zero islands and is reported as
-    ``erc.unconnected_net`` -- which reads as "this net is not in the
-    layout", i.e. a blocking supply-connectivity defect. In practice that
+    In the report's findings an empty label layer is indistinguishable
+    from a real defect: every ``gates[].net`` on that role reads ``null``
+    (as with a spec with no ``label_layer`` at all) and every ``nets[]``
+    entry that expects to match through it resolves zero islands and is
+    reported as ``erc.unconnected_net`` -- which reads as "this net is not
+    in the layout", i.e. a blocking supply-connectivity defect. The only
+    JSON evidence of the cause is ``provenance.label_layers[]``'s
+    ``label_text_count: 0`` for that role (issue #2415). In practice that
     combination is almost always a mis-transcribed layer/datatype (a
     ``.pin`` polygon layer named where the PDK's ``.label`` text layer was
     meant) rather than a real connectivity failure. Printed to stderr,
@@ -3792,6 +3850,7 @@ def _register_label_layer(
     entry: dict[str, Any],
     conductor_region: Any,
     verb: str | None,
+    label_layers: list[dict[str, Any]] | None = None,
 ) -> None:
     """Register a ``stackup`` entry's declared ``label_layer`` text onto its
     conductor region in the ``LayoutToNetlist`` graph -- and warn when that
@@ -3803,12 +3862,29 @@ def _register_label_layer(
     of ``None`` registers the text but skips the warning: the tie-graph
     re-extraction (:func:`_extract_connectivity`'s second caller) walks the
     same ``stackup`` again, and the warning is printed once per affected
-    entry, not once per extraction."""
+    entry, not once per extraction.
+
+    ``label_layers`` (issue #2415), when given, receives one
+    ``provenance.label_layers[]`` entry for this role: the role ``name``, its
+    normalized ``label_layer`` string and ``label_text_count`` -- the number
+    of text *occurrences* in the very collection registered below (flattened
+    over the top-cell hierarchy, so each child-cell instance and each
+    repeated string counts separately; before any conductor-overlap
+    filtering). Only the primary extraction passes a collector, so the tie
+    re-extraction never duplicates an entry."""
     if entry["label_layer"] is None:
         return
     label_texts = _texts(layout, top_cell, entry["label_layer"])
+    layer, datatype = entry["label_layer"]
+    if label_layers is not None:
+        label_layers.append(
+            {
+                "name": entry["name"],
+                "label_layer": f"{layer}/{datatype}",
+                "label_text_count": label_texts.count(),
+            }
+        )
     if verb is not None and label_texts.is_empty():
-        layer, datatype = entry["label_layer"]
         _warn_label_layer_empty(verb, entry["name"], f"{layer}/{datatype}")
     l2n.register(label_texts, f"{entry['name']}_label")
     l2n.connect(conductor_region, label_texts)
@@ -3822,6 +3898,7 @@ def _extract_connectivity(
     ties: list[dict[str, Any]],
     device_cuts: dict[str, Any],
     verb: str | None,
+    label_layers: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
     """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
     over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
@@ -3831,7 +3908,11 @@ def _extract_connectivity(
     objects in the analysed top cell additionally gets a one-line stderr
     warning (:func:`_warn_label_layer_empty`, issue #2401) -- the
     mis-transcribed-layer case the report alone renders as
-    ``erc.unconnected_net`` on every net matched through it.
+    ``erc.unconnected_net`` without that warning. ``label_layers``, when
+    given, collects the measured text count of every declared label layer
+    in stackup order (``provenance.label_layers``, issue #2415; see
+    :func:`_register_label_layer`), so a JSON consumer sees the same
+    condition without reading stderr.
 
     Returns ``(l2n, circuit, layer_index, tie_layers)``.
 
@@ -3908,7 +3989,9 @@ def _extract_connectivity(
         regions[entry["name"]] = conductor_region
         layer_index[entry["name"]] = l2n.register(conductor_region, entry["name"])
         l2n.connect(conductor_region)
-        _register_label_layer(l2n, layout, top_cell, entry, conductor_region, verb)
+        _register_label_layer(
+            l2n, layout, top_cell, entry, conductor_region, verb, label_layers
+        )
 
     for via in vias:
         via_region = _cut_device_bodies(
@@ -3927,6 +4010,12 @@ def _extract_connectivity(
         # that assertion is degenerate (issue #2255). Everything below is
         # identical either way: the well is the well, however it was named.
         well_region, well_degenerate = _tie_well_region(kdb, layout, top_cell, tie)
+        # Issue #2427: disclosure-only staleness measure for `well_boxes`.
+        well_assertion_entry = (
+            _well_assertion_coverage_entry(kdb, layout, top_cell, tie, well_region)
+            if tie["well_boxes"]
+            else None
+        )
         # Issue #2377: a *drawn* `well_layer` (never `well_boxes` -- an
         # asserted region cannot be empty, see `_tie_well_region`) that
         # draws no geometry at all in this stream. Measured here, before
@@ -3998,6 +4087,9 @@ def _extract_connectivity(
                 # extent -- always `False` for a drawn `well_layer`. Read by
                 # `_degenerate_tie_reasons`.
                 "well_degenerate": well_degenerate,
+                # Issue #2427: see `_well_assertion_coverage_entry`; `None`
+                # unless this tie asserted `well_boxes`.
+                "well_assertion_entry": well_assertion_entry,
                 # Issue #2377: whether this tie names a *drawn* `well_layer`
                 # that draws no geometry at all in this stream -- always
                 # `False` for an asserted (`well_boxes`) tie, since an
@@ -4293,8 +4385,18 @@ def run_erc(
             for entry in devices_applied
         ] + deck_devices_applied
 
+    # `provenance.label_layers` (issue #2415): measured by the primary
+    # extraction only -- the tie re-extraction below passes no collector.
+    label_layers: list[dict[str, Any]] = []
     l2n, circuit, layer_index, _ = _extract_connectivity(
-        layout, top_cell, stackup, vias, [], device_cuts, verb="klt erc"
+        layout,
+        top_cell,
+        stackup,
+        vias,
+        [],
+        device_cuts,
+        verb="klt erc",
+        label_layers=label_layers,
     )
 
     gate_role = stackup[0]["name"]
@@ -4430,6 +4532,7 @@ def run_erc(
     degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
+    well_assertion_coverage: list[dict[str, Any]] = []
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
             layout, top_cell, stackup, vias, ties, device_cuts, verb=None
@@ -4461,6 +4564,15 @@ def run_erc(
             for tie in tie_layers
             if tie["well_asserted"] and tie["name"] not in degenerate_ties
         }
+        well_assertion_coverage = sorted(
+            (
+                tie["well_assertion_entry"]
+                for tie in tie_layers
+                if tie["well_assertion_entry"] is not None
+                and tie["name"] not in degenerate_ties
+            ),
+            key=lambda entry: entry["id"],
+        )
     erc_findings.sort(
         key=lambda f: (
             f["rule"],
@@ -4556,6 +4668,7 @@ def run_erc(
             _spec_declared_layers(stackup, vias, ties, devices),
             deck_obj,
         ),
+        well_assertion_coverage,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
@@ -4645,6 +4758,15 @@ def run_erc(
     # that bit, exactly as `provenance.devices[].body_area_um2 == 0.0` is.
     # Always present; `[]` when no declared net asked for one.
     provenance["net_exclusions"] = net_exclusions
+
+    # `provenance.label_layers` (issue #2415): the measured effect of every
+    # `stackup[].label_layer` declaration, in stackup order -- the same
+    # auditability contract as `provenance.devices[].body_area_um2`. A
+    # declared label layer carrying zero text otherwise reaches the JSON
+    # only as `erc.unconnected_net` / `gates[].net: null`, which reads like
+    # a real supply defect; its #2401 warning is stderr-only. Always
+    # present; `[]` when no stackup role declares a `label_layer`.
+    provenance["label_layers"] = label_layers
 
     return {
         "schema_version": SCHEMA_VERSION,
