@@ -747,6 +747,18 @@ def run_lvs(request: str) -> dict[str, Any]:
     ``provenance.deck.options`` when non-empty, matching ``klt extract``'s
     own shape.
 
+    ``layout.label_layers`` (issue #2686) is the request-document counterpart
+    of ``klt extract --label-layer`` (that verb's own ``label_layers`` request
+    field, issue #2656): ``{"<role>": [layer, datatype] | null}`` redirecting
+    which GDS purpose inline extraction reads net/pin name text from, for a
+    layout whose names sit on a text purpose the curated deck does not read.
+    Extraction-only: a non-empty override needs ``layout.file`` +
+    ``layout.deck`` and is a clean :class:`LvsError` on the pre-extracted
+    ``layout.netlist`` shape (see :func:`_parse_layout_label_layers`).
+    Omitting it (or giving ``null``/``{}``) extracts exactly as before. An
+    applied override is echoed as the response's top-level ``label_layers``
+    field (absent otherwise) and replayed by ``--check --rerun``.
+
     Same inline-extraction condition also gates ``device.body_unverified``
     (issue #281, see :func:`_body_net_warnings`): non-blocking
     ``severity: "warning"`` ``mismatches[]`` entries noting that some MOS
@@ -959,6 +971,12 @@ def run_lvs(request: str) -> dict[str, Any]:
             # `layout.file` specifically.
             raise LvsError("request.layout.deck_options requires request.layout.deck")
 
+    # Issue #2686: `layout.label_layers` mirrors `klt extract --label-layer`
+    # (request field `label_layers`, issue #2656) for inline extraction only
+    # -- see `_parse_layout_label_layers` for the shape and the
+    # extraction-only rule. `None` when omitted/`null`.
+    label_layers = _parse_layout_label_layers(layout_spec)
+
     # Issue #2761: a FinFET extraction deck's devices are only correct with
     # their geometry-counted `nfin` compared, which the reference reader does
     # not yet preserve -- refuse rather than silently compare planar W/L.
@@ -1065,6 +1083,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         keep_extracted,
         combine_devices_enabled,
         deck_options,
+        label_layers,
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.
@@ -2349,6 +2368,11 @@ def run_lvs(request: str) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "layout": layout_echo,
+        # Issue #2686: the applied `layout.label_layers` override (which GDS
+        # purpose inline extraction read net/pin names from, per role) --
+        # see `_label_layers_echo`. Absent when no override was applied, so
+        # those reports stay byte-identical to before.
+        **_label_layers_echo(label_layers),
         "reference": reference_echo,
         "top": layout_circuit.name,
         # Issue #1205: the *reference* side's resolved top circuit name,
@@ -2690,7 +2714,8 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     previously committed report, for :func:`rerun_lvs_report`.
 
     Reconstructs the fields the response actually echoes: ``engine``,
-    ``layout`` (``file``+``deck``[+``deck_options``] when
+    ``layout`` (``file``+``deck``[+``deck_options``][+``label_layers``,
+    issue #2686, from the report's own ``label_layers`` echo] when
     ``provenance.deck`` is populated, else ``netlist`` -- the pre-extracted
     ``layout.netlist`` shape is unambiguous *without* a deck, since only
     ``layout.file`` and the ``layout.netlist``+``layout.deck`` combo, issue
@@ -2761,6 +2786,9 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         deck_options = explicit_deck_options(deck)
         if deck_options:
             layout_spec["deck_options"] = deck_options
+        # Issue #2686: replay the applied label-purpose override, `null`
+        # roles included; a report without the echo replays without one.
+        layout_spec.update(_label_layers_replay(committed))
     else:
         layout_spec["netlist"] = committed.get("layout")
 
@@ -3106,12 +3134,123 @@ def _require_path(spec: dict[str, Any], field: str, side: str, request_dir: str)
     return resolved
 
 
+def _parse_layout_label_layers(
+    layout_spec: dict[str, Any],
+) -> dict[str, tuple[int, int] | None] | None:
+    """``request.layout.label_layers`` (issue #2686) as the ``{role: (layer,
+    datatype) | None}`` mapping
+    :func:`~klayout_tools.extract.extract_netlist_from_layout`'s own
+    ``label_layers`` parameter takes, or ``None`` when the field is absent
+    or ``null``.
+
+    The JSON shape is exactly ``klt extract``'s request-document
+    ``label_layers`` field (issue #2656): an object mapping a label role
+    (``well``/``poly``/``metal<i>``) to a ``[layer, datatype]`` pair of
+    non-negative integers, or ``null`` to read no label layer for that role.
+    Validated without coercion (a bool, a float, a string ``"8/25"`` or a
+    wrong-length array is rejected, never converted), matching
+    :func:`klayout_tools.cli._request_document.get_label_layer_map_as_pairs`.
+    An empty object is accepted and is a no-op, the same as ``klt extract``
+    given an empty ``label_layers`` object.
+
+    Role *names* are not checked here: the role set depends on the deck, and
+    :meth:`~klayout_tools.decks.ExtractionDeck.with_label_layers` rejects an
+    unknown one during inline extraction (surfaced as :class:`LvsError`,
+    naming the roles that deck does have).
+
+    A non-empty override is **extraction-only**: it changes where inline
+    extraction reads net/pin name text from, so it requires ``layout.file``
+    plus ``layout.deck``. The pre-extracted ``layout.netlist`` shape is
+    rejected outright -- its net names were fixed when that netlist was
+    written, and silently accepting an override that cannot rename anything
+    would read as "the override had no effect". (``layout.deck_options`` is
+    different on purpose: it *is* honored for that shape, issue #585.)
+    """
+    raw = layout_spec.get("label_layers")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise LvsError(
+            "request.layout.label_layers must be a JSON object mapping a label "
+            'role to a [layer, datatype] pair (or null), e.g. {"metal0": [8, 25]}'
+        )
+    overrides: dict[str, tuple[int, int] | None] = {}
+    for role, value in raw.items():
+        if value is None:
+            overrides[role] = None
+            continue
+        if not (
+            isinstance(value, list)
+            and len(value) == 2
+            and all(
+                isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in value
+            )
+        ):
+            raise LvsError(
+                f"request.layout.label_layers.{role} must be a [layer, datatype] "
+                f"pair of non-negative integers, or null (got {value!r})"
+            )
+        overrides[role] = (value[0], value[1])
+    if overrides and "netlist" in layout_spec:
+        raise LvsError(
+            "request.layout.label_layers applies only to inline extraction "
+            "(request.layout.file + request.layout.deck): a pre-extracted "
+            "request.layout.netlist already carries its net names and cannot "
+            "be re-read from a different label purpose -- re-extract it with "
+            "`klt extract --label-layer ...`, or give request.layout.file instead"
+        )
+    if overrides and not layout_spec.get("deck"):
+        raise LvsError("request.layout.label_layers requires request.layout.deck")
+    return overrides
+
+
+def _label_layers_echo(
+    label_layers: Mapping[str, tuple[int, int] | None] | None,
+) -> dict[str, Any]:
+    """``{"label_layers": {role: [layer, datatype] | null}}`` when this run
+    applied a non-empty ``layout.label_layers`` override (issue #2686), else
+    ``{}``.
+
+    Omitted entirely (not ``null``) when no override was applied, so every
+    report from a request without the field -- and every report committed
+    before it existed -- stays byte-identical, and ``--check --rerun`` of
+    such a report cannot see the field as drift. The value shape is ``klt
+    extract``'s own ``label_layers`` echo (sorted by role, a cleared role kept
+    as ``null``); :func:`_label_layers_replay` reads it back.
+    """
+    if not label_layers:
+        return {}
+    return {
+        "label_layers": {
+            role: (None if layer is None else [layer[0], layer[1]])
+            for role, layer in sorted(label_layers.items())
+        }
+    }
+
+
+def _label_layers_replay(committed: dict[str, Any]) -> dict[str, Any]:
+    """The ``request.layout`` key that rebuilds a committed report's
+    ``label_layers`` echo (issue #2686), or ``{}`` for a report without one
+    (every run that applied no override, and every report committed before
+    the field existed -- those replay exactly as they used to).
+
+    Passed through verbatim, ``null`` roles included: a malformed recorded
+    value stays malformed, so :func:`_parse_layout_label_layers` rejects it
+    on replay rather than it silently becoming a different, valid override.
+    """
+    echoed = committed.get("label_layers")
+    if not isinstance(echoed, dict) or not echoed:
+        return {}
+    return {"label_layers": dict(echoed)}
+
+
 def _resolve_layout(
     layout_spec: dict[str, Any],
     request_dir: str,
     keep_extracted: bool,
     combine_devices: bool = False,
     deck_options: Mapping[str, str] | None = None,
+    label_layers: Mapping[str, tuple[int, int] | None] | None = None,
 ) -> tuple[kdb.Netlist, str, str, str | None, dict[int, list[dict[str, Any]]]]:
     """Resolve ``request.layout`` to ``(netlist, echo, hash_source_path,
     extracted_netlist_path_or_none, net_label_positions)``. Original drawn
@@ -3136,6 +3275,16 @@ def _resolve_layout(
     ``deck_options`` into here -- ``run_lvs`` applies it directly to its own
     ``get_extraction_deck`` call instead (for ``device_classes`` and the
     deferred resistor ``fixed_offset_ohm`` correction).
+
+    ``label_layers`` (issue #2686, ``request.layout.label_layers``): forwarded
+    to :func:`~klayout_tools.extract.extract_netlist_from_layout` for the
+    ``layout.file`` shape -- replaces, per label role, the GDS purpose inline
+    extraction reads net/pin name text from, exactly like ``klt extract
+    --label-layer``. Already validated by :func:`_parse_layout_label_layers`
+    (which also rejects a non-empty override on the ``layout.netlist``
+    shape, so it never reaches that branch); an unknown role raises
+    :class:`~klayout_tools.extract.ExtractError`, re-raised as
+    :class:`LvsError` below.
 
     ``combine_devices`` (issue #559): when ``True`` (``options.combine_devices``
     in the caller's request), inline extraction defers each opted-in
@@ -3314,6 +3463,10 @@ def _resolve_layout(
                 # --deck-option`. `None` when the field was never given,
                 # unchanged from every request that predates it.
                 deck_options=deck_options,
+                # Issue #2686: `request.layout.label_layers` -- mirrors `klt
+                # extract --label-layer`. `None` when the field was never
+                # given, unchanged from every request that predates it.
+                label_layers=label_layers,
             )
         except ExtractError as exc:
             raise LvsError(str(exc)) from exc
