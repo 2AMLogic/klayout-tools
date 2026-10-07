@@ -32,6 +32,7 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   "Engine" below.
 - `--deck-file` — explicit path to a KLayout DRC-DSL script (`.lydrc`/`.drc`)
   to run with `--engine klayout`, overriding `--pdk`/`--pdk-root` resolution.
+  klt ships one such script of its own, for ASAP7 — see "ASAP7 deck" below.
 - `--pdk` / `--pdk-root` — PDK variant/install-root (same resolution
   semantics as `klt lef-abstract`'s `--pdk`/`--pdk-root`, see
   [`klt pdk`](pdk.md)). For `--engine klayout`, also resolves the native deck
@@ -1601,6 +1602,187 @@ entry carries an `annotation: true` field when its `(layer, datatype)` falls
 in the 990-999 range — see [`docs/cli/layers.md`](layers.md) → "Semantics
 and guarantees" and [`docs/cli/stats.md`](stats.md) → "Semantics and
 guarantees".
+
+## ASAP7 deck (`--engine klayout`, issue #2760)
+
+klt ships its own KLayout DRC-DSL deck for the open ASAP7 7 nm predictive
+FinFET PDK, because the pinned lambdapdk (v0.2.17) ships the ASAP7 Design
+Rule Manual but no KLayout deck. The deck is
+[`src/klayout_tools/decks/asap7.drc`](../../src/klayout_tools/decks/asap7.drc);
+it is installed with the package, next to its declared rule-id list
+[`asap7_rules.py`](../../src/klayout_tools/decks/asap7_rules.py)
+(`klayout_tools.decks.asap7_rules.DECK_PATH`).
+
+```bash
+klt drc layout.gds --engine klayout \
+    --deck-file src/klayout_tools/decks/asap7.drc \
+    --expect-rule-categories 106 --format json
+```
+
+`--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
+tree (#2759) but not a deck inside it, so pass `--deck-file`. The output is
+the standard `--engine klayout` envelope described in "Engine" above.
+
+**Phase 1 (this deck today): FEOL and MOL.** It checks DRM Tables 3.1.1
+(geometry) to 3.10.3 (LIG) and V0 width/connectivity from Tables 3.11.1-2.
+BEOL (M1-M9, V1-V9 and the remaining V0 rules) is #2810; density checks and
+the full shipped-cell clean-run gate are #2811; the FEOL/MOL rules listed
+under "Not implemented" below are #2812.
+
+**Source.** Every rule is transcribed from the ASAP7 PDK Design Rule Manual,
+PDK Release 1p7 (`asap7_drm_201207a.pdf`, under
+`lambdapdk/asap7/base/docs/` after `scripts/fetch-pdks.sh`; BSD-3-Clause,
+Arizona State University). Each rule's line in the deck names its DRM table;
+the DRM is cited, not copied, and no PDK content or GDS is committed.
+
+**Drawing scale: 1x.** Thresholds are the DRM's nanometre values applied to
+layouts drawn at 1x, in micrometres. This matches the pinned standard cells
+(`asap7sc7p5t_28_R.gds.gz`: FIN 7 nm tall, GATE 20 nm wide on a 54 nm
+pitch, 270 nm cells). Some ASAP7 distributions draw at 4x; this deck does not
+support that. A 4x layout fails the exact-width rules (`FIN.W.1`,
+`GATE.W.1`) wholesale rather than passing, which
+`tests/test_drc_asap7_deck.py::test_drawn_scale_convention_is_1x` checks.
+The 0.00025 um dbu from `asap7.lyt` represents every DRM value.
+
+**Layers.** GDS numbers are those the pinned `asap7.lyp` names (`fin
+drawing - 2/0`, ...), which equal the DRM mask IDs (Tables 2.1.1-2.4.1). A
+test cross-checks the deck against the fetched `.lyp`.
+
+### Rule ids (the contract)
+
+Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
+DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
+well" (section 3.7), the mirrored rule substitutes the layer name. These
+106 ids are declared once, in `asap7_rules.RULES`; renaming or dropping one
+is a breaking change, and a test fails if the deck, that list, the fixtures
+or this table drift apart. Pass `--expect-rule-categories 106` so that a deck
+which silently drops a category fails the run (exit 1) instead of reporting
+`clean`.
+
+| DRM table | Rule ids |
+| --- | --- |
+| Table 3.1.1 | `GEOMETRY.NONORTHOGONAL` |
+| Table 3.2.1 | `WELL.W.1`, `WELL.W.2`, `WELL.S.1`, `WELL.S.2`, `WELL.A.1A`, `WELL.A.1B`, `WELL.GATE.EX.1`, `WELL.GATE.EX.2` |
+| Table 3.3.1 | `FIN.W.1`, `FIN.W.2`, `FIN.S.1`, `FIN.AUX.1` |
+| Table 3.4.1 | `GATE.W.1`, `GATE.W.2`, `GATE.S.1`, `GATE.S.2`, `GATE.S.3`, `GATE.AUX.1`, `GATE.ACTIVE.AUX.3`, `GATE.ACTIVE.EX.1`, `GATE.ACTIVE.EX.2`, `GATE.ACTIVE.S.4` |
+| Table 3.5.1 | `ACTIVE.FIN.EX.1`, `ACTIVE.W.1`, `ACTIVE.W.3`, `ACTIVE.S.1`, `ACTIVE.S.2B`, `ACTIVE.WELL.S.4`, `ACTIVE.WELL.EN.1` |
+| Table 3.5.2 | `ACTIVE.A.1A`, `ACTIVE.A.1B`, `ACTIVE.AUX.1` |
+| Table 3.6.1 | `GCUT.W.1`, `GCUT.ACTIVE.S.1`, `GCUT.GATE.EX.1`, `GCUT.GATE.S.2`, `GCUT.S.3`, `GCUT.AUX.1`, `GCUT.AUX.2`, `GCUT.AUX.3` |
+| Table 3.7.1 | `NSELECT.W.1`, `NSELECT.W.2`, `NSELECT.ACTIVE.EN.1`, `NSELECT.ACTIVE.EN.2`, `NSELECT.GATE.EX.1`, `NSELECT.GATE.EX.2`, `PSELECT.W.1`, `PSELECT.W.2`, `PSELECT.ACTIVE.EN.1`, `PSELECT.ACTIVE.EN.2`, `PSELECT.GATE.EX.1`, `PSELECT.GATE.EX.2`, `SLVT.W.1`, `SLVT.W.2`, `SLVT.ACTIVE.EN.1`, `SLVT.ACTIVE.EN.2`, `SLVT.GATE.EX.1`, `SLVT.GATE.EX.2`, `LVT.W.1`, `LVT.W.2`, `LVT.ACTIVE.EN.1`, `LVT.ACTIVE.EN.2`, `LVT.GATE.EX.1`, `LVT.GATE.EX.2`, `SRAMVT.W.1`, `SRAMVT.W.2`, `SRAMVT.ACTIVE.EN.1`, `SRAMVT.ACTIVE.EN.2`, `SRAMVT.GATE.EX.1`, `SRAMVT.GATE.EX.2`, `NSELECT.PSELECT.AUX.1`, `VT.AUX.2` |
+| Table 3.8.1 | `SDT.W.1`, `SDT.W.2`, `SDT.S.1`, `SDT.GATE.S.2`, `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2`, `SDT.GATE.AUX.1`, `SDT.ACTIVE.AUX.2`, `SDT.ACTIVE.AUX.3`, `SDT.LISD.AUX.4` |
+| Table 3.9.1 | `LISD.W.1`, `LISD.S.1`, `LISD.S.2`, `LISD.S.3`, `LISD.A.1` |
+| Table 3.10.1 | `LIG.W.1`, `LIG.S.1`, `LIG.S.2`, `LIG.S.3`, `LIG.S.4`, `LIG.S.5` |
+| Table 3.10.2 | `LIG.GATE.S.9A`, `LIG.GATE.S.9B`, `LIG.GATE.S.10`, `LIG.GCUT.S.11`, `LIG.A.1`, `LIG.LISD.A.2`, `LIG.GATE.A.3`, `LIG.GATE.AUX.1` |
+| Table 3.10.3 | `LIG.LISD.OV.1`, `LIG.GATE.EX.1` |
+| Table 3.11.1 | `V0.W.1` |
+| Table 3.11.2 | `V0.AUX.1` |
+
+### Approximations
+
+| Rule id | DRM table | How it differs from the DRM text |
+| --- | --- | --- |
+| `GEOMETRY.NONORTHOGONAL` | Table 3.1.1 | applied to the FEOL/MOL layers only until the BEOL phase (#2810) |
+| `FIN.S.1` | Table 3.3.1 | exact pitch checked edge-to-edge for minimum-width shapes: neighbours closer than two pitches must sit exactly one pitch apart; alignment of shapes two or more pitches apart is not checked |
+| `GATE.S.1` | Table 3.4.1 | exact pitch checked edge-to-edge for minimum-width shapes: neighbours closer than two pitches must sit exactly one pitch apart; alignment of shapes two or more pitches apart is not checked |
+| `GATE.S.3` | Table 3.4.1 | centre-to-centre distance checked as edge-to-edge spacing <= 34 nm, exact for 20 nm GATE (GATE.W.1) |
+| `SDT.ACTIVE.AUX.2` | Table 3.8.1 | 'coincide' read as 'lies on and overlaps an ACTIVE horizontal edge', per Fig. 3.8.1(d), which accepts SDT overhanging ACTIVE horizontally |
+| `LIG.LISD.OV.1` | Table 3.10.3 | any LIG/LISD overlap is treated as 'connected together' |
+| `V0.W.1` | Table 3.11.1 | stated along the M1 length; checked in both directions (V0 is as wide as M1 across the track per V0.M1.AUX.3) |
+
+Related notes:
+
+- **Exact widths.** `FIN.W.1` (== 7 nm) and `GATE.W.1` (== 20 nm) are
+  checked on each shape's bounding box, so any other height or width fails.
+  Bent shapes are reported by `FIN.AUX.1` / `GATE.AUX.1`.
+- **Fin and gate grids vs. the manufacturing grid.** The `--engine klayout`
+  path does no manufacturing-grid (`OFFGRID`) check of its own; that group
+  belongs to the curated engine (`tests/test_drc_offgrid.py`). Fin and gate
+  placement is checked only through the pitch rules above, relative to
+  neighbouring shapes, not against an absolute grid origin.
+- **Multi-patterning.** FIN (SAQP) and GATE (SADP) are multi-patterned
+  (Table 2.1.1), but their tables state no same-mask/different-mask spacing,
+  so phase 1 needs no colouring. The SADP/LELE BEOL layers are #2810.
+
+### Not implemented
+
+DRM rules in the phase-1 tables that the deck does not check yet:
+
+| Rule id | DRM table | Reason | Tracked by |
+| --- | --- | --- | --- |
+| `GATE.AUX.2` | Table 3.4.1 | the DRM gives no distance bound to check against | #2812 |
+| `ACTIVE.W.2` | Table 3.5.1 | integer-multiple width has no modulo predicate in the DRC DSL | #2812 |
+| `ACTIVE.S.2A` | Table 3.5.1 | needs net connectivity (different-net spacing) | #2812 |
+| `SRAM.ACTIVE.WELL.S.5` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.ACTIVE.WELL.EN.2` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.ACTIVE.A.2A` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.ACTIVE.A.2B` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.ACTIVE.AUX.2` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `ACTIVE.AUX.3` | Table 3.5.2 | the DRM gives no distance bound to check against | #2812 |
+| `ACTIVE.LUP.1` | Table 3.5.2 | latch-up distance (30 um) needs tap/device classification | #2812 |
+| `SRAM.NSELECT.ACTIVE.EN.3` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.NSELECT.ACTIVE.EN.4` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SDT.W.3` | Table 3.8.1 | integer-multiple width has no modulo predicate in the DRC DSL | #2812 |
+| `SRAM.SDT.W.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.SDT.ACTIVE.OV.3` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.SDT.LISD.OV.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.LISD.S.4` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.LISD.AUX.1` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `LIG.LISD.S.6` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
+| `LIG.LISD.S.7` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
+| `LIG.SDT.S.8` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
+| `SRAM.LIG.GATE.A.4` | Table 3.10.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.LIG.AUX.2` | Table 3.10.3 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.LIG.GATE.OV.2` | Table 3.10.3 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `V0.S.1` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.S.2` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.S.3` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.S.4` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.M1.EN.1` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.LISD.EN.2` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.LISD.EN.3` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.LIG.EN.4` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.LIG.A.1` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.LIG.AUX.2` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `V0.M1.AUX.3` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+
+### Shipped standard cells
+
+`tests/test_drc_asap7_deck.py` runs the deck on all 212 cells of each pinned
+library (`asap7sc7p5t_28_R`, `_L` and `_SL`), each cell abutted between two
+`INVx1` cells as in a placed row. Row-only cells such as `FILLERxp5` and
+`TAPCELL_WITH_FILLER` carry 54 nm WELL/select slivers that are legal only
+abutted, so checking cells in isolation would report width violations that a
+placed row does not have. The test skips with a reason when `pdks/lambdapdk`
+is not fetched or the `klayout` binary is missing.
+
+Every cell is clean except these ten (same in all three libraries), which
+violate `SDT.ACTIVE.AUX.2` as the DRM states it. Each draws SDT 81 nm tall
+over a 54 nm ACTIVE, so the SDT's top edge is not on an ACTIVE edge, which
+Fig. 3.8.1(d) marks illegal. The rule is not loosened; the deviation is
+recorded in `asap7_rules.SHIPPED_CELL_DEVIATIONS` and the test fails if the
+set changes:
+
+`AO33x2`, `BUFx2`, `BUFx4`, `BUFx4f`, `CKINVDCx9p33`, `ICGx2p67DC`,
+`ICGx4DC`, `ICGx5p33DC`, `ICGx6p67DC`, `OAI22xp33` (each `_ASAP7_75t_<VT>`).
+
+### Per-rule fixtures
+
+`tests/helpers/asap7_drc_fixtures.py` generates, for every rule id, at
+least one failing layout that trips that id and one passing layout drawn at
+the threshold boundary (one 0.25 nm dbu away from the failing one). All
+cases share one GDS, one 5 um slot each, written to a temp directory, so one
+`klayout` run checks them all. CI runs them in the `asap7-drc-deck` job of
+`.github/workflows/ci.yml`, which installs the `klayout` binary the `test`
+job does not have. A case expects exactly `{rule}` (fail) or
+nothing (pass), except where the DRM makes two rules inseparable; those
+cases list the extra ids and say why, for example:
+
+- a WELL area under 5832 nm^2 is also under the 108 x 54 nm minimum widths
+  (DRM 3.2, note 1);
+- a GCUT within 4 nm of the channel shortens the cut gate's extension past
+  ACTIVE (`GATE.ACTIVE.EX.1`);
+- SDT edges lie on ACTIVE edges and SDT lies inside LISD, so a short SDT also
+  breaks `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2` and `ACTIVE.W.1`.
 
 ## Limitation: whole-layout, flattened
 
