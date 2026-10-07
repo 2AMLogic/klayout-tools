@@ -49,6 +49,51 @@ release** (read from `.fetched-version`), not an upstream ASAP7 revision, and
 open_pdks `SOURCES` stamps are a separate namespace. See
 [`docs/cli/pdk.md`](../docs/cli/pdk.md#package-compatibility-compatibility-issue-2759).
 
+### ASAP7 KLayout technology (issue #2758)
+
+The open ASAP7 7 nm predictive FinFET PDK needs no second copy in this
+repo: the pinned lambdapdk archive already ships it, and klt treats those
+files as the single source of truth (no hand-maintained `.lyt`/`.lyp`/GDS
+map).
+
+- **Pinned version / checksum:** `LAMBDAPDK_VERSION` and `LAMBDAPDK_SHA256`
+  in [`scripts/fetch-pdks.sh`](../scripts/fetch-pdks.sh) (currently v0.2.17).
+  The script fails closed on checksum mismatch.
+- **Assets** (under `pdks/lambdapdk/lambdapdk/asap7/`):
+  `base/setup/klayout/asap7.lyt` (technology `ASAP7`, dbu 0.00025 um),
+  `base/setup/klayout/asap7.lyp` (named layers, e.g. `fin drawing - 2/0`),
+  `base/apr/asap7.layermap` (LEF/DEF layer map), and
+  `libs/asap7sc7p5t_rvt/gds/asap7sc7p5t_28_R.gds.gz` (RVT standard cells).
+- **License:** BSD-3-Clause (Clark, Vashishtha, Arizona State University),
+  at `asap7/base/LICENSE` and `asap7/libs/asap7sc7p5t_*/LICENSE` in the
+  fetched tree. lambdapdk itself is Apache-2.0.
+- **Headless open** (from the repo root, after `scripts/fetch-pdks.sh`):
+
+  ```bash
+  A=pdks/lambdapdk/lambdapdk/asap7
+  cat > /tmp/asap7_open.py <<'PY'
+  import pya
+  tech = pya.Technology(); tech.load(lyt)
+  lay = pya.Layout(); lay.read(gds, tech.load_layout_options)
+  print("OK", tech.name, lay.cells(), lay.dbu)
+  PY
+  klayout -zz -nc \
+    -rd lyt=$A/base/setup/klayout/asap7.lyt \
+    -rd gds=$A/libs/asap7sc7p5t_rvt/gds/asap7sc7p5t_28_R.gds.gz \
+    -r /tmp/asap7_open.py
+  ```
+
+  To view layer names/colours, load `asap7.lyp` (`LayoutView.load_layer_props`).
+- **Validation:** `pytest tests/test_pdk.py -k asap7` checks the asset paths,
+  the license text, representative FEOL/MOL/BEOL layer mappings (including
+  `fin`), the std-cell GDS open, and a generated example layout reopening
+  with the same layer mapping. Tests skip with an explicit reason when the
+  PDK is not fetched or KLayout is unavailable, and write only to temp paths.
+- **Scope:** these are explicit paths, separate from the `klt pdk` process-tree
+  discovery of `~/pdks/asap7` and the version checks shipped in #2759 (which
+  map only the `klayout` and `libs_ref` asset directories). ASAP7 DRC, LVS and
+  PCells are #2760, #2761 and #2762.
+
 **`sky130-liberty/` is the exception**: unlike `lambdapdk/`, it *is* laid
 out as an open_pdks variant (`sky130A/libs.tech/`, `sky130A/libs.ref/`) so
 `klt pdk`/`klt synthesize` discover it the normal way once
