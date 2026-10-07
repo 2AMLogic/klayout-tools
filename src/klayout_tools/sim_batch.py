@@ -365,6 +365,7 @@ def _build_batch_job_spec(
     corner_count: int,
     timeout_s: float,
     keep_artifacts: bool,
+    request_dir: str | None = None,
 ) -> BatchJobSpec:
     """Build the `klt sim` fan-out job as a :class:`BatchJobSpec` -- batch's
     analog of :func:`sim_remote._build_remote_job_description`, and the one
@@ -397,11 +398,19 @@ def _build_batch_job_spec(
     raises ``SimError`` from here -- before :func:`submit_job`'s first S3
     write, mirroring :func:`_resolve_provision_script`'s own
     "raise before any partial upload" discipline.
+
+    Under ``options.stage_model_inputs`` (issue #2668) the same
+    :func:`sim_staging.stage_sim_job` result also carries the request's
+    staged model closure (resolved against ``request_dir``) and the
+    rewritten worker request uploaded as ``request.json``. ``pdk_variant``
+    still comes from ``models.pdk`` -- image selection is unchanged and
+    independent of where the model files come from.
     """
     models = remote_request.get("models") or {}
-    staged = sim_staging.stage_sim_netlist(
+    staged = sim_staging.stage_sim_job(
         remote_request,
         netlist_path,
+        request_dir=request_dir,
         netlist_staged_name=BATCH_NETLIST_FILENAME,
         reserved_names=(BATCH_REQUEST_FILENAME,),
         backend="batch",
@@ -446,7 +455,7 @@ def _build_batch_job_spec(
             BatchJobInput(
                 name=BATCH_REQUEST_FILENAME,
                 label="request",
-                content=json.dumps(remote_request),
+                content=json.dumps(staged.request),
             ),
         ),
     )
@@ -1191,6 +1200,7 @@ def _run_batch_job(
     explicit_points: list[CornerPoint] | None = None,
     runner: remote_transport.CommandRunner | None = None,
     sleep: Any = time.sleep,
+    request_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -1228,6 +1238,7 @@ def _run_batch_job(
         corner_count=len(corner_points),
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
+        request_dir=request_dir,
     )
     submit_job(config, job_id, spec, runner=runner)
     launch_job(config, job_id, runner=runner)
@@ -1290,6 +1301,7 @@ def _run_batch(
     initial_ppid: int | None = None,
     checkpoint: _Checkpoint | None = None,
     probe_abort: dict[str, Any] | None = None,
+    request_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
     batch fleet as one job and collect its report back out of S3.
@@ -1339,6 +1351,7 @@ def _run_batch(
             artifacts_dir=artifacts_dir,
             request=request,
             measurements_spec=measurements_spec,
+            request_dir=request_dir,
         )
     except BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
@@ -1355,6 +1368,7 @@ def _run_batch_fleet(
     request: dict[str, Any],
     hosts: int,
     measurements_spec: list[dict[str, Any]],
+    request_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend's ``hosts > 1`` dispatch: one **job** per shard.
 
@@ -1386,6 +1400,18 @@ def _run_batch_fleet(
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
+    # Stage (and discard) the whole job closure once, before any shard's
+    # first S3 write: an unstageable include or model input (issue #2668)
+    # must refuse the submit, not surface as K lost shards after some of
+    # them already uploaded.
+    sim_staging.stage_sim_job(
+        request,
+        netlist_path,
+        request_dir=request_dir,
+        netlist_staged_name=BATCH_NETLIST_FILENAME,
+        reserved_names=(BATCH_REQUEST_FILENAME,),
+        backend="batch",
+    )
 
     def _shard_runner(
         shard_points: list[CornerPoint],
@@ -1409,6 +1435,7 @@ def _run_batch_fleet(
             request=request,
             measurements_spec=measurements_spec,
             explicit_points=shard_points,
+            request_dir=request_dir,
         )
 
     return _run_sharded(
