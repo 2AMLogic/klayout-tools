@@ -14984,6 +14984,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
     assert report["options"] == {
         "combine_devices": True,
         "combine_devices_per_circuit": None,
+        "combine_devices_max_attempts": lvs._COMBINE_DEVICES_MAX_ATTEMPTS,
         "flatten_layout": False,
         "flatten_reference": False,
         "netgen_setup": None,
@@ -15109,6 +15110,180 @@ def test_rerun_lvs_report_legacy_report_without_request_echo_fields(tmp_path):
     # diffed against a committed report that predates them.
     assert result["fresh"]["reference_top"] == "INV"
     assert result["fresh"]["options"]["parameter_tolerance"] == 0.01
+
+
+@pytest.mark.parametrize("budget", [None, 1, 25])
+@pytest.mark.parametrize("combine", [True, False])
+def test_run_lvs_echoes_resolved_combine_devices_max_attempts(
+    tmp_path, monkeypatch, budget, combine
+):
+    """Issue #2682: the resolved retry budget (default when omitted) is
+    echoed, matches what the combine helper received, and is present even
+    when combining is disabled."""
+    seen = []
+    real = lvs._combine_devices_safely
+
+    def _spy(*args, **kwargs):
+        seen.append(args[2] if len(args) > 2 else kwargs.get("max_attempts"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lvs, "_combine_devices_safely", _spy)
+    request = _folded_request(tmp_path)
+    request["options"] = {"combine_devices": combine}
+    if budget is not None:
+        request["options"]["combine_devices_max_attempts"] = budget
+    report = run_lvs(json.dumps(request))
+    expected = lvs._COMBINE_DEVICES_MAX_ATTEMPTS if budget is None else budget
+    assert report["options"]["combine_devices_max_attempts"] == expected
+    assert all(value == expected for value in seen)
+    assert bool(seen) == combine
+
+
+def test_run_lvs_echoes_max_attempts_with_per_circuit_combine(tmp_path):
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+        "options": {
+            "combine_devices_per_circuit": {"*": True},
+            "combine_devices_max_attempts": 7,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["options"]["combine_devices_max_attempts"] == 7
+
+
+@pytest.mark.parametrize("budget", [1, 25])
+def test_reconstruct_lvs_request_preserves_max_attempts(budget):
+    committed = {
+        "layout": "l.spice",
+        "reference": "r.spice",
+        "top": "inv",
+        "options": {
+            "combine_devices": ["nmos"],
+            "combine_devices_per_circuit": {"*": True},
+            "combine_devices_max_attempts": budget,
+        },
+    }
+    options = lvs._reconstruct_lvs_request(committed)["options"]
+    assert options["combine_devices_max_attempts"] == budget
+    assert type(options["combine_devices_max_attempts"]) is int
+    assert options["combine_devices"] == ["nmos"]
+    assert options["combine_devices_per_circuit"] == {"*": True}
+
+
+def test_reconstruct_lvs_request_legacy_options_have_no_max_attempts():
+    committed = {
+        "layout": "l.spice",
+        "reference": "r.spice",
+        "top": "inv",
+        "options": {"combine_devices": True},
+    }
+    options = lvs._reconstruct_lvs_request(committed)["options"]
+    assert "combine_devices_max_attempts" not in options
+
+
+def test_reconstruct_lvs_request_keeps_malformed_max_attempts_malformed():
+    committed = {
+        "layout": "l.spice",
+        "reference": "r.spice",
+        "top": "inv",
+        "options": {"combine_devices_max_attempts": True},
+    }
+    options = lvs._reconstruct_lvs_request(committed)["options"]
+    with pytest.raises(LvsError, match="combine_devices_max_attempts"):
+        lvs._parse_combine_devices_max_attempts(options)
+
+
+def test_rerun_lvs_report_replays_recorded_max_attempts(tmp_path, monkeypatch):
+    request = _folded_request(tmp_path)
+    request["options"]["combine_devices_max_attempts"] = 25
+    committed = run_lvs(json.dumps(request))
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    captured = []
+    real = lvs._run_reconstructed_lvs
+
+    def _spy(req):
+        captured.append(req)
+        return real(req)
+
+    monkeypatch.setattr(lvs, "_run_reconstructed_lvs", _spy)
+    result = rerun_lvs_report(str(report_path))
+
+    assert captured[0]["options"]["combine_devices_max_attempts"] == 25
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_lvs_report_without_max_attempts_key_is_not_drift(tmp_path):
+    request = _folded_request(tmp_path)
+    committed = run_lvs(json.dumps(request))
+    committed["options"].pop("combine_devices_max_attempts")
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert "combine_devices_max_attempts" in result["fresh"]["options"]
+
+    # Whole options block absent (pre-#1205 report): still no drift.
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    legacy = run_lvs(
+        json.dumps(
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            }
+        )
+    )
+    legacy.pop("options")
+    _write_report(report_path, legacy)
+    assert rerun_lvs_report(str(report_path))["drift"] == []
+
+
+def test_rerun_lvs_report_detects_max_attempts_difference_in_modern_report(
+    tmp_path, monkeypatch
+):
+    """A report that records the budget still diffs it: if the replay were to
+    run at a different budget, that is drift (the key is not excluded)."""
+    request = _folded_request(tmp_path)
+    request["options"]["combine_devices_max_attempts"] = 25
+    committed = run_lvs(json.dumps(request))
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+
+    real = lvs._reconstruct_lvs_request
+
+    def _drop_budget(report):
+        req = real(report)
+        req["options"].pop("combine_devices_max_attempts")
+        return req
+
+    monkeypatch.setattr(lvs, "_reconstruct_lvs_request", _drop_budget)
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    assert "options.combine_devices_max_attempts" in {
+        entry["field"] for entry in result["drift"]
+    }
+
+
+def test_rerun_lvs_report_legacy_report_still_detects_real_change(tmp_path):
+    request = _folded_request(tmp_path)
+    committed = run_lvs(json.dumps(request))
+    committed["options"].pop("combine_devices_max_attempts")
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, committed)
+    _write(tmp_path / "ref.spice", _INVERTER_SPICE.replace("W=0.65U", "W=0.70U"))
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    assert "status" in {entry["field"] for entry in result["drift"]}
 
 
 def test_check_lvs_report_cheap_mode_unaffected_by_asymmetric_top(tmp_path):
