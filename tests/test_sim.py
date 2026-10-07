@@ -11381,3 +11381,286 @@ def test_supply_override_explicit_points_are_validated(tmp_path, monkeypatch):
     }
     with pytest.raises(sim.SimError, match="PWL"):
         sim.run_sim(str(_write_request(tmp_path, request)))
+
+
+# --------------------------------------------------------------------------- #
+# Measurement output precision (issue #2681)
+#
+# ngspice formats `.meas` results with `measureprec` and scalar `print`
+# output with `numdgt`; both are *formatting* controls, reachable through
+# `options.ngspice_init`. These cases pin what `klt sim` reports under each.
+# The divider's analytic value is 2000.1 / 3000.1 = 0.6666777774074197
+# --------------------------------------------------------------------------- #
+
+_DIVIDER_ANALYTIC = 2000.1 / 3000.1
+
+
+def _write_precision_divider(tmp_path: Path) -> None:
+    """1 V across 1k / 2.0001k: v(out) = 2000.1 / 3000.1, no PDK, no models."""
+    (tmp_path / "divider.spice").write_text(
+        "Vin in 0 DC 1\nR1 in out 1k\nR2 out 0 2.0001k\nC1 out 0 1f\n"
+    )
+
+
+def _run_precision_request(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    analysis: dict,
+    measurements: list[dict],
+    ngspice_init: list[str] | None = None,
+) -> tuple[dict, str]:
+    """Run a single-corner request against real ngspice with ambient
+    precision configuration neutralised; return `(corner, raw_log_text)`."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("NGSPICE_MEAS_PRECISION", raising=False)
+    _write_precision_divider(tmp_path)
+    options: dict = {"keep_artifacts": True}
+    if ngspice_init is not None:
+        options["ngspice_init"] = ngspice_init
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "divider.spice",
+            "analysis": analysis,
+            "measurements": measurements,
+            "options": options,
+        },
+    )
+    report = sim.run_sim(
+        str(request), artifacts_dir=str(tmp_path / "art"), backend="local"
+    )
+    assert report["status"] == "pass"
+    (corner,) = report["corners"]
+    assert corner["diagnostics"] == []
+    return corner, Path(corner["artifacts"]["log"]).read_text()
+
+
+def _raw_value_token(log_text: str, name: str) -> str:
+    """The unparsed numeric token ngspice printed for `name`."""
+    match = re.search(
+        rf"^{name}\s*=\s*([+-]?[\d.]+(?:e[+-]?\d+)?)", log_text, re.M | re.I
+    )
+    assert match, f"no `{name} = <value>` line in log:\n{log_text}"
+    return match.group(1)
+
+
+def _mantissa_decimals(token: str) -> int:
+    mantissa = token.lower().split("e")[0]
+    return len(mantissa.split(".")[1]) if "." in mantissa else 0
+
+
+_TRAN_FIND = {"kind": "tran", "args": "1n 10n"}
+_VOUT_FIND = [
+    {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=5n", "unit": "V"}
+]
+_OP = {"kind": "op", "args": ""}
+_VOUT_EXPR = [{"name": "vout", "expr": "v(out)", "unit": "V"}]
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_default_meas_is_coarser_than_solver(
+    tmp_path, monkeypatch
+):
+    corner, log = _run_precision_request(
+        tmp_path, monkeypatch, analysis=_TRAN_FIND, measurements=_VOUT_FIND
+    )
+    (m,) = corner["measurements"]
+    assert m["name"] == "vout" and m["status"] == "pass"
+    token = _raw_value_token(log, "vout")
+    assert _mantissa_decimals(token) <= 6
+    # The JSON value is the full printed token, and it is visibly rounded.
+    assert m["value"] == float(token)
+    assert abs(m["value"] - _DIVIDER_ANALYTIC) > 1e-10
+    assert m["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-6, rel=0)
+
+
+def _ngspice_major(tmp_path: Path) -> int:
+    """Major version of the ngspice `klt sim` will actually run, read from its
+    own banner -- independent of anything a simulated result printed. Uses
+    the runner's own resolution (`$KLT_NGSPICE_BINARY` before `ngspice` on
+    PATH), so pointing `KLT_NGSPICE_BINARY` at a 46 build selects the strict
+    case rather than probing whatever older ngspice is on PATH."""
+    binary = sim._resolve_ngspice_binary({}, str(tmp_path))
+    out = subprocess.run(
+        [binary, "--version"], capture_output=True, text=True, timeout=60
+    ).stdout
+    match = re.search(r"ngspice-(\d+)", out)
+    assert match, f"cannot read ngspice version from:\n{out}"
+    return int(match.group(1))
+
+
+#: First ngspice release that honours `set measureprec` for `.meas` output
+#: (verified live on 46; 42 ignores it -- see docs/cli/sim.md).
+_MEASUREPREC_MIN_MAJOR = 46
+
+_MEAS_PREC_INIT = ["set measureprec=12", "set numdgt=12"]
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_measureprec_honoured_on_meas_card(tmp_path, monkeypatch):
+    """On an engine that supports `measureprec`, the request must emit the
+    requested digits -- a silently ignored setting fails this test."""
+    if _ngspice_major(tmp_path) < _MEASUREPREC_MIN_MAJOR:
+        pytest.skip(f"ngspice < {_MEASUREPREC_MIN_MAJOR} ignores measureprec")
+    corner, log = _run_precision_request(
+        tmp_path,
+        monkeypatch,
+        analysis=_TRAN_FIND,
+        measurements=_VOUT_FIND,
+        ngspice_init=_MEAS_PREC_INIT,
+    )
+    (m,) = corner["measurements"]
+    assert m["status"] == "pass"
+    token = _raw_value_token(log, "vout")
+    assert _mantissa_decimals(token) >= 12
+    assert m["value"] == float(token)
+    assert m["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-10, rel=0)
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_measureprec_ignored_on_legacy_engine(
+    tmp_path, monkeypatch
+):
+    """On an engine without `measureprec` (ngspice 42), the request is
+    accepted and the `.meas` value is identical to a measured default run --
+    not silently "improved" and not merely close to the analytic value."""
+    if _ngspice_major(tmp_path) >= _MEASUREPREC_MIN_MAJOR:
+        pytest.skip(f"ngspice >= {_MEASUREPREC_MIN_MAJOR} honours measureprec")
+    (tmp_path / "default").mkdir()
+    base, base_log = _run_precision_request(
+        tmp_path / "default",
+        monkeypatch,
+        analysis=_TRAN_FIND,
+        measurements=_VOUT_FIND,
+    )
+    (tmp_path / "wide").mkdir()
+    wide, wide_log = _run_precision_request(
+        tmp_path / "wide",
+        monkeypatch,
+        analysis=_TRAN_FIND,
+        measurements=_VOUT_FIND,
+        ngspice_init=_MEAS_PREC_INIT,
+    )
+    assert _raw_value_token(wide_log, "vout") == _raw_value_token(base_log, "vout")
+    (bm,) = base["measurements"]
+    (wm,) = wide["measurements"]
+    assert wm["status"] == "pass"
+    assert wm["value"] == bm["value"]
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_numdgt_widens_expr_scalar(tmp_path, monkeypatch):
+    (tmp_path / "default").mkdir()
+    base, base_log = _run_precision_request(
+        tmp_path / "default", monkeypatch, analysis=_OP, measurements=_VOUT_EXPR
+    )
+    assert _mantissa_decimals(_raw_value_token(base_log, "vout")) <= 6
+    (bm,) = base["measurements"]
+    assert abs(bm["value"] - _DIVIDER_ANALYTIC) > 1e-10
+
+    (tmp_path / "wide").mkdir()
+    wide, wide_log = _run_precision_request(
+        tmp_path / "wide",
+        monkeypatch,
+        analysis=_OP,
+        measurements=_VOUT_EXPR,
+        ngspice_init=["set numdgt=12"],
+    )
+    assert _mantissa_decimals(_raw_value_token(wide_log, "vout")) >= 11
+    (wm,) = wide["measurements"]
+    assert wm["status"] == "pass"
+    assert wm["value"] == pytest.approx(_DIVIDER_ANALYTIC, abs=1e-10, rel=0)
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_measureprec_alone_does_not_widen_expr(
+    tmp_path, monkeypatch
+):
+    """The two controls are independent: `measureprec` never changes a
+    `print`ed scalar, so an `expr` needs `numdgt`."""
+    corner, log = _run_precision_request(
+        tmp_path,
+        monkeypatch,
+        analysis=_OP,
+        measurements=_VOUT_EXPR,
+        ngspice_init=["set measureprec=12"],
+    )
+    assert _mantissa_decimals(_raw_value_token(log, "vout")) <= 6
+    (m,) = corner["measurements"]
+    assert abs(m["value"] - _DIVIDER_ANALYTIC) > 1e-10
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_derived_expr_uses_stored_vector_not_print(
+    tmp_path, monkeypatch
+):
+    """With default digits `vout` prints as 0.6666778, but the vector the next
+    `let` reads is the solver's double: `(vout - 0.6666778) * 1e9` is
+    -22.59..., not the 0 that the rounded printed operand would give."""
+    corner, log = _run_precision_request(
+        tmp_path,
+        monkeypatch,
+        analysis=_OP,
+        measurements=[
+            {"name": "vout", "expr": "v(out)", "unit": "V"},
+            {"name": "resid_nv", "expr": "(vout - 0.6666778) * 1e9", "unit": "nV"},
+        ],
+    )
+    values = {m["name"]: m["value"] for m in corner["measurements"]}
+    assert float(_raw_value_token(log, "vout")) == pytest.approx(0.6666778, abs=0)
+    expected = (_DIVIDER_ANALYTIC - 0.6666778) * 1e9
+    assert expected == pytest.approx(-22.59, abs=0.01)
+    assert values["resid_nv"] == pytest.approx(expected, abs=1e-3, rel=0)
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_precision_non_scalar_expr_still_diagnosed(tmp_path, monkeypatch):
+    """Raising `numdgt` does not turn a multi-point vector into a scalar: the
+    existing `measurement` diagnostic still fires."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("NGSPICE_MEAS_PRECISION", raising=False)
+    _write_precision_divider(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "divider.spice",
+            "analysis": _TRAN_FIND,
+            "measurements": [{"name": "wave", "expr": "v(out)", "unit": "V"}],
+            "options": {"ngspice_init": ["set numdgt=12"]},
+        },
+    )
+    report = sim.run_sim(str(request), backend="local")
+    (corner,) = report["corners"]
+    (m,) = corner["measurements"]
+    assert m["status"] == "error"
+    assert any(d["code"] == "measurement" for d in corner["diagnostics"])
+
+
+def test_parse_measurements_keeps_long_scientific_tokens_exactly():
+    log = (
+        "vout                =  6.666777774074e-01\n"
+        "big                 = -1.23456789012345e+03\n"
+        "tiny                =  9.87654321098765e-15\n"
+    )
+    values = sim._parse_measurements(log)
+    assert values["vout"] == 6.666777774074e-01
+    assert values["big"] == -1.23456789012345e03
+    assert values["tiny"] == 9.87654321098765e-15
+
+
+def test_parse_measurements_long_token_with_trailer():
+    log = (
+        "tphl                =  4.020000000001e-11 targ=  1.090000000001e-09"
+        " trig=  1.050000000002e-09\n"
+        "avgv                =  6.666777774074e-01 from=  0.000000000000e+00"
+        " to=  1.000000000000e-08\n"
+    )
+    values = sim._parse_measurements(log)
+    assert values["tphl"] == 4.020000000001e-11
+    assert values["avgv"] == 6.666777774074e-01
+    assert set(values) == {"tphl", "avgv"}
