@@ -27,7 +27,8 @@ plus ``_yosys_version``/``_combined_content_hash`` (previously copy-pasted --
 and silently diverged -- between ``equiv.py`` and ``synthesize.py``; issue
 #1112), plus ``wasi_sandbox_hint_if_applicable`` (issue #1755 -- the #1368
 WASI-sandboxed-yosys detection had only been added to ``synthesize.py``,
-leaving ``equiv.py``'s independent error-formatting function without it).
+leaving ``equiv.py``'s independent error-formatting function without it;
+issue #2453 narrowed it for scripts under the host temp dir).
 
 Alongside the raw-byte ``sha256_file`` it also owns ``layout_geometry_digest``
 (issue #2065) -- a *layout-aware* digest for reports that pin the input streams
@@ -42,6 +43,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping
 from typing import Any
 
@@ -61,12 +63,59 @@ _WASI_SANDBOX_HINT = (
     "a native yosys build's directory to $PATH."
 )
 
+# Issue #2453: a WASI runtime such as yowasp-yosys's typically preopens every
+# top-level host directory but then mounts its own private scratch directory
+# over the guest's ``/tmp`` -- so the host temp dir is specifically the one
+# place it cannot see. A request staged there (``tempfile.mkdtemp()``, a
+# pytest ``tmp_path``, a CI harness) puts its request-relative
+# ``.klt/<verb>`` run tree there too. The remedy leads with moving the request
+# (keeping the caller's deliberately pinned engine); swapping in a native
+# yosys is only the fallback, since it silently unpins the engine.
+_WASI_SANDBOX_TEMPDIR_HINT = (
+    "; the script file exists on disk but yosys could not read it, and it "
+    "lies under the host temp directory ({tempdir}) -- this likely means the "
+    "'yosys' on $PATH is a WASI-sandboxed build (e.g. yowasp-yosys) whose "
+    "runtime mounts its own private scratch directory over /tmp, shadowing "
+    "the host temp directory. Move the request file outside the host temp "
+    "directory (e.g. into your checkout or under $HOME) so its "
+    "request-relative .klt/ run tree moves with it, and keep your pinned "
+    "engine; only as a fallback, prepend a native yosys build's directory "
+    "to $PATH."
+)
+
+
+def _is_within(path: str, root: str) -> bool:
+    """True if normalized ``path`` is ``root`` or inside it.
+
+    Component-wise (``os.path.commonpath``), never a string-prefix test, so a
+    sibling such as ``/tmp-foo`` is not "inside" ``/tmp``.
+    """
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # different drives (Windows) or mixed abs/rel
+        return False
+
+
+def _is_under_host_tempdir(path: str) -> bool:
+    """True if ``path`` -- literally or once symlinks are resolved -- is inside
+    ``tempfile.gettempdir()`` (itself compared both as given and resolved).
+    """
+    tempdir = tempfile.gettempdir()
+    roots = {
+        os.path.normcase(os.path.abspath(tempdir)),
+        os.path.normcase(os.path.realpath(tempdir)),
+    }
+    candidates = {
+        os.path.normcase(os.path.abspath(path)),
+        os.path.normcase(os.path.realpath(path)),
+    }
+    return any(_is_within(c, r) for c in candidates for r in roots)
+
 
 def wasi_sandbox_hint_if_applicable(error_line: str) -> str:
-    """``_WASI_SANDBOX_HINT`` if ``error_line`` is Yosys's ``Can't open
-    script file `<path>' for reading: No such file or directory`` shape
-    *and* ``<path>`` verifiably exists on the host filesystem -- otherwise
-    ``""``.
+    """A WASI-sandbox hint if ``error_line`` is Yosys's ``Can't open script
+    file `<path>' for reading: No such file or directory`` shape *and*
+    ``<path>`` verifiably exists on the host filesystem -- otherwise ``""``.
 
     A script path that genuinely does not exist is a different, unrelated
     failure and must not get the hint. Shared by ``synthesize.py`` and
@@ -74,11 +123,20 @@ def wasi_sandbox_hint_if_applicable(error_line: str) -> str:
     ``yowasp-yosys``) detection can't silently diverge between verbs again,
     the same failure mode issue #1112 fixed for ``_yosys_version``/
     ``_combined_content_hash`` above.
+
+    When ``<path>`` is inside ``tempfile.gettempdir()`` (normalized
+    containment, symlinks resolved) the hint is
+    ``_WASI_SANDBOX_TEMPDIR_HINT`` -- naming the likely private-``/tmp``
+    shadowing and leading with relocating the request -- rather than the
+    generic ``_WASI_SANDBOX_HINT`` (issue #2453).
     """
     match = _WASI_SANDBOX_SCRIPT_NOT_FOUND_RE.search(error_line)
-    if match and os.path.isfile(match.group(1)):
-        return _WASI_SANDBOX_HINT
-    return ""
+    if not match or not os.path.isfile(match.group(1)):
+        return ""
+    script_path = match.group(1)
+    if _is_under_host_tempdir(script_path):
+        return _WASI_SANDBOX_TEMPDIR_HINT.format(tempdir=tempfile.gettempdir())
+    return _WASI_SANDBOX_HINT
 
 
 def sha256_file(path: str | None) -> str | None:

@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#2453, `klt synthesize`/`klt equiv`; no JSON field changes):
+  the WASI-sandboxed-yosys hint appended to a `Can't open script file`
+  error now branches on where the (existing) script lives. Under the host
+  temp dir (`tempfile.gettempdir()`, normalized containment with symlinks
+  resolved) it names the likely cause — the sandbox's private `/tmp` mount
+  shadowing the host temp dir — and leads with moving the request file (and
+  its request-relative `.klt/` run tree) outside the temp dir, keeping the
+  pinned engine; prepending a native `yosys` to `$PATH` is now only the
+  fallback. Scripts outside the temp dir keep the previous generic hint.
+
 - **Fixed** (#2648, `klt gen`; no JSON field changes): sky130 generator cuts
   are now snapped onto the 0.005um manufacturing grid the curated deck's
   `*.ongrid.1` rule declares (resolved from the deck by
