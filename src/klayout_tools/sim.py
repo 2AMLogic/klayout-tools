@@ -1596,6 +1596,10 @@ def run_sim(
         if k_sigma is not None:
             monte_carlo_info["k_sigma"] = k_sigma
 
+    # Issue #2706: fail fast (before any probe or backend dispatch) when a
+    # supply override targets a source with an explicit transient waveform.
+    _validate_supply_override_targets(netlist_path, corner_points)
+
     # Issue #2522: a `corners.process` bundle may name its own model library
     # per section. Resolved (and existence-checked) per host, from the refs
     # as declared -- a fleet shard resolves the same refs against its own box,
@@ -3914,6 +3918,101 @@ _BACKENDS = {
 # --------------------------------------------------------------------------- #
 
 _ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
+
+
+_WAVEFORM_KEYWORDS = frozenset(
+    {"pwl", "pulse", "sin", "exp", "sffm", "am", "trnoise", "trrandom", "external"}
+)
+_WAVEFORM_RE = re.compile(r"^([a-z]+)\s*(?:\(|$)")
+
+
+def _logical_netlist_lines(netlist_text: str) -> list[str]:
+    """Netlist lines with ``+`` continuations joined and comments removed.
+
+    Full-line ``*`` comments and inline ``;``/``$`` comments are dropped.
+    Deliberately lexical, not a complete SPICE parser: ``.include``/``.lib``
+    are not followed."""
+    logical: list[str] = []
+    for raw in netlist_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("*"):
+            continue
+        line = re.split(r";|\s\$", line, maxsplit=1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("+"):
+            if logical:
+                logical[-1] += " " + line[1:].strip()
+            continue
+        logical.append(line)
+    return logical
+
+
+def _top_level_waveform_sources(netlist_text: str) -> dict[str, str]:
+    """Map lower-cased top-level independent voltage-source names to the
+    explicit waveform keyword (``pwl``/``pulse``/``sin``/...) they declare.
+    Sources declared inside ``.subckt`` bodies are ignored; sources with no
+    waveform (bare value or ``dc``) are absent from the result."""
+    found: dict[str, str] = {}
+    depth = 0
+    for line in _logical_netlist_lines(netlist_text):
+        lowered = line.lower()
+        if lowered.startswith("."):
+            word = lowered.split(None, 1)[0]
+            if word == ".subckt":
+                depth += 1
+            elif word == ".ends":
+                depth = max(0, depth - 1)
+            continue
+        if depth or lowered[0] != "v":
+            continue
+        # Name, two nodes, then value/DC/waveform specification. Spaces
+        # between a keyword and its "(" are tolerated.
+        tokens = lowered.replace("(", " ( ").split()
+        if len(tokens) < 4:
+            continue
+        spec = " ".join(tokens[3:]).replace(" ( ", "(")
+        for token in spec.split():
+            if token in _WAVEFORM_KEYWORDS or any(
+                token.startswith(k + "(") for k in _WAVEFORM_KEYWORDS
+            ):
+                found[tokens[0]] = re.match(r"[a-z]+", token).group(0)  # type: ignore[union-attr]
+                break
+    return found
+
+
+def _validate_supply_override_targets(
+    netlist_path: str, corner_points: list[CornerPoint]
+) -> None:
+    """Reject a ``supply_v`` override aimed at a waveform source (#2706).
+
+    ngspice's ``alter name=value`` silently has no effect on a
+    PWL/PULSE/SIN source, so the request fails as a whole rather than
+    simulating the wrong voltage. Validates the actual expanded points
+    (including worker ``_explicit_points``). Inspection is lexical over the
+    top-level netlist file only: included files and hierarchical targets are
+    not resolved, and an unresolved declaration is never assumed DC."""
+    targets = sorted({key for point in corner_points for key in point.supply_v})
+    if not targets:
+        return
+    try:
+        with open(netlist_path, encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return
+    waveforms = _top_level_waveform_sources(text)
+    for target in targets:
+        waveform = waveforms.get(target.strip().lower())
+        if waveform is not None:
+            raise SimError(
+                f"corners.supply_v override of source {target!r} is not "
+                f"supported: the netlist declares it with an explicit "
+                f"{waveform.upper()} waveform, and ngspice's `alter "
+                f"{target}=<value>` has no effect on it (the run would "
+                "silently simulate the netlist's own waveform). Declare the "
+                "source as a plain DC value, or remove it from "
+                "corners.supply_v"
+            )
 
 
 def _prepare_corner_run(

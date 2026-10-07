@@ -1535,6 +1535,20 @@ fails with `Unable to find definition of model …` and every corner errors.
   generated `.control` block, so `<key>` must name either a voltage source or
   a `.param` the netlist body defines and its sources reference (e.g.
   `.param vdd=1.8` / `Vdd vdd 0 DC {vdd}`).
+  **Scalar sources only.** ngspice's `alter` silently has no effect on an
+  independent voltage source with an explicit transient waveform
+  (`PWL`/`PULSE`/`SIN`/`EXP`/`SFFM`/`AM`), so `klt sim` rejects such a request
+  up front with a `SimError` naming the target, the waveform and the
+  unsupported override -- before any probe, local run or off-host
+  (`remote`/`batch`) submission. A mixed grid fails as a whole; a waveform
+  source with no `supply_v` entry is unaffected, and bare-value/`DC` sources
+  keep the scalar override. The check covers the actual expanded corner points
+  (including a fleet shard's `_explicit_points`). It is a lexical inspection of
+  the netlist body only (case-insensitive names, `+` continuations, comments
+  ignored, `.subckt`-local declarations ignored), **not** a complete SPICE
+  parser: `.include`d/`.lib` files and hierarchical targets are not resolved,
+  so a waveform declared there is not detected, and an unresolved declaration
+  is never assumed to be DC. Rewriting waveform sources is out of scope.
 - **`corners.temperature_c`** (`array<number>`, optional) — degrees Celsius,
   one `.temp <value>` card per point. Defaults to `[27]` when omitted.
 - **`exclude`** (`array<object>`, optional) — partial corner specs

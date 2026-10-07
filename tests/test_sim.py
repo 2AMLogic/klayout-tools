@@ -11295,3 +11295,89 @@ def test_staged_worker_directory_reproduces_model_cards_and_provenance(
         e["sha256"] for e in local_report["environment"]["osdi_preload"]
     ]
     assert [e["name"] for e in worker_env["corner_section_libs"]] == ["res.lib"]
+
+
+# --- #2706: supply override vs. waveform sources (PDK-free) ---------------- #
+
+
+def _supply_deck_request(tmp_path, body, supply_v, **extra):
+    (tmp_path / "body.spice").write_text(body)
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "corners": {"supply_v": supply_v},
+    }
+    request.update(extra)
+    return _write_request(tmp_path, request)
+
+
+def _boom(*args, **kwargs):
+    raise AssertionError("simulation must not start for a rejected request")
+
+
+@pytest.mark.parametrize(
+    "decl,wave",
+    [
+        ("Vdd vdd 0 PWL(0 0 1u 5)", "PWL"),
+        ("vdd vdd 0 pulse (0 1.8 0 1n 1n 1u 2u)", "PULSE"),
+        ("VDD vdd 0 dc 0 SIN(0 1 1k)", "SIN"),
+        ("Vdd vdd 0\n+ PWL(0 0\n+ 1u 5)", "PWL"),
+    ],
+)
+def test_supply_override_on_waveform_source_is_rejected(
+    tmp_path, monkeypatch, decl, wave
+):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    monkeypatch.setattr(sim.subprocess, "Popen", _boom)
+    path = _supply_deck_request(tmp_path, f"{decl}\nR1 vdd 0 1k\n", {"vdd": [1.0, 1.8]})
+    with pytest.raises(sim.SimError) as exc:
+        sim.run_sim(str(path))
+    message = str(exc.value)
+    assert "'vdd'" in message and wave in message and "alter" in message
+
+
+def test_supply_override_mixed_grid_fails_as_a_whole(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    body = "Vdd vdd 0 DC 1\nVref vref 0 PWL(0 0 1u 1)\nR1 vdd vref 1k\n"
+    path = _supply_deck_request(tmp_path, body, {"vdd": [1, 2], "vref": [1, 2]})
+    with pytest.raises(sim.SimError, match="'vref'"):
+        sim.run_sim(str(path))
+
+
+def test_supply_override_scalar_sources_and_lexical_non_matches(tmp_path):
+    body = (
+        "* Vdd vdd 0 PWL(0 0 1 1)\n"
+        "Vdd vdd 0 1.8 ; PWL(0 0 1 1)\n"
+        "Vclk clk 0 PULSE(0 1 0 1n 1n 1u 2u)\n"
+        "Vsig sig 0 dc 1\n"
+        ".subckt blk a b\nVdd a b PWL(0 0 1 1)\n.ends\n"
+        "Vdc dc 0 DC 1.2\n"
+    )
+    (tmp_path / "n.spice").write_text(body)
+    points = [sim.CornerPoint(None, {"vdd": 1.0, "vdc": 1.1, "sig": 2.0}, 27)]
+    sim._validate_supply_override_targets(str(tmp_path / "n.spice"), points)
+    # Waveform source without an override remains usable.
+    sim._validate_supply_override_targets(
+        str(tmp_path / "n.spice"), [sim.CornerPoint(None, {}, 27)]
+    )
+
+
+def test_supply_override_node_named_like_waveform_is_not_waveform(tmp_path):
+    (tmp_path / "n.spice").write_text("Vdd pwl 0 DC 1\n")
+    sim._validate_supply_override_targets(
+        str(tmp_path / "n.spice"), [sim.CornerPoint(None, {"vdd": 1.0}, 27)]
+    )
+
+
+def test_supply_override_explicit_points_are_validated(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    (tmp_path / "body.spice").write_text("Vdd vdd 0 PWL(0 0 1u 5)\nR1 vdd 0 1k\n")
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "_explicit_points": [
+            {"process": None, "supply_v": {"vdd": 1.2}, "temperature_c": 27}
+        ],
+    }
+    with pytest.raises(sim.SimError, match="PWL"):
+        sim.run_sim(str(_write_request(tmp_path, request)))
