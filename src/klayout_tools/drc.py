@@ -36,6 +36,7 @@ instance rather than only the top cell.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import re
 import subprocess
@@ -1515,9 +1516,9 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
             # Issue #2697: reproduce the original coverage assertion too,
             # or a committed `clean` would always drift to `coverage_unknown`.
-            expected_rule_categories=(committed.get("coverage_assertion") or {}).get(
-                "expected"
-            ),
+            # Issue #2806: dispatched on its `kind`; a set assertion replays
+            # its embedded names, never the original manifest file.
+            **_rerun_assertion_kwargs(committed),
         )
     else:
         fresh = run_drc(file_path, deck, top=None)
@@ -2812,13 +2813,28 @@ def _cleanup_klayout_drc_work_dir(work_dir: str) -> None:
     shutil.rmtree(work_dir, ignore_errors=True)
 
 
+#: ``coverage_assertion.kind`` of the count assertion (issue #2697).
+COVERAGE_ASSERTION_COUNT_KIND = "expected_rule_categories"
+#: ``coverage_assertion.kind`` of the exact-set assertion (issue #2806).
+COVERAGE_ASSERTION_NAMES_KIND = "expected_rule_category_names"
+
+
 def _evaluate_category_assertion(
-    expected: int | None, rule_categories: list[str], deck_errored: bool
+    expected: int | None,
+    rule_categories: list[str],
+    deck_errored: bool,
+    expected_names: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the opt-in ``expected_rule_categories`` assertion (issue
-    #2697) against the deduplicated declared categories. ``None`` when not
-    requested; raises :class:`DrcError` on a count mismatch of a run that did
-    not tolerate deck errors; a tolerated-error run is never satisfied."""
+    #2697) -- or its exact-set sibling ``expected_rule_category_names``
+    (issue #2806) -- against the deduplicated declared categories. ``None``
+    when neither is requested; raises :class:`DrcError` on a mismatch of a
+    run that did not tolerate deck errors; a tolerated-error run is never
+    satisfied."""
+    if expected_names is not None:
+        return _evaluate_category_set_assertion(
+            expected_names, rule_categories, deck_errored
+        )
     if expected is None:
         return None
     observed = len(set(rule_categories))
@@ -2833,10 +2849,45 @@ def _evaluate_category_assertion(
             "invocation or update the expected count."
         )
     return {
-        "kind": "expected_rule_categories",
+        "kind": COVERAGE_ASSERTION_COUNT_KIND,
         "expected": expected,
         "observed": observed,
         "satisfied": observed == expected and not deck_errored,
+    }
+
+
+def _evaluate_category_set_assertion(
+    expected_names: list[str], rule_categories: list[str], deck_errored: bool
+) -> dict[str, Any]:
+    """The exact-set variant (issue #2806): the unique declared RDB category
+    names must equal ``expected_names`` exactly (case-sensitive; order and
+    duplicate declarations are irrelevant). A same-size swap fails just like
+    a missing or extra category. Raises :class:`DrcError` listing the sorted
+    missing and unexpected names unless the run tolerated deck errors, in
+    which case the assertion is recorded unsatisfied instead."""
+    expected_set = set(expected_names)
+    observed_set = set(rule_categories)
+    missing = sorted(expected_set - observed_set)
+    unexpected = sorted(observed_set - expected_set)
+    if (missing or unexpected) and not deck_errored:
+        raise DrcError(
+            "rule-category coverage assertion failed: the deck's report "
+            "declared a different set of rule categories than the "
+            "expected set (--expect-rule-categories-file) vouched for "
+            f"(expected {len(expected_set)}, declared {len(observed_set)}). "
+            f"missing (expected, not declared): {json.dumps(missing)}; "
+            f"unexpected (declared, not expected): {json.dumps(unexpected)}"
+            " -- a gated-off rule group, a missing --deck-var, a "
+            "data-dependent declaration, or a changed deck? Fix the deck "
+            "invocation or re-review the expected category list."
+        )
+    return {
+        "kind": COVERAGE_ASSERTION_NAMES_KIND,
+        "expected_names": sorted(expected_set),
+        "observed_names": sorted(observed_set),
+        "missing_names": missing,
+        "unexpected_names": unexpected,
+        "satisfied": not missing and not unexpected and not deck_errored,
     }
 
 
@@ -2892,6 +2943,133 @@ def _validate_expected_rule_categories(value: Any) -> None:
         )
 
 
+def _validate_expected_rule_category_names(
+    value: Any, expected_count: Any = None
+) -> list[str] | None:
+    """Normalize the exact-set assertion's ``expected_rule_category_names``
+    (issue #2806) into a sorted, deduplicated list, or ``None`` when omitted.
+
+    Accepts any list/tuple/set/frozenset of non-empty strings, compared
+    exactly (case-sensitive, no stripping, no glob interpretation -- the
+    manifest loader :func:`load_rule_category_manifest` has already trimmed
+    its lines). A bare string, an empty collection, a non-string or a
+    blank name raises :class:`DrcError`, as does combining it with the count
+    assertion ``expected_count`` -- the two are mutually exclusive.
+    """
+    if value is None:
+        return None
+    if expected_count is not None:
+        raise DrcError(
+            "expected_rule_categories (--expect-rule-categories) and "
+            "expected_rule_category_names (--expect-rule-categories-file) "
+            "are mutually exclusive -- pass one rule-category assertion"
+        )
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        raise DrcError(
+            "expected_rule_category_names (--expect-rule-categories-file) "
+            f"must be a list of rule category names (got {type(value).__name__})"
+        )
+    names: set[str] = set()
+    for name in value:
+        if not isinstance(name, str) or not name.strip():
+            raise DrcError(
+                "expected_rule_category_names (--expect-rule-categories-file) "
+                f"must contain only non-empty strings (got {name!r})"
+            )
+        names.add(name)
+    if not names:
+        raise DrcError(
+            "expected_rule_category_names (--expect-rule-categories-file) "
+            "must name at least one rule category (got an empty set)"
+        )
+    return sorted(names)
+
+
+def load_rule_category_manifest(path: str) -> list[str]:
+    """Read an ``--expect-rule-categories-file`` manifest (issue #2806):
+    UTF-8 text, one exact rule category name per line. Surrounding
+    whitespace is trimmed, blank lines are ignored and duplicates are
+    deduplicated; there is no comment syntax and no glob expansion, so a
+    line ``# M1.a`` names the category ``# M1.a``. Returns the sorted,
+    deduplicated names.
+
+    Raises :class:`DrcError` for an unreadable file, invalid UTF-8, or a
+    manifest that resolves to no names at all -- all before KLayout is
+    ever launched.
+    """
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        raise DrcError(
+            f"could not read rule-category manifest "
+            f"(--expect-rule-categories-file) '{path}': {exc.strerror or exc}"
+        ) from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DrcError(
+            f"rule-category manifest (--expect-rule-categories-file) '{path}' "
+            f"is not valid UTF-8: {exc}"
+        ) from exc
+    if text.startswith("﻿"):
+        text = text[1:]
+    names = {line.strip() for line in text.splitlines()}
+    names.discard("")
+    if not names:
+        raise DrcError(
+            f"rule-category manifest (--expect-rule-categories-file) '{path}' "
+            "names no rule categories (empty or blank-only file)"
+        )
+    return sorted(names)
+
+
+def _rerun_assertion_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
+    """The ``run_drc_klayout_engine`` keyword reproducing a committed
+    report's ``coverage_assertion`` on ``--rerun`` (issues #2697/#2806),
+    dispatched on ``kind``. A set assertion replays its embedded
+    ``expected_names`` -- the original manifest file is not needed. A
+    malformed assertion raises :class:`DrcError` rather than leaking an
+    array into the count path."""
+    assertion = committed.get("coverage_assertion")
+    if assertion is None:
+        return {}
+    if not isinstance(assertion, dict):
+        raise DrcError(
+            "committed report's 'coverage_assertion' is malformed (expected "
+            f"an object, got {type(assertion).__name__})"
+        )
+    kind = assertion.get("kind", COVERAGE_ASSERTION_COUNT_KIND)
+    if kind == COVERAGE_ASSERTION_COUNT_KIND:
+        expected = assertion.get("expected")
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+            raise DrcError(
+                "committed report's 'coverage_assertion.expected' is "
+                f"malformed (expected a positive integer, got {expected!r})"
+            )
+        return {"expected_rule_categories": expected}
+    if kind == COVERAGE_ASSERTION_NAMES_KIND:
+        names = assertion.get("expected_names")
+        if not isinstance(names, list):
+            raise DrcError(
+                "committed report's 'coverage_assertion.expected_names' is "
+                f"malformed (expected a list of names, got {names!r})"
+            )
+        try:
+            resolved = _validate_expected_rule_category_names(names)
+        except DrcError as exc:
+            raise DrcError(
+                "committed report's 'coverage_assertion.expected_names' is "
+                f"malformed: {exc}"
+            ) from exc
+        return {"expected_rule_category_names": resolved}
+    raise DrcError(
+        f"committed report's 'coverage_assertion.kind' {kind!r} is not "
+        f"recognized (expected {COVERAGE_ASSERTION_COUNT_KIND!r} or "
+        f"{COVERAGE_ASSERTION_NAMES_KIND!r})"
+    )
+
+
 def run_drc_klayout_engine(
     path: str,
     deck_file: str,
@@ -2904,6 +3082,7 @@ def run_drc_klayout_engine(
     allow_missing_host_tools: bool = False,
     expected_rule_categories: int | None = None,
     min_klayout_version: str | None = None,
+    expected_rule_category_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -3083,6 +3262,21 @@ def run_drc_klayout_engine(
     for such a partial run, but ``coverage_assertion.satisfied`` is ``False``
     and coverage stays unknown. Omitted, behaviour is unchanged.
 
+    ``expected_rule_category_names`` (CLI ``--expect-rule-categories-file
+    PATH``, issue #2806) is the exact-set form of the same caller-vouched
+    assertion: a non-empty collection of exact (case-sensitive) category
+    names, mutually exclusive with ``expected_rule_categories`` (both
+    validated before KLayout is launched). The unique declared categories
+    must equal that set exactly -- a same-size swap fails just like a
+    missing or extra name, raising :class:`DrcError` that lists the sorted
+    missing and unexpected names. A match grants the same caller-vouched
+    coverage as a count match; the report records it under
+    ``coverage_assertion`` with ``kind: "expected_rule_category_names"``
+    (``expected_names``/``observed_names``/``missing_names``/
+    ``unexpected_names``/``satisfied``). Neither form proves rule execution
+    independently: the names must be reviewed for the deck revision,
+    switches and inputs in use, not copied from the accepted run.
+
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
     #1901) are resolved via :func:`klayout_tools.pdk.find_pdk`, when either
     is given, purely so ``provenance.pdk`` can record which PDK revision the
@@ -3099,6 +3293,9 @@ def run_drc_klayout_engine(
     or ``pdk_variant``/``pdk_root`` given but no matching PDK found.
     """
     _validate_expected_rule_categories(expected_rule_categories)
+    expected_names = _validate_expected_rule_category_names(
+        expected_rule_category_names, expected_rule_categories
+    )
     if top is not None:
         raise DrcError(
             "the klayout engine does not support --top yet -- omit --top, "
@@ -3211,7 +3408,7 @@ def run_drc_klayout_engine(
             report_path, dbu
         )
         coverage_assertion = _evaluate_category_assertion(
-            expected_rule_categories, rule_categories, deck_errored
+            expected_rule_categories, rule_categories, deck_errored, expected_names
         )
     finally:
         _cleanup_klayout_drc_work_dir(work_dir)

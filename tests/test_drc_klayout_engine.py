@@ -2007,6 +2007,494 @@ def test_expect_rule_categories_report_check_and_rerun(tmp_path, monkeypatch, ca
 
 
 # --------------------------------------------------------------------------- #
+# Exact rule-category set assertion (issue #2806)
+# --------------------------------------------------------------------------- #
+
+
+def _categories_rdb(*names: str) -> str:
+    """A finding-free RDB declaring ``names`` (in the given order, repeats
+    kept) -- the synthetic fixture for set-assertion tests."""
+    body = "".join(
+        f"  <category>\n   <name>{name}</name>\n   <description>d</description>\n"
+        "  </category>\n"
+        for name in names
+    )
+    return _EMPTY_RDB.replace(" <categories>\n", f" <categories>\n{body}")
+
+
+def _manifest(tmp_path, text, name="expected.txt", *, raw: bytes | None = None):
+    path = tmp_path / name
+    if raw is not None:
+        path.write_bytes(raw)
+    else:
+        path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def test_set_assertion_same_count_swap_fails(tmp_path, monkeypatch):
+    """The critical case: {A,B} expected vs {A,C} declared has equal counts
+    (so --expect-rule-categories 2 would pass) but must fail naming both."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_categories_rdb("A", "C"))
+    gds, deck = _assert_setup(tmp_path)
+
+    assert (
+        run_drc_klayout_engine(gds, deck, expected_rule_categories=2)["status"]
+        == "clean"
+    )
+    with pytest.raises(DrcError) as exc:
+        run_drc_klayout_engine(gds, deck, expected_rule_category_names=["A", "B"])
+
+    message = str(exc.value)
+    assert 'missing (expected, not declared): ["B"]' in message
+    assert 'unexpected (declared, not expected): ["C"]' in message
+
+
+@pytest.mark.parametrize(
+    "declared, expected, missing, unexpected",
+    [
+        (("A",), ["A", "B"], ["B"], []),
+        (("A", "B", "C"), ["A", "B"], [], ["C"]),
+        (("a.1",), ["A.1"], ["A.1"], ["a.1"]),
+        (("M1.a",), ["M*.a"], ["M*.a"], ["M1.a"]),
+        (("Z", "Y"), ["B", "A"], ["A", "B"], ["Y", "Z"]),
+    ],
+)
+def test_set_assertion_mismatch_lists_sorted_names(
+    tmp_path, monkeypatch, declared, expected, missing, unexpected
+):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_categories_rdb(*declared))
+    gds, deck = _assert_setup(tmp_path)
+
+    with pytest.raises(DrcError) as exc:
+        run_drc_klayout_engine(gds, deck, expected_rule_category_names=expected)
+
+    assert f"declared, not expected): {json.dumps(unexpected)}" in str(exc.value)
+    assert f"not declared): {json.dumps(missing)}" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "declared, expected",
+    [
+        (("W.1", "S.1"), ["S.1", "W.1"]),
+        (("W.1", "S.1", "W.1"), ["W.1", "S.1"]),
+        (("S.1", "W.1"), ("W.1", "S.1", "S.1")),
+        (("M1 space #2",), {"M1 space #2"}),
+    ],
+)
+def test_set_assertion_exact_match_is_clean(tmp_path, monkeypatch, declared, expected):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_categories_rdb(*declared))
+    gds, deck = _assert_setup(tmp_path)
+
+    report = run_drc_klayout_engine(gds, deck, expected_rule_category_names=expected)
+
+    names = sorted(set(declared))
+    assert report["status"] == "clean"
+    assert report["coverage"]["known"] is True
+    assert report["coverage"]["checked"] == names
+    assert report["coverage_assertion"] == {
+        "kind": "expected_rule_category_names",
+        "expected_names": names,
+        "observed_names": names,
+        "missing_names": [],
+        "unexpected_names": [],
+        "satisfied": True,
+    }
+    assert drc_module.drc_exit_code(report) == 0
+
+
+def test_set_assertion_quoted_rdb_names_match(tmp_path, monkeypatch):
+    """Category identity follows `_parse_klayout_rdb_report` (quote strip)."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EDGE_PAIR_RDB)
+    gds, deck = _assert_setup(tmp_path)
+
+    report = run_drc_klayout_engine(gds, deck, expected_rule_category_names=["W.1"])
+
+    assert report["status"] == "violations"
+    assert report["coverage_assertion"]["satisfied"] is True
+    assert drc_module.drc_exit_code(report) == 3
+
+
+def test_set_assertion_refused_after_tolerated_deck_errors(tmp_path, monkeypatch):
+    _stub_klayout_drc_subprocess(
+        monkeypatch,
+        rdb_xml=_categories_rdb("A", "C"),
+        returncode=1,
+        stderr=_DECK_ABORT_STDERR,
+    )
+    gds, deck = _assert_setup(tmp_path)
+
+    # Matching set: still never satisfied by a partial run.
+    report = run_drc_klayout_engine(
+        gds, deck, allow_deck_errors=True, expected_rule_category_names=["A", "C"]
+    )
+    assert report["status"] == "coverage_unknown"
+    assert report["coverage_assertion"]["satisfied"] is False
+
+    # Mismatched set: recorded, not raised.
+    report = run_drc_klayout_engine(
+        gds, deck, allow_deck_errors=True, expected_rule_category_names=["A", "B"]
+    )
+    assert report["status"] == "coverage_unknown"
+    assert report["coverage_assertion"]["missing_names"] == ["B"]
+    assert report["coverage_assertion"]["unexpected_names"] == ["C"]
+    assert report["coverage_assertion"]["satisfied"] is False
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"expected_rule_category_names": []}, "at least one"),
+        ({"expected_rule_category_names": "A"}, "list of rule category names"),
+        ({"expected_rule_category_names": ["A", 1]}, "non-empty strings"),
+        ({"expected_rule_category_names": ["A", " "]}, "non-empty strings"),
+        (
+            {"expected_rule_category_names": ["A"], "expected_rule_categories": 1},
+            "mutually exclusive",
+        ),
+    ],
+)
+def test_set_assertion_invalid_rejected_before_subprocess(
+    tmp_path, monkeypatch, kwargs, match
+):
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+    gds, deck = _assert_setup(tmp_path)
+
+    with pytest.raises(DrcError, match=match):
+        run_drc_klayout_engine(gds, deck, **kwargs)
+
+    assert captured == []
+
+
+def test_load_manifest_trims_dedups_and_keeps_literal_names(tmp_path):
+    path = _manifest(
+        tmp_path,
+        "﻿  B \n\nA\n\t\n# not a comment\nM*.a\nA\nwith space\r\n",
+    )
+
+    assert drc_module.load_rule_category_manifest(path) == [
+        "# not a comment",
+        "A",
+        "B",
+        "M*.a",
+        "with space",
+    ]
+
+
+@pytest.mark.parametrize(
+    "text, raw, match",
+    [
+        ("", None, "names no rule categories"),
+        ("\n  \n\t\n", None, "names no rule categories"),
+        (None, b"A\n\xff\xfeB\n", "not valid UTF-8"),
+    ],
+)
+def test_load_manifest_rejects_empty_and_invalid(tmp_path, text, raw, match):
+    path = _manifest(tmp_path, text, raw=raw)
+    with pytest.raises(DrcError, match=match):
+        drc_module.load_rule_category_manifest(path)
+
+
+def test_load_manifest_rejects_unreadable(tmp_path):
+    with pytest.raises(DrcError, match="could not read rule-category manifest"):
+        drc_module.load_rule_category_manifest(str(tmp_path / "missing.txt"))
+    with pytest.raises(DrcError, match="could not read rule-category manifest"):
+        drc_module.load_rule_category_manifest(str(tmp_path))
+
+
+def test_cli_set_assertion_clean_exit_zero(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    manifest = _manifest(tmp_path, "W.1\nS.1\n")
+
+    code = main(
+        _expect_cli(
+            tmp_path, ["--expect-rule-categories-file", manifest, "--format", "json"]
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "clean"
+    assert payload["coverage_assertion"]["kind"] == "expected_rule_category_names"
+    assert payload["coverage_assertion"]["expected_names"] == ["S.1", "W.1"]
+
+
+def test_cli_set_assertion_text_output(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    manifest = _manifest(tmp_path, "W.1\nS.1\n")
+
+    code = main(
+        _expect_cli(
+            tmp_path, ["--expect-rule-categories-file", manifest, "--format", "text"]
+        )
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "status: clean" in out
+    assert "rule-category set assertion: satisfied (2 expected, 2 declared)" in out
+
+
+@pytest.mark.parametrize("fmt", ["json", "text"])
+def test_cli_set_assertion_swap_exit_one(tmp_path, monkeypatch, capsys, fmt):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_categories_rdb("A", "C"))
+    manifest = _manifest(tmp_path, "A\nB\n")
+
+    code = main(
+        _expect_cli(
+            tmp_path, ["--expect-rule-categories-file", manifest, "--format", fmt]
+        )
+    )
+
+    assert code == 1
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "status: clean" not in out
+    if fmt == "json":
+        assert captured.out == ""
+        message = json.loads(captured.err)["error"]["message"]
+    else:
+        message = out
+    assert '["B"]' in message and '["C"]' in message
+
+
+@pytest.mark.parametrize(
+    "extra, match",
+    [
+        (["--expect-rule-categories", "2"], "mutually exclusive"),
+        ([], "names no rule categories"),
+    ],
+)
+def test_cli_set_assertion_invalid_launches_nothing(
+    tmp_path, monkeypatch, capsys, extra, match
+):
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+    manifest = _manifest(tmp_path, "" if not extra else "A\n")
+
+    code = main(
+        _expect_cli(
+            tmp_path,
+            ["--expect-rule-categories-file", manifest, *extra, "--format", "json"],
+        )
+    )
+
+    assert code == 1
+    assert captured == []
+    assert match in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_cli_set_assertion_missing_manifest_launches_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+
+    code = main(
+        _expect_cli(
+            tmp_path,
+            ["--expect-rule-categories-file", str(tmp_path / "nope.txt")],
+        )
+    )
+
+    assert code == 1
+    assert captured == []
+
+
+def test_cli_set_assertion_ignored_for_curated_engine(tmp_path, capsys):
+    """Native-only convention (like --expect-rule-categories): the curated
+    engine ignores the flag entirely -- the manifest is not even read."""
+    gds = _write_gds(tmp_path / "test.gds")
+
+    code = main(
+        [
+            "drc",
+            gds,
+            "--deck",
+            "sky130",
+            "--expect-rule-categories-file",
+            str(tmp_path / "does-not-exist.txt"),
+            "--expect-rule-categories",
+            "3",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code in (0, 3, 4)
+    assert "coverage_assertion" not in json.loads(capsys.readouterr().out)
+
+
+def _set_request(tmp_path, **fields):
+    gds, deck = _assert_setup(tmp_path)
+    request = tmp_path / "req" / "request.json"
+    request.parent.mkdir(exist_ok=True)
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.drc.request/1",
+                "file": gds,
+                "engine": "klayout",
+                "deck_file": deck,
+                **fields,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(request)
+
+
+def test_request_document_set_manifest_is_request_relative(
+    tmp_path, monkeypatch, capsys
+):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    request = _set_request(tmp_path, expect_rule_categories_file="expected.txt")
+    (tmp_path / "req" / "expected.txt").write_text("S.1\nW.1\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    code = main(["drc", request, "--format", "json"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["coverage_assertion"]["expected_names"] == ["S.1", "W.1"]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"expect_rule_categories_file": ["S.1", "W.1"]},
+        {"expect_rule_categories_file": 3},
+        {"expect_rule_categories_file": "expected.txt", "expect_rule_categories": 2},
+    ],
+)
+def test_request_document_set_manifest_invalid(tmp_path, monkeypatch, capsys, fields):
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+    request = _set_request(tmp_path, **fields)
+    (tmp_path / "req" / "expected.txt").write_text("S.1\nW.1\n", encoding="utf-8")
+
+    assert main(["drc", request, "--format", "json"]) == 1
+    assert captured == []
+
+
+def test_request_document_set_manifest_conflicts_with_argv(
+    tmp_path, monkeypatch, capsys
+):
+    captured: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured)
+    request = _set_request(tmp_path)
+    manifest = _manifest(tmp_path, "S.1\n")
+
+    code = main(
+        ["drc", request, "--expect-rule-categories-file", manifest, "--format", "json"]
+    )
+
+    assert code == 1
+    assert captured == []
+
+
+def test_set_report_check_and_rerun_without_manifest(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    manifest = Path(_manifest(tmp_path, "W.1\nS.1\n"))
+    assert (
+        main(
+            _expect_cli(
+                tmp_path,
+                ["--expect-rule-categories-file", str(manifest), "--format", "json"],
+            )
+        )
+        == 0
+    )
+    report_path = tmp_path / "report.json"
+    report_path.write_text(capsys.readouterr().out, encoding="utf-8")
+    manifest.unlink()
+
+    assert main(["drc", "--check", str(report_path), "--format", "json"]) == 0
+    capsys.readouterr()
+    assert (
+        main(["drc", "--check", str(report_path), "--rerun", "--format", "json"]) == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+
+def test_set_report_rerun_detects_swapped_deck(tmp_path, monkeypatch, capsys):
+    """A rerun replays the embedded names, so a deck that now declares a
+    swapped set fails the rerun rather than matching."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_categories_rdb("A", "B"))
+    report = run_drc_klayout_engine(
+        *_assert_setup(tmp_path), expected_rule_category_names=["A", "B"]
+    )
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_categories_rdb("A", "C"))
+
+    code = main(["drc", "--check", str(report_path), "--rerun", "--format", "json"])
+
+    assert code == 1
+    assert '["B"]' in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "assertion, match",
+    [
+        ({"kind": "expected_rule_category_names"}, "expected_names"),
+        (
+            {"kind": "expected_rule_category_names", "expected_names": "A"},
+            "expected_names",
+        ),
+        (
+            {"kind": "expected_rule_category_names", "expected_names": []},
+            "at least one",
+        ),
+        ({"kind": "expected_rule_category_names", "expected_names": [1]}, "non-empty"),
+        ({"kind": "expected_rule_categories", "expected": ["A", "B"]}, "positive"),
+        ({"kind": "something_else"}, "not recognized"),
+        (["A"], "malformed"),
+    ],
+)
+def test_malformed_set_report_rerun_errors_cleanly(
+    tmp_path, monkeypatch, capsys, assertion, match
+):
+    captured: list = []
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB, captured_cmds=captured
+    )
+    report = run_drc_klayout_engine(*_assert_setup(tmp_path))
+    report["coverage_assertion"] = assertion
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    captured.clear()
+
+    code = main(["drc", "--check", str(report_path), "--rerun", "--format", "json"])
+
+    assert code == 1
+    assert captured == []
+    assert match in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_legacy_count_report_rerun_still_replays_count(tmp_path, monkeypatch, capsys):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    report = run_drc_klayout_engine(
+        *_assert_setup(tmp_path), expected_rule_categories=2
+    )
+    assert set(report["coverage_assertion"]) == {
+        "kind",
+        "expected",
+        "observed",
+        "satisfied",
+    }
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    code = main(["drc", "--check", str(report_path), "--rerun", "--format", "json"])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
 # Application-version preflight (issue #2689)
 # --------------------------------------------------------------------------- #
 

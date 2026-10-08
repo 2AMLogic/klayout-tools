@@ -1273,6 +1273,25 @@ of whether RDB categories exist: absent findings their status is
 correction to `coverage.rules_checked`; category declarations move to
 `coverage.rule_categories`.
 
+**Caller-vouched rule-category assertions** (issues #2697, #2806) are the one
+opt-in exception: the additive top-level `coverage_assertion` field, present
+only when the caller supplied an assertion, records which one was used and
+whether it held. Two variants, distinguished by `kind`:
+
+- `{"kind": "expected_rule_categories", "expected": <int>, "observed":
+  <int>, "satisfied": <bool>}` — `--expect-rule-categories N` (unchanged).
+- `{"kind": "expected_rule_category_names", "expected_names": [<str>],
+  "observed_names": [<str>], "missing_names": [<str>], "unexpected_names":
+  [<str>], "satisfied": <bool>}` — `--expect-rule-categories-file PATH`. All
+  name lists are sorted and deduplicated. This variant never carries the
+  integer `expected`/`observed` keys, so a consumer must dispatch on `kind`
+  rather than read `expected` blindly.
+
+A satisfied assertion of either kind marks the declared categories checked
+and clears the `unmeasured_rule_execution` sentinel; it is caller-supplied
+evidence, not proof of execution (see `docs/cli/drc.md`, "Engine" →
+`"klayout"`).
+
 `nothing_checked` and `nothing_checked_reasons` remain available. In a v1
 coverage block, zero means **known** zero actual checked work. It is not a
 synonym for partial, unknown, attempted, or inapplicable work. Real errored
