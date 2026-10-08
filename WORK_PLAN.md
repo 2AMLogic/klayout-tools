@@ -77,9 +77,7 @@ Issues carrying `loom:curated`.
 - **#2674**: netgen engine: property-error block header without a `class:index` colon is not parsed, so every per-parameter detail degrades to one opaque details.raw blob *(curated)*
 - **#2675**: Friction: klt yield reports lost censored/inconclusive keys, breaking 5 native-extension tests on main *(curated)*
 - **#2679**: decks/sg13g2: poly-resistor body/marker are inverted vs the PDK's own PCell convention, so no drawn rsil/rppd/rhigh is ever recognized *(curated)*
-- **#2686**: klt lvs / klt pex cannot override a deck's label purpose: --label-layer is klt extract-only *(curated)*
 - **#2688**: drc: curated sg13g2 Cnt.c drops the activ_mask join, so every HBT contact false-positives *(curated)*
-- **#2689**: drc --engine klayout: cannot use the bundled KLayout, and does not preflight the PATH one's DSL feature level *(curated)*
 - **#2690**: ring-check: no way to scope the layer set to the ring, so a shared layer can report continuous from unrelated geometry *(curated)*
 - **#2704**: lvs: a tie-net (or any interior-node) swap on a black-box macro still compares clean -- top-level pin anchoring cannot reach it *(curated)*
 - **#2716**: sim batch: document and regression-test adaptive single-probe campaigns *(curated)*
@@ -108,6 +106,10 @@ Issues carrying `loom:curated`.
 - **#2764**: pex: per-net parasitic RC network integrity report (opens, islands, short candidates, bad R, C delta) *(curated)*
 - **#2765**: pex: point-to-point resistance query over a net's RC network *(curated)*
 - **#2766**: ci: monotonic per-file size ratchet checked against the merge-base *(curated)*
+- **#2767**: ci: enforce verb-module import boundaries statically *(curated)*
+- **#2768**: drc: list deck rules and run a selected rule subset *(curated)*
+- **#2769**: lef-abstract: structural self-check of emitted LEF *(curated)*
+- **#2770**: Output-directory lock so concurrent agent runs can't interleave *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -138,7 +140,7 @@ Issues carrying `loom:curated`.
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 6 |
-| Curated | 53 |
+| Curated | 55 |
 | Architect / Hermit proposals | 5 |
 | Active epics | 8 |
 <!-- guide:plan-body:end -->
