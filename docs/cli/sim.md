@@ -750,6 +750,72 @@ A `batch` run's response fills the same additive `environment.remote` slot
 }
 ```
 
+### Failed jobs: output recovery and the diagnostic you get
+
+When a job reaches a terminal `failed`/`timeout` state with an exit code
+outside `klt sim`'s own `0`/`3`/`4`, the client makes **one bounded,
+collection-only attempt** to download `outputs/` and read `report.json`. It
+never resubmits or re-launches the job. The collected object is classified:
+
+| Collected `report.json` | Result |
+|---|---|
+| klt error envelope (`{"schema_version": 1, "error": {"command", "message"[, "code"]}}`, see [json-contract](../json-contract.md)) | Every requested corner is reported with the job's `batch_job_failed`/`batch_job_timeout` diagnostic whose `message` carries the runner's own `error.message`; `error.code`, when present, is attached as `runner_code`. |
+| Missing, invalid JSON, non-object, unrelated object, empty/invalid `corners`, or an ordinary report on a non-sim exit code | Existing fallback (`... without a usable report`), with a short `[output recovery: ...]` note saying why recovery found nothing. |
+| Download itself fails | Same fallback, the collection error is noted; the primary job failure is never replaced. |
+
+A `done` job (or exit 3/4) whose collection fails still raises as before. A
+`batch_poll_timeout` is not a terminal failure (the job may still be
+running), so no recovery is attempted. Raw logs are never copied into the
+JSON; use the retained artifacts below.
+
+**Note.** The generated job command redirects only *stdout* to
+`report.json`; klt writes its error envelope to *stderr*, which the harness
+merges into `harness.log`. Recovery therefore only finds an envelope when the
+runner left one in `report.json`; otherwise the fallback applies and the
+reason is in `harness.log` under the job's S3 prefix.
+
+### Getting the per-corner deck and ngspice log through klt
+
+Set `options.keep_artifacts: true` (and pass `--outdir DIR` to choose where
+they land). The job writes `artifacts/` inside its `outputs/`, klt downloads
+it, and each corner's `artifacts.deck` / `artifacts.log` point at the local
+copies under `DIR` (one `DIR/<job_id>/` subdirectory per shard when
+`hosts > 1`). This works for any run that produced a simulator report,
+including failed corners and exit-3/4 jobs.
+
+Limitations: if the job failed before ngspice ran (a validation error, a
+failed upload) no deck or log exists, so there is nothing to retrieve. In that
+case the diagnostic and `environment.remote` give `job_id` and `bucket`;
+the remaining evidence (`status.json`, `harness.log`, `outputs/`) lives at
+`s3://<bucket>/<jobs prefix>/<job_id>/`.
+
+### gf180 local-versus-batch troubleshooting checklist
+
+A gf180mcuD netlist was reported to simulate locally but fail on the fleet
+with `could not find a valid modelname` at a binned `nfet_03v3` instance
+(`W=300u L=6u nf=12`), while a single-device control (`W=10u L=1u`) worked.
+The cause is **not established**; treat the following as an investigation
+aid, not a diagnosis. Equal PDK commits, equal library hashes and an equal
+ngspice major version do not by themselves show the two executions are
+equivalent.
+
+1. Run with `options.keep_artifacts` locally and on `batch`; diff the
+   generated per-corner decks (`artifacts.deck`) and logs.
+2. Compare how every `.include`/`.lib` resolved: the expanded paths and
+   section names in each deck/log, and their order relative to the netlist.
+3. Compare the model inputs actually present on the job instance (the
+   staged closure under `options.stage_model_inputs`, or the image's PDK
+   tree) rather than the commit the request names.
+4. Compare simulator build identity (`environment.engine_version` plus the
+   full ngspice banner in the log) and any compatibility/init settings
+   (`.spiceinit`, `ngbehavior`) each side applied.
+5. Bisect the failing instance against the control: same deck with the
+   device at `W=300u L=6u nf=12` vs `W=10u L=1u`, to see which bin the
+   model selection depends on.
+
+Only a reproducible difference from these steps justifies a simulator or
+model change; none is made on the strength of the original report.
+
 **Prerequisites live in 2am, not here.** The batch AMI bake, the job
 bucket's `provision --apply`, the `batch-runner-submit` access key, and the
 scheduled `reconcile` timer are all 2am-side operator steps. The backend and

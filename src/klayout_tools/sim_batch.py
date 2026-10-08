@@ -1148,23 +1148,119 @@ def _job_failure_corners(
     measurements_spec: list[dict[str, Any]],
     status: dict[str, Any],
     job_id: str,
+    *,
+    runner_error: dict[str, Any] | None = None,
+    collection_note: str | None = None,
 ) -> list[dict[str, Any]]:
     """Every unit of a job that reached ``failed``/``timeout`` without
     writing a usable report, reported through the shared unrun-corner shape
     (``batch_job_failed``/``batch_job_timeout``) rather than aborting the
     sweep. The client never retries these: a genuine job failure is
     terminal, and an ``interrupted`` job (the only re-runnable state) is
-    2am's ``reconcile``'s business, not the client's."""
+    2am's ``reconcile``'s business, not the client's.
+
+    ``runner_error`` is the recovered ``error`` object of the job's own klt
+    error envelope (see :func:`_classify_collected_report`); its message is
+    appended to the diagnostic (its ``code``, when present, attached as
+    ``runner_code``) so the actionable reason is visible without S3 access.
+    ``collection_note`` records why recovery found nothing usable. Neither
+    replaces the primary job-failure code or the failed status."""
     state = str(status.get("state") or "")
     code = "batch_job_timeout" if state == "timeout" else "batch_job_failed"
     detail = str(status.get("detail") or "").strip()
-    message = f"batch job {job_id} finished {state!r} without a usable report" + (
-        f": {detail}" if detail else ""
-    )
-    return [
+    if runner_error is not None:
+        message = (
+            f"batch job {job_id} finished {state!r}"
+            + (f" ({detail})" if detail else "")
+            + f": the job's klt reported: {runner_error['message']}"
+        )
+    else:
+        message = f"batch job {job_id} finished {state!r} without a usable report" + (
+            f": {detail}" if detail else ""
+        )
+        if collection_note:
+            message += f" [output recovery: {collection_note}]"
+    corners = [
         _unrun_corner_report(point, measurements_spec, code, message=message)
         for point in corner_points
     ]
+    if runner_error is not None and runner_error.get("code"):
+        for corner in corners:
+            for diagnostic in corner.get("diagnostics") or []:
+                if diagnostic.get("code") == code:
+                    diagnostic["runner_code"] = runner_error["code"]
+    return corners
+
+
+def _classify_collected_report(
+    report: Any,
+) -> tuple[str, dict[str, Any] | None]:
+    """Classify one collected ``report.json`` object.
+
+    Returns ``("report", None)`` for an ordinary ``klt sim`` report (a
+    non-empty ``corners`` list of objects), ``("error", error)`` for a klt
+    error envelope (``{"schema_version", "error": {"command", "message"[,
+    "code"]}}`` -- docs/json-contract.md "Error shape"), and
+    ``("unusable", None)`` for anything else. Truthiness of ``corners`` is
+    deliberately not used to detect success."""
+    if not isinstance(report, dict):
+        return "unusable", None
+    corners = report.get("corners")
+    if (
+        isinstance(corners, list)
+        and corners
+        and all(isinstance(item, dict) for item in corners)
+    ):
+        return "report", None
+    error = report.get("error")
+    if (
+        "corners" not in report
+        and isinstance(error, dict)
+        and isinstance(error.get("message"), str)
+        and error["message"].strip()
+    ):
+        recovered: dict[str, Any] = {"message": error["message"].strip()}
+        if isinstance(error.get("code"), str):
+            recovered["code"] = error["code"]
+        return "error", recovered
+    return "unusable", None
+
+
+def _recover_failed_job_corners(
+    *,
+    config: BatchConfig,
+    job_id: str,
+    corner_points: list[CornerPoint],
+    measurements_spec: list[dict[str, Any]],
+    status: dict[str, Any],
+    runner: remote_transport.CommandRunner | None,
+) -> list[dict[str, Any]]:
+    """Bounded, collection-only recovery after a terminal job failure: one
+    outputs download and one read of ``report.json``. Never resubmits and
+    never raises -- a collection problem is recorded on the fallback
+    diagnostic while the primary job failure stays authoritative."""
+    runner_error: dict[str, Any] | None = None
+    note: str | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
+            collect_outputs(config, job_id, collected, runner=runner)
+            kind, runner_error = _classify_collected_report(
+                read_collected_report(collected)
+            )
+            if kind == "report":
+                note = "collected report is not a klt error envelope"
+            elif kind == "unusable":
+                note = "collected report has an unrecognized shape"
+    except BatchError as exc:
+        note = str(exc)
+    return _job_failure_corners(
+        corner_points,
+        measurements_spec,
+        status,
+        job_id,
+        runner_error=runner_error,
+        collection_note=note,
+    )
 
 
 def _poll_timeout_corners(
@@ -1262,7 +1358,14 @@ def _run_batch_job(
         _status_exit_code(status) not in _BATCH_SIM_SUCCESS_EXIT_CODES
     ):
         return (
-            _job_failure_corners(corner_points, measurements_spec, status, job_id),
+            _recover_failed_job_corners(
+                config=config,
+                job_id=job_id,
+                corner_points=corner_points,
+                measurements_spec=measurements_spec,
+                status=status,
+                runner=runner,
+            ),
             None,
             environment,
         )

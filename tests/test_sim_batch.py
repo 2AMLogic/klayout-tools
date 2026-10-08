@@ -1367,9 +1367,10 @@ def test_failed_job_reports_unrun_corners_not_a_raise(tmp_path, monkeypatch):
         "batch_job_failed"
     }
     assert environment["state"] == "failed"
-    # Never collected, never retried: a failed job is terminal for the client.
-    assert runner.argvs_matching("outputs/") == []
+    # Recovery is collection only; a failed job is never resubmitted.
     assert len(runner.argvs_matching("launch")) == 1
+    assert len(runner.argvs_matching("outputs/")) == 1
+    assert "output recovery" in corners[0]["diagnostics"][0]["message"]
 
 
 def test_timed_out_job_uses_its_own_diagnostic_code(tmp_path, monkeypatch):
@@ -1421,6 +1422,261 @@ def test_failed_job_with_a_sim_exit_code_still_collects_its_report(
     )
     assert engine_version == "46"
     assert [corner["corner_id"] for corner in corners] == ["tt_1.800_27"]
+
+
+def _run_failed_job(tmp_path, monkeypatch, runner, *, points=2, **overrides):
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    kwargs = dict(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(points),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+    kwargs.update(overrides)
+    return sb._run_batch_job(**kwargs)
+
+
+_RUNNER_REASON = "each request.measurements[] entry requires 'name' and 'spice'"
+
+
+def _envelope(message=_RUNNER_REASON, **error):
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "error": {"command": "sim", "message": message, **error},
+        }
+    )
+
+
+def test_failed_job_error_envelope_reaches_every_corner(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.outputs = {"report.json": _envelope(code="some_code")}
+
+    corners, engine_version, environment = _run_failed_job(
+        tmp_path, monkeypatch, runner, points=3
+    )
+
+    assert engine_version is None
+    assert len(corners) == 3
+    assert environment["job_id"] == "job-1"
+    assert environment["state"] == "failed"
+    for corner in corners:
+        assert corner["status"] == "error"
+        diagnostic = corner["diagnostics"][0]
+        assert diagnostic["code"] == "batch_job_failed"
+        assert diagnostic["runner_code"] == "some_code"
+        assert _RUNNER_REASON in diagnostic["message"]
+        assert "job-1" in diagnostic["message"]
+    assert len(runner.argvs_matching("launch")) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        "{not json",
+        "[1, 2]",
+        '"text"',
+        '{"unrelated": true}',
+        '{"corners": []}',
+        '{"corners": "x"}',
+        '{"corners": [1]}',
+        '{"error": "boom"}',
+        '{"error": {"message": ""}}',
+        '{"error": {"message": 5}}',
+    ],
+)
+def test_failed_job_without_a_usable_report_keeps_the_fallback(
+    tmp_path, monkeypatch, payload
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.outputs = {} if payload is None else {"report.json": payload}
+
+    corners, _, environment = _run_failed_job(tmp_path, monkeypatch, runner)
+
+    assert [corner["status"] for corner in corners] == ["error", "error"]
+    assert [corner["corner_id"] for corner in corners] == [
+        "tt/1.800V/0C",
+        "tt/1.800V/1C",
+    ]
+    for corner in corners:
+        diagnostic = corner["diagnostics"][0]
+        assert diagnostic["code"] == "batch_job_failed"
+        assert "without a usable report" in diagnostic["message"]
+        assert "runner_code" not in diagnostic
+    assert environment["state"] == "failed"
+    assert len(runner.argvs_matching("launch")) == 1
+
+
+def test_failed_job_ordinary_report_on_exit_1_is_not_a_pass(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="1"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    corners, engine_version, _ = _run_failed_job(
+        tmp_path, monkeypatch, runner, points=1
+    )
+
+    assert engine_version is None
+    assert corners[0]["status"] == "error"
+    assert corners[0]["diagnostics"][0]["code"] == "batch_job_failed"
+
+
+def test_collection_failure_on_a_failed_job_preserves_the_primary_failure(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.queue("outputs/", fake_completed(returncode=1, stderr="AccessDenied"))
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner)
+
+    assert len(corners) == 2
+    for corner in corners:
+        diagnostic = corner["diagnostics"][0]
+        assert diagnostic["code"] == "batch_job_failed"
+        assert "job command exited 1" in diagnostic["message"]
+        assert "output recovery" in diagnostic["message"]
+
+
+def test_collection_failure_on_a_done_job_still_raises(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.queue("outputs/", fake_completed(returncode=1, stderr="AccessDenied"))
+
+    with pytest.raises(sb.BatchError):
+        _run_failed_job(tmp_path, monkeypatch, runner)
+
+
+def test_timed_out_job_recovers_an_envelope_but_keeps_its_code(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("timeout", exit_code="124"))
+    runner.outputs = {"report.json": _envelope("ran out of time")}
+
+    corners, _, environment = _run_failed_job(tmp_path, monkeypatch, runner, points=1)
+
+    assert corners[0]["diagnostics"][0]["code"] == "batch_job_timeout"
+    assert "ran out of time" in corners[0]["diagnostics"][0]["message"]
+    assert environment["state"] == "timeout"
+
+
+def test_poll_timeout_does_not_attempt_recovery(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+    runner.outputs = {"report.json": _envelope()}
+
+    corners, _, environment = _run_failed_job(
+        tmp_path, monkeypatch, runner, config=_config(tmp_path, poll_timeout_s=0.0)
+    )
+
+    assert corners[0]["diagnostics"][0]["code"] == "batch_poll_timeout"
+    assert environment["state"] == "running"
+    assert runner.argvs_matching("outputs/") == []
+
+
+def test_failed_exit_3_report_keeps_retained_artifacts_after_cleanup(
+    tmp_path, monkeypatch
+):
+    report = json.loads(_sim_report())
+    report["corners"][0]["status"] = "error"
+    report["corners"][0]["artifacts"] = {
+        "log": "/var/tmp/eda-x/outputs/artifacts/tt_1.800_27.log",
+        "raw": None,
+        "waveform": None,
+        "deck": "/var/tmp/eda-x/outputs/artifacts/tt_1.800_27.cir",
+    }
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    runner.outputs = {
+        "report.json": json.dumps(report),
+        "artifacts/tt_1.800_27.log": "ngspice log",
+        "artifacts/tt_1.800_27.cir": "* deck",
+    }
+    artifacts_dir = tmp_path / "artifacts"
+
+    corners, engine_version, _ = _run_failed_job(
+        tmp_path,
+        monkeypatch,
+        runner,
+        points=1,
+        keep_artifacts=True,
+        artifacts_dir=str(artifacts_dir),
+    )
+
+    assert engine_version == "46"
+    log = Path(corners[0]["artifacts"]["log"])
+    deck = Path(corners[0]["artifacts"]["deck"])
+    assert log.parent == artifacts_dir and log.read_text() == "ngspice log"
+    assert deck.read_text() == "* deck"
+
+
+def test_mixed_shards_keep_per_shard_diagnostics_and_artifacts(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.queue("job-b/status.json", fake_completed(_status("failed", exit_code="1")))
+    ids = iter(["job-a", "job-b"])
+    monkeypatch.setattr(sb, "new_job_id", lambda: next(ids))
+    good = json.loads(_sim_report(corner_ids=("tt_1.800_0",)))
+    good["corners"][0]["artifacts"] = {
+        "log": "/var/tmp/eda-a/outputs/artifacts/tt_1.800_0.log",
+        "raw": None,
+        "waveform": None,
+        "deck": None,
+    }
+    runner.outputs_by_job = {
+        "job-a": {
+            "report.json": json.dumps(good),
+            "artifacts/tt_1.800_0.log": "shard a log",
+        },
+        "job-b": {"report.json": _envelope()},
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    artifacts_dir = tmp_path / "artifacts"
+
+    corners, _, environment = sb._run_batch_fleet(
+        corner_points=_corner_points(2),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=True,
+        want_waveforms=False,
+        artifacts_dir=str(artifacts_dir),
+        request={
+            "netlist": "body.spice",
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0.0,
+            },
+        },
+        hosts=2,
+        measurements_spec=_measurements_spec(),
+    )
+
+    assert [c["corner_id"] for c in corners][0] == "tt_1.800_0"
+    assert corners[0]["diagnostics"] == []
+    log = Path(corners[0]["artifacts"]["log"])
+    assert log == artifacts_dir / "job-a" / "tt_1.800_0.log"
+    assert log.read_text() == "shard a log"
+    failed = corners[1]["diagnostics"][0]
+    assert failed["code"] == "batch_job_failed"
+    assert _RUNNER_REASON in failed["message"]
+    assert len(environment["fleet"]) == 2
 
 
 def test_poll_budget_overrun_reports_unrun_corners(tmp_path, monkeypatch):
