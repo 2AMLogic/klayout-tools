@@ -595,6 +595,7 @@ What differs from `remote` is *who acquires the machine*:
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
+| `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`); see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 
 ### Capacity refusal and `batch_no_capacity`
@@ -751,9 +752,65 @@ A `batch` run's response fills the same additive `environment.remote` slot
   "exit_code": "0",
   "concurrency": "2",
   "physical_cores": "8",
-  "elapsed_seconds": 412
+  "elapsed_seconds": 412,
+  "runner_klt_version": "0.9.0",
+  "client_klt_version": "0.9.0",
+  "runner_compatibility": "match"
 }
 ```
+
+### Runner/client `klt` version skew ([#2719](https://github.com/2AMLogic/klayout-tools/issues/2719))
+
+The job runs the `klt` baked into the fleet image, which can be older than the
+submitting client. An older runner fails loudly on some newer request fields
+but silently ignores others (for example `options.ngspice_init`), so the same
+request could run with different simulator settings than a local run and still
+report a pass. Policy: **reject before simulating**.
+
+- Every job command starts with a client-generated shell preflight that uses
+  only `klt --version` (so it works on images that predate any new request
+  key). It records the runner's build string in `outputs/runner_identity.json`
+  and compares it with the client's `klt --version` by **exact string
+  equality**. Anything else is not treated as compatible: a numerically newer
+  runner, a development build (`+g<sha>`, `.dirty`, `+unknown`) against a
+  release, or an unparseable/absent version.
+- On a mismatch (`batch_runner_version_mismatch`) or an unreadable runner
+  version (`batch_runner_version_unknown`) the preflight writes a klt error
+  envelope to `report.json` and exits `87` **without running `klt sim`**. The
+  client recovers it through the normal failed-job path, so every unit gets a
+  `batch_job_failed` diagnostic with `runner_code` set to the code above, the
+  runner's message, and `runner_klt_version` / `client_klt_version`.
+- `environment.remote` (and each `environment.remote.fleet[]` entry for
+  `hosts > 1`, so mixed-version shards stay distinguishable) always carries
+  `runner_klt_version` (the runner's own version, or `null` when it could not
+  be established -- never the client's), `client_klt_version`, and
+  `runner_compatibility` (`match` / `mismatch` / `unknown`). A non-`match`
+  value also carries `runner_compatibility_warning`. The report's
+  `provenance.klt_version` stays the client's.
+- `batch.runner_version_check` (`"enforce"`, default, or `"warn"`) selects the
+  behavior. `warn` runs the simulation anyway and only reports the skew in
+  `environment.remote`; use it deliberately (for example a development client
+  against a release image), because it is detection after execution and does
+  not guarantee request options were honored.
+
+```json
+"remote": {
+  "provider": "aws-batch-fleet",
+  "job_id": "klt-sim-4f2b19c0ae31",
+  "state": "failed",
+  "exit_code": "87",
+  "runner_klt_version": "0.4.2",
+  "client_klt_version": "0.9.0",
+  "runner_compatibility": "mismatch",
+  "runner_compatibility_warning": "the fleet runner ran klt 0.4.2 but the submitting client is 0.9.0; ..."
+}
+```
+
+Limits: version identity does not prove equivalent behavior between two
+differently built copies that share one version string. **Remediation:**
+update the runner image to the client's `klt` build, or submit from a client
+matching the image. Jobs that never reach a terminal state (`batch_poll_timeout`)
+report `runner_klt_version: null` and `runner_compatibility: "unknown"`.
 
 ### Failed jobs: output recovery and the diagnostic you get
 

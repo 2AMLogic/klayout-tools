@@ -2547,3 +2547,328 @@ def test_sequential_single_unit_probes_adapt_to_the_collected_result(
     ]
     assert len(collects) == len(uploads) == 2
     assert collects[0] < uploads[1]
+
+
+# --------------------------------------------------------------------------- #
+# Runner/client klt version skew (issue #2719)
+# --------------------------------------------------------------------------- #
+
+_CLIENT_VERSION = "0.9.0"
+_INIT_LINES = ["set ngbehavior=hsa", "option klu"]
+
+
+def _identity(runner_version) -> str:
+    return json.dumps(
+        {"runner_klt_version": runner_version, "client_klt_version": _CLIENT_VERSION}
+    )
+
+
+def _pin_client_version(monkeypatch, version: str = _CLIENT_VERSION) -> None:
+    monkeypatch.setattr(sb._provenance, "_klt_version", lambda: version)
+
+
+def _run_one_job(tmp_path, monkeypatch, runner, **overrides):
+    _pin_client_version(monkeypatch)
+    return _run_failed_job(tmp_path, monkeypatch, runner, points=1, **overrides)
+
+
+def test_matching_runner_version_reports_match_and_keeps_both_identities(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {
+        "report.json": _sim_report(),
+        "runner_identity.json": _identity(_CLIENT_VERSION),
+    }
+    corners, engine_version, environment = _run_one_job(tmp_path, monkeypatch, runner)
+
+    assert [c["corner_id"] for c in corners] == ["tt_1.800_27"]
+    assert engine_version == "46"
+    assert environment["runner_klt_version"] == _CLIENT_VERSION
+    assert environment["client_klt_version"] == _CLIENT_VERSION
+    assert environment["runner_compatibility"] == "match"
+    assert "runner_compatibility_warning" not in environment
+    assert environment["job_id"] == "job-1"  # existing fields untouched
+
+
+def test_different_runner_version_is_reported_not_replaced_by_client(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {
+        "report.json": _sim_report(),
+        "runner_identity.json": _identity("0.4.2"),
+    }
+    _, _, environment = _run_one_job(tmp_path, monkeypatch, runner)
+
+    assert environment["runner_klt_version"] == "0.4.2"
+    assert environment["client_klt_version"] == _CLIENT_VERSION
+    assert environment["runner_compatibility"] == "mismatch"
+    assert "0.4.2" in environment["runner_compatibility_warning"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        "{not json",
+        "[1]",
+        '{"runner_klt_version": null}',
+        '{"runner_klt_version": ""}',
+        '{"runner_klt_version": 5}',
+    ],
+)
+def test_absent_or_malformed_runner_identity_is_explicitly_unknown(
+    tmp_path, monkeypatch, payload
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    if payload is not None:
+        runner.outputs["runner_identity.json"] = payload
+    _, _, environment = _run_one_job(tmp_path, monkeypatch, runner)
+
+    assert environment["runner_klt_version"] is None  # never the client's
+    assert environment["client_klt_version"] == _CLIENT_VERSION
+    assert environment["runner_compatibility"] == "unknown"
+    assert "runner_compatibility_warning" in environment
+
+
+def test_preflight_rejection_surfaces_a_structured_diagnostic(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="87", detail="job command exited 87")
+    )
+    runner.outputs = {
+        "report.json": _envelope(
+            "the fleet runner runs klt 0.4.2 but the submitting client is 0.9.0",
+            code=sb.BATCH_RUNNER_MISMATCH_CODE,
+        ),
+        "runner_identity.json": _identity("0.4.2"),
+    }
+    corners, engine_version, environment = _run_one_job(tmp_path, monkeypatch, runner)
+
+    assert engine_version is None
+    diagnostic = corners[0]["diagnostics"][0]
+    assert corners[0]["status"] == "error"
+    assert diagnostic["code"] == "batch_job_failed"
+    assert diagnostic["runner_code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+    assert diagnostic["runner_klt_version"] == "0.4.2"
+    assert diagnostic["client_klt_version"] == _CLIENT_VERSION
+    assert environment["runner_compatibility"] == "mismatch"
+    assert environment["runner_klt_version"] == "0.4.2"
+
+
+def test_poll_timeout_environment_marks_runner_identity_unknown(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+    _pin_client_version(monkeypatch)
+    _, _, environment = _run_failed_job(
+        tmp_path,
+        monkeypatch,
+        runner,
+        points=1,
+        config=_config(tmp_path, poll_timeout_s=0.0),
+    )
+    assert environment["runner_klt_version"] is None
+    assert environment["runner_compatibility"] == "unknown"
+
+
+def test_mixed_version_shards_keep_each_runner_identity(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch)
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    versions = {"0": _CLIENT_VERSION, "1": "0.4.2"}
+
+    def _register(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
+            document = json.loads(Path(source).read_text())
+            points = document["_explicit_points"]
+            first = int(points[0]["temperature_c"])
+            runner.outputs_by_job[job_id_of(destination)] = {
+                "report.json": _sim_report(
+                    corner_ids=tuple(
+                        f"tt_1.800_{int(p['temperature_c'])}" for p in points
+                    )
+                ),
+                # shard holding unit 0 runs a matching runner, the other an old one
+                "runner_identity.json": _identity(versions["0" if first == 0 else "1"]),
+            }
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _register)
+    corners, _, environment = sb._run_batch_fleet(
+        corner_points=_corner_points(3),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={
+            "netlist": "body.spice",
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0.0,
+            },
+        },
+        hosts=2,
+        measurements_spec=_measurements_spec(),
+    )
+    assert [c["corner_id"] for c in corners] == [
+        "tt_1.800_0",
+        "tt_1.800_1",
+        "tt_1.800_2",
+    ]
+    fleet = environment["fleet"]
+    assert [e["runner_compatibility"] for e in fleet] == ["match", "mismatch"]
+    assert [e["runner_klt_version"] for e in fleet] == [_CLIENT_VERSION, "0.4.2"]
+
+
+def test_runner_version_check_setting_is_validated_before_any_s3_write(tmp_path):
+    request = _batch_request(tmp_path)
+    request["batch"]["runner_version_check"] = "ignore"
+    with pytest.raises(sim.SimError, match="runner_version_check"):
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    request["batch"]["runner_version_check"] = "warn"
+    assert (
+        sb._resolve_batch_config(
+            request, corner_count=1, timeout_s=30.0
+        ).runner_version_check
+        == "warn"
+    )
+
+
+def test_forwarded_request_keeps_ngspice_init_lines_unchanged(tmp_path):
+    spec = sb._build_batch_job_spec(
+        {"models": {}, "options": {"ngspice_init": list(_INIT_LINES)}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+        client_version=_CLIENT_VERSION,
+    )
+    uploaded = next(i for i in spec.inputs if i.name == sb.BATCH_REQUEST_FILENAME)
+    assert json.loads(uploaded.content)["options"]["ngspice_init"] == _INIT_LINES
+
+
+def _run_job_cmd_with_fake_klt(tmp_path, spec, klt_script):
+    """Execute the generated job command under `bash -c` with a fake `klt`
+    on PATH; return (CompletedProcess, out_dir, sim_marker)."""
+    import shutil
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    marker = tmp_path / "sim-ran"
+    if klt_script is not None:
+        klt = bin_dir / "klt"
+        klt.write_text(klt_script.replace("@MARKER@", str(marker)))
+        klt.chmod(0o755)
+    proc = subprocess.run(
+        [bash, "-c", spec.cmd],
+        env={
+            "EDA_OUTPUT_DIR": str(out_dir),
+            "EDA_INPUT_DIR": str(tmp_path),
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+        },
+        capture_output=True,
+        text=True,
+    )
+    return proc, out_dir, marker
+
+
+def _fake_klt(version_line: str) -> str:
+    return (
+        "#!/bin/bash\n"
+        f'if [ "$1" = "--version" ]; then echo "{version_line}"; exit 0; fi\n'
+        'touch "@MARKER@"; echo \'{"corners": []}\'; exit 0\n'
+    )
+
+
+def _init_spec(tmp_path, **kwargs):
+    return sb._build_batch_job_spec(
+        {"models": {}, "options": {"ngspice_init": list(_INIT_LINES)}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=True,
+        client_version=_CLIENT_VERSION,
+        **kwargs,
+    )
+
+
+def test_old_runner_is_rejected_before_the_simulation_starts(tmp_path):
+    """The original reproduction shape: an old runner `klt` that would accept
+    (and silently ignore) `options.ngspice_init`. The preflight must skip the
+    simulation and leave a structured envelope the client can recover."""
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _init_spec(tmp_path), _fake_klt("klt 0.4.2")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()  # `klt sim` never ran
+    envelope = json.loads((out_dir / "report.json").read_text())
+    kind, error = sb._classify_collected_report(envelope)
+    assert kind == "error"
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+    assert "0.4.2" in error["message"] and _CLIENT_VERSION in error["message"]
+    assert (
+        json.loads((out_dir / "runner_identity.json").read_text())["runner_klt_version"]
+        == "0.4.2"
+    )
+
+
+def test_runner_without_a_readable_version_is_rejected_as_unknown(tmp_path):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _init_spec(tmp_path), None
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_UNKNOWN_CODE
+    assert (
+        json.loads((out_dir / "runner_identity.json").read_text())["runner_klt_version"]
+        is None
+    )
+
+
+def test_matching_runner_proceeds_to_the_simulation(tmp_path):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _init_spec(tmp_path), _fake_klt(f"klt {_CLIENT_VERSION}")
+    )
+    assert proc.returncode == 0
+    assert marker.exists()
+    assert json.loads((out_dir / "report.json").read_text()) == {"corners": []}
+    assert (
+        json.loads((out_dir / "runner_identity.json").read_text())["runner_klt_version"]
+        == _CLIENT_VERSION
+    )
+
+
+def test_warn_mode_runs_the_simulation_despite_skew(tmp_path):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _init_spec(tmp_path, version_check="warn"), _fake_klt("klt 0.4.2")
+    )
+    assert proc.returncode == 0
+    assert marker.exists()
+    assert (
+        json.loads((out_dir / "runner_identity.json").read_text())["runner_klt_version"]
+        == "0.4.2"
+    )
+
+
+def test_hostile_runner_version_output_cannot_break_the_envelope(tmp_path):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _init_spec(tmp_path), _fake_klt('klt 1.0" ; touch x ; "')
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    json.loads((out_dir / "report.json").read_text())  # still valid JSON
+    json.loads((out_dir / "runner_identity.json").read_text())
