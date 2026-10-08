@@ -110,6 +110,7 @@ from typing import Any
 
 from ..design_evidence_tiers import DesignEvidenceTiersError
 from ..signoff import (
+    _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     SignoffError,
     _read_json_source,
     build_fleet_report,
@@ -413,6 +414,36 @@ def _print_input_verified(citation: dict) -> None:
     print(f"        input: {statement}")
 
 
+def _print_artifact_binding(item: dict, citation: dict) -> None:
+    """Print what a met item 1/2/9/10 citation is actually bound to (issue
+    #2718), or nothing for every other item.
+
+    An artifact-anchored generic citation names the audited artifact; a
+    native citation for one of these four is a passing envelope the grader
+    could not judge for relevance, and says so -- the two otherwise render
+    as identical ``MET`` rows.
+    """
+    if item.get("tier") != "T1" or (
+        item.get("id") not in _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
+    ):
+        return
+    binding = citation.get("artifact_binding")
+    if binding:
+        path = binding.get("path")
+        if isinstance(path, dict):
+            path = path.get("path")
+        print(
+            f"        bound: T1 item #{binding.get('t1_item')} -> {path} "
+            f"(content_hash={binding.get('content_hash')})"
+        )
+        return
+    print(
+        f"        topic: not bound -- a passing {citation.get('kind')} envelope "
+        "satisfies this item, but klt signoff cannot judge its relevance "
+        "(cite an artifact-anchored generic envelope to bind it)"
+    )
+
+
 def _print_power_delivery(citation: dict) -> None:
     """Print T1 item 11's compound-citation summary (issue #2025), or
     nothing at all for every other item's single-artifact citation.
@@ -639,6 +670,8 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # against another claim are otherwise indistinguishable to a
             # reader. Disclosure only -- the verdict above is unaffected.
             _print_input_verified(citation)
+            # Issue #2718: items 1/2/9/10 -- bound artifact, or "not bound".
+            _print_artifact_binding(item, citation)
             # Issue #2002: a `drc` citation's own coverage statement, shown
             # beside the "clean" it qualifies -- item 3's doc text requires
             # the claim to disclose these, and `klt signoff` does not grade

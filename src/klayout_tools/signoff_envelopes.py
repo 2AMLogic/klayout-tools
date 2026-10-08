@@ -263,6 +263,11 @@ class _GenericRequired(_EnvelopeCommon):
 class _GenericEnvelope(_GenericRequired, total=False):
     summary: Any
     source: Any
+    # Issue #2718: the T1 item this attestation is for -- required (and must
+    # match) when the citation is graded for an artifact-anchored item (1, 2,
+    # 9, 10); optional otherwise. Optional here, so not type-checked at the
+    # envelope boundary -- the grader refuses a malformed value itself.
+    t1_item: Any
     metrics: dict[str, Any]
     provenance: dict[str, Any] | None
 

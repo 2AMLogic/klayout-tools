@@ -238,7 +238,10 @@ independently of the existing :data:`_ITEM_ALLOWED_KINDS` mechanism (item
 ``"met"`` grading on a ``"generic"``-kind citation to ``"unmet"``/
 ``"wrong_kind"`` for every item *not* in that set, regardless of whether
 ``allowed_kinds`` would otherwise have accepted it. Today the set is
-``{8}`` -- the one T1 item whose own checklist text names no `klt` verb.
+``{8}`` -- the one T1 item whose own checklist text names no `klt` verb
+(issue #2718 later added items 1, 2, 9 and 10, but only for an
+artifact-anchored generic citation -- see "Artifact-anchored generic
+evidence" below).
 Items 3-7 (DRC, LVS, corner verification, Monte Carlo, post-layout) reject a
 ``"generic"`` citation unconditionally, the same ``"wrong_kind"`` outcome
 item 7 already renders for any non-``pex`` citation; this phase did not
@@ -415,16 +418,34 @@ changes is only whether an `extract` citation (or any other wrong-kind one)
 can satisfy a *numbered tier item*.
 
 **Items 1, 2, 9 and 10 are deliberately left unrestricted.** Unlike items
-3-8 they name no evidence at all -- ``docs/design-evidence-tiers.md`` says
-so outright ("items **1**, **2**, **9**, and **10** have none ... Citing
-them honestly is the claimant's responsibility, not something the tool
-verifies"), and ``docs/cli/signoff.md``'s "Items 1, 2, 9, and 10" section
-states the grading consequence plainly: any recognised, passing native kind
-satisfies them, topical relevance included. Excluding ``extract`` there
-specifically would be arbitrary -- a `klt drc` citation for item 9
-("Testbenches shipped") is exactly as irrelevant and still counts by
-design. Binding those four to real evidence needs an artifact for them to
-bind *to*, which is a separate question from this one.
+3-8 they name no `klt` verb at all, and ``docs/cli/signoff.md``'s "Items
+1, 2, 9, and 10" section states the grading consequence plainly: any
+recognised, passing native kind satisfies them, topical relevance
+included. Excluding ``extract`` there specifically would be arbitrary -- a
+`klt drc` citation for item 9 ("Testbenches shipped") is exactly as
+irrelevant and still counts by design. Binding those four to real evidence
+needs an artifact for them to bind *to* -- see the next section.
+
+## Artifact-anchored generic evidence for items 1, 2, 9 and 10 (issue #2718)
+
+A passing native envelope cited for one of these four carries no
+information about the item, so this phase gives them a way to be evidenced
+that the grader *can* read: an opt-in ``"generic"`` envelope that declares
+which item it attests (``"t1_item": <id>``) and pins the audited artifact
+(``provenance.input.path`` + ``provenance.input.content_hash``, issue
+#2403's opt-in fields), cited by a manifest entry that pins the same
+``content_hash``. :data:`_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE`
+documents the four conditions; :func:`_generic_item_binding_refusal` and
+:func:`_grade_evidence` enforce them, and the ``"met"`` citation carries an
+``artifact_binding`` block disclosing the bound artifact.
+
+Strictly additive: a native citation for these items grades exactly as it
+did before (and carries no ``artifact_binding``, which is how a reader tells
+"a passing envelope was cited" apart from "the item is bound to an audited
+artifact"); items 3-7 and 11 still reject ``"generic"``; item 8 accepts a
+generic envelope with no ``t1_item`` exactly as before, and refuses one that
+declares a different item (:data:`_REASON_WRONG_ITEM`), so an anchored
+attestation for item 9 cannot be replayed onto item 8 either.
 
 ## Power delivery (structural): item 11 <- `klt erc` + `klt lvs` (+ P&R) (issue #2025)
 
@@ -1111,12 +1132,49 @@ _ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE: frozenset[int] = frozenset({7})
 #: ``"generic"`` citation for any item *not* in this set is always
 #: downgraded to ``"unmet"``/``"wrong_kind"``, even for an item that would
 #: otherwise accept any recognised native kind (``allowed_kinds is None``).
-#: Today this is only item 8 ("Characterization report") -- every other
-#: item's checklist text names a concrete `klt` verb (`klt
-#: drc`/`lvs`/sim/yield/pex) or a repo-state artifact no envelope, native or
-#: generic, could ever stand in for (items 1, 2, 9, 10), so none of them
-#: opt in.
-_ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({8})
+#: Item 8 ("Characterization report") was the only member until issue
+#: #2718; items 3-7 name a concrete `klt` verb (`klt
+#: drc`/`lvs`/sim/yield/pex) and still never accept ``"generic"``.
+#:
+#: Issue #2718 adds items 1, 2, 9 and 10 -- the repo-state items no `klt`
+#: verb can check -- but **only** through the stricter, artifact-anchored
+#: form :data:`_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE` defines: a bare
+#: "yep, it's fine" generic record still cannot satisfy them.
+_ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 8, 9, 10})
+
+#: T1 item ids that accept a ``"generic"`` citation **only when it is
+#: artifact-anchored** (issue #2718) -- items 1 (Design sources), 2 (Layout),
+#: 9 (Testbenches shipped) and 10 (Repo hygiene). For these four a generic
+#: citation renders ``"met"`` only when all of the following hold, checked
+#: in :func:`_generic_item_binding_refusal` and :func:`_grade_evidence`:
+#:
+#: 1. the envelope declares ``"t1_item": <this item's id>`` -- so one
+#:    attestation can never be replayed across items
+#:    (:data:`_REASON_WRONG_ITEM` on a mismatch);
+#: 2. the envelope names the audited artifact in
+#:    ``provenance.input.path`` and records its
+#:    ``provenance.input.content_hash`` (issue #2403's opt-in fields);
+#: 3. the manifest entry pins that same ``content_hash`` (the existing
+#:    staleness gate -- :data:`_REASON_STALE_EVIDENCE` /
+#:    :data:`_REASON_UNVERIFIABLE_PROVENANCE`);
+#: 4. the named artifact actually re-hashes to it from the grading context
+#:    (``input_verified is True``, issue #2196) -- ``False`` renders
+#:    :data:`_REASON_STALE_EVIDENCE`, ``None`` (not found/readable here)
+#:    renders :data:`_REASON_UNVERIFIABLE_PROVENANCE`.
+#:
+#: A missing or malformed piece of 1-3 renders
+#: :data:`_REASON_UNANCHORED_EVIDENCE`. The met citation then carries an
+#: ``artifact_binding`` block disclosing what was bound.
+#:
+#: Deliberately **not** in :data:`_ITEM_ALLOWED_KINDS`: these four still
+#: accept any passing native envelope exactly as before (no verdict any
+#: existing manifest renders changes), and so stay "structurally
+#: ungradeable" for the fleet roll-up's blocker reduction
+#: (:func:`_is_structurally_ungradeable_item`). The absence of
+#: ``artifact_binding`` on such a citation is what tells a reader the row
+#: was satisfied by a passing envelope the grader could not judge for
+#: relevance, rather than by an item-bound artifact.
+_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 9, 10})
 
 #: T1 item ids a ``"power"``-kind citation (issue #1321, see this module's
 #: "`klt power` (IR-drop/EM) evidence ingestion" docstring section) may
@@ -1630,6 +1688,25 @@ _REASON_ENVELOPE_VERSION_SKEW = "envelope_version_skew"
 #: compound item-11 citation depends on instead of the manifest's pinned
 #: ``content_hash``.
 _REASON_UNVERIFIABLE_PROVENANCE = "unverifiable_provenance"
+
+#: Issue #2718: a passing ``"generic"`` citation for one of the
+#: artifact-anchored items (:data:`_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE`
+#: -- 1, 2, 9, 10) that does not carry the binding those items require: the
+#: envelope declares no ``t1_item`` (or a non-integer one), names no
+#: ``provenance.input.path``, or the manifest entry pins no
+#: ``content_hash``. Nothing ties the attestation to an audited artifact,
+#: so its ``status: "pass"`` is the caller's word alone. Grouped with the
+#: "no runnable check" reasons: the remedy is to anchor the citation, not
+#: to re-run anything.
+_REASON_UNANCHORED_EVIDENCE = "unanchored_evidence"
+
+#: Issue #2718: a passing ``"generic"`` citation whose envelope declares a
+#: ``t1_item`` other than the item it is cited for -- an attestation
+#: replayed across items. Checked for every item that accepts
+#: ``"generic"`` at all (:data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE`,
+#: including item 8); an item-8 envelope that declares no ``t1_item`` is
+#: unaffected, exactly as before.
+_REASON_WRONG_ITEM = "wrong_item"
 
 #: Issue #2342: the evidence entry carried a ``"pointer"`` (an RFC 6901 JSON
 #: Pointer naming where inside the cited document the envelope lives -- see
@@ -5187,6 +5264,7 @@ def _grade_evidence(
     *,
     require_post_layout: bool = False,
     allowed_kinds: set[str] | None = None,
+    item_id: int | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
     and return ``(status, reason, citation, failure_detail)``.
@@ -5271,6 +5349,14 @@ def _grade_evidence(
     above, and skipped entirely for any envelope that makes no such
     statement (including every envelope predating the convention). See this
     module's "Vacuous-verdict refusal" docstring section.
+
+    **Generic item binding** (issue #2718): ``item_id`` is the T1 item being
+    graded (``None`` outside :func:`_build_tier_item`). A passing
+    ``"generic"`` citation for an item that accepts that kind must not
+    declare a different ``t1_item`` (:data:`_REASON_WRONG_ITEM`), and for an
+    item in :data:`_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE` must be
+    artifact-anchored (:data:`_REASON_UNANCHORED_EVIDENCE` otherwise) and its
+    named artifact must re-hash to the pinned hash -- see that constant.
     """
     resolution, reason = _resolve_evidence(spec)
     if resolution is None:
@@ -5318,13 +5404,147 @@ def _grade_evidence(
         )
         return "unmet", kind_gated, None, failure_detail
 
+    # Issue #2718: a generic citation's declared item identity and, for the
+    # artifact-anchored items, its artifact binding -- checked only for an
+    # item that accepts "generic" at all, so items 3-7/11 keep rendering
+    # `wrong_kind` from `_build_tier_item`'s opt-in gate exactly as before.
+    binding_refusal = _generic_item_binding_refusal(check_kind, item_id, envelope, spec)
+    if binding_refusal is not None:
+        return "unmet", binding_refusal, None, {}
+
     expected_hash = spec.get("content_hash")
     if expected_hash is not None and resolution["content_hash"] != expected_hash:
         if resolution["content_hash"] is None:
             return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
-    return "met", None, _citation(resolution), {}
+    citation = _citation(resolution)
+    anchored_refusal = _bind_anchored_citation(
+        check_kind, item_id, resolution, citation
+    )
+    if anchored_refusal is not None:
+        return "unmet", anchored_refusal, None, {}
+    return "met", None, citation, {}
+
+
+def _bind_anchored_citation(
+    check_kind: str,
+    item_id: int | None,
+    resolution: Mapping[str, Any],
+    citation: dict[str, Any],
+) -> str | None:
+    """For a ``"generic"`` citation of an artifact-anchored item (issue
+    #2718), require the bound artifact to re-hash to the recorded hash and
+    attach ``citation["artifact_binding"]`` -- or return the refusing
+    reason. A no-op (``None``) for every other kind/item.
+
+    By the time this runs the manifest pin has matched the envelope's own
+    claim; for an anchored item that claim must also hold against the
+    artifact itself (issue #2196's re-hash), or the binding is only one
+    self-report deep. ``False`` (re-hashed, differs) is
+    :data:`_REASON_STALE_EVIDENCE`; ``None`` (nothing could be re-hashed
+    from here) is :data:`_REASON_UNVERIFIABLE_PROVENANCE`.
+    """
+    if check_kind != "generic" or item_id not in (
+        _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
+    ):
+        return None
+    input_verified = resolution.get("input_verified")
+    if input_verified is False:
+        return _REASON_STALE_EVIDENCE
+    if input_verified is not True:
+        return _REASON_UNVERIFIABLE_PROVENANCE
+    citation["artifact_binding"] = _generic_artifact_binding(
+        resolution["envelope"], resolution
+    )
+    return None
+
+
+def _generic_binding_path(envelope: Mapping[str, Any]) -> Any:
+    """The ``provenance.input.path`` a generic envelope names, or ``None``
+    when it names no usable one -- a non-empty string, or a ``{path,
+    scope: "repo"}`` object (``scope: "external"`` carries no resolvable
+    path by design)."""
+    provenance = envelope.get("provenance")
+    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    path = input_block.get("path") if isinstance(input_block, Mapping) else None
+    if isinstance(path, str) and path:
+        return path
+    if isinstance(path, Mapping) and path.get("scope") == "repo":
+        return path
+    return None
+
+
+def _generic_item_binding_refusal(
+    check_kind: str,
+    item_id: int | None,
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+) -> str | None:
+    """Why a passing ``"generic"`` citation cannot be bound to T1 item
+    ``item_id`` (issue #2718), or ``None`` when its item identity and -- for
+    an artifact-anchored item -- its binding are present and consistent.
+    Always ``None`` for a non-generic kind, and for an item that does not
+    accept ``"generic"`` at all -- items 3-7/11 keep rendering
+    ``"wrong_kind"`` from :func:`_build_tier_item`'s opt-in gate, exactly as
+    before.
+
+    Only the *shape* of the binding is checked here; whether the pinned hash
+    matches the envelope, and the envelope the artifact, is
+    :func:`_grade_evidence`'s existing staleness gate plus its
+    ``input_verified`` requirement, so a stale binding reports the same
+    reasons a stale native citation does.
+
+    - A declared ``t1_item`` that is not an integer -- or is absent on an
+      anchored item -- renders :data:`_REASON_UNANCHORED_EVIDENCE`; one
+      naming a different item renders :data:`_REASON_WRONG_ITEM`. An item-8
+      envelope that declares no ``t1_item`` is accepted as before.
+    - An anchored item additionally needs ``provenance.input.path`` and a
+      manifest-pinned ``content_hash``.
+    """
+    if check_kind != "generic" or item_id not in _ITEMS_ACCEPTING_GENERIC_EVIDENCE:
+        return None
+    anchored = item_id in _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
+    declared = envelope.get("t1_item")
+    if declared is None:
+        if anchored:
+            return _REASON_UNANCHORED_EVIDENCE
+    elif isinstance(declared, bool) or not isinstance(declared, int):
+        return _REASON_UNANCHORED_EVIDENCE
+    elif declared != item_id:
+        return _REASON_WRONG_ITEM
+    if anchored and (
+        _generic_binding_path(envelope) is None
+        or not isinstance(spec.get("content_hash"), str)
+    ):
+        return _REASON_UNANCHORED_EVIDENCE
+    return None
+
+
+def _generic_artifact_binding(
+    envelope: Mapping[str, Any], resolution: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The ``citation.artifact_binding`` disclosure for a ``"met"``
+    artifact-anchored generic citation (issue #2718): which item the
+    attestation declared, which artifact it is bound to (``path`` exactly as
+    the envelope names it -- a string or a ``{path, scope}`` object), and the
+    hash that artifact re-hashed to. ``summary``/``source`` are echoed when
+    the envelope carries them, so a reader sees what was audited without
+    opening the envelope; they are never graded.
+    """
+    provenance = envelope.get("provenance") or {}
+    input_block = provenance.get("input") or {}
+    binding: dict[str, Any] = {
+        "t1_item": envelope.get("t1_item"),
+        "path": input_block.get("path"),
+        "content_hash": resolution["content_hash"],
+        "input_verified": resolution.get("input_verified"),
+    }
+    for field in ("summary", "source"):
+        value = envelope.get(field)
+        if isinstance(value, str):
+            binding[field] = value
+    return binding
 
 
 def _resolve_evidence(
@@ -5636,7 +5856,9 @@ def _build_tier_item(
 
     A ``"generic"``-kind citation (issue #1152) is gated independently of
     ``allowed_kinds``: it only satisfies an item whose id is a member of
-    :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` (today, item 8 only) -- checked
+    :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` (item 8, plus items 1, 2, 9
+    and 10 for an artifact-anchored citation only -- issue #2718, enforced
+    inside :func:`_grade_evidence`, which receives ``item_id``) -- checked
     first, so ``"generic"`` never borrows a pass from an item's otherwise
     unrestricted ``allowed_kinds=None`` (which was written for the six
     `klt`-verb-native kinds, before ``"generic"`` existed, and would
@@ -5682,6 +5904,7 @@ def _build_tier_item(
                 spec,
                 require_post_layout=require_post_layout,
                 allowed_kinds=allowed_kinds,
+                item_id=item_id,
             )
             opt_in_items = (
                 _OPT_IN_KIND_ITEMS.get(citation["kind"]) if status == "met" else None

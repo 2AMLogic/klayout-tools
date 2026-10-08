@@ -396,6 +396,17 @@ no divergence it cannot prove. A new key on an unchanged shape: no
 `schema_version` bump on either mode. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "A doc the build has outrun".
 
+Issue #2718 lets T1 items 1, 2, 9 and 10 accept an artifact-anchored
+`generic` envelope. The additions are: an optional `t1_item` key on the
+generic envelope; a conditional `citation.artifact_binding` object, present
+only on such a citation; and two new values in the existing `reason` enum,
+`unanchored_evidence` and `wrong_item`. A native citation for those items
+grades and renders exactly as before. A bare generic envelope cited for
+them was already `unmet`, and its `reason` changes from `wrong_kind` to the
+more specific `unanchored_evidence`. No `schema_version` bump. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10: bind them
+to an audited artifact".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A
