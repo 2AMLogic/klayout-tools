@@ -28,6 +28,7 @@
 - [Gate verdicts: VERIFIED_RED vs UNEVALUATED (#3974)](#gate-verdicts-verified_red-vs-unevaluated-3974)
 - [Per-workspace priority tiers (#3946)](#per-workspace-priority-tiers-3946)
 - [Forge-side pipeline snapshot (`status --pipeline`, #3977)](#forge-side-pipeline-snapshot-status---pipeline-3977)
+- [Section-scoped status (`status --json --section`, #10787)](#section-scoped-status-status---json---section-10787)
 - [One-shot fleet vitals (`loom-daemon health`, #4761)](#one-shot-fleet-vitals-loom-daemon-health-4761)
 - [ETA tracker (`autonomous.eta`, #9289)](#eta-tracker-autonomouseta-9289)
 - [Reaper task](#reaper-task)
@@ -1462,7 +1463,8 @@ the config tiers, so a change takes effect on the next tick without a restart.
 Absent means no floor; a malformed value (not a string, not canonical `X.Y.Z`) keeps the
 last good floor and is reported as a fleet-sync error. It appears as
 `floor` in `fleet-sync-status.json` and on the `Fleet store:` status block.
-Nothing acts on it yet (#10698).
+The self-update loop rolls a host below it (#10712), and the workspace resync
+treats an installed version below it as too old (#10718).
 
 **`fleet/state.yml`**:
 
@@ -1725,6 +1727,161 @@ reports `hold`, not `stop`. `status --json` carries `fleet_store.state`
 (desired, provenance, `by`/`since`/`reason`) and `fleet_store.enforced`
 (`proceed` / `hold` / `stop`); a transition — never the steady state — is also
 published on the event bus as `fleet.sync.state`.
+
+### Workspace resync (#10718)
+
+The same timer also keeps each registered repo's installed Loom at the version
+the daemon is **running**. A pass starts once at startup (after the startup
+pass, once the drain state exists) and then every `fleet.syncIntervalSecs`.
+Nothing else schedules it, and it does not wait for a roll window.
+
+A pass runs on its own task and the timer never waits for it, so it cannot
+delay the fleet-store sync, the floor, or `paused`/`stopped` enforcement. Only
+one pass runs at a time: while one is still running, the next tick starts none.
+A pass still running at the fifth tick in a row is one `pass-stuck` alert. After
+15 minutes the task stops waiting for it and frees the slot; until the old pass
+ends, each new one does nothing and says so on the status block.
+
+Each pass reads `.loom/install-metadata.json` from every registered
+workspace's default branch (never the working tree) and classifies it:
+
+| State | Meaning | What the pass does |
+|---|---|---|
+| `W0` | the installed files equal this daemon's payload | nothing |
+| `W1` | compatible, but the files differ | tries the claim |
+| `W3` | too old for this daemon or the floor, and the files differ | as `W1`, first |
+| `W4` | the installed files need a newer daemon | reports only |
+| `repo-ahead` | installed by a newer daemon, or at a version that cannot be ordered | reports only |
+| `skipped` | the Loom source repo, a non-GitHub origin, or no Loom on the default branch | nothing |
+
+- **An empty payload diff is `W0`, whatever the stamp says.** A resync that
+  changes no installed file writes nothing, so a daemon-only release makes no
+  claim and no commit, and a stamp that is old or lacks `requires_daemon` over
+  matching files is left alone.
+- **Never a downgrade.** `W4` and `repo-ahead` are never claimed or written.
+  They are left to the host roll (#10719).
+- **Only from H0.** A host claims and writes only when all of these hold: it is
+  a verified official release build (below), a fleet-sync pass has completed,
+  dispatch is not paused (a drain, a roll's pause or a fleet hold, which is how
+  `paused` reaches it), no roll is retained, the binary on disk is still the one
+  running, self-update is not in backoff or terminal, and the running version
+  is not below `loom_min_version`. The gate is read at the start of the pass,
+  again immediately before the claim, and again immediately before the push.
+  A newer release merely existing is not a reason to wait.
+- **Writes need `fleet.autoApply`**, like every other timer write.
+
+**Only an official release build pushes.** A daemon resyncs from the payload it
+embeds, so the binary must be a release's. Both of these must hold:
+
+1. It carries the release stamp for its own version. `release.yml` sets
+   `LOOM_RELEASE_BUILD_TAG` on a publishing run and `build_stamp.rs` bakes it
+   in. A developer's build, a feature branch's, a CI build and
+   `scripts/daemon-build.sh` carry no stamp.
+2. Once per process, the daemon asks the forge which commit tag `v<version>`
+   of `rjwalters/loom` names, and it is the commit the binary was built from.
+
+A binary that fails either is reported once for the host
+(`host never resyncs: this daemon is not an official release build`) and never
+claims or writes. If the tag lookup gets no answer, the host reports
+`this daemon's release tag is not verified yet`, pushes nothing, and retries on
+a later tick (one sync interval apart at first, doubling, capped at one hour).
+
+**What a pass costs.** Every pass checks every workspace's default-branch
+head (#10987), so a change made by anyone is classified on the next tick. The
+verdict is cached per default-branch commit and running version, in process
+memory.
+
+| Case | Per tick |
+|---|---|
+| a host that may not write (`fleet.autoApply` off, `paused`, or otherwise not in H0) | no network call; classified from the clone's own `origin/<default>` |
+| a host that may write | one GraphQL query per repo owner, naming every repo's default branch and head (100 repos per query) |
+| head is the cached commit | nothing more: no git child, no fetch |
+| head moved since the cached verdict | one `git fetch` of the default branch, only if the clone does not already have the commit |
+| the query failed, or does not cover a repo | one `git ls-remote` for each such repo, 8 at a time |
+| the rate-limit breaker is open | nothing is asked; the pass reports from the cache and says so |
+
+The query runs under the writer App through `gh api graphql` and costs one
+point on that installation's GraphQL bucket (not the REST core bucket); a
+`POST` has no ETag, so an unchanged fleet still pays it. An installation token
+sees one owner's repos, hence one query per owner. At 60 repos and 5 hosts
+with a 60s interval that is 300 queries an hour per owner fleet-wide (600 for
+two owners), no `git ls-remote` and no `git fetch`. A query that fails in
+three passes in a row while the remotes still answer is one `head-query`
+alert. A restart empties the cache, so startup and a version change both
+evaluate every workspace.
+
+**A pass is bounded.** Classification stops after 45s; the workspaces it did
+not reach keep their last verdict and are first in the next pass. No resync
+starts more than 120s into a pass. Every child has a timeout: 15s for the head
+query and for `ls-remote`, 30s for a fetch, 60s for the worktree checkout, the
+commit and the push, 20s for local plumbing. Three remotes in a row that do
+not answer end the pass's network use.
+
+A stale workspace is resynced under a per-repo claim, the ref
+`refs/loom/resync-claim`:
+
+- A host reads the ref first. If it is held and fresh, the host passes until
+  its next tick, with no error, no alert and nothing created. Otherwise the
+  first host to create the ref wins.
+- The claim commit records the host, the version and the time. A claim older
+  than `max(10 x syncIntervalSecs, 15 min)` may be taken over. Takeover goes
+  through a ticket ref, `refs/loom/resync-takeover/<stale sha>`, which only one
+  host can create: GitHub does not enforce fast-forward on refs outside
+  `refs/heads/`, so an update of the claim ref cannot pick a winner.
+- The holder releases the claim when it is done, and only while the ref is
+  still its own commit. It then deletes any abandoned takeover ticket.
+
+The resync itself runs in a throwaway detached worktree
+(`.loom/worktrees/.resync-<pid>`) off `origin/<default>`, never the checkout
+agents work in. It makes one commit (`chore(loom): resync installed Loom to
+v<version>`, with `Loom-Resync-Host` and `Loom-Resync-Version` trailers) and
+pushes it without `--force`. At most one repo is resynced per pass. The
+worktree is removed and the claim released on every way out, a panic included;
+a worktree left by a killed process is removed by the next pass. The fetch does
+not rewrite the checkout's `FETCH_HEAD`.
+
+The commit is made under the repo's own configured git identity
+(`loom-daemon <loom-daemon@users.noreply.github.com>` only when git has none),
+and the push uses the checkout's own git credential, not the fleet writer App.
+The claim ref is the only part that goes through the writer App. A host whose
+checkout credential cannot push to the default branch fails the push; one whose
+credential is a repo admin can bypass branch protection.
+
+**A repo cannot be resynced in a loop.** Whatever makes a repo stale again (a
+host on the same version with other files, a person or a tool undoing the
+resync), it gets at most one daemon resync commit per version, from any host.
+The record is the default branch itself: the last 300 commits are searched for
+`Loom-Resync-Version`. A workspace that is stale again at a version it was
+already resynced to is left alone, reported as `resync-loop`, and alerted once.
+The next release resyncs it. There is no wait between resyncs to different
+versions: a host never installs a version older than the repo's.
+
+| Outcome | Result |
+|---|---|
+| push accepted | `W0` |
+| nothing left to write once the claim is held | `W0`, no commit |
+| branch moved | re-read and retried once, then next tick |
+| host left H0, or the claim was taken over, before the claim or the push | abandoned, no push; not a failure |
+| already resynced to this version | `resync-loop`: no push, one alert per repo and version |
+| branch protection or a ruleset refused the push | backoff of 6h; one alert per repo, then logged only |
+| a remote or the forge did not answer | backoff for that repo, no alert for it; one `network` alert for the host per outage, from the third failing pass |
+| the forge or the remote refuses one repo (deleted, renamed, or the credential may not read it) | backoff for that repo and a `repo-access` alert from the third in a row; never counted as an outage |
+| any other failure | backoff from one sync interval, doubling, capped at 6h; alert from the third in a row |
+
+Alerts are logged at `error` and published on the event bus as
+`fleet_sync.workspace_resync`. The cache, the backoff and the alert-once marks
+are in memory and reset on restart. Each workspace's state and reason appear on
+the `Fleet store:` status block and under `workspaces` in
+`fleet-sync-status.json`.
+
+The resync covers the payload surfaces only: `.loom/{roles,scripts,hooks,docs,runtimes}/`,
+`.loom/bin/`, `.loom/README.md`, `.loom/pricing.json`, `.loom/biome.jsonc` and
+`.claude/commands/loom/`. It does not yet touch `.loom/config.json`,
+`.loom/CLAUDE.md`, `.gitignore`, `.agents/skills/`, `.claude/README.md`,
+`.claude/biome.jsonc`, `.github/CONFIGURATION.md`, or the retired-file sweep and
+`package.json` edit that `resync-installed.sh` performs (#10895). It also does not
+fast-forward a host's own checkout (#10869), so a host keeps running its old
+installed scripts until that checkout is updated.
 
 ### ETA fit publication branch (#10395)
 
@@ -2840,6 +2997,72 @@ managed repo, fetched *after* the IPC round-trip completes:
   its 24h default. A masked-off metric is left `None`; a caller that masks a
   metric off simply must not read it.
 
+## Section-scoped status (`status --json --section`, #10787)
+
+A full `loom-daemon status --json` builds the whole report — `O(registered
+repos)`, 10–21 s across ~58 repos on a busy dispatcher — and then runs the
+CLI's own collectors (the per-account token probe, the git staleness check,
+the worktree disk walk). A caller that reads two or three fields can ask for
+only those:
+
+```bash
+loom-daemon status --json --section daemon_build,auto_update
+loom-daemon status --json --section drain --section in_flight
+```
+
+- **Names** — `--section` takes the payload's top-level keys, comma-separated
+  and repeatable, and requires `--json`. A section that groups several keys is
+  named for its base key: `in_flight` is `in_flight` + `in_flight_count`, and
+  `preflight_advisory`, `observability` and `role_runner` group their
+  `*_`-prefixed keys. `loom-daemon status --help` lists every valid name; an
+  unknown one is a usage error (exit 2) naming them all.
+- **Output** — the same JSON object with only the selected keys. Without
+  `--section` the output is unchanged.
+- **What it skips** — the daemon builds only the phases a selected section
+  reads (`loom_daemon::status_section::SectionSet`), and the CLI skips its
+  collectors for unselected sections. `daemon_build`, `auto_update` and the
+  other process-level sections walk no registered repo at all.
+- **What still walks every repo** — anything derived from the live sweep list:
+  `in_flight`, `unregistered_locked`, `stale_sweeps`, `capacity_bound`,
+  `role_agents` and `drain` (the last three for the in-flight count), plus
+  `per_repo`, `worktrees` and `pipeline`, which also run the per-repo detail
+  phases. Do not pick `drain` or `role_agents` as a "cheap" poll.
+- **Interactions** — `pipeline` still needs `--pipeline` (else `null`). The
+  autonomy-mismatch exit code applies only when `protection` is selected.
+- **Wire** — a selection is sent as `Request::DaemonStatusSections { sections
+  }`; a selection naming every section is sent as the plain `DaemonStatus`
+  frame. The reply is the same `Response::DaemonStatus`. The daemon refuses a
+  frame with an empty `sections` list with an error reply.
+- **Version skew** — an unreachable daemon gets the usual unreachable payload
+  (`--section` ignored). A daemon older than the CLI rejects the frame, which
+  the CLI reports as `daemon too old for --section` (exit 1).
+
+### Concurrent status requests share one build (#10861)
+
+A status build cannot be cancelled once it has started, so a client that
+times out and retries used to leave its first build running and start a
+second. The daemon now runs **at most one build per section set at a time**
+(`ipc/status_off_runtime.rs`): a request that arrives while a build for the
+same set is in flight waits for that build's report.
+
+- **Keyed by section set.** Order and duplicates do not matter, and an
+  all-sections request shares the full build. Different sets never wait on
+  each other, so `--section daemon_build,auto_update` still answers quickly
+  while a full build is running.
+- **In flight only.** A finished report is never reused: a request arriving
+  after a build has completed starts a new one, so `status` straight after
+  `drain` / `halt` / `release` reflects the action. A request that *joins* a
+  build can receive a snapshot whose build began up to one build-duration
+  earlier.
+- **Drain is always live.** The `drain` block is overlaid per request, after
+  the shared build, so it is current even on a joined build.
+- **Failures.** If the shared build panics or its task does not complete,
+  every waiting request gets an error reply (never a dropped connection), and
+  the next request builds afresh.
+- **Telemetry.** `loom.daemon.ipc.requests{kind=DaemonStatus}` still counts
+  every request; `loom.daemon.ipc.status_builds{outcome}` counts the builds
+  ([`telemetry-schema.md`](telemetry-schema.md)).
+
 ## One-shot fleet vitals (`loom-daemon health`, #4761)
 
 ```
@@ -3124,8 +3347,8 @@ rules with `git check-ignore`.
 | `autonomous.eta.fit.enabled` | `LOOM_ETA_FIT_ENABLED` | `true`: the daily coefficient refit (#10245). It checks hourly, fits at most once per UTC day into `.loom/state/eta/fit/`, makes no forge call, and runs only with `autonomous.eta.enabled`. A no-op until a snapshot is cached. With `fleetRefresh.enabled` (below, #10263) the check runs at the end of every fleet refresh cycle instead of on its own task, so it always sees fresh snapshots. Read at start |
 | `autonomous.eta.current.{finish,land}` | none | `finish-v1` / `land-v1` |
 | `autonomous.eta.shadow.maxActive` | `LOOM_ETA_SHADOW_MAX_ACTIVE` | `14` registered heuristics per kind (floor 1, #10525): `current` plus the 13 `eta.snapshot` alternates (#10521; 13 since #10549, was 10). A build over it does not start the ETA tracker; the error names the excess heuristics. Read at start. See [eta → shadow fleet management](eta.md#shadow-fleet-management) |
-| `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. **Restart required**. **On a multi-host fleet declare `fleet.captain` together with `fleet.repo`** (#10329, #10395): only the captain refreshes and fits, and it publishes the fit through the store for every other host to serve. With no captain every host with a reader refreshes, against the same shared reader budgets; with a captain but no `fleet.repo` the other hosts cannot learn the fit and drift to `no_model`, so do not declare one there — see [Fleet captain](#fleet-captain-8848) and [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263) |
-| `fleet.etaAuthority` | `LOOM_ETA_AUTHORITY` | unset (#10498). The one host that computes and emits `eta.*` records and fits locally. Unset: the declared `fleet.captain`, else the host whose own `fleetRefresh.enabled` is on; several candidates fall back to the lowest host id with a warning. Re-read every pass. See [eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498) |
+| `autonomous.eta.fleetRefresh.enabled` | `LOOM_ETA_FLEET_REFRESH_ENABLED` | **`true`** — the fleet snapshot backfill/refresh task (#10263). Default-on like `transcriptIngest`, and for the same kind of reason: it generates no work, only reads (reader Apps only, never the operator PAT), and is budgeted with a reserve floor, while default-off would leave the daily fit with no training data. Also requires `autonomous.eta.enabled` and an observability exporter. Since #10918 the key is re-read every tick (no restart): `false` makes this host's tick `disabled` (no forge call), **except on the host `fleet.etaAuthority` names explicitly, which refreshes regardless**, so a worker-level `false` override does not starve the authority's fit. The env `LOOM_ETA_FLEET_REFRESH_ENABLED=0` is the hard stop on any host, the authority included (read at start: the loop is not spawned). **With `fleet.etaAuthority` set, the authority, not the captain, is the one refresher** and runs the nightly folds too ([eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498)). Otherwise, **on a multi-host fleet declare `fleet.captain` together with `fleet.repo`** (#10329, #10395): only the captain refreshes and fits, and it publishes the fit through the store for every other host to serve. With no captain every host with a reader refreshes, against the same shared reader budgets; with a captain but no `fleet.repo` the other hosts cannot learn the fit and drift to `no_model`, so do not declare one there — see [Fleet captain](#fleet-captain-8848) and [eta → one refresher](eta.md#fleet-refresh-task-autonomousetafleetrefresh-10263) |
+| `fleet.etaAuthority` | `LOOM_ETA_AUTHORITY` | unset (#10498). The one host that computes and emits `eta.*` records and fits locally. When set, it also runs the `eta-fleet-refresh` and `eta-nightly-folds` singleton jobs in place of `fleet.captain` (#10918). Unset: the declared `fleet.captain`, else the host whose own `fleetRefresh.enabled` is on; several candidates fall back to the lowest host id with a warning. Re-read every pass. See [eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498) |
 | `autonomous.eta.fleetRefresh.intervalSecs` | `LOOM_ETA_FLEET_REFRESH_INTERVAL_SECS` | `3600` (floor `900`); first cycle 120 s after start |
 | `autonomous.eta.fleetRefresh.maxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_MAX_CALLS` | `300` forge calls per cycle for refresh passes, host-wide (`304`s and errors count) |
 | `autonomous.eta.fleetRefresh.backfillMaxCallsPerCycle` | `LOOM_ETA_FLEET_REFRESH_BACKFILL_MAX_CALLS` | `600` per cycle for backfill passes, host-wide (was `1500`, most of a 5,000/h installation, #10329); a larger backfill resumes next cycle. Spend per hour is `budget × 3600 / intervalSecs`, so a lowered `intervalSecs` multiplies it |
@@ -5650,6 +5873,7 @@ knobs not yet audited here.
 | `autonomous.autoUpdate.deferDeadlineSecs` | `LOOM_AUTO_UPDATE_DEFER_DEADLINE_SECS` | `21600` (6h) | Bound on the build-stampede gate (#4929): after this much **continuous** deferral for in-flight sweeps, the rebuild runs anyway at reduced CPU priority (`nice 19`) instead of deferring forever. Any check that sees zero in-flight sweeps — or a new source commit, or a completed rebuild — re-arms the clock, so short busy bursts never reach it. **Bounds the rebuild/source path only (#8252)** — a resolved release artifact is fetched immediately regardless of in-flight sweeps (niced, not deferred), so this deadline never delays an artifact roll. Zero/invalid → default; there is deliberately no "defer forever" value (set a very large one instead) |
 | `autonomous.autoUpdate.rollStallDeadlines` | `LOOM_AUTO_UPDATE_ROLL_STALL_DEADLINES` | `3` | Unsatisfiable-drain detector (#8998): how many drain deadlines may expire — summed **across roll lifetimes**, not per drain — with the in-flight sweep count never improving before the roll is declared unsatisfiable, abandoned, and *not re-armed* until an auto-update tick samples in-flight at zero (a sample on this cadence, not a continuous watch — see the mechanism entry below, and #9010 for the bounded-retry follow-up). Bounds the arm → refuse → retain → abandon → re-arm *sequence*, which #6007's per-drain paused-dispatch budget does not: each new release (or a #8514 supersede) restarted that budget, so two fleet dispatchers sat paused for 21h behind a legitimate 9h32m analog-simulation sweep and never rolled. Zero/invalid → default; there is deliberately no "never give up" value, since that is the bug. Set it high to make the detector effectively unreachable |
 | `autonomous.autoUpdate.rollStallCooldownSecs` | `LOOM_AUTO_UPDATE_ROLL_STALL_COOLDOWN_SECS` | `21600` (6h) | Bounds the `rollStallDeadlines` suppression above in TIME as well as by the `in_flight == 0` sample (#9010): once a standing unsatisfiability declaration has stood for this long, it is dropped and the next tick arms a roll for **one** more bounded attempt — if the host still cannot drain, the detector re-declares after `rollStallDeadlines` more deadlines rather than cycling, so the cost is one paused-dispatch budget per cooldown period instead of unbounded staleness on a host whose `in_flight == 0` sample never lands. Zero/invalid → default, exactly like `rollStallDeadlines`: a `0` would clear a declaration on the tick it was made, re-entering #8998's livelock through the knob. Set it very large to make the retry effectively unreachable |
+| `autonomous.autoUpdate.pauseRoll.minResumableAgeSecs` | `LOOM_AUTO_UPDATE_PAUSE_ROLL_MIN_RESUMABLE_AGE_SECS` | `300` (5 min) | Pause-and-roll (#10830, design `docs/design/daemon-roll-pause-resume.md` §2): an agent whose session first started less than this long ago is reset (killed and requeued with reason `young-agent-reset`) at a roll instead of being paused and resumed. The age is measured from the session's first start, carried across earlier roll resumes. `0` disables the rule. Resolved now but **not yet consumed**: no roll pauses agents until #10831/#10832 land |
 | `autonomous.autoUpdate.rollWindowSecs` | `LOOM_AUTO_UPDATE_ROLL_WINDOW_SECS` | *(off)* | Period of the scheduled roll window (#9132). **Unset/zero/invalid → no window**: rolls arm on every new build exactly as before (opt-in; this default preserves existing behaviour). When set, a new build arms **nothing** outside an open window, the settle gate is bypassed (the window is the batching mechanism, so a busy `main` cannot starve the host), and at most one roll arms per window — see [Scheduled roll windows](#scheduled-roll-windows-9132). **Restart required** |
 | `autonomous.autoUpdate.rollWindowOffsetSecs` | `LOOM_AUTO_UPDATE_ROLL_WINDOW_OFFSET_SECS` | derived from host id | Where window 0 opens within the period. Zero/invalid → the **derived** offset: `fnv1a(host_id) mod period`, stable across restarts and spread across hosts. An explicit value is reduced modulo the period, so the offset is always `< rollWindowSecs`. Only meaningful with `rollWindowSecs`. **Restart required** |
 | `autonomous.autoUpdate.launchdLiveReload` | `LOOM_AUTO_UPDATE_LAUNCHD_LIVE_RELOAD` | `false` | Opt-in for the launchd skip-the-drain path (`restart --reload-supervisor`, #6682). Selected **only** on launchd **and** only when `true`; systemd always uses the bounded drain. Depends on #9452 (the stale-sweep watchdog killing journal-adopted survivors) — do not enable on a real host before that is resolved. **Not yet wired to execute**: the selection is reported in `status` and logged, and rolls still use the bounded drain until live-host verification lands |
@@ -6317,6 +6541,18 @@ nothing to do" must never accrete toward a `loom:blocked` hold, and
 `noopCooldown` is the right brake for it. Defaults **on**; disable with
 `LOOM_WORK_FINDER_PRLESS_RETRY=0` or
 `autonomous.workFinder.prlessRetry.enabled = false`.
+
+**Phaseless deaths have a durable floor (#10642).** The tally above is
+in-memory: a daemon restart resets it, and a streak more than `maxBackoffSecs`
+old goes cold. Sweeps that die before any phase checkpoint with no classifier
+label (`failure_class = unclassified:no-phase-signal`, ~90 s each) slipped
+through both on `2AMLogic/2am` — 278 in a day, one issue 47 times. For that
+class only, this host's own count of such deaths for the issue in the last 24 h
+is read back from the `sweep.outcome` journal and used as a lower bound on the
+consecutive count, so the hold lands at `threshold` per issue per day
+regardless of restarts or spacing. A landing in the journal, or any clear above
+(open PR, merge, self-reported no-op), ends that count. The hold comment
+carries the record's `no_phase_cause` (exit code, last step, reason).
 
 **Verified-open-PR memo (#6788).** The three brakes above bound how often an
 issue is *re-dispatched*. A fourth, narrower problem sits one layer down, in the
@@ -7357,6 +7593,13 @@ the shared reader budgets. Each tick re-reads the gate for the singleton job
 | `Armed` (this host is the captain) | Arms `eta-fleet-refresh` (`host.health.armed_singleton_jobs`) and runs the cycle |
 | `Refused` (another host is) | **No forge call** (snapshots, backfill, raw events) and no `eta.fleet_refresh` record. The daily fit check still runs, on the snapshots this host has |
 | `NoCaptainDeclared` | Runs the cycle **unarmed**, and logs once that a multi-host fleet should declare a captain. Not listed in `captainless_singleton_jobs` |
+
+**An explicit `fleet.etaAuthority` takes the job over (#10918).** When the key,
+or `LOOM_ETA_AUTHORITY`, names a host, that host arms `eta-fleet-refresh` and
+runs the cycle (gauge state `authority`). It does so even with its own
+`fleetRefresh.enabled` off in config. Every other host, the captain included,
+stands down as `Refused` above. `eta-nightly-folds` follows the same owner. See
+[eta → one ETA authority](eta.md#one-eta-authority-per-fleet-fleetetaauthority-10498).
 
 **Why it fails open, unlike `ci-telemetry-poll`**: the gate's fail-closed
 contract protects dedup-sensitive alerts, where a duplicate is a bug. A
@@ -12199,6 +12442,7 @@ seams):
 | `LOOM_DAEMON_UPDATE_COSIGN_OIDC_ISSUER` | Expected keyless certificate issuer (default `https://token.actions.githubusercontent.com`) |
 | `LOOM_DAEMON_UPDATE_REQUIRE_SIGNATURE` | `1`/`true`/`yes`/`on` selects **required** signature mode (#10470): an unsigned release (`SIGNATURE=skipped`) or one whose signature cannot be checked here (`SIGNATURE=unavailable`) is refused before provisioning, with distinct messages, and a sanitized `LOOM_SIGNATURE_EVIDENCE {...}` line is emitted on success (the full schema-versioned record, see [Signature evidence record](#signature-evidence-record-loom_signature_evidence-10474)): tag, asset sha256, signature state, and what the verifier that actually succeeded checked (`verification_method` = `codesign` / `cosign-key` / `cosign-keyless-identity` / `cosign-keyless-identity-regexp`; `identity`, `identity_regexp` and `oidc_issuer` are populated only by the keyless verifier that checked them and are `null` for codesign and key mode, which establish no GitHub workflow identity). Default off = the **present-only** compatibility mode (#5054), unchanged |
 | `LOOM_DAEMON_UPDATE_APPROVED_WORKFLOW` | Optional, with required mode: pin the derived keyless identity to this workflow file (regex-escaped) instead of `[^@]+`; a workflow rename then needs an explicit policy update. Recorded in the evidence line as `configured_workflow`, with `configured_workflow_applied` true only when a keyless regexp actually enforced it (false for codesign, key mode and an exact-identity override) |
+| `LOOM_DAEMON_UPDATE_APPROVED_SOURCE_ANCHOR` | Optional, with required mode (#10473): a full 40-hex commit SHA; the release tag must resolve (via `gh api .../git/ref/tags/<tag>`, annotated tags peeled through `git/tags/<sha>`) to that commit or a descendant (`compare/<anchor>...<commit>` status `identical`/`ahead`). Refusal classes, all before the candidate is executed: **configuration error** (short/non-hex anchor — never a skip), **source assurance unavailable** (`gh`/API failure or unparsable answer — not worded as tampering), **not a descendant of approved source** (`behind`/`diverged`, including a rollback below the anchor), **tag movement** (same tag, different commit than this host adopted) and **asset replacement** (same tag, different asset sha256). Every required-mode success records `{tag -> commit, asset sha256}` in `~/.loom/daemon-update/release-adoption.json` (public facts only; each write holds an exclusive lock on `release-adoption.json.lock` and re-checks the tag's pin, so a conflicting pin a concurrent update persisted first is refused as tag movement / asset replacement, never overwritten) and adds `source_revision` (the resolved commit) / `source_anchor` / `source_check` (`identical` / `ahead` / `not_configured`) / `adoption_record` (`first_seen` / `matched`; an unwritable record refuses the artifact before it is executed) to the evidence line; unrun checks stay `null`. **Limits**: the commit half of the record is only populated when an anchor is set (the asset-digest half always is); the record lives on the recipient host, so it detects drift and ordinary replacement, not an attacker with write access to that host; provenance attestation and an approval boundary outside the recipient are not provided. Lower/replace the anchor (or remove a record entry) explicitly to accept an older release or a re-cut tag |
 | `LOOM_SIGNATURE_EVIDENCE_JOURNAL_PATH` | Override where the durable signature-evidence journal is written (default `<repo>/.loom/logs/signature-evidence.jsonl`, only when the checkout already has a `.loom/`). See [Signature evidence record](#signature-evidence-record-loom_signature_evidence-10474) |
 
 #### Signature evidence record (`LOOM_SIGNATURE_EVIDENCE`, #10474)
@@ -12223,7 +12467,7 @@ belongs to the fleet-inventory repo, not here.
   and additive-only in *what* it carries: it is now the same record, a strict
   superset of the original nine keys with identical meanings.
 
-`LOOM_SIGNATURE_EVIDENCE` not-available fields (explicit `null` + `*_status: "not_available"`, never fabricated): `source_revision` (#10473), `policy_revision` / `approval_provenance` / `root_domain_scope` (#10472).
+`LOOM_SIGNATURE_EVIDENCE` not-available fields (explicit `null` + `*_status: "not_available"`, never fabricated): `policy_revision` / `approval_provenance` / `root_domain_scope` (#10472).
 
 Schema (`schema_version: 1`; adding a field is not a breaking change, so
 consumers must ignore unknown keys):
@@ -12235,7 +12479,7 @@ consumers must ignore unknown keys):
 | `host_id` | The host's telemetry identity (`LOOM_HOST_ID` precedence, same as OTLP records) |
 | `loom` | Deciding build's provenance: `version`, `revision`, `tree_state`, `complete` |
 | `policy_mode` | `required` or `present-only` |
-| `outcome` | `verified` / `refused_unsigned` / `refused_unavailable` / `signature_invalid` / `checksum_mismatch` / `signature_material_unavailable` / `glibc_incompatible` / `download_failed` |
+| `outcome` | `verified` / `refused_unsigned` / `refused_unavailable` / `signature_invalid` / `checksum_mismatch` / `signature_material_unavailable` / `glibc_incompatible` / `source_assurance_refused` / `download_failed` |
 | `tamper_evidence` | `true` only for `signature_invalid` and `checksum_mismatch`; a tooling gap (`refused_unavailable`) is never tampering |
 | `tag` | Release tag fetched |
 | `asset_sha256` | Digest of the checksum-verified binary; `null` when the checksum did not match or no binary was downloaded |
@@ -12244,7 +12488,8 @@ consumers must ignore unknown keys):
 | `identity`, `identity_regexp`, `oidc_issuer` | Populated only by the keyless verifier that checked them; `null` for codesign and key mode |
 | `configured_workflow` | `LOOM_DAEMON_UPDATE_APPROVED_WORKFLOW` as configured (the current policy-revision proxy) |
 | `configured_workflow_applied` | Whether that pin was enforced by this verification |
-| `source_revision` + `source_revision_status` | Always `null` + `"not_available"` — filled by #10473 (adopted source revision / tag ancestry) |
+| `source_revision` + `source_revision_status` | The release commit the tag resolved to (`"available"`) when the required-mode source gate ran with a configured anchor (#10473); otherwise `null` + `"not_available"` |
+| `source_anchor`, `source_check`, `adoption_record` | Source-gate detail (#10473): the configured anchor, `not_configured`/`identical`/`ahead` (refusals: `behind`/`diverged`/`unavailable`), and `not_recorded`/`first_seen`/`matched` (refusals: `unavailable`/`tag_moved`/`asset_replaced`/`write_failed`); `null` when that check did not run |
 | `policy_revision` + `policy_revision_status` | Always `null` + `"not_available"` — filled by #10472 (recorded, monotonic assurance policy) |
 | `approval_provenance` + `approval_provenance_status` | Always `null` + `"not_available"` — filled by #10472 (provider authority map) |
 | `root_domain_scope` + `root_domain_scope_status` | Always `null` + `"not_available"` — filled by #10472 (provider authority map) |
