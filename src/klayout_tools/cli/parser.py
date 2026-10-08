@@ -4679,7 +4679,31 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "coverage_unknown (exit 4), and the assertion is recorded in "
             "the report's coverage_assertion field. Never satisfied by a "
             "run that tolerated deck errors (--allow-deck-errors). "
+            "A count cannot tell a swapped category from a match; prefer "
+            "--expect-rule-categories-file. "
             "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_parser.add_argument(
+        "--expect-rule-categories-file",
+        dest="expect_rule_categories_file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "opt-in exact-set coverage assertion (--engine klayout only; "
+            "ignored for --engine curated; mutually exclusive with "
+            "--expect-rule-categories): a UTF-8 file naming, one per line, "
+            "exactly the RDB rule categories the deck must declare "
+            "(surrounding whitespace trimmed, blank lines ignored, "
+            "duplicates merged, case-sensitive; no comments or globs). Any "
+            "missing or unexpected name fails the run listing both -- even "
+            "when the counts agree; an exact match is graded like a "
+            "satisfied --expect-rule-categories and recorded in the "
+            "report's coverage_assertion field. The list must be reviewed "
+            "independently for this deck revision, its switches and inputs: "
+            "copying the accepted run's own categories is circular, and "
+            "categories declared inside data-dependent branches can vary "
+            "with the layout. See docs/cli/drc.md, 'Engine' -> 'klayout'."
         ),
     )
     drc_parser.add_argument(

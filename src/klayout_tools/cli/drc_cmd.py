@@ -60,6 +60,7 @@ from ..drc import (
     check_drc_report,
     drc_exit_code,
     load_request_arg,
+    load_rule_category_manifest,
     rerun_drc_report,
     run_drc,
     run_drc_klayout_engine,
@@ -144,6 +145,7 @@ _REQUEST_FIELD_DESTS = {
     "allow_deck_errors": "allow_deck_errors",
     "allow_missing_host_tools": "allow_missing_host_tools",
     "expect_rule_categories": "expect_rule_categories",
+    "expect_rule_categories_file": "expect_rule_categories_file",
     "min_klayout_version": "min_klayout_version",
     "pdk": "pdk",
     "pdk_root": "pdk_root",
@@ -154,10 +156,11 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
     """Load the request document in ``args.file`` and return a namespace with
     its fields in place of the argv flags they mirror (issue #1867).
 
-    Relative paths inside the document (``file``, ``deck_file``, ``pdk_root``)
-    resolve against the document's own directory for the file form, or the
-    current working directory for the stdin/inline forms -- ``klt lvs``'s
-    convention, implemented by the same shared helper.
+    Relative paths inside the document (``file``, ``deck_file``, ``pdk_root``,
+    ``expect_rule_categories_file``) resolve against the document's own
+    directory for the file form, or the current working directory for the
+    stdin/inline forms -- ``klt lvs``'s convention, implemented by the same
+    shared helper.
     """
     request, base_dir = load_request_arg(args.file)
     reqdoc.check_schema(
@@ -207,6 +210,9 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 request, "allow_missing_host_tools", verb="drc", error_cls=DrcError
             ),
             "expect_rule_categories": _expect_rule_categories(request),
+            # Issue #2806: resolved against the request document's own
+            # directory, like every other path field.
+            "expect_rule_categories_file": _path("expect_rule_categories_file"),
             "min_klayout_version": _str("min_klayout_version"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
@@ -251,6 +257,7 @@ def _run(args: argparse.Namespace) -> dict:
             allow_missing_host_tools=args.allow_missing_host_tools,
             expected_rule_categories=args.expect_rule_categories,
             min_klayout_version=args.min_klayout_version,
+            expected_rule_category_names=_expected_rule_category_names(args),
         )
 
     if not args.deck:
@@ -262,6 +269,23 @@ def _run(args: argparse.Namespace) -> dict:
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
     )
+
+
+def _expected_rule_category_names(args: argparse.Namespace) -> list[str] | None:
+    """Resolve ``--expect-rule-categories-file`` (issue #2806) into the
+    sorted, deduplicated names :func:`run_drc_klayout_engine` compares
+    against, once, at the CLI/request boundary -- before KLayout is launched.
+    Combining it with ``--expect-rule-categories`` is rejected first, so a
+    conflicting invocation never even reads the manifest."""
+    manifest = args.expect_rule_categories_file
+    if manifest is None:
+        return None
+    if args.expect_rule_categories is not None:
+        raise DrcError(
+            "--expect-rule-categories and --expect-rule-categories-file are "
+            "mutually exclusive -- pass one rule-category assertion"
+        )
+    return load_rule_category_manifest(manifest)
 
 
 def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
@@ -317,6 +341,31 @@ def _print_coverage_gaps(coverage: dict) -> None:
         print(f"unchecked layers in stream: {len(unchecked_layers)}")
 
 
+def _print_coverage_assertion(assertion: dict | None) -> None:
+    """One line summarizing a caller-vouched rule-category assertion
+    (issues #2697/#2806), plus the missing/unexpected names of an
+    unsatisfied set assertion (only reachable via --allow-deck-errors; a
+    strict mismatch is an error, not a report)."""
+    if not assertion:
+        return
+    verdict = "satisfied" if assertion.get("satisfied") else "not satisfied"
+    if "expected_names" in assertion:
+        print(
+            f"rule-category set assertion: {verdict} "
+            f"({len(assertion['expected_names'])} expected, "
+            f"{len(assertion['observed_names'])} declared)"
+        )
+        for label in ("missing", "unexpected"):
+            for name in assertion.get(f"{label}_names") or []:
+                print(f"  {label}: {name}")
+    else:
+        print(
+            f"rule-category count assertion: {verdict} "
+            f"({assertion.get('expected')} expected, "
+            f"{assertion.get('observed')} declared)"
+        )
+
+
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"deck: {report['deck']}")
@@ -337,6 +386,7 @@ def _print_text(report: dict) -> None:
         for line in deck_errors["error_lines"]:
             print(f"  {line}")
     print(f"violations: {report['violation_count']}")
+    _print_coverage_assertion(report.get("coverage_assertion"))
     _print_coverage_gaps(report["coverage"])
 
     rule_counts = report["rule_counts"]

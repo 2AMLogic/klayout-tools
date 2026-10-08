@@ -5,7 +5,7 @@ report violations as structured data.
 
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--expect-rule-categories <N>] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
@@ -66,6 +66,14 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   positive integer; `0`, negatives and non-integers are rejected before
   `klayout` is launched. See "Engine" → `"klayout"` → "Opt-in rule-category
   assertion".
+- `--expect-rule-categories-file PATH` — opt-in **exact-set** coverage
+  assertion (`--engine klayout` only, issue #2806; ignored for `--engine
+  curated`, like `--expect-rule-categories`, and the file is then not even
+  read). Mutually exclusive with `--expect-rule-categories`. `PATH` is a
+  UTF-8 manifest naming, one per line, exactly the rule categories the deck
+  must declare. An unreadable file, invalid UTF-8, or a manifest with no
+  names is rejected before `klayout` is launched. See "Engine" → `"klayout"`
+  → "Opt-in rule-category set assertion".
 - `--check` — verify a previously committed `--format json` report instead
   of running a fresh check (issue #1106). Mutually exclusive with `<file>`
   (the input path is read from the report itself) — see "`--check` /
@@ -122,6 +130,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `allow_missing_host_tools` | boolean | `--allow-missing-host-tools` |
 | `min_klayout_version` | string | `--min-klayout-version` (dotted decimal, e.g. `"0.30.12"`) |
 | `expect_rule_categories` | positive integer | `--expect-rule-categories` (booleans, floats, strings, `0` and negatives are rejected) |
+| `expect_rule_categories_file` | string | `--expect-rule-categories-file` (a path, resolved relative to the request document's own directory like `deck_file`; mutually exclusive with `expect_rule_categories`. The *names* are not inlined in the request — point at the reviewed manifest.) |
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
 
@@ -450,6 +459,78 @@ real open_pdks install never pays for the extra probe.
     `--rerun` replays it from the committed report. Example:
     `klt drc layout.gds --engine klayout --deck-file deck.lydrc
     --expect-rule-categories 42 --format json`.
+  - **a count cannot tell a swap from a match.** If one expected category
+    is gated off and an unexpected one appears, the count still agrees and
+    the run is graded `clean`. Prefer the set assertion below.
+- **Opt-in rule-category set assertion (issue #2806).**
+  `--expect-rule-categories-file PATH` (Python:
+  `expected_rule_category_names=[...]`, the already-resolved names; request
+  field `expect_rule_categories_file`, a path) vouches for the exact **set**
+  of unique category names instead of only its size. It is the same kind of
+  caller-supplied evidence as the count, graded identically when satisfied.
+  - **Manifest format**: UTF-8, one exact category name per line;
+    surrounding whitespace is trimmed, blank lines are ignored and duplicate
+    lines are merged. Comparison is case-sensitive. There is **no** comment
+    syntax and **no** glob expansion: a line `# M1.a` names the category
+    `# M1.a`, and `M*.a` names the literal category `M*.a`. Names are
+    compared after the same quote-stripping `coverage.rule_categories`
+    applies, so write `W.1`, not `'W.1'`.
+  - **Equality**: the unique names in `coverage.rule_categories` must equal
+    the manifest's names exactly. Ordering and duplicate declarations do not
+    matter. A missing name, an extra name, **or a same-size swap** fails the
+    run (exit 1, no report) with a deterministic error listing the sorted
+    names on both sides. For a manifest `A`/`B` and a deck that declared
+    `A`/`C`, `--expect-rule-categories 2` passes but the set assertion fails:
+
+    ```
+    klt drc: rule-category coverage assertion failed: the deck's report declared a different set of rule categories than the expected set (--expect-rule-categories-file) vouched for (expected 2, declared 2). missing (expected, not declared): ["B"]; unexpected (declared, not expected): ["C"] -- ...
+    ```
+  - a satisfied set has the same effect as a satisfied count: zero findings
+    give `clean` (exit 0), findings still give `violations` (exit 3). A run
+    that tolerated deck errors can never satisfy it — the report stays
+    `coverage_unknown` and records the mismatch (if any) instead of failing.
+  - the assertion is recorded in the additive `coverage_assertion` field
+    with a **distinct `kind`**:
+
+    ```json
+    "coverage_assertion": {
+      "kind": "expected_rule_category_names",
+      "expected_names": ["S.1", "W.1"],
+      "observed_names": ["S.1", "W.1"],
+      "missing_names": [],
+      "unexpected_names": [],
+      "satisfied": true
+    }
+    ```
+
+    The count variant (`kind: "expected_rule_categories"`, integer
+    `expected`/`observed`) is unchanged. `--rerun` dispatches on `kind` and
+    replays the **embedded** `expected_names`, so the original manifest file
+    need not exist any more; `--check` is unaffected. A malformed or
+    unknown-kind `coverage_assertion` in a committed report is a clean error
+    (exit 1) before `klayout` is launched.
+  - Example: `klt drc layout.gds --engine klayout --deck-file deck.lydrc
+    --expect-rule-categories-file deck.categories.txt --format json`.
+- **Where the expected names must come from.** Neither assertion proves rule
+  execution independently, and klt does not discover a deck's full category
+  list for you. The count or set must be reviewed independently for the
+  particular deck revision, its switches (`--deck-var`) and the inputs it
+  applies to — e.g. from reading the deck's `output(...)` calls under the
+  switches you use. **Copying `coverage.rule_categories` from the very run
+  you are accepting is circular**: it vouches for whatever that run did.
+  Two caveats:
+  - **Data-dependent declarations.** Some decks declare a category only
+    inside a branch that depends on the layout itself — e.g. only when a
+    measured area exceeds a limit (so the category exists only when it also
+    has findings), or only when an optional marker layer is present. For
+    such decks the declared set (and so `N`) is input-dependent: a list that
+    is right for one layout can be wrong for the next. Review per input
+    class, or scope the deck so those branches do not gate declarations.
+  - **Deck variables.** A `--deck-var` that gates nothing (e.g. a thread
+    count) is recorded in `provenance.deck.options` and need not change the
+    expectation; but a variable that selects rule groups, a metal stack or
+    feature switches *does* change the declared set. Do not assume deck
+    variables in general are irrelevant.
 - **Partial layer coverage information.** External scripts are opaque to
   the curated rule table, so layer/deck-specific legacy coverage arrays
   remain empty. They do not claim that nothing or everything was checked.
