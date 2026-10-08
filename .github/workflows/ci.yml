@@ -12,9 +12,12 @@ on:
 permissions:
   contents: read
 
+# PRs: one group per PR number; a newer push cancels the superseded run.
+# main: one shared group (github.ref) that never cancels a started run; the
+# default single pending slot still lets a newer merge replace a waiting run.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # uv caches (issue #2559): every `astral-sh/setup-uv` step below RESTORES on any
 # ref but SAVES only on pushes to main (`save-cache`). The repo's Actions cache
