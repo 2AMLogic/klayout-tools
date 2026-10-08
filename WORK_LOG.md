@@ -2,6 +2,37 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-08
+
+- **PR #2859**: release: klayout-tools 0.7.0
+- **PR #2857**: feat(drc): exact rule-category set assertion for --engine klayout (#2806)
+- **PR #2856**: ci: stop cancelling started main runs in ci.yml
+- **PR #2855**: feat(sim): report resolved .include closure with per-file digests
+- **PR #2843**: feat(signoff): artifact-anchored generic evidence for T1 items 1/2/9/10
+- **PR #2841**: feat(report): path-only key registry for drc/extract reports
+- **PR #2836**: feat(sim): reject batch jobs on runner/client klt version skew
+- **PR #2797**: fix(lvs): parse netgen property blocks with colonless device identifiers
+- **PR #2832**: feat(mom): series-path PEEC inductance and resistance for a single winding
+- **PR #2828**: klt sim: add options.save_mode ("all"|"netlist") saved-vector opt-out
+- **PR #2827**: feat(sim): recover runner error envelope from failed batch jobs (#2733)
+- **PR #2825**: docs+example: adaptive single-probe campaigns on the batch backend
+- **PR #2824**: ring-check: opt-in --cells cell-inclusion scope (#2690)
+- **Issue #2838** (closed): Release: cut klayout-tools 0.7.0 to PyPI (downstream pins wait on #2431, #2480, --measure-command)
+- **Issue #2806** (closed): drc --engine klayout: no independent way to derive or check the --expect-rule-categories set (count-only, input-dependent)
+- **Issue #2786** (closed): CI: stop cancelling started main runs in ci.yml, and consider batching main CI on the newest main (~685 job-min/day on main)
+- **Issue #2799** (closed): klt sim: report hashes only the top-level netlist, not the .include closure it already resolves
+- **Issue #2718** (closed): klt signoff: T1 items 1/2/9/10 accept any passing envelope and reject generic, so a cited 'met' carries no information about the item
+- **Issue #2723** (closed): Friction: klt JSON reports (drc, extract) embed the caller's absolute invocation path, so identical analyses are never byte-identical
+- **Issue #2489** (closed): sim: a corner whose solve emitted singular-matrix/gmin warnings, or returned physically implausible node voltages, is still graded as a normal measurement
+- **Issue #2719** (closed): klt sim --backend batch: an older klt on the fleet image silently ignores request options the submitting klt accepted (e.g. options.ngspice_init)
+- **Issue #2674** (closed): netgen engine: property-error block header without a `class:index` colon is not parsed, so every per-parameter detail degrades to one opaque details.raw blob
+- **Issue #2388** (closed): Backfill threshold_max_dbu on sky130/sg13g2/sg13cmos5l fixed-size cut/via rules
+- **Issue #2729** (closed): Compute series-path PEEC inductance and resistance for a single winding
+- **Issue #2732** (closed): klt sim: no request-level control over the saved vector set; generated 'save all' defeats a netlist-body resident-vector save on large transient decks
+- **Issue #2733** (closed): klt sim batch: fleet klt version skew and gf180mcu model-bin failure only visible via S3
+- **Issue #2716** (closed): sim batch: document and regression-test adaptive single-probe campaigns
+- **Issue #2690** (closed): ring-check: no way to scope the layer set to the ring, so a shared layer can report continuous from unrelated geometry
+
 ### 2026-10-07
 
 - **PR #2820**: feat(drc): opt-in --min-klayout-version preflight for --engine klayout (#2689)
