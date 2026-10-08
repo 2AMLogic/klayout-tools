@@ -1055,6 +1055,38 @@ operator lists, and the negative controls:
 [`guides/golden-artifact-determinism.md`](guides/golden-artifact-determinism.md)
 → "Float provenance rules for committed evidence".
 
+## Path-only (non-result) keys (issue #2723)
+
+`klt drc` and `klt extract` echo caller-supplied filesystem paths. Two analyses
+of identical inputs run from different directories therefore never produce
+byte-identical reports, even when every result is identical. A consumer that
+hashes, diffs, or dedupes reports should drop the keys below rather than
+hard-code names from observation. The lists are also importable constants in
+`src/klayout_tools/_report_verify.py` (`DRC_PATH_ONLY_PATHS`,
+`EXTRACT_PATH_ONLY_PATHS`, `PATH_ONLY_KEYS_BY_VERB`) with a helper
+`strip_path_only_keys(report, verb)`; a test fails if a path-bearing key is
+added without being registered. Paths use dotted notation, `*` standing for
+any list index.
+
+| Verb | Key | Meaning |
+|---|---|---|
+| `drc` | `file` | input layout, as provided by the caller |
+| `extract` | `file` | input layout, as provided by the caller |
+| `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`) |
+| `extract` | `spef_path` | written SPEF (`--spef`), else `null` |
+| `extract` | `subcircuit.path` | written sub-circuit netlist (`--subcircuit`) |
+| `extract` | `abstracted_cells.*.lef_path` | LEF file an abstracted cell's pins came from |
+| `extract` | `pdk.root` | `{path, scope}` of the PDK install (never absolute, but host-dependent) |
+
+Separately, `provenance.klt_version`, `provenance.klayout_version`, and
+`provenance.pdk.version` (`VOLATILE_PROVENANCE_PATHS`) differ across tool
+builds even when every path matches, so reports are comparable across
+checkouts only for the same tool build; `strip_path_only_keys(...,
+include_volatile_provenance=True)` drops those too. The default report shape
+is unchanged: these fields are still emitted as before (no `schema_version`
+change). A `--path-root` option that records them relative to a caller-given
+root is tracked separately.
+
 ## Verifying committed evidence: `--check` / `--rerun`
 
 Seven verbs let a consumer verify that a previously committed `--format json`

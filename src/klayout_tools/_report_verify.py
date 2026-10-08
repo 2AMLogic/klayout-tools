@@ -292,6 +292,56 @@ def _strip_path_patterns(
     return value
 
 
+#: Path-only / run-scoped (non-result) keys of a ``klt drc --format json``
+#: report (issue #2723), as :func:`strip_path_patterns` patterns. These echo
+#: the caller's invocation path (``file`` is "the path as provided"), so two
+#: analyses of identical inputs from different directories differ in exactly
+#: these fields and nowhere else. A consumer that hashes/dedupes reports
+#: strips these (plus :data:`VOLATILE_PROVENANCE_PATHS` for cross-build
+#: stability) via :func:`strip_path_only_keys`. Registering a new path-bearing
+#: key here is mandatory; ``tests/test_report_path_only_keys.py`` fails
+#: otherwise. Documented in ``docs/json-contract.md``.
+DRC_PATH_ONLY_PATHS: frozenset[tuple[str, ...]] = frozenset({("file",)})
+
+#: The ``klt extract --format json`` counterpart of :data:`DRC_PATH_ONLY_PATHS`
+#: (issue #2723). ``pdk.root`` is the ``{path, scope}`` shape from
+#: ``env_provenance.repo_relative_path`` (never absolute, but still a function
+#: of where the PDK is installed, not of the analysis).
+EXTRACT_PATH_ONLY_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("file",),
+        ("netlist_path",),
+        ("spef_path",),
+        ("subcircuit", "path"),
+        ("abstracted_cells", LIST_ITEM, "lef_path"),
+        ("pdk", "root"),
+    }
+)
+
+#: Verb -> its path-only key registry (issue #2723).
+PATH_ONLY_KEYS_BY_VERB: dict[str, frozenset[tuple[str, ...]]] = {
+    "drc": DRC_PATH_ONLY_PATHS,
+    "extract": EXTRACT_PATH_ONLY_PATHS,
+}
+
+
+def strip_path_only_keys(
+    report: Any, verb: str, *, include_volatile_provenance: bool = False
+) -> Any:
+    """``report`` with ``verb``'s documented path-only keys removed (issue
+    #2723) -- the normalization a consumer applies before hashing/diffing two
+    reports of the same analysis run from different directories.
+
+    ``include_volatile_provenance`` additionally drops
+    :data:`VOLATILE_PROVENANCE_PATHS` (tool/KLayout/PDK version strings),
+    which differ across tool builds even when every path matches.
+    """
+    patterns = PATH_ONLY_KEYS_BY_VERB[verb]
+    if include_volatile_provenance:
+        patterns = patterns | VOLATILE_PROVENANCE_PATHS
+    return strip_path_patterns(report, patterns)
+
+
 def diff_verdict_fields(
     committed: Any,
     fresh: Any,
