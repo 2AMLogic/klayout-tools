@@ -5564,13 +5564,13 @@ def test_mixed_signal_partitions_apply_their_own_item_5_rule(tmp_path):
 def test_extract_still_satisfies_the_four_items_with_no_evidence_behind_them(
     tmp_path, item_id
 ):
-    """Deliberately out of scope for issue #2044: items 1, 2, 9 and 10 name
-    no evidence at all ("items 1, 2, 9, and 10 have none ... Citing them
-    honestly is the claimant's responsibility, not something the tool
-    verifies"), so they are graded on whether *some* passing envelope was
-    cited, topical relevance included -- and `extract` is no more irrelevant
-    there than the `drc` report that also satisfies them. Restricting them
-    needs an artifact to bind them to, which is a separate question."""
+    """Deliberately out of scope for issue #2044, and kept for compatibility
+    by issue #2718: items 1, 2, 9 and 10 name no `klt` verb, so any passing
+    native envelope still satisfies them -- `extract` no more irrelevantly
+    than the `drc` report that also does. Issue #2718 adds an
+    artifact-anchored generic form for them instead of restricting native
+    kinds; a native citation is told apart by carrying no
+    `artifact_binding`."""
     extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
 
     result = build_tier_report(_manifest(evidence={str(item_id): extract_path}))
@@ -5675,20 +5675,341 @@ def test_generic_evidence_for_items_3_through_7_renders_unmet_wrong_kind(
 
 
 @pytest.mark.parametrize("item_id", [1, 2, 9, 10])
-def test_generic_evidence_for_unrestricted_non_item_8_items_still_rejected(
+def test_bare_generic_evidence_for_items_1_2_9_10_is_refused_as_unanchored(
     tmp_path, item_id
 ):
-    """Items 1, 2, 9, and 10 are otherwise unrestricted (any native kind
-    satisfies them, like items 3-6) but do not opt in to "generic" either --
-    only item 8 does."""
+    """Items 1, 2, 9, and 10 accept "generic" only when it is
+    artifact-anchored (issue #2718). A bare "yep, it's fine" generic record
+    -- no `t1_item`, no bound artifact, no pinned hash -- still never
+    renders `met`; the reason now names what is missing (it was
+    `wrong_kind` before these items accepted any generic citation)."""
     generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
 
     result = build_tier_report(_manifest(evidence={str(item_id): generic_path}))
 
     item = next(item for item in result["items"] if item["id"] == item_id)
     assert item["status"] == "unmet"
-    assert item["reason"] == "wrong_kind"
+    assert item["reason"] == "unanchored_evidence"
     assert item["citation"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Artifact-anchored generic evidence for items 1, 2, 9, 10 (issue #2718)
+# --------------------------------------------------------------------------- #
+
+#: One audited artifact per anchored item -- the subject matter each item's
+#: checklist text names.
+_ANCHORED_ARTIFACTS = {
+    1: ("design-sources.txt", "schematic/ota.sch\nnetlist/ota.spice\n"),
+    2: ("ota.gds", "GDS-BYTES"),
+    9: ("testbenches.txt", "tb/ota_ac.spice\ntb/ota_tran.spice\n"),
+    10: ("ci.yml", "jobs: {validate: {}}\n"),
+}
+
+
+def _anchored_generic(
+    tmp_path,
+    item_id: int,
+    *,
+    declared_item: object = "same",
+    path: object = "same",
+    recorded_hash: str | None = None,
+    status: str = "pass",
+    name: str | None = None,
+) -> tuple[str, str]:
+    """Write an artifact for ``item_id`` and an artifact-anchored generic
+    envelope beside it. Returns ``(envelope path, artifact hash)``.
+
+    ``declared_item``/``path`` default to the honest values; pass ``None``
+    to omit the field, or any other value to override it."""
+    artifact_name, content = _ANCHORED_ARTIFACTS[item_id]
+    artifact = tmp_path / artifact_name
+    artifact.write_text(content)
+    digest = _hash_of(artifact)
+    input_block: dict = {"content_hash": recorded_hash or digest}
+    if path == "same":
+        input_block["path"] = artifact_name
+    elif path is not None:
+        input_block["path"] = path
+    envelope: dict = {
+        "schema_version": 1,
+        "kind": "generic",
+        "status": status,
+        "summary": f"audited artifact for T1 item {item_id}",
+        "source": artifact_name,
+        "provenance": {
+            "klt_version": "0.5.0",
+            "klayout_version": "0.30.10",
+            "pdk": None,
+            "deck": None,
+            "input": input_block,
+        },
+    }
+    if declared_item == "same":
+        envelope["t1_item"] = item_id
+    elif declared_item is not None:
+        envelope["t1_item"] = declared_item
+    return _write(tmp_path, name or f"item{item_id}.json", envelope), digest
+
+
+@pytest.mark.parametrize("item_id", [1, 2, 9, 10])
+def test_anchored_generic_evidence_satisfies_its_item_and_discloses_binding(
+    tmp_path, item_id
+):
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={str(item_id): {"file": envelope_path, "content_hash": digest}}
+        )
+    )
+
+    item = _item(result, item_id)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    citation = item["citation"]
+    assert citation["kind"] == "generic"
+    assert citation["content_hash"] == digest
+    assert citation["input_verified"] is True
+    assert citation["artifact_binding"] == {
+        "t1_item": item_id,
+        "path": _ANCHORED_ARTIFACTS[item_id][0],
+        "content_hash": digest,
+        "input_verified": True,
+        "summary": f"audited artifact for T1 item {item_id}",
+        "source": _ANCHORED_ARTIFACTS[item_id][0],
+    }
+
+
+@pytest.mark.parametrize(
+    ("cited_for", "declared"), [(1, 2), (2, 9), (9, 10), (10, 1), (8, 9)]
+)
+def test_anchored_generic_evidence_cannot_be_replayed_onto_another_item(
+    tmp_path, cited_for, declared
+):
+    """An attestation declares the one item it is for; citing it for any
+    other item -- including item 8 -- renders `wrong_item`."""
+    envelope_path, digest = _anchored_generic(tmp_path, declared)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={str(cited_for): {"file": envelope_path, "content_hash": digest}}
+        )
+    )
+
+    item = _item(result, cited_for)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_item"
+    assert item["citation"] is None
+
+
+@pytest.mark.parametrize("item_id", [3, 4, 5, 6, 7])
+def test_anchored_generic_evidence_still_wrong_kind_for_items_3_to_7(tmp_path, item_id):
+    """Declaring the item does not unlock a verb-backed item: those still
+    reject "generic" as `wrong_kind`, exactly as before."""
+    envelope_path, digest = _anchored_generic(tmp_path, 9)
+    envelope = json.loads(Path(envelope_path).read_text())
+    envelope["t1_item"] = item_id
+    Path(envelope_path).write_text(json.dumps(envelope))
+
+    result = build_tier_report(
+        _manifest(
+            evidence={str(item_id): {"file": envelope_path, "content_hash": digest}}
+        )
+    )
+
+    item = _item(result, item_id)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"declared_item": None},
+        {"declared_item": "9"},
+        {"declared_item": True},
+        {"path": None},
+        {"path": ""},
+        {"path": {"path": "testbenches.txt", "scope": "external"}},
+    ],
+    ids=[
+        "no-t1_item",
+        "string-t1_item",
+        "bool-t1_item",
+        "no-path",
+        "empty-path",
+        "external-scope",
+    ],
+)
+def test_missing_or_malformed_binding_renders_unanchored(tmp_path, overrides):
+    envelope_path, digest = _anchored_generic(tmp_path, 9, **overrides)
+
+    result = build_tier_report(
+        _manifest(evidence={"9": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 9)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+    assert item["citation"] is None
+
+
+def test_unpinned_manifest_entry_renders_unanchored(tmp_path):
+    """The manifest must pin the artifact hash -- an unpinned citation makes
+    no freshness claim, so nothing anchors it."""
+    envelope_path, _ = _anchored_generic(tmp_path, 10)
+
+    result = build_tier_report(_manifest(evidence={"10": envelope_path}))
+
+    item = _item(result, 10)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+
+
+def test_pin_mismatch_renders_stale(tmp_path):
+    envelope_path, _ = _anchored_generic(tmp_path, 2)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={"2": {"file": envelope_path, "content_hash": "sha256:other"}}
+        )
+    )
+
+    item = _item(result, 2)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+
+
+def test_changed_artifact_renders_stale_even_when_pin_matches_envelope(tmp_path):
+    """The manifest and envelope agree, but the audited artifact (here the
+    testbench inventory) changed underneath them. For a native citation this
+    is only disclosed (`input_verified: false`); for an anchored item it is
+    the whole claim, so it refuses."""
+    envelope_path, digest = _anchored_generic(tmp_path, 9)
+    (tmp_path / "testbenches.txt").write_text("tb/ota_ac.spice\n")
+
+    result = build_tier_report(
+        _manifest(evidence={"9": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 9)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+    assert item["citation"] is None
+
+
+def test_unresolvable_artifact_renders_unverifiable(tmp_path):
+    """The bound artifact cannot be found from the grading context, so the
+    hash is only the envelope's own claim."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    (tmp_path / "design-sources.txt").unlink()
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unverifiable_provenance"
+
+
+def test_failing_anchored_generic_renders_check_failed(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 10, status="fail")
+
+    result = build_tier_report(
+        _manifest(evidence={"10": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 10)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_command_backed_anchored_generic_follows_the_same_rules(tmp_path):
+    """File- and command-backed evidence bind identically: the command runs
+    in `cwd`, where the artifact lives."""
+    envelope_path, digest = _anchored_generic(tmp_path, 9)
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.write(open(sys.argv[1]).read())",
+        envelope_path,
+    ]
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "9": {"command": command, "cwd": str(tmp_path), "content_hash": digest},
+                "10": {
+                    "command": command,
+                    "cwd": str(tmp_path),
+                    "content_hash": digest,
+                },
+            }
+        )
+    )
+
+    item_9 = _item(result, 9)
+    assert item_9["status"] == "met"
+    assert item_9["citation"]["command"] is not None
+    assert item_9["citation"]["artifact_binding"]["t1_item"] == 9
+    item_10 = _item(result, 10)
+    assert item_10["status"] == "unmet"
+    assert item_10["reason"] == "wrong_item"
+
+
+@pytest.mark.parametrize("item_id", [1, 2, 9, 10])
+def test_native_citation_for_items_1_2_9_10_carries_no_artifact_binding(
+    tmp_path, item_id
+):
+    """Compatibility: a passing native envelope still satisfies these four
+    exactly as before -- and its citation carries no `artifact_binding`,
+    which is what distinguishes "a passing envelope was cited" from "the
+    item is bound to an audited artifact"."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={str(item_id): drc_path}))
+
+    item = _item(result, item_id)
+    assert item["status"] == "met"
+    assert "artifact_binding" not in item["citation"]
+
+
+def test_item_8_generic_without_t1_item_is_unchanged(tmp_path):
+    """Item 8 does not require the anchored form; declaring itself is
+    accepted, and no `artifact_binding` is attached."""
+    plain = _write(tmp_path, "plain.json", GENERIC_PASS_ENVELOPE)
+    declared = _write(
+        tmp_path, "declared.json", {**GENERIC_PASS_ENVELOPE, "t1_item": 8}
+    )
+
+    for path in (plain, declared):
+        item_8 = _item(build_tier_report(_manifest(evidence={"8": path})), 8)
+        assert item_8["status"] == "met"
+        assert "artifact_binding" not in item_8["citation"]
+
+
+def test_anchored_binding_is_shown_in_text_output(tmp_path, capsys):
+    envelope_path, digest = _anchored_generic(tmp_path, 9)
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            evidence={
+                "9": {"file": envelope_path, "content_hash": digest},
+                "10": drc_path,
+            }
+        ),
+    )
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert exit_code in (0, 3)
+    assert "bound: T1 item #9 -> testbenches.txt" in out
+    assert "topic: not bound" in out
 
 
 def test_command_evidence_generic_wrong_kind_renders_unmet(monkeypatch):

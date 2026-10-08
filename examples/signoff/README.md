@@ -119,17 +119,19 @@ pins exactly this shape so the example cannot rot.
 
 ## Do not pad items 1, 2, 9, and 10
 
-Those four T1 items have no `klt` verb behind them, so `klt signoff` grades
-them on whether *some* recognised, passing envelope was cited — not on
-whether that evidence has anything to do with the claim. Citing this
-example's `drc.json` again for item 10 ("Repo hygiene") would produce a
-third `MET` row, and the tool would have no basis on which to object.
+Those four T1 items have no `klt` verb behind them. `klt signoff` still
+accepts any recognised, passing native envelope for them, for
+compatibility, without checking whether that evidence has anything to do
+with the claim. Citing this example's `drc.json` again for item 10 ("Repo
+hygiene") would produce a third `MET` row, with no `artifact_binding` on
+its citation.
 
 This example deliberately does not do that. An honest `UNMET`/`no_evidence`
-row is worth more than a mechanically-green one, and the tool checks
-envelope validity, freshness, and kind-restriction — never topical
-relevance. See [`docs/cli/signoff.md`](../../docs/cli/signoff.md)'s "Items 1,
-2, 9, and 10: `klt signoff` cannot check topical relevance".
+row is worth more than a mechanically-green one. To evidence one of these
+items, cite an artifact-anchored `generic` envelope (issue #2718) that
+declares the item and pins the audited artifact's hash. See
+[`docs/cli/signoff.md`](../../docs/cli/signoff.md)'s "Items 1, 2, 9, and
+10: bind them to an audited artifact".
 
 ## Two normalized provenance fields
 

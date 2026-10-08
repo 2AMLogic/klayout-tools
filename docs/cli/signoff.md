@@ -25,9 +25,10 @@ Four modes, one verb:
    until issue #1152 (Phase 3) additionally let item 8 ("Characterization
    report"), the one T1 item with no named `klt` verb, accept a generic
    evidence citation too — no other item may cite one. Since issue #2044
-   **every T1 item that names evidence (3-8) is kind-restricted**; only
-   items 1, 2, 9 and 10, which name none, still accept any passing envelope.
-   See "Tier-verdict report" below.
+   **every T1 item that names evidence (3-8) is kind-restricted**. Items 1,
+   2, 9 and 10, which name none, still accept any passing envelope. Since
+   issue #2718 they can also be bound to an audited artifact through an
+   artifact-anchored generic envelope. See "Tier-verdict report" below.
 3. **Fleet roll-up** (`--fleet`, issue #827 — Phase 1c of epic #706) — grade
    every block named in a **fleet manifest** (one tier-verdict report per
    block) and reduce each block's result down to its current tier and, for
@@ -827,7 +828,8 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
   entry, either **file-backed** or **command-backed**:
   - **File-backed** (issue #722) — a bare file path (a `klt
     drc`/`lvs`/`extract`/`sim`/`yield`/`pex` `--format json` envelope, or
-    (issue #1152, item 8 only) a generic evidence envelope, or `"-"` for
+    (issue #1152) a generic evidence envelope for item 8, or (issue #2718)
+    an artifact-anchored one for items 1, 2, 9 or 10, or `"-"` for
     stdin) or `{"file": ..., "content_hash": ..., "pointer": ...}` to also
     pin the check to an expected input revision, and/or (issue #2342) to
     name where inside that file the envelope lives. A `klt power` envelope
@@ -892,8 +894,10 @@ accept (items 3-8 each accept only the kind(s) `design-evidence-tiers.md`
 names for them — see "Item 7 is kind-restricted, per block kind" and "Items
 5, 6 and 8 are kind-restricted too" below, e.g. item 7
 accepts `pex` for an analog block and `pex` or an SDF-annotated
-`functional-verification` run for a digital one; every item
-other than item 8 rejects a `generic` citation; **every** item rejects a
+`functional-verification` run for a digital one; items 3-7 and 11 reject a
+`generic` citation, and items 1, 2, 9 and 10 accept only an
+artifact-anchored one — see "Items 1, 2, 9, and 10: bind them to an audited
+artifact" below; **every** item rejects a
 `power` citation — see "No T1
 item accepts `power` evidence" below) — also renders `"unmet"`: **this phase
 never infers a `"met"` verdict for an item with no runnable check behind
@@ -922,7 +926,8 @@ below).
 it to item 8, the one T1 item naming no specific `klt` verb — and, like item
 7's restriction, gates which item a `generic` citation may satisfy, so it
 cannot substitute for items 3-7's own evidence requirements (see "Generic
-evidence (opt-in, non-`klt`-native)" below). **Phase 4 (issue #1321, Phase 2
+evidence (opt-in, non-`klt`-native)" below). Issue #2718 extends `generic`
+to items 1, 2, 9 and 10, in an artifact-anchored form only. **Phase 4 (issue #1321, Phase 2
 of epic #712)** adds `klt power`'s IR-drop/EM verdict as a recognised
 envelope kind for *envelope-aggregation mode only* — `docs/design-evidence-
 tiers.md`'s T1 checklist has no item for power-grid evidence yet, so a
@@ -1068,49 +1073,106 @@ reduction — tier, counts, and what is blocking — and already directs a
 reader to the block's own `--manifest` report, which carries the
 declaration in full.
 
-### Items 1, 2, 9, and 10: `klt signoff` cannot check topical relevance
+### Items 1, 2, 9, and 10: bind them to an audited artifact
 
-**These four items have no `klt` verb behind them, and the tool does not
-pretend otherwise.** Items 3-7 each have a natural verb a well-formed
-manifest is expected to cite (`klt drc`, `klt lvs`, `klt sim`, `klt yield`,
-`klt pex`), and item 8 has the purpose-built `generic` envelope. Items **1**
-(Design sources), **2** (Layout), **9** (Testbenches shipped), and **10**
-(Repo hygiene) have none — they are claims about what a repository
-*contains*, not about a check that can be run.
+**These four items have no `klt` verb behind them.** Items 3-7 each have a
+natural verb a well-formed manifest is expected to cite (`klt drc`, `klt
+lvs`, `klt sim`, `klt yield`, `klt pex`), and item 8 has the purpose-built
+`generic` envelope. Items **1** (Design sources), **2** (Layout), **9**
+(Testbenches shipped), and **10** (Repo hygiene) are claims about what a
+repository *contains*, not about a check that can be run.
 
-The grading consequence is blunt and worth stating plainly: any recognised,
-*native* envelope kind (`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`) whose own
-check passed renders these four items `"met"`, **even if it is topically
-unrelated to what the item actually claims**. Citing the same clean `klt
-drc` report for item 3 and again for item 10 produces two `MET` rows, and
-`klt signoff` has no basis on which to object. (The two existing
-restrictions still apply: a `generic` citation satisfies item 8 only, and a
-`power` citation satisfies no item at all — so neither can be used here.)
+**The evidence the grader can read: an artifact-anchored generic envelope**
+(issue #2718). A `generic` envelope can be cited for one of these four when
+it is bound to the artifact that was audited. All four conditions below
+must hold, or the row is `unmet`:
 
-**These four are the only unrestricted items left** (issue #2044). Every
-item that names evidence — 3 through 8 — accepts only the kind(s) named for
-it. That asymmetry is deliberate and not an oversight here: the restriction
-mechanism works by naming the right artifact, and for items 1, 2, 9 and 10
-there is no right artifact to name. In particular a `klt extract` report,
-which cannot fail, still satisfies these four exactly like a clean `klt drc`
-report does — equally irrelevant, equally accepted, for the same structural
-reason.
+| Condition | Where | If missing or wrong |
+| --------- | ----- | ------------------- |
+| The envelope declares the item it attests: `"t1_item": <id>` (an integer) | envelope | absent or not an integer: `unanchored_evidence`; a different item: `wrong_item` |
+| The envelope names the audited artifact in `provenance.input.path` (a string resolved beside the envelope, or a `{"path", "scope": "repo"}` object) and records its `provenance.input.content_hash` | envelope | `unanchored_evidence` |
+| The manifest entry pins the same `content_hash` | manifest | not pinned: `unanchored_evidence`; pinned but different: `stale_evidence` |
+| The named artifact re-hashes to that value from the grading context (`input_verified: true`) | filesystem | changed since the envelope was written: `stale_evidence`; not found or not readable here: `unverifiable_provenance` |
 
-What `klt signoff` *does* verify for these items is what it verifies
-everywhere: that the evidence resolves to a readable, recognised envelope;
-that the check it reports actually passed; and that it is fresh against any
-`content_hash` the manifest pinned. What it cannot verify is **relevance** —
-whether the cited artifact has anything to do with the claim. For items 1,
-2, 9, and 10 that gap is structural, not an oversight to be fixed by a
-future phase: there is no verb to bind them to.
+What each item binds:
 
-**So citing these four honestly is the manifest author's responsibility, not
-something this command enforces.** The safest default is to leave them
-uncited — an `UNMET`/`no_evidence` row is an accurate statement that no
-check backs the claim, which is exactly the failure mode this verb exists to
-make visible (see "Proving a skipped check is caught, not silently passed"
-below). `examples/signoff/` follows that default: it cites items 3 and 4
-only, and leaves the rest visibly `UNMET`.
+| Item | Bind to (the artifact `provenance.input.path` names) |
+| ---- | ---------------------------------------------------- |
+| **1** Design sources | The design-source inventory: a committed list of the schematic/RTL sources and the derived netlist, or the netlist itself. |
+| **2** Layout | The committed GDS/OASIS stream. |
+| **9** Testbenches shipped | The testbench inventory: a committed list of every claimed measurement's testbench and its cold-start invocation. |
+| **10** Repo hygiene | The hygiene audit record: the CI workflow file, or a committed checklist covering README, spec table and license. |
+
+The `status: "pass"` inside the envelope is still the author's own
+assertion; `klt signoff` does not re-audit a testbench list. What the
+binding adds is that the attestation names the exact bytes it was made
+about, that it cannot be cited for any other item, and that any edit to
+those bytes since the attestation turns the row `unmet`. A `--check` re-run
+also reports that as drift.
+
+A valid item-9 citation (`tb-inventory.json` written beside
+`testbenches.txt`):
+
+```json
+{
+  "schema_version": 1,
+  "kind": "generic",
+  "status": "pass",
+  "t1_item": 9,
+  "summary": "every claimed measurement has a committed testbench; cold-start: make sim",
+  "source": "testbenches.txt",
+  "provenance": {
+    "klt_version": "0.5.0",
+    "klayout_version": "0.30.10",
+    "pdk": null,
+    "deck": null,
+    "input": {"content_hash": "sha256:3f1c...", "path": "testbenches.txt"}
+  }
+}
+```
+
+```json
+{"evidence": {"9": {"file": "evidence/tb-inventory.json", "content_hash": "sha256:3f1c..."}}}
+```
+
+This renders `MET`, and the citation carries
+`artifact_binding: {"t1_item": 9, "path": "testbenches.txt", "content_hash":
+"sha256:3f1c...", "input_verified": true, "summary": ..., "source": ...}`.
+Text output adds `bound: T1 item #9 -> testbenches.txt (content_hash=...)`.
+
+Rejected examples:
+
+- The same envelope cited for item 10 (or item 8): `unmet`/`wrong_item`.
+- The same envelope with no `t1_item`, or cited without the manifest
+  `content_hash` pin: `unmet`/`unanchored_evidence`.
+- `testbenches.txt` edited after the envelope was written:
+  `unmet`/`stale_evidence`.
+- A bare characterization-style `generic` envelope with none of the binding:
+  `unmet`/`unanchored_evidence`.
+
+Command-backed evidence follows the same rules. The binding is read from
+the command's stdout envelope, and a relative `provenance.input.path` is
+resolved against the entry's `cwd`.
+
+**Native envelopes are still accepted for these four, for compatibility,
+and they carry no information about the item.** Any recognised, passing
+native envelope kind (`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`/`sta`/
+`functional-verification`) still renders these items `"met"` exactly as
+before, **even when it is topically unrelated to the claim**. Citing the
+same clean `klt drc` report for item 3 and again for item 10 produces two
+`MET` rows. Such a citation has **no `artifact_binding` key**. That absence
+is the machine-readable difference between "a passing envelope was cited"
+and "the item is bound to an audited artifact", and text output says so
+on the row (`topic: not bound -- ...`). (`power`, `erc` and
+`place-and-route` citations are still refused for these items, as before.)
+Do not use a borrowed native pass to make these rows agree with a human
+audit. Bind the audited artifact instead.
+
+**Leaving them uncited is still honest.** An `UNMET`/`no_evidence` row is
+an accurate statement that no check backs the claim, which is exactly the
+failure mode this verb exists to make visible (see "Proving a skipped check
+is caught, not silently passed" below). `examples/signoff/` cites items 3
+and 4 only, and leaves the rest visibly `UNMET`.
 
 **Taking that advice does not cost you the fleet roll-up's answer** (issue
 #2178). Because these four render `unmet` by construction for any manifest
@@ -1546,8 +1608,8 @@ Two mechanisms close that gap, both driven by the same content hash:
    drift from it:
 
    ```json
-   "opt_in_evidence_kinds": {"generic": [8], "power": [], "erc": [11], "place-and-route": [11]},
-   "opt_in_kinds_by_item": {"8": ["generic"], "11": ["erc", "place-and-route"]}
+   "opt_in_evidence_kinds": {"generic": [1, 2, 8, 9, 10], "power": [], "erc": [11], "place-and-route": [11]},
+   "opt_in_kinds_by_item": {"1": ["generic"], "2": ["generic"], "8": ["generic"], "9": ["generic"], "10": ["generic"], "11": ["erc", "place-and-route"]}
    ```
 
    `opt_in_evidence_kinds` maps kind to the item ids it may satisfy; an
@@ -1687,7 +1749,7 @@ reader of the citation.
 
 What has *not* changed: a hand-rolled `"kind": "generic"` envelope asserting
 that a post-layout comparison happened is still `"unmet"`/`"wrong_kind"` for
-item 7 (`generic` remains item 8 only — see "Generic evidence (opt-in,
+item 7 (`generic` is never accepted for items 3-7 — see "Generic evidence (opt-in,
 non-`klt`-native)" below), and so is a `drc`/`lvs`/`sim`/`extract`/`yield`/
 `sta` citation. Item 7 still requires a real, disclosed
 schematic-vs-extracted comparison.
@@ -1891,10 +1953,11 @@ citation is refused by the second — no item is doubly restricted into
 accepting nothing.
 
 **Items 1, 2, 9 and 10 are deliberately left alone**, including for
-`extract` — see "Items 1, 2, 9, and 10: `klt signoff` cannot check topical
-relevance" above. They name no evidence at all, so there is no right
-artifact to restrict them *to*, and singling out one irrelevant kind while
-every other irrelevant kind still counts would be arbitrary.
+`extract` — see "Items 1, 2, 9, and 10: bind them to an audited artifact"
+above. They name no `klt` verb, so there is no native kind to restrict them
+*to*, and singling out one irrelevant kind while every other irrelevant
+kind still counts would be arbitrary. Issue #2718 later gave them an
+artifact-anchored `generic` form instead, without restricting native kinds.
 
 ### Generic evidence (opt-in, non-`klt`-native)
 
@@ -1922,6 +1985,11 @@ misclassify it as a native kind instead:
 ```
 
 - `kind` — required, must be the literal string `"generic"`.
+- `t1_item` — optional integer (issue #2718), the T1 item this envelope
+  attests. **Required**, and must match, when the envelope is cited for
+  item 1, 2, 9 or 10. When present it must match for item 8 too, so an
+  attestation cannot be replayed onto another item (`unmet`/`wrong_item`).
+  An item-8 envelope that omits it grades exactly as before.
 - `status` — required, `"pass"` or `"fail"` — the envelope's own,
   caller-asserted verdict. Nothing else is re-derived from any other field,
   since a generic envelope's content is not otherwise defined.
@@ -1991,16 +2059,22 @@ above alongside (or generated from) its own non-`klt`-native record; feeding
 `klt signoff` a bare `.md` file directly still fails to parse as JSON,
 exactly as it always has, and is out of this feature's scope.
 
-**Only item 8 accepts a `generic` citation.** Naively recognising `generic`
+**Which items accept a `generic` citation.** Item 8 accepts a bare one.
+Items 1, 2, 9 and 10 accept only the artifact-anchored form (issue #2718,
+see "Items 1, 2, 9, and 10: bind them to an audited artifact"). Items 3-7
+and 11 never accept one. The rest of this paragraph is the original
+(issue #1152) reasoning for scoping it at all. Naively recognising `generic`
 in `_classify` with no further restriction would let it satisfy *any*
 unrestricted item (1-6, 8-10) the same way any other recognised, passing
 kind already can — letting a hand-rolled "yep, it's fine" record stand in
 for DRC/LVS/corner/Monte-Carlo/post-layout evidence it never actually
 proved. `klt signoff` closes that independently of item 7's `pex`-only
-restriction: a `generic` citation for **any item other than item 8** —
-including items 3-7, and including the otherwise-unrestricted items 1, 2,
-9, and 10 — renders `"unmet"` with `reason: "wrong_kind"`, never a borrowed
-pass, even when the generic envelope's own `status` genuinely is `"pass"`.
+restriction: a `generic` citation for items 3-7 (and 11) renders
+`"unmet"` with `reason: "wrong_kind"`, never a borrowed pass, even when the
+generic envelope's own `status` genuinely is `"pass"`. Before issue #2718
+the same was true for items 1, 2, 9 and 10. A bare generic envelope cited
+for them now renders `"unanchored_evidence"` instead, which is still
+`unmet` and names what is missing.
 Item 8 itself was otherwise unrestricted when this shipped: it also accepted
 any native kind's passing citation, `generic` being an *additional* accepted
 kind for item 8 rather than a replacement. Issue #2044 closed that half too
@@ -2414,7 +2488,7 @@ distinguishable from "no samples document was ever named" (see
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
 | `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
 | `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
 
 #### `citation` fields
 
@@ -2433,6 +2507,7 @@ distinguishable from "no samples document was ever named" (see
 | `power_delivery`| object          | **Item 11 citations only** (issue #2025): `{"partition_kind", "supply_nets", "pdn", "strap_layers", "tapcell_master", "power_connectivity_status", "ties_checked_by_assertion", "ties_checked_by_well_assertion", "supply_unlabelled_islands"}`, plus `disclosed_undeclared_tie_classes` when present — what the grading actually resolved, so a `met` verdict states which supplies were declared and which branch proved them. `pdn` is `false` (with `strap_layers: []`, `tapcell_master: null`) for an analog or full-custom block that cited no `place-and-route` response — "no PDN citation", not "a PDN was checked and found missing", which renders `unmet`/`no_pdn` instead. `ties_checked_by_assertion` (array\<string\>, issue #2234) quotes the cited ERC run's own `erc_coverage.checked_by_assertion`: the `erc.missing_tie` work identities whose tap region came from a caller assertion (`ties[].tap_boxes`) rather than PDK-marker narrowing — `[]` for a purely marker-derived run, and for ERC evidence produced before that field existed. It does not change the verdict (an asserted tie is graded `met` exactly as a marker-derived one, and a degenerate or unmatched assertion is rejected by `klt erc` itself); it states which taps rested on the caller's word, without re-opening the cited envelope. `ties_checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) quotes that run's `erc_coverage.checked_by_well_assertion` the same way, for the **well** side: the work identities whose well side rested on caller-named coordinates, in either of two forms — the substrate region itself asserted (`ties[].well_layer: null` + `ties[].well_boxes`) because the block draws no well/tub layer at all (the native-substrate case), or a *drawn* well whose class selection was named in boxes (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`) because no drawn layer separates the tub's two bias classes. `[]` for a run using neither, and for ERC evidence produced before those fields existed. Kept as a separate list because it is a separate, weaker claim: one says which drawn geometry is the tap, the other says how the well side was named. It does not change the verdict either — `klt erc` rejects an assertion indistinguishable from the whole top-cell extent as `degenerate_well_assertion`, and a box selection that kept every shape of the drawn layer or none of them as `degenerate_well_selection`, both landing in `erc_coverage.skipped` where this item already refuses to read them as a clean missing-tie verdict. A purely marker-layer selection (`well_requires`/`well_excludes`) stays out of this list: the stream draws its own partition. `supply_unlabelled_islands` (object, issue #2524) is the **severed-rail negative** this item could not previously state: `{<declared supply name>: <nets[].unlabelled_islands>}` for each cited supply whose ERC spec declared the `stackup` roles it owns (`nets[].roles`, issue #2510), every value `0` for a met item. `erc.unconnected_net` counts islands *carrying the declared label*, so a single-label rail severed into a labelled piece and an unlabelled orphan grades clean — this key is what says the clean read was measured over the whole conductor on the owned roles, not only over what carried a label (its non-zero counterpart is `erc.unlabelled_conductor`, already an `unmet`/`supply_not_continuous` blocker in the table above). `{}` when no cited supply declared `roles`, and for every ERC envelope produced before those keys existed — the honest "not measured", never a fabricated zero, so a grader can tell "checked, and it is zero" from "nobody asked". Like the two assertion lists, it does not change the verdict; it states the negative the verdict rests on. `disclosed_undeclared_tie_classes` (array\<object\>, issue #2623) is the **partial-declaration** counterpart of `detail.ties_disclosure_reason` below: `[{"class", "reason"}, …]`, one entry per `erc.missing_tie:["<class>"]` the cited ERC run recorded in `erc_coverage.inapplicable` with a disclosed reason (`ties_disclosure.undeclared_classes`, issue #2541) — a well class the spec names as inexpressible or tool-limited *alongside* at least one other tie it did declare and get checked (the `tie_count > 0` path this item is already `met` on). It does not change the verdict — the declared, checked tie(s) already carry the item to `met` on their own merits, and a disclosure is never a substitute for a computed result — it only states, in the report of record, that a second class was considered and why it could not be checked. **Absent** (not an empty list) whenever the cited run disclosed no named class, so a run predating #2541 or naming none renders this citation exactly as it did before this key existed. |
 | `coverage`      | object          | **`drc` citations only**, and only when the cited envelope carries a `coverage` block (issue #2002): `{"layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`, quoted verbatim from it — the three fields [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a DRC claim to disclose. **Absent** for any other kind, and for DRC evidence committed before `klt drc` reported coverage — an absent `coverage` means "this artifact reported no coverage", never "this deck has no gaps". See "DRC coverage is reported, not graded" above. |
 | `yield_campaign` | object | **`yield` citations only**, and only when the cited report carries at least one measurement (issue #2467): `{"sample_size", "undersized_measurements", "negative_control", "measurements_without_negative_control", "undetected_negative_controls"}` — the campaign's own sample-size and negative-control state, rolled up across `measurements[]`. `sample_size` is `"insufficient"` when any measurement says so, `"sufficient"` when at least one says so and none says otherwise, and `null` when none states a verdict; `negative_control` is `"not_detected"` when any declared control failed, `"detected"` when at least one was declared and every declared one detected, and `"not_declared"` when none was declared. The three name-lists are in the report's own measurement order. On a `"met"` citation the refusing values (`"insufficient"`, `"not_detected"`) can never appear — those render `unmet`/`undersized_sample` or `unmet`/`negative_control_not_detected` instead, carrying this same block as the item's `detail.yield_campaign`. **Absent** for any other kind, and for a report with no measurements — an absent key means "this artifact made no campaign statement", never "the campaign was disciplined". See "Campaign discipline on item 6" below. |
+| `artifact_binding` | object | **Items 1, 2, 9 and 10, `generic` citations only** (issue #2718): `{"t1_item", "path", "content_hash", "input_verified", "summary"?, "source"?}`. These are the item the attestation declared, the audited artifact exactly as its `provenance.input.path` names it (a string or a `{path, scope}` object), the hash that artifact re-hashed to, and `input_verified` (always `true` on a met row). `summary`/`source` are echoed when the envelope carries them as strings, and are never graded. **Absent** on every other citation, including a native-kind citation of items 1, 2, 9 or 10. On those four items an absent key means "a passing envelope was cited, but nothing ties it to the item's subject matter". See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
 | `coverage_qualification` | object | **Any kind**, and only when the cited envelope's versioned `coverage` block classifies as `partial` (issue #2109): `{"reason": "partial_coverage", "skipped": [{"id", "reason"}, …]}` — the requested work the cited run did not check. **Absent** for complete, zero, unknown, malformed and pre-contract coverage alike; an absent key means "this artifact made no partial-coverage claim", never "nothing was skipped". Legacy verb-specific gap fields (`coverage.rules_skipped`) are **not** re-read into it. Quoted, never graded on — see "Partial coverage is qualified, not inferred" above. |
 
 #### `reason` values
@@ -2457,9 +2532,11 @@ actually ran and failed):
 | `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, timed out, or exited nonzero — distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
-| `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. |
-| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a `functional-verification` envelope (no `provenance` block by design) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. |
-| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above), every item other than item 11 rejects an `"erc"` or `"place-and-route"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the pin matches the envelope but the audited artifact itself no longer re-hashes to that value (`input_verified: false`), meaning the artifact was edited after it was attested. |
+| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a `functional-verification` envelope (no `provenance` block by design) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
+| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"` or `"place-and-route"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"unanchored_evidence"`   | yes | **(issue #2718)** **Items 1, 2, 9 and 10 only.** The evidence resolved to a *passing* `generic` envelope, but it is not bound to an audited artifact. Either the envelope declares no `t1_item` (or a non-integer one), or it names no usable `provenance.input.path`, or the manifest entry pins no `content_hash`. The envelope's `status` is then only its author's word. Add the binding; there is nothing to re-run. A non-integer `t1_item` renders this for item 8 too. See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
+| `"wrong_item"`            | yes | **(issue #2718)** The evidence resolved to a *passing* `generic` envelope whose declared `t1_item` names a different item than the one it is cited for: an attestation replayed across items. Rendered for every item that accepts `generic` (1, 2, 8, 9, 10). An item-8 envelope with no `t1_item` is unaffected. Cite the attestation made for this item. |
 | `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`, or no `power.tapcell_master` was placed. Re-run P&R with a `request.power` block. |
 | `"supply_spec_incomplete"` | yes | **Item 11 only** (issue #2025). The cited `klt erc` run's own spec document does not ask the question this item grades: it could not be read at *any* path it could mean from here (issue #2608 — the ERC report's own directory is tried as well as the producing run's, so this no longer fires for a spec committed beside its evidence), declares no `"kind": "supply"` net, declares no `ties[]` with no disclosure of why — an uncomputed check is not a clean one — declares a `ties[]` entry the ERC run reported as *degenerate* in `erc_coverage.skipped[]` (issue #2199 — a tie whose tap region is indistinguishable from an ordinary source/drain contact is likewise not a clean one; narrow it with `tap_requires`, `tap_is_dedicated`, or assert it directly with `tap_boxes`), or its stackup does not cover every strap layer the P&R response reports. Widen the spec and re-run `klt erc`. A spec that *did* disclose why it declares no `ties[]` renders one of the two sibling reasons below instead, one per disclosed obstacle (`"supply_spec_disclosed_unexpressible"`, issue #2234, or `"supply_spec_disclosed_tool_limitation"`, issue #2247). A spec that *could* be read but no longer matches (or was never pinned against) the envelope's own `provenance.spec.content_hash` renders `"stale_evidence"`/`"unverifiable_provenance"` above instead, never this reason (issue #2496) — an unverified spec is a provenance gap, not a declaration gap. |
 | `"supply_spec_disclosed_unexpressible"` | yes | **Item 11 only** (issue #2234). The cited `klt erc` run declares zero `ties[]`, exactly as `"supply_spec_incomplete"`'s "no `ties[]`" case above — but its spec explicitly disclosed why no tap can be expressed on this stream (`ties_disclosure`). Still unmet: a disclosure proves nothing about the tap's actual connectivity, so it can never substitute for a computed `erc.missing_tie` result — but distinguishable in the rendered reason (and `detail.ties_disclosure_reason`) from "nobody declared ties at all". Express the tap (`tap_boxes`, `tap_requires`, or `tap_is_dedicated`) and re-run `klt erc`, or accept this item stays unmet for this stream. |
@@ -2523,7 +2600,7 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
 
 **`blocking_item` skips items 1, 2, 9 and 10 whenever any other T1 item is
 also unmet.** Those four have no `klt` verb behind them, and this page's
-["Items 1, 2, 9, and 10"](#items-1-2-9-and-10-klt-signoff-cannot-check-topical-relevance)
+["Items 1, 2, 9, and 10"](#items-1-2-9-and-10-bind-them-to-an-audited-artifact)
 section tells a manifest author that the honest default is to leave them
 **uncited** — which renders four `UNMET`/`no_evidence` rows at positions 1,
 2, 9 and 10 *by construction*, for every honestly-authored manifest.
@@ -3227,8 +3304,9 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
 ```
 
 `klt signoff` never lets a hand-rolled "yep, it's fine" record stand in for
-a check it never actually ran — only item 8 accepts `"generic"`; items 3-7
-still require their own `klt`-verb-backed (or, for item 7, `pex`-specific)
+a check it never actually ran. Only item 8 accepts a bare `"generic"`
+envelope, and items 1, 2, 9 and 10 accept only an artifact-anchored one
+(issue #2718). Items 3-7 still require their own `klt`-verb-backed (or, for item 7, `pex`-specific)
 evidence, unloosened by this feature.
 
 ## Worked example: a full-custom digital partition, graded like the analog column (no RTL/synthesis evidence)
@@ -3288,6 +3366,13 @@ unchanged from the RTL/synthesis-flow wording (the doc adds no full-custom
 text there — see "Full-custom digital sub-case" in
 [`../design-evidence-tiers.md`](../design-evidence-tiers.md)), since its
 grading already does not depend on which flow produced the evidence.
+
+Items 1 and 2 here are native citations, so their citations carry no
+`artifact_binding`: the grader accepted a passing LVS/DRC report but did
+not check that it is about the design sources or the committed layout. To
+make those rows mean what they say, bind them with artifact-anchored
+`generic` envelopes (issue #2718) instead. See "Items 1, 2, 9, and 10: bind
+them to an audited artifact" above.
 
 ## Worked example: fleet roll-up across four canaries
 
