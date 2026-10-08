@@ -2107,6 +2107,57 @@ def test_hosts_greater_than_one_submits_one_job_per_shard(tmp_path, monkeypatch)
     assert len(environment["fleet"]) == 2
 
 
+def test_every_shard_request_preserves_options_save_mode(tmp_path, monkeypatch):
+    """Issue #2732: `options.save_mode` rides the shared request builder
+    into every shard's uploaded request document unchanged -- the job
+    instance's own `klt sim` reads it from there."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    uploaded: list[dict] = []
+
+    def _capture_request(argv, timeout_s):
+        joined = " ".join(argv)
+        if "inputs/request.json" in joined:
+            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
+            document = json.loads(Path(source).read_text())
+            uploaded.append(document)
+            runner.outputs_by_job[job_id_of(destination)] = {
+                "report.json": _sim_report(
+                    corner_ids=tuple(
+                        f"tt_1.800_{int(point['temperature_c'])}"
+                        for point in document["_explicit_points"]
+                    )
+                )
+            }
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture_request)
+
+    sb._run_batch_fleet(
+        corner_points=_corner_points(2),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={
+            "netlist": "body.spice",
+            "options": {"save_mode": "netlist"},
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0.0,
+            },
+        },
+        hosts=2,
+        measurements_spec=_measurements_spec(),
+    )
+
+    assert len(uploaded) == 2
+    assert all(doc["options"]["save_mode"] == "netlist" for doc in uploaded)
+
+
 def test_hosts_over_unit_count_raises_before_any_s3_write(tmp_path, monkeypatch):
     runner = _FakeRunner()
     _install_fake_batch_transport(monkeypatch, runner=runner)

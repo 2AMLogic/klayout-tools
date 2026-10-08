@@ -1282,20 +1282,77 @@ before the circuit is even parsed. A request declaring neither `measurements[]`
 nor `options.waveforms` omits `save all` entirely, leaving that path
 byte-identical to before (issue #2521).
 
-There is currently **no request-level opt-out** — no `options.save` to ask
-for a deliberately narrower saved set (e.g. for performance on a very large
-netlist). That is a documented follow-up, not a gap in this pass: every
-existing caller either wants the full set restored (the common case this
-fixes) or was not previously relying on the netlist body's own `.save`
-already winning, since that behavior was never contractual — it was only ever
-an accident of `_write_corner_deck` never emitting a `save` card of its own.
+### Opting out: `options.save_mode` (issue #2732)
+
+`options.save_mode` decides who owns the corner's saved vector set. It takes
+exactly two values:
+
+| Value       | Effect |
+| ----------- | ------ |
+| `"all"`     | The default (also what omitting the key means). The generated `save all` above is emitted under exactly the conditions and in exactly the position described above — a request that omits the key produces a byte-identical deck. |
+| `"netlist"` | No generated `save all`, in either the real corner deck or the `options.fail_fast_probe` calibration deck. The included netlist's own `.save` cards (or ngspice's own default when it carries none) decide what is resident. |
+
+Anything else — `null`, a boolean, an array, an unknown or differently-cased
+string — is an application error (exit 1) before any corner, probe, remote
+instance or batch job is launched. An explicit `save_mode` (either value) with
+`engine: "xyce"` is refused the same way: the Xyce deck has no `.control`
+block and no generated save card to control. Omitting it leaves Xyce requests
+unchanged.
+
+`"netlist"` is the opt-out for large transient decks where keeping every node
+and branch resident is the cost you want to avoid. `klt sim` does **not**
+parse, rewrite, infer or widen the netlist's `.save` selectors: under
+`"netlist"`, **the caller owns the vector coverage** every `measurements[]`
+entry (`spice` or `expr`) and every `options.waveforms` consumer needs. A
+measurement that reads an excluded vector is not silently zero — it comes back
+`value: null`, `status: "error"` with the usual `code: "measurement"`
+diagnostic (and usually `code: "no_such_vector"` too), whose message names the
+`"netlist"` mode and how to fix it; the corner and the run grade `error`, never
+`pass`. The waveform artifact likewise contains only the retained vectors.
+No speedup or memory figure is claimed here; measure it on your own circuit.
+
+A complete request against a netlist body that keeps only `v(out)`:
+
+```spice
+* body.spice
+Vin in 0 DC 1
+R1 in out 1k
+R2 out 0 1k
+.save v(out)
+```
+
+```json
+{
+  "netlist": "body.spice",
+  "analysis": {"kind": "tran", "args": "1u 10u"},
+  "measurements": [
+    {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=5u",
+     "unit": "V", "limits": {"min": 0.45, "max": 0.55}},
+    {"name": "vout_pk", "expr": "vecmax(v(out))", "unit": "V"}
+  ],
+  "options": {"save_mode": "netlist", "waveforms": true}
+}
+```
+
+Both measurements resolve and the waveform carries `time` and `v(out)` but
+not `v(in)`; adding a measurement on `v(in)` would report it as an error.
+Without `save_mode` (or with `"all"`), `v(in)` is retained as before.
+
+The option is honored by `local`, `local-parallel`, `hosts > 1` local shards
+and the fail-fast probe. For `remote`/`batch` it rides the forwarded request
+document (single job and every shard alike) and is applied by the worker's
+own `klt sim` — so **the worker image must include this implementation**. An
+older worker that predates the field does not know it and keeps emitting
+`save all`; worker-version compatibility diagnostics are tracked by
+#2733/#2719. Under `resume`, a checkpoint written under one mode is never
+reused for the other.
 
 **Diagnosing a still-missing measurement.** When a `.meas`/rawfile signal
 still comes back empty after this fix, ngspice's log gives the same `Error:
 no such vector as <name>.` line (classified as `code: "no_such_vector"`,
 alongside the generic `code: "measurement"`) whether the name is a genuine
-typo/dead node or — pre-#2521, or on a future `options.save`-narrowed corner
-— a vector that exists but was excluded from the saved set. Verified
+typo/dead node or — pre-#2521, or on an `options.save_mode: "netlist"`
+corner — a vector that exists but was excluded from the saved set. Verified
 empirically against ngspice 46: there is no log-side signal that tells the
 two apart, so `no_such_vector` names the *symptom* ("nothing resolved for
 this name"), not the cause; treat it as "check the signal name against the
@@ -2895,6 +2952,7 @@ the *response* echoes back.
 | `options.osdi_preload`   | array\<string\>   | Issue #2513. Compiled OSDI (Verilog-A) shared libraries to load with `pre_osdi`, emitted in declared order at the top of the generated `.control` block. `$VAR`/`~` expand; relative paths resolve against the request file's directory. Each must exist (checked before any corner runs; exit 1 otherwise). Refused for `backend: "remote"`/`"batch"` unless `options.stage_model_inputs` is `true`, and always for `engine: "xyce"`. Defaults to unset (no `pre_osdi` lines — the deck is unchanged). See "OSDI (Verilog-A) model preload" above. |
 | `options.stage_model_inputs` | boolean       | Issue #2668. For `backend: "remote"`/`"batch"`, upload `models.lib`, per-section corner libraries and `options.osdi_preload` binaries — with their full `.include`/file-bearing `.lib` closure — and point the worker request at the staged copies. Defaults to `false` (models resolve on the runner image, unchanged). A non-boolean is an application error (exit 1); no effect on `local`/`local-parallel`. See "Staging the request's model inputs" above. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
+| `options.save_mode`      | string            | Issue #2732. `"all"` (default; omitted means the same) keeps the generated `save all`; `"netlist"` suppresses it so the netlist's own `.save` cards decide the resident vector set, and the caller owns measurement/waveform coverage. Any other value (including `null`) is an application error (exit 1); an explicit value is refused for `engine: "xyce"`. Off-host workers must include this implementation. See "Opting out: `options.save_mode`" above. |
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
