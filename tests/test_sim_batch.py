@@ -2743,6 +2743,19 @@ def test_runner_version_check_setting_is_validated_before_any_s3_write(tmp_path)
     )
 
 
+@pytest.mark.parametrize("version", ["", "1.2.3 dirty", '1.2"; rm -rf /', "1.2\n3"])
+def test_unusable_client_version_is_a_sim_error_not_a_traceback(tmp_path, version):
+    with pytest.raises(sim.SimError, match="cannot be pinned"):
+        sb._build_batch_job_spec(
+            {"models": {}, "options": {}},
+            str(_write_body(tmp_path)),
+            corner_count=1,
+            timeout_s=30.0,
+            keep_artifacts=False,
+            client_version=version,
+        )
+
+
 def test_forwarded_request_keeps_ngspice_init_lines_unchanged(tmp_path):
     spec = sb._build_batch_job_spec(
         {"models": {}, "options": {"ngspice_init": list(_INIT_LINES)}},

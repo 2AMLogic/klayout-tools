@@ -419,9 +419,19 @@ def _runner_preflight_script(client_version: str, *, enforce: bool) -> str:
     Redirects here deliberately have no space before ``>`` so the
     ``> "$EDA_OUTPUT_DIR/report.json"`` marker of the main command stays the
     first such occurrence.
+
+    A client version string outside ``[A-Za-z0-9._+-]`` cannot be embedded
+    safely and raises :class:`~klayout_tools.sim.SimError` (a structured CLI
+    error, never a traceback) before any S3 write.
     """
     if not re.fullmatch(r"[A-Za-z0-9._+-]+", client_version):
-        raise ValueError(f"unusable client klt version {client_version!r}")
+        from .sim import SimError
+
+        raise SimError(
+            f"the submitting client's klt version {client_version!r} cannot be "
+            "pinned against the fleet runner (expected only [A-Za-z0-9._+-]) "
+            "-- submit from a klt install with a well-formed version"
+        )
     out = '"$EDA_OUTPUT_DIR/{}"'
     identity_path = out.format(BATCH_RUNNER_IDENTITY_FILENAME)
     report_path = out.format(BATCH_REPORT_FILENAME)
@@ -1493,18 +1503,29 @@ def _recover_failed_job_corners(
         runner_error=runner_error,
         collection_note=note,
     )
-    if runner_error is not None and runner_error.get("code") in (
+    _annotate_preflight_rejection(corners, runner_error, identity)
+    return corners, identity
+
+
+def _annotate_preflight_rejection(
+    corners: list[dict[str, Any]],
+    runner_error: dict[str, Any] | None,
+    identity: dict[str, Any],
+) -> None:
+    """When the runner preflight rejected the job before ``klt sim`` ran
+    (a version mismatch/unknown ``runner_error``), carry the two ``klt``
+    identities on each matching diagnostic so the cause is machine-readable.
+    A no-op for any other failure."""
+    if runner_error is None or runner_error.get("code") not in (
         BATCH_RUNNER_MISMATCH_CODE,
         BATCH_RUNNER_UNKNOWN_CODE,
     ):
-        # The preflight rejected the job before `klt sim` ran: carry the two
-        # identities on each diagnostic so the cause is machine-readable.
-        for corner in corners:
-            for diagnostic in corner.get("diagnostics") or []:
-                if diagnostic.get("runner_code") == runner_error["code"]:
-                    diagnostic["runner_klt_version"] = identity["runner_klt_version"]
-                    diagnostic["client_klt_version"] = identity["client_klt_version"]
-    return corners, identity
+        return
+    for corner in corners:
+        for diagnostic in corner.get("diagnostics") or []:
+            if diagnostic.get("runner_code") == runner_error["code"]:
+                diagnostic["runner_klt_version"] = identity["runner_klt_version"]
+                diagnostic["client_klt_version"] = identity["client_klt_version"]
 
 
 def _poll_timeout_corners(
