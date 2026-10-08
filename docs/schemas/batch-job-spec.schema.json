@@ -15,7 +15,7 @@
     "cmd": {
       "type": "string",
       "minLength": 1,
-      "description": "REQUIRED. The shell command the harness runs under `bash -c` in the job directory. For `klt sim` this is always a `klt sim \"$EDA_INPUT_DIR/request.json\" --backend local-parallel --format json` invocation whose stdout is redirected to \"$EDA_OUTPUT_DIR/report.json\" -- the redirect is load-bearing, not cosmetic: the harness merges its own log lines and the job command's into one harness.log, so stdout is not a clean channel back to the submitter (only outputs/** and status.json are). When options.keep_artifacts is set, `--outdir \"$EDA_OUTPUT_DIR/artifacts\"` is appended so per-corner logs/rawfiles land inside the collected tree too."
+      "description": "REQUIRED. The shell command the harness runs under `bash -c` in the job directory. For `klt sim` this is always a `klt sim \"$EDA_INPUT_DIR/request.json\" --backend local-parallel --format json` invocation whose stdout is redirected to \"$EDA_OUTPUT_DIR/report.json\" -- the redirect is load-bearing, not cosmetic: the harness merges its own log lines and the job command's into one harness.log, so stdout is not a clean channel back to the submitter (only outputs/** and status.json are). Stderr is additionally teed into \"$EDA_OUTPUT_DIR/stderr.log\" (still forwarded to harness.log) because klt writes its --format json error envelope to stderr; the command ends with `; rc=$?; wait $! 2>/dev/null; exit $rc` so the job keeps klt's own exit code. When options.keep_artifacts is set, `--outdir \"$EDA_OUTPUT_DIR/artifacts\"` is appended so per-corner logs/rawfiles land inside the collected tree too."
     },
     "pdk_variant": {
       "type": "string",

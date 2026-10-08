@@ -54,6 +54,12 @@ clean channel back to the submitter, unlike ``remote``'s SSH channel (which
 ``$EDA_OUTPUT_DIR/report.json`` and this module reads it back out of the
 collected ``outputs/`` tree.
 
+klt writes its ``--format json`` *error* envelope to **stderr**, not stdout
+(``cli.output.emit_error``), so the same ``cmd`` also tees stderr into
+``$EDA_OUTPUT_DIR/stderr.log`` -- still forwarding it to the harness's
+stderr, so ``harness.log`` is unchanged. A failed job's own error envelope
+is recovered from that file (see :func:`_recover_failed_job_corners`).
+
 Credentials, buckets, and the launch script
 -------------------------------------------
 No credential, key path, or bucket name is baked into this module. The
@@ -80,6 +86,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -129,6 +136,18 @@ BATCH_REQUEST_FILENAME = remote_transport.REMOTE_REQUEST_FILENAME
 #: to, under ``$EDA_OUTPUT_DIR`` -- see this module's docstring on why
 #: stdout is not a usable channel here.
 BATCH_REPORT_FILENAME = "report.json"
+
+#: Filename the job command tees `klt sim`'s stderr to, under
+#: ``$EDA_OUTPUT_DIR`` -- klt's JSON *error* envelope goes to stderr
+#: (``cli.output.emit_error``), so this is where a failed job's own reason is
+#: recovered from. The tee keeps forwarding stderr, so ``harness.log`` still
+#: carries it too.
+BATCH_STDERR_FILENAME = "stderr.log"
+
+#: Upper bound on how much of the collected stderr file recovery reads (its
+#: tail). The envelope is the last thing klt writes; anything earlier is
+#: progress/warning noise that is never parsed or copied into the JSON.
+_BATCH_STDERR_TAIL_BYTES = 64 * 1024
 
 #: ``$EDA_OUTPUT_DIR``-relative directory the job command points `klt sim`'s
 #: ``--outdir`` at when ``options.keep_artifacts`` is set, so per-corner
@@ -432,7 +451,17 @@ def _build_batch_job_spec(
         command += ' ${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}'
     if keep_artifacts:
         command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
-    command += f' > "$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
+    # stdout -> report.json (the success channel); stderr is teed into
+    # stderr.log (klt's error envelope lands there) *and* forwarded, so
+    # harness.log still sees it. The harness runs `bash -c "$JOB_CMD"`, so
+    # process substitution is available; `wait $!` lets the tee drain before
+    # the harness uploads outputs/, and `exit $rc` keeps klt's own exit code
+    # (0/3/4/...) as the job's.
+    command += (
+        f' > "$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
+        f' 2> >(tee "$EDA_OUTPUT_DIR/{BATCH_STDERR_FILENAME}" >&2)'
+        "; rc=$?; wait $! 2>/dev/null; exit $rc"
+    )
     return BatchJobSpec(
         cmd=command,
         tool=_batch_job_tool_label(remote_request),
@@ -1226,6 +1255,39 @@ def _classify_collected_report(
     return "unusable", None
 
 
+def _read_stderr_envelope(local_dir: str) -> tuple[dict[str, Any] | None, str]:
+    """Recover the klt error envelope from the collected stderr file.
+
+    ``emit_error`` writes ``json.dump(indent=2)`` plus a newline as the last
+    thing on stderr, possibly after warning/progress lines, so the envelope
+    is the trailing JSON object that starts at column 0. Only the file's
+    last :data:`_BATCH_STDERR_TAIL_BYTES` are read, candidates are tried from
+    the last ``{`` line backwards, and each is run through
+    :func:`_classify_collected_report`. Returns ``(error, "")`` on success or
+    ``(None, note)`` -- the note never contains raw stderr text."""
+    path = os.path.join(local_dir, BATCH_STDERR_FILENAME)
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _BATCH_STDERR_TAIL_BYTES))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None, f"collected outputs hold no {BATCH_STDERR_FILENAME}"
+    decoder = json.JSONDecoder()
+    starts = [0] if text.startswith("{") else []
+    starts += [m.start() + 1 for m in re.finditer(r"\n\{", text)]
+    for start in reversed(starts):
+        try:
+            payload, _ = decoder.raw_decode(text, start)
+        except ValueError:
+            continue
+        kind, error = _classify_collected_report(payload)
+        if kind == "error":
+            return error, ""
+    return None, f"{BATCH_STDERR_FILENAME} holds no klt error envelope"
+
+
 def _recover_failed_job_corners(
     *,
     config: BatchConfig,
@@ -1236,21 +1298,35 @@ def _recover_failed_job_corners(
     runner: remote_transport.CommandRunner | None,
 ) -> list[dict[str, Any]]:
     """Bounded, collection-only recovery after a terminal job failure: one
-    outputs download and one read of ``report.json``. Never resubmits and
-    never raises -- a collection problem is recorded on the fallback
-    diagnostic while the primary job failure stays authoritative."""
+    outputs download, one read of ``report.json`` and, when that holds no
+    error envelope, one bounded read of :data:`BATCH_STDERR_FILENAME` (where
+    klt actually writes its ``--format json`` error envelope). Never
+    resubmits and never raises -- a collection problem is recorded on the
+    fallback diagnostic while the primary job failure stays authoritative.
+    Only the envelope's structured ``message``/``code`` reach the JSON;
+    raw stderr text never does."""
     runner_error: dict[str, Any] | None = None
     note: str | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             collect_outputs(config, job_id, collected, runner=runner)
-            kind, runner_error = _classify_collected_report(
-                read_collected_report(collected)
-            )
-            if kind == "report":
-                note = "collected report is not a klt error envelope"
-            elif kind == "unusable":
-                note = "collected report has an unrecognized shape"
+            try:
+                kind, runner_error = _classify_collected_report(
+                    read_collected_report(collected)
+                )
+                if kind == "report":
+                    note = "collected report is not a klt error envelope"
+                elif kind == "unusable":
+                    note = "collected report has an unrecognized shape"
+            except BatchError as exc:
+                note = str(exc)
+            if runner_error is None:
+                runner_error, stderr_note = _read_stderr_envelope(collected)
+                if runner_error is None:
+                    note = (
+                        f"{note}; {stderr_note} -- see harness.log under the "
+                        f"job's S3 prefix"
+                    )
     except BatchError as exc:
         note = str(exc)
     return _job_failure_corners(
@@ -1558,6 +1634,7 @@ __all__ = [
     "BATCH_NO_CAPACITY_CODE",
     "BATCH_NETLIST_FILENAME",
     "BATCH_REPORT_FILENAME",
+    "BATCH_STDERR_FILENAME",
     "BATCH_REQUEST_FILENAME",
     "BATCH_TERMINAL_STATES",
     "BATCH_WAITING_STATES",

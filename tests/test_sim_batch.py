@@ -307,10 +307,59 @@ def test_job_cmd_redirects_report_to_output_dir(tmp_path):
     )
     # The redirect is load-bearing: the harness merges all stdout/stderr into
     # harness.log, so only $EDA_OUTPUT_DIR is a structured channel back.
-    assert spec.cmd.endswith('> "$EDA_OUTPUT_DIR/report.json"')
+    assert '> "$EDA_OUTPUT_DIR/report.json"' in spec.cmd
     assert '"$EDA_INPUT_DIR/request.json"' in spec.cmd
     assert "--backend local-parallel --format json" in spec.cmd
     assert "--outdir" not in spec.cmd
+
+
+def test_job_cmd_tees_stderr_into_outputs(tmp_path):
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    # klt's --format json error envelope goes to stderr, so it must reach a
+    # collected file -- while still being forwarded to harness.log.
+    assert sb.BATCH_STDERR_FILENAME == "stderr.log"
+    assert '2> >(tee "$EDA_OUTPUT_DIR/stderr.log" >&2)' in spec.cmd
+    assert spec.cmd.endswith("; rc=$?; wait $! 2>/dev/null; exit $rc")
+
+
+def test_job_cmd_stderr_capture_runs_under_bash_c(tmp_path):
+    """Run the generated redirect/exit tail under `bash -c` exactly as the
+    harness does (with a stand-in for `klt`): stdout lands in report.json,
+    stderr lands in stderr.log *and* on the outer stderr, and the job's
+    exit code is klt's own."""
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    spec = sb._build_batch_job_spec(
+        {"models": {}, "options": {"max_workers": 1}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    tail = spec.cmd[spec.cmd.index(' > "$EDA_OUTPUT_DIR/') :]
+    fake_klt = 'printf "{}\\n"; printf "warn\\n{\\n}\\n" >&2; exit 4'
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    proc = subprocess.run(
+        [bash, "-c", "{ " + fake_klt + "; }" + tail],
+        env={"EDA_OUTPUT_DIR": str(out_dir), "PATH": os.environ.get("PATH", "")},
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 4
+    assert (out_dir / "report.json").read_text() == "{}\n"
+    assert (out_dir / "stderr.log").read_text() == "warn\n{\n}\n"
+    assert "warn" in proc.stderr
 
 
 def test_job_cmd_runs_one_worker_per_physical_core_on_the_job_instance(tmp_path):
@@ -372,7 +421,9 @@ def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
         keep_artifacts=True,
     )
     assert '--outdir "$EDA_OUTPUT_DIR/artifacts"' in spec.cmd
-    assert spec.cmd.endswith('> "$EDA_OUTPUT_DIR/report.json"')
+    assert spec.cmd.index("--outdir") < spec.cmd.index(
+        '> "$EDA_OUTPUT_DIR/report.json"'
+    )
 
 
 def test_job_json_omits_unset_optional_fields(tmp_path):
@@ -1520,6 +1571,138 @@ def test_failed_job_without_a_usable_report_keeps_the_fallback(
         assert "runner_code" not in diagnostic
     assert environment["state"] == "failed"
     assert len(runner.argvs_matching("launch")) == 1
+
+
+def _real_emit_error_stderr(message=_RUNNER_REASON, **kwargs):
+    """The exact stderr `klt sim --format json` produces for a usage-level
+    failure, by calling the real `emit_error` -- so these tests lock the
+    shape the fleet runner actually writes, not a hand-built approximation."""
+    import contextlib
+    import io
+
+    from klayout_tools.cli.output import emit_error
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stderr(buffer):
+        emit_error("sim", message, "json", **kwargs)
+    return buffer.getvalue()
+
+
+def test_failed_job_recovers_the_real_stderr_envelope(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    noise = "warning: something unrelated {not json}\n{ also not json\n"
+    runner.outputs = {
+        "report.json": "",
+        "stderr.log": noise + _real_emit_error_stderr(),
+    }
+
+    corners, engine_version, environment = _run_failed_job(
+        tmp_path, monkeypatch, runner, points=2
+    )
+
+    assert engine_version is None
+    assert environment["state"] == "failed"
+    for corner in corners:
+        assert corner["status"] == "error"
+        diagnostic = corner["diagnostics"][0]
+        assert diagnostic["code"] == "batch_job_failed"
+        assert _RUNNER_REASON in diagnostic["message"]
+        assert "runner_code" not in diagnostic
+        # Raw stderr is never copied into the JSON.
+        assert "something unrelated" not in diagnostic["message"]
+    assert len(runner.argvs_matching("launch")) == 1
+    assert len(runner.argvs_matching("outputs/")) == 1
+
+
+def test_failed_job_stderr_envelope_carries_its_code(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="1"))
+    runner.outputs = {"stderr.log": _real_emit_error_stderr(code="some_code")}
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner, points=1)
+
+    diagnostic = corners[0]["diagnostics"][0]
+    assert diagnostic["code"] == "batch_job_failed"
+    assert diagnostic["runner_code"] == "some_code"
+    assert _RUNNER_REASON in diagnostic["message"]
+
+
+def test_timed_out_job_stderr_envelope_keeps_its_code(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("timeout", exit_code="124"))
+    runner.outputs = {"stderr.log": _real_emit_error_stderr("ran out of time")}
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner, points=1)
+
+    assert corners[0]["diagnostics"][0]["code"] == "batch_job_timeout"
+    assert "ran out of time" in corners[0]["diagnostics"][0]["message"]
+
+
+def test_report_json_envelope_wins_over_stderr(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="1"))
+    runner.outputs = {
+        "report.json": _envelope("from report"),
+        "stderr.log": _real_emit_error_stderr("from stderr"),
+    }
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner, points=1)
+
+    message = corners[0]["diagnostics"][0]["message"]
+    assert "from report" in message
+    assert "from stderr" not in message
+
+
+@pytest.mark.parametrize(
+    "stderr_text",
+    [
+        "Traceback (most recent call last):\n  boom\nRuntimeError: secret-ish\n",
+        "{not json\n",
+        '{"corners": [{"corner_id": "x"}]}\n',
+        '{"error": {"message": ""}}\n',
+        "",
+    ],
+)
+def test_failed_job_stderr_without_envelope_falls_back_with_a_note(
+    tmp_path, monkeypatch, stderr_text
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.outputs = {"report.json": "", "stderr.log": stderr_text}
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner, points=1)
+
+    diagnostic = corners[0]["diagnostics"][0]
+    assert diagnostic["code"] == "batch_job_failed"
+    assert "without a usable report" in diagnostic["message"]
+    assert "stderr.log holds no klt error envelope" in diagnostic["message"]
+    assert "harness.log" in diagnostic["message"]
+    assert "boom" not in diagnostic["message"]
+    assert "secret-ish" not in diagnostic["message"]
+    assert "runner_code" not in diagnostic
+
+
+def test_stderr_envelope_read_is_bounded_to_the_tail(tmp_path):
+    (tmp_path / "stderr.log").write_text(
+        _real_emit_error_stderr("early")
+        + "x" * (sb._BATCH_STDERR_TAIL_BYTES + 10)
+        + "\n"
+    )
+    error, note = sb._read_stderr_envelope(str(tmp_path))
+    assert error is None
+    assert "no klt error envelope" in note
+
+    (tmp_path / "stderr.log").write_text(
+        "x" * (sb._BATCH_STDERR_TAIL_BYTES + 10) + "\n" + _real_emit_error_stderr()
+    )
+    error, note = sb._read_stderr_envelope(str(tmp_path))
+    assert error == {"message": _RUNNER_REASON}
+    assert note == ""
 
 
 def test_failed_job_ordinary_report_on_exit_1_is_not_a_pass(tmp_path, monkeypatch):

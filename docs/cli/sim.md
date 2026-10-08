@@ -708,8 +708,13 @@ a consumer-repo wrapper does"), and `klt` implements exactly its four steps:
 **Why the job command redirects to a file.** 2am's harness merges *all*
 stdout/stderr — its own log lines and the job command's — into one
 `harness.log`, so stdout is not a clean channel back to the submitter (only
-`outputs/**` and `status.json` are). The generated `job.json` therefore ends
-in `> "$EDA_OUTPUT_DIR/report.json"`, and `--outdir "$EDA_OUTPUT_DIR/artifacts"`
+`outputs/**` and `status.json` are). The generated `job.json` therefore
+redirects stdout with `> "$EDA_OUTPUT_DIR/report.json"`. Because klt writes its
+`--format json` *error* envelope to stderr, the command also tees stderr into
+`$EDA_OUTPUT_DIR/stderr.log` (`2> >(tee ... >&2)`, which still forwards it to
+`harness.log`) and ends with `; rc=$?; wait $! 2>/dev/null; exit $rc` so the
+tee drains before upload and the job keeps klt's own exit code.
+`--outdir "$EDA_OUTPUT_DIR/artifacts"`
 is added when `options.keep_artifacts` is set so per-corner logs/rawfiles
 land inside the one tree the harness collects. The generated document's
 schema is [`docs/schemas/batch-job-spec.schema.json`](../schemas/batch-job-spec.schema.json).
@@ -754,13 +759,17 @@ A `batch` run's response fills the same additive `environment.remote` slot
 
 When a job reaches a terminal `failed`/`timeout` state with an exit code
 outside `klt sim`'s own `0`/`3`/`4`, the client makes **one bounded,
-collection-only attempt** to download `outputs/` and read `report.json`. It
-never resubmits or re-launches the job. The collected object is classified:
+collection-only attempt** to download `outputs/` and read `report.json`; when
+that holds no error envelope, it also reads the tail (at most 64 KiB) of
+`stderr.log` and parses the trailing JSON object starting at column 0 — the
+shape klt's `emit_error` writes — ignoring any warning lines before it. It
+never resubmits or re-launches the job. The collected object is classified
+the same way whichever file it came from:
 
-| Collected `report.json` | Result |
+| Collected `report.json` / `stderr.log` envelope | Result |
 |---|---|
 | klt error envelope (`{"schema_version": 1, "error": {"command", "message"[, "code"]}}`, see [json-contract](../json-contract.md)) | Every requested corner is reported with the job's `batch_job_failed`/`batch_job_timeout` diagnostic whose `message` carries the runner's own `error.message`; `error.code`, when present, is attached as `runner_code`. |
-| Missing, invalid JSON, non-object, unrelated object, empty/invalid `corners`, or an ordinary report on a non-sim exit code | Existing fallback (`... without a usable report`), with a short `[output recovery: ...]` note saying why recovery found nothing. |
+| Missing, invalid JSON, non-object, unrelated object, empty/invalid `corners`, or an ordinary report on a non-sim exit code — and no envelope in `stderr.log` | Existing fallback (`... without a usable report`), with a short `[output recovery: ...]` note saying why recovery found nothing and pointing at `harness.log`. |
 | Download itself fails | Same fallback, the collection error is noted; the primary job failure is never replaced. |
 
 A `done` job (or exit 3/4) whose collection fails still raises as before. A
@@ -768,11 +777,11 @@ A `done` job (or exit 3/4) whose collection fails still raises as before. A
 running), so no recovery is attempted. Raw logs are never copied into the
 JSON; use the retained artifacts below.
 
-**Note.** The generated job command redirects only *stdout* to
-`report.json`; klt writes its error envelope to *stderr*, which the harness
-merges into `harness.log`. Recovery therefore only finds an envelope when the
-runner left one in `report.json`; otherwise the fallback applies and the
-reason is in `harness.log` under the job's S3 prefix.
+**Note.** Only the envelope's structured `message`/`code` reach the JSON;
+raw `stderr.log` text never does. The stderr capture is part of the command
+the *submitting* client generates, so it works whatever klt version the fleet
+image runs. When neither file yields an envelope, the reason is in
+`harness.log` (and `stderr.log`) under the job's S3 prefix.
 
 ### Getting the per-corner deck and ngspice log through klt
 
