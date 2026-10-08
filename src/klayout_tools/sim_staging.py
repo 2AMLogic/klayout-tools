@@ -379,9 +379,7 @@ def netlist_closure(
         entry["sha256"] = sha256_file(source)
         entries.append(entry)
     for target, reason in staged.host_resolved_detail:
-        entries.append(
-            {"target": target, "sha256": None, "unhashed_reason": reason}
-        )
+        entries.append({"target": target, "sha256": None, "unhashed_reason": reason})
     return entries
 
 
