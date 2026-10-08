@@ -14,6 +14,49 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+## 0.7.0 (2026-10-08)
+
+616 commits on `main` since v0.6.0 (334 on the first-parent line; merges have
+been merge commits rather than squashes since 2026-09-26), cut under both
+triggers in [`RELEASING.md`](RELEASING.md)'s "Release cadence": the
+event-based one (#2838 — downstream chip repositories pin released wheels in
+CI and are blocked on fixes that exist only on `main`) and the 25-commit
+backstop. The changes those consumers asked for by name:
+
+- **`klt signoff` T1 item 11** pairs a supply through `net_correspondence`
+  alias membership (PR #2431, issue #2405): `klt lvs` writes a label-merged
+  net's `layout` as its aliases joined with `|`, so the exact-name match
+  could never pair a routed supply grid.
+- **`klt signoff` T1 item 6** grades a cited `klt yield` report's sample size
+  and negative control, not its `status` alone (PR #2480, issue #2467). This
+  can turn a previously `"met"` item `"unmet"` (`undersized_sample`,
+  `negative_control_not_detected`); a campaign that declared no control stays
+  `"met"` with that state disclosed.
+- **`klt pex --measure-command`** measures both legs of the
+  schematic-vs-extracted comparison with a caller-supplied command (PR #2486,
+  issue #2478; #2837 records that it was unreleased until now).
+- **`klt signoff` T1 items 1/2/9/10** accept `kind: generic` evidence when it
+  is anchored to an artifact (PR #2843, issue #2718): the envelope declares
+  its `t1_item` and the audited artifact's `content_hash`, the manifest pins
+  the same hash, and the artifact re-hashes to it. A citation that passes
+  carries `citation.artifact_binding`. Additive: native citations for these
+  items grade as before and carry no binding; new `reason` values
+  `unanchored_evidence` and `wrong_item`.
+
+Minor bump: the range adds verbs and request fields (`klt characterize`,
+`klt netlist`, `klt pex --measure-command`, `klt ring-check --cells`,
+`klt sim`'s OSDI preload and plausibility bounds, `klt erc`'s declared-net
+grading) with no conventional-commit breaking marker (`!:` /
+`BREAKING CHANGE`) and no `schema_version` value under `src/` decreased or
+removed (the range only adds new constants at 1); compatibility notes, where
+they matter, are in the entries below.
+
+Pinning note (#2823, still open): a build from a commit after the `v0.7.0`
+tag reports `0.7.0+g<sha>`, and PEP 440 lets that local version satisfy
+`==0.7.0`. Where the pin has to mean the tagged wheel, resolve in a clean
+environment (`uvx --isolated`, a fresh virtualenv) and check
+`klt version --format json` for `is_release: true`.
+
 - **Added** (#2729, `klt mom`): a single open mixed-axis winding (L/U trace,
   tiled square spiral) is now accepted as ONE conductor with
   `compute_inductance: true` and solved as a series path -- signed Neumann
@@ -2541,6 +2584,246 @@ not `klt --version`, if you need to detect this kind of drift. See
   `test_pdk_resolved_binds_three_terminal_resistor_sky130_suffix_free`, and
   end-to-end against the real vendor deck (where an install + ngspice
   resolve) by `test_real_sky130_bound_resistor_card_simulates_against_the_vendor_deck`.
+
+### Merged since 0.6.0, by commit type
+
+Every commit on the first-parent line of `main` in `v0.6.0..v0.7.0` (334 of
+the range's 616 commits; the rest are the branch commits behind the merges),
+grouped by its conventional-commit prefix. A squash-merged commit is listed
+by its subject and a merge commit by its pull request's title; the trailing
+`(#N)` is the PR. Subjects with no conventional prefix are listed under
+Changed. The narrative entries above cite the originating issue where one
+exists. Repeated no-PR sync commits (`chore: resync installed Loom
+surfaces`) are aggregated into a single line.
+
+#### Added
+
+- feat(drc): exact rule-category set assertion for --engine klayout (#2806) (#2857)
+- feat(sim): report resolved .include closure with per-file digests (#2855)
+- feat(signoff): artifact-anchored generic evidence for T1 items 1/2/9/10 (#2843)
+- feat(report): path-only key registry for drc/extract reports (#2841)
+- feat(sim): reject batch jobs on runner/client klt version skew (#2836)
+- feat(mom): series-path PEEC inductance and resistance for a single winding (#2832)
+- feat(sim): recover runner error envelope from failed batch jobs (#2733) (#2827)
+- feat(drc): opt-in --min-klayout-version preflight for --engine klayout (#2689) (#2820)
+- feat(lvs,pex): accept the --label-layer label-purpose override (#2819)
+- feat(extract): ASAP7 FinFET extraction with geometry-counted nfin (#2817)
+- feat(drc): add ASAP7 FEOL/MOL KLayout DRC deck with per-rule fixtures (#2815)
+- feat(pdk): shared ~/pdks root, ASAP7 probe, PDK version compatibility (#2808)
+- feat(lvs): placeholder-value exclusion on the netgen engine (#2673) (#2791)
+- feat(drc): opt-in --expect-rule-categories coverage assertion for klayout engine (#2803)
+- feat(sim): reject supply_v override of PWL/PULSE/SIN sources (#2706) (#2800)
+- feat(gen-compose): sky130 metal4/5/6 and via3/4/5 routing roles (#2798)
+- feat(sim): opt-in staging of model inputs for remote/batch jobs (#2668) (#2796)
+- feat(extract): recover cap_cmomi feed variant from drawn port placement (#2794)
+- feat(drc): backfill threshold_max_dbu on sky130 via2/via3/via4 width rules (#2443) (#2789)
+- feat(erc): report label-layer text counts in provenance.label_layers (#2788)
+- feat(synthesize): add netlist_sha256 to response (#2452) (#2763)
+- feat(extract): warn when a MOS flavour marker layer has no shapes (#2417) (#2785)
+- feat(erc): disclose how much drawn tap geometry a well_boxes assertion covers (#2784)
+- feat(drc): backfill threshold_max_dbu on sg13g2 cont/via1-4 + sky130 via (#2388) (#2776)
+- feat(erc,power,mom): reject unrecognised spec-file keys (#2243) (#2755)
+- feat(signoff): publish opt-in evidence kind -> T1 item mapping (#2691)
+- feat(mom): oriented segment paths for mixed-axis conductors (#2737)
+- feat(lvs): accept vector-macro port connections (concat / range slice / wide constant) in gate-level-verilog (#2694)
+- feat(extract): `--label-layer`, a per-request override of a deck's net/pin label purpose (#2687)
+- feat(lvs): per-library power-pin universe for macro-backed designs (#2715)
+- feat(release): publish klt-yield-native wheels and add the [yield] extra (#2714)
+- feat(sim): multi-wave batching for single-host remote path (#2084) (#2713)
+- feat(netlist): --block for an includable .subckt export (#2710)
+- feat(extract): escalate a majority-share many-pins-one-net abstract collapse (#2709)
+- feat(lvs): resolve gate-level pin orders from more than one library (#2708)
+- feat(netlist): --pdk/--pdk-root with xschemrc PDK-root consistency check (#2685)
+- feat(lvs): anchor top-level pin names so a permuted macro bus is caught (#2705)
+- feat(sg13cmos5l): poly-resistor end-term/width-offset correction (#2684)
+- feat(deck): transcribe sg13g2's 6.11 MIM group (MIM.c/MIM.d) (#2651)
+- feat(netlist): add `klt netlist`, a headless xschem -> SPICE wrapper (#2678)
+- feat(lvs): resolve mask-option reference netlists via hints.short_nets (#2669)
+- feat(drc): add ongrid/angle check kinds and transcribe sky130's OFFGRID rule group (#2649)
+- feat(sta): distinguish an unreachable container runtime from an OpenROAD analysis failure (#2640)
+- feat: report why klt synthesize's sta stage produced no number (#2631)
+- feat(sim): add measurements[].expr for non-.meas-expressible measurements (#2547)
+- feat(drc): backfill threshold_max_dbu on sg13cmos5l + sg13g2 top-via fixed-size cut rules (#2586)
+- feat(characterize): measure input pin capacitance instead of echoing it (#2555)
+- feat(pdk): add resistivity/effective-thickness fields to substrate stackup entry (#2562)
+- feat(sim): per-section model libraries in a corners.process bundle (#2538)
+- feat(sim): first-class OSDI (Verilog-A) model preload via options.osdi_preload (#2534)
+- feat(characterize): power/leakage extraction, batch mode, and vendor-.lib accuracy harness (#2528)
+- feat(erc): measure a declared net's unlabelled remainder on the roles it owns (#2510) (#2525)
+- feat(characterize): single-cell combinational NLDM extraction and .lib emission (#2516)
+- feat(erc): report the matched island count behind every declared net (#2509)
+- feat(sim): one inconclusive status for a solve the run will not vouch for (#2506)
+- feat(sim): plausibility bounds to catch physically implausible solves before grading (#2505)
+- feat(sim): roll up diagnostic counts across corners in the top-level report (#2499)
+- feat(pex): measure both legs with a caller-supplied command (--measure-command) (#2486)
+- feat(yield): add censored, a no-value category for an unmet measurement precondition (#2479)
+- feat(erc): grade a declared intentional tie via nets[].same_net_as (#2470)
+- feat(lvs): disclose that a resistor/capacitor class's geometry is never compared (#2472)
+- feat(pex): report a model_mismatch diagnostic for device model divergence (#2430)
+- feat(pnr): support request.power on sg13g2_stdcell by skipping only tapcell (#2448)
+- feat(extract): measure MoM-capacitor mmin/mmax from drawn finger geometry (#2446)
+- feat(synthesize): request-level standard-cell exclusion (constraints.dont_use) (#2429)
+- feat(lvs): diagnose a reference that mixes deck-option-selected device classes (#2440)
+- feat(provenance): record the fully resolved deck-option set, not just overrides (#2428)
+- feat(erc): disclose drawn layers the supply spec declares nowhere (#2426)
+- feat(gen-compose): add explicit-placement bbox targets as an origins_um alternative (#2420)
+- feat(place-and-route): name the library-only limit alongside existing design-rule violation counts (#2385)
+- feat(extract): make device-class drawn-layer predicates discoverable and warn on near misses (#2365) (#2416)
+- feat(stats): add instance-resolved flattened_polygon_count/flattened_vertex_count (#2412)
+- feat: grade erc net island count against a declared nets[].islands (#2418)
+- feat(functional-verification): add options.sdf.entries interconnect-only mode (#2413)
+- feat(erc): warn when a declared label_layer carries no text (#2411)
+- feat(power): add shared provenance block and per-edge geometry to the report (#2353)
+- feat(signoff): cite a nested envelope with an RFC 6901 manifest pointer (#2376)
+- feat(erc): select which wells a ties[] entry grades by class marker (#2375)
+- feat(sim): Xyce-backed cross-validation oracle for klt sim (#2016) (#2332)
+- feat(drc): check sky130 tap.drawing tie rings for width and licon enclosure (#2321) (#2330)
+- feat(benchmarks): add mutation gates for the remaining 9 design-agent tasks (#2324)
+
+#### Fixed
+
+- fix(lvs): parse netgen property blocks with colonless device identifiers (#2797)
+- fix(sta): count recovery/removal and clock-gating violators with setup/hold (#2802)
+- fix(synthesize,equiv): narrow WASI hint for scripts under the host temp dir (#2793)
+- fix(decks): release build resolves its own deck hash (#2790)
+- fix(place-and-route): use IHP sg13g2.map in DEF->GDS merge; routed sg13g2 GDS now klt-drc clean (#2444) (#2779)
+- fix(gen): snap sky130 cut centres onto the manufacturing grid (#2778)
+- fix(place-and-route): apply set_dont_use from shared synthesis table (#2378) (#2774)
+- fix(lvs): explain omitted reference.form on --rerun reference parse failure (#2754)
+- fix(tests): make sky130 op-sanity integration test resilient to host contention (#2683)
+- fix(extract): probe a LEF-resolved abstract pin on its own PORT layer first (#2696)
+- fix(functional-verification): normalize OpenSTA SDF header triples so corner typ works (#2712)
+- fix(extract): sg13g2 rsil/rppd/rhigh resistors gain end-term and width-correction (#2661)
+- fix(ci): bring sibling workflows' apt budget up to the post-#2662 numbers (#2676)
+- fix(lvs): attribute only narrowed-away primaries to compare_parameters (#2671)
+- fix(ci): size the Yosys apt retry budget to fit a second full attempt (#2670)
+- fix(ruff): close lint/complexity exclude-scope gap for vendored trees (#2664)
+- fix(tests): write the equal-content DRC/extract provenance inputs without GDS2 timestamps (#2650)
+- fix(gen,deck): clamp sky130 licon1/mcon cuts to their fixed 0.17um foundry size (#2646)
+- fix: stop gen-compose clearance advisory firing on array pitch and abutments (#2643)
+- fix(gf180mcu): scope pplus.enclosing.comp.1 to its real NWELL/DNWELL context (#2641)
+- fix(signoff): surface disclosed undeclared tie classes for tie_count > 0 (#2629)
+- fix(lvs): declare a dummy marker layer for the sg13g2 extraction deck (#2600)
+- fix(loom): wire merge-pr.sh exit 4/5 into the pinned champion-pr-merge.md (#2549) (#2558)
+- fix(gen): size sg13g2 cap_array's bottom plate to MIM.c's 0.60um enclosure (#2582)
+- fix(sim): report ambiguous PDK-root resolution instead of discarding it (#2571)
+- fix(signoff): report a reworded checklist as doc drift, not evidence drift (#2569)
+- fix(yield-campaign): keep target_yield out of the klt sim request (#2565)
+- fix(decks/sg13g2): accept upstream's pSD-absence well tie alongside nSD (#2591) (#2601)
+- fix(decks): declare sg13cmos5l dummy marker layer for res_array (#2607)
+- fix(functional-verification): drop stale cocotb Python-ceiling claim from install hint (#2611)
+- fix(signoff): resolve an ERC envelope's spec path beside the evidence too (#2609)
+- fix(lvs): name an unresolvable --check input instead of a bare null hash (#2606)
+- fix(lvs): declare a dummy marker layer for the gf180mcu extraction deck (#2604)
+- fix(functional-verification): read sim_time_ns from cocotb 2.1.0 properties (#2603)
+- fix: adapt fixtures and cocotb pin to klayout 0.30.12 / cocotb 2.1.0 (#2596)
+- fix(gen): report mos_array's absent S/D implant in drc_hints (#2589)
+- fix: drop stale sky130/gf180mcu-only claim from klt gen --help (#2588)
+- fix(sim): case-fold spice-form measurement name lookup for ngspice (#2566)
+- fix(loom): unpin merge-pr.sh/forge-helpers.sh so repo-aware merge-method detection lands (#2548)
+- fix(sim): validate models.pdk on the batch backend before any S3 write (#2539)
+- fix(sim): default save all so a netlist's own .save can't starve measurements (#2536)
+- fix(sim): anchor ngspice's cwd to the corner dir, add options.ngspice_init (#2530)
+- fix(signoff): name which half of item 11 a failing LVS citation leaves unproven (#2504)
+- fix(yield): exclude klt sim's inconclusive draws from the yield population (#2519)
+- fix(signoff): verify item 11's re-read ERC spec against its own content_hash (#2508)
+- fix(loom): restore champion-epic.md's missing Step 0 / Step 0a / Step 0.5 (#2500)
+- fix(sim): stage the netlist's .include closure for remote/batch jobs (#2488)
+- fix(pnr,extract): guard an io layer whose DEF port geometry extraction cannot see (#2483)
+- fix(corpus): pin openroad/orfs Docker image by digest in regen/validation scripts (#2481)
+- fix(signoff): grade a yield citation's sample size and negative control (#2480)
+- fix(decks): check gf180mcu Nplus/Pplus implant width, space, overlap (#2384)
+- fix(gen): snap guard-ring placement offsets to the dbu grid (#2450)
+- fix(equiv,sim): resolve yosys/ngspice/iverilog/vvp binaries instead of hardcoding names (#2438)
+- fix(signoff): let a generic envelope opt in to input_verified via provenance.input.path (#2432)
+- fix(signoff): match item 11 supply pairing by net_correspondence alias membership (#2431)
+- fix(extract): restore an abstracted macro's own well tie for body pins (#2434)
+- fix(drc): enforce the max half of gf180mcu's CO.1/Vn.1 fixed-size cut rules (#2390)
+- fix(extract): capture the capacitor top-plate-via exclusion before --abstract-cells erasure (#2433)
+- fix(gen): per-flavour res_array width floor for sky130's narrow poly-resistor primitives (#2436)
+- fix(erc): grade a ties[] entry whose well_layer has no geometry as skipped, not clean (#2383)
+- fix(lvs): case-fold circuit/device names in capacitor recovery map key (#2425)
+- fix(lvs): run the adopted combine in place and conserve combined parameters (#2424)
+- fix(lvs): resolve the netgen binary instead of hardcoding the name (#2422)
+- fix(extract): count parasitic squares per conductor fragment, not per merged net (#2392)
+- fix(lvs): expand concatenation-RHS assigns in gate-level-verilog references (#2414)
+- fix(signoff): honor the partition-qualified evidence key on a pure-kind manifest (#2393)
+- fix(functional-verification): drop zero-delay SDF INTERCONNECT onto physical-only diode destinations (#2399)
+- fix(kb): defer jsonschema import so a broken install can't crash every klt command (#2404)
+- fix(extract): use SI-suffixed, PARAMS:-free SPICE cards for unbound MoM-cap devices (#2381)
+- fix(extract): bare-mode 3-terminal resistor cards become X subckt calls (#1157); lock sky130 resistor bare-um geometry + vendor proof (#1159) (#2336)
+- fix(drc): name the missing host utility before a PDK driver aborts the deck (#2346)
+- fix(lvs): carry sky130 fixed-geometry PNP emitter area onto the converted Q card (#2344)
+- fix(lvs): carry a custom-device-class X ... PARAMS: card through subckt-call conversion (#2334)
+
+#### Changed
+
+- klt sim: add options.save_mode ("all"|"netlist") saved-vector opt-out (#2828)
+- docs+example: adaptive single-probe campaigns on the batch backend (#2825)
+- ring-check: opt-in --cells cell-inclusion scope (#2690) (#2824)
+- Validate and document pinned ASAP7 KLayout technology package (#2809)
+- lvs: echo options.combine_devices_max_attempts and replay it on --check --rerun (#2807)
+- docs+test(sim): document and regression-test measurement output precision (#2805)
+- design-agent: characterize a reusable switched sky130 charge pump for the device PLL (#2756)
+- design-agent: add unscored sky130 device-level relaxation VCO (device-vco) (#2742)
+- klt sim --backend batch: batch_no_capacity error.code + opt-in batch.capacity_wait_s (#2731)
+- refactor(characterize): remove dead single-cell wrappers (#2717)
+- Split signoff.py's power-delivery/supply-grading subsystem into signoff_power_delivery.py (#2630)
+- batch: land 8 approved backlog PRs (#2544 #2545 #2551 #2552 #2575 #2584 #2587 #2597) (#2618)
+- refactor(gen-compose): dedupe route_two_pin unroutable-result dicts (#2554)
+- refactor(synthesize): move arithmetic candidate selection into synthesize_arithmetic (#2535)
+- lvs: express a PDK fixed-geometry device-flavour wrapper (#2459) (#2469)
+- sim: $KLT_SIM_BACKEND host default, so fleet workers send SPICE grids to Spot (2am#1004) (#2454)
+- sim_batch: run one ngspice per physical core on the batch job instance (#2455)
+- .github/workflows: Migrate workflows to Blacksmith runners (#2214)
+- refactor(gen): split per-family validate/describe into gen_describe.py (#2361)
+- Adopt Renovate dependency security policy (14-day quarantine) (#2267)
+- refactor(site): dedupe getContext->makeFakeGL spy wiring into installFakeGLContext() (#2350)
+- refactor(site): hoist makeFakeGL/mockFetchOk into a shared test module (#2338)
+- refactor(signoff): move envelope TypedDict declarations into signoff_envelopes.py (#2326)
+
+#### Docs
+
+- docs: Guide document maintenance update (#2818)
+- docs: Guide document maintenance update (#2792)
+- docs: Guide document maintenance update (#2787)
+- docs(extract): design terminal-aware resistance graph for parallel fragments (#2391) (#2777)
+- docs(design): executable spike for GF180MCU DF.12-DF.14 (#2371) (#2775)
+- docs(erc): profile klt erc on routed dense sky130 layouts (#2229) (#2752)
+- docs(erc): design spike for well/substrate-tap net continuity (#2750)
+- docs: correct false find_spec ValueError claim in sta docstrings (#2637)
+- docs: fix stale 3.14 CI budget numbers in cocotb spike addendum (#2636)
+- docs: document the Icarus SystemVerilog-2012 subset boundary for engine choice (#2625)
+- docs(characterize): explain the stacked-arc rise/fall energy split (#2542)
+- docs(tiers): drop item 11's stale #2255 "Known gap" contradicting the shipped well_boxes form (#2529)
+- docs(signoff): note item 6's evidence needs a from-source toolchain (#2474)
+- docs: pin MoM-cap card's W/L-only parameter set as a cited known limitation (#2439)
+- docs(golden-deck): refresh stale rule counts across all four decks (#2387)
+- docs(golden-deck): re-derive sky130 cross-check counts from the manifest (#2379)
+
+#### Chores
+
+- ci: stop cancelling started main runs in ci.yml (#2856)
+- chore(claude): fix malformed Bash(**:*) permission rules
+- chore(tooling): update repo-skills to v0.19.5
+- ci: record #2567's resolution of the Actions-cache size discrepancy (#2644)
+- ci: gate CI wall clock on a rolling baseline and pool-contention factor (#2616)
+- ci: stop counting actions/cache-miss rebuilds as compute in the wall-clock budget (#2619)
+- build: drop the functional-verification extra's python_version < "3.14" cap, add a 3.14 CI leg (#2605)
+- ci: move off Blacksmith to GitHub-hosted runners (operator decision 2026-09-30, D5) (#2624)
+- ci: save the uv cache only on main, not on PR branches (#2568)
+- ci: re-baseline the wall-clock budget after the runner-pool migrations (#2614)
+- ci: move short and scheduled jobs off Blacksmith to GitHub-hosted (#2598)
+- test(gf180mcu): accept both upstream MiM device-class spellings (#2487)
+- build(openroad): pin openroad/orfs by digest, not :latest (#2475)
+- build(deps): bump eecircuit-engine from 1.7.0 to 1.8.0 in /site (#1829)
+- test(gen-compose): cover blocks[].cell placement of a non-zero-origin library cell (#2409)
+- test(drc): document tap.width.1's FEOL-gated native-deck disagreement (#2360)
+- build(deps-dev): bump vitest from 4.1.10 to 5.0.1 in /site (#1828)
+- test(design-agent-benchmark): honor KLT_SKIP_NGSPICE_TESTS=1 opt-out (#2331)
+- test(mom): pin the near/far kernel-split boundary artifact with measured evidence (#2323) (#2328)
+- chore(decks): regenerate deck history table for v0.6.0
+- chore: resync installed Loom surfaces (121 commits, no PR)
 
 ## 0.6.0 (2026-09-22)
 
