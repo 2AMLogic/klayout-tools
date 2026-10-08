@@ -757,3 +757,60 @@ def test_pdk_rooted_model_sources_are_staged_when_opted_in(tmp_path, monkeypatch
     }
     # The netlist's own PDK-rooted include keeps its #2485 behaviour.
     assert job.netlist.host_resolved == ("$PDK_ROOT/sky130A/libs.ref/cells.spice",)
+
+
+# --- issue #2799: report-side include closure --------------------------------
+
+
+def _file_sha(path):
+    return hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+
+def test_netlist_closure_hashes_original_bytes_in_resolution_order(tmp_path):
+    (tmp_path / "shared.spice").write_text("R1 a b 1k\n")
+    (tmp_path / "top.spice").write_text(".include shared.spice\n.param x=1\n")
+    entries = st.netlist_closure(
+        {}, str(tmp_path / "top.spice"), repo_root=str(tmp_path)
+    )
+    assert [e["path"] for e in entries] == ["top.spice", "shared.spice"]
+    # the rewritten staged copy differs; the digest is of the on-disk file
+    assert entries[0]["sha256"] == _file_sha(tmp_path / "top.spice")
+    assert entries[1]["sha256"] == _file_sha(tmp_path / "shared.spice")
+
+
+def test_netlist_closure_digest_tracks_included_file_edit(tmp_path):
+    inc = tmp_path / "shared.spice"
+    inc.write_text("R1 a b 1k\n")
+    top = tmp_path / "top.spice"
+    top.write_text(".include shared.spice\n")
+    before = st.netlist_closure({}, str(top), repo_root=str(tmp_path))
+    inc.write_text("R1 a b 2k\n")
+    after = st.netlist_closure({}, str(top), repo_root=str(tmp_path))
+    assert before[0]["sha256"] == after[0]["sha256"]
+    assert before[1]["sha256"] != after[1]["sha256"]
+
+
+def test_netlist_closure_lists_host_resolved_targets_unhashed(tmp_path, monkeypatch):
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    (tmp_path / "top.spice").write_text(
+        ".include $SOME_DECK/models.spice\n.include /pdk/x.spice\n"
+    )
+    entries = st.netlist_closure(
+        {"models": {"pdk_root": "/pdk"}},
+        str(tmp_path / "top.spice"),
+        repo_root=str(tmp_path),
+    )
+    assert entries[1:] == [
+        {
+            "target": "$SOME_DECK/models.spice",
+            "sha256": None,
+            "unhashed_reason": "env_var",
+        },
+        {"target": "/pdk/x.spice", "sha256": None, "unhashed_reason": "pdk_root"},
+    ]
+
+
+def test_netlist_closure_missing_include_raises(tmp_path):
+    (tmp_path / "top.spice").write_text(".include nope.spice\n")
+    with pytest.raises(st.IncludeStagingError):
+        st.netlist_closure({}, str(tmp_path / "top.spice"))

@@ -23,6 +23,7 @@ Two tiers, per the issue's testing requirement (#91):
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import json
 import os
@@ -3717,6 +3718,25 @@ def test_run_sim_stubbed_netlist_source_absent_omits_environment_key(
 
     assert "netlist_source" not in report["environment"]
     assert report["status"] == "not_checked"
+
+
+def test_run_sim_stubbed_reports_include_closure(tmp_path, monkeypatch):
+    # Issue #2799: environment.netlist_closure pins the .include closure.
+    _write_body(tmp_path)
+    (tmp_path / "shared.spice").write_text("R1 a b 1k\n")
+    (tmp_path / "top.spice").write_text(".include shared.spice\n")
+    request = _write_request(
+        tmp_path,
+        {"netlist": "top.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    env = sim.run_sim(str(request))["environment"]
+
+    closure = env["netlist_closure"]
+    assert len(closure) == 2
+    assert closure[0]["sha256"] == env["netlist_sha256"]
+    assert closure[1]["sha256"] == hashlib.sha256(b"R1 a b 1k\n").hexdigest()
 
 
 def test_run_sim_stubbed_provenance_pins_model_library(tmp_path, monkeypatch):
