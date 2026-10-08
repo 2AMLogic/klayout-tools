@@ -2135,6 +2135,16 @@ def run_sim(
         "models_lib_sha256": sha256_file(models_lib),
         "netlist_sha256": sha256_file(netlist_path),
     }
+    # Issue #2799: `netlist_sha256` covers only the top-level file, so also
+    # pin the resolved `.include`/`.inc` closure (same resolver the
+    # off-host backends stage with). Additive; an unresolvable closure is
+    # disclosed rather than failing the report.
+    try:
+        environment["netlist_closure"] = sim_staging.netlist_closure(
+            request, netlist_path, repo_root=repo_root
+        )
+    except sim_staging.IncludeStagingError as exc:
+        environment["netlist_closure_error"] = str(exc)
     if netlist_source is not None:
         # Additive/optional: only present when the request declares it, so
         # existing consumers of a request that omits netlist_source see an

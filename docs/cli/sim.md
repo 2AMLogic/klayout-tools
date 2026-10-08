@@ -3045,6 +3045,11 @@ the *response* echoes back.
     "models_lib": { "path": null, "scope": "external" },
     "models_lib_sha256": "3ccce27a...",
     "netlist_sha256": "71d273ab...",
+    "netlist_closure": [
+      { "path": "tb/top.spice", "scope": "repo", "sha256": "71d273ab..." },
+      { "path": "tb/shared.spice", "scope": "repo", "sha256": "9c1e07f2..." },
+      { "target": "$PDK_ROOT/models.spice", "sha256": null, "unhashed_reason": "env_var" }
+    ],
     "netlist_source": "extracted",
     "monte_carlo": {
       "n": 300,
@@ -3363,3 +3368,17 @@ corner) run as the same 5-corner matrix on `local` and on `remote`, with
 both reference reports committed — see
 [the "Remote backend" section above](#remote-backend) and
 [`examples/sim-remote/README.md`](../../examples/sim-remote/README.md).
+
+### `environment.netlist_closure` (issue #2799)
+
+`environment.netlist_sha256` digests only the top-level `netlist`. Additively,
+`environment.netlist_closure` lists the resolved `.include`/`.inc` closure --
+the netlist first, then each include in resolution order -- using the same
+resolver the `remote`/`batch` backends stage with (issue #2485), so local and
+off-host reports of one request describe the same set. A resolved file is
+`{"path", "scope", "sha256"}` (`path`/`scope` as in `models_lib`; `sha256` is
+of the file's on-disk bytes). A directive left to the executing host is
+`{"target", "sha256": null, "unhashed_reason"}` with reason `env_var` or
+`pdk_root`. If the closure cannot be resolved (e.g. a missing include),
+`environment.netlist_closure_error` carries the message instead and the report
+is otherwise unchanged.

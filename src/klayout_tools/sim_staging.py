@@ -197,6 +197,10 @@ class StagedFile:
     label: str
     local_path: str | None = None
     content: str | None = None
+    #: The on-host file this entry was read from, set whether or not
+    #: ``content`` rewrote it (``local_path`` is ``None`` then). Lets a
+    #: caller digest the *original* bytes (issue #2799).
+    source_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +216,9 @@ class StagedNetlist:
     netlist: StagedFile
     includes: tuple[StagedFile, ...] = ()
     host_resolved: tuple[str, ...] = ()
+    #: ``(target, reason)`` per verbatim directive, ``reason`` being
+    #: ``"env_var"`` or ``"pdk_root"`` (issue #2799).
+    host_resolved_detail: tuple[tuple[str, str], ...] = ()
 
     @property
     def files(self) -> tuple[StagedFile, ...]:
@@ -336,7 +343,46 @@ def _stage_netlist_with(
         netlist=netlist,
         includes=tuple(includes),
         host_resolved=tuple(stager.host_resolved),
+        host_resolved_detail=tuple(stager.host_resolved_detail),
     )
+
+
+def netlist_closure(
+    request: dict[str, Any], netlist_path: str, *, repo_root: str | None = None
+) -> list[dict[str, Any]]:
+    """The netlist's resolved ``.include``/``.inc`` closure as report
+    entries (issue #2799), from the *same* resolver the off-host backends
+    stage with (:func:`stage_netlist`), so a local report and a remote/batch
+    report of one request describe the same file set.
+
+    Resolution order: the netlist first, then each include breadth-first.
+    A hashed entry is ``{"path", "scope", "sha256"}`` (``path``/``scope`` as
+    ``env_provenance.repo_relative_path``; digest of the original on-disk
+    bytes, never the rewritten staged copy). A directive left to the
+    executing host is ``{"target", "sha256": null, "unhashed_reason"}`` with
+    reason ``"env_var"`` or ``"pdk_root"``.
+
+    Raises :class:`IncludeStagingError` when the closure cannot be resolved.
+    """
+    from . import env_provenance
+    from ._provenance import sha256_file
+
+    staged = stage_netlist(
+        netlist_path,
+        netlist_staged_name="netlist.cir",
+        roots=host_resolved_roots(request),
+    )
+    entries: list[dict[str, Any]] = []
+    for item in staged.files:
+        source = item.source_path or item.local_path
+        entry = dict(env_provenance.repo_relative_path(source, repo_root=repo_root))
+        entry["sha256"] = sha256_file(source)
+        entries.append(entry)
+    for target, reason in staged.host_resolved_detail:
+        entries.append(
+            {"target": target, "sha256": None, "unhashed_reason": reason}
+        )
+    return entries
 
 
 def stage_sim_netlist(
@@ -676,6 +722,7 @@ class _Stager:
         self.name_by_key: dict[tuple[str, str], str] = {}
         self.pending: list[_Pending] = []
         self.host_resolved: list[str] = []
+        self.host_resolved_detail: list[tuple[str, str]] = []
         self.netlist_files = 0
         self.netlist_bytes = 0
         self.total_files = 0
@@ -782,7 +829,10 @@ class _Stager:
         local_path = item.local_path
         if item.mode == _MODE_BINARY:
             return StagedFile(
-                staged_name=item.staged_name, label=label, local_path=local_path
+                staged_name=item.staged_name,
+                label=label,
+                local_path=local_path,
+                source_path=local_path,
             )
         text, decodable = _read_text(local_path)
         lines = text.splitlines(keepends=True)
@@ -801,10 +851,16 @@ class _Stager:
 
         if not changed:
             return StagedFile(
-                staged_name=item.staged_name, label=label, local_path=local_path
+                staged_name=item.staged_name,
+                label=label,
+                local_path=local_path,
+                source_path=local_path,
             )
         return StagedFile(
-            staged_name=item.staged_name, label=label, content="".join(rewritten)
+            staged_name=item.staged_name,
+            label=label,
+            content="".join(rewritten),
+            source_path=local_path,
         )
 
     def _rewrite_line(
@@ -823,6 +879,9 @@ class _Stager:
                 resolved = self._resolve(target, origin=local_path)
                 if resolved is None:
                     self.host_resolved.append(target)
+                    self.host_resolved_detail.append(
+                        (target, "env_var" if "$" in target else "pdk_root")
+                    )
                     return None
                 if not os.path.isfile(resolved):
                     raise IncludeStagingError(
