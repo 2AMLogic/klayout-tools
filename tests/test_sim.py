@@ -23,6 +23,7 @@ Two tiers, per the issue's testing requirement (#91):
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import json
 import os
@@ -3735,7 +3736,7 @@ def test_run_sim_stubbed_reports_include_closure(tmp_path, monkeypatch):
     closure = env["netlist_closure"]
     assert len(closure) == 2
     assert closure[0]["sha256"] == env["netlist_sha256"]
-    assert closure[1]["sha256"] == __import__("hashlib").sha256(b"R1 a b 1k\n").hexdigest()
+    assert closure[1]["sha256"] == hashlib.sha256(b"R1 a b 1k\n").hexdigest()
 
 
 def test_run_sim_stubbed_provenance_pins_model_library(tmp_path, monkeypatch):

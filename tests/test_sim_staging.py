@@ -769,7 +769,9 @@ def _file_sha(path):
 def test_netlist_closure_hashes_original_bytes_in_resolution_order(tmp_path):
     (tmp_path / "shared.spice").write_text("R1 a b 1k\n")
     (tmp_path / "top.spice").write_text(".include shared.spice\n.param x=1\n")
-    entries = st.netlist_closure({}, str(tmp_path / "top.spice"), repo_root=str(tmp_path))
+    entries = st.netlist_closure(
+        {}, str(tmp_path / "top.spice"), repo_root=str(tmp_path)
+    )
     assert [e["path"] for e in entries] == ["top.spice", "shared.spice"]
     # the rewritten staged copy differs; the digest is of the on-disk file
     assert entries[0]["sha256"] == _file_sha(tmp_path / "top.spice")
@@ -794,10 +796,16 @@ def test_netlist_closure_lists_host_resolved_targets_unhashed(tmp_path, monkeypa
         ".include $SOME_DECK/models.spice\n.include /pdk/x.spice\n"
     )
     entries = st.netlist_closure(
-        {"models": {"pdk_root": "/pdk"}}, str(tmp_path / "top.spice"), repo_root=str(tmp_path)
+        {"models": {"pdk_root": "/pdk"}},
+        str(tmp_path / "top.spice"),
+        repo_root=str(tmp_path),
     )
     assert entries[1:] == [
-        {"target": "$SOME_DECK/models.spice", "sha256": None, "unhashed_reason": "env_var"},
+        {
+            "target": "$SOME_DECK/models.spice",
+            "sha256": None,
+            "unhashed_reason": "env_var",
+        },
         {"target": "/pdk/x.spice", "sha256": None, "unhashed_reason": "pdk_root"},
     ]
 
