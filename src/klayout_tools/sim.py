@@ -704,8 +704,8 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # or the vector exists but fell outside the saved set -- e.g. a
         # restrictive `.save` card the netlist body carries, from before
         # `_write_corner_deck`'s own `save all` (below) started restoring
-        # the full set by default, or (should a future caller opt into a
-        # narrower `options.save`) a node that override deliberately
+        # the full set by default, or (under `options.save_mode: "netlist"`,
+        # issue #2732) a node the body's own `.save` deliberately
         # excluded. Verified empirically: a vector genuinely absent from the
         # circuit and a vector merely unsaved both produce the identical
         # `no such vector as ...` line -- there is no ngspice-side signal
@@ -1115,6 +1115,44 @@ def _validate_ngspice_init(value: Any) -> tuple[str, ...]:
     return tuple(lines)
 
 
+#: ``options.save_mode`` (issue #2732): who owns the corner's saved
+#: node/branch set. ``"all"`` (the default) keeps issue #2521's generated
+#: ``save all`` -- emitted whenever the corner has measurements or a rawfile
+#: to capture, superseding any restrictive ``.save`` card in the netlist
+#: body. ``"netlist"`` suppresses that generated card entirely, so whatever
+#: ``.save`` cards the included netlist carries (or ngspice's own default
+#: when it carries none) decide what is resident -- the caller then owns the
+#: vector coverage every measurement and waveform consumer needs. klt never
+#: parses, rewrites or widens the netlist's ``.save`` selectors.
+SAVE_MODES = ("all", "netlist")
+DEFAULT_SAVE_MODE = "all"
+
+
+def _validate_save_mode(options: dict[str, Any]) -> tuple[str, bool]:
+    """Validate ``options.save_mode`` (issue #2732).
+
+    Returns ``(mode, declared)``: the normalized mode (``"all"`` when the
+    key is omitted) and whether the request declared the key at all -- the
+    latter is what the Xyce support boundary refuses, so an omitted mode
+    never changes an existing Xyce request. Unlike most optional fields an
+    explicit ``null`` is refused rather than read as "unset": the field is a
+    two-valued policy switch, and a ``null`` most likely means a templating
+    slip the caller should see rather than a silent default.
+    """
+    if "save_mode" not in options:
+        return DEFAULT_SAVE_MODE, False
+    value = options["save_mode"]
+    if not isinstance(value, str) or value not in SAVE_MODES:
+        raise SimError(
+            "options.save_mode must be one of "
+            + ", ".join(f'"{mode}"' for mode in SAVE_MODES)
+            + f' (got {json.dumps(value, default=repr)}): "all" (the default) restores '
+            'the full saved set with a generated `save all`; "netlist" '
+            "leaves the saved set to the netlist's own .save cards"
+        )
+    return value, True
+
+
 def run_sim(
     request_path: str,
     *,
@@ -1513,6 +1551,11 @@ def run_sim(
     # this is a per-request compatibility-mode declaration, not a runtime
     # dial an operator would reach for per invocation.
     ngspice_init_lines = _validate_ngspice_init(options.get("ngspice_init"))
+    # Issue #2732: validated up front, before any corner, probe or off-host
+    # job is launched. An off-host worker re-reads it from the forwarded
+    # request document (see `_build_remote_request`), so only the local
+    # backends receive the resolved value below.
+    save_mode, save_mode_declared = _validate_save_mode(options)
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
     # check -- never blocks the sweep, only surfaces an advisory string. See
@@ -1553,6 +1596,7 @@ def run_sim(
         fail_fast_probe=fail_fast_probe,
         osdi_preload_declared=bool(osdi_preload),
         expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
+        save_mode_declared=save_mode_declared,
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -1668,6 +1712,7 @@ def run_sim(
             engine=engine,
             osdi_preload=osdi_preload,
             corner_section_libs=corner_section_libs,
+            save_mode=save_mode,
         )
         pre_completed, loaded_engine_version = _load_checkpoint(
             checkpoint_path, fingerprint
@@ -1709,6 +1754,7 @@ def run_sim(
             ngspice_binary=ngspice_binary,
             ngspice_init=ngspice_init_lines,
             osdi_preload=osdi_preload,
+            save_mode=save_mode,
         )
 
     probe_abort: dict[str, Any] | None = None
@@ -1771,6 +1817,7 @@ def run_sim(
             "fail_on_diagnostic": fail_on_diagnostic_codes,
             "ngspice_init": ngspice_init_lines,
             "osdi_preload": osdi_preload,
+            "save_mode": save_mode,
         }
         if backend not in _OFFHOST_BACKENDS
         else {"request_dir": request_dir}
@@ -3296,6 +3343,7 @@ def _checkpoint_fingerprint(
     engine: str,
     osdi_preload: tuple[str, ...] = (),
     corner_section_libs: tuple[str, ...] = (),
+    save_mode: str = DEFAULT_SAVE_MODE,
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
     corners actually run -- the basis for deciding whether an on-disk
@@ -3328,6 +3376,12 @@ def _checkpoint_fingerprint(
         # Only keyed in when declared, so a request without the option keeps
         # its pre-#2513 fingerprint (and its existing checkpoint) unchanged.
         payload["osdi_preload_sha256"] = [sha256_file(p) for p in osdi_preload]
+    if save_mode != DEFAULT_SAVE_MODE:
+        # Issue #2732: the saved set decides which measurements resolve, so
+        # a checkpoint written under one mode never applies to the other.
+        # Only keyed in off the default, so an existing checkpoint stays
+        # valid for a request that omits the option.
+        payload["save_mode"] = save_mode
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
@@ -3439,6 +3493,7 @@ def _enforce_xyce_support_boundary(
     fail_fast_probe: bool,
     osdi_preload_declared: bool = False,
     expr_measurements_declared: bool = False,
+    save_mode_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -3505,6 +3560,17 @@ def _enforce_xyce_support_boundary(
             "top-level dot card); use engine 'ngspice', or express the "
             "quantity as a `.meas` card in measurements[].spice"
         )
+    if save_mode_declared:
+        # Issue #2732: `save_mode` selects whether klt's generated ngspice
+        # `.control` block carries `save all`; the Xyce deck has no control
+        # block and no generated save card to suppress. Refused by name,
+        # even for "all", rather than silently accepted with no effect.
+        raise SimError(
+            "options.save_mode is not supported for engine 'xyce': it "
+            "controls the `save all` card in klt's generated ngspice "
+            "`.control` block, which the Xyce deck does not have; use "
+            "engine 'ngspice' or omit options.save_mode"
+        )
 
 
 def _run_local(
@@ -3529,6 +3595,7 @@ def _run_local(
     fail_on_diagnostic: tuple[str, ...] = (),
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
+    save_mode: str = DEFAULT_SAVE_MODE,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -3609,6 +3676,7 @@ def _run_local(
             fail_on_diagnostic=fail_on_diagnostic,
             ngspice_init=ngspice_init,
             osdi_preload=osdi_preload,
+            save_mode=save_mode,
         )
         corners.append(result)
         if version is not None:
@@ -3751,6 +3819,7 @@ def _run_local_parallel(
     fail_on_diagnostic: tuple[str, ...] = (),
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
+    save_mode: str = DEFAULT_SAVE_MODE,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -3860,6 +3929,7 @@ def _run_local_parallel(
                     fail_on_diagnostic=fail_on_diagnostic,
                     ngspice_init=ngspice_init,
                     osdi_preload=osdi_preload,
+                    save_mode=save_mode,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -4028,6 +4098,7 @@ def _prepare_corner_run(
     ngspice_binary: str | None = None,
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
+    save_mode: str = DEFAULT_SAVE_MODE,
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
 
@@ -4080,6 +4151,7 @@ def _prepare_corner_run(
             measurements_spec=measurements_spec,
             raw_path=raw_path,
             osdi_preload=osdi_preload,
+            save_mode=save_mode,
         )
         _write_spiceinit(corner_dir, ngspice_init)
         command = [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path]
@@ -4183,6 +4255,7 @@ def _run_corner(
     fail_on_diagnostic: tuple[str, ...] = (),
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
+    save_mode: str = DEFAULT_SAVE_MODE,
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
     classify the result.
@@ -4248,6 +4321,7 @@ def _run_corner(
         ngspice_binary=ngspice_binary,
         ngspice_init=ngspice_init,
         osdi_preload=osdi_preload,
+        save_mode=save_mode,
     )
 
     diagnostics: list[dict[str, str]] = []
@@ -4329,7 +4403,7 @@ def _run_corner(
                 {
                     "severity": "error",
                     "code": "measurement",
-                    "message": _no_value_message(spec),
+                    "message": _no_value_message(spec, save_mode=save_mode),
                 }
             )
         else:
@@ -4489,7 +4563,9 @@ def _harvest_measurement_value(
     return value
 
 
-def _no_value_message(spec: dict[str, Any]) -> str:
+def _no_value_message(
+    spec: dict[str, Any], *, save_mode: str = DEFAULT_SAVE_MODE
+) -> str:
     """The ``code: "measurement"`` diagnostic text for a measurement that
     came back with no value.
 
@@ -4504,18 +4580,33 @@ def _no_value_message(spec: dict[str, Any]) -> str:
     single most likely first-use mistake with this field, and the raw log
     alone does not distinguish "your expression is wrong" from "this node
     does not exist".
+
+    Under ``options.save_mode: "netlist"`` (issue #2732) the message gains a
+    trailing hint naming the opt-out, because the most likely cause there is
+    a signal the netlist's own ``.save`` cards no longer retain. The default
+    mode's text is unchanged.
     """
     name = spec["name"]
     if spec.get("expr") is None:
-        return f"measurement '{name}' produced no value"
-    return (
-        f"measurement '{name}' produced no value: its 'expr' "
-        f"({spec['expr']!r}) printed no '{name} = <value>' line -- check "
-        "that the expression resolves against this analysis's saved vectors "
-        "and reduces to a single scalar (a multi-point or complex result "
-        "prints as a table instead; reduce it with e.g. vecmax()/mean()/"
-        "db()/<expr>[0])"
-    )
+        message = f"measurement '{name}' produced no value"
+    else:
+        message = (
+            f"measurement '{name}' produced no value: its 'expr' "
+            f"({spec['expr']!r}) printed no '{name} = <value>' line -- check "
+            "that the expression resolves against this analysis's saved "
+            "vectors and reduces to a single scalar (a multi-point or "
+            "complex result prints as a table instead; reduce it with e.g. "
+            "vecmax()/mean()/db()/<expr>[0])"
+        )
+    if save_mode == "netlist":
+        message += (
+            ' -- options.save_mode is "netlist", so klt emitted no `save '
+            "all` and only the vectors the netlist's own .save cards retain "
+            "were available: add every signal this measurement reads to the "
+            "netlist's .save card, or omit options.save_mode (default "
+            '"all")'
+        )
+    return message
 
 
 def _read_log_file(path: str) -> str:
@@ -4587,6 +4678,7 @@ def _write_corner_deck(
     measurements_spec: list[dict[str, Any]],
     raw_path: str | None,
     osdi_preload: tuple[str, ...] = (),
+    save_mode: str = DEFAULT_SAVE_MODE,
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
     seed card, ``.lib``/``.include``/``.temp``, the request's verbatim
@@ -4641,6 +4733,7 @@ def _write_corner_deck(
             measurements_spec=measurements_spec,
             raw_path=raw_path,
             osdi_preload=osdi_preload,
+            save_mode=save_mode,
         )
     )
     lines.append(".end")
@@ -4656,6 +4749,7 @@ def _corner_deck_control_lines(
     measurements_spec: list[dict[str, Any]],
     raw_path: str | None,
     osdi_preload: tuple[str, ...],
+    save_mode: str = DEFAULT_SAVE_MODE,
 ) -> list[str]:
     """The ``.control``/``.endc`` block of :func:`_write_corner_deck`'s
     generated deck, in emission order -- this function owns the ordering
@@ -4687,10 +4781,12 @@ def _corner_deck_control_lines(
        ``measurements[]``/``options.waveforms`` at the request level), so
        the probe-deck caller and the historical
        no-measurement/no-waveform request stay byte-identical to
-       pre-#2521 behavior. There is currently no request-level opt-out
-       (e.g. a narrower ``options.save`` for a caller who wants to trade
-       completeness for performance) -- see docs/cli/sim.md's "Saved signal
-       set" section for why that is deferred to a follow-up.
+       pre-#2521 behavior. ``save_mode="netlist"`` (``options.save_mode``,
+       issue #2732) suppresses the card unconditionally, leaving the
+       included netlist's own ``.save`` cards in charge of the resident
+       vector set -- the request-level opt-out for a caller who wants to
+       trade completeness for memory on a large transient deck; see
+       docs/cli/sim.md's "Saved signal set" section.
     3. One ``alter`` per supply rail, then the analysis command, wrapped by
        the ASCII-rawfile ``set filetype``/``write`` pair when a rawfile was
        requested.
@@ -4721,7 +4817,7 @@ def _corner_deck_control_lines(
     lines = [".control"]
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
-    if measurements_spec or raw_path is not None:
+    if save_mode == DEFAULT_SAVE_MODE and (measurements_spec or raw_path is not None):
         lines.append("save all")
     for key, value in sorted(point.supply_v.items()):
         lines.append(f"alter {key}={value}")
@@ -5194,6 +5290,7 @@ def _run_calibration_probe(
     ngspice_binary: str | None = None,
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
+    save_mode: str = DEFAULT_SAVE_MODE,
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
     two-pass probe model -- and report how it went.
@@ -5255,6 +5352,7 @@ def _run_calibration_probe(
         measurements_spec=[],
         raw_path=None,
         osdi_preload=osdi_preload,
+        save_mode=save_mode,
     )
     _write_spiceinit(probe_dir, ngspice_init)
 
@@ -5302,6 +5400,7 @@ def _run_fail_fast_probe(
     ngspice_binary: str | None = None,
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
+    save_mode: str = DEFAULT_SAVE_MODE,
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
     run one short, bounded calibration ``tran`` slice on the grid's first
@@ -5346,6 +5445,7 @@ def _run_fail_fast_probe(
         ngspice_binary=ngspice_binary,
         ngspice_init=ngspice_init,
         osdi_preload=osdi_preload,
+        save_mode=save_mode,
     )
     if probe["error"] is not None:
         return None
