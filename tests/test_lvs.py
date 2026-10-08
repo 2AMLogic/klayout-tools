@@ -13166,6 +13166,85 @@ The following cells had property errors:
  top
 """
 
+
+# Property-error blocks whose headers carry no `class:index` colon (issue
+# #2674). netgen names a device after its connected net in some compares, and
+# the reference side can be a hierarchical path; the two headers and their
+# parameter lines below are verbatim from a netgen 1.5.133 (from-source)
+# `comp.out` (including netgen's own trailing padding on the parameter lines).
+# The surrounding summary/pin tables are the same shape as the other fixtures
+# here. Before #2674 `_NETGEN_PROPERTY_BLOCK_RE` required a colon in each
+# side's identifier, so neither block matched and both devices collapsed into
+# one marker-only `details.raw` entry with `device`/`property` left `null`.
+def _netgen_property_log_with_blocks(blocks: str) -> str:
+    return (
+        """
+Subcircuit summary:
+Circuit 1: top                             |Circuit 2: top
+-------------------------------------------|-------------------------------------------
+r (2)                                      |r (2)
+Number of devices: 2                       |Number of devices: 2
+Number of nets: 3                          |Number of nets: 3
+---------------------------------------------------------------------------------------
+Netlists match uniquely with property errors.
+"""
+        + blocks
+        + """
+Subcircuit pins:
+Circuit 1: top                             |Circuit 2: top
+-------------------------------------------|-------------------------------------------
+a                                          |a
+b                                          |b
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes top and top are equivalent.
+
+Final result: Circuits match uniquely.
+Property errors were found.
+
+The following cells had property errors:
+ top
+"""
+    )
+
+
+_NETGEN_COLONLESS_PROPERTY_LOG = _netgen_property_log_with_blocks(
+    "VSS$29 vs. CELL_NAME/VSSP:\n"
+    " value circuit1: 120000   circuit2: 0   \n"
+    "VSS$28 vs. CELL_NAME/VSSN:\n"
+    " value circuit1: 120000   circuit2: 0   \n"
+)
+
+# Mixed header shapes in one log (issue #2674): a `class:index` layout side
+# against a hierarchical colonless reference, a net-derived layout name
+# against a named subcircuit instance (`sub:i1`, issue #363), a fully
+# colonless `$`/`/` pair whose reference path contains an *internal* colon,
+# and the classic `pmos:1 vs. pmos:1:` shape -- with several parameter lines
+# per device, so each must stay attached to its own header.
+_NETGEN_MIXED_HEADER_PROPERTY_LOG = _netgen_property_log_with_blocks(
+    "pmos:1 vs. CELL/XP1:\n"
+    " W circuit1: 1e-06   circuit2: 2e-06   (delta=66.7%, cutoff=1%)\n"
+    " L circuit1: 1.5e-07   circuit2: 1.8e-07   (delta=18.2%, cutoff=1%)\n"
+    "net$12 vs. sub:i1:\n"
+    " m circuit1: 2   circuit2: 1   (delta=66.7%, cutoff=0%)\n"
+    "X1/M$3 vs. top/a:b/M3:\n"
+    ' model circuit1: "fast"   circuit2: "slow"   (exact match req\'d)\n'
+    " nf circuit1: 2   circuit2: 4   (delta=66.7%, cutoff=0%)\n"
+    "pmos:2 vs. pmos:2:\n"
+    " W circuit1: 3e-06   circuit2: 4e-06   (delta=28.6%, cutoff=1%)\n"
+)
+
+# A colonless header whose parameter line is in a shape
+# `_NETGEN_PROPERTY_LINE_RE` does not structure: the line must still surface
+# as a per-line `details.raw` entry carrying the captured device identifiers
+# (the #343 "never silently drop a property line" rule), not be lost.
+_NETGEN_COLONLESS_UNSTRUCTURED_LINE_PROPERTY_LOG = _netgen_property_log_with_blocks(
+    "VSS$29 vs. CELL_NAME/VSSP:\n"
+    " value 120000 != 0\n"
+    " value circuit1: 120000   circuit2: 0   \n"
+)
+
+
 _NETGEN_TOPOLOGY_LOG = """
 Subcircuit summary:
 Circuit 1: inv                             |Circuit 2: inv
@@ -13477,6 +13556,154 @@ def test_netgen_engine_declared_property_errors_without_parsable_detail(
     assert mismatch["category"] == "device.property"
     assert "property errors" in mismatch["description"]
     assert "property errors" in mismatch["details"]["raw"]
+
+
+def test_netgen_engine_colonless_property_headers_are_structured(tmp_path, monkeypatch):
+    """Regression (issue #2674): netgen headers naming devices by connected
+    net (`VSS$29 vs. CELL_NAME/VSSP:`) carry no `class:index` colon. Each
+    block must still yield its own structured `device.property` entry with
+    the exact identifiers and `class: null` -- not collapse into a single
+    marker-only `details.raw` blob."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_COLONLESS_PROPERTY_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["mismatch_count"] == 2
+    assert report["error_count"] == 2
+    assert report["category_counts"] == {"device.property": 2}
+    # The report sorts `mismatches[]` deterministically; key by device.
+    by_layout = {m["device"]["layout"]: m for m in report["mismatches"]}
+    assert set(by_layout) == {"VSS$29", "VSS$28"}
+    first, second = by_layout["VSS$29"], by_layout["VSS$28"]
+    for mismatch in (first, second):
+        assert mismatch["category"] == "device.property"
+        assert mismatch["severity"] == "error"
+        assert mismatch["property"] == {
+            "name": "value",
+            "layout": "120000",
+            "reference": "0",
+        }
+        assert mismatch["details"] is None
+    assert first["device"] == {
+        "layout": "VSS$29",
+        "reference": "CELL_NAME/VSSP",
+        "class": None,
+    }
+    assert second["device"] == {
+        "layout": "VSS$28",
+        "reference": "CELL_NAME/VSSN",
+        "class": None,
+    }
+
+
+def test_netgen_engine_mixed_property_headers_keep_per_device_evidence(
+    tmp_path, monkeypatch
+):
+    """Issue #2674: colonless and `class:index` header shapes mixed in one
+    log, with several parameter lines per device, yield one entry per
+    parameter, each attached to its own device -- adjacent blocks' evidence
+    is never joined, internal colons / `$` / `/` in identifiers are kept
+    verbatim, and `class` is derived only from a `class:index` layout side."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MIXED_HEADER_PROPERTY_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["mismatch_count"] == 6
+    assert report["error_count"] == 6
+    assert report["category_counts"] == {"device.property": 6}
+    observed = sorted(
+        (
+            (
+                m["device"]["layout"],
+                m["device"]["reference"],
+                m["device"]["class"],
+                m["property"]["name"],
+                m["property"]["layout"],
+                m["property"]["reference"],
+            )
+            for m in report["mismatches"]
+        ),
+        key=str,
+    )
+    assert observed == sorted(
+        [
+            ("pmos:1", "CELL/XP1", "pmos", "W", "1e-06", "2e-06"),
+            ("pmos:1", "CELL/XP1", "pmos", "L", "1.5e-07", "1.8e-07"),
+            ("net$12", "sub:i1", None, "m", "2", "1"),
+            ("X1/M$3", "top/a:b/M3", None, "model", '"fast"', '"slow"'),
+            ("X1/M$3", "top/a:b/M3", None, "nf", "2", "4"),
+            ("pmos:2", "pmos:2", "pmos", "W", "3e-06", "4e-06"),
+        ],
+        key=str,
+    )
+    assert all(m["details"] is None for m in report["mismatches"])
+    # Entries must not share mutable `device` sub-objects.
+    devices = [m["device"] for m in report["mismatches"]]
+    assert len({id(d) for d in devices}) == len(devices)
+
+
+def test_netgen_engine_colonless_header_unstructured_line_keeps_raw_evidence(
+    tmp_path, monkeypatch
+):
+    """Issue #2674 + #343 review: under a colonless header, a parameter line
+    the line regex cannot structure still becomes its own entry with the raw
+    line in `details.raw` and the captured device identifiers -- while a
+    parseable sibling line in the same block is still structured."""
+    _stub_netgen_subprocess(
+        monkeypatch, log_text=_NETGEN_COLONLESS_UNSTRUCTURED_LINE_PROPERTY_LOG
+    )
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    assert report["mismatch_count"] == 2
+    assert report["category_counts"] == {"device.property": 2}
+    (raw_entry,) = [m for m in report["mismatches"] if m["property"] is None]
+    (structured_entry,) = [m for m in report["mismatches"] if m["property"] is not None]
+    expected_device = {
+        "layout": "VSS$29",
+        "reference": "CELL_NAME/VSSP",
+        "class": None,
+    }
+    assert raw_entry["device"] == expected_device
+    assert raw_entry["property"] is None
+    assert raw_entry["details"] == {"raw": "value 120000 != 0"}
+    assert structured_entry["device"] == expected_device
+    assert structured_entry["property"] == {
+        "name": "value",
+        "layout": "120000",
+        "reference": "0",
+    }
+
+
+def test_netgen_property_block_header_shapes_unit():
+    """Issue #2674: direct parser coverage of each observed header shape,
+    so the class derivation is pinned independently of the report path."""
+    from klayout_tools.lvs_netgen import (
+        _netgen_device_class,
+        _parse_netgen_property_errors,
+    )
+
+    assert _netgen_device_class("pmos:1") == "pmos"
+    assert _netgen_device_class("sub:i1") == "sub"
+    assert _netgen_device_class("VSS$29") is None
+    assert _netgen_device_class("CELL_NAME/VSSP") is None
+
+    entries = _parse_netgen_property_errors(
+        "sub:i1 vs. sub:i1:\n"
+        " w circuit1: 1e-06   circuit2: 2e-06   (delta=66.7%, cutoff=0%)\n"
+        "VSS$29 vs. CELL_NAME/VSSP:\n"
+        " value circuit1: 120000   circuit2: 0   \n"
+    )
+    assert [e["device"] for e in entries] == [
+        {"layout": "sub:i1", "reference": "sub:i1", "class": "sub"},
+        {"layout": "VSS$29", "reference": "CELL_NAME/VSSP", "class": None},
+    ]
 
 
 def test_netgen_engine_topology_mismatch_buckets_net_details(tmp_path, monkeypatch):
