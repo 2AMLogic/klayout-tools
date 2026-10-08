@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2729, `klt mom`): a single open mixed-axis winding (L/U trace,
+  tiled square spiral) is now accepted as ONE conductor with
+  `compute_inductance: true` and solved as a series path -- signed Neumann
+  interactions summed leg by leg, resistance summed over electrical
+  centreline lengths. Output shape is unchanged; parallel bundles/bars are
+  bit-for-bit as before. Branched/disconnected shapes and any winding with
+  `frequencies_hz` keep their explicit rejection (#2730).
 - `klt ring-check --cells NAME` (repeatable; library `cells=`): opt-in exact-name
   cell inclusion scope so a ring on a layer shared with core routing can be
   checked on its own cells (issue #2690). Additive `cells` JSON field (`null`

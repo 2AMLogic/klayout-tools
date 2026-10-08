@@ -307,14 +307,15 @@ co-axis, co-spanning boxes (e.g. a coax shield's north/south walls), stays a
 remove that geometry class. Only a conductor that is not a bundle is
 classified as a path.
 
-**Public solves still reject.** No public consumer reads an `OrientedPath`
-yet. A single mixed-axis winding still fails `classify_bars` ("same
-current-flow axis") on every `compute_inductance` and `frequencies_hz`
-request. Series L/R aggregation and public static acceptance belong to
-[#2729](https://github.com/2AMLogic/klayout-tools/issues/2729). Retarded
-coupling and frequency/port acceptance belong to
-[#2730](https://github.com/2AMLogic/klayout-tools/issues/2730). Accepting the
-geometry here therefore cannot produce incorrect numbers.
+**Consumers.** Series L/R aggregation and public *static* acceptance landed
+in [#2729](https://github.com/2AMLogic/klayout-tools/issues/2729):
+`discretize_bars` routes a non-bundle conductor that classifies as an
+`OrientedPath` to the series-path PEEC model (see `docs/cli/mom.md`, "Series
+windings"). A winding that is not a valid path keeps the mixed-axis
+rejection, and any winding with `frequencies_hz` still fails
+`classify_bars` ("same current-flow axis") until retarded coupling and
+frequency/port acceptance land in
+[#2730](https://github.com/2AMLogic/klayout-tools/issues/2730).
 Capacitance-only solves of the same winding are unchanged.
 
 **Validation.** Native tests in `oriented_path.rs` cover:

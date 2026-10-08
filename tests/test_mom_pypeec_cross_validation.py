@@ -273,6 +273,58 @@ def pypeec_spiral() -> dict:
     return _run_pypeec()
 
 
+def _write_single_conductor_spiral(path: Path, boxes) -> None:
+    """The same eight tiled legs on ONE layer, i.e. one electrical conductor
+    (issue #2729): `klt mom` classifies it as an open series winding."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    shapes = top.shapes(layout.layer(1, 0))
+    for x0, y0, x1, y1 in boxes:
+        shapes.insert(kdb.Box.new(_dbu(x0), _dbu(y0), _dbu(x1), _dbu(y1)))
+    layout.write(str(path))
+
+
+@pytest.fixture(scope="module")
+def klt_mom_spiral_single_conductor(tmp_path_factory) -> dict:
+    """`klt mom`'s solve of the SAME spiral requested as a genuinely single
+    conductor with `compute_inductance: true`: the series-path PEEC model
+    reports the winding's self inductance and resistance directly as
+    `inductance_matrix_nh[0][0]` / `resistance_ohm[0]` -- no external signed
+    reduction (issue #2729)."""
+    boxes_and_signs = _leg_boxes_and_signs()
+    root = tmp_path_factory.mktemp("mom-pypeec-single-conductor")
+    gds = root / "spiral1.gds"
+    spec = root / "spiral1.mom.json"
+    _write_single_conductor_spiral(gds, [box for box, _ in boxes_and_signs])
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "panel_size_um": 5.0,
+                "compute_inductance": True,
+                "filament_size_um": FILAMENT_SIZE_UM,
+                "stackup": [
+                    {
+                        "layer": "1/0",
+                        "conductor": "spiral",
+                        "z0_um": 0.0,
+                        "z1_um": THICKNESS_UM,
+                        "conductivity_S_per_m": CONDUCTIVITY_S_PER_M,
+                    }
+                ],
+            }
+        )
+    )
+    report = run_mom(str(gds), str(spec))
+    assert report["conductors"] == ["spiral"]
+    return {
+        "total_nh": report["inductance_matrix_nh"][0][0],
+        "resistance_ohm": report["resistance_ohm"][0],
+        "filament_count": report["filament_count"],
+    }
+
+
 # --- spiral inductance: klt mom vs the external PyPEEC oracle ----------------
 
 
@@ -383,3 +435,62 @@ def test_the_comparison_can_actually_fail(klt_mom_spiral):
         "distinguish the two geometries, so the agreement tests above prove "
         "nothing"
     )
+
+
+# --- single-conductor winding (issue #2729) ----------------------------------
+
+
+def test_single_conductor_spiral_matches_signed_leg_reduction(
+    klt_mom_spiral, klt_mom_spiral_single_conductor
+):
+    """The series-path solve of the one-conductor spiral must equal the
+    legacy eight-conductor signed reduction. They differ only in the
+    electrical leg lengths (the single conductor runs vertex-to-vertex; the
+    legacy legs are the drawn tiled boxes, each end pushed by W/2), so the
+    band is small: a series-weighting mistake would be off by tens of
+    percent, not a fraction."""
+    single = klt_mom_spiral_single_conductor["total_nh"]
+    legacy = klt_mom_spiral["total_nh"]
+    rel_err = abs(single - legacy) / abs(legacy)
+    print(
+        f"\nsingle-conductor spiral L={single:.6f} nH vs signed-leg reduction "
+        f"L={legacy:.6f} nH  rel.diff={rel_err * 100:.4f}%"
+    )
+    assert rel_err < 0.02
+
+
+def test_single_conductor_spiral_inductance_matches_pypeec_reference(
+    klt_mom_spiral_single_conductor, pypeec_spiral
+):
+    klt_nh = klt_mom_spiral_single_conductor["total_nh"]
+    pypeec_nh = pypeec_spiral["L_nH"]
+    rel_err = abs(klt_nh - pypeec_nh) / abs(pypeec_nh)
+    print(
+        f"\n2-turn square spiral (ONE conductor): klt mom series-path PEEC "
+        f"L={klt_nh:.6f} nH ({klt_mom_spiral_single_conductor['filament_count']} "
+        f"filaments)  PyPEEC {pypeec_spiral['pypeec_version']} (external "
+        f"oracle) L={pypeec_nh:.6f} nH "
+        f"({pypeec_spiral['voxel_count_used']} conductor voxels)  "
+        f"rel.err={rel_err * 100:.4f}%"
+    )
+    assert klt_nh > 0.0
+    assert rel_err < AGREEMENT_TOL, (
+        f"single-conductor spiral L {klt_nh:.6f} nH vs PyPEEC {pypeec_nh:.6f} "
+        f"nH: rel.err {rel_err * 100:.4f}% exceeds the 2% tolerance"
+    )
+
+
+def test_single_conductor_spiral_resistance_matches_pypeec_reference(
+    klt_mom_spiral_single_conductor, pypeec_spiral
+):
+    """Same 10% budget as the legacy resistance check (PyPEEC resolves the
+    3-D corner current, the 1-D series model does not)."""
+    klt_ohm = klt_mom_spiral_single_conductor["resistance_ohm"]
+    pypeec_ohm = pypeec_spiral["R_ohm"]
+    rel_err = abs(klt_ohm - pypeec_ohm) / abs(pypeec_ohm)
+    print(
+        f"\n2-turn square spiral (ONE conductor) resistance: klt mom "
+        f"R={klt_ohm:.6f} ohm  PyPEEC R={pypeec_ohm:.6f} ohm  "
+        f"rel.err={rel_err * 100:.4f}%"
+    )
+    assert rel_err < 0.10
