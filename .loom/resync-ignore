@@ -136,6 +136,33 @@ scripts/tests/test-verdict-staleness-guard.sh
 # occurrence. If the upstream Loom project ever adopts an equivalent
 # formula-version guard, these pins can be dropped and the files resynced
 # normally.
+#
+# #2437 (2026-10-09): re-evaluated against upstream rjwalters/loom#8510
+# (merged 418d1badca76eb8449962f89b1c8830105554dbc — repo-aware
+# `owner/repo#N` named dependencies) and the installed runtime the upstream
+# thin-stub wrapper would exec (loom-daemon 0.19.950, source 72047016). The
+# pins are RETAINED: resyncing would regress protected local behavior, shown
+# by running this repo's test-dep-recheck-fingerprint.sh against the upstream
+# wrapper + installed daemon (18 failures) and by direct probes:
+#   - #1671: a prose-prefixed item (`- [ ] Landing of #1607 (Closes #1600)`)
+#     is dropped entirely -> DEPS='' / false VERDICT=clear (upstream accepts
+#     only a fixed phrase/`PR `/`Issue ` token before the ref).
+#   - #1569: multiple Dependencies sections are UNIONED, not last-wins, so a
+#     stale original section's refs leak into DEPS/the verdict.
+#   - #1546/#1544: the dep-recheck hash formula differs (narrowed label
+#     component, `n/a` merge bucket, canonicalized block reason) with no
+#     FORMULA_VERSION output, and every KEY=VALUE value is now shell-quoted
+#     (`DEPS=''`, `DEPS=$'...'`) — byte changes to every consumer-visible line.
+# Migration chosen instead: the upstream routing/output CONTRACT was ported
+# into this pinned shell script — an unchecked `owner/repo#N` is read in that
+# repo (never the invoking one, fail closed on lookup failure), a bare `#N`
+# in the invoking repo (`--repo` or cwd default), cross-repo DEPS lines render
+# `owner/repo#N:<state>`, and same-repo lines stay the bare `N:<state>` so no
+# same-repo named-dependency hash moves (pinned by T18a); FORMULA_VERSION
+# stays v1 because the dep-recheck/operator-premise formulas are untouched.
+# Repo-aware regressions live in test-dep-recheck-fingerprint.sh (T18a-T18j).
+# Drop these pins only when upstream's runtime passes that whole local suite
+# (or an intentional, versioned migration of the local consumers lands).
 scripts/dep-recheck-fingerprint.sh
 scripts/tests/test-dep-recheck-fingerprint.sh
 
