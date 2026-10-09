@@ -2272,11 +2272,22 @@ already-supported mismatch-enabled `.lib` section like sky130's `tt_mm`
 points to be re-run `n` times with a different seed. A request combining
 both expands to `corner_count * monte_carlo.n` total runs.
 
-**Seed contract.** `monte_carlo.seed` makes the sampled sequence
-reproducible run-to-run: the same `seed` always derives the same per-sample
-seed values (module hardware/OS variance aside), in any process, on any
-machine — the derivation is SHA-256-based, never Python's salted built-in
-`hash()`. Each sample derives two independent components — `process_seed`
+**Seed contract.** `monte_carlo.seed` makes the derived per-sample seed
+integers reproducible: the same `seed` always derives the same per-sample
+seed values, in any process, on any machine — the derivation is
+SHA-256-based, never Python's salted built-in `hash()`. Those integers are
+stable; the random *draws* ngspice produces from them are not part of the
+contract. Reproducing a given sample's draws requires the same engine build,
+netlist, model inputs and request. Identical seeds do not guarantee identical
+draws across ngspice versions or builds (a different build can draw a
+different sequence from the same `.options seed=`, shifting measurements by
+far more than run-to-run noise on a fixed engine), nor bit-identical
+numerical measurements. This matters when comparing local, `--backend batch`
+and `--backend remote` results, which may run different ngspice builds:
+compare `environment.engine_version` first. A matching version string is
+useful provenance but does not uniquely identify every build, and a
+mismatch means per-sample differences are not evidence about the circuit.
+Each sample derives two independent components — `process_seed`
 and `mismatch_seed` — plus a combined `rndseed` written into the generated
 deck as `.options seed=<rndseed>` (ngspice's documented mechanism for
 seeding `AGAUSS`/`GAUSS`/`random()`, which must appear before the netlist's
