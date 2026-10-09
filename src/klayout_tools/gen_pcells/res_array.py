@@ -219,6 +219,22 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "generator's own cut size unchanged",
                 default=0.0,
             )
+            # Issue #2449: rectangular precision-poly end contact (sky130
+            # high/xhigh licon.1b/c = 0.19um x 2.0um); 0.0 = square cut.
+            self.param(
+                "end_contact_w_um",
+                self.TypeDouble,
+                "Rectangular end-contact extent (um) along the current-flow "
+                "axis -- 0.0 draws the ordinary square cut",
+                default=0.0,
+            )
+            self.param(
+                "end_contact_h_um",
+                self.TypeDouble,
+                "Rectangular end-contact extent (um) across the current-flow "
+                "axis -- 0.0 draws the ordinary square cut",
+                default=0.0,
+            )
             self.param(
                 "mfg_grid_um",
                 self.TypeDouble,
@@ -250,6 +266,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.metal_res_via_min_w_um,
                 self.metal_res_via_enclosure_min_um,
                 self.metal_res_via_space_min_um,
+                self.end_contact_w_um,
+                self.end_contact_h_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]

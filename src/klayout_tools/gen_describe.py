@@ -73,6 +73,7 @@ from .gen_layer_params import (
     _mos_array_well_tap_role_layer,
     _pdk_family,
     _reject_deferred_family,
+    _res_end_contact_um,
     _res_flavor_min_width_um_floor,
     _ring_implant_margin_um,
     _role_layer_info,
@@ -616,6 +617,10 @@ def _res_array_describe(
         if metal_level
         else {key: 0.0 for key in _METAL_RES_GEOMETRY_MIN_KEYS}
     )
+    # Issue #2449: sky130 high/xhigh draw a rectangular precision-poly licon.
+    end_contact = _res_end_contact_um(
+        family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
+    )
     info = _res_array_layout(
         params["length_um"],
         params["width_um"],
@@ -626,6 +631,7 @@ def _res_array_describe(
         floors["via_min_w_um"],
         floors["via_enclosure_min_um"],
         floors["via_space_min_um"],
+        *end_contact,
     )
     unit = info["unit"]
     # A metal-level resistor's own body layer (metN) is already a routing
@@ -667,7 +673,7 @@ def _res_array_describe(
                 "layer": metal_layer,
                 "x_um": c["x0_um"] + entry_xy[0],
                 "y_um": c["y0_um"] + entry_xy[1],
-                "width_um": unit["height_um"],
+                "width_um": unit["pad_height_um"],
                 "direction_deg": entry_deg,
             }
         )
@@ -678,7 +684,7 @@ def _res_array_describe(
                 "layer": metal_layer,
                 "x_um": c["x0_um"] + exit_xy[0],
                 "y_um": c["y0_um"] + exit_xy[1],
-                "width_um": unit["height_um"],
+                "width_um": unit["pad_height_um"],
                 "direction_deg": exit_deg,
             }
         )
@@ -715,6 +721,14 @@ def _res_array_describe(
             f"{metal_level}'s own minimum body width "
             f"({floors['body_width_min_um']}um) on PDK family '{family}' -- "
             "the drawn body will violate that layer's own DRC width rule"
+        )
+
+    if end_contact[0] > 0.0:
+        notes.append(
+            f"flavor '{params.get('flavor')}' on PDK family '{family}' draws "
+            f"rectangular {end_contact[0]}um x {end_contact[1]}um end "
+            "contacts (licon.1b/c precision-resistor exception) on "
+            f"{unit['pad_height_um']}um-tall poly/local-metal end pads"
         )
 
     snapped = _grid_snapped(

@@ -1380,6 +1380,8 @@ def _res_unit_layout(
     width_um: float,
     via_min_w_um: float = 0.0,
     via_enclosure_min_um: float = 0.0,
+    end_contact_w_um: float = 0.0,
+    end_contact_h_um: float = 0.0,
 ) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
     of ``length_um`` between two contact+local-metal end pads.
@@ -1405,10 +1407,33 @@ def _res_unit_layout(
     ``metN`` body / end via / landing pad on -- see
     :func:`_resistor_layer_params`'s own docstring for how those roles are
     resolved to different physical layers depending on ``params.metal_level``.
+
+    ``end_contact_w_um``/``end_contact_h_um`` (issue #2449, both ``0.0`` by
+    default) draw a *rectangular* end contact instead of the square one:
+    ``end_contact_w_um`` along the current-flow (x) axis and
+    ``end_contact_h_um`` across it (y). sky130's precision-poly resistor
+    flavours (``high``/``xhigh``) need this -- upstream ``licon.1b/c`` pins a
+    licon on a precision resistor to 0.19um x 2.0um (see
+    :data:`~klayout_tools.gen_layer_params._PDK_RES_FLAVOR_END_CONTACT_UM`).
+    The poly and local-metal end pads grow with the cut: they are
+    ``end_contact_w_um + 2 * enclosure`` wide and, when taller than the
+    resistor body, ``end_contact_h_um + 2 * enclosure`` tall, centred on the
+    body (a "dogbone" head). The resistor-ID marker still spans only the
+    body segment. With both ``0.0`` every existing caller is unchanged.
     """
+    rect_contact = end_contact_w_um > 0.0 and end_contact_h_um > 0.0
     contact_side_um = max(CONTACT_SIZE_UM, via_min_w_um)
     enclosure_um = max(ENCLOSURE_MARGIN_UM, via_enclosure_min_um)
-    contact_region_um = contact_side_um + 2 * enclosure_um
+    contact_w_um = end_contact_w_um if rect_contact else contact_side_um
+    contact_h_um = end_contact_h_um if rect_contact else contact_side_um
+    contact_region_um = contact_w_um + 2 * enclosure_um
+    # Pad extent across the body axis: the body width, grown to enclose a
+    # taller-than-body rectangular contact (dogbone head).
+    pad_h_um = (
+        max(width_um, contact_h_um + 2 * enclosure_um) if rect_contact else width_um
+    )
+    pad_y0 = (width_um - pad_h_um) / 2.0
+    pad_y1 = pad_y0 + pad_h_um
     total_len_um = 2 * contact_region_um + length_um
     seg_positions = [
         (0.0, contact_region_um),
@@ -1423,9 +1448,18 @@ def _res_unit_layout(
     }
     contact_half = contact_side_um / 2.0
     for sx0, sx1 in seg_positions:
-        boxes["metal"].append((sx0, 0.0, sx1, width_um))
+        if pad_h_um > width_um:
+            boxes["poly"].append((sx0, pad_y0, sx1, pad_y1))
+        boxes["metal"].append((sx0, pad_y0, sx1, pad_y1))
         cx = (sx0 + sx1) / 2.0
         cy = width_um / 2.0
+        if rect_contact:
+            boxes["contact"].append(
+                _snap_rect_box_um(
+                    cx, cy, contact_w_um / 2.0, contact_h_um / 2.0, _GRID_DBU_UM
+                )
+            )
+            continue
         # Snap the centre to the dbu grid *before* deriving the edges -- an
         # un-snapped `cx +/- contact_half` lets the two edges round in
         # opposite directions when the centre lands on a half-dbu tie (e.g.
@@ -1439,6 +1473,7 @@ def _res_unit_layout(
     return {
         "total_len_um": total_len_um,
         "height_um": width_um,
+        "pad_height_um": pad_h_um,
         "boxes_um": boxes,
         "a_xy": a_xy,
         "b_xy": b_xy,
@@ -1455,6 +1490,8 @@ def _res_array_layout(
     via_min_w_um: float = 0.0,
     via_enclosure_min_um: float = 0.0,
     min_spacing_um: float = 0.0,
+    end_contact_w_um: float = 0.0,
+    end_contact_h_um: float = 0.0,
 ) -> dict[str, Any]:
     """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
     into ``rows`` parallel rows in boustrophedon ("snake") order once
@@ -1497,8 +1534,19 @@ def _res_array_layout(
     :func:`_res_array_describe`) can note when it widened the request. All
     three default to ``0.0``, leaving every existing (poly-body) caller
     byte-for-byte unchanged.
+
+    ``end_contact_w_um``/``end_contact_h_um`` (issue #2449) forward to
+    :func:`_res_unit_layout`'s rectangular precision-poly end contact; a
+    dogbone head taller than the body also widens the row-to-row pitch.
     """
-    unit = _res_unit_layout(length_um, width_um, via_min_w_um, via_enclosure_min_um)
+    unit = _res_unit_layout(
+        length_um,
+        width_um,
+        via_min_w_um,
+        via_enclosure_min_um,
+        end_contact_w_um,
+        end_contact_h_um,
+    )
     effective_spacing_um = max(spacing_um, min_spacing_um)
     pitch = unit["total_len_um"] + effective_spacing_um
     # Row-to-row pitch (issue #1639): the same `min_spacing_um` floor applies
@@ -1509,7 +1557,7 @@ def _res_array_layout(
     # `pitch` above already floors under `min_spacing_um`) would leave a
     # folded (`rows > 1`) met5 request DRC-dirty even though the unfolded
     # case is clean.
-    row_pitch = unit["height_um"] + max(MIN_SAME_LAYER_SPACING_UM, min_spacing_um)
+    row_pitch = unit["pad_height_um"] + max(MIN_SAME_LAYER_SPACING_UM, min_spacing_um)
     cols_per_row = -(-num // rows) if rows > 0 else num  # ceil(num / rows)
 
     def _row_and_column(i: int) -> tuple[int, int, int]:
@@ -1797,6 +1845,25 @@ def _boxes_overlap(
     return (
         min(a[2], b[2]) - max(a[0], b[0]) > eps
         and min(a[3], b[3]) - max(a[1], b[1]) > eps
+    )
+
+
+def _snap_rect_box_um(
+    cx_um: float, cy_um: float, half_w_um: float, half_h_um: float, dbu_um: float
+) -> tuple[float, float, float, float]:
+    """Rectangular sibling of :func:`_snap_square_box_um` (issue #2449): a
+    ``2 * half_w_um`` x ``2 * half_h_um`` box whose centre and half-extents are
+    snapped to integer dbu *before* the edges are derived, so both drawn
+    dimensions are exact (e.g. a 0.19um x 2.0um precision-poly licon)."""
+    cx_dbu = round(cx_um / dbu_um)
+    cy_dbu = round(cy_um / dbu_um)
+    hw_dbu = round(half_w_um / dbu_um)
+    hh_dbu = round(half_h_um / dbu_um)
+    return (
+        (cx_dbu - hw_dbu) * dbu_um,
+        (cy_dbu - hh_dbu) * dbu_um,
+        (cx_dbu + hw_dbu) * dbu_um,
+        (cy_dbu + hh_dbu) * dbu_um,
     )
 
 

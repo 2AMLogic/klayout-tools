@@ -1656,6 +1656,42 @@ _PDK_RES_FLAVOR_MIN_W_UM: dict[str, dict[str, float]] = {
 }
 
 
+#: Context-dependent **rectangular** end-contact size per ``(family, flavor)``
+#: for ``res_array``'s poly-body path (issue #2449), as ``(w_um, h_um)`` --
+#: ``w_um`` along the current-flow axis, ``h_um`` across it.
+#:
+#: sky130's precision poly resistors (``flavor="high"``/``"xhigh"``, the only
+#: ones drawn under ``rpm``/``urpm``) are exempt from the ordinary 0.17um licon
+#: rule: ``sky130.lydrc`` ``licon.1b/c`` ("minimum/maximum width/length of
+#: licon inside poly resistor : 2.0/0.19um") demands every such licon have
+#: edges of exactly 0.19um and 2.0um, i.e. a 0.19um x 2.0um slot. The rule
+#: constrains the edge lengths only, not which axis is long; the generator
+#: draws the 2.0um edge across the current flow (y), so the slot spans the
+#: full resistor head -- matching the foundry's own ``res_high_po``/
+#: ``res_xhigh_po`` dogbone-head cells -- and the pitch to a neighbouring
+#: contact (``licon.2b``/``licon.2c``: 0.35um / 0.51um) stays met by the
+#: unit pitch. An empty/absent entry means the ordinary layer-keyed cut size
+#: applies.
+_PDK_RES_FLAVOR_END_CONTACT_UM: dict[str, dict[str, tuple[float, float]]] = {
+    "sky130": {
+        "high": (0.19, 2.0),
+        "xhigh": (0.19, 2.0),
+    },
+}
+
+
+def _res_end_contact_um(
+    family: str, flavor: str, metal_level: int = 0
+) -> tuple[float, float]:
+    """``(w_um, h_um)`` of ``res_array``'s rectangular precision-poly end
+    contact for this request (see :data:`_PDK_RES_FLAVOR_END_CONTACT_UM`), or
+    ``(0.0, 0.0)`` when the ordinary square cut applies -- always for
+    ``metal_level != 0`` (metal resistors ignore ``flavor``)."""
+    if metal_level:
+        return (0.0, 0.0)
+    return _PDK_RES_FLAVOR_END_CONTACT_UM.get(family, {}).get(flavor, (0.0, 0.0))
+
+
 def _res_flavor_min_width_um(family: str, flavor: str) -> float:
     """Return the minimum ``res_array`` ``params.width_um`` accepted for
     ``flavor`` in ``family`` (see :data:`_PDK_RES_FLAVOR_MIN_W_UM`), falling
@@ -2082,8 +2118,10 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #:   (:data:`_PDK_RES_FLAVOR_LAYERS`), and their end contacts were already
 #:   drawn at neither exempt size (0.22um) before this entry, so clamping to
 #:   0.17um neither introduces nor fixes that case -- it is a context-
-#:   dependent size this layer-keyed table structurally cannot express, left
-#:   to the broader tracking issue #2449.
+#:   dependent size this layer-keyed table structurally cannot express;
+#:   issue #2449 resolves it per request via
+#:   :data:`_PDK_RES_FLAVOR_END_CONTACT_UM` (and zeroes this clamp for those
+#:   requests in :func:`_resistor_layer_params`).
 #: - ``sky130`` ``mcon`` (67/44) 0.17um -- ``sky130.lydrc`` ``ct.1``
 #:   (``mcon.edges.without_length(0.17)``, "minimum/maximum width of mcon :
 #:   0.17um"), split in ``sky130A_mr.drc`` into ``ct.1_a`` ("minimum width of
@@ -2743,13 +2781,20 @@ def _resistor_layer_params(
             f"for flavor '{flavor}' on PDK family '{family}'"
         )
     mark = _role_layer_info(family, "res_mark")
+    # Issue #2449: a precision-poly flavour draws its own rectangular cut, so
+    # the layer-keyed ordinary fixed-size clamp (0.17um) must not shrink it.
+    end_w_um, end_h_um = _res_end_contact_um(family, flavor)
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
         "mfg_grid_um": _mfg_grid_um(family, _PDK_ROLE_LAYERS[family].get("contact")),
-        "contact_fixed_size_um": _cut_fixed_size_um(
-            family, _PDK_ROLE_LAYERS[family].get("contact")
+        "contact_fixed_size_um": (
+            0.0
+            if end_w_um > 0.0
+            else _cut_fixed_size_um(family, _PDK_ROLE_LAYERS[family].get("contact"))
         ),
+        "end_contact_w_um": end_w_um,
+        "end_contact_h_um": end_h_um,
         "metal_layer": _role_layer_info(family, "metal"),
         "res_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "res_mark_present": mark is not None,
