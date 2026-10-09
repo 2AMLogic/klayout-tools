@@ -1680,6 +1680,25 @@ _PDK_RES_FLAVOR_END_CONTACT_UM: dict[str, dict[str, tuple[float, float]]] = {
 }
 
 
+#: Enclosure (um) of the whole poly resistor -- body *and* contacted end
+#: heads -- by each precision-resistor requires-mask, keyed by family then
+#: mask layer (issue #2449). Only applied when the request draws
+#: :data:`_PDK_RES_FLAVOR_END_CONTACT_UM`'s rectangular contact: upstream
+#: ``sky130A_mr.drc`` exempts a licon from ``licon.1`` only inside
+#: ``(rpm | urpm) & psdm & poly.interacting(poly_rs)``, so the masks must
+#: cover the end-pad licons. Values are the sky130 periphery rules
+#: ``rpm.3`` (rpm/urpm enclosure of the poly resistor, 0.2um) and ``rpm.4``
+#: (psdm enclosure, 0.11um). The resistor-ID marker (``poly.res`` 66/13)
+#: stays on the body only. A mask absent here keeps the body-only box.
+_PDK_RES_FLAVOR_MASK_ENCLOSURE_UM: dict[str, dict[tuple[int, int], float]] = {
+    "sky130": {
+        (86, 20): 0.2,  # rpm  -- rpm.3
+        (79, 20): 0.2,  # urpm -- rpm.3
+        (94, 20): 0.11,  # psdm -- rpm.4
+    },
+}
+
+
 def _res_end_contact_um(
     family: str, flavor: str, metal_level: int = 0
 ) -> tuple[float, float]:
@@ -2764,6 +2783,7 @@ def _resistor_layer_params(
         for i in range(_MAX_RES_FLAVOR_LAYERS):
             resolved[f"res_flavor_{i}_layer"] = kdb.LayerInfo(0, 0)
             resolved[f"res_flavor_{i}_present"] = False
+            resolved[f"res_flavor_{i}_head_enclosure_um"] = 0.0
         floors = _metal_res_geometry_min_um(family, metal_level)
         resolved["metal_res_via_min_w_um"] = floors["via_min_w_um"]
         resolved["metal_res_via_enclosure_min_um"] = floors["via_enclosure_min_um"]
@@ -2806,6 +2826,12 @@ def _resistor_layer_params(
             kdb.LayerInfo(*pair) if pair is not None else kdb.LayerInfo(0, 0)
         )
         resolved[f"res_flavor_{i}_present"] = pair is not None
+        # Issue #2449: precision-resistor masks cover the end heads too.
+        resolved[f"res_flavor_{i}_head_enclosure_um"] = (
+            _PDK_RES_FLAVOR_MASK_ENCLOSURE_UM.get(family, {}).get(pair, 0.0)
+            if pair is not None and end_w_um > 0.0
+            else 0.0
+        )
     return resolved
 
 
