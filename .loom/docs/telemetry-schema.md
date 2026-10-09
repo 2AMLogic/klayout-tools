@@ -21,6 +21,7 @@ writing) will additionally push these records to a cloud backend.
 - [Envelope](#envelope)
 - [`/ingest` response (the bound-`host_id` echo)](#ingest-response-the-bound-host_id-echo)
 - [`RepoVisibility` contract — private by default](#repovisibility-contract--private-by-default)
+- [Exported-facts contract (external ETA consumers, #11098)](#exported-facts-contract-external-eta-consumers-11098)
 - [Record kinds](#record-kinds)
 - [Persistence & read surface (`sweep.outcome`, Issue #4704)](#persistence--read-surface-sweepoutcome-issue-4704)
 - [Refreshing the model rate card](#refreshing-the-model-rate-card)
@@ -211,6 +212,86 @@ keys off this tag, never off client-side filtering.
 Visibility is derived at emit time from the forge (`gh api repos/{owner}/{repo}
 --jq .private`) and cached per `owner/repo` with a TTL, so it costs no per-record
 API call. A probe failure resolves to `private` — the same fail-safe default.
+
+## Exported-facts contract (external ETA consumers, #11098)
+
+ETA is moving out of Loom (decision #11078). loom-ui rebuilds it from label
+webhooks, `github-read`, SigNoz and the records below (tracked on #11098).
+Loom keeps no ETA logic. Its one obligation is to keep exporting the facts in
+the first table. This section only points at each kind's own section, which
+remains the field reference.
+
+**Stability promise.** For every record in the first table, changes are
+additive only. A field, attribute or metric name is never renamed or removed,
+and its meaning never changes. Removing one needs an issue that loom-ui has
+agreed to. **Growth rule:** a new fact (up to the whole ready queue per daemon
+cycle) is added only when loom-ui's error tracking shows it is needed.
+
+**Stable records: owned by non-ETA code.**
+
+| Record | Signal | Owner (emit site, under `loom-daemon/src/`) |
+|---|---|---|
+| [`sweep.outcome`](#sweepoutcome) | log, native + OTLP | `sweep_registry/outcome_journal.rs`, `observability/collector.rs`, `sweep_registry/prless_retry/durable.rs`, `observability/backfill.rs` |
+| [`sweep.started`](#sweepstarted) / [`sweep.phase`](#sweepphase) / [`sweep.completed`](#sweepcompleted) / [`sweep.identity`](#sweepidentity) | log, native + OTLP | `observability/collector.rs` (+ `collector/identity.rs`), `observability/queue.rs`, `observability/shutdown.rs`, `observability/backfill.rs` |
+| Phase spans (`trace.span`: `loom.phase`, `loom.role_attempt`) | span, OTLP only | `observability/lifecycle.rs` → `observability/otlp/traces.rs`; see [`tracing.md`](tracing.md#owned-lifecycle-instrumentation) |
+| [`pick.decision`](#pickdecision) | log, OTLP only | `observability/pick_decision.rs` (from `role_tick_telemetry.rs` and `work_finder/tick_summary.rs`) |
+| [`queue.snapshot`](#queuesnapshot) (whole ready queue per tick) | native only | `observability/queue_snapshot.rs` |
+| `loom.queue.issues`, `loom.queue.listing_failed_repos` ([`metric.points`](#metricpoints)) | metric | `observability/ops/queue.rs` |
+| `loom.queue.oldest_wait`, `loom.queue.starved[.by_reason]`, `loom.queue.dispatch_wait[.samples]` ([`metric.points`](#metricpoints)) | metric | `observability/ops/dwell.rs` |
+| [`loom.dispatch.disposition`](#loomdispatchdisposition-issue-9222-per-issue-why-is-it-waiting) rows (`loom.queue.*` attributes) and `loom.queue.disposition_rows_dropped` | span + metric, OTLP only | `observability/ops/disposition.rs` |
+| [`host.health`](#hosthealth) | gauges, native + OTLP | `observability/collector.rs` (+ `exporter.rs`, `sender.rs`) |
+| Captain gauges: `loom.captain.gauge_age_seconds`, `loom.captain.gauge_fallback`, `loom.forge.stage_dwell`, `loom.forge.stage_items` ([`metric.points`](#metricpoints)) | metric | `observability/captain_gauges.rs`, `observability/ops/stage_dwell.rs` |
+
+The captain gauges are emitted by non-ETA code. Since Stage 2 of #11098,
+`fleet.captainGauges.ref` has its own default (`eta-fit`, the branch the
+heartbeat already used; a legacy `fleet.etaFitRef` is still read as the
+fallback), and `captain_gauges/store.rs` uses the neutral
+`fleet_store/publication.rs` helpers instead of `crate::eta::fit`. What is
+emitted did not change.
+
+**ETA-only records.** Only ETA code emits these. Each one either gets a non-ETA
+owner or is dropped with loom-ui's agreement. No disposition is final until
+loom-ui confirms it; track each disposition on #11098.
+
+| Record | Signal | Sole emit site (under `loom-daemon/src/`) | ETA-only | Disposition |
+|---|---|---|---|---|
+| [`eta.stage_outcome`](#etastage_outcome) (stage-journal rows) | log, OTLP only | `observability/eta/stage_outcome.rs` | yes | **open: needs loom-ui input.** Either keep it under a non-ETA owner or drop it. It is the one stage-boundary fact loom-ui cannot easily rebuild from webhooks. |
+| [`pr.resolved`](#prresolved) | log, OTLP only | `observability/eta/pr_resolved.rs` | yes | **open: needs loom-ui input.** Either keep it under a non-ETA owner or drop it. loom-ui's webhooks already cover merge and close. |
+| [`eta.estimate` / `eta.outcome`](#etaestimate--etaoutcome) | log, OTLP only | `observability/eta.rs` | yes | drop, pending loom-ui agreement (predictions, not facts) |
+| [`eta.snapshot`](#etasnapshot) | native only | `observability/eta_snapshot.rs` | yes | drop, pending loom-ui agreement. loom-ui consumes it natively today. |
+| [`eta.fit`](#etafit) | log, OTLP only | `observability/eta_fit.rs` | yes | drop, pending loom-ui agreement |
+| [`eta.fleet_refresh`](#etafleet_refresh) | log, OTLP only | `observability/eta_fleet_refresh.rs` | yes | drop, pending loom-ui agreement |
+| [`eta.backtest.fold` / `eta.backtest.summary`](#etabacktestfold-and-etabacktestsummary) | log, OTLP only | `observability/eta_nightly_folds.rs` | yes | drop, pending loom-ui agreement |
+| `loom.eta.health.*` (14 gauges, [`metric.points`](#metricpoints)) | metric | `observability/ops/eta_health.rs` | yes | drop, pending loom-ui agreement |
+
+ETA-only records leave the daemon by two kinds of path, not one:
+
+- **Collector tick.** The `eta::record`, `eta_snapshot::record` and
+  `ops::eta_health::record` calls in `observability/collector.rs` emit
+  `eta.estimate` / `eta.outcome`, `eta.snapshot` and the `loom.eta.health.*`
+  gauges.
+- **Separate task paths.** Each of these has its own `spawn_task`
+  registration in `observability/mod.rs` and offers to the sink directly:
+  `eta.fit` from `observability/eta_fit.rs`, `eta.fleet_refresh` from
+  `observability/eta_fleet_refresh.rs`, and `eta.backtest.fold` /
+  `eta.backtest.summary` from `observability/eta_nightly_folds.rs`.
+
+Removal stages must cover both paths. The `eta.stage_outcome` and
+`pr.resolved` rows are owned by the files named in the table above.
+
+**Non-ETA records that borrow an ETA type.**
+[`pass.summary` / `pass.verdict`](#passsummary-and-passverdict),
+[`auto_update.tick`](#auto_updatetick),
+[`token_ranking.refresh`](#token_rankingrefresh), and the `release_fetch` and
+`stale_blocked` release telemetry use `Provenance` as their `loom` object.
+They stay. Stage 2 of #11098 moved `Provenance` to the neutral
+`telemetry/provenance.rs` (`crate::eta::Provenance` is a re-export until
+Stage 3); the wire shape is unchanged, pinned by that module's serialization
+test.
+
+**Naming note.** The issue text said `eta.stage_sample`, but no record kind
+has that name. The stage-journal rows are exported as `eta.stage_outcome`.
+`StageSample` is only an in-memory type in `eta/fleet.rs`.
 
 ## Record kinds
 
@@ -2347,6 +2428,12 @@ its existing review listing and the PR read the tracker already makes. Only
 the fleet's ETA authority runs the pass, so only it emits these. At most one
 record per `(repo, pr_number, state)` per pass.
 
+**Natural key: `(repo, pr_number, state)`.** The record carries
+`loom.fact_id = derived_hex(["loom.fact", "pr.resolved", repo, pr_number,
+state], 16)`, the same on every host (no `host_id`, no `emitted_at`), so a
+reader dedupes the fact across hosts with `LIMIT 1 BY loom.fact_id`; see
+[`telemetry-replay.md`](telemetry-replay.md).
+
 The log record's **time is `resolved_at`** and its **observed timestamp is
 `observed_at`** (the knowable-at time, see "Event time vs knowable-at"
 above). The body is the record's JSON. The scalars ride as `loom.repo`,
@@ -2377,6 +2464,11 @@ review-label transitions, verdicts, `merge_hold` overlays and the
 `pr.resolved` read. A slot-turnover sample has no issue and gives no
 record. The record joins the issue's story trace when an open estimate
 knew the repo id.
+
+**Natural key: `(repo, issue, stage, left_at)`.** The record carries
+`loom.fact_id = derived_hex(["loom.fact", "eta.stage_outcome", repo, issue,
+stage, left_at], 16)` (`left_at` as RFC 3339 UTC, nanoseconds), the same on
+every host; see [`telemetry-replay.md`](telemetry-replay.md).
 
 The log record's **time is `left_at`** and its **observed timestamp is
 `observed_at`**. The body is the record's JSON. The scalars ride as
@@ -2612,6 +2704,127 @@ row under "GitHub rate limit" above): `github.caller` inside a caller scope,
 (passes per repo with skips by reason and calls by operation, why each
 artifact is still held, and which mechanism removed each `loom:blocked`):
 `defaults/observability/signoz/pass-queries.sql`.
+
+### `fleet.state`
+
+This host's own view of the work it holds, the PRs under review in its repos,
+and its ready queue (Issue #10196). It is the state record of the replay
+contract ([`telemetry-replay.md`](telemetry-replay.md)). Envelopes carry
+`schema_version: 12` (the shared post-#8921 gate). The kind is **OTLP-only**:
+one log record per envelope, with the record JSON as the log **body** and a few
+`loom.fleet.*` scalars as attributes. `queue.snapshot` and `eta.snapshot` stay
+native-HTTPS dashboard keys and are unchanged.
+
+The collector builds it on the `host.health` interval. **Every host emits its
+own view; nothing is elected.** The record does not depend on ETA: it is sent
+whenever an OTLP exporter exists, whatever `autonomous.eta.enabled` says, and
+**no record at all** only when there is no OTLP exporter. An anchor with zero
+rows is still sent, because it truthfully says "nothing here". Rows come from
+three non-ETA sources:
+
+| Source | Rows | Notes |
+|---|---|---|
+| Sweep registries | the sweeps this host runs (`host`, `slot` set) | stage from the sweep's own checkpoint marker: none → `sweep.curator` (entered at dispatch), `curator-done` → `sweep.builder`, `builder-done` / `doctor-done` → `review_wait`, `judge-rejected` → `doctor`, `judge-done` / `merge-done` → `merge_wait`; `entered_at` is the marker's `timestamp` |
+| Review-label listings | open PRs under `loom:review-requested` / `loom:changes-requested` / `loom:pr` (or `loom:treating` alone), plus the per-repo census | ETag-cached REST listings, each walked to its last page (an unchanged page is a free `304`). A walk that fails, reads 10 full pages (more than 1000 PRs under one label) or sees the listing shift mid-walk is a **failed** listing, never a partial one. A row is keyed by the issue the PR body links (a closing keyword first, else `Part of`); a PR linking no issue is in the census only; two PRs for one issue keep the lower PR number. An approved PR under a registry `merge_hold` label is `merge_hold` |
+| Work finder's last tick | `ready_wait` for every ready-queue row the planner saw on that tick that is not running here | the same tick the `queue.snapshot` producer reads; each row carries this host's planner `rank` and the planner's inputs. Nothing re-ranks. The work finder lists one forge page (100 items) per label and cannot yet prove a listing whole, so `ready_complete` is `false` for every repo until #11139 and the repo's ready rows go out whole with `ready_replace` |
+
+When sources overlap on one `(repo, issue)`, the held row wins, then the PR
+row, then the `ready_wait` row. A listing row still in the same stage keeps its
+`entered_at` from pass to pass; a row new to a listing that was complete on the
+previous pass entered at this pass's `as_of`; any other row is first seen
+mid-stage and carries `entered_at_lower_bound: true`. A managed repo whose
+review listing failed keeps its previous PR rows, and its `census` is absent; a
+managed repo whose ready listing failed keeps its previous `ready_wait` rows.
+An item a failed read could not see is therefore never sent in `removed`, but
+a kept row may be an item that has since left; it is replaced or removed once
+a read sees the repo again. A repo whose ready listing was read but is not
+`ready_complete` has exactly the tick's `ready_wait` rows: none is kept past
+its absence from the tick.
+
+**Anchors and deltas.** The first pass of a daemon process sends a full
+**anchor** (`anchor: true`, every row), and so does any pass at which the last
+anchor is at least 3600 s old or the planner stamps changed (a regime
+boundary). Between anchors a pass sends a **delta** (`anchor: false`) only if
+rows, a census, a repo's `ready_complete` or the plan slots changed. A delta holds the added or changed
+rows, the issues that left (`removed`), and the **full** census of each repo it
+names. **Ready replacement:** a repo with `ready_complete: false` (today every
+repo) is sent with `ready_replace: true`. Its `ready_wait` rows are not
+diffed: every record that names it carries the repo's **entire** observed
+`ready_wait` set in `rows`, a delta names it whenever that set changed, and
+its `removed` never lists a `ready_wait` row. Its other rows are diffed as
+usual. A `ready_complete: true` repo (possible only after #11139) is diffed
+in full, `ready_wait` rows included. A pass with no change sends nothing. The change test ignores
+`census_at`. A planner rank shift changes every row behind it, so it is a
+change.
+
+**No row cap; chunks by bytes.** The emitter drops none of the rows its sources
+read: it has no row cap. (What the sources read is bounded as described above:
+see `ready_complete` for the ready queue.) A record whose JSON
+would exceed ~1 MB (`CHUNK_BYTES`, a quarter of the ~4 MB OTLP/gRPC message
+limit) is split into several log records that share `as_of` and every header
+field, numbered `chunk_index` `0..chunk_count`; rows and `removed` entries are
+packed in order, and a repo that spans chunks repeats its `repo`,
+`visibility`, `census`, `ready_complete` and `ready_replace` in each. A ~3000-row queue (~100-180 bytes a row) is
+one record with `chunk_count: 1`. A reader uses a record only once it holds
+all `chunk_count` chunks of that `(host, as_of)`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `schema` | string | `fleet-state/v1` |
+| `as_of` | RFC 3339 | the instant described; also the log `timestamp`; shared by every chunk |
+| `anchor` | bool | full anchor (`true`) or delta (`false`) |
+| `anchor_as_of` | RFC 3339 | the `as_of` of the anchor this record's chain started from (equal to `as_of` on an anchor) |
+| `prev_as_of` | RFC 3339, optional | delta only: the `as_of` of the record this delta applies on top of. A gap in the chain means a lost delta |
+| `chunk_index` | integer | 0-based chunk number (missing decodes to `0`) |
+| `chunk_count` | integer | chunks the record at `as_of` was split into; `1` when unsplit (missing decodes to `1`) |
+| `planner_version` | string | the daemon version whose planner produced the ranks |
+| `planner_config_hash` | string | 12 hex of sha256 over the canonical JSON (sorted keys, no whitespace) of the effective `autonomous.workFinder` and `autonomous.mergeSequencing` blocks; unrelated config never moves it |
+| `fleet_config_hash` | string, optional | the fleet store commit this host's last fleet-sync config pass resolved; absent on a host with no fleet store |
+| `census_at` | RFC 3339, optional | when the review listings were read |
+| `slots` | object, optional | `{max_concurrent, occupancy?}` from the last work-finder dispatch plan |
+| `repos[]` | array | per repo, ordered by slug. An anchor lists every repo with rows or a census; a delta lists only repos that changed |
+
+A change in `planner_version`, `planner_config_hash` or `fleet_config_hash`
+marks a regime boundary; the emitter starts a fresh anchor there, so a reader
+can cut its window at the boundary instead of guessing.
+
+Each `repos[]` entry:
+
+| Field | Type | Notes |
+|---|---|---|
+| `repo` | string | forge `owner/repo`, lowercased, never a local path |
+| `visibility` | `public` / `private` | missing or unknown decodes to `private` |
+| `census` | object, optional | `{open, by_stage?}`: distinct open PRs under a Loom review label, with `by_stage` keys `review_wait` / `doctor` / `merge_wait` / `merge_hold` / `held` (labels that name no single stage). **Absent means unknown** (listing incomplete or not read), never zero. Open PRs with no review label are not counted |
+| `ready_complete` | bool | `true` when the work finder's last tick is known to have listed this repo's whole ready queue. **Always `false` until #11139**: the work finder lists one page per label and, after filtering out PRs and merging side listings, cannot tell a full raw page from a short one, so no row count proves a listing whole. A reader must not treat a `false` repo's `ready_wait` rows as its whole queue. Always sent; missing (an older emitter) decodes to `false` |
+| `ready_replace` | bool, optional | `true` exactly when `ready_complete` is `false`: `rows` carries the repo's **entire** observed `ready_wait` set, and a reader replaces the repo's `ready_wait` rows with it (drop them all, then apply `removed` and `rows`). Removals of `ready_wait` rows are never sent in `removed` for such a repo, and a reader never infers one from absence otherwise. Absent (`false`, or an older emitter): plain diffing |
+| `rows[]` | array, optional | anchor: every row; delta: added or changed rows. Ordered by issue |
+| `removed[]` | integers, optional | delta only: issues that left. A repo that left entirely has every prior issue here (but no `ready_wait` issue when `ready_replace` is set) and no `census` |
+
+Each row:
+
+| Field | Type | Notes |
+|---|---|---|
+| `issue` | integer | issue number |
+| `stage` | string | `ready_wait`, `sweep.curator`, `sweep.builder`, `review_wait`, `doctor`, `merge_wait`, `merge_hold` |
+| `entered_at` | RFC 3339 | when the item entered `stage` |
+| `entered_at_lower_bound` | bool, optional | present (`true`) when `entered_at` is only a lower bound, for example when the item was first seen mid-stage after a restart |
+| `pr` | integer, optional | the PR, when known |
+| `host` | string, optional | the host whose sweep holds the item. Present **only** when the emitting host runs it; absent rather than guessed otherwise |
+| `slot` | `regular` / `overflow`, optional | the dispatch slot that sweep holds (`overflow` = the host's single `loom:operator-priority` overflow slot, #9244). Present exactly when `host` is |
+| `rank` | integer, optional | `ready_wait` only: this host's planner rank (1-based position in its dispatch order on the last work-finder tick). Per host: two hosts' ranks for one issue are two true answers |
+| `star` | bool, optional | `ready_wait` only: starred at any level (absent = `false`) |
+| `star_at` | RFC 3339, optional | `ready_wait` only: when it was starred, when known |
+| `level` | integer, optional | `ready_wait` only: effective operator priority level (absent = `0`) |
+| `fleet_priority` | integer, optional | `ready_wait` only: the repo's fleet (workspace) priority tier; lower dispatches first |
+| `created_at` | RFC 3339, optional | `ready_wait` only: the issue's creation instant, the planner's age input (age = `as_of - created_at`; the instant is sent so an unchanged row stays unchanged) |
+| `main_red_fix` | bool, optional | `ready_wait` only: a red-main fix the planner boosted this tick (absent = `false`) |
+
+Log attributes besides `loom.kind` and `loom.record_id`
+(`FLEET_STATE_LOG_ATTRIBUTE_KEYS`, kept by the collector's `transform/privacy`
+`keep_keys`, contract-tested): `loom.fleet.schema`, `loom.fleet.anchor`,
+`loom.fleet.anchor_as_of`, `loom.fleet.repos`, `loom.fleet.rows`,
+`loom.fleet.removed`, `loom.fleet.chunk_index`, `loom.fleet.chunk_count`.
+Each chunk is its own record with its own `loom.record_id`.
 
 ### `tokens.snapshot`
 
