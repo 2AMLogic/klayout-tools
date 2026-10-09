@@ -35,6 +35,7 @@ from . import (
     layout_metrics_cmd,
     lef_abstract_cmd,
     lvs_cmd,
+    mcp_cmd,
     mom_cmd,
     netlist_cmd,
     pdk_cmd,
@@ -290,6 +291,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_yield_sensitivity_parser(subparsers)
 
     _add_design_centering_parser(subparsers)
+
+    _add_mcp_parser(subparsers)
 
     return parser
 
@@ -4249,6 +4252,68 @@ def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(validate_parser)
     validate_parser.set_defaults(func=kb_cmd.run_validate)
+
+
+def _add_mcp_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``mcp`` verb: stdio MCP bridge over the registry (#2830)."""
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="serve the klt verbs to MCP-capable agent frameworks",
+        description=(
+            "Model Context Protocol bridge. `klt mcp serve` runs a stdio MCP "
+            "server exposing one tool per klt verb, generated from this "
+            "argument parser; each call runs `klt <verb> ... --format json` "
+            "in a subprocess, so docs/json-contract.md stays the single "
+            "contract. Needs the optional extra: pip install "
+            "'klayout-tools[mcp]'. See docs/guides/mcp-server.md."
+        ),
+    )
+    mcp_sub = mcp_parser.add_subparsers(dest="mcp_command", metavar="<subcommand>")
+    mcp_parser.set_defaults(func=_no_subcommand_handler(mcp_parser))
+    serve_parser = mcp_sub.add_parser(
+        "serve",
+        help="run the stdio MCP server",
+        description=(
+            "Serve MCP over stdio (stdout is the protocol channel; nothing "
+            "else is written there). Paths in tool calls resolve against "
+            "--workspace-root, which is also each subprocess's cwd."
+        ),
+    )
+    serve_parser.add_argument(
+        "--workspace-root",
+        default=".",
+        help="directory relative paths in tool calls resolve against (default: cwd)",
+    )
+    serve_parser.add_argument(
+        "--enable-verb",
+        action="append",
+        default=[],
+        metavar="VERB",
+        help=(
+            "expose a verb that is hidden by default (fleet-dispatching: "
+            "yield-campaign); repeatable"
+        ),
+    )
+    serve_parser.add_argument(
+        "--allow-fleet",
+        action="store_true",
+        help=(
+            "expose every hidden verb and permit --backend remote/batch "
+            "(provisions cloud hosts / submits to the batch fleet)"
+        ),
+    )
+    serve_parser.add_argument(
+        "--allow-outside-workspace",
+        action="store_true",
+        help="do not reject path arguments that resolve outside --workspace-root",
+    )
+    serve_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=900.0,
+        help="per-call subprocess timeout in seconds (default: 900)",
+    )
+    serve_parser.set_defaults(func=mcp_cmd.run_serve)
 
 
 def _add_layers_parser(subparsers: argparse._SubParsersAction) -> None:

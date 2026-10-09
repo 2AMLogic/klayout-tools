@@ -14,6 +14,11 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt mcp serve`** (issue #2830): stdio MCP server, one tool per verb derived
+  from the argparse registry, executing `klt <verb> --format json` in a
+  subprocess. Optional `[mcp]` extra; fleet verbs hidden by default. See
+  `docs/guides/mcp-server.md`.
+
 ## 0.7.0 (2026-10-08)
 
 616 commits on `main` since v0.6.0 (334 on the first-parent line; merges have
