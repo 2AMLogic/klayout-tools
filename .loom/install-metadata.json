@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.953",
-  "loom_commit": "b93d7a955d63411cb4c94b986fd5138d27dedb0f",
+  "loom_version": "0.19.972",
+  "loom_commit": "113c7f31d7d16f75d30c470023e0b65b29b1fe94",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -366,7 +366,16 @@
     ".loom/scripts/tests/test-spawn-claude-ambient-scrub.sh",
     ".loom/scripts/tests/test-spawn-claude-credential-proxy.sh",
     ".loom/scripts/tests/test-worktree-stale-closed-branch.sh",
-    ".loom/scripts/tests/test-worktree-stash-baseline.sh"
+    ".loom/scripts/tests/test-worktree-stash-baseline.sh",
+    ".loom/scripts/tests/test-loom-daemon-update-floor-confirm.sh",
+    ".loom/scripts/tests/test-spawn-claude-oom-policy.sh",
+    ".claude/commands/loom/sweep-wave-lifecycle.md",
+    ".loom/docs/ci-observability.md",
+    ".loom/docs/gh-issue-create-rest-fallback.md",
+    ".loom/docs/telemetry-replay.md",
+    ".loom/scripts/claim-staleness.sh",
+    ".loom/scripts/tests/lib/daemon-update-fixtures.sh",
+    ".loom/scripts/tests/test-claim-staleness.sh"
   ],
   "last_resync": "2026-10-09",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
