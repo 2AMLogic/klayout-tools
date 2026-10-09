@@ -18,6 +18,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   from the argparse registry, executing `klt <verb> --format json` in a
   subprocess. Optional `[mcp]` extra; fleet verbs hidden by default. See
   `docs/guides/mcp-server.md`.
+- `klt gen res_array` on sky130 `flavor: "high"`/`"xhigh"` now draws the
+  precision-poly end contacts as 0.19 um x 2.0 um slots (`licon.1b/c`) on
+  taller poly/`li1` head pads (issue #2449); R<i>_A/R<i>_B port `width_um`
+  reports the pad height for those flavours. The `psdm` and `rpm`/`urpm`
+  requires-masks now cover the whole unit, end heads included (`rpm.3` 0.2 um /
+  `rpm.4` 0.11 um enclosure, merged across neighbouring units), so the slots
+  sit inside upstream `sky130A_mr.drc`'s `prec_resistor` region. This also
+  clears the `rpm.1a` width violation; `poly.res` stays on the body only.
+  Other flavours and families are unchanged. Audit: no supported generator draws sg13g2/sg13cmos5l `TopVia1`.
 
 ## 0.7.0 (2026-10-08)
 

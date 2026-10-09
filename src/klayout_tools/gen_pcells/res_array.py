@@ -34,6 +34,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _clamp_cut_boxes,
         _insert_boxes,
         _res_array_layout,
+        _res_flavor_mask_box_um,
     )
 
     class _ResArrayPCell(kdb.PCellDeclarationHelper):
@@ -162,6 +163,16 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     "layer the resolved PDK's requested flavour requires",
                     default=False,
                 )
+                # Issue #2449: > 0.0 draws this mask over the whole unit
+                # (body + end heads) at this enclosure instead of the
+                # body-only marker box -- see gen._res_flavor_mask_box_um.
+                self.param(
+                    f"res_flavor_{i}_head_enclosure_um",
+                    self.TypeDouble,
+                    f"Enclosure (um) of the whole unit (end heads included) by "
+                    f"res_flavor_{i}_layer -- 0.0 covers the body segment only",
+                    default=0.0,
+                )
             self.param(
                 "dummy_layer",
                 self.TypeLayer,
@@ -219,6 +230,22 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "generator's own cut size unchanged",
                 default=0.0,
             )
+            # Issue #2449: rectangular precision-poly end contact (sky130
+            # high/xhigh licon.1b/c = 0.19um x 2.0um); 0.0 = square cut.
+            self.param(
+                "end_contact_w_um",
+                self.TypeDouble,
+                "Rectangular end-contact extent (um) along the current-flow "
+                "axis -- 0.0 draws the ordinary square cut",
+                default=0.0,
+            )
+            self.param(
+                "end_contact_h_um",
+                self.TypeDouble,
+                "Rectangular end-contact extent (um) across the current-flow "
+                "axis -- 0.0 draws the ordinary square cut",
+                default=0.0,
+            )
             self.param(
                 "mfg_grid_um",
                 self.TypeDouble,
@@ -250,6 +277,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.metal_res_via_min_w_um,
                 self.metal_res_via_enclosure_min_um,
                 self.metal_res_via_space_min_um,
+                self.end_contact_w_um,
+                self.end_contact_h_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]
@@ -273,21 +302,30 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # :func:`_res_unit_layout` for why the marker box excludes the
             # contacted end pads.
             marker_boxes = unit_boxes["marker"]
-            for present, layer_param in [
-                (self.res_mark_present, self.res_mark_layer),
+            for present, layer_param, head_enc in [
+                (self.res_mark_present, self.res_mark_layer, 0.0),
             ] + [
                 (
                     getattr(self, f"res_flavor_{i}_present"),
                     getattr(self, f"res_flavor_{i}_layer"),
+                    getattr(self, f"res_flavor_{i}_head_enclosure_um"),
                 )
                 for i in range(_MAX_RES_FLAVOR_LAYERS)
             ]:
                 if not present:
                     continue
                 li_mark = self.layout.layer(layer_param)
+                # Issue #2449: sky130 precision masks (rpm/urpm, psdm) must
+                # enclose the end-pad licons; the resistor-ID marker never
+                # does (head_enc 0.0 -> body-only box).
+                boxes = (
+                    [_res_flavor_mask_box_um(info, head_enc)]
+                    if head_enc > 0.0
+                    else marker_boxes
+                )
                 for c in all_cells:
                     _insert_boxes(
-                        self.cell, li_mark, dbu, marker_boxes, c["x0_um"], c["y0_um"]
+                        self.cell, li_mark, dbu, boxes, c["x0_um"], c["y0_um"]
                     )
 
             # Dummy-device marker (issue #491): drawn only over

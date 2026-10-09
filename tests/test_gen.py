@@ -10171,3 +10171,165 @@ def test_sky130_tap_role_generators_stay_drc_clean_under_tap_rules(
     # same discipline the #995 enclosing pair applies).
     for rule_id in ("tap.width.1", "tap.enclosing.licon.1"):
         assert rule_id not in drc_report["coverage"]["rules_skipped"]
+
+
+# Issue #2449: sky130 precision-poly resistor contacts. Independent source:
+# open_pdks `sky130.lydrc` rule `licon.1b/c` -- "minimum/maximum width/length
+# of licon inside poly resistor : 2.0/0.19um" (every licon on a poly resistor
+# under rpm must have edges of exactly 0.19um and 2.0um) -- plus `licon.2b/c`
+# (0.35um / 0.51um spacing) and the ordinary `licon.1` 0.17um square cut.
+_SKY130_LICON_LAYER = (66, 44)
+_SKY130_POLY_LAYER = (66, 20)
+_SKY130_LI1_LAYER = (67, 20)
+
+
+def _drawn_boxes_dbu(path, layer_pair):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(path))
+    top = layout.top_cell()
+    top.flatten(True)
+    return [
+        s.box for s in top.shapes(layout.layer(*layer_pair)).each() if s.is_box()
+    ], layout.dbu
+
+
+def _gen_sky130_res(tmp_path, pdk_root, flavor, extra=None):
+    output = tmp_path / f"res_{flavor}.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": flavor, "num": 2, "dummy": 0, **(extra or {})},
+            "options": {"output": str(output)},
+        }
+    )
+    return output, report
+
+
+@pytest.mark.parametrize("flavor", ["high", "xhigh"])
+def test_sky130_precision_res_draws_licon_1b_1c_slot(tmp_path, pdk_root, flavor):
+    """High/xhigh end contacts are 0.19um x 2.0um (licon.1b/c) with the long
+    edge across the current flow, enclosed by correspondingly sized poly and
+    li1 head pads."""
+    output, _ = _gen_sky130_res(tmp_path, pdk_root, flavor)
+    cuts, dbu = _drawn_boxes_dbu(output, _SKY130_LICON_LAYER)
+    assert len(cuts) == 4
+    assert {(c.width(), c.height()) for c in cuts} == {(190, 2000)}
+    assert dbu == 0.001
+    for layer in (_SKY130_POLY_LAYER, _SKY130_LI1_LAYER):
+        pads, _ = _drawn_boxes_dbu(output, layer)
+        for cut in cuts:
+            # poly.8 / li.5 style enclosure of the cut (>= 0.08um) on all sides
+            assert any(
+                p.left <= cut.left - 80
+                and p.right >= cut.right + 80
+                and p.bottom <= cut.bottom - 80
+                and p.top >= cut.top + 80
+                for p in pads
+            ), (layer, cut)
+
+
+def test_sky130_precision_res_describe_agrees_with_geometry(tmp_path, pdk_root):
+    output, report = _gen_sky130_res(tmp_path, pdk_root, "high")
+    pads, dbu = _drawn_boxes_dbu(output, _SKY130_LI1_LAYER)
+    height_um = max(p.height() for p in pads) * dbu
+    assert height_um == pytest.approx(2.2)  # 2.0um slot + 2 * 0.1um enclosure
+    ports = report["ports"]
+    assert all(p["width_um"] == pytest.approx(height_um) for p in ports)
+    notes = report["drc_hints"]["notes"]
+    assert any("0.19um x 2.0um" in n for n in notes)
+
+
+def test_sky130_precision_res_rows_do_not_overlap(tmp_path, pdk_root):
+    output, _ = _gen_sky130_res(tmp_path, pdk_root, "xhigh", {"rows": 2})
+    pads, _ = _drawn_boxes_dbu(output, _SKY130_LI1_LAYER)
+    import klayout.db as kdb
+
+    region = kdb.Region()
+    for p in pads:
+        region.insert(p)
+    assert region.merged().count() == len(pads)  # no pad merged into another
+
+
+def _layer_region(path, layer_pair):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(path))
+    top = layout.top_cell()
+    top.flatten(True)
+    region = kdb.Region()
+    for shape in top.shapes(layout.layer(*layer_pair)).each():
+        region.insert(shape.polygon)
+    return region
+
+
+@pytest.mark.parametrize("flavor", ["high", "xhigh"])
+@pytest.mark.parametrize("extra", [{}, {"rows": 2, "num": 4, "dummy": 1}])
+def test_sky130_precision_res_end_licons_inside_prec_resistor(
+    tmp_path, pdk_root, flavor, extra
+):
+    """Every slot licon lies inside upstream ``sky130A_mr.drc``'s
+    ``prec_resistor = (rpm | urpm) & psdm & poly.interacting(poly_rs)`` --
+    the only region where licon.1b/c replaces the ordinary 0.17um licon.1
+    rule (Judge review on #2949). poly.res stays on the body only, the masks
+    enclose the whole poly resistor by rpm.3 (0.2um) / rpm.4 (0.11um), and
+    neighbouring units' masks merge (no sub-rpm.2 / psdm-space slivers)."""
+    output, _ = _gen_sky130_res(tmp_path, pdk_root, flavor, extra)
+    licon = _layer_region(output, _SKY130_LICON_LAYER)
+    poly = _layer_region(output, _SKY130_POLY_LAYER)
+    poly_rs = _layer_region(output, (66, 13))
+    rpm = _layer_region(output, (86, 20)) | _layer_region(output, (79, 20))
+    psdm = _layer_region(output, (94, 20))
+    prec_resistor = rpm & psdm & poly.interacting(poly_rs)
+    assert licon.count() > 0
+    assert (licon - prec_resistor).is_empty()
+    # rpm.3 / rpm.4 enclosure of the whole poly resistor, heads included.
+    assert (poly.sized(200) - rpm).is_empty()
+    assert (poly.sized(110) - psdm).is_empty()
+    # Neighbouring masks abut/overlap into one shape per array.
+    assert rpm.merged().count() == 1
+    assert psdm.merged().count() == 1
+    # Resistor-ID marker still covers the body only, never a licon.
+    assert (licon & poly_rs).is_empty()
+
+
+def test_sky130_generic_res_keeps_ordinary_square_licon(tmp_path, pdk_root):
+    """Control: the generic flavour keeps the 0.17um square licon (licon.1)."""
+    output, report = _gen_sky130_res(tmp_path, pdk_root, "generic")
+    sides, count = _drawn_box_sides_um(output, _SKY130_LICON_LAYER)
+    assert (sides, count) == ({(0.17, 0.17)}, 4)
+    assert not any("licon.1b/c" in n for n in report["drc_hints"]["notes"])
+
+
+def test_no_supported_generator_path_draws_topvia1_and_compose_floor_holds():
+    """Issue #2449 audit: sg13g2/sg13cmos5l `TopVia1` (125/0, fixed 0.42um) is
+    not a role layer, cap via, or metal-resistor via of any `klt gen` generator
+    (compose's routing roles stop at `metal3`/`via2`; `cap_array` lands on
+    `Vmim` 129/0), so the historical "0.22um TopVia1" shortfall has no
+    reproducing request. Should a path ever reach it, compose's deck-derived
+    floor already resolves the exact fixed size -- pinned here."""
+    from klayout_tools.gen_compose import (
+        _VIA_DROP_SIZE_UM,
+        _min_width_um_for_layer,
+        _via_fixed_size_um,
+    )
+    from klayout_tools.gen_layer_params import (
+        _PDK_METAL_RES_LEVELS,
+        _PDK_ROLE_LAYERS,
+    )
+
+    topvia1 = (125, 0)
+    for roles in _PDK_ROLE_LAYERS.values():
+        assert topvia1 not in roles.values()
+    for levels in _PDK_METAL_RES_LEVELS.values():
+        assert all(topvia1 not in level.values() for level in levels.values())
+    for variant in ("ihp-sg13g2", "ihp-sg13cmos5l"):
+        floor = _min_width_um_for_layer(variant, topvia1)
+        assert floor is not None and floor[0] == pytest.approx(0.42)
+        fixed = _via_fixed_size_um(variant, topvia1)
+        assert gen._fixed_cut_side_um(
+            max(_VIA_DROP_SIZE_UM, floor[0]), fixed
+        ) == pytest.approx(0.42)
