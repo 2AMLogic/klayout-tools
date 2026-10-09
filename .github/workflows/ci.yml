@@ -227,12 +227,13 @@ jobs:
             group: yield
             timeout_minutes: 20
             cargo_test_args: ""
-            # Both files share this one crate (issue #923, Phase 3 of the
+            # All three files share this one crate (issue #923, Phase 3 of the
             # statistical/yield epic #710, added `klt yield-sensitivity` to
-            # the same `klt_yield_native` extension `klt yield` uses).
-            test_paths: tests/test_yield.py tests/test_yield_sensitivity.py
+            # the same `klt_yield_native` extension `klt yield` uses; issue
+            # #2675 added the `klt yield-campaign` native end-to-end tests).
+            test_paths: tests/test_yield.py tests/test_yield_campaign.py tests/test_yield_sensitivity.py
             extension_module: klt_yield_native
-            no_skip_message: "klt_yield_native did not install -- tests/test_yield.py's and tests/test_yield_sensitivity.py's statistics tiers would have skipped"
+            no_skip_message: "klt_yield_native did not install -- tests/test_yield.py's, tests/test_yield_campaign.py's and tests/test_yield_sensitivity.py's statistics tiers would have skipped"
     defaults:
       run:
         working-directory: ${{ matrix.dir }}
