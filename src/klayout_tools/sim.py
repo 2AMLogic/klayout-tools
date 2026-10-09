@@ -87,7 +87,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any
 
-from . import env_provenance
+from . import env_provenance, sim_steps
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -224,6 +224,11 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "timeout",
         "measurement",
         "unknown",
+        # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
+        # by `sim_steps.grade_step_measurements`: a step whose analysis
+        # produced no plot, and a result whose inputs produced no value.
+        "step_failed",
+        "derived_input_unavailable",
         # Units that never ran (`_unrun_corner_report` and friends).
         "budget_exceeded",
         "orphaned",
@@ -799,19 +804,52 @@ def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sim`` request JSON file.
 
     Raises :class:`SimError` if the file is missing/unreadable, not valid
-    JSON, or missing a required top-level field (``netlist``, ``analysis``).
+    JSON, or missing a required top-level field (``netlist``, and one of
+    ``analysis`` or -- issue #2482 -- ``analysis_steps``; which one, and
+    that not both are declared, is validated in :func:`run_sim`).
     ``models`` is validated separately, in :func:`run_sim` -- it is only
     required when the request declares a ``corners.process`` axis (see
     ``_resolve_models_lib``). Does not require the request to carry a
     ``schema`` field (see this module's docstring).
     """
     request = _load_request_json(request_path, SimError)
-    return validate_request_shape(
+    request = validate_request_shape(
         request,
         "request file",
         error_cls=SimError,
-        required_fields=("netlist", "analysis"),
+        required_fields=("netlist",),
     )
+    if "analysis" not in request and "analysis_steps" not in request:
+        raise SimError(
+            "request is missing required field: analysis (or analysis_steps "
+            "for an ordered multi-step sequence)"
+        )
+    return request
+
+
+def _resolve_analysis_and_measurements(
+    request: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The request's ``(analysis, measurements_spec)``, validated.
+
+    The scalar ``analysis`` form returns the request's own objects exactly as
+    before issue #2482. ``analysis_steps[]`` (issue #2482) resolves to the
+    internal step-sequence ``analysis`` object plus the flattened
+    step-scoped and derived measurements -- see
+    :func:`klayout_tools.sim_steps.resolve_analysis_steps`.
+    """
+    if request.get("analysis_steps") is not None:
+        return sim_steps.resolve_analysis_steps(request)
+    analysis = request.get("analysis") or {}
+    if "kind" not in analysis or "args" not in analysis:
+        raise SimError("request.analysis requires 'kind' and 'args'")
+    measurements_spec = request.get("measurements", [])
+    # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
+    # expression evaluated after the analysis, inside the generated
+    # `.control` block) are the two declarable forms, exactly one per entry
+    # -- see `_validate_measurement_forms` for the full rule set.
+    _validate_measurement_forms(measurements_spec)
+    return analysis, measurements_spec
 
 
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
@@ -1421,16 +1459,10 @@ def run_sim(
             provenance_pdk = None
         _warn_pdk_ambiguity(provenance_pdk)
 
-    analysis = request.get("analysis") or {}
-    if "kind" not in analysis or "args" not in analysis:
-        raise SimError("request.analysis requires 'kind' and 'args'")
-
-    measurements_spec = request.get("measurements", [])
-    # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
-    # expression evaluated after the analysis, inside the generated
-    # `.control` block) are the two declarable forms, exactly one per entry
-    # -- see `_validate_measurement_forms` for the full rule set.
-    _validate_measurement_forms(measurements_spec)
+    # Issue #2482: either the scalar `analysis` (unchanged) or an ordered
+    # `analysis_steps[]` sequence, resolved -- every structural error raised
+    # -- here, before any corner is dispatched.
+    analysis, measurements_spec = _resolve_analysis_and_measurements(request)
     for spec in measurements_spec:
         if spec.get("spice") is not None:
             _validate_meas_card(spec["name"], spec["spice"])
@@ -1503,6 +1535,11 @@ def run_sim(
         # request document itself declared.
         keep_artifacts = True
         want_waveforms = True
+    # Issue #2482: a step sequence runs several analyses per corner, which the
+    # one-analysis waveform artifact cannot represent -- refused by name.
+    sim_steps.refuse_unsupported_options(
+        analysis, want_waveforms=want_waveforms, plot_requested=plot_dir is not None
+    )
 
     max_workers = max_workers if max_workers is not None else options.get("max_workers")
     if max_workers is not None:
@@ -1597,6 +1634,7 @@ def run_sim(
         osdi_preload_declared=bool(osdi_preload),
         expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
         save_mode_declared=save_mode_declared,
+        analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -1643,6 +1681,9 @@ def run_sim(
     # Issue #2706: fail fast (before any probe or backend dispatch) when a
     # supply override targets a source with an explicit transient waveform.
     _validate_supply_override_targets(netlist_path, corner_points)
+    # Issue #2482: the same pre-dispatch check for a step's own `alter`
+    # overrides (plus a clash with the corner's own supply axis).
+    sim_steps.validate_alter_targets(analysis, netlist_path, corner_points)
 
     # Issue #2522: a `corners.process` bundle may name its own model library
     # per section. Resolved (and existence-checked) per host, from the refs
@@ -3504,6 +3545,7 @@ def _enforce_xyce_support_boundary(
     osdi_preload_declared: bool = False,
     expr_measurements_declared: bool = False,
     save_mode_declared: bool = False,
+    analysis_steps_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -3516,6 +3558,20 @@ def _enforce_xyce_support_boundary(
     """
     if engine != "xyce":
         return
+    if analysis_steps_declared:
+        # Issue #2482: an ordered step sequence is `alter`/analysis/`let`
+        # commands inside one ngspice `.control` block. The Xyce deck has no
+        # control block and no `alter`, and no equivalent ordered-analysis
+        # contract is implemented for it -- refused rather than run with the
+        # sequence silently reduced to something else. Checked first: the
+        # flattened step measurements are `expr`s too, and this is the more
+        # specific refusal.
+        raise SimError(
+            "analysis_steps is not supported for engine 'xyce': the ordered "
+            "step sequence is generated as `alter`/analysis/`let` commands in "
+            "an ngspice `.control` block, which the Xyce deck does not have; "
+            "use engine 'ngspice'"
+        )
     if backend not in ("local", "local-parallel"):
         raise SimError(
             f"engine 'xyce' supports only the local backends (local, "
@@ -4394,45 +4450,17 @@ def _run_corner(
     # *response* below still echoes the caller's original `name` spelling --
     # only the internal lookup is case-folded.
     measurement_values = _parse_engine_measurements(log_text, engine)
-    measurement_results: list[dict[str, Any]] = []
-    for spec in measurements_spec:
-        name = spec["name"]
-        value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
-        unit = spec.get("unit")
-        if value is None:
-            measurement_results.append(
-                {
-                    "name": name,
-                    "value": None,
-                    "unit": unit,
-                    "status": "error",
-                    "margin": None,
-                }
-            )
-            diagnostics.append(
-                {
-                    "severity": "error",
-                    "code": "measurement",
-                    "message": _no_value_message(spec, save_mode=save_mode),
-                }
-            )
-        else:
-            # `_grade_measurement_value` owns the plausibility-pre-check ->
-            # `limits` ordering (issue #2493) in one place, so there is no
-            # second grading path where the pre-check could be skipped.
-            m_status, margin, grading_diagnostics = _grade_measurement_value(
-                spec, value
-            )
-            measurement_results.append(
-                {
-                    "name": name,
-                    "value": value,
-                    "unit": unit,
-                    "status": m_status,
-                    "margin": margin,
-                }
-            )
-            diagnostics.extend(grading_diagnostics)
+    measurement_results, measurement_diagnostics, step_fields = (
+        _corner_measurement_results(
+            measurement_values,
+            measurements_spec,
+            analysis=analysis,
+            log_text=log_text,
+            is_xyce=is_xyce,
+            save_mode=save_mode,
+        )
+    )
+    diagnostics.extend(measurement_diagnostics)
 
     # A recovered `singular_matrix`/`nonconvergence` classification (the
     # engine's own stepping-recovery narration -- routine noise on the way
@@ -4531,8 +4559,79 @@ def _run_corner(
         "diagnostics": diagnostics,
         "artifacts": artifacts,
         "monte_carlo": monte_carlo,
+        # Additive/optional (issue #2482): `steps` -- per-step outcomes --
+        # only for an `analysis_steps[]` request; empty for every other one.
+        **step_fields,
     }
     return corner, engine_version
+
+
+def _corner_measurement_results(
+    measurement_values: dict[str, float],
+    measurements_spec: list[dict[str, Any]],
+    *,
+    analysis: dict[str, Any],
+    log_text: str,
+    is_xyce: bool,
+    save_mode: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
+    from its harvested log values.
+
+    An ``analysis_steps[]`` corner (issue #2482) is graded by
+    :func:`klayout_tools.sim_steps.grade_step_measurements`, which adds the
+    per-step outcome list and the step/derived failure propagation. Every
+    other corner takes the original single-analysis path below, unchanged:
+    one result per spec in declared order, a ``measurement`` diagnostic for
+    each one that produced no value, and ``extra_corner_fields`` empty.
+    """
+    if sim_steps.is_steps_analysis(analysis):
+        return sim_steps.grade_step_measurements(
+            measurement_values,
+            measurements_spec,
+            analysis=analysis,
+            log_text=log_text,
+            save_mode=save_mode,
+        )
+    measurement_results: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    for spec in measurements_spec:
+        name = spec["name"]
+        value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
+        unit = spec.get("unit")
+        if value is None:
+            measurement_results.append(
+                {
+                    "name": name,
+                    "value": None,
+                    "unit": unit,
+                    "status": "error",
+                    "margin": None,
+                }
+            )
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "measurement",
+                    "message": _no_value_message(spec, save_mode=save_mode),
+                }
+            )
+            continue
+        # `_grade_measurement_value` owns the plausibility-pre-check ->
+        # `limits` ordering (issue #2493) in one place, so there is no
+        # second grading path where the pre-check could be skipped.
+        m_status, margin, grading_diagnostics = _grade_measurement_value(spec, value)
+        measurement_results.append(
+            {
+                "name": name,
+                "value": value,
+                "unit": unit,
+                "status": m_status,
+                "margin": margin,
+            }
+        )
+        diagnostics.extend(grading_diagnostics)
+    return measurement_results, diagnostics, {}
 
 
 def _harvest_measurement_value(
@@ -4609,14 +4708,20 @@ def _no_value_message(
             "vecmax()/mean()/db()/<expr>[0])"
         )
     if save_mode == "netlist":
-        message += (
-            ' -- options.save_mode is "netlist", so klt emitted no `save '
-            "all` and only the vectors the netlist's own .save cards retain "
-            "were available: add every signal this measurement reads to the "
-            "netlist's .save card, or omit options.save_mode (default "
-            '"all")'
-        )
+        message += SAVE_MODE_NETLIST_NO_VALUE_HINT
     return message
+
+
+#: The trailing hint :func:`_no_value_message` (and the step-sequence
+#: equivalent in :mod:`klayout_tools.sim_steps`, issue #2482) appends under
+#: ``options.save_mode: "netlist"`` (issue #2732).
+SAVE_MODE_NETLIST_NO_VALUE_HINT = (
+    ' -- options.save_mode is "netlist", so klt emitted no `save '
+    "all` and only the vectors the netlist's own .save cards retain "
+    "were available: add every signal this measurement reads to the "
+    "netlist's .save card, or omit options.save_mode (default "
+    '"all")'
+)
 
 
 def _read_log_file(path: str) -> str:
@@ -4823,6 +4928,13 @@ def _corner_deck_control_lines(
 
        No lines at all when no ``expr`` is declared, so every pre-#2533
        request's deck is byte-identical.
+
+    An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
+    and 4's ``expr`` lines with the ordered step sequence
+    :func:`klayout_tools.sim_steps.control_lines` generates -- after the same
+    ``pre_osdi``/``save all``/corner-supply ``alter`` prefix, so every step
+    solves the corner the prefix set up. (``options.waveforms`` is refused
+    for a step sequence, so ``raw_path`` is always ``None`` there.)
     """
     lines = [".control"]
     for path in osdi_preload:
@@ -4831,6 +4943,10 @@ def _corner_deck_control_lines(
         lines.append("save all")
     for key, value in sorted(point.supply_v.items()):
         lines.append(f"alter {key}={value}")
+    if sim_steps.is_steps_analysis(analysis):
+        lines.extend(sim_steps.control_lines(analysis, measurements_spec))
+        lines.extend(["quit", ".endc"])
+        return lines
     if raw_path is not None:
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {analysis['args']}")
@@ -6322,6 +6438,9 @@ def _rollup_measurements(
             "limits": spec.get("limits"),
             "status": agg_status,
             "worst_case": worst_case,
+            # Additive/optional (issue #2482): `step`/`derived_from` for an
+            # `analysis_steps[]` measurement; nothing for any other one.
+            **sim_steps.measurement_provenance(spec),
         }
         plausible_range = spec.get("plausible_range")
         if plausible_range is not None:

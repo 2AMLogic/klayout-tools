@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` `analysis_steps[]`** (issue #2482): an additive, ngspice-only
+  alternative to the scalar `analysis` that runs several named solves in order
+  inside each corner's single deck. Each step has optional `alter` source
+  overrides and step-scoped measurements, reported as `<step>.<name>`. The
+  top-level `measurements[]` become derived expressions over `<step>.<name>`
+  results (e.g. a load regulation or a `d(out)/d(in)` sensitivity), graded
+  through the existing `limits`. Additive report fields:
+  `measurements[].step`, `measurements[].derived_from`, and
+  `corners[].steps[]`. New diagnostic codes: `step_failed` and
+  `derived_input_unavailable`. Duplicate, unknown, forward, and ambiguous
+  references are refused before dispatch, as are invalid overrides. The
+  sequence is refused for `engine: "xyce"` and with `options.waveforms` or
+  `--plot`. It works unchanged on `remote`/`batch`. `schema_version` is
+  unchanged, and scalar-`analysis` requests produce byte-identical decks and
+  reports. See `docs/cli/sim.md`, "Several solves per corner".
 - **`klt mcp serve`** (issue #2830): stdio MCP server, one tool per verb derived
   from the argparse registry, executing `klt <verb> --format json` in a
   subprocess. Optional `[mcp]` extra; fleet verbs hidden by default. See
