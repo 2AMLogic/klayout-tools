@@ -156,6 +156,7 @@ docs/
   guides/                # how-to guides
     building-klayout-macos.md
     ci-wall-clock-budget.md
+    mcp-server.md
     digital-review/      # RTL / testbench review guides (ported, Apache-2.0 — see its NOTICE)
       README.md
       NOTICE

@@ -38,7 +38,9 @@ an agent needs instead:
 - **Machine-readable output** — every CLI command supports `--format json`
 - **Programmatic layout writing** — generate and edit layouts without a GUI
   (`klt gen`, `klt gen-compose`, `klt draw`)
-- **MCP server** (planned) — expose the toolkit directly to agent frameworks
+- **MCP server** — `klt mcp serve` exposes every verb to agent frameworks over
+  stdio, generated from the CLI registry (`pip install 'klayout-tools[mcp]'`;
+  see [the guide](docs/guides/mcp-server.md))
 - **LLM reasoning interface** (planned) — purpose-built module for layout
   decisions, with geometric execution handled by tools, not tokens
 
@@ -202,6 +204,9 @@ full inputs/outputs reference and a complete worked example.
 - [The `klt verify` GitHub Action](docs/guides/github-action.md) — reusable
   composite Action wrapping `klt` for downstream block repo CI: inputs,
   outputs, and a worked example.
+- [The `klt mcp serve` MCP server](docs/guides/mcp-server.md) — stdio bridge
+  generating one tool per verb from the CLI registry; client config, exit-code
+  mapping, safety defaults (#2830).
 - [Tagged remote compute](docs/guides/remote-compute.md) — provisioning and
   operating a tagged EC2 box for heavy agent workloads (sim sweeps, renders,
   evidence runs) while git/forge operations stay local (#2277).

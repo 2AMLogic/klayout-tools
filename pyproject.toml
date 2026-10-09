@@ -34,6 +34,14 @@ klt = "klayout_tools.cli:main"
 dev = [
     "pytest>=8.0",
     "ruff>=0.14",
+    # Lets tests/test_mcp_server.py run its stdio round-trip in CI. Dev-only:
+    # the test importorskip()s `mcp`, so the suite also passes without it.
+    "mcp>=1.10,<2",
+]
+# Backs `klt mcp serve` (issue #2830): the stdio MCP bridge over the verb
+# registry. Optional so the base install gains no dependency.
+mcp = [
+    "mcp>=1.10,<2",
 ]
 # Backs the `klt functional-verification` verb (issue #422, Phase 3 of Epic
 # #391) -- not a runtime dependency of any shipped `klt` command, so it is its
