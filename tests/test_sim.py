@@ -37,7 +37,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _paths as paths_module
-from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote
+from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
 from klayout_tools.cli import main
 
@@ -9285,7 +9285,7 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 
 
 #: The modules that can put a `diagnostics[].code` into a `klt sim` report.
-_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch)
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps)
 
 #: Emission sites where the code is supplied by the site's *caller* or by a
 #: table it iterates, so the literal cannot be read off the site itself --
