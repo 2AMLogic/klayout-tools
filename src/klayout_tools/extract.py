@@ -5897,6 +5897,7 @@ def _collect_diode_near_miss_warnings(
     return warnings
 
 
+#: Minimum number of geometrically separate `contact` clusters a candidate
 #: poly component must touch to be flagged by `_detect_unmodelled_poly_bodies`
 #: -- the "resistor-body signature": a two-terminal conductor segment
 #: contacted at *each* end, rather than routing with a single landing pad.
