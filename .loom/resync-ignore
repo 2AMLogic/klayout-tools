@@ -174,6 +174,33 @@ scripts/tests/test-verdict-staleness-guard.sh
 scripts/dep-recheck-fingerprint.sh
 scripts/tests/test-dep-recheck-fingerprint.sh
 
+# #1966 (PR 1 of the operator's two-PR "Option B, gated" plan, ruled
+# 2026-09-18): scripts/claim-staleness.sh (and its test) carry the local-only
+# frozen-timeline protection that the #668 pin above has so far kept as inline
+# prose in curator.md/judge.md/doctor.md -- relocated into the shared script
+# upstream's role files already drive, mirroring the #1546 pin's shape (an
+# isolated script pin instead of whole role-file pins). When the `check`
+# subcommand reaches a `stale`/`stale-bounded-fallback` verdict it now (a)
+# re-reads the issue/PR resource itself (labels + updated_at, a NON-timeline
+# read) and fails safe to `unknown` if that read fails or is rate-limited, and
+# (b) runs a reclaim-loop guard: a trusted reclaim comment newer than
+# CLAIMED_AT (the #668 `<!-- loom:reclaimed claim=... -->` marker or
+# upstream's marker-less "Reclaiming ... claim" prose) plus a ground-truth
+# updated_at past CLAIMED_AT means /timeline is frozen, so the verdict is
+# downgraded to `fresh` (FROZEN_TIMELINE=true) -- one reclaim per frozen
+# CLAIMED_AT instead of the 30+ that hit #509 on 2026-08-10. The test's
+# T21-T30 cases reproduce #509 and the fail-safe paths. Upstream's
+# defaults/scripts/claim-staleness.sh has no equivalent (verified 2026-10-02
+# against rjwalters/loom @ 65442ba48: no `updatedAt`/`frozen`/`RECLAIM`
+# anywhere in it), so an unpinned resync would silently revert it -- the same
+# reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898. The #668
+# whole-file pins above stay until PR 2 of #1966 unpins them, which the
+# operator gated on THIS pin landing and being verified. If the upstream Loom
+# project ever adopts an equivalent frozen-timeline guard, these pins can be
+# dropped and the files resynced normally.
+scripts/claim-staleness.sh
+scripts/tests/test-claim-staleness.sh
+
 # #1749: champion-pr-merge.md carries a local-only propagation from a held
 # PR's `loom:operator` state onto the issue(s) it would close — when the
 # merge-risk hold (criterion #2) or the critical-file hold (criterion #3)

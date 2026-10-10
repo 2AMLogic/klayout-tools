@@ -138,6 +138,19 @@ case "$path" in
       echo '{"message":"Not Found"}' >&2
       exit 1
     fi
+    # #1966: the ground-truth cross-check is the issue read that asks for
+    # updated_at. It can be failed / served from a separate fixture, to model a
+    # rate-limited second read or a label removed between the two reads.
+    if [[ "$jq_expr" == *updated_at* ]]; then
+      if [[ "${LOOM_TEST_GROUND_TRUTH_FAILS:-}" == "1" ]]; then
+        echo '{"message":"API rate limit exceeded"}' >&2
+        exit 1
+      fi
+      if [[ -n "${LOOM_TEST_GROUND_TRUTH_FIXTURE:-}" ]]; then
+        serve "$LOOM_TEST_GROUND_TRUTH_FIXTURE"
+        exit 0
+      fi
+    fi
     serve issue.json
     ;;
   *) echo "stub gh: unhandled path: $path" >&2; exit 3 ;;
@@ -178,9 +191,15 @@ ago() { # <minutes> -> RFC3339 UTC timestamp that many minutes in the past
         date -u -v-"$1"M +%Y-%m-%dT%H:%M:%SZ
 }
 
-set_labels() { # <label>...
-    printf '%s\n' "$*" | jq -R 'split(" ") | map(select(length > 0) | {name: .}) | {labels: .}' \
+set_labels() { # <label>...  (updated_at defaults to "now"; see set_updated_at)
+    printf '%s\n' "$*" | jq -R --arg u "$(ago 0)" \
+        'split(" ") | map(select(length > 0) | {name: .}) | {labels: ., updated_at: $u}' \
         >"$STUB_DIR/issue.json"
+}
+
+set_updated_at() { # <iso-ts>  the issue resource's updated_at (ground truth, #1966)
+    jq --arg u "$1" '.updated_at = $u' "$STUB_DIR/issue.json" >"$STUB_DIR/issue.json.tmp" &&
+        mv "$STUB_DIR/issue.json.tmp" "$STUB_DIR/issue.json"
 }
 
 set_claim() { # <label> <iso-ts>  (empty ts => no claim event in the timeline)
@@ -200,6 +219,7 @@ set_comments() { # reads a JSON array on stdin; an item without `user` is the fl
 reset() {
     : >"$STUB_DIR/gh-calls.log"
     unset LOOM_TEST_MUTATION_FAILS LOOM_TEST_ISSUE_READ_FAILS LOOM_TEST_NO_TRUST_VERB
+    unset LOOM_TEST_GROUND_TRUTH_FAILS LOOM_TEST_GROUND_TRUTH_FIXTURE
     set_labels "loom:reviewing"
     echo '[]' >"$STUB_DIR/comments.json"
 }
@@ -500,6 +520,209 @@ assert_eq "stale" "$(field "$out" CLAIM_STATE)" "T20a: outsider / bare-slug acti
 assert_eq "0" "$(field "$out" ACTIVITY_COUNT)" "T20b: neither is counted as claimant activity"
 out="$(LOOM_TEST_NO_TRUST_VERB=1 "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
 assert_eq "unknown" "$(field "$out" CLAIM_STATE)" "T20c: no trust filter -> unknown (fail safe, never stomp)"
+
+# ===========================================================================
+# LOCAL (klayout-tools #1966; #668/#509): frozen-timeline cross-check and
+# reclaim-loop guard. Not part of upstream Loom's suite - this file and the
+# script are pinned in .loom/resync-ignore.
+# ===========================================================================
+
+# --- T21: THE #509 LIVELOCK, end to end ------------------------------------
+# A claim goes stale and a pass reclaims it (remove label, reclaim comment,
+# re-add label). The re-add is real - the issue resource's labels/updated_at
+# show it - but /timeline stays frozen on the OLD `labeled` event, so
+# CLAIMED_AT never advances. Before #1966 every later pass saw the same stale
+# claim and reclaimed again (30+ times on #509), stomping the live claimant
+# each time. Drive 8 passes exactly the way the role files do and count the
+# reclaims: there must be exactly ONE.
+reset
+set_labels "loom:curating"
+FROZEN_TS="$(ago 45)"
+set_claim loom:curating "$FROZEN_TS" # the timeline never moves after this
+echo '[]' | set_comments
+RECLAIMS=0
+STATES=""
+for pass in 1 2 3 4 5 6 7 8; do
+    out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:curating)"
+    state="$(field "$out" CLAIM_STATE)"
+    STATES="$STATES $state"
+    case "$state" in
+        stale | stale-bounded-fallback)
+            RECLAIMS=$((RECLAIMS + 1))
+            # The caller's reclaim, upstream-shaped (no marker): the comment
+            # lands, the label is re-added (ground truth bumps updated_at), the
+            # timeline does NOT record it.
+            now="$(ago 0)"
+            prior="$(cat "$STUB_DIR/comments.json")" # read fully before set_comments truncates it
+            jq --arg t "$now" --arg id "$((900 + pass))" \
+                '. + [{id: ($id|tonumber), created_at: $t,
+                  body: "Reclaiming stale loom:curating claim (idle 45m > 30m, no claimant activity) — the prior sweep likely died mid-enhancement."}]' \
+                <<<"$prior" | set_comments
+            set_updated_at "$now"
+            ;;
+        fresh | unknown)
+            # A standing-down pass bumps the stand-down comment in place.
+            "$TARGET_SCRIPT" standdown --repo owner/repo --number 509 --label loom:curating >/dev/null
+            ;;
+    esac
+done
+assert_eq "1" "$RECLAIMS" "T21a: a frozen timeline yields exactly ONE reclaim across 8 passes, not one per pass (#509)"
+assert_eq " stale fresh fresh fresh fresh fresh fresh fresh" "$STATES" \
+    "T21b: every pass after the reclaim stands down instead of re-reclaiming"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:curating)"
+assert_eq "true" "$(field "$out" FROZEN_TIMELINE)" "T21c: the downgraded verdict is flagged FROZEN_TIMELINE=true"
+assert_eq "1" "$(field "$out" RECLAIM_COUNT)" "T21d: the upstream marker-less reclaim prose is counted"
+assert_eq "ok" "$(field "$out" GROUND_TRUTH)" "T21e: the verdict rests on a successful ground-truth read"
+assert_eq "$FROZEN_TS" "$(field "$out" CLAIMED_AT)" "T21f: CLAIMED_AT is still the frozen timeline value"
+
+# --- T22: the stand-down streak cannot force a re-reclaim either ----------
+# Passes after T21's reclaim pile stand-downs onto the frozen CLAIMED_AT. Once
+# the streak hits the cap, the bounded fallback would fire - it must be held by
+# the same guard, and the stand-down comment must carry the one-time #668
+# diagnostic (edited in place, so it is raised once, not once per pass).
+reset
+set_labels "loom:curating"
+CLAIM_TS="$(ago 45)"
+set_claim loom:curating "$CLAIM_TS"
+jq -n --arg r "$(ago 20)" --arg s "$(ago 2)" --arg sm "<!-- loom:standdown claim=$CLAIM_TS seq=7 -->" \
+    '[{id: 1001, created_at: $r, body: "Reclaiming stale loom:curating claim (idle 45m > 30m) — the prior sweep likely died."},
+      {id: 1002, created_at: $s, body: ("Curator pass: standing down.\n" + $sm)}]' | set_comments
+set_updated_at "$(ago 2)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:curating)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" \
+    "T22a: a streak of 7 on a frozen, already-reclaimed CLAIMED_AT does not reach the bounded fallback"
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 509 --label loom:curating)"
+log="$(read_log)"
+assert_eq "bumped:1002:8" "$(field "$out" STANDDOWN_ACTION)" "T22b: the stand-down is bumped in place"
+assert_contains "$log" "<!-- loom:frozen-timeline claim=$CLAIM_TS -->" \
+    "T22c: the stand-down carries the frozen-timeline diagnostic marker"
+assert_not_contains "$log" "POST repos/owner/repo/issues/509/comments" "T22d: no new comment is posted"
+
+# --- T23: the legacy local reclaim marker counts too ----------------------
+reset
+set_labels "loom:reviewing"
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg r "$(ago 10)" --arg m "<!-- loom:reclaimed claim=$CLAIM_TS -->" \
+    '[{id: 1101, created_at: $r, body: ("Judge: taking over this review.\n" + $m)}]' | set_comments
+set_updated_at "$(ago 9)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:reviewing)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T23a: a #668 loom:reclaimed marker for this CLAIMED_AT holds the guard"
+assert_eq "1" "$(field "$out" RECLAIM_COUNT)" "T23b: the legacy marker is counted"
+
+# --- T24: once the timeline catches up, normal behaviour resumes ----------
+# The re-add finally appears as a new `labeled` event, newer than the reclaim
+# comment: RECLAIM_COUNT resets to 0 with no manual intervention, and the claim
+# is judged on its own (new) age again - fresh now, stale later.
+reset
+set_labels "loom:curating"
+jq -n --arg r "$(ago 12)" \
+    '[{id: 1201, created_at: $r, body: "Reclaiming stale loom:curating claim (idle 45m > 30m)."}]' | set_comments
+set_claim loom:curating "$(ago 11)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:curating)"
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T24a: the caught-up claim is fresh on its own merits"
+assert_eq "0" "$(field "$out" RECLAIM_COUNT)" "T24b: a reclaim older than the new CLAIMED_AT is not counted"
+assert_eq "false" "$(field "$out" FROZEN_TIMELINE)" "T24c: no frozen-timeline flag"
+jq -n --arg r "$(ago 80)" \
+    '[{id: 1201, created_at: $r, body: "Reclaiming stale loom:curating claim (idle 45m > 30m)."}]' | set_comments
+set_claim loom:curating "$(ago 79)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:curating)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" \
+    "T24d: a genuinely dead claimant on the caught-up claim is reclaimable again (no permanent lock-out)"
+
+# --- T25: FAIL SAFE - the ground-truth read fails / is rate-limited --------
+reset
+set_claim loom:reviewing "$(ago 40)"
+export LOOM_TEST_GROUND_TRUTH_FAILS=1
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:reviewing)"
+assert_eq "unknown" "$(field "$out" CLAIM_STATE)" \
+    "T25a: a stale-looking claim is NOT reclaimable when the ground-truth read fails"
+assert_eq "unavailable" "$(field "$out" GROUND_TRUTH)" "T25b: GROUND_TRUTH=unavailable is reported"
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg r "$(ago 10)" \
+    '[{id: 1301, created_at: $r, body: "Reclaiming stale loom:reviewing claim (idle 40m > 30m)."}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:reviewing)"
+assert_eq "unknown" "$(field "$out" CLAIM_STATE)" \
+    "T25c: with reclaim evidence and a failed ground-truth read, still unknown (never re-reclaim)"
+out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 509 --label loom:reviewing --dry-run)"
+assert_eq "would-post:1" "$(field "$out" STANDDOWN_ACTION)" "T25d: the unknown verdict stands down rather than stomping"
+unset LOOM_TEST_GROUND_TRUTH_FAILS
+echo '{"labels": [{"name": "loom:reviewing"}], "updated_at": "not-a-date"}' >"$STUB_DIR/issue-gt.json"
+export LOOM_TEST_GROUND_TRUTH_FIXTURE=issue-gt.json
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:reviewing)"
+assert_eq "unknown" "$(field "$out" CLAIM_STATE)" "T25e: a garbled ground-truth updated_at fails safe to unknown"
+assert_eq "" "$(field "$out" GROUND_TRUTH_UPDATED_AT)" "T25f: an unvalidated timestamp is never emitted (eval safety)"
+unset LOOM_TEST_GROUND_TRUTH_FIXTURE
+
+# --- T26: ground truth says the label is already gone -> unclaimed ---------
+reset
+set_claim loom:reviewing "$(ago 40)"
+echo "{\"labels\": [{\"name\": \"loom:review-requested\"}], \"updated_at\": \"$(ago 0)\"}" >"$STUB_DIR/issue-gt.json"
+export LOOM_TEST_GROUND_TRUTH_FIXTURE=issue-gt.json
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:reviewing)"
+unset LOOM_TEST_GROUND_TRUTH_FIXTURE
+assert_eq "unclaimed" "$(field "$out" CLAIM_STATE)" \
+    "T26: a label removed between the first read and the ground-truth read reports unclaimed"
+
+# --- T27: reads that disagree fail safe ----------------------------------
+# A reclaim is recorded after CLAIMED_AT, yet ground truth claims nothing has
+# changed since CLAIMED_AT: one of the two reads is wrong. Do not reclaim.
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg r "$(ago 10)" \
+    '[{id: 1401, created_at: $r, body: "Reclaiming loom:reviewing claim: 3 stand-down passes."}]' | set_comments
+set_updated_at "$(ago 50)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:reviewing)"
+assert_eq "unknown" "$(field "$out" CLAIM_STATE)" \
+    "T27: reclaim evidence + ground truth older than CLAIMED_AT -> unknown, never re-reclaim"
+
+# --- T28: what does NOT count as reclaim evidence -------------------------
+# The guard only ever WEAKENS a stale verdict, so it must not be triggerable by
+# things that are not a reclaim of THIS claim: an outsider's comment (#9548), a
+# reclaim of a different label, a reclaim from a previous claim cycle, or a
+# comment that merely quotes the phrase mid-sentence. And with no reclaim
+# evidence, a recent updated_at (any comment bumps it) must NOT keep the claim
+# alive - that would bring back the #6514 defect.
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg a "$(ago 50)" --arg b "$(ago 10)" --arg m "<!-- loom:reclaimed claim=$CLAIM_TS -->" \
+    '[{id: 1501, created_at: $a, body: "Reclaiming stale loom:reviewing claim (previous cycle)."},
+      {id: 1502, created_at: $b, body: "Reclaiming stale loom:treating claim (idle 70m > 60m)."},
+      {id: 1503, created_at: $b, body: "Note: the log said \"Reclaiming stale loom:reviewing claim\" earlier."},
+      {id: 1504, created_at: $b, body: ("Reclaiming stale loom:reviewing claim " + $m),
+       user: {login: "drive-by", type: "User"}, author_association: "NONE"}]' | set_comments
+set_updated_at "$(ago 1)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:reviewing)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" \
+    "T28a: none of these count as reclaim evidence, and a recent updated_at alone does not pin the claim"
+assert_eq "0" "$(field "$out" RECLAIM_COUNT)" "T28b: RECLAIM_COUNT=0"
+assert_eq "ok" "$(field "$out" GROUND_TRUTH)" "T28c: the ground-truth read still ran (label re-confirmed)"
+
+# --- T29: the guard never touches a fresh verdict --------------------------
+reset
+set_claim loom:reviewing "$(ago 5)"
+export LOOM_TEST_GROUND_TRUTH_FAILS=1
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:reviewing)"
+unset LOOM_TEST_GROUND_TRUTH_FAILS
+assert_eq "fresh" "$(field "$out" CLAIM_STATE)" "T29a: a fresh claim stays fresh"
+assert_eq "not-read" "$(field "$out" GROUND_TRUTH)" "T29b: no ground-truth read is spent on a fresh verdict"
+
+# --- T30: --json carries the new fields ------------------------------------
+reset
+set_labels "loom:curating"
+CLAIM_TS="$(ago 45)"
+set_claim loom:curating "$CLAIM_TS"
+jq -n --arg r "$(ago 10)" \
+    '[{id: 1601, created_at: $r, body: "Reclaiming stale loom:curating claim (idle 45m > 30m)."}]' | set_comments
+set_updated_at "$(ago 9)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 509 --label loom:curating --json)"
+assert_eq "fresh" "$(jq -r '.claim_state' <<<"$out")" "T30a: --json claim_state=fresh under a frozen timeline"
+assert_eq "true" "$(jq -r '.frozen_timeline' <<<"$out")" "T30b: --json frozen_timeline is a boolean true"
+assert_eq "1" "$(jq -r '.reclaim_count' <<<"$out")" "T30c: --json reclaim_count"
+assert_eq "ok" "$(jq -r '.ground_truth' <<<"$out")" "T30d: --json ground_truth"
 
 # --- Summary ---
 echo ""
