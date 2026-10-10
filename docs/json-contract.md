@@ -1340,6 +1340,41 @@ are never a requested-check claim. The
 [full table, field names and adapter migration contract](coverage-contract.md)
 are normative.
 
+## A success payload that is itself an input document (`klt yield-samples`, issue #2563)
+
+Most payloads are reports a person or tool reads. `klt yield-samples`'
+payload is also a **document another verb consumes**: its `--format json`
+output is a `klt yield` sample-set document, redirected to a file and passed
+to `klt yield` unchanged. It needs no exception to this contract, because
+the envelope is additive and flat:
+
+```json
+{
+  "schema_version": 1,
+  "measurements": [ "... sample-set entries, see docs/cli/yield.md ..." ],
+  "derivation": { "nominal": {"path": "...", "content_hash": "sha256:..."},
+                  "negative_control": {"path": "...", "content_hash": "sha256:...", "description": null},
+                  "measurements": [ "... per-measurement control disclosures ..." ] }
+}
+```
+
+- The success payload is emitted through `emit_success()` like every other
+  verb; `schema_version` (this command's own, `1`) sits beside the
+  sample-set's `measurements`, and `derivation` is an additive audit block.
+  `klt yield`'s sample-set reader reads `measurements` and ignores both
+  extra top-level keys, so **no result wrapper and no extraction step** sits
+  between the two commands.
+- Errors use the shared error shape below (`error.command:
+  "yield-samples"`) on stderr with stdout empty, exit `1`; a missing
+  `--negative-control` is an argparse usage error, exit `2`. Because stdout
+  is empty on failure, `klt yield-samples ... --format json > samples.json`
+  leaves an empty file rather than a partial sample set — still, check the
+  exit code before using the file.
+- The output is deterministic (no timestamps), so a CI job can re-derive and
+  byte-compare a committed copy. Field-level documentation, the matching
+  rules, and the signoff freshness consequence are in
+  [`cli/yield.md`](cli/yield.md#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples).
+
 ## Error shape
 
 Under `--format json`, errors are also JSON — not a plain-text line — written

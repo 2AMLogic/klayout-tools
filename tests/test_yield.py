@@ -15,6 +15,7 @@ Two tiers, deliberately split:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import math
@@ -30,6 +31,7 @@ from klayout_tools.yield_analysis import (
     YieldError,
     _measurements_from_sim_report,
     _read_samples,
+    derive_sample_set,
     run_yield,
 )
 
@@ -1806,3 +1808,622 @@ def test_worked_example_matches_the_documented_numbers():
     assert iq["capability"]["cp"] is None
     assert iq["capability"]["limiting_side"] == "upper"
     assert iq["sample_size"]["required_n_for_target"] == 874
+
+
+# --------------------------------------------------------------------------- #
+# `klt yield-samples`: derive a sample set from two sim reports (issue #2563)
+#
+# Input-tier tests (no native extension) pin the derived document against a
+# hand-authored equivalent; the `requires_native` tests then prove the
+# statistics are identical to analysing the nominal report directly.
+# --------------------------------------------------------------------------- #
+
+_DET_CORNER = "tt/1.800V/27C"
+
+
+def _mc_report_doc(rollup, draws, *, origin, deterministic=None):
+    """A `klt sim` MC report: ``draws`` is a list of
+    ``(corner_status, {name: (value, measurement_status)})`` -- one sampled
+    corner each -- and ``deterministic`` an optional ``{name: value}`` for a
+    plain (non-sampled) PVT corner that must never enter a population."""
+    corners = []
+    if deterministic is not None:
+        corners.append(
+            {
+                "corner_id": _DET_CORNER,
+                "status": "pass",
+                "measurements": [
+                    {"name": n, "value": v, "status": "pass"}
+                    for n, v in deterministic.items()
+                ],
+                "monte_carlo": None,
+            }
+        )
+    for i, (corner_status, values) in enumerate(draws):
+        corners.append(
+            {
+                "corner_id": f"{origin}/mc{i}",
+                "status": corner_status,
+                "measurements": [
+                    {"name": n, "value": v, "status": s} for n, (v, s) in values.items()
+                ],
+                "monte_carlo": {"sample_index": i, "seed": 7000 + i},
+            }
+        )
+    return {
+        "schema_version": 3,
+        "netlist": {"path": "tb.spice", "scope": "repo"},
+        "status": "pass",
+        "environment": {"monte_carlo": {"n": len(draws), "seed": 7000}},
+        "measurements": rollup,
+        "corners": corners,
+    }
+
+
+_NOMINAL_VOS = _normal_grid(200, 0.0, 0.05)
+_CONTROL_VOS = _normal_grid(200, 0.6, 0.05)
+
+
+def _nominal_doc():
+    """Nominal campaign: mixed deterministic + sampled corners, a null draw,
+    measurement-level and corner-level distrust (including both on one
+    draw, and distrust on a null value), plus rollup-supplied
+    failed_unmeasurable/censored counts and an analytic cross-check."""
+    draws = []
+    for i, vos in enumerate(_NOMINAL_VOS):
+        corner_status, vos_value, vos_status = "pass", vos, "pass"
+        if i == 0:
+            vos_value = None  # errored
+        elif i == 1:
+            vos_value, vos_status = 9.0e9, "inconclusive"  # measurement level
+        elif i == 2:
+            corner_status = "inconclusive"  # corner level
+        elif i == 3:
+            corner_status, vos_status = "inconclusive", "inconclusive"  # both
+        elif i == 4:
+            vos_value, vos_status = None, "inconclusive"  # distrusted null
+        draws.append(
+            (
+                corner_status,
+                {"vos": (vos_value, vos_status), "iq": (5.0 + 0.01 * i, "pass")},
+            )
+        )
+    rollup = [
+        {
+            "name": "vos",
+            "unit": "V",
+            "limits": {"min": -0.5, "max": 0.5},
+            "failed_unmeasurable": 2,
+            "censored": 1,
+            "analytic_cross_check": {"kind": "mismatch_offset", "sigma": 0.05},
+        },
+        {"name": "iq", "unit": "uA", "limits": {"max": 10.0}},
+    ]
+    return _mc_report_doc(
+        rollup,
+        draws,
+        origin=_DET_CORNER,
+        deterministic={"vos": 99.0, "iq": 99.0},
+    )
+
+
+def _control_doc():
+    """Known-bad variant: its own (wider) limits that must be ignored, a
+    reordered rollup with an extra measurement, and its own exclusions."""
+    draws = []
+    for i, vos in enumerate(_CONTROL_VOS):
+        corner_status, vos_value, vos_status = "pass", vos, "pass"
+        if i == 0:
+            vos_value = None
+        elif i == 1:
+            vos_value, vos_status = 9.0e9, "inconclusive"
+        elif i == 2:
+            corner_status = "inconclusive"
+        draws.append(
+            (
+                corner_status,
+                {
+                    "vos": (vos_value, vos_status),
+                    "iq": (15.0 + 0.01 * i, "pass"),
+                    "extra": (1.0, "pass"),
+                },
+            )
+        )
+    rollup = [
+        {"name": "extra", "unit": "s"},
+        {"name": "iq", "unit": "uA", "limits": {"max": 1000.0}},
+        {
+            "name": "vos",
+            "unit": "V",
+            "limits": {"min": -100.0, "max": 100.0},
+            "failed_unmeasurable": 3,
+            "censored": 2,
+        },
+    ]
+    return _mc_report_doc(
+        rollup, draws, origin="ss/1.620V/125C", deterministic={"vos": -99.0}
+    )
+
+
+def _write_json(path, doc):
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+def _derivation_inputs(tmp_path, nominal=None, control=None):
+    return (
+        _write_json(tmp_path / "nominal.json", nominal or _nominal_doc()),
+        _write_json(tmp_path / "control.json", control or _control_doc()),
+    )
+
+
+def _hand_authored_measurements(description=None):
+    """What a careful caller would have had to extract by hand -- the
+    sample-set equivalent of the two fixture reports above."""
+    iq_nominal = [5.0 + 0.01 * i for i in range(200) if i not in (2, 3)]
+    iq_control = [15.0 + 0.01 * i for i in range(200) if i != 2]
+    return [
+        {
+            "name": "vos",
+            "unit": "V",
+            "samples": _NOMINAL_VOS[5:],
+            "errored": 1,
+            "inconclusive": 4,
+            "failed_unmeasurable": 2,
+            "censored": 1,
+            "limits": {"min": -0.5, "max": 0.5},
+            "source_corners": [_DET_CORNER],
+            "negative_control": {
+                "samples": _CONTROL_VOS[3:],
+                "errored": 1 + 2,
+                "failed_unmeasurable": 3,
+                "censored": 2,
+                "description": description,
+            },
+            "analytic_cross_check": {"kind": "mismatch_offset", "sigma": 0.05},
+            "sampling": None,
+        },
+        {
+            "name": "iq",
+            "unit": "uA",
+            "samples": iq_nominal,
+            "errored": 0,
+            "inconclusive": 2,
+            "failed_unmeasurable": 0,
+            "censored": 0,
+            "limits": {"max": 10.0},
+            "source_corners": [_DET_CORNER],
+            "negative_control": {
+                "samples": iq_control,
+                "errored": 0 + 1,
+                "failed_unmeasurable": 0,
+                "censored": 0,
+                "description": description,
+            },
+            "analytic_cross_check": None,
+            "sampling": None,
+        },
+    ]
+
+
+def _sha256(path):
+    with open(path, "rb") as f:
+        return "sha256:" + hashlib.sha256(f.read()).hexdigest()
+
+
+def test_derived_sample_set_matches_a_hand_authored_equivalent(tmp_path):
+    nominal, control = _derivation_inputs(tmp_path)
+    doc = derive_sample_set(nominal, control, description="vos forced to 0.6 V")
+    assert doc["schema_version"] == 1
+    assert doc["measurements"] == _hand_authored_measurements("vos forced to 0.6 V")
+
+
+def test_derived_sample_set_excludes_deterministic_corners_from_both_populations(
+    tmp_path,
+):
+    nominal, control = _derivation_inputs(tmp_path)
+    doc = derive_sample_set(nominal, control)
+    vos = doc["measurements"][0]
+    assert 99.0 not in vos["samples"]
+    assert -99.0 not in vos["negative_control"]["samples"]
+    assert len(vos["samples"]) == 195
+    assert len(vos["negative_control"]["samples"]) == 197
+
+
+def test_derivation_metadata_records_source_hashes_and_control_disclosures(tmp_path):
+    nominal, control = _derivation_inputs(tmp_path)
+    doc = derive_sample_set(nominal, control, description="seeded defect")
+    derivation = doc["derivation"]
+    assert derivation["nominal"] == {"path": nominal, "content_hash": _sha256(nominal)}
+    assert derivation["negative_control"] == {
+        "path": control,
+        "content_hash": _sha256(control),
+        "description": "seeded defect",
+    }
+    assert derivation["measurements"] == [
+        {
+            "name": "vos",
+            "negative_control": {
+                "source_corners": ["ss/1.620V/125C"],
+                "errored": 1,
+                "inconclusive": 2,
+                "errored_reported": 3,
+            },
+        },
+        {
+            "name": "iq",
+            "negative_control": {
+                "source_corners": ["ss/1.620V/125C"],
+                "errored": 0,
+                "inconclusive": 1,
+                "errored_reported": 1,
+            },
+        },
+    ]
+
+
+def test_derivation_is_deterministic_and_never_modifies_its_inputs(tmp_path):
+    nominal, control = _derivation_inputs(tmp_path)
+    before = (open(nominal, "rb").read(), open(control, "rb").read())
+    first = json.dumps(derive_sample_set(nominal, control, description="d"))
+    second = json.dumps(derive_sample_set(nominal, control, description="d"))
+    assert first == second
+    assert (open(nominal, "rb").read(), open(control, "rb").read()) == before
+
+
+def test_derived_document_reads_back_as_a_sample_set(tmp_path):
+    """The flat payload *is* the sample-set document: `klt yield`'s reader
+    takes it unchanged, ignoring `schema_version`/`derivation`."""
+    nominal, control = _derivation_inputs(tmp_path)
+    derived = _write_json(
+        tmp_path / "samples.json", derive_sample_set(nominal, control)
+    )
+    kind, entries, _ = _read_samples(derived)
+    assert kind == "sample-set"
+    direct = {e["name"]: e for e in _read_samples(nominal)[1]}
+    for entry in entries:
+        expected = {**direct[entry["name"]]}
+        assert entry["negative_control"] is not None
+        assert {k: v for k, v in entry.items() if k != "negative_control"} == {
+            k: v for k, v in expected.items() if k != "negative_control"
+        }
+
+
+def test_measurement_selection_follows_the_comma_list_convention(tmp_path, capsys):
+    nominal, control = _derivation_inputs(tmp_path)
+    doc = derive_sample_set(nominal, control, measurements=["iq"])
+    assert [m["name"] for m in doc["measurements"]] == ["iq"]
+    assert [m["name"] for m in doc["derivation"]["measurements"]] == ["iq"]
+
+    assert (
+        main(
+            [
+                "yield-samples",
+                nominal,
+                "--negative-control",
+                control,
+                "--measurement",
+                "iq,vos",
+                "--measurement",
+                "iq",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert [m["name"] for m in payload["measurements"]] == ["iq", "vos"]
+
+
+def test_selection_of_an_unknown_measurement_is_an_error(tmp_path):
+    nominal, control = _derivation_inputs(tmp_path)
+    with pytest.raises(YieldError, match="no such measurement in nominal.*nope"):
+        derive_sample_set(nominal, control, measurements=["nope"])
+
+
+def test_a_measurement_missing_from_the_control_is_an_error_unless_deselected(
+    tmp_path,
+):
+    control_doc = _control_doc()
+    control_doc["measurements"] = [
+        m for m in control_doc["measurements"] if m["name"] != "iq"
+    ]
+    nominal, control = _derivation_inputs(tmp_path, control=control_doc)
+    with pytest.raises(YieldError, match="no measurement named 'iq'.*--measurement"):
+        derive_sample_set(nominal, control)
+    doc = derive_sample_set(nominal, control, measurements=["vos"])
+    assert [m["name"] for m in doc["measurements"]] == ["vos"]
+
+
+def test_a_duplicate_companion_measurement_is_an_error(tmp_path):
+    control_doc = _control_doc()
+    control_doc["measurements"].append({"name": "vos", "unit": "V"})
+    nominal, control = _derivation_inputs(tmp_path, control=control_doc)
+    with pytest.raises(YieldError, match="'vos' 2 times.*must be unique"):
+        derive_sample_set(nominal, control)
+
+
+def test_a_duplicate_nominal_measurement_is_an_error(tmp_path):
+    nominal_doc = _nominal_doc()
+    nominal_doc["measurements"].append({"name": "iq", "unit": "uA"})
+    nominal, control = _derivation_inputs(tmp_path, nominal=nominal_doc)
+    with pytest.raises(YieldError, match="'iq' 2 times"):
+        derive_sample_set(nominal, control)
+
+
+def test_a_unit_mismatch_is_an_error(tmp_path):
+    control_doc = _control_doc()
+    for m in control_doc["measurements"]:
+        if m["name"] == "vos":
+            m["unit"] = "mV"
+    nominal, control = _derivation_inputs(tmp_path, control=control_doc)
+    with pytest.raises(YieldError, match="unit mismatch.*'V'.*'mV'"):
+        derive_sample_set(nominal, control)
+
+
+def test_absent_units_on_both_sides_match(tmp_path):
+    nominal_doc, control_doc = _nominal_doc(), _control_doc()
+    for doc in (nominal_doc, control_doc):
+        for m in doc["measurements"]:
+            m.pop("unit", None)
+    nominal, control = _derivation_inputs(tmp_path, nominal_doc, control_doc)
+    doc = derive_sample_set(nominal, control)
+    assert [m["unit"] for m in doc["measurements"]] == [None, None]
+
+
+def test_an_absent_unit_does_not_match_a_present_one(tmp_path):
+    control_doc = _control_doc()
+    for m in control_doc["measurements"]:
+        m.pop("unit", None)
+    nominal, control = _derivation_inputs(tmp_path, control=control_doc)
+    with pytest.raises(YieldError, match="unit mismatch"):
+        derive_sample_set(nominal, control)
+
+
+def test_an_existing_negative_control_is_never_silently_replaced(tmp_path):
+    nominal_doc = _nominal_doc()
+    nominal_doc["measurements"][0]["negative_control"] = {"samples": [1.0, 2.0]}
+    nominal, control = _derivation_inputs(tmp_path, nominal=nominal_doc)
+    with pytest.raises(YieldError, match="already declares a negative_control"):
+        derive_sample_set(nominal, control)
+    # ...but excluding that measurement lets the rest derive.
+    doc = derive_sample_set(nominal, control, measurements=["iq"])
+    assert [m["name"] for m in doc["measurements"]] == ["iq"]
+
+
+def test_invalid_json_is_an_error_naming_the_file(tmp_path):
+    nominal, _ = _derivation_inputs(tmp_path)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(YieldError, match="could not read negative-control"):
+        derive_sample_set(nominal, str(bad))
+
+
+def test_a_missing_input_is_an_error(tmp_path):
+    nominal, _ = _derivation_inputs(tmp_path)
+    with pytest.raises(YieldError, match="negative-control sim report not found"):
+        derive_sample_set(nominal, str(tmp_path / "nope.json"))
+
+
+def test_a_sample_set_document_is_not_accepted_as_an_input(tmp_path):
+    _, control = _derivation_inputs(tmp_path)
+    sample_set = _sample_set(tmp_path, [1.0, 2.0], limits={"max": 3.0})
+    with pytest.raises(YieldError, match="nominal .* is not a `klt sim"):
+        derive_sample_set(sample_set, control)
+
+
+def test_a_report_without_monte_carlo_corners_is_an_error(tmp_path):
+    control_doc = _control_doc()
+    control_doc["corners"] = [c for c in control_doc["corners"] if not c["monte_carlo"]]
+    nominal, control = _derivation_inputs(tmp_path, control=control_doc)
+    with pytest.raises(
+        YieldError, match="negative-control .*declares no Monte Carlo samples"
+    ):
+        derive_sample_set(nominal, control)
+
+
+def test_an_empty_control_population_is_an_error(tmp_path):
+    """A companion that names the measurement in its rollup but whose
+    sampled corners never report it has no draw at all -- not a valid,
+    empty negative control."""
+    control_doc = _control_doc()
+    for corner in control_doc["corners"]:
+        corner["measurements"] = [
+            m for m in corner["measurements"] if m["name"] != "iq"
+        ]
+    nominal, control = _derivation_inputs(tmp_path, control=control_doc)
+    with pytest.raises(YieldError, match="no Monte Carlo draws for measurement 'iq'"):
+        derive_sample_set(nominal, control)
+
+
+def test_an_empty_nominal_population_is_an_error(tmp_path):
+    nominal_doc = _nominal_doc()
+    nominal_doc["measurements"].append({"name": "extra", "unit": "s"})
+    nominal, control = _derivation_inputs(tmp_path, nominal=nominal_doc)
+    with pytest.raises(YieldError, match="nominal .*no Monte Carlo draws.*'extra'"):
+        derive_sample_set(nominal, control)
+
+
+def test_a_control_population_of_only_rollup_counts_is_kept(tmp_path):
+    """A defect so effective every draw is `failed_unmeasurable` is a valid
+    control (docs/cli/yield.md's Negative control); the derivation must not
+    mistake 'no numeric samples' for 'no draws'."""
+    control_doc = _control_doc()
+    for corner in control_doc["corners"]:
+        corner["measurements"] = [
+            m for m in corner["measurements"] if m["name"] != "iq"
+        ]
+    for m in control_doc["measurements"]:
+        if m["name"] == "iq":
+            m["failed_unmeasurable"] = 50
+    nominal, control = _derivation_inputs(tmp_path, control=control_doc)
+    doc = derive_sample_set(nominal, control)
+    nc = doc["measurements"][1]["negative_control"]
+    assert nc["samples"] == [] and nc["failed_unmeasurable"] == 50
+
+
+def test_cli_json_success_is_the_flat_sample_set_payload(tmp_path, capsys):
+    nominal, control = _derivation_inputs(tmp_path)
+    before = (open(nominal, "rb").read(), open(control, "rb").read())
+    argv = [
+        "yield-samples",
+        nominal,
+        "--negative-control",
+        control,
+        "--description",
+        "seeded defect",
+        "--format",
+        "json",
+    ]
+    assert main(argv) == 0
+    first = capsys.readouterr()
+    assert first.err == ""
+    payload = json.loads(first.out)
+    assert sorted(payload) == ["derivation", "measurements", "schema_version"]
+    assert payload["schema_version"] == 1
+    assert payload["measurements"] == _hand_authored_measurements("seeded defect")
+    assert payload["derivation"]["negative_control"]["description"] == "seeded defect"
+    # Stable bytes across runs, and the inputs are untouched.
+    assert main(argv) == 0
+    assert capsys.readouterr().out == first.out
+    assert (open(nominal, "rb").read(), open(control, "rb").read()) == before
+
+
+def test_cli_json_error_goes_to_stderr_with_empty_stdout(tmp_path, capsys):
+    nominal, _ = _derivation_inputs(tmp_path)
+    argv = [
+        "yield-samples",
+        nominal,
+        "--negative-control",
+        str(tmp_path / "missing.json"),
+        "--format",
+        "json",
+    ]
+    assert main(argv) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "yield-samples"
+    assert "not found" in error["error"]["message"]
+
+
+def test_cli_text_error_is_the_plain_stderr_line(tmp_path, capsys):
+    nominal, _ = _derivation_inputs(tmp_path)
+    assert (
+        main(["yield-samples", nominal, "--negative-control", str(tmp_path / "x")]) == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("klt yield-samples: ")
+
+
+def test_cli_negative_control_flag_is_required(tmp_path):
+    nominal, _ = _derivation_inputs(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        main(["yield-samples", nominal])
+    assert exc.value.code == 2
+
+
+def test_cli_text_rendering_shows_description_hashes_and_exclusions(tmp_path, capsys):
+    nominal, control = _derivation_inputs(tmp_path)
+    assert (
+        main(
+            [
+                "yield-samples",
+                nominal,
+                "--negative-control",
+                control,
+                "--description",
+                "vos forced to 0.6 V",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "description: vos forced to 0.6 V" in out
+    assert _sha256(nominal) in out
+    assert _sha256(control) in out
+    assert "errored=3 (= 1 errored + 2 inconclusive)" in out
+
+
+@requires_native
+def test_derived_nominal_statistics_equal_direct_analysis_of_the_nominal_report(
+    tmp_path,
+):
+    nominal, control = _derivation_inputs(tmp_path)
+    derived = _write_json(
+        tmp_path / "samples.json", derive_sample_set(nominal, control)
+    )
+    direct = run_yield(nominal)
+    via_derived = run_yield(derived)
+    assert direct["source"]["sample_count"] == via_derived["source"]["sample_count"]
+    assert direct["status"] == via_derived["status"]
+    for d, v in zip(direct["measurements"], via_derived["measurements"], strict=True):
+        assert d["negative_control"] is None
+        assert v["negative_control"] is not None
+        assert {k: x for k, x in d.items() if k != "negative_control"} == {
+            k: x for k, x in v.items() if k != "negative_control"
+        }
+
+
+@requires_native
+def test_derived_control_grades_like_a_hand_authored_control_against_nominal_limits(
+    tmp_path,
+):
+    nominal, control = _derivation_inputs(tmp_path)
+    derived = _write_json(
+        tmp_path / "samples.json",
+        derive_sample_set(nominal, control, description="seeded"),
+    )
+    hand = _write_json(
+        tmp_path / "hand.json",
+        {"measurements": _hand_authored_measurements("seeded")},
+    )
+    via_derived = run_yield(derived)
+    via_hand = run_yield(hand)
+    for d, h in zip(via_derived["measurements"], via_hand["measurements"], strict=True):
+        assert d["negative_control"] == h["negative_control"]
+    vos_nc = via_derived["measurements"][0]["negative_control"]
+    assert vos_nc["verdict"] == "detected"
+    # Graded against the nominal +/-0.5 V limits, never the control's own
+    # +/-100 V ones (which every control draw would pass).
+    assert vos_nc["yield"]["empirical"]["estimate"] < 0.5
+    # Inconclusive control draws are excluded from the denominator (folded
+    # into errored), never counted as design failures.
+    assert vos_nc["errored"] == 3
+    assert vos_nc["failed_unmeasurable"] == 3
+    assert vos_nc["censored"] == 2
+
+
+@requires_native
+def test_documented_two_command_pipeline_grades_a_negative_control(tmp_path, capsys):
+    nominal, control = _derivation_inputs(tmp_path)
+    before = (open(nominal, "rb").read(), open(control, "rb").read())
+    assert (
+        main(
+            [
+                "yield-samples",
+                nominal,
+                "--negative-control",
+                control,
+                "--description",
+                "seeded defect",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    samples = tmp_path / "samples.json"
+    samples.write_text(capsys.readouterr().out)
+    assert main(["yield", str(samples), "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    for m in report["measurements"]:
+        assert m["negative_control"]["verdict"] == "detected"
+        assert m["negative_control"]["description"] == "seeded defect"
+    assert not any(
+        "no measurement declared a negative_control" in w for w in report["warnings"]
+    )
+    assert (open(nominal, "rb").read(), open(control, "rb").read()) == before

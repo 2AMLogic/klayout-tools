@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt yield-samples`** (issue #2563): a new verb that derives a `klt yield`
+  sample-set document from two unedited `klt sim --format json` Monte Carlo
+  reports — the nominal campaign and a seeded known-bad variant whose draw
+  becomes each matched measurement's `negative_control`. Both reports are
+  read with `klt yield`'s own sim-report reader; measurements match by exact
+  name and unit; the control is graded against the nominal limits, and its
+  screened `inconclusive` draws are folded into its `errored` count (same
+  denominator treatment), with the original counts disclosed. The flat
+  `--format json` payload (`schema_version: 1`, `measurements`, and an
+  additive `derivation` block carrying both source paths and SHA-256 hashes)
+  is consumed by `klt yield` unchanged. `klt signoff` hashing is unchanged:
+  a yield citation's pin is the derived document, and signoff does not
+  recursively re-hash the source campaigns — re-derive when either changes.
+  `klt yield`'s own inputs and outputs are unchanged.
 - **`klt sim` `analysis_steps[]`** (issue #2482): an additive, ngspice-only
   alternative to the scalar `analysis` that runs several named solves in order
   inside each corner's single deck. Each step has optional `alter` source

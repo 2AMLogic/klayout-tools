@@ -29,10 +29,17 @@ format the canary blocks' MC harnesses already produce, so `klt yield` runs
 against real canary output with nothing in between.
 
 See ``docs/cli/yield.md`` for the full input/output schema.
+
+This module also backs ``klt yield-samples`` (:func:`derive_sample_set`,
+issue #2563), which turns a nominal and a known-bad `klt sim` report into a
+sample-set document carrying a ``negative_control``. It lives here, not in a
+module of its own, so both inputs go through the same sim-report reader
+``klt yield`` uses -- the draw-screening rules are never duplicated.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Any
@@ -794,3 +801,280 @@ def _resolve(explicit: Any, from_spec: Any, fallback: Any) -> Any:
     if from_spec is not None:
         return from_spec
     return fallback
+
+
+# --------------------------------------------------------------------------- #
+# Sample-set derivation (`klt yield-samples`, issue #2563)
+# --------------------------------------------------------------------------- #
+
+#: ``klt yield-samples``' own payload version -- versioned per command, as
+#: ``docs/json-contract.md`` requires, independently of ``SCHEMA_VERSION``
+#: above (which mirrors the native crate's ``klt yield`` report shape).
+SAMPLE_SET_SCHEMA_VERSION = 1
+
+
+def _load_sim_report_bytes(path: str, role: str) -> tuple[dict[str, Any], str]:
+    """Read one ``klt sim`` report for derivation, as ``(report, content_hash)``.
+
+    The bytes are read **once**: the same buffer is both hashed and parsed,
+    so the recorded ``sha256:`` hash can never describe a different version
+    of the file than the one the samples were taken from (a file rewritten
+    between a hash pass and a parse pass would otherwise be misattributed).
+    The file is opened read-only; nothing here ever writes to it.
+    """
+    if not os.path.exists(path):
+        raise YieldError(f"{role} sim report not found: {path}")
+    if os.path.isdir(path):
+        raise YieldError(f"{role} sim report is not a file: {path}")
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as exc:
+        raise YieldError(f"could not read {role} sim report '{path}': {exc}") from exc
+    content_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
+    try:
+        doc = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise YieldError(f"could not read {role} sim report '{path}': {exc}") from exc
+    if not isinstance(doc, dict) or not isinstance(doc.get("corners"), list):
+        raise YieldError(
+            f"{role} '{path}' is not a `klt sim --format json` report (no "
+            "'corners' array) -- `klt yield-samples` derives a sample set from "
+            "two Monte Carlo sim reports only"
+        )
+    return doc, content_hash
+
+
+def _sim_report_entries(
+    report: dict[str, Any], path: str, role: str
+) -> list[dict[str, Any]]:
+    """Run `klt yield`'s own sim-report reader over one report -- the single
+    place the draw-screening rules live -- naming the offending file on any
+    error so a two-input command's diagnostics stay actionable."""
+    try:
+        return _measurements_from_sim_report(report)
+    except YieldError as exc:
+        raise YieldError(f"{role} '{path}': {exc}") from exc
+
+
+def _draw_count(entry: dict[str, Any]) -> int:
+    """Every draw a measurement entry accounts for, across all five
+    categories (``docs/cli/yield.md``'s "the full draw is always accounted
+    for" identity)."""
+    return (
+        len(entry["samples"])
+        + entry["errored"]
+        + entry["inconclusive"]
+        + entry["failed_unmeasurable"]
+        + entry["censored"]
+    )
+
+
+def _index_by_name(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group rollup entries by name, keeping duplicates visible so the caller
+    can reject an ambiguous match instead of silently taking the last one."""
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        by_name.setdefault(entry["name"], []).append(entry)
+    return by_name
+
+
+def _selected_names(
+    nominal_entries: list[dict[str, Any]],
+    nominal_by_name: dict[str, list[dict[str, Any]]],
+    measurements: list[str] | None,
+    nominal_path: str,
+) -> list[str]:
+    """The nominal measurement names to derive, in output order: the
+    ``--measurement`` order when given (first occurrence wins), else the
+    nominal rollup's own order. An unknown requested name is an error."""
+    source = (
+        measurements
+        if measurements is not None
+        else [e["name"] for e in nominal_entries]
+    )
+    names = list(dict.fromkeys(source))
+    missing = [n for n in names if n not in nominal_by_name]
+    if missing:
+        raise YieldError(
+            f"no such measurement in nominal '{nominal_path}': "
+            f"{', '.join(sorted(missing))} (available: "
+            f"{', '.join(sorted(nominal_by_name)) or 'none'})"
+        )
+    return names
+
+
+def _unique_match(
+    matches: list[dict[str, Any]], name: str, path: str, role: str
+) -> dict[str, Any]:
+    if len(matches) > 1:
+        raise YieldError(
+            f"{role} '{path}' declares measurement '{name}' {len(matches)} times "
+            "in its 'measurements' rollup -- names must be unique to match a "
+            "negative control by name"
+        )
+    entry = matches[0]
+    if _draw_count(entry) == 0:
+        raise YieldError(
+            f"{role} '{path}' has no Monte Carlo draws for measurement "
+            f"'{name}' -- no sampled corner reports it"
+        )
+    return entry
+
+
+def _matched_pair(
+    name: str,
+    nominal_by_name: dict[str, list[dict[str, Any]]],
+    control_by_name: dict[str, list[dict[str, Any]]],
+    nominal_path: str,
+    control_path: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Match one nominal measurement to its companion by exact name,
+    enforcing the uniqueness/unit/no-existing-control/non-empty rules."""
+    nominal = _unique_match(nominal_by_name[name], name, nominal_path, "nominal")
+    if nominal["negative_control"] is not None:
+        raise YieldError(
+            f"nominal '{nominal_path}' measurement '{name}' already declares a "
+            "negative_control -- refusing to replace it silently; remove it "
+            "from the report's rollup entry or exclude the measurement with "
+            "--measurement"
+        )
+    if name not in control_by_name:
+        raise YieldError(
+            f"negative-control '{control_path}' has no measurement named "
+            f"'{name}' (available: "
+            f"{', '.join(sorted(control_by_name)) or 'none'}) -- measurements "
+            "are matched by exact name; restrict the derivation with "
+            "--measurement to skip one the control does not measure"
+        )
+    control = _unique_match(
+        control_by_name[name], name, control_path, "negative-control"
+    )
+    if nominal["unit"] != control["unit"]:
+        raise YieldError(
+            f"measurement '{name}' unit mismatch: nominal '{nominal_path}' "
+            f"reports {nominal['unit']!r}, negative-control '{control_path}' "
+            f"reports {control['unit']!r} -- the control is graded against the "
+            "nominal limits, so the units must agree"
+        )
+    return nominal, control
+
+
+def _derived_entry(
+    nominal: dict[str, Any], control: dict[str, Any], description: str | None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One sample-set entry (the nominal draw, carrying the companion's draw
+    as its ``negative_control``) plus its ``derivation`` disclosure."""
+    # The negative-control schema has no `inconclusive` field; folding it
+    # into `errored` gives a distrusted draw the same exclusion from both
+    # numerator and denominator it gets everywhere else -- never counted as
+    # a design failure. Both originals are disclosed below.
+    control_errored = control["errored"] + control["inconclusive"]
+    entry = {
+        "name": nominal["name"],
+        "unit": nominal["unit"],
+        "samples": nominal["samples"],
+        "errored": nominal["errored"],
+        "inconclusive": nominal["inconclusive"],
+        "failed_unmeasurable": nominal["failed_unmeasurable"],
+        "censored": nominal["censored"],
+        "limits": nominal["limits"],
+        "source_corners": nominal["source_corners"],
+        "negative_control": {
+            "samples": control["samples"],
+            "errored": control_errored,
+            "failed_unmeasurable": control["failed_unmeasurable"],
+            "censored": control["censored"],
+            "description": description,
+        },
+        "analytic_cross_check": nominal["analytic_cross_check"],
+        "sampling": nominal["sampling"],
+    }
+    disclosure = {
+        "name": nominal["name"],
+        "negative_control": {
+            "source_corners": control["source_corners"],
+            "errored": control["errored"],
+            "inconclusive": control["inconclusive"],
+            "errored_reported": control_errored,
+        },
+    }
+    return entry, disclosure
+
+
+def derive_sample_set(
+    nominal_path: str,
+    control_path: str,
+    *,
+    description: str | None = None,
+    measurements: list[str] | None = None,
+) -> dict[str, Any]:
+    """Derive a sample-set document from two `klt sim` Monte Carlo reports:
+    the nominal campaign, and a seeded known-bad variant whose draw becomes
+    each selected measurement's ``negative_control`` (issue #2563).
+
+    The returned dict is ``klt yield-samples``' flat JSON payload: a
+    sample-set document (``docs/cli/yield.md``'s "Sample-set document") that
+    ``klt yield`` reads unchanged, plus ``schema_version`` and an additive
+    ``derivation`` audit block the sample-set reader ignores.
+
+    Rules (see ``docs/cli/yield.md``'s "Deriving a sample set from two `klt
+    sim` reports"):
+
+    - Both inputs go through :func:`_measurements_from_sim_report`, the same
+      reader ``klt yield`` applies to a sim report directly, so which corners
+      count as draws, how a ``null`` maps to ``errored`` and how
+      ``inconclusive`` is screened are decided in exactly one place.
+    - Measurements match by exact name, never by position. Every selected
+      nominal measurement needs exactly one companion measurement with the
+      same ``unit`` (both absent counts as equal); extra companion
+      measurements are ignored.
+    - A selected nominal measurement that already declares a
+      ``negative_control`` is rejected rather than silently replaced.
+    - The negative control has no ``inconclusive`` field, so the companion's
+      screened ``inconclusive`` count is **added to** its ``errored`` (the
+      same denominator treatment), and both original counts are disclosed in
+      ``derivation``. Companion limits are never used: a negative control is
+      always graded against the nominal measurement's limits.
+
+    Raises :class:`YieldError` for anything that makes the derivation
+    unrunnable. Never writes to either input.
+    """
+    nominal_report, nominal_hash = _load_sim_report_bytes(nominal_path, "nominal")
+    control_report, control_hash = _load_sim_report_bytes(
+        control_path, "negative-control"
+    )
+    nominal_entries = _sim_report_entries(nominal_report, nominal_path, "nominal")
+    control_entries = _sim_report_entries(
+        control_report, control_path, "negative-control"
+    )
+
+    nominal_by_name = _index_by_name(nominal_entries)
+    control_by_name = _index_by_name(control_entries)
+    selected_names = _selected_names(
+        nominal_entries, nominal_by_name, measurements, nominal_path
+    )
+
+    out_measurements: list[dict[str, Any]] = []
+    disclosures: list[dict[str, Any]] = []
+    for name in selected_names:
+        nominal, control = _matched_pair(
+            name, nominal_by_name, control_by_name, nominal_path, control_path
+        )
+        entry, disclosure = _derived_entry(nominal, control, description)
+        out_measurements.append(entry)
+        disclosures.append(disclosure)
+
+    return {
+        "schema_version": SAMPLE_SET_SCHEMA_VERSION,
+        "measurements": out_measurements,
+        "derivation": {
+            "nominal": {"path": nominal_path, "content_hash": nominal_hash},
+            "negative_control": {
+                "path": control_path,
+                "content_hash": control_hash,
+                "description": description,
+            },
+            "measurements": disclosures,
+        },
+    }
