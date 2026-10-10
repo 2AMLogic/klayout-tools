@@ -1976,8 +1976,8 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 
 ```json
 {
-  "schema_version": 2,
-  "file": "design.gds",
+  "schema_version": 3,
+  "file": { "path": "design.gds", "scope": "repo" },
   "deck": "sky130",
   "dbu_um": 0.001,
   "status": "clean",
@@ -2028,8 +2028,8 @@ On a run with findings:
 
 ```json
 {
-  "schema_version": 2,
-  "file": "design.gds",
+  "schema_version": 3,
+  "file": { "path": "design.gds", "scope": "repo" },
   "deck": "sky130",
   "dbu_um": 0.001,
   "status": "violations",
@@ -2076,8 +2076,8 @@ On a run with findings:
 
 | Field             | Type                     | Description                                                             |
 | ----------------- | ------------------------ | ------------------------------------------------------------------------ |
-| `schema_version`  | integer                  | Version of this command's JSON shape (`2`; per-command).       |
-| `file`            | string                   | The input path exactly as provided on the command line.                  |
+| `schema_version`  | integer                  | Version of this command's JSON shape (`3`; per-command).       |
+| `file`            | object                   | The input layout this run read and hashed, as the committable `{"path", "scope"}` envelope (issue #2659, `schema_version` 3 — it was the raw input path string through `schema_version` 2): `scope: "repo"` with a repo-relative POSIX `path` when the layout lives inside the repo the invocation resolved, `{"path": null, "scope": "external"}` when it does not. The producing host's absolute path is never echoed. This is the field `provenance.input.content_hash` covers, so it is also the one a consumer re-hashes to verify that hash against the artifact rather than against another claim — `klt signoff --manifest`'s `input_verified` gate resolves `scope: "repo"` against the repo root of the *evidence file's* own location, which is what lets a committed `klt drc` envelope be re-verified from any clone instead of only on the machine that wrote it. Same shape `klt sim`'s `netlist` and `klt pex`'s `layout` carry (issue #1261); see [`docs/json-contract.md`](../json-contract.md)'s "Path fields: envelope vs. plain string". |
 | `deck`            | string                   | `--engine curated`: the deck name used (`"sky130"` or `"gf180mcu"`). `--engine klayout`: the resolved/given deck script's own path (no separate short name exists for an arbitrary PDK-native script). |
 | `engine`          | string                   | Present only for `--engine klayout` (always `"klayout"`) — purely additive; the curated engine's own output carries no `engine` key at all, unchanged since it was the sole engine until issue #565. |
 | `engine_deck_errors` | object                | Present only on an `--engine klayout` run that tolerated a failed deck run via `--allow-deck-errors` (issue #1941): `{"exit_status": <int>, "error_lines": [<klayout's own `ERROR` lines>]}`. Omitted entirely otherwise (including on every run that predates the flag being passed), so an ordinary payload is unchanged. Its presence means the deck may have aborted part-way through and the `status`/`violation_count` below cover only the rules that ran before the abort — see "Engine" → `"klayout"`. |
@@ -2131,9 +2131,10 @@ builds regardless of the engine's internal shape-enumeration order.
 ### `coverage`
 
 The [common v1 coverage fields](../coverage-contract.md) accompany the
-verb-specific fields below. New DRC reports use envelope `schema_version: 2`
+verb-specific fields below. DRC reports moved to envelope `schema_version: 2`
 because external `rules_checked` now denotes proven checks, not declared
-categories. Known zero curated work becomes `not_checked` (exit 4);
+categories (issue #2659 took the envelope to `3` for an unrelated reason —
+`file`'s retype above; the `coverage` block itself is unchanged by it). Known zero curated work becomes `not_checked` (exit 4);
 unknown external execution becomes `coverage_unknown` (exit 4). Actual
 violations take precedence. Partial curated work is `clean_partial` (exit 0,
 issue #2110) — see "`coverage.skipped` vs. `coverage.inapplicable`" below
@@ -2435,6 +2436,20 @@ klt drc --check design.drc.json --rerun           # full mode
 with `--deck`/`--top`/`--engine`/etc., which are ignored) — the input path,
 deck, and engine are all read from `<report.json>` itself, not given again
 on the command line.
+
+**Both modes resolve the committed report's `file` field from *this*
+checkout (issue #2659).** Since `schema_version` 3 that field is the
+`{path, scope}` envelope, and a `scope: "repo"` entry is joined to the repo
+root discovered from **the committed report's own directory** — not from the
+current working directory — so a report committed beside its input verifies
+from any clone and from any cwd, which is the same resolution `klt signoff`'s
+`input_verified` gate applies to the same shape. A `scope:
+"external"`/`"absent"` entry names no path by construction (the absolute
+path is deliberately never emitted): cheap mode reports it as the
+unverifiable `actual: null` an absent field gets, and `--rerun` as the same
+clean "no `'file'` field to rerun" error. A report predating #2659, whose
+`file` is a bare path string, keeps resolving exactly as it always did —
+verbatim if absolute, against the current working directory if relative.
 
 ### Cheap mode (default)
 

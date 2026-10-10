@@ -181,7 +181,7 @@ below are plain absolute-path strings, not the `{path, scope}` envelope
 paths as — including `klt place-and-route`'s `def_path` that this command's
 own `def` field typically consumes as input (see "Response" above). This is
 a deliberate, documented split, not an oversight — see
-`docs/json-contract.md`'s "Output-artifact path fields: envelope vs. plain
+`docs/json-contract.md`'s "Path fields: envelope vs. plain
 string" for the full enumeration and rationale.
 
 | Field | Type | Description |

@@ -49,6 +49,35 @@ EXAMPLE_GDS = "examples/drc/example.gds"
 EXAMPLE_DRC_JSON = REPO_ROOT / "examples" / "drc" / "example.drc.json"
 
 
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """Shadows pytest's own built-in `tmp_path` fixture for every test in this
+    module (issue #2659): seeds a `.git` marker so `tmp_path` itself resolves
+    as this run's own repo root (`env_provenance.find_repo_root` only checks
+    for a `.git` entry -- no real `git` binary or working tree is needed).
+
+    Since #2659 `run_drc`'s `file` field is the committable `{path, scope}`
+    envelope rather than the raw input path, and `klt drc --check`/`--rerun`
+    resolve a `scope: "repo"` entry against the repo root of the committed
+    report's own directory. A layout under a bare `tmp_path` resolves to
+    `scope: "external"` with `path: null` -- correct, but it means the
+    report records no locatable input, which is exactly the one case
+    `--check`/`--rerun` cannot verify. Seeding the marker puts every test
+    below in the *realistic* position of a design inside a repo (the only
+    position a report committed as `klt signoff` evidence is ever in), so
+    this module's `--check`/`--rerun` coverage exercises the resolution that
+    matters instead of the degenerate one.
+
+    The external branch is not thereby left uncovered: the tests that pin it
+    deliberately work outside `tmp_path`, via `tmp_path_factory` (see
+    `test_run_drc_file_is_external_outside_any_repo` and friends), mirroring
+    how `tests/test_synthesize.py`'s own `tmp_path` override (issue #1844)
+    keeps its "no repo at all" case honest.
+    """
+    (tmp_path / ".git").mkdir()
+    return tmp_path
+
+
 def _make_violation_layout() -> kdb.Layout:
     """A layout with one clear, seeded `poly.width.1` violation.
 
@@ -84,8 +113,11 @@ def test_run_drc_reports_seeded_violation(tmp_path):
 
     report = run_drc(str(path), "sky130")
 
-    assert report["schema_version"] == 2
-    assert report["file"] == str(path)
+    assert report["schema_version"] == 3
+    # Issue #2659: the committable `{path, scope}` envelope, resolved against
+    # the repo root the `tmp_path` fixture override seeds -- never the
+    # producing host's absolute path.
+    assert report["file"] == {"path": "violation.gds", "scope": "repo"}
     assert report["deck"] == "sky130"
     assert report["dbu_um"] == 0.001
     assert report["status"] == "violations"
@@ -599,7 +631,7 @@ def test_json_contract(tmp_path, capsys):
         "coverage",
         "provenance",
     }
-    assert data["schema_version"] == 2
+    assert data["schema_version"] == 3
 
     prov = data["provenance"]
     assert set(prov.keys()) == {
@@ -622,7 +654,9 @@ def test_json_contract(tmp_path, capsys):
     # Issue #331: the input layout stream is now hashed too, distinct from
     # the deck's own content hash above.
     assert prov["input"]["content_hash"].startswith("sha256:")
-    assert isinstance(data["file"], str)
+    # Issue #2659: `file` is the `{path, scope}` envelope, not a bare string.
+    assert set(data["file"]) == {"path", "scope"}
+    assert data["file"]["scope"] in {"repo", "external"}
     assert data["deck"] == "sky130"
     assert isinstance(data["dbu_um"], float)
     assert data["status"] in {"clean", "violations"}
@@ -1000,7 +1034,7 @@ def test_run_drc_gf180mcu_reports_seeded_violation(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["deck"] == "gf180mcu"
     assert report["dbu_um"] == 0.001
     assert report["status"] == "violations"
@@ -1042,7 +1076,7 @@ def test_run_drc_gf180mcu_missing_layer_does_not_crash(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["deck"] == "gf180mcu"
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
@@ -1055,7 +1089,7 @@ def test_run_drc_gf180mcu_json_contract(tmp_path, capsys):
     assert main(["drc", str(path), "--deck", "gf180mcu", "--format", "json"]) == 3
     data = json.loads(capsys.readouterr().out)
 
-    assert data["schema_version"] == 2
+    assert data["schema_version"] == 3
     assert data["deck"] == "gf180mcu"
     assert data["status"] == "violations"
     assert sum(data["rule_counts"].values()) == data["violation_count"]
@@ -1363,8 +1397,14 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
     synthetic seeded fixtures."""
     report = run_drc(str(layout_path), "gf180mcu")
 
-    assert report["schema_version"] == 2
-    assert report["file"] == str(layout_path)
+    assert report["schema_version"] == 3
+    # Issue #2659: `{path, scope}`, repo-relative -- the corpus layout lives
+    # inside this very repo, so `scope` is `"repo"` and `path` is the
+    # checkout-independent `tests/corpus/...` spelling.
+    assert report["file"] == {
+        "path": str(layout_path.relative_to(REPO_ROOT)),
+        "scope": "repo",
+    }
     assert report["deck"] == "gf180mcu"
     assert report["dbu_um"] == 0.001
     assert report["status"] in {"clean", "violations"}
@@ -1418,8 +1458,11 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
     and routing-layer usage the hand-drawn analog corpus never exercises."""
     report = run_drc(str(PLACE_AND_ROUTE_GDS), "sky130")
 
-    assert report["schema_version"] == 2
-    assert report["file"] == str(PLACE_AND_ROUTE_GDS)
+    assert report["schema_version"] == 3
+    assert report["file"] == {
+        "path": str(PLACE_AND_ROUTE_GDS.relative_to(REPO_ROOT)),
+        "scope": "repo",
+    }
     assert report["deck"] == "sky130"
     assert report["status"] in {"clean", "violations"}
     assert isinstance(report["violation_count"], int)
@@ -8299,7 +8342,10 @@ def test_request_document_stdin_form(tmp_path, capsys, monkeypatch):
     code, report = _run_drc_json(capsys, ["-"])
 
     assert code == 3
-    assert report["file"] == str(path)
+    # Issue #2659: the resolved layout, reported as the `{path, scope}`
+    # envelope -- the *resolution* a request document performs is unchanged,
+    # only the shape the result is reported in.
+    assert report["file"] == {"path": "violation.gds", "scope": "repo"}
     assert report["deck"] == "sky130"
 
 
@@ -8310,7 +8356,7 @@ def test_request_document_inline_form(tmp_path, capsys):
     code, report = _run_drc_json(capsys, [json.dumps(_drc_request_document(path))])
 
     assert code == 3
-    assert report["file"] == str(path)
+    assert report["file"] == {"path": "violation.gds", "scope": "repo"}
 
 
 def test_request_document_relative_paths_resolve_against_its_own_directory(
@@ -8334,7 +8380,9 @@ def test_request_document_relative_paths_resolve_against_its_own_directory(
     code, report = _run_drc_json(capsys, [str(request_path)])
 
     assert code == 3
-    assert report["file"] == str(design_dir / "violation.gds")
+    # The document-relative resolution is what is under test here; #2659 only
+    # changed how the resolved path is reported.
+    assert report["file"] == {"path": "design/violation.gds", "scope": "repo"}
 
 
 def test_request_document_stdin_relative_paths_resolve_against_cwd(
@@ -8353,7 +8401,7 @@ def test_request_document_stdin_relative_paths_resolve_against_cwd(
     code, report = _run_drc_json(capsys, ["-"])
 
     assert code == 3
-    assert report["file"] == str(tmp_path / "violation.gds")
+    assert report["file"] == {"path": "violation.gds", "scope": "repo"}
 
 
 def test_request_document_is_mutually_exclusive_with_argv_flags(tmp_path, capsys):
@@ -8842,3 +8890,215 @@ def test_eval_gate_does_not_pass_a_partial_drc_run(tmp_path, monkeypatch):
     status, exit_code, count = _status_drc(run_drc(str(path), "synthetic"))
 
     assert (status, exit_code, count) == ("fail", 0, 0)
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2659: `file` is the portable `{path, scope}` envelope, not the
+# producing host's absolute path.
+#
+# A `klt drc --format json` envelope is cited verbatim by a `klt signoff`
+# manifest, and `klt signoff`'s `input_verified` freshness gate (issue #2196)
+# re-hashes the artifact `file` names to check `provenance.input.content_hash`
+# against the file rather than against another claim. While `file` was the
+# producing run's own absolute path, that gate could only resolve it on the
+# producing host: a committed signoff record graded `input_verified: true`
+# there and `null` from every other clone, so `klt signoff --check` reported
+# drift on `items.N.citation.input_verified` for evidence committed in full
+# beside the manifest. `klt sim`/`klt pex` fixed the same defect for their own
+# input-path fields in issue #1261; this is `klt drc` adopting that shape.
+# --------------------------------------------------------------------------- #
+
+
+def _make_fake_repo(tmp_path: Path) -> Path:
+    """A `.git`-marked directory `env_provenance.find_repo_root` recognises as
+    a repo root -- mirrors `tests/test_pex.py`'s own `_make_fake_repo` (kept
+    local rather than imported across test modules, matching this file's
+    existing convention). No real git working tree is needed: `find_repo_root`
+    only looks for a `.git` entry."""
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    return root
+
+
+def test_run_drc_file_is_repo_relative_inside_a_repo(tmp_path):
+    """The happy path: a layout inside a repo is echoed as a repo-relative
+    `{path, scope: "repo"}` entry -- usable from any checkout of that repo,
+    and never the producing machine's absolute path."""
+    root = _make_fake_repo(tmp_path)
+    (root / "blocks").mkdir()
+    path = root / "blocks" / "violation.gds"
+    _make_violation_layout().write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["schema_version"] == 3
+    assert report["file"] == {"path": "blocks/violation.gds", "scope": "repo"}
+
+
+def test_run_drc_file_is_external_outside_any_repo(tmp_path_factory):
+    """The edge case from the issue's Test Plan: a layout outside any repo
+    reports `scope: "external"` with `path: null` -- detail is lost, the
+    absolute path is *never* emitted (`env_provenance.repo_relative_path`'s
+    "the failure mode is losing detail, never leaking it").
+
+    Deliberately uses `tmp_path_factory` rather than this module's own
+    `tmp_path` override, which seeds a `.git` marker -- so this really is
+    outside any repo."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["file"] == {"path": None, "scope": "external"}
+
+
+def test_check_drc_report_re_hashes_a_repo_scoped_file_from_another_checkout(
+    tmp_path, monkeypatch
+):
+    """The issue's own reproduction, reduced to `--check`: a report committed
+    beside its layout verifies from a *different* checkout of the same
+    content -- the `{path, scope}` entry resolves against the repo root of
+    the committed report's own directory, so neither the producing absolute
+    path nor the grading process's cwd is involved."""
+    producer = _make_fake_repo(tmp_path / "producer")
+    _make_violation_layout().write(str(producer / "violation.gds"))
+    report = run_drc(str(producer / "violation.gds"), "sky130")
+    assert report["file"] == {"path": "violation.gds", "scope": "repo"}
+
+    # A second, independent clone: same bytes, a different absolute location.
+    consumer = _make_fake_repo(tmp_path / "consumer")
+    (consumer / "violation.gds").write_bytes((producer / "violation.gds").read_bytes())
+    report_path = consumer / "violation.drc.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    # ...and a cwd that is neither clone, so only report-relative resolution
+    # can possibly find the layout.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = check_drc_report(str(report_path))
+
+    assert result["status"] == "match"
+    (input_check,) = [
+        c for c in result["checks"] if c["field"] == "provenance.input.content_hash"
+    ]
+    assert input_check["match"] is True
+
+
+def test_check_drc_report_still_resolves_a_pre_2659_bare_string_file(tmp_path_factory):
+    """Backwards compatibility: every report committed before #2659 carries
+    `file` as a bare path string, and `--check` must keep resolving it
+    exactly as it always did (verbatim when absolute) rather than reading it
+    as an unresolvable shape -- including, as here, from outside any
+    repository, which is where the old shape was the *only* thing that
+    worked."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+    report["schema_version"] = 2
+    report["file"] = str(path)  # the pre-#2659 shape
+    report_path = tmp_path / "violation.drc.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    result = check_drc_report(str(report_path))
+
+    assert result["status"] == "match"
+
+
+def test_check_drc_report_reports_an_external_file_as_unverifiable(tmp_path_factory):
+    """A `scope: "external"` entry names no path by construction, so there is
+    nothing to re-hash: that is the same unverifiable `actual: null` an
+    absent field gets -- never a crash, and never a false `"match"`.
+
+    This is the accepted cost of the portability fix, stated here as a test
+    rather than left to be discovered: a `klt drc` run whose layout is
+    outside any repository records no locatable input, so its committed
+    report can no longer be re-verified anywhere -- including on the
+    producing host, which the old absolute path did support. Inside a repo
+    (every case where the report is committed as evidence at all) the
+    opposite holds, and `--check` now works from *every* checkout rather
+    than only one."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+    assert report["file"] == {"path": None, "scope": "external"}
+    report_path = tmp_path / "violation.drc.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    result = check_drc_report(str(report_path))
+
+    (input_check,) = [
+        c
+        for c in check_drc_report(str(report_path))["checks"]
+        if c["field"] == "provenance.input.content_hash"
+    ]
+    assert input_check["actual"] is None
+    assert input_check["match"] is False
+    assert result["status"] == "drifted"
+
+
+def test_rerun_drc_report_refuses_an_external_file_cleanly(tmp_path_factory):
+    """`--rerun` has nothing to re-run from when `file` names no path: the
+    same clean `DrcError` a report missing the field entirely raises, never a
+    traceback (the counterpart to the `--check` case above)."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+    report_path = tmp_path / "violation.drc.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(DrcError, match="no 'file' field to rerun"):
+        rerun_drc_report(str(report_path))
+
+
+def test_rerun_drc_report_resolves_a_repo_scoped_file_from_another_checkout(
+    tmp_path, monkeypatch
+):
+    """The `--rerun` half of the portability fix: the committed report's
+    `{path, scope}` entry is resolved against its own directory's repo root,
+    so the deck actually re-runs on the grading checkout's copy of the
+    layout."""
+    producer = _make_fake_repo(tmp_path / "producer")
+    _make_violation_layout().write(str(producer / "violation.gds"))
+    report = run_drc(str(producer / "violation.gds"), "sky130")
+
+    consumer = _make_fake_repo(tmp_path / "consumer")
+    (consumer / "violation.gds").write_bytes((producer / "violation.gds").read_bytes())
+    report_path = consumer / "violation.drc.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = rerun_drc_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["fresh"]["violation_count"] == report["violation_count"]
+
+
+def test_drc_text_output_renders_the_file_envelope_not_a_dict_repr(
+    tmp_path, tmp_path_factory, capsys
+):
+    """`--format text` is a courtesy, but it must stay readable: the field is
+    rendered through the shared `env_provenance.render_path_field` helper
+    `klt sim`/`klt pex` already use, so a reader sees the repo-relative path
+    (or `<outside repo>`) rather than a raw Python dict."""
+    root = _make_fake_repo(tmp_path)
+    path = root / "violation.gds"
+    _make_violation_layout().write(str(path))
+
+    assert main(["drc", str(path), "--deck", "sky130"]) == 3
+    inside = capsys.readouterr().out
+
+    outside_dir = tmp_path_factory.mktemp("outside-any-repo")
+    outside = outside_dir / "violation.gds"
+    _make_violation_layout().write(str(outside))
+    assert main(["drc", str(outside), "--deck", "sky130"]) == 3
+    outside_text = capsys.readouterr().out
+
+    assert inside.splitlines()[0] == "file: violation.gds"
+    assert outside_text.splitlines()[0] == "file: <outside repo>"

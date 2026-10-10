@@ -45,7 +45,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Mapping
 from typing import Any
+
+from .env_provenance import render_path_field
 
 __all__ = ["ReportError", "build_report"]
 
@@ -207,10 +210,31 @@ def _build_section(kind: str, envelope: dict[str, Any], source: str) -> dict[str
     return builder(envelope, source)
 
 
+def _rendered_input_path(value: Any) -> str | None:
+    """One cited envelope's input-path field, rendered for a human report --
+    ``None`` when there is nothing worth naming.
+
+    Tolerates both shapes a committed envelope can carry for such a field,
+    because this module renders *committed evidence of any vintage*: the
+    ``{path, scope}`` object `klt drc`/`klt lvs` emit since issue #2659 (and
+    `klt sim`/`klt pex` since #1261) is rendered by the shared
+    :func:`~klayout_tools.env_provenance.render_path_field` -- so an
+    out-of-repo input reads ``<outside repo>`` rather than leaking the
+    producing host's absolute path into a rendered report -- while a bare
+    path string (every envelope predating those bumps) is rendered verbatim,
+    exactly as this module always did.
+    """
+    if isinstance(value, Mapping):
+        return render_path_field(value)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
 def _section_drc(envelope: dict[str, Any], source: str) -> dict[str, Any]:
     violations = envelope.get("violations") or []
     title = "DRC Report"
-    file_ = envelope.get("file")
+    file_ = _rendered_input_path(envelope.get("file"))
     if file_:
         title += f": {file_}"
 
@@ -255,8 +279,8 @@ def _section_drc(envelope: dict[str, Any], source: str) -> dict[str, Any]:
 def _section_lvs(envelope: dict[str, Any], source: str) -> dict[str, Any]:
     mismatches = envelope.get("mismatches") or []
     title = "LVS Report"
-    layout = envelope.get("layout")
-    reference = envelope.get("reference")
+    layout = _rendered_input_path(envelope.get("layout"))
+    reference = _rendered_input_path(envelope.get("reference"))
     if layout or reference:
         title += f": {layout} vs {reference}"
 

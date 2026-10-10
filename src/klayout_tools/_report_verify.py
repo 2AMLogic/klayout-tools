@@ -26,10 +26,11 @@ Both modes report the same two-value ``status``:
 ``drc.py``/``lvs.py``/``extract.py``/``synthesize.py``/``place_and_route.py``
 each supply the verb-specific pieces (which hashes to re-derive, how to re-run
 the analysis) via the small building blocks below; this module owns only the
-shape-agnostic mechanics (loading a committed report, comparing one hash,
-diffing two report dicts, dropping run-scoped bookkeeping keys -- by name
-(:func:`strip_keys`) or by path (:func:`strip_path_patterns`) -- before that
-diff).
+shape-agnostic mechanics (loading a committed report, resolving one echoed
+input path back to a file on *this* checkout (:func:`resolve_committed_path`,
+issue #2659), comparing one hash, diffing two report dicts, dropping
+run-scoped bookkeeping keys -- by name (:func:`strip_keys`) or by path
+(:func:`strip_path_patterns`) -- before that diff).
 
 **Flow verbs need the request back (issue #2224).** ``klt drc``/``klt lvs``/
 ``klt extract`` echo their own inputs into the report (``file``/``deck``/
@@ -49,6 +50,8 @@ import json
 import os
 from collections.abc import Mapping
 from typing import Any
+
+from . import env_provenance
 
 #: The `provenance` fields every verb's own docstring documents as
 #: legitimately varying between two runs of the identical inputs -- the tool
@@ -124,6 +127,57 @@ def load_committed_report(path: str, error_cls: type[Exception]) -> dict[str, An
     if not isinstance(data, dict):
         raise error_cls(f"committed report must be a JSON object: {path}")
     return data
+
+
+def resolve_committed_path(value: Any, *, report_path: str | None) -> str | None:
+    """The filesystem path a committed report's own echoed input-path field
+    names, resolved **from this checkout** -- ``None`` when the recorded
+    value names no resolvable path here (issue #2659).
+
+    Accepts both shapes a committed report can carry for such a field, so a
+    ``--check``/``--rerun`` of evidence written before *or* after issue
+    #2659's normalization keeps working:
+
+    - a bare path **string** (every report predating #2659, and every
+      still-plain-string field): returned verbatim, so the historical
+      anchoring is byte-unchanged -- a relative value still resolves against
+      the current process's cwd, the convention ``klt drc --check``
+      established and :func:`klayout_tools.lvs._input_hash_check` documents.
+    - the ``{path, scope}`` object :func:`~klayout_tools.env_provenance
+      .repo_relative_path` builds: ``scope: "repo"`` is joined to the repo
+      root discovered from **the committed report's own location**, which is
+      what ``scope: "repo"`` means by construction -- the identical
+      resolution ``klt signoff``'s ``input_verified`` gate applies to the
+      same shape (``signoff.py``'s ``_resolve_input_artifact_value``). This
+      is the portability the normalization buys: evidence committed beside
+      its inputs verifies from any clone, not only on the producing host.
+      ``scope: "external"``/``"absent"`` carry no path at all (``null``, on
+      purpose, so a host-specific absolute path never lands in committed
+      evidence) and are therefore unresolvable here -- correctly reported as
+      "cannot verify" rather than guessed at.
+
+    ``report_path`` may be ``None`` for a caller holding a decoded report but
+    not the file it came from; the repo root is then discovered from the
+    current working directory, the only other defensible anchor available.
+    """
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, Mapping):
+        if value.get("scope") != "repo":
+            return None
+        relative = value.get("path")
+        if not isinstance(relative, str) or not relative:
+            return None
+        anchor = (
+            os.path.dirname(os.path.abspath(report_path))
+            if report_path
+            else os.getcwd()
+        )
+        root = env_provenance.find_repo_root(anchor)
+        if root is None:
+            return None
+        return os.path.join(root, relative)
+    return None
 
 
 def hash_check(field: str, expected: str | None, actual: str | None) -> dict[str, Any]:

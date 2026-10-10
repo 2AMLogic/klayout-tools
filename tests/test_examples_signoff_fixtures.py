@@ -199,7 +199,9 @@ def test_committed_drc_envelope_carries_the_current_coverage_rollup():
     """
     drc = _fixture("drc.json")
 
-    assert drc["schema_version"] == 2
+    # `3` since issue #2659 retyped `file` to the `{path, scope}` envelope;
+    # the `coverage` block this test is about is unchanged by that bump.
+    assert drc["schema_version"] == 3
     coverage = drc["coverage"]
     assert coverage["rules_checked"], "expected a non-empty top-level rules_checked"
 

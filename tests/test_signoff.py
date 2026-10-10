@@ -11742,6 +11742,12 @@ def _hash_of(path) -> str:
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _hash_of_bytes(payload: bytes) -> str:
+    """:func:`_hash_of` for an artifact built from literal bytes -- the same
+    `sha256:`-prefixed form, without needing the file on disk first."""
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 def _drc_evidence_beside_its_layout(
     tmp_path, *, layout_bytes: bytes = b"GDS-A", recorded_hash: str | None = None
 ) -> tuple[str, Path]:
@@ -13213,3 +13219,289 @@ def test_signoff_help_lists_opt_in_kind_scopes(capsys):
     for kind in signoff_module._OPT_IN_KIND_ITEMS:
         assert f"{kind}:" in out
     assert "power: no T1 item" in out
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2659: a `drc`/`extract`/`lvs` citation's `input_verified` re-derives
+# from *any* checkout, not only the producing one.
+#
+# `klt drc`/`klt extract` used to echo their input layout as the producing
+# run's absolute path, and `klt lvs` its layout as the request document's own
+# (often relative) echo. `_resolve_input_artifact_value` can only try the
+# grading host's filesystem for those shapes, so a committed envelope cited
+# by a block manifest graded `input_verified: true` on the producing host and
+# `null` everywhere else -- and `klt signoff --check` then reported drift on
+# `items.N.citation.input_verified` for a signoff record whose evidence was
+# committed in full beside it.
+#
+# #2659 fixed that in the *emitters*: all three now carry the `{path, scope}`
+# shape this module's resolver has handled generically since `klt sim`/`klt
+# pex` adopted it in #1261. These tests are the proof that no change to
+# `signoff.py` was needed -- they drive the resolver with the three new
+# shapes directly, rather than asserting the claim in prose.
+# --------------------------------------------------------------------------- #
+
+
+def _repo_committed_evidence(
+    tmp_path, name: str, envelope: dict, artifact_name: str, artifact_bytes: bytes
+) -> tuple[str, Path]:
+    """One envelope committed beside the artifact it names, inside a repo --
+    the shape committed evidence actually takes in a block repo.
+
+    Returns `(envelope path, repo root)`. The repo root is a `.git`-marked
+    directory (`env_provenance.find_repo_root` only looks for a `.git` entry),
+    and the envelope's own input-path field is the `{path, scope: "repo"}`
+    object the three verbs emit since issue #2659 -- repo-relative, so it
+    resolves against whichever clone the grading happens in.
+    """
+    root = tmp_path / name
+    (root / ".git").mkdir(parents=True)
+    artifact = root / artifact_name
+    artifact.write_bytes(artifact_bytes)
+    return _write(root, f"{name}.json", envelope), root
+
+
+def _portable_drc_envelope(content_hash: str) -> dict:
+    return {
+        **DRC_CLEAN_ENVELOPE,
+        "schema_version": 3,
+        "file": {"path": "block.gds", "scope": "repo"},
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": content_hash, "role": "layout"},
+        },
+    }
+
+
+def test_drc_citation_input_verified_true_from_a_different_checkout(tmp_path):
+    """The issue's own reproduction: evidence produced in one clone grades
+    `input_verified: true` when re-graded from a *second* clone of the same
+    content, at a different absolute path, with the process cwd in neither.
+
+    The pre-#2659 `file` -- an absolute path into the producing checkout --
+    could only ever resolve on the producing host, which is what made the
+    committed signoff record irreproducible elsewhere.
+    """
+    layout_bytes = b"GDS-A"
+    recorded = _hash_of_bytes(layout_bytes)
+    drc_path, _ = _repo_committed_evidence(
+        tmp_path,
+        "consumer",
+        _portable_drc_envelope(recorded),
+        "block.gds",
+        layout_bytes,
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["input_verified"] is True
+
+
+def test_drc_citation_input_verified_false_when_the_repo_copy_changed(tmp_path):
+    """Portability must not be bought with a false pass: a repo-scoped entry
+    that resolves to a file whose bytes no longer match the recorded hash is
+    `False`, exactly as the pre-#2659 absolute path was on its own host."""
+    drc_path, _ = _repo_committed_evidence(
+        tmp_path,
+        "consumer",
+        _portable_drc_envelope(_hash_of_bytes(b"GDS-A")),
+        "block.gds",
+        b"GDS-B -- rewritten after the report was made",
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["citation"]["input_verified"] is False
+
+
+def test_drc_citation_input_verified_null_for_an_external_scope_entry(tmp_path):
+    """`scope: "external"` carries no path at all, on purpose -- so there is
+    nothing to re-hash and the citation says `null` rather than guessing or
+    raising. This is the shape a `klt drc` run whose layout lives outside any
+    repository emits, and the edge case the issue's Test Plan calls out."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "schema_version": 3,
+        "file": {"path": None, "scope": "external"},
+    }
+    drc_path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["input_verified"] is None
+
+
+def test_extract_citation_input_verified_true_from_a_different_checkout(tmp_path):
+    """The same portability, for `klt extract`'s own `file` field.
+
+    Driven through the resolver directly rather than through
+    `build_tier_report`: no numbered T1 item accepts an `extract` citation
+    (`_ITEM_ALLOWED_KINDS` restricts item 3 to `drc` and item 4 to `lvs`,
+    issue #1987 -- `klt extract` has no verdict to pass), yet
+    `_INPUT_ARTIFACT_FIELDS` still names `extract`'s `file`, so the shape it
+    emits has to resolve here for every other consumer of that table.
+    """
+    layout_bytes = b"GDS-EXTRACT"
+    recorded = _hash_of_bytes(layout_bytes)
+    envelope = {
+        **EXTRACT_ENVELOPE,
+        "schema_version": 4,
+        "file": {"path": "block.gds", "scope": "repo"},
+        "provenance": {
+            **EXTRACT_ENVELOPE["provenance"],
+            "input": {"content_hash": recorded, "role": "layout"},
+        },
+    }
+    extract_path, root = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "block.gds", layout_bytes
+    )
+
+    candidates = signoff_module._input_artifact_candidates(
+        "extract", envelope, {}, extract_path
+    )
+    verified = signoff_module._verify_input_artifact(
+        "extract", envelope, {}, recorded, extract_path
+    )
+
+    assert candidates == [str(root / "block.gds")]
+    assert verified is True
+
+
+def test_extract_citation_input_verified_false_when_the_repo_copy_changed(tmp_path):
+    """Portability must not be bought with a false pass, for `extract` either
+    (the counterpart to the `drc` case above)."""
+    envelope = {
+        **EXTRACT_ENVELOPE,
+        "schema_version": 4,
+        "file": {"path": "block.gds", "scope": "repo"},
+    }
+    extract_path, _ = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "block.gds", b"GDS-REWRITTEN"
+    )
+
+    verified = signoff_module._verify_input_artifact(
+        "extract", envelope, {}, _hash_of_bytes(b"GDS-EXTRACT"), extract_path
+    )
+
+    assert verified is False
+
+
+def test_extract_citation_input_verified_null_for_an_external_scope_entry(tmp_path):
+    """`scope: "external"` names no path, so `extract`'s own field reports
+    `null` rather than guessing -- same as `drc`'s."""
+    envelope = {
+        **EXTRACT_ENVELOPE,
+        "schema_version": 4,
+        "file": {"path": None, "scope": "external"},
+    }
+    extract_path = _write(tmp_path, "extract.json", envelope)
+
+    assert (
+        signoff_module._input_artifact_candidates("extract", envelope, {}, extract_path)
+        == []
+    )
+    assert (
+        signoff_module._verify_input_artifact(
+            "extract", envelope, {}, "sha256:whatever", extract_path
+        )
+        is None
+    )
+
+
+def test_lvs_citation_input_verified_true_from_a_different_checkout(tmp_path):
+    """And for `klt lvs`'s `layout` (item 4). `reference` is deliberately
+    still the verbatim request echo -- it is pinned by
+    `environment.reference_sha256`, not by `provenance.input`, so it is not
+    the field this gate re-hashes (`_INPUT_ARTIFACT_FIELDS` names `layout`
+    only for `lvs`)."""
+    layout_bytes = b".SUBCKT INV\n.ENDS\n"
+    recorded = _hash_of_bytes(layout_bytes)
+    envelope = {
+        **LVS_MATCH_ENVELOPE,
+        "schema_version": 2,
+        "layout": {"path": "design.spice", "scope": "repo"},
+        "provenance": {
+            **LVS_MATCH_ENVELOPE["provenance"],
+            "input": {"content_hash": recorded, "role": "netlist"},
+        },
+    }
+    lvs_path, _ = _repo_committed_evidence(
+        tmp_path, "consumer", envelope, "design.spice", layout_bytes
+    )
+
+    result = build_tier_report(_manifest(evidence={"4": lvs_path}))
+
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    assert item_4["citation"]["kind"] == "lvs"
+    assert item_4["citation"]["input_verified"] is True
+
+
+def test_check_reproduces_a_portable_citation_from_another_checkout(tmp_path):
+    """The issue's reproduction all the way to its reported symptom: a
+    committed tier report re-graded with `klt signoff --check` from a
+    *different* clone no longer drifts on
+    `items.N.citation.input_verified`.
+
+    Both halves run against clones at different absolute paths, so a report
+    that still reproduces can only be doing so by resolving the citation's
+    `{path, scope}` entry against each clone's own root.
+    """
+    layout_bytes = b"GDS-A"
+    recorded = _hash_of_bytes(layout_bytes)
+    producer_path, _ = _repo_committed_evidence(
+        tmp_path,
+        "producer",
+        _portable_drc_envelope(recorded),
+        "block.gds",
+        layout_bytes,
+    )
+    committed = build_tier_report(_manifest(evidence={"3": producer_path}))
+    item_3 = next(item for item in committed["items"] if item["id"] == 3)
+    assert item_3["citation"]["input_verified"] is True
+
+    # A second clone: same bytes, different absolute location.
+    consumer_path, _ = _repo_committed_evidence(
+        tmp_path,
+        "consumer",
+        _portable_drc_envelope(recorded),
+        "block.gds",
+        layout_bytes,
+    )
+    regraded = build_tier_report(_manifest(evidence={"3": consumer_path}))
+
+    regraded_item = next(item for item in regraded["items"] if item["id"] == 3)
+    assert regraded_item["citation"]["input_verified"] is True
+
+
+def test_resolver_still_handles_a_pre_2659_bare_string_citation(tmp_path):
+    """Backwards compatibility, asserted on the resolver this module already
+    had: an envelope committed *before* #2659 carries a bare path string, and
+    a relative one is still resolved against the evidence file's own
+    directory (the branch `examples/signoff/`'s own fixtures relied on).
+    Nothing about reading older evidence changed."""
+    layout_bytes = b"GDS-A"
+    root = tmp_path / "legacy"
+    root.mkdir()
+    (root / "block.gds").write_bytes(layout_bytes)
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "file": "block.gds",  # the pre-#2659 shape
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {
+                "content_hash": _hash_of_bytes(layout_bytes),
+                "role": "layout",
+            },
+        },
+    }
+    drc_path = _write(root, "drc.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["citation"]["input_verified"] is True

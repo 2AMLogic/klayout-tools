@@ -125,6 +125,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from . import env_provenance
 from ._paths import _load_request_json, _resolve_relative
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
@@ -144,6 +145,7 @@ from ._report_verify import (
     build_rerun_result,
     get_path,
     hash_check,
+    resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
 from .decks import (
@@ -202,7 +204,21 @@ if TYPE_CHECKING:
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#:
+#: Bumped 1 -> 2 (issue #2659): the top-level `layout` field changed from the
+#: request document's own `layout.file`/`layout.netlist` string, echoed
+#: verbatim, to the `{path, scope}` shape `env_provenance.repo_relative_path`
+#: already defines -- the same normalization `klt sim`/`klt pex` adopted in
+#: issue #1261 and `klt drc`/`klt extract` in #2659. A committed `klt lvs`
+#: envelope is cited verbatim by a `klt signoff` manifest, and the echoed
+#: string was anchored to whatever directory the producing run happened to
+#: use (often that host's absolute path), so `klt signoff`'s
+#: `input_verified` freshness gate (issue #2196) could re-verify such a
+#: citation only there and reported drift from every other checkout.
+#: `reference` is deliberately *not* part of this bump and stays the verbatim
+#: echo: it is pinned by its own `environment.reference_sha256` digest and is
+#: not the artifact `provenance.input` hashes. See `_report_path` below.
+SCHEMA_VERSION = 2
 
 #: ``klayout`` (in-process ``NetlistComparer``) is the primary engine;
 #: ``netgen`` (issue #343) is a second, independent comparator wrapped as a
@@ -686,6 +702,47 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
+def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
+    """Normalise one input-path field for this module's own JSON response
+    (issue #2659) -- a thin, module-local wrapper over
+    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
+    second normalizer, so `klt lvs`'s reports, `klt drc`/`klt extract`/`klt
+    sim`/`klt pex`'s and `klt env-provenance`'s own emitter agree on exactly
+    one ``{path, scope}`` shape.
+
+    Applied to the ``layout`` field only: it is the artifact
+    ``provenance.input.content_hash`` pins and therefore the one `klt
+    signoff`'s ``input_verified`` gate re-hashes for an `lvs` citation
+    (``signoff.py``'s ``_INPUT_ARTIFACT_FIELDS``). ``reference`` stays the
+    verbatim request echo -- it is pinned by its own
+    ``environment.reference_sha256``.
+
+    Pass the *resolved* layout path (``layout_hash_source``, i.e. the file
+    actually hashed), never the request's own echo: a bare relative string
+    would be resolved against this process's cwd rather than the request
+    file's own directory, which is not what the request meant.
+    """
+    return env_provenance.repo_relative_path(path, repo_root=repo_root)
+
+
+def _report_repo_root(path: str | None) -> str | None:
+    """The repo root this run's own ``layout`` field is normalised against --
+    resolved from the **layout's** own location, not the request document's.
+
+    The field describes the layout, so its ``scope`` has to answer "is the
+    layout inside a repo", and the two are not the same question: a request
+    document may name a layout anywhere, and the inline/stdin request forms
+    have no document directory at all (``request_dir`` is this process's cwd
+    there -- see :func:`load_request_arg`), which would make the field's
+    scope depend on where `klt` happened to be invoked from. Anchoring on the
+    layout itself is also the same "walk up from the input" choice `klt
+    drc`/`klt extract`/`klt pex` make for their own input-path fields, so the
+    four verbs agree on what ``scope: "repo"`` means."""
+    if path is None:
+        return None
+    return env_provenance.find_repo_root(os.path.dirname(os.path.abspath(path)))
+
+
 def run_lvs(request: str) -> dict[str, Any]:
     """Run the netlist compare declared by ``request``.
 
@@ -705,6 +762,19 @@ def run_lvs(request: str) -> dict[str, Any]:
     reference input, unknown deck, unsupported engine, engine error) --
     a documented ``status: "mismatch"`` is a successful run, not an error
     (see this module's docstring).
+
+    ``layout`` is the committable ``{path, scope}`` object
+    :func:`~klayout_tools.env_provenance.repo_relative_path` defines (issue
+    #2659, ``schema_version`` ``2``), built from the *resolved* layout path
+    this run actually hashed into ``provenance.input.content_hash`` --
+    ``scope: "repo"`` with a path relative to the repo the **layout** sits
+    in (:func:`_report_repo_root`), ``{"path": null, "scope": "external"}``
+    when it sits in none. It is therefore no longer the request's own verbatim
+    ``layout.file``/``layout.netlist`` echo, which was anchored to whatever
+    directory the producing run used and so could be re-verified only
+    there: a committed `klt lvs` envelope is cited verbatim in `klt signoff`
+    evidence. ``reference`` *is* still the verbatim echo -- it is pinned by
+    its own ``environment.reference_sha256``, not by ``provenance.input``.
 
     ``device_classes`` (issue #221) echoes the layout-side
     :attr:`~klayout_tools.decks.ExtractionDeck.device_classes` -- what that
@@ -1073,7 +1143,13 @@ def run_lvs(request: str) -> dict[str, Any]:
 
     (
         layout_netlist,
-        layout_echo,
+        # Issue #2659: the request's own verbatim `layout.file`/
+        # `layout.netlist` echo is no longer what the response reports --
+        # `layout` is now built from `layout_hash_source` (the resolved
+        # path) via `_report_path`, so the field is portable across
+        # checkouts. `_resolve_layout` still returns the echo for callers
+        # that want it.
+        _layout_echo,
         layout_hash_source,
         extracted_netlist_path,
         layout_net_label_positions,
@@ -2367,7 +2443,14 @@ def run_lvs(request: str) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
-        "layout": layout_echo,
+        # Issue #2659: the committable `{path, scope}` shape, built from the
+        # *resolved* layout path (`layout_hash_source` -- the file
+        # `provenance.input.content_hash` below actually hashes), never the
+        # request's own cwd-dependent echo. See `_report_path`. `reference`
+        # stays the verbatim echo, pinned by `environment.reference_sha256`.
+        "layout": _report_path(
+            layout_hash_source, repo_root=_report_repo_root(layout_hash_source)
+        ),
         # Issue #2686: the applied `layout.label_layers` override (which GDS
         # purpose inline extraction read net/pin names from, per role) --
         # see `_label_layers_echo`. Absent when no override was applied, so
@@ -2617,8 +2700,19 @@ def _input_hash_check(
     diagnostic to stay consistent, which is a deliberate follow-up, not a
     side effect of this one. Promote this helper to ``_report_verify`` if
     and when that happens.
+
+    Issue #2659: ``echoed`` is resolved through
+    :func:`klayout_tools._report_verify.resolve_committed_path`, so the
+    ``{path, scope}`` object ``layout`` carries today is joined to the repo
+    root of the committed report's own directory -- which is precisely the
+    case the "known limitation" above describes, now *resolved* for the
+    layout side rather than merely diagnosed. ``reference`` still echoes the
+    request verbatim and keeps the cwd anchoring (and the diagnostic). An
+    entry naming no path at all (``scope: "external"``/``"absent"``, or a
+    report with no such field) resolves to ``None`` and renders exactly as
+    an absent one always has.
     """
-    path = echoed if isinstance(echoed, str) and echoed else None
+    path = resolve_committed_path(echoed, report_path=report_path)
     check = hash_check(field, expected, sha256_file(path))
     if path is None or os.path.isfile(path):
         return check
@@ -2652,21 +2746,27 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     compares against ``provenance.deck.content_hash``. Each mismatch names
     which of the (up to three) inputs moved -- never a single pass/fail bit.
 
-    **Known limitation**: ``committed["layout"]``/``["reference"]`` are
-    echoed *exactly as given* in the original request document (see
-    :func:`run_lvs`'s docstring on ``layout_echo``/``reference_echo``),
-    which may have been relative to that request *file's own directory* --
-    not necessarily the current working directory. This re-hashes them
-    relative to the current working directory (the same convention ``klt
-    drc --check``'s ``file`` field uses); if the original request used
-    request-file-relative paths, invoke ``--check`` from that same
-    directory, or commit reports whose ``layout``/``reference`` are already
-    absolute paths. Issue #2595: that anchoring is unchanged, but hitting it
-    no longer renders as a bare ``actual: null`` -- an echoed path that
-    names no existing file gets an ``input_not_found`` block on its
-    ``checks[]`` entry saying where it was looked for, and where it *was*
-    found relative to the report's own directory when it is there. See
-    :func:`_input_hash_check`.
+    **Known limitation, now only for the reference side**:
+    ``committed["reference"]`` is echoed *exactly as given* in the original
+    request document (see :func:`run_lvs`'s docstring on
+    ``reference_echo``), which may have been relative to that request
+    *file's own directory* -- not necessarily the current working directory.
+    This re-hashes it relative to the current working directory (the same
+    convention ``klt drc --check``'s own pre-#2659 ``file`` field used); if
+    the original request used request-file-relative paths, invoke
+    ``--check`` from that same directory, or commit reports whose
+    ``reference`` is already an absolute path. Issue #2595: that anchoring
+    is unchanged, but hitting it no longer renders as a bare ``actual:
+    null`` -- an echoed path that names no existing file gets an
+    ``input_not_found`` block on its ``checks[]`` entry saying where it was
+    looked for, and where it *was* found relative to the report's own
+    directory when it is there. See :func:`_input_hash_check`.
+    ``committed["layout"]`` no longer has this limitation at all: since
+    issue #2659 it is the ``{path, scope}`` object, resolved against the
+    repo root of the committed report's own directory, so it re-hashes
+    correctly from any clone and from any working directory. A pre-#2659
+    report whose ``layout`` is a bare string keeps the old anchoring, and
+    the diagnostic above with it.
 
     Raises :class:`LvsError` for a missing/unparseable committed report --
     never a traceback.
@@ -2709,9 +2809,21 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     return result
 
 
-def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
+def _reconstruct_lvs_request(
+    committed: dict[str, Any], *, report_path: str | None = None
+) -> dict[str, Any]:
     """Best-effort reconstruction of a ``klt lvs`` request document from a
     previously committed report, for :func:`rerun_lvs_report`.
+
+    ``report_path`` (issue #2659) is where the committed report was read
+    from: the ``{path, scope}`` ``layout`` field is resolved against the repo
+    root of that file's own directory
+    (:func:`klayout_tools._report_verify.resolve_committed_path`), so the
+    reconstructed ``layout.file``/``layout.netlist`` is an absolute path that
+    resolves on *this* checkout. ``None`` (a caller holding only the decoded
+    report) falls back to the current working directory's repo root; a
+    committed report whose ``layout`` is a bare string -- every report
+    predating #2659 -- reconstructs byte-identically either way.
 
     Reconstructs the fields the response actually echoes: ``engine``,
     ``layout`` (``file``+``deck``[+``deck_options``][+``label_layers``,
@@ -2775,9 +2887,14 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     # falling back to it reconstructs such a report the same way as before.
     reference_top = committed.get("reference_top") or top
 
+    # Issue #2659: the `{path, scope}` object resolved back to a path on this
+    # checkout (a bare string passes through unchanged) -- see this
+    # function's `report_path` docstring note.
+    layout = resolve_committed_path(committed.get("layout"), report_path=report_path)
+
     layout_spec: dict[str, Any] = {"top": top} if top else {}
     if has_deck:
-        layout_spec["file"] = committed.get("layout")
+        layout_spec["file"] = layout
         layout_spec["deck"] = deck["name"]
         # Issue #2394: replay only the options the *caller* pinned, not the
         # resolved set `provenance.deck.options` now records -- re-pinning a
@@ -2790,7 +2907,7 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         # roles included; a report without the echo replays without one.
         layout_spec.update(_label_layers_replay(committed))
     else:
-        layout_spec["netlist"] = committed.get("layout")
+        layout_spec["netlist"] = layout
 
     reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
     if reference_top:
@@ -3071,16 +3188,21 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     when the original request used either.)
 
     Raises :class:`LvsError` for a missing/unparseable committed report, a
-    report missing ``layout``/``reference`` to rerun, or any error the
-    rerun itself raises -- never a traceback.
+    report missing (or, since issue #2659, carrying an unresolvable)
+    ``layout``, a report missing ``reference`` to rerun, or any error the
+    rerun itself raises -- never a traceback. A ``layout`` entry whose
+    ``scope`` is ``"external"``/``"absent"`` names no path at all by
+    construction, so there is nothing to re-run from: that is reported as
+    the same clean error a report missing the field entirely gets.
     """
     committed = _load_committed_report(report_path, LvsError)
-    if committed.get("layout") is None or committed.get("reference") is None:
+    layout = resolve_committed_path(committed.get("layout"), report_path=report_path)
+    if layout is None or committed.get("reference") is None:
         raise LvsError(
             f"committed report has no 'layout'/'reference' field to rerun: "
             f"{report_path}"
         )
-    request = _reconstruct_lvs_request(committed)
+    request = _reconstruct_lvs_request(committed, report_path=report_path)
     fresh = _run_reconstructed_lvs(request)
     exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
     exclude.update(

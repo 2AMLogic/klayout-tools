@@ -44,13 +44,20 @@ import tempfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from . import env_provenance
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import _content_hash, build_provenance
-from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
+from ._report_verify import (
+    build_check_result,
+    build_rerun_result,
+    get_path,
+    hash_check,
+    resolve_committed_path,
+)
 from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import (
     REASON_ALL_RULES_SKIPPED,
@@ -159,6 +166,23 @@ _DERIVED_LAYER_MODES = {
 _VIOLATION_COUNT_METRIC_NAME = "drc__error__count"
 
 assert is_registered(_VIOLATION_COUNT_METRIC_NAME)
+
+
+#: Bumped only on a non-additive (breaking) change to this command's own JSON
+#: shape -- see docs/json-contract.md. Shared by both engines'
+#: response builders (:func:`run_drc`, :func:`run_drc_klayout_engine`), which
+#: have always carried the same version number and must not drift apart.
+#:
+#: Bumped 2 -> 3 (issue #2659): ``file`` changed from a raw (usually
+#: absolute) path string to the ``{path, scope}`` shape
+#: ``env_provenance.repo_relative_path`` already defines -- a committed `klt
+#: drc` envelope is cited verbatim by a `klt signoff` manifest, so an
+#: absolute path here pinned the record to the producing host's own
+#: filesystem: ``klt signoff``'s ``input_verified`` freshness gate could
+#: re-verify such a citation only on that host, and reported drift from
+#: every other checkout. The same normalization `klt sim`/`klt pex` adopted
+#: for their own input-path fields in issue #1261. See `_report_path` below.
+SCHEMA_VERSION = 3
 
 
 class DrcError(Exception):
@@ -546,6 +570,31 @@ def _curated_nothing_checked_reasons(
     return [REASON_DECK_HAS_NO_RULES if not deck else REASON_ALL_RULES_SKIPPED]
 
 
+def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
+    """Normalise one input-path field for this module's own JSON response
+    (issue #2659) -- a thin, module-local wrapper over
+    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
+    second normalizer, so `klt drc`'s reports, `klt sim`/`klt pex`'s (issue
+    #1261) and `klt env-provenance`'s own emitter agree on exactly one
+    ``{path, scope}`` shape.
+
+    The reader counterpart is
+    :func:`~klayout_tools._report_verify.resolve_committed_path`, which both
+    ``--check`` modes here and ``klt signoff``'s ``input_verified`` gate use
+    to turn the emitted entry back into a file on *their* checkout.
+    """
+    return env_provenance.repo_relative_path(path, repo_root=repo_root)
+
+
+def _report_repo_root(path: str) -> str | None:
+    """The one repo root every input-path field a run over ``path`` echoes is
+    normalised against -- resolved once from the layout's own location, the
+    same "walk up from the input" default
+    :func:`~klayout_tools.env_provenance.find_repo_root` uses for its own
+    caller (and the same anchor `klt pex` picks for its own ``layout``)."""
+    return env_provenance.find_repo_root(os.path.dirname(os.path.abspath(path)))
+
+
 def run_drc(
     path: str,
     deck_name: str,
@@ -559,8 +608,8 @@ def run_drc(
     ``docs/cli/drc.md``)::
 
         {
-            "schema_version": 2,
-            "file": <path as provided>,
+            "schema_version": 3,
+            "file": {"path": <repo-relative path>, "scope": "repo"},
             "deck": <deck name>,
             "dbu_um": <database unit in micrometres, float>,
             "status": "clean" | "clean_partial" | "violations" | "not_checked",
@@ -601,6 +650,16 @@ def run_drc(
     ``schema_version`` is versioned independently per command (see
     ``docs/json-contract.md``); it starts at ``1`` and only increments when
     this command's JSON shape changes in a way that isn't purely additive.
+
+    ``file`` is the committable ``{path, scope}`` object
+    :func:`~klayout_tools.env_provenance.repo_relative_path` defines (issue
+    #2659, ``schema_version`` ``3``) -- ``scope: "repo"`` with a
+    repo-relative ``path`` when the layout sits inside the invocation's
+    repo, ``{"path": null, "scope": "external"}`` when it does not. The
+    producing host's absolute path is never echoed: a `klt drc` envelope is
+    cited verbatim in committed `klt signoff` evidence, and an absolute path
+    there is re-verifiable only on the machine that wrote it. Same shape
+    `klt sim`'s ``netlist`` and `klt pex`'s ``layout`` carry (issue #1261).
 
     ``metrics`` (issue #1847, adopting the declared metric namespace
     registry from #247 beyond its ``klt layout-metrics`` pilot) is a
@@ -1364,8 +1423,10 @@ def run_drc(
     # verb's unconditional success). See `docs/coverage-contract.md`.
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     return {
-        "schema_version": 2,
-        "file": path,
+        "schema_version": SCHEMA_VERSION,
+        # Issue #2659: the committable `{path, scope}` shape, never the
+        # producing host's absolute path -- see `_report_path`.
+        "file": _report_path(path, repo_root=_report_repo_root(path)),
         "deck": deck_name,
         "dbu_um": layout.dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
@@ -1445,6 +1506,15 @@ def check_drc_report(report_path: str) -> dict[str, Any]:
     never counts as a match -- see
     :func:`klayout_tools._report_verify.hash_check`'s docstring.
 
+    ``committed["file"]`` is read through
+    :func:`klayout_tools._report_verify.resolve_committed_path` (issue
+    #2659), so both shapes a committed report can carry work: the
+    ``{path, scope}`` object this verb emits today resolves against the
+    repo root of **the committed report's own directory** -- which is what
+    makes a committed report re-checkable from any clone -- while a bare
+    path string (every report predating #2659) keeps resolving exactly as
+    before, against the current working directory.
+
     Raises :class:`DrcError` for a missing/unparseable committed report
     (:func:`klayout_tools._report_verify.load_committed_report`) -- never a
     traceback.
@@ -1454,7 +1524,9 @@ def check_drc_report(report_path: str) -> dict[str, Any]:
         hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            _content_hash(committed.get("file")),
+            _content_hash(
+                resolve_committed_path(committed.get("file"), report_path=report_path)
+            ),
         ),
         hash_check(
             "provenance.deck.content_hash",
@@ -1492,12 +1564,22 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
     input-moved case ``--check`` also catches, redundantly but harmlessly
     here since this mode always re-hashes as a side effect of re-running).
 
+    ``committed["file"]`` is resolved through
+    :func:`klayout_tools._report_verify.resolve_committed_path` (issue
+    #2659) -- the ``{path, scope}`` object against the repo root of the
+    committed report's own directory, a bare string (a pre-#2659 report)
+    exactly as before. A ``scope: "external"``/``"absent"`` entry names no
+    path at all by construction, so there is nothing to re-run from: that is
+    reported as the same clean "no 'file' field to rerun" error a report
+    missing the field entirely gets, never a traceback.
+
     Raises :class:`DrcError` for a missing/unparseable committed report, a
-    report missing ``file``/``deck`` to rerun, or any error the rerun itself
-    raises (bad file, unknown deck, engine error) -- never a traceback.
+    report missing (or carrying an unresolvable) ``file``/``deck`` to rerun,
+    or any error the rerun itself raises (bad file, unknown deck, engine
+    error) -- never a traceback.
     """
     committed = _load_committed_report(report_path, DrcError)
-    file_path = committed.get("file")
+    file_path = resolve_committed_path(committed.get("file"), report_path=report_path)
     if not file_path:
         raise DrcError(f"committed report has no 'file' field to rerun: {report_path}")
     deck = committed.get("deck")
@@ -3429,8 +3511,11 @@ def run_drc_klayout_engine(
     )
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     return {
-        "schema_version": 2,
-        "file": path,
+        "schema_version": SCHEMA_VERSION,
+        # Issue #2659: same `{path, scope}` normalization the curated engine's
+        # own response builder applies -- the two engines' envelopes stay
+        # shape-compatible (see `_report_path`).
+        "file": _report_path(path, repo_root=_report_repo_root(path)),
         "deck": deck_file,
         "engine": "klayout",
         # Additive, and present *only* when --allow-deck-errors actually

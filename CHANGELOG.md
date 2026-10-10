@@ -383,6 +383,45 @@ environment (`uvx --isolated`, a fresh virtualenv) and check
   than dropped (tracked as #2695) — see `_tied_abstract_pin_warning`'s
   docstring for why that needs an opt-out flag now that the binding fault
   behind it is fixed at source.
+
+- **Changed** (#2659, breaking — `klt drc` `schema_version` 2 -> **3**, `klt
+  extract` 3 -> **4** (its `run_extract_klayout_engine` agreement oracle 1 ->
+  **2**), `klt lvs` 1 -> **2**): the input artifact each verb echoes beside
+  `provenance.input.content_hash` — `drc`/`extract`'s `file`, `lvs`'s
+  `layout` — is now the committable `{path, scope}` object
+  `env_provenance.repo_relative_path()` builds, not a raw filesystem path.
+  `{"path": "<repo-relative POSIX path>", "scope": "repo"}` when the input
+  resolves inside a repository, `{"path": null, "scope": "external"}` when it
+  does not; the producing host's absolute path is never emitted. Same shape
+  `klt sim`'s `netlist` and `klt pex`'s `layout` have carried since #1261.
+  **Why it is breaking rather than additive**: a consumer reading
+  `report["file"]` as a string now gets a dict. **What it fixes**:
+  `klt signoff --manifest`'s input-artifact freshness gate (#2196) re-hashes
+  that path to check the recorded hash against the artifact rather than
+  against another claim, and for the old shapes it could only try the grading
+  host's own filesystem — an absolute path names a directory that exists on
+  one machine, and `klt lvs`'s verbatim request echo was anchored to whatever
+  directory the producing run used. A committed `drc`/`extract`/`lvs`
+  envelope cited by a block manifest therefore graded `input_verified: true`
+  on the producing host and `null` from every other clone, so
+  `klt signoff --check` reported drift on
+  `items.N.citation.input_verified` for a signoff record whose evidence was
+  committed in full beside it. `klt signoff` itself needed no change: its
+  resolver has handled this shape generically since #1261.
+  **Not** included, deliberately: `lvs`'s `reference` (pinned by its own
+  `environment.reference_sha256`, not by `provenance.input`) and every
+  *output*-artifact path (`extract`'s `netlist_path`/`spef_path`/
+  `abstracted_cells[].lef_path`) stay plain strings — see
+  `docs/json-contract.md`'s "Path fields: envelope vs. plain string". Both
+  `--check` and `--rerun` on all three verbs now resolve a `scope: "repo"`
+  entry against the repo root of the **committed report's own directory**, so
+  a report committed beside its input re-verifies from any clone and any
+  working directory; a bare path string (every report predating this change)
+  resolves exactly as it always did. One consequence is tracked separately in
+  #2699: a report whose input lives outside any repository records no
+  locatable path, so `--check` reports it as unverifiable and `--rerun`
+  refuses with a clean error, where the old absolute path worked on the
+  producing host.
 - **Added** (#55, new verb `klt netlist`; `schema_version: 1`): export an
   xschem schematic to a SPICE netlist headlessly, with a real exit status,
   plus a `--check` staleness gate over a committed netlist. The verb **owns

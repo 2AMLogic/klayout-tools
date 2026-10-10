@@ -54,6 +54,7 @@ from klayout_tools.extract import (
     _rewrite_dotted_net_names,
     def_net_instance_pins,
     run_extract,
+    run_extract_klayout_engine,
 )
 from klayout_tools.extract_abstract import _abstract_pin_net_score
 from klayout_tools.extract_parasitics import (
@@ -244,6 +245,34 @@ def _make_inverter_layout(
         label(67, 5, substrate_tap_label, -300, -600)
 
     return layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Path:
+    """Shadows pytest's own built-in `tmp_path` fixture for every test in this
+    module (issue #2659): seeds a `.git` marker so `tmp_path` itself resolves
+    as this run's own repo root (`env_provenance.find_repo_root` only checks
+    for a `.git` entry -- no real `git` binary or working tree is needed).
+
+    Since #2659 `run_extract`'s `file` field is the committable
+    `{path, scope}` envelope rather than the raw input path, and `klt extract
+    --check`/`--rerun` resolve a `scope: "repo"` entry against the repo root
+    of the committed report's own directory. A layout under a bare `tmp_path`
+    resolves to `scope: "external"` with `path: null` -- correct, but it
+    means the report records no locatable input, which is the one case
+    `--check`/`--rerun` cannot verify. Seeding the marker puts every test
+    below in the *realistic* position of a design inside a repo (the only
+    position a report committed as `klt signoff` evidence is ever in).
+
+    The external branch is not thereby left uncovered: the tests that pin it
+    deliberately work outside `tmp_path`, via `tmp_path_factory` -- mirroring
+    how `tests/test_synthesize.py`'s own `tmp_path` override (issue #1844)
+    keeps its "no repo at all" case honest. `netlist_path`/`spef_path`/
+    `abstracted_cells[].lef_path` are unaffected either way: they stay plain
+    strings (see `extract.SCHEMA_VERSION`).
+    """
+    (tmp_path / ".git").mkdir()
+    return tmp_path
 
 
 def _write_gds(layout: kdb.Layout, path: Path) -> str:
@@ -574,8 +603,11 @@ def test_synthetic_inverter_extracts_two_devices(tmp_path):
 
     report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
 
-    assert report["schema_version"] == 3
-    assert report["file"] == path
+    assert report["schema_version"] == 4
+    # Issue #2659: the `{path, scope}` envelope, not the raw input path --
+    # this module's `tmp_path` override seeds a `.git` marker, so the layout
+    # resolves inside a repo.
+    assert report["file"] == {"path": "inv.gds", "scope": "repo"}
     assert report["deck"] == "sky130"
     assert report["top"] == "TOP"
     assert report["dbu_um"] == pytest.approx(0.001)
@@ -5030,26 +5062,34 @@ def _isolate_pdk_search(monkeypatch):
     monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
 
 
-def test_optional_pdk_resolution_is_reported(tmp_path):
-    variant_dir = tmp_path / "pdk_install" / "sky130A"
-    (variant_dir / "libs.tech").mkdir(parents=True)
+def test_optional_pdk_resolution_is_reported(tmp_path, tmp_path_factory):
+    # The PDK install goes outside this module's own `tmp_path` (which seeds a
+    # `.git` marker since issue #2659 -- see the fixture override above), so
+    # it is genuinely external to any repo, which is the condition the
+    # `scope: "external"` assertion below is about. A real PDK install always
+    # is; `tmp_path` being a repo root is a test-harness convenience.
+    external_pdk_root = tmp_path_factory.mktemp("outside-any-repo") / "pdk_install"
+    (external_pdk_root / "sky130A" / "libs.tech").mkdir(parents=True)
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
 
     report = run_extract(
-        path, "sky130", pdk_variant="sky130A", pdk_root=str(tmp_path / "pdk_install")
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=str(external_pdk_root),
     )
 
     # Issue #1376: `pdk.root` is a sanitized `{path, scope}` pair (mirroring
     # `env_provenance.repo_relative_path`), never the raw `--pdk-root`
-    # argument -- a PDK install under a pytest `tmp_path` lives outside this
-    # repo, so it resolves to `scope: "external"`, `path: null`. The literal
-    # absolute path string must not appear anywhere in the report.
+    # argument -- a PDK install outside this repo resolves to
+    # `scope: "external"`, `path: null`. The literal absolute path string
+    # must not appear anywhere in the report.
     assert report["pdk"] == {
         "variant": "sky130A",
         "root": {"path": None, "scope": "external"},
         "version": None,
     }
-    assert str(tmp_path / "pdk_install") not in json.dumps(report)
+    assert str(external_pdk_root) not in json.dumps(report)
 
     # The shared provenance block mirrors the resolved PDK (name/source/
     # version), independent of extract's own richer `pdk` echo above.
@@ -9011,7 +9051,7 @@ def test_sky130_corpus_extraction_produces_well_formed_report(layout_path, tmp_p
         str(layout_path), "sky130", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -9030,7 +9070,7 @@ def test_gf180mcu_corpus_extraction_produces_well_formed_report(layout_path, tmp
         str(layout_path), "gf180mcu", output=str(tmp_path / f"{layout_path.stem}.spice")
     )
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["status"] == "extracted"
     assert report["device_count"] == sum(report["device_counts"].values())
     assert report["net_count"] == len(report["nets"])
@@ -20567,7 +20607,11 @@ def test_extract_request_document_stdin_form(tmp_path, capsys, monkeypatch):
     code, report = _run_extract_json(capsys, ["-"])
 
     assert code == 0
-    assert report["file"] == path
+    # Issue #2659: the resolved layout, reported as the `{path, scope}`
+    # envelope. The request document's own *resolution* is unchanged -- only
+    # the shape the result is reported in. `netlist_path` is an output path
+    # and still the plain resolved string.
+    assert report["file"] == {"path": "inv.gds", "scope": "repo"}
     assert report["netlist_path"] == str(output)
     assert report["device_count"] == 2
 
@@ -20603,7 +20647,9 @@ def test_extract_request_document_relative_paths_resolve_against_its_directory(
     code, report = _run_extract_json(capsys, [str(request_path)])
 
     assert code == 0
-    assert report["file"] == str(design_dir / "inv.gds")
+    # The document-relative resolution is what is under test; #2659 only
+    # changed how the resolved *input* path is reported.
+    assert report["file"] == {"path": "design/inv.gds", "scope": "repo"}
     assert report["netlist_path"] == str(design_dir / "inv.spice")
 
 
@@ -22110,6 +22156,259 @@ def test_rerun_of_a_report_predating_the_field_replays_no_override(tmp_path):
     assert [entry["field"] for entry in result["drift"]] == ["label_layers"]
     assert result["fresh"]["label_layers"] is None
     assert result["fresh"]["pin_count"] == committed["pin_count"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2659: `file` is the portable `{path, scope}` envelope, not the
+# producing host's absolute path.
+#
+# A `klt extract --format json` envelope is cited verbatim by a `klt signoff`
+# manifest, and that verb's `input_verified` freshness gate (issue #2196)
+# re-hashes the artifact `file` names to check `provenance.input.content_hash`
+# against the file rather than against another claim. While `file` was the
+# producing run's own absolute path, the gate could resolve it only on the
+# producing host -- `input_verified: true` there, `null` from every other
+# clone, so `klt signoff --check` reported drift on
+# `items.N.citation.input_verified` for evidence committed in full beside the
+# manifest. `klt sim`/`klt pex` fixed the same defect for their own
+# input-path fields in issue #1261.
+#
+# `netlist_path`/`spef_path`/`abstracted_cells[].lef_path` are deliberately
+# *not* part of this: they are output artifacts, stay plain strings, and are
+# not what `provenance.input` covers -- see `extract.SCHEMA_VERSION`'s own
+# note and `docs/json-contract.md`'s "Path fields: envelope vs. plain
+# string".
+# --------------------------------------------------------------------------- #
+
+
+def _make_fake_repo(tmp_path: Path) -> Path:
+    """A `.git`-marked directory `env_provenance.find_repo_root` recognises as
+    a repo root -- mirrors `tests/test_pex.py`'s own `_make_fake_repo` (kept
+    local rather than imported across test modules, matching this file's
+    existing convention). No real git working tree is needed: `find_repo_root`
+    only looks for a `.git` entry."""
+    root = tmp_path / "fake-repo"
+    (root / ".git").mkdir(parents=True)
+    return root
+
+
+def test_run_extract_file_is_repo_relative_inside_a_repo(tmp_path):
+    """The happy path: a layout inside a repo is echoed as a repo-relative
+    `{path, scope: "repo"}` entry -- usable from any checkout of that repo,
+    and never the producing machine's absolute path."""
+    root = _make_fake_repo(tmp_path)
+    (root / "blocks").mkdir()
+    path = _write_gds(_make_inverter_layout(), root / "blocks" / "inv.gds")
+
+    report = run_extract(path, "sky130", output=str(root / "inv.spice"))
+
+    assert report["schema_version"] == 4
+    assert report["file"] == {"path": "blocks/inv.gds", "scope": "repo"}
+
+
+def test_run_extract_file_is_external_outside_any_repo(tmp_path_factory):
+    """The edge case from the issue's Test Plan: a layout outside any repo
+    reports `scope: "external"` with `path: null` -- detail is lost, the
+    absolute path is *never* emitted.
+
+    Deliberately uses `tmp_path_factory` rather than this module's own
+    `tmp_path` override, which seeds a `.git` marker -- so this really is
+    outside any repo."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["file"] == {"path": None, "scope": "external"}
+
+
+def test_run_extract_output_paths_stay_plain_strings(tmp_path):
+    """The deliberate boundary (issue #2659): only the *input* `file` is
+    retyped. `netlist_path` is an output artifact -- a caller chaining on the
+    written netlist still reads a usable filesystem path out of the response,
+    including for a netlist written outside any repo, which the `{path,
+    scope}` shape could only have reported as `path: null`."""
+    root = _make_fake_repo(tmp_path)
+    path = _write_gds(_make_inverter_layout(), root / "inv.gds")
+    outside = tmp_path / "outside-the-repo.spice"
+
+    report = run_extract(path, "sky130", output=str(outside))
+
+    assert report["file"] == {"path": "inv.gds", "scope": "repo"}
+    assert report["netlist_path"] == str(outside)
+    assert Path(report["netlist_path"]).is_file()
+
+
+def test_run_extract_klayout_engine_file_matches_run_extract_shape(tmp_path):
+    """The agreement oracle's own response builder normalises `file`
+    identically (its own `schema_version` 1 -> 2), so the two stay
+    shape-compatible field-for-field where they overlap."""
+    root = _make_fake_repo(tmp_path)
+    path = _write_gds(_make_inverter_layout(), root / "inv.gds")
+    deck = root / "deck.lylvs"
+    deck.write_text("# stub native deck\n", encoding="utf-8")
+
+    report = run_extract(path, "sky130", output=str(root / "inv.spice"))
+    try:
+        engine_report = run_extract_klayout_engine(path, str(deck))
+    except ExtractError:
+        pytest.skip("no klayout binary available for the native-deck engine")
+
+    assert engine_report["schema_version"] == 2
+    assert engine_report["file"] == report["file"]
+
+
+def test_check_extract_report_re_hashes_a_repo_scoped_file_from_another_checkout(
+    tmp_path, monkeypatch
+):
+    """The issue's own reproduction, reduced to `--check`: a report committed
+    beside its layout verifies from a *different* checkout of the same
+    content -- the `{path, scope}` entry resolves against the repo root of
+    the committed report's own directory, so neither the producing absolute
+    path nor the grading process's cwd is involved."""
+    producer = _make_fake_repo(tmp_path / "producer")
+    path = _write_gds(_make_inverter_layout(), producer / "inv.gds")
+    report = run_extract(path, "sky130", output=str(producer / "inv.spice"))
+    assert report["file"] == {"path": "inv.gds", "scope": "repo"}
+
+    consumer = _make_fake_repo(tmp_path / "consumer")
+    (consumer / "inv.gds").write_bytes((producer / "inv.gds").read_bytes())
+    report_path = consumer / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = check_extract_report(str(report_path))
+
+    (input_check,) = [
+        c for c in result["checks"] if c["field"] == "provenance.input.content_hash"
+    ]
+    assert input_check["match"] is True
+    assert result["status"] == "match"
+
+
+def test_check_extract_report_still_resolves_a_pre_2659_bare_string_file(
+    tmp_path_factory,
+):
+    """Backwards compatibility: every report committed before #2659 carries
+    `file` as a bare path string, and `--check` must keep resolving it
+    exactly as it always did -- including, as here, from outside any
+    repository, which is where the old shape was the *only* thing that
+    worked."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    report["schema_version"] = 3
+    report["file"] = path  # the pre-#2659 shape
+    report_path = tmp_path / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    assert check_extract_report(str(report_path))["status"] == "match"
+
+
+def test_check_extract_report_reports_an_external_file_as_unverifiable(
+    tmp_path_factory,
+):
+    """A `scope: "external"` entry names no path by construction, so there is
+    nothing to re-hash: the same unverifiable `actual: null` an absent field
+    gets -- never a crash, and never a false `"match"`.
+
+    This is the accepted cost of the portability fix, stated here as a test
+    rather than left to be discovered: a run whose layout is outside any
+    repository records no locatable input, so its committed report can no
+    longer be re-verified anywhere -- including on the producing host, which
+    the old absolute path did support. Inside a repo (every case where the
+    report is committed as evidence at all) the opposite holds, and `--check`
+    now works from *every* checkout rather than only one."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    assert report["file"] == {"path": None, "scope": "external"}
+    report_path = tmp_path / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    result = check_extract_report(str(report_path))
+
+    (input_check,) = [
+        c for c in result["checks"] if c["field"] == "provenance.input.content_hash"
+    ]
+    assert input_check["actual"] is None
+    assert input_check["match"] is False
+    assert result["status"] == "drifted"
+
+
+def test_rerun_extract_report_refuses_an_external_file_cleanly(tmp_path_factory):
+    """`--rerun` has nothing to re-run from when `file` names no path: the
+    same clean `ExtractError` a report missing the field entirely raises,
+    never a traceback (the counterpart to the `--check` case above)."""
+    tmp_path = tmp_path_factory.mktemp("outside-any-repo")
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+    report_path = tmp_path / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(ExtractError, match="no 'file' field to rerun"):
+        rerun_extract_report(str(report_path))
+
+
+def test_rerun_extract_report_resolves_a_repo_scoped_file_from_another_checkout(
+    tmp_path, monkeypatch
+):
+    """The `--rerun` half of the portability fix: the committed report's
+    `{path, scope}` entry is resolved against its own directory's repo root,
+    so the extraction actually re-runs on the grading checkout's copy."""
+    producer = _make_fake_repo(tmp_path / "producer")
+    path = _write_gds(_make_inverter_layout(), producer / "inv.gds")
+    report = run_extract(path, "sky130", output=str(producer / "inv.spice"))
+
+    consumer = _make_fake_repo(tmp_path / "consumer")
+    (consumer / "inv.gds").write_bytes((producer / "inv.gds").read_bytes())
+    report_path = consumer / "inv.extract.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["fresh"]["device_count"] == report["device_count"]
+
+
+def test_extract_text_output_renders_the_file_envelope_not_a_dict_repr(
+    tmp_path, tmp_path_factory, capsys
+):
+    """`--format text` is a courtesy, but it must stay readable: `file` is
+    rendered through the shared `env_provenance.render_path_field` helper
+    `klt sim`/`klt pex` already use. `netlist_path` keeps printing its plain
+    string."""
+    root = _make_fake_repo(tmp_path)
+    path = _write_gds(_make_inverter_layout(), root / "inv.gds")
+    out = root / "inv.spice"
+
+    assert main(["extract", path, "--deck", "sky130", "-o", str(out)]) == 0
+    inside = capsys.readouterr().out
+
+    outside_dir = tmp_path_factory.mktemp("outside-any-repo")
+    outside_layout = _write_gds(_make_inverter_layout(), outside_dir / "inv.gds")
+    assert (
+        main(
+            [
+                "extract",
+                outside_layout,
+                "--deck",
+                "sky130",
+                "-o",
+                str(outside_dir / "inv.spice"),
+            ]
+        )
+        == 0
+    )
+    outside = capsys.readouterr().out
+
+    assert "file: inv.gds\n" in inside
+    assert f"netlist_path: {out}\n" in inside
+    assert "file: <outside repo>\n" in outside
 
 
 def _make_mos_layout_without_flavour_marker(draw_nmos) -> kdb.Layout:
