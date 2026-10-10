@@ -3533,8 +3533,10 @@ the full reasoning):
 - **Reproducibility is in-band** — `environment` hashes the netlist and
   resolved model library so a stored result can be checked against the
   inputs that produced it; a `monte_carlo` request additionally makes the
-  sampled seed sequence itself reproducible from `monte_carlo.seed` alone
-  (see "Monte Carlo sampling" above).
+  derived per-sample seed integers themselves reproducible from
+  `monte_carlo.seed` alone — the draws ngspice makes from them are only
+  reproducible on the same engine build (see "Seed contract." under "Monte
+  Carlo sampling" above).
 
 ## Exit codes
 
