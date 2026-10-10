@@ -22274,6 +22274,8 @@ def _spice_circuits(path: str) -> dict[str, dict[str, Any]]:
             circuits[tokens[1]] = current
         elif head == ".ENDS":
             current = None
+        elif current is not None and head == "+" and current["cards"]:
+            current["cards"][-1].extend(tokens[1:])  # continuation line
         elif current is not None and not head.startswith("."):
             current["cards"].append(tokens)
     return circuits
@@ -22587,3 +22589,52 @@ def test_hierarchical_cells_blank_flag_is_a_usage_error(tmp_path, capsys):
         capsys, [path, "--deck", "sky130", "--hierarchical-cells", ","]
     )
     assert "--hierarchical-cells" in message
+
+
+def test_hierarchical_cells_preserves_model_binding_and_mos_flavour(tmp_path):
+    """`--pdk` model binding is preserved inside the emitted child circuits:
+    a NMOS drawn under sky130's `hvi` marker in cell ``HV`` still binds
+    `nfet_g5v0d10v5` (the MOS flavour device property survives the move
+    into the child circuit), while the plain NMOS in ``LV`` binds
+    `nfet_01v8` -- exactly the cards the flat run writes for the same
+    devices."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    hv = layout.create_cell("HV")
+    _draw_sky130_nmos(hv, layout, 0, "S_HV", drain_label="D_HV")
+    hv.shapes(layout.layer(75, 20)).insert(kdb.Box(-500, -500, 2500, 1500))
+    lv = layout.create_cell("LV")
+    _draw_sky130_nmos(lv, layout, 0, "S_LV", drain_label="D_LV")
+    top.insert(kdb.CellInstArray(hv.cell_index(), kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(lv.cell_index(), kdb.Trans(0, 20000)))
+    path = _write_gds(layout, tmp_path / "mixed.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    def extract(output: Path, **kwargs):
+        return run_extract(
+            path,
+            "sky130",
+            pdk_variant="sky130A",
+            pdk_root=root,
+            output=str(output),
+            **kwargs,
+        )
+
+    flat_report = extract(tmp_path / "flat.spice")
+    report = extract(tmp_path / "hier.spice", hierarchical_cells=("HV", "LV"))
+    circuits = _spice_circuits(str(tmp_path / "hier.spice"))
+
+    assert set(circuits) == {"TOP", "HV", "LV"}
+    hv_cards = circuits["HV"]["cards"]
+    lv_cards = circuits["LV"]["cards"]
+    assert len(hv_cards) == len(lv_cards) == 1
+    assert hv_cards[0][0].startswith("X")
+    assert "sky130_fd_pr__nfet_g5v0d10v5" in hv_cards[0]
+    assert "sky130_fd_pr__nfet_01v8" in lv_cards[0]
+    top_cards = circuits["TOP"]["cards"]
+    assert sorted(card[0] for card in top_cards) == ["XHV_1", "XLV_1"]
+    # The flat view in the response is unchanged by the option.
+    assert report["device_counts"] == flat_report["device_counts"] == {"nfet": 2}
+    flat_text = (tmp_path / "flat.spice").read_text()
+    assert flat_text.count("sky130_fd_pr__nfet_g5v0d10v5") == 1
+    assert flat_text.count("sky130_fd_pr__nfet_01v8") == 1

@@ -3304,8 +3304,10 @@ def _collect_hierarchy_placements(
 ) -> None:
     """Fill ``out`` with the per-device placement attribution
     ``--hierarchical-cells`` needs (issue #2722); no-op when omitted."""
+    if not names or out is None:
+        return
     final_top = netlist.circuit_by_name(top_cell.name)
-    if not names or out is None or final_top is None:
+    if final_top is None:
         return
     from .extract_hierarchy import device_placements
 
