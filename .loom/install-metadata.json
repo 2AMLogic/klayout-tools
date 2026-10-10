@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1018",
-  "loom_commit": "13e54f1cfc513507a7ef84ec6908085638d9c187",
+  "loom_version": "0.19.1026",
+  "loom_commit": "09a449709f5a1c6ae81b471ef56d466247e50808",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -390,7 +390,11 @@
     ".loom/scripts/post-verdict.sh",
     ".loom/scripts/tests/test-post-verdict-gate.sh",
     ".loom/scripts/tests/test-post-verdict.sh",
-    ".loom/scripts/tests/test-sweep-lease-renew-lifecycle.sh"
+    ".loom/scripts/tests/test-sweep-lease-renew-lifecycle.sh",
+    ".loom/scripts/tests/test-check-main-clean-build-trees.sh",
+    ".loom/scripts/tests/test-resync-installed-payload-fallback.sh",
+    ".agents/skills/loom-builder-pr/SKILL.md",
+    ".loom/docs/park-record.md"
   ],
   "last_resync": "2026-10-10",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
