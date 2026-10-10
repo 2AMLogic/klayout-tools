@@ -17585,9 +17585,17 @@ def test_run_lvs_macro_bus_anchoring_does_not_reach_internal_tie_nets(tmp_path):
     topologically interchangeable (one macro pin each, nothing else) and
     swapping them still compares clean. The correctly-wired twin below is the
     control that the fixture itself is sound. See `docs/cli/lvs.md`,
-    "Top-level pin anchoring" -- reaching this case needs the macro's *own*
-    pin names anchored, which is a different (and separately filed)
-    mechanism.
+    "Top-level pin anchoring".
+
+    Issue #2704's spike measured that *paired-instance* pin anchoring cannot
+    reach this case either: `NetlistComparer` already pairs a black-box
+    master's pins by name and already pairs the parent nets reached through a
+    paired instance's pins, so an anchor derived from that pairing restates
+    the comparer's own conclusion (see the `_spike_2704_*` probes below and
+    `docs/design/lvs-paired-instance-anchoring-spike.md`). The swap is only
+    visible through what the layout's tie nodes *mean* (logic-0 vs logic-1),
+    which only an explicit tie-net declaration can supply -- see
+    `test_spike_2704_explicit_tie_net_declaration_catches_the_swap`.
     """
     clean = run_lvs(
         _macro_bus_request(
@@ -17615,6 +17623,397 @@ def test_run_lvs_macro_bus_anchoring_does_not_reach_internal_tie_nets(tmp_path):
         if m["category"] == "topology.top_level_pins_anchored"
     ]
     assert entry["details"]["pins"] == ["DIN[0]", "DIN[1]", "DOUT"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2704 design spike: can paired-instance pin anchoring be derived
+# soundly, and would it reach the tie-net gap above?
+#
+# Design/test instrumentation only -- these probes drive `klayout.db`'s
+# `NetlistComparer` directly (never a production hook) and record every
+# comparer callback, so each assertion is about *pairing evidence*, not just a
+# clean/mismatch verdict. The measured result and disposition live in
+# `docs/design/lvs-paired-instance-anchoring-spike.md`.
+# --------------------------------------------------------------------------- #
+
+#: Two instances of one black-box master sharing two interior nets (`n0`,
+#: `n1`) that only the master's pins distinguish, each instance driving its
+#: own top-level output so the two instances are themselves distinguishable.
+_SPIKE_2704_TWO_INSTANCE_SPICE = (
+    ".subckt top a b q1 q2\n"
+    "XU1 a b n0 n1 q1 mylib__macro_4\n"
+    "XU2 a b n0 n1 q2 mylib__macro_4\n"
+    ".ends\n" + _MACRO_BUS_LIBRARY_SPICE
+)
+
+#: The same netlist with `D2`/`D3` swapped on the second instance only.
+_SPIKE_2704_TWO_INSTANCE_ONE_SWAPPED_SPICE = _SPIKE_2704_TWO_INSTANCE_SPICE.replace(
+    "XU2 a b n0 n1", "XU2 a b n1 n0"
+)
+
+
+def _spike_2704_reference_spice(verilog: str) -> str:
+    """The exact SPICE `reference.form: "gate-level-verilog"` hands the
+    comparer for ``verilog`` against the #2692 macro library (tie bits become
+    the module-scoped `__CONST0__`/`__CONST1__` nets)."""
+    from klayout_tools.verilog_netlist import (
+        convert_gate_level_verilog,
+        parse_subckt_pin_orders,
+    )
+
+    orders = parse_subckt_pin_orders(_MACRO_BUS_LIBRARY_SPICE)
+    return convert_gate_level_verilog(verilog, pin_order_lookup=orders.get)
+
+
+def _spike_2704_compare(
+    tmp_path,
+    layout_spice: str,
+    reference_spice: str,
+    *,
+    equivalent_pins: tuple[str, ...] = (),
+    replay: list[tuple[str, str]] | tuple[()] = (),
+):
+    """Run one `NetlistComparer.compare()` with a callback recorder and return
+    ``(result, record)``.
+
+    ``record`` holds, captured *inside* the callbacks (as plain names/ids, so
+    nothing depends on a transient wrapper object outliving its callback):
+
+    - ``master_pins``: ``(layout_pin_name, reference_pin_name)`` pairs from
+      ``match_pins`` while the master circuit pair is being compared;
+    - ``instances``: ``(layout_id, layout_name, reference_id,
+      reference_name)`` from ``match_subcircuits`` on the top pair;
+    - ``top_nets``: ``(layout_net, reference_net)`` from ``match_nets`` /
+      ``match_ambiguous_nets`` on the top pair;
+    - ``derived``: the staged paired-instance anchors -- for every paired
+      instance and every paired master pin, the layout parent net reached
+      through the layout instance's pin and the reference parent net reached
+      through the paired reference instance's same pin
+      (``SubCircuit.net_for_pin``), as ``(instance, pin, layout_net,
+      reference_net)``.
+
+    ``equivalent_pins`` declares a swappable master-pin group on both sides
+    (the mechanism `hints.equivalent_pins` uses); ``replay`` asserts
+    ``(layout_net, reference_net)`` pairs on the top circuits with
+    ``same_nets(..., must_match=True)`` before comparing -- the staged
+    re-compare a follow-up would perform.
+    """
+    import klayout.db as kdb
+
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    netlists = []
+    for side, text in (("layout", layout_spice), ("reference", reference_spice)):
+        path = _write(tmp_path / f"{side}.spice", text)
+        netlist = kdb.Netlist()
+        netlist.read(path, kdb.NetlistSpiceReader())
+        netlists.append(netlist)
+    layout_netlist, reference_netlist = netlists
+    master = "MYLIB__MACRO_4"
+    record: dict[str, list] = {
+        "master_pins": [],
+        "instances": [],
+        "top_nets": [],
+        "derived": [],
+    }
+
+    def _name(obj, attr="expanded_name"):
+        return None if obj is None else getattr(obj, attr)()
+
+    class _Recorder(kdb.GenericNetlistCompareLogger):
+        def __init__(self):
+            self.scope = None
+
+        def begin_circuit(self, a, b):
+            self.scope = a.name if a is not None else None
+
+        def match_pins(self, a, b):
+            if self.scope == master:
+                record["master_pins"].append((_name(a, "name"), _name(b, "name")))
+
+        def match_subcircuits(self, a, b):
+            record["instances"].append((a.id(), a.name, b.id(), b.name))
+
+        def match_nets(self, a, b):
+            if self.scope == "TOP":
+                record["top_nets"].append((_name(a), _name(b)))
+
+        def match_ambiguous_nets(self, a, b, msg):
+            self.match_nets(a, b)
+
+    # Held in a local: the comparer does not keep the Python logger alive,
+    # so a temporary would be collected and every callback silently lost.
+    recorder = _Recorder()
+    comparer = kdb.NetlistComparer(recorder)
+    if equivalent_pins:
+        for netlist in netlists:
+            circuit = netlist.circuit_by_name(master)
+            comparer.equivalent_pins(
+                circuit, [circuit.pin_by_name(pin).id() for pin in equivalent_pins]
+            )
+    layout_top = layout_netlist.circuit_by_name("TOP")
+    reference_top = reference_netlist.circuit_by_name("TOP")
+    for layout_net, reference_net in replay:
+        comparer.same_nets(
+            layout_top,
+            reference_top,
+            layout_top.net_by_name(layout_net),
+            reference_top.net_by_name(reference_net),
+            True,
+        )
+    result = comparer.compare(layout_netlist, reference_netlist)
+
+    layout_master = layout_netlist.circuit_by_name(master)
+    reference_master = reference_netlist.circuit_by_name(master)
+    for layout_id, _, reference_id, reference_name in record["instances"]:
+        layout_inst = layout_top.subcircuit_by_id(layout_id)
+        reference_inst = reference_top.subcircuit_by_id(reference_id)
+        for layout_pin, reference_pin in record["master_pins"]:
+            if layout_pin is None or reference_pin is None:
+                # A master pin declared on one side only: there is no pin to
+                # reach a parent net through on the other side, so no anchor
+                # can be derived -- it stays unstrengthened.
+                continue
+            net_a = layout_inst.net_for_pin(layout_master.pin_by_name(layout_pin).id())
+            net_b = reference_inst.net_for_pin(
+                reference_master.pin_by_name(reference_pin).id()
+            )
+            record["derived"].append(
+                (reference_name, reference_pin, _name(net_a), _name(net_b))
+            )
+    return result, record
+
+
+def _spike_2704_tie_fixture(swapped: bool) -> tuple[str, str]:
+    layout = _MACRO_TIE_LAYOUT_SPICE_SWAPPED if swapped else _MACRO_TIE_LAYOUT_SPICE
+    return layout, _spike_2704_reference_spice(_MACRO_TIE_REFERENCE_VERILOG)
+
+
+@pytest.mark.parametrize("swapped", [False, True], ids=["clean", "swapped"])
+def test_spike_2704_paired_instance_anchors_restate_the_comparers_own_pairing(
+    tmp_path, swapped
+):
+    """Issue #2704 spike, the central measurement: on the #2692 tie-net
+    fixture, a paired-instance anchor *can* be derived soundly after a first
+    compare (staged: `match_subcircuits` pairs the instance, the master pair's
+    `match_pins` pairs `D2`<->`D2` by name, `SubCircuit.net_for_pin` reaches
+    the parent nets), but every derived anchor is already one of the
+    comparer's own `match_nets` pairings -- so replaying them on a fresh
+    comparer cannot change the verdict. The swap is not a pairing defect."""
+    layout, reference = _spike_2704_tie_fixture(swapped)
+    result, record = _spike_2704_compare(tmp_path / "first", layout, reference)
+
+    # The tie swap compares clean either way (the #2692 residual gap).
+    assert result is True
+    # Abstract-master pins pair by name, not by position.
+    assert record["master_pins"] == [
+        ("D0", "D0"),
+        ("D1", "D1"),
+        ("D2", "D2"),
+        ("D3", "D3"),
+        ("Q", "Q"),
+    ]
+    assert [(i[1], i[3]) for i in record["instances"]] == [("1", "U1")]
+    tie_anchors = {
+        (d[1], d[2], d[3]) for d in record["derived"] if d[1] in ("D2", "D3")
+    }
+    if swapped:
+        assert tie_anchors == {("D2", "HI", "__CONST0__"), ("D3", "LO", "__CONST1__")}
+    else:
+        assert tie_anchors == {("D2", "LO", "__CONST0__"), ("D3", "HI", "__CONST1__")}
+    # Tautology: every derived anchor is a pairing the comparer already made.
+    derived_pairs = {(d[2], d[3]) for d in record["derived"]}
+    assert derived_pairs <= set(record["top_nets"])
+
+    replayed, _ = _spike_2704_compare(
+        tmp_path / "replay", layout, reference, replay=sorted(derived_pairs)
+    )
+    assert replayed is result
+
+
+def test_spike_2704_one_instance_swap_is_caught_by_topology_already(tmp_path):
+    """Issue #2704 spike: two instances of one black-box master. A `D2`/`D3`
+    swap on one instance, where the swapped nets are distinguishable through
+    the *other* instance, already reports a mismatch with no anchoring at all
+    -- the comparer enforces paired-instance pin identity itself. The
+    correctly wired sibling instance stays paired."""
+    ok, clean = _spike_2704_compare(
+        tmp_path / "clean",
+        _SPIKE_2704_TWO_INSTANCE_SPICE,
+        _SPIKE_2704_TWO_INSTANCE_SPICE,
+    )
+    assert ok is True
+    assert [(i[1], i[3]) for i in clean["instances"]] == [("U1", "U1"), ("U2", "U2")]
+
+    ok, swapped = _spike_2704_compare(
+        tmp_path / "swapped",
+        _SPIKE_2704_TWO_INSTANCE_ONE_SWAPPED_SPICE,
+        _SPIKE_2704_TWO_INSTANCE_SPICE,
+    )
+    assert ok is False
+    # Only the unswapped sibling is paired; the swapped instance is not.
+    assert [(i[1], i[3]) for i in swapped["instances"]] == [("U1", "U1")]
+
+
+def test_spike_2704_instance_pairing_ignores_names_and_order(tmp_path):
+    """Issue #2704 spike: the instance pairing `match_subcircuits` reports
+    follows topology, not instance names or creation order -- renamed and
+    reordered layout instances, and even a duplicated layout instance name,
+    pair with the reference instance that drives the same output. (Any
+    name- or order-based pre-compare heuristic would get these wrong.)"""
+    reordered = (
+        ".subckt top a b q1 q2\n"
+        "XZZ a b n0 n1 q2 mylib__macro_4\n"
+        "XAA a b n0 n1 q1 mylib__macro_4\n"
+        ".ends\n" + _MACRO_BUS_LIBRARY_SPICE
+    )
+    ok, record = _spike_2704_compare(
+        tmp_path / "renamed", reordered, _SPIKE_2704_TWO_INSTANCE_SPICE
+    )
+    assert ok is True
+    assert sorted((i[1], i[3]) for i in record["instances"]) == [
+        ("AA", "U1"),
+        ("ZZ", "U2"),
+    ]
+
+    duplicated = reordered.replace("XZZ", "X1").replace("XAA", "X1")
+    ok, record = _spike_2704_compare(
+        tmp_path / "duplicate", duplicated, _SPIKE_2704_TWO_INSTANCE_SPICE
+    )
+    assert ok is True
+    # Both layout instances are named "1"; only the id tells them apart, and
+    # the pairing still follows the output each one drives.
+    pairs = {(i[0], i[3]) for i in record["instances"]}
+    assert pairs == {(2, "U1"), (1, "U2")}
+
+
+def test_spike_2704_unpaired_instance_derives_no_anchor(tmp_path):
+    """Issue #2704 spike: an extra layout instance with no reference
+    counterpart is reported by the comparer (verdict `False`) and never
+    appears in `match_subcircuits`, so no anchor could be derived through it
+    -- the staged mapping stays silent rather than guessing a partner."""
+    extra = _SPIKE_2704_TWO_INSTANCE_SPICE.replace(
+        ".ends\n.subckt", "XU3 a b n0 n1 q2 mylib__macro_4\n.ends\n.subckt", 1
+    )
+    ok, record = _spike_2704_compare(tmp_path, extra, _SPIKE_2704_TWO_INSTANCE_SPICE)
+    assert ok is False
+    assert "U3" not in {i[1] for i in record["instances"]}
+    assert {d[0] for d in record["derived"]} <= {"U1", "U2"}
+
+
+def test_spike_2704_one_sided_master_pin_derives_no_anchor(tmp_path):
+    """Issue #2704 spike: a master pin declared on the reference side only
+    surfaces as a `match_pins(None, "D3")` event; there is no layout pin to
+    reach a parent net through, so no anchor is derived for it. (Measured,
+    not endorsed: KLayout's own verdict for this shape is `True` because the
+    reference net reaches only that one pin.)"""
+    reference = (
+        ".subckt top a b q\nXU1 a b n0 n1 q mylib__macro_4\n.ends\n"
+        + _MACRO_BUS_LIBRARY_SPICE
+    )
+    layout = (
+        ".subckt top a b q\nXU1 a b n0 q mylib__macro_4\n.ends\n"
+        ".subckt mylib__macro_4 D0 D1 D2 Q\n.ends\n"
+    )
+    ok, record = _spike_2704_compare(tmp_path, layout, reference)
+    assert ok is True
+    assert (None, "D3") in record["master_pins"]
+    assert "D3" not in {d[1] for d in record["derived"]}
+
+
+def test_spike_2704_equivalent_pins_must_take_precedence(tmp_path):
+    """Issue #2704 spike: with `D2`/`D3` declared swappable, the one-instance
+    swap is legal and compares clean -- but the comparer still reports the
+    master pins as `D2`<->`D2`, so the *staged* anchors derived through that
+    pin on the two instances contradict each other (the unswapped sibling
+    says `N0`<->`N0`, the swapped one `N1`<->`N0`). KLayout accepts that
+    incoherent set silently rather than flagging it, so any automatic
+    derivation must skip pins in an `equivalent_pins` group *and* detect
+    conflicting anchors itself before replay. Negative control: the same
+    swap without the declaration is a mismatch."""
+    ok, _ = _spike_2704_compare(
+        tmp_path / "undeclared",
+        _SPIKE_2704_TWO_INSTANCE_ONE_SWAPPED_SPICE,
+        _SPIKE_2704_TWO_INSTANCE_SPICE,
+    )
+    assert ok is False
+
+    ok, record = _spike_2704_compare(
+        tmp_path / "declared",
+        _SPIKE_2704_TWO_INSTANCE_ONE_SWAPPED_SPICE,
+        _SPIKE_2704_TWO_INSTANCE_SPICE,
+        equivalent_pins=("D2", "D3"),
+    )
+    assert ok is True
+    contradicting = sorted(
+        (d[2], d[3])
+        for d in record["derived"]
+        if (d[2], d[3]) not in set(record["top_nets"])
+    )
+    # The swapped instance's anchors disagree with the comparer's pairing...
+    assert contradicting == [("N0", "N1"), ("N1", "N0")]
+    # ...and with the unswapped sibling's anchors: per-instance anchors
+    # through a swappable pin are mutually inconsistent.
+    derived_pairs = sorted({(d[2], d[3]) for d in record["derived"]})
+    assert ("N0", "N0") in derived_pairs and ("N0", "N1") in derived_pairs
+
+    # KLayout does not police contradictory `same_nets` assertions: replaying
+    # the whole incoherent set is accepted silently (one assertion per net
+    # survives), so it neither rejects the legal swap nor reports the
+    # contradiction. Conflict detection cannot be delegated to the comparer.
+    replayed, _ = _spike_2704_compare(
+        tmp_path / "replayed",
+        _SPIKE_2704_TWO_INSTANCE_ONE_SWAPPED_SPICE,
+        _SPIKE_2704_TWO_INSTANCE_SPICE,
+        equivalent_pins=("D2", "D3"),
+        replay=derived_pairs,
+    )
+    assert replayed is True
+
+    # Skipping the declared group leaves a coherent (one partner per net)
+    # anchor set that keeps the caller's verdict.
+    kept = sorted({(d[2], d[3]) for d in record["derived"] if d[1] not in ("D2", "D3")})
+    assert len({a for a, _ in kept}) == len(kept) == len({b for _, b in kept})
+    replayed, _ = _spike_2704_compare(
+        tmp_path / "replayed_skipping_group",
+        _SPIKE_2704_TWO_INSTANCE_ONE_SWAPPED_SPICE,
+        _SPIKE_2704_TWO_INSTANCE_SPICE,
+        equivalent_pins=("D2", "D3"),
+        replay=kept,
+    )
+    assert replayed is True
+
+
+def test_spike_2704_explicit_tie_net_declaration_catches_the_swap(tmp_path):
+    """Issue #2704 spike, the disposition's narrow explicit declaration: the
+    tie swap is caught once the caller says which layout node *is* logic-0
+    and which is logic-1 -- expressible today through `hints.same_nets` on
+    the real `run_lvs` path, with the clean twin still matching. Each refusal
+    is a hand-written-hint refusal (`details: null`), never confused with a
+    top-level-pin anchor's."""
+    hints = {"same_nets": [["LO", "__CONST0__"], ["HI", "__CONST1__"]]}
+    reports = {}
+    for label, layout in (
+        ("clean", _MACRO_TIE_LAYOUT_SPICE),
+        ("swapped", _MACRO_TIE_LAYOUT_SPICE_SWAPPED),
+    ):
+        request = json.loads(
+            _macro_bus_request(tmp_path / label, layout, _MACRO_TIE_REFERENCE_VERILOG)
+        )
+        request["hints"] = hints
+        reports[label] = run_lvs(json.dumps(request))
+
+    assert reports["clean"]["status"] == "match"
+    assert reports["clean"]["error_count"] == 0
+    assert reports["swapped"]["status"] == "mismatch"
+    rejected = [
+        m for m in reports["swapped"]["mismatches"] if m["category"] == "hints.rejected"
+    ]
+    assert sorted((m["net"]["layout"], m["net"]["reference"]) for m in rejected) == [
+        ("HI", "__CONST1__"),
+        ("LO", "__CONST0__"),
+    ]
+    assert all(m["details"] is None for m in rejected)
 
 
 def test_run_lvs_anchor_top_level_pins_rejects_a_non_boolean(tmp_path):
