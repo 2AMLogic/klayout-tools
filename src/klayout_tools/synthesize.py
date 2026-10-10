@@ -194,6 +194,24 @@ from. Both are ``None`` when the resolved liberty reports no
 libraries, e.g. gf180mcu_fd_sc_mcu9t5v0, report leakage only via
 per-input-state groups this module deliberately does not average into one
 number). See :func:`_compute_leakage`.
+
+``macros`` (issue #2635, optional) is the shared hard-macro declaration --
+one shape, documented once in :mod:`klayout_tools.macros`, accepted
+identically by ``klt sta`` and (plus its own placement fields) by ``klt
+place-and-route``. Each entry names a pre-characterized block the design
+instantiates but carries no RTL for, and this module's generated ``.ys``
+loads its liberty (``read_liberty -lib``) or a blackbox declaration
+(``read_verilog -lib``, generated from the LEF when the caller supplies
+neither) **before** ``hierarchy``, so the macro survives as one opaque
+instance instead of being implemented out of standard cells. Without it,
+Yosys aborts with ``Module `\\<cell>' referenced in module `\\<top>' in
+cell `\\<inst>' is not part of the design``. The response reports macro
+instances separately (``macros``, ``macro_instance_counts_by_type``,
+``macro_instance_count``) and names every instantiated cell type whose area
+``area_um2`` does *not* account for (``cells_without_area``, plus a
+``warnings`` entry) -- a blackboxed macro contributes ``0`` to ``area_um2``
+by construction, and that used to be silent. See
+:func:`_macro_blackbox_inputs` / :func:`_cells_without_area`.
 """
 
 from __future__ import annotations
@@ -208,6 +226,7 @@ import uuid
 from typing import Any
 
 from . import env_provenance
+from . import macros as macro_spec
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -713,6 +732,20 @@ _CELL_LEAKAGE_POWER_RE = re.compile(
     r"\bcell_leakage_power\s*:\s*(?P<value>[-+0-9.eE]+)\s*;"
 )
 
+#: The scalar ``area : <value>;`` attribute Liberty defines for a cell's
+#: footprint -- the number Yosys's own ``stat -liberty`` sums into
+#: ``area_um2``. Read here (issue #2635) only to answer the *inverse*
+#: question: which of the cell types this run actually instantiated have
+#: **no** such number in the resolved liberty, and therefore contributed a
+#: silent ``0`` to ``area_um2``. A blackboxed hard macro is the motivating
+#: case -- its area lives in its own macro liberty, never in the
+#: standard-cell liberty ``stat -liberty`` was handed -- but a
+#: ``-dont_use``d or otherwise unmapped cell type lands in the same bucket,
+#: which is exactly why the response field is a cell list rather than a
+#: macro list. Deliberately minimal, the same scope discipline
+#: :func:`_parse_liberty_leakage_nw` states for itself.
+_CELL_AREA_RE = re.compile(r"\barea\s*:\s*(?P<value>[-+0-9.eE]+)\s*;")
+
 #: ``leakage_power_unit : "1nW";`` (sky130_fd_sc_hd) / ``leakage_power_unit :
 #: 1uW ;`` (gf180mcu_fd_sc_mcu9t5v0, unquoted, space before the semicolon) --
 #: the multiplier a bare ``cell_leakage_power`` number in this liberty is
@@ -895,6 +928,30 @@ def _script_liberty_text(liberty_path: str, *, pdk_root: str | None) -> str:
     return f"{PDK_ROOT_TOKEN}/{normalized['path']}"
 
 
+def _script_input_text(
+    path: str, *, repo_root: str | None, pdk_root: str | None
+) -> str:
+    """The text :func:`_write_script` embeds for a caller-supplied input
+    whose home is not known in advance (issue #2635: a declared macro's LEF/
+    liberty/blackbox).
+
+    Composes the two existing normalizers in the order that keeps the
+    artifact commit-safe in the most cases: repo-relative first
+    (:func:`_script_path_text` -- a macro vendored into the design repo, the
+    common case for a ``klt lef-abstract`` output), then ``$PDK_ROOT``-
+    relative (:func:`_script_liberty_text` -- a PDK-shipped memory-compiler
+    macro, the case issue #2635 was filed from), then the absolute path
+    unchanged. Writing a :data:`PDK_ROOT_TOKEN` here needs no extra
+    machinery: :func:`_write_script` already emits a rehydrated runnable
+    sibling whenever the finished script text contains that token at all,
+    and :func:`rehydrate_script_text` substitutes *every* occurrence.
+    """
+    repo_text = _script_path_text(path, repo_root=repo_root)
+    if repo_text != path:
+        return repo_text
+    return _script_liberty_text(path, pdk_root=pdk_root)
+
+
 def _baseline_ref_fallback(resolved_path: str, *, repo_root: str | None) -> str:
     """`baseline.ref`'s default value (issue #1844) when
     `request.baseline.ref` is omitted -- previously the literal
@@ -1068,6 +1125,12 @@ def run_synthesize(
     # resolved liberty, just below.
     dont_use_requested, dont_use_mode = _resolve_dont_use_request(constraints)
     expected_latches = _resolve_expected_latches(request)
+    # Issue #2635: the shared hard-macro declaration. Shape-validated here,
+    # with everything else that needs no PDK resolution; the one
+    # corner-dependent half (which of a macro's per-corner liberties applies)
+    # necessarily waits for `_resolve_liberty` below, exactly as
+    # `dont_use`'s own liberty-dependent half already does.
+    macros = _validate_macros(request.get("macros"), request_dir)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
@@ -1076,8 +1139,27 @@ def run_synthesize(
         dont_use_requested, liberty_path
     )
 
+    # Issue #2635: a declared macro's LEF/liberty/blackbox/GDS are *declared
+    # inputs* to this run exactly as the RTL sources and the standard-cell
+    # liberty are, so they get the same "was this mutated under us?" check
+    # `_assert_inputs_unchanged` applies to everything else. The *generated*
+    # blackbox (when a macro supplies neither a `lib` nor a
+    # `verilog_blackbox`) is an output of this run, not an input, and is
+    # deliberately absent.
+    macro_input_paths = [
+        path
+        for macro in macros
+        for path in (
+            macro["lef"],
+            macro["gds"],
+            macro["verilog_blackbox"],
+            *(macro["lib"] or {}).values(),
+        )
+        if path is not None
+    ]
     input_state = {
-        path: _input_file_state(path) for path in [*resolved_sources, liberty_path]
+        path: _input_file_state(path)
+        for path in [*resolved_sources, liberty_path, *macro_input_paths]
     }
     input_state[request_path] = request_state
     # Hash before any engine invocation. The final state check also covers
@@ -1110,6 +1192,11 @@ def run_synthesize(
         constr_path = os.path.join(output_dir, f"{hdl_toplevel}_abc.constr")
         abc_log_path = os.path.join(output_dir, f"{hdl_toplevel}_abc.log")
         _write_constr(constr_path, *constr_inputs)
+
+    # Issue #2635: resolved after the run directory exists, because a macro
+    # that supplies neither a `lib` nor a `verilog_blackbox` gets one
+    # generated from its own LEF *into* that directory.
+    macro_inputs = _macro_blackbox_inputs(macros, corner=corner, output_dir=output_dir)
 
     dont_use_globs, cell_exclusions = _resolve_cell_exclusions(
         requested=dont_use_requested,
@@ -1179,6 +1266,7 @@ def run_synthesize(
         tie_cells=_TIE_CELLS.get(cell_library),
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
+        macro_inputs=tuple(macro_inputs),
         repo_root=repo_root,
         pdk_root=pdk_info["root"],
     )
@@ -1211,19 +1299,37 @@ def run_synthesize(
     timing = _read_produced_abc_timing(abc_log_path, delay_target_ps)
     engine_version = _yosys_version()
     structural = _compute_structural(module_stats, yosys_log, expected_latches)
+    instance_counts_by_type = dict(
+        sorted((module_stats.get("num_cells_by_type") or {}).items())
+    )
+    leakage_power_nw, leakage_by_type_nw = _compute_leakage(
+        liberty_path, instance_counts_by_type
+    )
+    # Issue #2635: macro instances reported *separately* from standard
+    # cells. `instance_counts_by_type` deliberately keeps counting every
+    # type (removing the macro from it would be a breaking change, and
+    # "how many cells of every kind" is still the right answer for it);
+    # these two fields are the additive split a caller needs to compare
+    # standard-cell counts against a standard-cell budget.
+    macro_cells = frozenset(macro["cell"] for macro in macros)
+    macro_instance_counts_by_type = {
+        cell_type: count
+        for cell_type, count in instance_counts_by_type.items()
+        if cell_type in macro_cells
+    }
+    macro_instance_count = sum(macro_instance_counts_by_type.values())
+    cells_without_area = _cells_without_area(liberty_path, instance_counts_by_type)
+    # Computed after the instance counts (issue #2635) so the missing-area
+    # disclosure can be one more entry in the same `warnings` block every
+    # other disclosed-but-skipped capability already reports through.
     warnings_summary = _summarize_warnings(
         yosys_log,
         capability_warnings={
             **_library_capability_warnings(cell_library),
             **_missing_timing_warning(abc_log_path, timing),
             **_dont_use_unsupported_warning(cell_exclusions),
+            **_macro_area_warning(cells_without_area, macro_cells),
         },
-    )
-    instance_counts_by_type = dict(
-        sorted((module_stats.get("num_cells_by_type") or {}).items())
-    )
-    leakage_power_nw, leakage_by_type_nw = _compute_leakage(
-        liberty_path, instance_counts_by_type
     )
 
     equivalence = None
@@ -1271,6 +1377,45 @@ def run_synthesize(
         # `KeyError` -- see #560.
         "sequential_area_um2": module_stats.get("sequential_area"),
         "instance_counts_by_type": instance_counts_by_type,
+        # Issue #2635: the shared hard-macro block. `macros` echoes the
+        # declaration resolved to absolute paths (identical shape to `klt
+        # sta`'s own echo -- `klayout_tools.macros.macros_response`);
+        # `macro_instance_counts_by_type`/`macro_instance_count` split the
+        # macro instances back out of `instance_counts_by_type` (which still
+        # counts every type, unchanged); `cells_without_area` names every
+        # instantiated type whose area `area_um2` does *not* account for --
+        # `null` when that cannot be established from the resolved liberty.
+        # Always present; additive fields, no `schema_version` bump
+        # (docs/json-contract.md).
+        # `blackbox_source`/`blackbox_path` additionally record *how* each
+        # macro was made visible to Yosys (`"liberty"` /
+        # `"verilog_blackbox"` / `"lef"`, the last being a stub this run
+        # generated into the run directory) -- see
+        # `_macro_blackbox_inputs`.
+        "macros": [
+            {
+                **entry,
+                "blackbox_source": macro_input["source"],
+                "blackbox_path": _report_path(macro_input["path"], repo_root=repo_root),
+            }
+            for entry, macro_input in zip(
+                macro_spec.macros_response(
+                    macros,
+                    # Every path in a `klt synthesize` response is the
+                    # `{path, scope}` shape (issue #1844, the reason this
+                    # verb's `schema_version` is 2) -- a committed report is
+                    # evidence, and an absolute path in one leaks the
+                    # author's home directory. `macros[]`'s paths are no
+                    # exception; `find_absolute_path_fields` enforces it.
+                    normalize_path=lambda path: _report_path(path, repo_root=repo_root),
+                ),
+                macro_inputs,
+                strict=True,
+            )
+        ],
+        "macro_instance_counts_by_type": macro_instance_counts_by_type,
+        "macro_instance_count": macro_instance_count,
+        "cells_without_area": cells_without_area,
         # Static (leakage) power only -- issue #1626. `None` when the
         # resolved liberty reports no `cell_leakage_power` for any
         # instantiated cell type at all -- see `_compute_leakage`.
@@ -1683,6 +1828,186 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
     return resolved
 
 
+def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
+    """Validate the optional ``request.macros`` array (issue #2635) -- the
+    shared, placement-free hard-macro declaration documented once in
+    :mod:`klayout_tools.macros` and accepted identically by ``klt sta``.
+
+    Returns ``[]`` when the field is omitted, so a request written before
+    this field existed synthesizes byte-for-byte as it did. A thin wrapper
+    rather than a second validator: the field's *shape* is a contract shared
+    across three verbs, and the only thing that differs per verb is which
+    exception class a bad request raises.
+    """
+    return macro_spec.validate_macros(macros, request_dir, error_cls=SynthesizeError)
+
+
+def _macro_blackbox_inputs(
+    macros: list[dict[str, Any]], *, corner: str, output_dir: str
+) -> list[dict[str, str]]:
+    """How each declared macro is made visible to Yosys, in request order::
+
+        [{"cell": str, "source": "liberty"|"verilog_blackbox"|"lef",
+          "path": str}, ...]
+
+    Exactly one of three dispositions per macro, in precedence order:
+
+    1. ``lib`` -- the corner-matching macro liberty
+       (:func:`klayout_tools.macros.macro_lib_for_corner`), loaded with
+       ``read_liberty -lib``. Preferred because it carries the macro's real
+       timing *and* area, so a later ``klt sta``/``klt place-and-route`` run
+       on the same declaration sees the same numbers.
+    2. ``verilog_blackbox`` -- a caller-supplied ``(* blackbox *)`` module
+       declaration, loaded with ``read_verilog -lib``.
+    3. Neither -- a blackbox is **generated** from the macro's own LEF pin
+       list (:func:`klayout_tools.macros.blackbox_verilog_text`) into
+       ``<run dir>/<cell>_blackbox.v`` and loaded the same way. This is the
+       path that means a caller with only a LEF never has to hand-write (and
+       hand-maintain) a stub.
+
+    Every disposition has the same effect on the netlist: the macro
+    survives ``hierarchy``/``synth``/``abc`` as one opaque instance rather
+    than being implemented out of standard cells. Live-verified against
+    Yosys 0.69 for dispositions 1 and 2 (see
+    :func:`~klayout_tools.macros.blackbox_verilog_text`); 3 produces the
+    same file shape as 2 by construction.
+
+    The generated file is written into the run directory (never next to the
+    LEF, which may be a read-only PDK install) and retained as a debuggable
+    artifact alongside the ``.ys`` script, matching every other generated
+    input this module keeps.
+    """
+    inputs: list[dict[str, str]] = []
+    for macro in macros:
+        lib_path = macro_spec.macro_lib_for_corner(
+            macro, corner, error_cls=SynthesizeError
+        )
+        if lib_path is not None:
+            inputs.append(
+                {"cell": macro["cell"], "source": "liberty", "path": lib_path}
+            )
+            continue
+        blackbox_path = macro["verilog_blackbox"]
+        if blackbox_path is not None:
+            inputs.append(
+                {
+                    "cell": macro["cell"],
+                    "source": "verilog_blackbox",
+                    "path": blackbox_path,
+                }
+            )
+            continue
+        generated = os.path.join(output_dir, f"{macro['cell']}_blackbox.v")
+        _write_text_file(
+            generated,
+            macro_spec.blackbox_verilog_text(macro, error_cls=SynthesizeError),
+        )
+        inputs.append({"cell": macro["cell"], "source": "lef", "path": generated})
+    return inputs
+
+
+def _liberty_cell_areas(liberty_text: str) -> dict[str, float]:
+    """Every ``cell (name) { ... area : <value>; ... }`` scalar in
+    ``liberty_text`` (issue #2635). Deliberately minimal, and the exact
+    block-scanning structure :func:`_parse_liberty_leakage_nw` already uses
+    -- a cell with no ``area`` line is simply absent from the result, never
+    assigned a guessed value, which is the whole point here."""
+    headers = list(_LIBERTY_CELL_HEADER_RE.finditer(liberty_text))
+    areas: dict[str, float] = {}
+    for index, header in enumerate(headers):
+        body_start = header.end()
+        body_end = (
+            headers[index + 1].start()
+            if index + 1 < len(headers)
+            else len(liberty_text)
+        )
+        match = _CELL_AREA_RE.search(liberty_text, body_start, body_end)
+        if match is None:
+            continue
+        try:
+            areas[header.group("name")] = float(match.group("value"))
+        except ValueError:  # pragma: no cover - regex only matches numbers
+            continue
+    return areas
+
+
+def _cells_without_area(
+    liberty_path: str, instance_counts_by_type: dict[str, int]
+) -> list[str] | None:
+    """The response's ``cells_without_area`` field (issue #2635): every cell
+    type this run instantiated for which the resolved standard-cell liberty
+    reports no ``area``, sorted.
+
+    This is what makes ``area_um2`` non-silent. Yosys's ``stat -liberty``
+    sums only the areas the *one* liberty it was handed declares, so a
+    blackboxed hard macro contributes exactly ``0`` with nothing in the
+    response marking it -- a caller comparing ``area_um2`` against an area
+    budget is then wrong by the macro's whole footprint, and has no way to
+    find out from the response. A non-empty list here says precisely which
+    instantiated types are unaccounted for.
+
+    ``[]`` -- a real, not-fabricated empty answer -- when the design
+    instantiates nothing at all, or when every instantiated type does have
+    an area. ``None`` -- "not establishable", never a fabricated empty list
+    -- when the liberty cannot be read or this deliberately-partial parser
+    can see no ``cell (...)`` group in it at all (a liberty whose cells all
+    lack ``area`` is *not* that case: its cells are parseable, so every
+    instantiated type is reported missing), exactly the posture
+    :func:`_liberty_cell_names` takes for the same two cases.
+    """
+    if not instance_counts_by_type:
+        return []
+    try:
+        with open(liberty_path, encoding="utf-8") as handle:
+            liberty_text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if _LIBERTY_CELL_HEADER_RE.search(liberty_text) is None:
+        return None
+    areas = _liberty_cell_areas(liberty_text)
+    return sorted(
+        cell_type for cell_type in instance_counts_by_type if cell_type not in areas
+    )
+
+
+def _macro_area_warning(
+    cells_without_area: list[str] | None, macro_cells: frozenset[str]
+) -> dict[str, str]:
+    """A ``warnings`` entry (issue #2635) whenever ``area_um2`` demonstrably
+    does not account for every instantiated cell type.
+
+    A response *field* a caller must remember to read is not enough on its
+    own -- the whole failure this closes is a naive reader trusting
+    ``area_um2``. Surfacing it through the same ``warnings`` block every
+    other disclosed-but-skipped capability uses means it shows up in any
+    harness that already summarises warnings, with no new field to learn.
+    Separate categories for "a declared hard macro" and "some other
+    unmapped type" because the dispositions differ: the first is expected
+    and the caller must add the macro's own area themselves, the second is
+    usually a ``-dont_use``/mapping problem.
+    """
+    if not cells_without_area:
+        return {}
+    macros_missing = [cell for cell in cells_without_area if cell in macro_cells]
+    others_missing = [cell for cell in cells_without_area if cell not in macro_cells]
+    warnings: dict[str, str] = {}
+    if macros_missing:
+        warnings["macro_area_excluded"] = (
+            "area_um2 excludes the hard macro(s) "
+            + ", ".join(macros_missing)
+            + ": their area lives in their own macro liberty, not in the "
+            "standard-cell liberty stat -liberty was handed. Add it from "
+            "response.macros[].lib before comparing area_um2 to an area "
+            "budget."
+        )
+    if others_missing:
+        warnings["cells_without_liberty_area"] = (
+            "area_um2 excludes instantiated cell type(s) with no liberty "
+            "area: " + ", ".join(others_missing)
+        )
+    return warnings
+
+
 def _resolve_liberty(
     cell_library: str,
     requested_corner: str | None,
@@ -2086,6 +2411,7 @@ def _write_script(
     tie_cells: tuple[tuple[str, str], tuple[str, str]] | None = None,
     adder_sources: tuple[str, ...] = (),
     adder_techmap_path: str | None = None,
+    macro_inputs: tuple[dict[str, str], ...] = (),
     repo_root: str | None = None,
     pdk_root: str | None = None,
 ) -> str:
@@ -2138,6 +2464,27 @@ def _write_script(
     `0` swaps one already-known, separately-tracked bare-constant limitation
     (:data:`_TIE_CELLS`'s own docstring, "gets **no** ``hilomap`` pass at
     all") for another rather than fixing anything.
+
+    ``macro_inputs`` (issue #2635, :func:`_macro_blackbox_inputs`' own
+    return value) inserts one line per declared hard macro **between** the
+    ``read_verilog`` of the RTL sources and ``hierarchy``::
+
+        read_liberty -lib <macro liberty>     # source == "liberty"
+        read_verilog -lib <macro blackbox>    # source == "verilog_blackbox"/"lef"
+
+    Its position is load-bearing: ``hierarchy -check -top`` is exactly the
+    pass that rejects a module instantiated but never read (``Module
+    `\\<cell>' referenced in module `\\<top>' in cell `\\<inst>' is not
+    part of the design`` -- the failure this field exists to close), so the
+    macro's declaration must already be loaded when it runs. ``-lib`` on
+    either reader is what makes the module a **blackbox**: its instance
+    survives ``synth``/``abc``/``clean`` untouched into ``write_verilog``'s
+    netlist and into ``stat``'s own ``num_cells_by_type``, instead of being
+    implemented out of standard cells -- which is the entire point of a hard
+    macro, and the thing that feeding the vendor's behavioural Verilog
+    through ``sources`` gets exactly backwards. With no macros declared
+    (every pre-#2635 request) not one line is emitted and the script is
+    byte-identical to before.
 
     ``adder_techmap_path`` (issue #1722, the request's ``arithmetic`` field)
     inserts the arithmetic-architecture substitution **between**
@@ -2246,6 +2593,19 @@ def _write_script(
         f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
         for path in sources
     ]
+    # Issue #2635: every declared hard macro's blackbox declaration, before
+    # `hierarchy` -- see this function's own docstring for why the position
+    # and the `-lib` flag are both load-bearing.
+    for macro_input in macro_inputs:
+        reader = (
+            "read_liberty -lib"
+            if macro_input["source"] == "liberty"
+            else "read_verilog -lib"
+        )
+        macro_text = _script_input_text(
+            macro_input["path"], repo_root=repo_root, pdk_root=pdk_root
+        )
+        lines.append(f"{reader} {macro_text}")
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     if adder_techmap_path is not None:
         lines += ["proc", "opt_expr", "opt_clean"]
@@ -2429,6 +2789,14 @@ def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
         if error_lines:
             message = f"yosys synthesis failed: {error_lines[-1]}"
             message += wasi_sandbox_hint_if_applicable(error_lines[-1])
+            # Issue #2635: `Module `\<cell>' ... is not part of the design`
+            # is what a hard macro with no `request.macros` entry looks
+            # like, and the raw line says nothing about which request field
+            # fixes it. Appended as a further `--` clause, the same
+            # recognized-hint structure the WASI hint above already uses.
+            macro_hint = macro_spec.undeclared_module_hint(error_lines[-1])
+            if macro_hint is not None:
+                message = f"{message} -- {macro_hint}"
             return message
 
     tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
@@ -3374,6 +3742,15 @@ RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
         "log_path",
         "stage2_script_path",
         "stage2_log_path",
+        # Issue #2635: `macros[].blackbox_path` is inside the run directory
+        # whenever this run *generated* the stub from a LEF, so it carries
+        # the same per-run `run_id` every other key here does and would
+        # otherwise make every rerun diff report a spurious difference.
+        # `macros[].lef`/`.lib`/`.gds`/`.verilog_blackbox` are caller-
+        # supplied inputs, stable across reruns, and deliberately stay in
+        # the diff -- a committed report whose macro declaration changed
+        # *should* fail the rerun check.
+        "blackbox_path",
     }
 )
 
