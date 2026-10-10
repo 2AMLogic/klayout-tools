@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-09
 
+- **PR #2950**: feat(mcp): klt mcp serve, a generic MCP server derived from the verb registry
+- **PR #2949**: gen: sky130 precision-poly res_array 0.19x2.0um contacts + TopVia1 audit (#2449)
+- **Issue #2830** (closed): Agent surface: ship a generic MCP server (klt mcp serve) derived from the verb registry
+- **Issue #2449** (closed): gen: finish context-dependent precision-poly contacts and audit TopVia1 sizing
 - **Issue #2913** (closed): Champion: Merge-Risk Hold Digest
 
 ### 2026-10-08
