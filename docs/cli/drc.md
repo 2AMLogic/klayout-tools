@@ -626,6 +626,47 @@ interacts at all) — a residual gap tracked as a known limitation, since
 closing it fully requires compound/connectivity-scoped layer expressions
 this engine does not evaluate (see "Coverage" below).
 
+### Required containment for single-population cuts (`require_containment`, issue #2726)
+
+The zero-overlap escape term above is deliberately scoped with
+`Region.interacting`, so a cut that touches the enclosing layer nowhere is
+invisible to it. For a **single-population** cut layer -- a `ViaN` that must
+always sit on both adjacent metals -- a deck can opt in with
+`DrcRule(require_containment=True)` on an `"enclosing"`/`"enclosed"` rule.
+Contract:
+
+- Every merged cut shape under the selected cell (hierarchy included) must lie
+  entirely inside the merged conductor; the escaped part (`cut - conductor`) is
+  reported as a polygon violation under the rule's `id`. There is no
+  interaction pre-filter, so an edge-only touch, a sliver of overlap, a cut over
+  a hole, or a cut on empty space all fail.
+- `threshold_dbu` is still an ordinary margin (deficient margin fails,
+  equality passes); `0` means pure geometric containment and exact boundary
+  coincidence passes.
+- If cuts exist but the conductor layer is absent from the stream (or has no
+  shapes under the selected cell), the rule is **checked** against an empty
+  conductor and every cut is reported; the absent layer does not appear in
+  `coverage.layers_checked`. With no cut shapes the rule is vacuous
+  (inapplicable), exactly as before.
+- It is valid only on `"enclosing"`/`"enclosed"` with an `other_layer` and no
+  `derived_layer`; anything else raises `DrcError` before layer-presence
+  shortcuts apply. The default (`False`) keeps the #318 behaviour, so shared
+  populations such as gf180mcu Contact vs Poly2/Comp are unaffected.
+
+The `sg13cmos5l` deck opts in for all eight via-stack relationships (cut /
+lower / upper): Via1 Metal1/Metal2, Via2 Metal2/Metal3, Via3 Metal3/Metal4,
+TopVia1 Metal4/TopMetal1. The lower sides reuse the existing
+`metalN.enclosing.viaN.1` rules (thresholds and provenance unchanged); the
+upper sides are new curated rules `metal2.enclosing.via1.1`,
+`metal3.enclosing.via2.1`, `metal4.enclosing.via3.1` at threshold 0 -- a
+topology assertion, with no foundry margin invented for them (TopVia1's upper
+side is the existing `topmetal1.enclosing.topvia1.1`).
+
+Remaining limitations: `Cont` against `Activ | GatPoly` (Contact layer `6/0` is
+still unread by the sg13cmos5l deck) needs compound-region/population
+semantics and is **not** covered; other PDKs' via stacks (including sg13g2) have
+not been reviewed for this opt-in and keep the legacy behaviour.
+
 ### Sized/derived-layer rules (`DerivedLayer`)
 
 Some DRM rules are defined against a derived geometry rather than a single

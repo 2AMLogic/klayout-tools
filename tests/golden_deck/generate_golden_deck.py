@@ -260,11 +260,36 @@ _ENCLOSED_SHAPE_SIZE_DBU = 2000
 _ENCLOSING_ESCAPE_WIDTH_DBU = 500
 
 
+def is_curated_topology_rule(rule: DrcRule) -> bool:
+    """A `require_containment` rule with no upstream `provenance` (issue
+    #2726's upper-landing via rules): a curated topology assertion with no
+    upstream rule to cite, so it has no golden pair (the golden manifest
+    requires per-rule upstream provenance); `tests/test_drc.py` covers it."""
+    return rule.require_containment and rule.provenance is None
+
+
+def _opposite_landings(
+    rule: DrcRule, deck_rules: list[DrcRule]
+) -> list[tuple[int, int]]:
+    """Conductors of the *other* `require_containment` rules sharing this
+    rule's cut layer (issue #2726): both fixtures must draw them, fully
+    covering the cut, so the unrelated landing's containment rule stays
+    quiet and only the rule under test can trip."""
+    return [
+        other.layer
+        for other in deck_rules
+        if other.require_containment
+        and other.other_layer == rule.other_layer
+        and other.layer != rule.layer
+    ]
+
+
 def _enclosing_pair(
     layer: tuple[int, int],
     other_layer: tuple[int, int],
     threshold_dbu: int,
     other_max_dbu: int | None = None,
+    extra_landings: list[tuple[int, int]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build a violate/clean pair for an `"enclosing"` `DrcRule` (`layer`
     encloses `other_layer`, e.g. metal encloses a contact/via).
@@ -336,6 +361,19 @@ def _enclosing_pair(
             {"layer": layer_list, "box": clean_layer_box},
         ]
     }
+    for landing in extra_landings or []:
+        # Generous, rule-compliant landing fully covering the cut (#2726).
+        shape = {
+            "layer": list(landing),
+            "box": [
+                -_ENCLOSED_SHAPE_SIZE_DBU // 2,
+                -_ENCLOSED_SHAPE_SIZE_DBU // 2,
+                size + _ENCLOSED_SHAPE_SIZE_DBU // 2,
+                size + _ENCLOSED_SHAPE_SIZE_DBU // 2,
+            ],
+        }
+        violate["shapes"].append(shape)
+        clean["shapes"].append(dict(shape))
     return violate, clean
 
 
@@ -638,6 +676,40 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
 }
 
 
+def _add_cut_landings(
+    rule: DrcRule,
+    deck_rules: list[DrcRule],
+    violate: dict[str, Any],
+    clean: dict[str, Any],
+) -> None:
+    """For a width/space rule on a cut layer that `require_containment`
+    rules constrain (issue #2726), draw both adjacent conductors around the
+    cut shapes in each fixture, so the "clean" case is not flagged for
+    drawing a cut with no landing."""
+    conductors = [
+        other.layer
+        for other in deck_rules
+        if other.require_containment and other.other_layer == rule.layer
+    ]
+    for fixture in (violate, clean):
+        cuts = [
+            shape["box"]
+            for shape in fixture["shapes"]
+            if tuple(shape["layer"]) == rule.layer
+        ]
+        if not cuts:
+            continue
+        pad = _ENCLOSED_SHAPE_SIZE_DBU
+        box = [
+            min(c[0] for c in cuts) - pad,
+            min(c[1] for c in cuts) - pad,
+            max(c[2] for c in cuts) + pad,
+            max(c[3] for c in cuts) + pad,
+        ]
+        for conductor in conductors:
+            fixture["shapes"].append({"layer": list(conductor), "box": list(box)})
+
+
 def build_manifest(
     deck_name: str,
     deck_rules: list[DrcRule],
@@ -650,7 +722,7 @@ def build_manifest(
     max_sizes = max_size_by_layer(deck_rules)
     manifest: dict[str, dict[str, Any]] = {}
     for rule in deck_rules:
-        if rule.check not in allowed_checks:
+        if rule.check not in allowed_checks or is_curated_topology_rule(rule):
             continue
         if rule.id in _DERIVED_LAYER_FIXTURES:
             violate, clean = _DERIVED_LAYER_FIXTURES[rule.id]
@@ -669,6 +741,7 @@ def build_manifest(
                 rule.other_layer,
                 rule.threshold_dbu,
                 max_sizes.get(rule.other_layer),
+                extra_landings=_opposite_landings(rule, deck_rules),
             )
         elif rule.check == "separation":
             assert rule.other_layer is not None, rule.id
@@ -687,6 +760,8 @@ def build_manifest(
                 f"{deck_name}/{rule.id}: 'enclosed' rules must be "
                 "hand-authored in _DERIVED_LAYER_FIXTURES"
             )
+        if rule.check in ("width", "space"):
+            _add_cut_landings(rule, deck_rules, violate, clean)
         prior = existing.get(rule.id, {})
         manifest[rule.id] = {
             "check": rule.check,

@@ -280,6 +280,27 @@ class DrcRule:
     "``\"enclosing\"``/``\"enclosed\"`` also catch zero-overlap escapes"
     section and ``drc.py``'s ``_run_check`` (#318).
 
+    ``require_containment`` (issue #2726) opts an ``"enclosing"``/``"enclosed"``
+    rule into *required full containment* of its **cut** side -- the
+    ``other_layer`` of an ``"enclosing"`` rule, the ``layer`` of an
+    ``"enclosed"`` rule. Every merged cut shape, anywhere in the checked cell
+    (hierarchy included), must lie entirely inside the merged conductor on the
+    other side; whatever escapes is reported under this rule's ``id`` as a
+    polygon violation (``cut - conductor``), with no ``interacting`` pre-filter.
+    A cut that touches the conductor only by an edge or a sliver, or lies
+    wholly outside it (or inside a hole of it), therefore fails. Exact
+    boundary coincidence passes. ``threshold_dbu`` still applies as an
+    ordinary margin; ``0`` means pure geometric containment. Use it only for
+    a *single-population* cut layer (a ``ViaN`` that must always land on both
+    adjacent metals); leave it ``False`` (the default) for a cut layer shared
+    by disjoint populations (e.g. gf180mcu Contact vs Poly2/Comp), which keeps
+    the interaction-scoped #318 behaviour. When cuts exist but the conductor
+    layer is absent from the stream, the rule is *checked* against an empty
+    conductor (every cut is reported); when no cut shape exists the rule is
+    skipped/inapplicable as usual. Valid only on ``"enclosing"``/``"enclosed"``
+    rules with an ``other_layer`` and no ``derived_layer``; ``run_drc()`` raises
+    :class:`~klayout_tools.drc.DrcError` otherwise.
+
     ``derived_layer``, when set (issue #345), replaces the *region actually
     checked* on the ``layer``/enclosing side of the rule with a computed
     :class:`DerivedLayer` (a sized/boolean combination of two drawn layers)
@@ -572,6 +593,7 @@ class DrcRule:
     threshold_max_dbu: int | None = None
     voltage_independent: bool = False
     requires_any_layer: tuple[tuple[int, int], ...] | None = None
+    require_containment: bool = False
 
 
 class UnknownDeckError(Exception):

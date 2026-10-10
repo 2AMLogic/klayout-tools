@@ -563,12 +563,27 @@ DECK: list[DrcRule] = [
         layer=(8, 0),  # Metal1.drawing
         other_layer=(19, 0),  # Via1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=10,  # 0.01 um
         # 5_19_via1.drc rule "V1.c": via1_nseal.enclosed(metal1_drw, 0.01um,
         # euclidian) -> "5.19.  V1.c Min. Metal1 enclosure of Via1 is 0.01 um"
         # (drc_rules['V1_c'] == 0.01)
         scope="5.19 Via1",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_19_via1.drc", "V1.c"),
+    ),
+    DrcRule(
+        id="metal2.enclosing.via1.1",
+        description="every Via1 must lie fully inside Metal2 (upper landing)",
+        layer=(10, 0),  # Metal2.drawing
+        other_layer=(19, 0),  # Via1.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726): a Via1 cut connects Metal1
+        # to Metal2, so it must always sit on both. No upstream enclosure margin
+        # for the Metal2 side was verified, so none is invented here --
+        # threshold 0 means containment only, and no provenance is cited.
+        scope="Via1 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal2 instance (beol/5_17_metaln.drc) -- cmos5l's
     # own, non-symlinked local copy, scoped "M2-M4 only (no M5)" -----------
@@ -632,12 +647,27 @@ DECK: list[DrcRule] = [
         layer=(10, 0),  # Metal2.drawing
         other_layer=(29, 0),  # Via2.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V2.c": via_lay.enclosed(metal_lay, 0.005um,
         # euclidian) -> "5.20. V2.c : Min. Metal2 enclosure of Via2 is
         # 0.005 um" (drc_rules['Vn_c'] == 0.005)
         scope="5.20 Vian",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_20_vian.drc", "V2.c"),
+    ),
+    DrcRule(
+        id="metal3.enclosing.via2.1",
+        description="every Via2 must lie fully inside Metal3 (upper landing)",
+        layer=(30, 0),  # Metal3.drawing
+        other_layer=(29, 0),  # Via2.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726): a Via2 cut connects Metal2
+        # to Metal3, so it must always sit on both. No upstream enclosure margin
+        # for the Metal3 side was verified, so none is invented here --
+        # threshold 0 means containment only, and no provenance is cited.
+        scope="Via2 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal3 instance (beol/5_17_metaln.drc) ---------------
     DrcRule(
@@ -699,12 +729,27 @@ DECK: list[DrcRule] = [
         layer=(30, 0),  # Metal3.drawing
         other_layer=(49, 0),  # Via3.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V3.c": via_lay.enclosed(metal_lay, 0.005um,
         # euclidian) -> "5.20. V3.c : Min. Metal3 enclosure of Via3 is
         # 0.005 um" (drc_rules['Vn_c'] == 0.005)
         scope="5.20 Vian",
         provenance=_cmos5l_provenance(f"{_DRC_BEOL_OWN}/5_20_vian.drc", "V3.c"),
+    ),
+    DrcRule(
+        id="metal4.enclosing.via3.1",
+        description="every Via3 must lie fully inside Metal4 (upper landing)",
+        layer=(50, 0),  # Metal4.drawing
+        other_layer=(49, 0),  # Via3.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726): a Via3 cut connects Metal3
+        # to Metal4, so it must always sit on both. No upstream enclosure margin
+        # for the Metal4 side was verified, so none is invented here --
+        # threshold 0 means containment only, and no provenance is cited.
+        scope="Via3 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal4 instance (beol/5_17_metaln.drc) -- the top of
     # this file's own templated table (cmos5l has no Metal5) ---------------
@@ -774,6 +819,7 @@ DECK: list[DrcRule] = [
         layer=(50, 0),  # Metal4.drawing
         other_layer=(125, 0),  # TopVia1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=100,  # 0.10 um
         # 5_21_topvia1.drc rule "TV1.c": topvia1_nseal.enclosed(metal4_drw,
         # 0.10um, euclidian) -- "SG13CMOS5L: M4 is below TV1" (this file's
@@ -788,6 +834,7 @@ DECK: list[DrcRule] = [
         layer=(126, 0),  # TopMetal1.drawing
         other_layer=(125, 0),  # TopVia1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=420,  # 0.42 um
         # 5_21_topvia1.drc rule "TV1.d": topvia1_nseal.enclosed(
         # topmetal1_drw, 0.42um, euclidian) -> "5.21. TV1.d : Min.

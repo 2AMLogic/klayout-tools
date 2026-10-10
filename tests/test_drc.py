@@ -7803,6 +7803,13 @@ _SG13CMOS5L_FIXED_SIZE_CUT_RULES = [
     ("topvia1.width.1", (125, 0), "TopVia1.drawing", 420),
 ]
 
+_SG13CMOS5L_CUT_LANDINGS = {
+    (19, 0): [(8, 0), (10, 0)],
+    (29, 0): [(10, 0), (30, 0)],
+    (49, 0): [(30, 0), (50, 0)],
+    (125, 0): [(50, 0), (126, 0)],
+}
+
 _SG13CMOS5L_FIXED_SIZE_CUT_BOUNDARY_CASES = [
     (rule_id, layer, layer_name, case_id, box, expected)
     for rule_id, layer, layer_name, size_dbu in _SG13CMOS5L_FIXED_SIZE_CUT_RULES
@@ -7831,6 +7838,11 @@ def test_run_drc_sg13cmos5l_fixed_size_cut_boundaries(
     cut = layout.layer(*layer)
     layout.set_info(cut, kdb.LayerInfo(layer[0], layer[1], layer_name))
     top.shapes(cut).insert(cut_box)
+    if expected_count == 0:
+        # Required containment (#2726): a cut with no landing is itself a
+        # violation, so the "clean" cases draw both adjacent conductors.
+        for conductor in _SG13CMOS5L_CUT_LANDINGS[layer]:
+            top.shapes(layout.layer(*conductor)).insert(cut_box.enlarged(900, 900))
     path = tmp_path / f"{rule_id}_{case_id}.gds"
     layout.write(str(path))
 
@@ -8842,3 +8854,319 @@ def test_eval_gate_does_not_pass_a_partial_drc_run(tmp_path, monkeypatch):
     status, exit_code, count = _status_drc(run_drc(str(path), "synthetic"))
 
     assert (status, exit_code, count) == ("fail", 0, 0)
+
+
+# --------------------------------------------------------------------------- #
+# Required containment for single-population cuts (issue #2726)
+# --------------------------------------------------------------------------- #
+
+_VIA_STACK = [
+    # (cut, lower conductor, upper conductor, lower rule id, upper rule id)
+    ((19, 0), (8, 0), (10, 0), "metal1.enclosing.via1.1", "metal2.enclosing.via1.1"),
+    ((29, 0), (10, 0), (30, 0), "metal2.enclosing.via2.1", "metal3.enclosing.via2.1"),
+    ((49, 0), (30, 0), (50, 0), "metal3.enclosing.via3.1", "metal4.enclosing.via3.1"),
+    (
+        (125, 0),
+        (50, 0),
+        (126, 0),
+        "metal4.enclosing.topvia1.1",
+        "topmetal1.enclosing.topvia1.1",
+    ),
+]
+# Cut sized per the fixed-size rule; landings enlarge it generously so no
+# width/enclosure margin defect can substitute for the containment finding.
+_CUT_SIZE = {(19, 0): 190, (29, 0): 190, (49, 0): 190, (125, 0): 420}
+
+
+def _contain_layout(tmp_path, name, shapes, dbu=0.001, extra_cell=None):
+    layout = kdb.Layout()
+    layout.dbu = dbu
+    top = layout.create_cell("TOP")
+    for layer, box in shapes:
+        top.shapes(layout.layer(*layer)).insert(box)
+    path = tmp_path / name
+    layout.write(str(path))
+    return str(path)
+
+
+def _rule_hits(report, rule_id):
+    return [v for v in report["violations"] if v["rule"] == rule_id]
+
+
+@pytest.mark.parametrize("cut,lower,upper,lower_id,upper_id", _VIA_STACK)
+@pytest.mark.parametrize("side", ["lower", "upper"])
+@pytest.mark.parametrize("mode", ["disjoint", "absent"])
+def test_sg13cmos5l_via_stack_requires_both_landings(
+    tmp_path, cut, lower, upper, lower_id, upper_id, side, mode
+):
+    size = _CUT_SIZE[cut]
+    cut_box = kdb.Box(0, 0, size, size)
+    good = cut_box.enlarged(900, 900)
+    far = kdb.Box(50_000, 0, 51_000, 1_000)
+    conductor = lower if side == "lower" else upper
+    other = upper if side == "lower" else lower
+    rule_id = lower_id if side == "lower" else upper_id
+    shapes = [(cut, cut_box), (other, good)]
+    if mode == "disjoint":
+        shapes.append((conductor, far))
+    path = _contain_layout(tmp_path, f"{rule_id}_{mode}.gds", shapes)
+
+    report = run_drc(path, "sg13cmos5l")
+
+    hits = _rule_hits(report, rule_id)
+    assert hits and report["status"] == "violations"
+    bbox = hits[0]["bbox"]
+    assert (bbox["left"], bbox["bottom"], bbox["right"], bbox["top"]) == (
+        0,
+        0,
+        size,
+        size,
+    )
+    assert rule_id in report["coverage"]["rules_checked"]
+    assert rule_id not in report["coverage"]["rules_skipped"]
+    # The opposite landing's rule is satisfied.
+    other_id = upper_id if side == "lower" else lower_id
+    assert not _rule_hits(report, other_id)
+    if mode == "absent":
+        assert (
+            f"{conductor[0]}/{conductor[1]}" not in report["coverage"]["layers_checked"]
+        )
+    assert main(["drc", path, "--deck", "sg13cmos5l"]) == 3
+
+
+@pytest.mark.parametrize("cut,lower,upper,lower_id,upper_id", _VIA_STACK)
+def test_sg13cmos5l_via_stack_contained_cut_is_clean(
+    tmp_path, cut, lower, upper, lower_id, upper_id
+):
+    size = _CUT_SIZE[cut]
+    cut_box = kdb.Box(0, 0, size, size)
+    path = _contain_layout(
+        tmp_path,
+        "ok.gds",
+        [
+            (cut, cut_box),
+            (lower, cut_box.enlarged(900, 900)),
+            (upper, cut_box.enlarged(900, 900)),
+        ],
+    )
+    report = run_drc(path, "sg13cmos5l")
+    assert not _rule_hits(report, lower_id) and not _rule_hits(report, upper_id)
+    assert main(["drc", path, "--deck", "sg13cmos5l"]) == 0
+
+
+def test_sg13cmos5l_via1_original_reproducer(tmp_path):
+    cut = (19, 0)
+    for name, m1, rule_id in (
+        ("a_partial", kdb.Box(-100, -100, 150, 150), "metal1.enclosing.via1.1"),
+        ("b_none", kdb.Box(5000, 0, 5500, 500), "metal1.enclosing.via1.1"),
+    ):
+        path = _contain_layout(
+            tmp_path,
+            f"{name}.gds",
+            [
+                (cut, kdb.Box(0, 0, 190, 190)),
+                ((10, 0), kdb.Box(-55, -55, 245, 245)),
+                ((8, 0), m1),
+            ],
+        )
+        report = run_drc(path, "sg13cmos5l")
+        assert _rule_hits(report, rule_id), name
+        assert report["status"] == "violations"
+        assert main(["drc", path, "--deck", "sg13cmos5l"]) == 3
+
+
+def _containment_deck(monkeypatch, threshold=0, require=True, check="enclosing"):
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="m.enclosing.v.1",
+                description="synthetic containment",
+                layer=(30, 0),
+                other_layer=(31, 0),
+                check=check,
+                threshold_dbu=threshold,
+                require_containment=require,
+            )
+        ],
+    )
+
+
+def _synthetic_hits(path):
+    return _rule_hits(run_drc(path, "synthetic"), "m.enclosing.v.1")
+
+
+def test_containment_edge_only_sliver_partial_and_hole(tmp_path, monkeypatch):
+    _containment_deck(monkeypatch)
+    cut = kdb.Box(0, 0, 100, 100)
+    cases = {
+        "edge_only": kdb.Box(-100, 0, 0, 100),
+        "sliver": kdb.Box(-100, 0, 1, 100),
+        "partial": kdb.Box(-100, -100, 50, 200),
+    }
+    for name, metal in cases.items():
+        path = _contain_layout(
+            tmp_path, f"{name}.gds", [((31, 0), cut), ((30, 0), metal)]
+        )
+        assert _synthetic_hits(path), name
+    # Hole under the cut.
+    holed = kdb.Region(kdb.Box(-200, -200, 300, 300)) - kdb.Region(
+        kdb.Box(20, 20, 80, 80)
+    )
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(31, 0)).insert(kdb.Box(30, 30, 70, 70))
+    top.shapes(layout.layer(30, 0)).insert(holed)
+    layout.write(str(tmp_path / "hole.gds"))
+    assert _synthetic_hits(str(tmp_path / "hole.gds"))
+
+
+def test_containment_exact_boundary_abutting_and_dbu(tmp_path, monkeypatch):
+    _containment_deck(monkeypatch)
+    for dbu in (0.001, 0.005):
+        cut = kdb.Box(0, 0, 100, 100)
+        exact = _contain_layout(
+            tmp_path, f"exact_{dbu}.gds", [((31, 0), cut), ((30, 0), cut)], dbu=dbu
+        )
+        assert not _synthetic_hits(exact)
+        # Abutting conductor halves form one region: no artificial seam.
+        abut = _contain_layout(
+            tmp_path,
+            f"abut_{dbu}.gds",
+            [
+                ((31, 0), cut),
+                ((30, 0), kdb.Box(-10, -10, 50, 110)),
+                ((30, 0), kdb.Box(50, -10, 110, 110)),
+            ],
+            dbu=dbu,
+        )
+        assert not _synthetic_hits(abut)
+        part = _contain_layout(
+            tmp_path,
+            f"part_{dbu}.gds",
+            [((31, 0), cut), ((30, 0), kdb.Box(0, 0, 99, 100))],
+            dbu=dbu,
+        )
+        assert _synthetic_hits(part)
+
+
+def test_containment_margin_deficient_and_exact(tmp_path, monkeypatch):
+    _containment_deck(monkeypatch, threshold=10)
+    cut = kdb.Box(0, 0, 100, 100)
+    ok = _contain_layout(
+        tmp_path, "m_ok.gds", [((31, 0), cut), ((30, 0), cut.enlarged(10, 10))]
+    )
+    assert not _synthetic_hits(ok)
+    bad = _contain_layout(
+        tmp_path, "m_bad.gds", [((31, 0), cut), ((30, 0), cut.enlarged(9, 9))]
+    )
+    assert _synthetic_hits(bad)
+
+
+def test_containment_conductor_only_in_other_cell_and_hierarchy(tmp_path, monkeypatch):
+    _containment_deck(monkeypatch)
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    other = layout.create_cell("OTHER")
+    child = layout.create_cell("CHILD")
+    cut = kdb.Box(0, 0, 100, 100)
+    child.shapes(layout.layer(31, 0)).insert(cut)
+    top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(1000, 0)))
+    other.shapes(layout.layer(30, 0)).insert(kdb.Box(-500, -500, 5000, 5000))
+    top.shapes(layout.layer(30, 0)).insert(kdb.Box(0, 0, 10, 10))
+    path = str(tmp_path / "h.gds")
+    layout.write(path)
+    # Conductor drawn only in OTHER (not under TOP): the hierarchical cut fails.
+    assert run_drc(path, "synthetic", top="TOP")["status"] == "violations"
+    # Conductor placed under TOP covering the instance: clean.
+    top.shapes(layout.layer(30, 0)).insert(kdb.Box(900, -100, 1200, 200))
+    layout.write(path)
+    assert not _synthetic_hits(path)
+
+
+def test_containment_absent_cut_no_finding_and_absent_conductor_checked(
+    tmp_path, monkeypatch
+):
+    _containment_deck(monkeypatch)
+    only_metal = _contain_layout(
+        tmp_path, "nocut.gds", [((30, 0), kdb.Box(0, 0, 10, 10))]
+    )
+    report = run_drc(only_metal, "synthetic")
+    assert not report["violations"]
+    assert "m.enclosing.v.1" not in report["coverage"]["rules_checked"]
+    only_cut = _contain_layout(
+        tmp_path, "nometal.gds", [((31, 0), kdb.Box(0, 0, 10, 10))]
+    )
+    report = run_drc(only_cut, "synthetic")
+    assert len(_rule_hits(report, "m.enclosing.v.1")) == 1
+    assert report["coverage"]["rules_checked"] == ["m.enclosing.v.1"]
+    assert report["coverage"]["rules_skipped"] == []
+
+
+def test_containment_enclosed_form(tmp_path, monkeypatch):
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="v.enclosed.m.1",
+                description="synthetic",
+                layer=(31, 0),
+                other_layer=(30, 0),
+                check="enclosed",
+                threshold_dbu=0,
+                require_containment=True,
+            )
+        ],
+    )
+    path = _contain_layout(tmp_path, "enc.gds", [((31, 0), kdb.Box(0, 0, 10, 10))])
+    assert _rule_hits(run_drc(path, "synthetic"), "v.enclosed.m.1")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"check": "width", "other_layer": None},
+        {"check": "enclosing", "other_layer": None},
+        {"check": "separation", "other_layer": (31, 0)},
+    ],
+)
+def test_containment_malformed_declaration_fails_even_without_layers(
+    tmp_path, monkeypatch, kwargs
+):
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="bad.1",
+                description="bad",
+                layer=(30, 0),
+                threshold_dbu=0,
+                require_containment=True,
+                **kwargs,
+            )
+        ],
+    )
+    path = _contain_layout(tmp_path, "bare.gds", [((99, 0), kdb.Box(0, 0, 10, 10))])
+    with pytest.raises(DrcError, match="require_containment"):
+        run_drc(path, "synthetic")
+
+
+def test_legacy_enclosing_unchanged_without_opt_in(tmp_path, monkeypatch):
+    """Two-population cut: a diffusion contact with no overlap against the
+    poly rule is not rejected when containment is not enabled; a fully
+    disjoint cut stays invisible to the legacy interaction-scoped term."""
+    _containment_deck(monkeypatch, require=False)
+    path = _contain_layout(
+        tmp_path,
+        "legacy.gds",
+        [((31, 0), kdb.Box(0, 0, 100, 100)), ((30, 0), kdb.Box(5000, 0, 5500, 500))],
+    )
+    assert not _synthetic_hits(path)
+    gf = get_deck("gf180mcu")
+    assert not any(getattr(r, "require_containment", False) for r in gf)

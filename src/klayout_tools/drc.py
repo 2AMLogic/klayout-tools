@@ -375,6 +375,10 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     :data:`_ANTENNA_CHECKS` is excluded below, or it will report a real gap
     as inapplicable.
     """
+    if rule.require_containment and rule.other_layer is not None:
+        # Required containment (#2726): only the cut layer's absence makes the
+        # rule vacuous; an absent conductor is the very defect it reports.
+        return {_containment_layers(rule)[0]}
     if rule.derived_layer is not None:
         layers = {rule.derived_layer.base}
         if rule.derived_layer.intersect_with is not None and (
@@ -847,6 +851,7 @@ def run_drc(
         # (below) and the check itself never runs -- see
         # `_validate_threshold_max`.
         _validate_threshold_max(rule)
+        _validate_require_containment(rule)
 
         # Gates that skip a rule before any layer resolution below -- see
         # `_rule_skipped_before_evaluation` for each one and why. Like a
@@ -901,7 +906,11 @@ def run_drc(
                 continue
         else:
             layer_index = layout.find_layer(*rule.layer)
-            if layer_index is None:
+            if layer_index is None and not (
+                rule.require_containment
+                and _containment_layers(rule)[1] == rule.layer
+                and layout.find_layer(*_containment_layers(rule)[0]) is not None
+            ):
                 # rule's layer is absent from this stream -> no violations,
                 # but record it so `coverage.rules_skipped` can surface the
                 # skip.
@@ -911,7 +920,11 @@ def run_drc(
         other_index = None
         if rule.other_layer is not None:
             other_index = layout.find_layer(*rule.other_layer)
-            if other_index is None:
+            if other_index is None and not (
+                rule.require_containment
+                and _containment_layers(rule)[1] == rule.other_layer
+                and layout.find_layer(*_containment_layers(rule)[0]) is not None
+            ):
                 rules_skipped.append(rule.id)
                 continue
 
@@ -977,11 +990,15 @@ def run_drc(
                         base_region.sized(size_dbu)
                     )
             else:
-                region = kdb.Region(cell.begin_shapes_rec(layer_index))
+                region = (
+                    kdb.Region(cell.begin_shapes_rec(layer_index))
+                    if layer_index is not None
+                    else kdb.Region()  # absent conductor (#2726)
+                )
             other_region = (
                 kdb.Region(cell.begin_shapes_rec(other_index))
                 if other_index is not None
-                else None
+                else (kdb.Region() if rule.require_containment else None)
             )
 
             # Supplementary edge pairs reported under the same rule id,
@@ -1683,10 +1700,18 @@ def _run_check(
                 # escapes `region` entirely (a plain Boolean NOT, no
                 # threshold: any escape at all is worse than a
                 # marginal-distance violation).
-                outside_region = other_region.interacting(region) - region
+                outside_region = (
+                    other_region - region
+                    if rule.require_containment
+                    else other_region.interacting(region) - region
+                )
             else:  # check == "enclosed"
                 # Symmetric: `region` is the enclosed layer here.
-                outside_region = region.interacting(other_region) - other_region
+                outside_region = (
+                    region - other_region
+                    if rule.require_containment
+                    else region.interacting(other_region) - other_region
+                )
 
         return edge_pairs, outside_region
 
@@ -1715,6 +1740,36 @@ def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
     if rule.other_layer is not None:
         layers.add(rule.other_layer)
     return layers
+
+
+def _validate_require_containment(rule: DrcRule) -> None:
+    """Reject a malformed ``require_containment`` declaration (issue #2726).
+
+    Runs for every rule before any layer-presence shortcut, so a bad
+    declaration fails loudly even on a stream that lacks its layers.
+    """
+    if not rule.require_containment:
+        return
+    if rule.check not in _OUTSIDE_CHECKS:
+        raise DrcError(
+            f"rule '{rule.id}': require_containment is only valid on "
+            f"'enclosing'/'enclosed' checks, not '{rule.check}'"
+        )
+    if rule.other_layer is None:
+        raise DrcError(f"rule '{rule.id}': require_containment requires other_layer")
+    if rule.derived_layer is not None:
+        raise DrcError(
+            f"rule '{rule.id}': require_containment cannot be combined with "
+            "derived_layer"
+        )
+
+
+def _containment_layers(rule: DrcRule) -> tuple[tuple[int, int], tuple[int, int]]:
+    """``(cut_layer, conductor_layer)`` of a ``require_containment`` rule."""
+    assert rule.other_layer is not None
+    if rule.check == "enclosing":
+        return rule.other_layer, rule.layer
+    return rule.layer, rule.other_layer
 
 
 def _validate_derived_layer(rule: DrcRule) -> None:
