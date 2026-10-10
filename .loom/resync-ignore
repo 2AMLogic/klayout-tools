@@ -6,6 +6,14 @@
 # resync-installed.sh's header comment ("Local-override convention") for the
 # full path-shape reference.
 #
+# WARNING (#2501): a pin skips the ENTIRE installed file, not just the section
+# it exists to protect. Every unrelated upstream fix to that file is blocked
+# too, indefinitely, and nothing reports the growing drift (champion-epic.md
+# drifted far behind upstream this way; see #2494). Before adding a pin, consider
+# upstreaming the change instead; when you do pin, record what it protects
+# and when it can be dropped. The drift inventory and retirement conditions
+# for existing pins live in docs/loom-pin-drift.md (repo-owned, not resynced).
+#
 # NOTE: `scripts/tests/ci-wired.txt` (and its sibling `ci-excluded.txt`) does
 # NOT belong in this list, and never has — it is upstream Loom's own CI
 # manifest for upstream Loom's own test suite, has zero effect on this repo's
