@@ -57,7 +57,7 @@ every callback is silently lost. Hold it in a local variable.
 ## Measurements by stage
 
 **Before `compare()`.** No API pairs instances before comparison. The only
-evidence available is instance names and order. B4 and B5 below show that
+evidence available is instance names and order. B4 to B6 below show that
 neither matches the pairing KLayout actually makes. **Not viable.**
 
 **During `compare()` (logger events).** For the master circuit pair,
@@ -78,6 +78,7 @@ results below show.
 | B2: two instances, `D2`/`D3` swapped on one | `False` with no anchoring | `subcircuit_mismatch` on the swapped instance. The correctly wired sibling stays paired. |
 | B4: layout instances renamed and reordered | `True` | `AA`↔`U1` and `ZZ`↔`U2`, following the output each one drives. Name and order disagree with this pairing. |
 | B5: duplicate layout instance names (`X1` twice) | `True` | The pairing follows topology, and only the id tells the two layout instances apart. |
+| B6: layout instance names cleared (absent) | `True` | Same pairing as B5, keyed by id. Names carry no part of the comparer's pairing. |
 | C1: extra, unpaired layout instance | `False` | Never appears in `match_subcircuits`, so no anchor is derived through it. |
 | C2: master pin present on the reference side only | `True` | The event is `match_pins(None, "D3")`. No layout pin exists, so no anchor is derived. KLayout's own verdict is `True` because that reference net reaches only that one pin. This is recorded as a measurement, not endorsed. |
 | B3: `equivalent_pins` declares `D2`/`D3` swappable | `True` | Master pins are still reported as `D2`↔`D2`. The swapped instance's derived anchors (`N1`↔`N0`) contradict both the comparer and the sibling's anchors (`N0`↔`N0`). **KLayout accepts the contradictory `same_nets` set silently.** |

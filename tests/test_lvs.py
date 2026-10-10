@@ -17672,6 +17672,7 @@ def _spike_2704_compare(
     *,
     equivalent_pins: tuple[str, ...] = (),
     replay: list[tuple[str, str]] | tuple[()] = (),
+    anonymous_layout_instances: bool = False,
 ):
     """Run one `NetlistComparer.compare()` with a callback recorder and return
     ``(result, record)``.
@@ -17696,61 +17697,34 @@ def _spike_2704_compare(
     (the mechanism `hints.equivalent_pins` uses); ``replay`` asserts
     ``(layout_net, reference_net)`` pairs on the top circuits with
     ``same_nets(..., must_match=True)`` before comparing -- the staged
-    re-compare a follow-up would perform.
+    re-compare a follow-up would perform. ``anonymous_layout_instances``
+    clears every layout-side top instance name after reading (SPICE always
+    names an instance, but an extracted netlist need not), so the absent-name
+    case can be measured.
     """
     import klayout.db as kdb
 
-    tmp_path = Path(tmp_path)
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    netlists = []
-    for side, text in (("layout", layout_spice), ("reference", reference_spice)):
-        path = _write(tmp_path / f"{side}.spice", text)
-        netlist = kdb.Netlist()
-        netlist.read(path, kdb.NetlistSpiceReader())
-        netlists.append(netlist)
-    layout_netlist, reference_netlist = netlists
-    master = "MYLIB__MACRO_4"
+    layout_netlist, reference_netlist = _spike_2704_read(
+        tmp_path, layout_spice, reference_spice
+    )
+    if anonymous_layout_instances:
+        for inst in layout_netlist.circuit_by_name("TOP").each_subcircuit():
+            inst.name = ""
     record: dict[str, list] = {
         "master_pins": [],
         "instances": [],
         "top_nets": [],
         "derived": [],
     }
-
-    def _name(obj, attr="expanded_name"):
-        return None if obj is None else getattr(obj, attr)()
-
-    class _Recorder(kdb.GenericNetlistCompareLogger):
-        def __init__(self):
-            self.scope = None
-
-        def begin_circuit(self, a, b):
-            self.scope = a.name if a is not None else None
-
-        def match_pins(self, a, b):
-            if self.scope == master:
-                record["master_pins"].append((_name(a, "name"), _name(b, "name")))
-
-        def match_subcircuits(self, a, b):
-            record["instances"].append((a.id(), a.name, b.id(), b.name))
-
-        def match_nets(self, a, b):
-            if self.scope == "TOP":
-                record["top_nets"].append((_name(a), _name(b)))
-
-        def match_ambiguous_nets(self, a, b, msg):
-            self.match_nets(a, b)
-
     # Held in a local: the comparer does not keep the Python logger alive,
     # so a temporary would be collected and every callback silently lost.
-    recorder = _Recorder()
+    recorder = _spike_2704_recorder(record)
     comparer = kdb.NetlistComparer(recorder)
-    if equivalent_pins:
-        for netlist in netlists:
-            circuit = netlist.circuit_by_name(master)
-            comparer.equivalent_pins(
-                circuit, [circuit.pin_by_name(pin).id() for pin in equivalent_pins]
-            )
+    for netlist in (layout_netlist, reference_netlist) if equivalent_pins else ():
+        circuit = netlist.circuit_by_name(_SPIKE_2704_MASTER)
+        comparer.equivalent_pins(
+            circuit, [circuit.pin_by_name(pin).id() for pin in equivalent_pins]
+        )
     layout_top = layout_netlist.circuit_by_name("TOP")
     reference_top = reference_netlist.circuit_by_name("TOP")
     for layout_net, reference_net in replay:
@@ -17762,26 +17736,94 @@ def _spike_2704_compare(
             True,
         )
     result = comparer.compare(layout_netlist, reference_netlist)
+    record["derived"] = _spike_2704_derive(layout_netlist, reference_netlist, record)
+    return result, record
 
-    layout_master = layout_netlist.circuit_by_name(master)
-    reference_master = reference_netlist.circuit_by_name(master)
+
+_SPIKE_2704_MASTER = "MYLIB__MACRO_4"
+
+
+def _spike_2704_name(obj, attr="expanded_name"):
+    return None if obj is None else getattr(obj, attr)()
+
+
+def _spike_2704_read(tmp_path, layout_spice: str, reference_spice: str):
+    """Read the layout and reference SPICE into fresh `klayout.db.Netlist`s."""
+    import klayout.db as kdb
+
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    netlists = []
+    for side, text in (("layout", layout_spice), ("reference", reference_spice)):
+        netlist = kdb.Netlist()
+        netlist.read(_write(tmp_path / f"{side}.spice", text), kdb.NetlistSpiceReader())
+        netlists.append(netlist)
+    return tuple(netlists)
+
+
+def _spike_2704_recorder(record: dict[str, list]):
+    """A `GenericNetlistCompareLogger` that appends comparer callbacks to
+    ``record`` as plain names/ids (see `_spike_2704_compare`)."""
+    import klayout.db as kdb
+
+    name = _spike_2704_name
+
+    class _Recorder(kdb.GenericNetlistCompareLogger):
+        def __init__(self):
+            self.scope = None
+
+        def begin_circuit(self, a, b):
+            self.scope = a.name if a is not None else None
+
+        def match_pins(self, a, b):
+            if self.scope == _SPIKE_2704_MASTER:
+                record["master_pins"].append((name(a, "name"), name(b, "name")))
+
+        def match_subcircuits(self, a, b):
+            record["instances"].append((a.id(), a.name, b.id(), b.name))
+
+        def match_nets(self, a, b):
+            if self.scope == "TOP":
+                record["top_nets"].append((name(a), name(b)))
+
+        def match_ambiguous_nets(self, a, b, msg):
+            self.match_nets(a, b)
+
+    return _Recorder()
+
+
+def _spike_2704_derive(layout_netlist, reference_netlist, record) -> list[tuple]:
+    """The staged paired-instance anchors: for every paired instance and every
+    master pin paired on both sides, ``(reference_instance, pin, layout_net,
+    reference_net)`` reached through that pin (`SubCircuit.net_for_pin`)."""
+    layout_top = layout_netlist.circuit_by_name("TOP")
+    reference_top = reference_netlist.circuit_by_name("TOP")
+    layout_master = layout_netlist.circuit_by_name(_SPIKE_2704_MASTER)
+    reference_master = reference_netlist.circuit_by_name(_SPIKE_2704_MASTER)
+    # A master pin declared on one side only has no pin to reach a parent net
+    # through on the other side, so no anchor can be derived -- it stays
+    # unstrengthened.
+    pin_pairs = [
+        (a, b) for a, b in record["master_pins"] if a is not None and b is not None
+    ]
+    derived = []
     for layout_id, _, reference_id, reference_name in record["instances"]:
         layout_inst = layout_top.subcircuit_by_id(layout_id)
         reference_inst = reference_top.subcircuit_by_id(reference_id)
-        for layout_pin, reference_pin in record["master_pins"]:
-            if layout_pin is None or reference_pin is None:
-                # A master pin declared on one side only: there is no pin to
-                # reach a parent net through on the other side, so no anchor
-                # can be derived -- it stays unstrengthened.
-                continue
+        for layout_pin, reference_pin in pin_pairs:
             net_a = layout_inst.net_for_pin(layout_master.pin_by_name(layout_pin).id())
             net_b = reference_inst.net_for_pin(
                 reference_master.pin_by_name(reference_pin).id()
             )
-            record["derived"].append(
-                (reference_name, reference_pin, _name(net_a), _name(net_b))
+            derived.append(
+                (
+                    reference_name,
+                    reference_pin,
+                    _spike_2704_name(net_a),
+                    _spike_2704_name(net_b),
+                )
             )
-    return result, record
+    return derived
 
 
 def _spike_2704_tie_fixture(swapped: bool) -> tuple[str, str]:
@@ -17858,9 +17900,10 @@ def test_spike_2704_one_instance_swap_is_caught_by_topology_already(tmp_path):
 def test_spike_2704_instance_pairing_ignores_names_and_order(tmp_path):
     """Issue #2704 spike: the instance pairing `match_subcircuits` reports
     follows topology, not instance names or creation order -- renamed and
-    reordered layout instances, and even a duplicated layout instance name,
-    pair with the reference instance that drives the same output. (Any
-    name- or order-based pre-compare heuristic would get these wrong.)"""
+    reordered layout instances, a duplicated layout instance name, and
+    cleared (absent) layout instance names all pair with the reference
+    instance that drives the same output. (Any name- or order-based
+    pre-compare heuristic would get these wrong.)"""
     reordered = (
         ".subckt top a b q1 q2\n"
         "XZZ a b n0 n1 q2 mylib__macro_4\n"
@@ -17885,6 +17928,18 @@ def test_spike_2704_instance_pairing_ignores_names_and_order(tmp_path):
     # the pairing still follows the output each one drives.
     pairs = {(i[0], i[3]) for i in record["instances"]}
     assert pairs == {(2, "U1"), (1, "U2")}
+
+    # Absent names: with every layout instance name cleared, the pairing is
+    # unchanged -- names carry no part of it.
+    ok, record = _spike_2704_compare(
+        tmp_path / "anonymous",
+        reordered,
+        _SPIKE_2704_TWO_INSTANCE_SPICE,
+        anonymous_layout_instances=True,
+    )
+    assert ok is True
+    assert {i[1] for i in record["instances"]} == {""}
+    assert {(i[0], i[3]) for i in record["instances"]} == {(2, "U1"), (1, "U2")}
 
 
 def test_spike_2704_unpaired_instance_derives_no_anchor(tmp_path):
