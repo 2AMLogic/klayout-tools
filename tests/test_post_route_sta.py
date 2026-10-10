@@ -2594,3 +2594,608 @@ def test_cli_missing_request_arg_is_usage_error():
     with pytest.raises(SystemExit) as exc_info:
         main(["sta"])
     assert exc_info.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# Per-port min/max I/O delays + worst-path identity (issue #2740).
+#
+# `tests/fixtures/sta_worst_paths/boundary_captures.json` is real engine
+# output (openroad/orfs:latest image sha256:0f1f4f03..., sky130_fd_sc_hd)
+# from `run_sta` sessions on a small boundary netlist: two boundary data
+# ports (`a_in`, `b_in`) with distinct min/max delays, a bus whose bit
+# `bus[1]` gets a min-only negative delay, an async reset `rst_n` left on
+# the scalar default, and an output `q_a` with a max-only output delay. It
+# also records direct `find_timing_paths -from [get_ports X]` queries made
+# against the same constraints written as plain SDC.
+# --------------------------------------------------------------------------- #
+
+_WORST_PATH_CAPTURES = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "sta_worst_paths"
+        / "boundary_captures.json"
+    ).read_text(encoding="utf-8")
+)
+
+_BOUNDARY_INPUT_DELAYS = {
+    "a_in": {"min_ns": 0.3, "max_ns": 0.6},
+    "b_in": {"min_ns": 0.05, "max_ns": 1.2},
+    "bus[1]": {"min_ns": -0.2},
+}
+_BOUNDARY_OUTPUT_DELAYS = {"q_a": {"max_ns": 0.5}}
+
+
+def _boundary_constraints(**overrides) -> dict:
+    constraints = {
+        "clock_port": "clk",
+        "clock_period_ns": 2.0,
+        "input_delay_ns": 0.0,
+        "output_delay_ns": 0.1,
+        "input_delays": json.loads(json.dumps(_BOUNDARY_INPUT_DELAYS)),
+        "output_delays": json.loads(json.dumps(_BOUNDARY_OUTPUT_DELAYS)),
+    }
+    constraints.update(overrides)
+    return constraints
+
+
+def _stub_openroad_capture(monkeypatch, scenario_by_corner: dict) -> list[str]:
+    """Replay a captured boundary scenario per corner (`None` key for a
+    single-corner run); returns the generated scripts."""
+    scripts: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="unknown \n")
+        metrics_path, script_path = cmd[4], cmd[5]
+        script_text = Path(script_path).read_text(encoding="utf-8")
+        scripts.append(script_text)
+        corner = next(
+            (c for c in scenario_by_corner if c and f"__{c}.lib" in script_text),
+            None,
+        )
+        captured = _WORST_PATH_CAPTURES["scenarios"][scenario_by_corner[corner]]
+        if captured["metrics"] is not None:
+            with open(metrics_path, "w", encoding="utf-8") as handle:
+                json.dump(captured["metrics"], handle)
+            return fake_completed(returncode=0, stdout=captured["stdout"])
+        return fake_completed(returncode=3, stdout=captured["stdout"])
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    return scripts
+
+
+def test_worst_path_capture_used_the_shipped_tcl():
+    """Fixture drift guard: the capture must come from the Tcl this module
+    emits today."""
+    assert _WORST_PATH_CAPTURES["worst_path_tcl"] == post_route_sta._worst_path_lines()
+    assert _WORST_PATH_CAPTURES["constraints"]["input_delays"] == _BOUNDARY_INPUT_DELAYS
+    assert (
+        _WORST_PATH_CAPTURES["constraints"]["output_delays"] == _BOUNDARY_OUTPUT_DELAYS
+    )
+
+
+# -- validation ------------------------------------------------------------- #
+
+
+def test_validate_port_delay_maps_omitted_and_empty_are_none():
+    assert post_route_sta._validate_port_delay_maps({}, "clk") == (None, None)
+    assert post_route_sta._validate_port_delay_maps(
+        {"input_delays": {}, "output_delays": {}}, "clk"
+    ) == (None, None)
+
+
+def test_validate_port_delay_maps_partial_bounds_not_copied():
+    inputs, outputs = post_route_sta._validate_port_delay_maps(
+        {
+            "input_delays": {"a": {"min_ns": 0.1}, "b": {"max_ns": 2}},
+            "output_delays": {"q": {"min_ns": -0.5, "max_ns": 0}},
+        },
+        "clk",
+    )
+    assert inputs == {"a": {"min_ns": 0.1}, "b": {"max_ns": 2.0}}
+    assert outputs == {"q": {"min_ns": -0.5, "max_ns": 0.0}}
+
+
+@pytest.mark.parametrize(
+    ("constraints", "message"),
+    [
+        ({"input_delays": [1]}, "input_delays must be a JSON object"),
+        ({"output_delays": "q"}, "output_delays must be a JSON object"),
+        ({"input_delays": {"a": 0.1}}, r"input_delays\['a'\] must be a JSON object"),
+        ({"input_delays": {"a": {}}}, r"input_delays\['a'\] is empty"),
+        ({"input_delays": {"a": {"min": 0.1}}}, "unknown key"),
+        ({"input_delays": {"a": {"min_ns": True}}}, "min_ns must be a finite number"),
+        ({"input_delays": {"a": {"max_ns": None}}}, "max_ns must be a finite number"),
+        ({"input_delays": {"a": {"max_ns": "1"}}}, "max_ns must be a finite number"),
+        (
+            {"output_delays": {"q": {"max_ns": float("nan")}}},
+            "max_ns must be a finite number",
+        ),
+        (
+            {"output_delays": {"q": {"min_ns": float("inf")}}},
+            "min_ns must be a finite number",
+        ),
+        (
+            {"input_delays": {"a": {"min_ns": 0.5, "max_ns": 0.1}}},
+            "must not exceed max_ns",
+        ),
+        ({"input_delays": {"clk": {"min_ns": 0.1}}}, "must not name the clock port"),
+        ({"input_delays": {"": {"min_ns": 0.1}}}, "non-empty port names"),
+        ({"input_delays": {" a": {"min_ns": 0.1}}}, "leading/trailing whitespace"),
+        ({"input_delays": {"a\nb": {"min_ns": 0.1}}}, "control character"),
+    ],
+)
+def test_validate_port_delay_maps_rejects(constraints, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_port_delay_maps(constraints, "clk")
+
+
+def test_run_sta_port_delay_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(input_delays={"a_in": {}}),
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        post_route_sta.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    with pytest.raises(PostRouteStaError, match="is empty"):
+        run_sta(request_path)
+    assert calls == []
+
+
+def test_signed_per_port_delays_allowed_but_legacy_scalar_stays_non_negative(
+    tmp_path, monkeypatch
+):
+    inputs, _ = post_route_sta._validate_port_delay_maps(
+        {"input_delays": {"d": {"min_ns": -0.4, "max_ns": 0}}}, "clk"
+    )
+    assert inputs == {"d": {"min_ns": -0.4, "max_ns": 0.0}}
+    with pytest.raises(PostRouteStaError, match="must be a non-negative number"):
+        post_route_sta._validate_constraints(
+            {"clock_port": "clk", "clock_period_ns": 1, "input_delay_ns": -0.4}
+        )
+
+
+# -- Tcl generation --------------------------------------------------------- #
+
+
+def test_request_io_delay_lines_without_maps_is_legacy_scalar_tcl():
+    for args in ((None, None), (0.2, None), (None, 0.3), (0.2, 0.3)):
+        assert post_route_sta._request_io_delay_lines(
+            "clk", *args, None, None
+        ) == post_route_sta._io_delay_lines("clk", *args)
+
+
+def test_port_io_delay_lines_target_only_mapped_ports():
+    """Two boundary ports with different min/max plus a min-only bus bit:
+    each gets exactly its own bounds, and the scalar default goes only to
+    the ports absent from the map (clock excluded)."""
+    lines = post_route_sta._port_io_delay_lines(
+        "clk", 0.0, 0.1, _BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS
+    )
+    delay_lines = [ln for ln in lines if ln.lstrip().startswith("set_")]
+    assert [ln for ln in delay_lines if "[get_ports" in ln and "-m" in ln] == [
+        "set_input_delay -min 0.3 -clock clk [get_ports a_in]",
+        "set_input_delay -max 0.6 -clock clk [get_ports a_in]",
+        "set_input_delay -min 0.05 -clock clk [get_ports b_in]",
+        "set_input_delay -max 1.2 -clock clk [get_ports b_in]",
+        "set_input_delay -min -0.2 -clock clk [get_ports bus\\[1\\]]",
+        "set_output_delay -max 0.5 -clock clk [get_ports q_a]",
+    ]
+    # Partial bounds are never mirrored onto the other side.
+    assert not any("-max" in ln and "bus\\[1\\]" in ln for ln in lines)
+    assert not any("-min" in ln and "q_a" in ln for ln in lines)
+    # The scalar default is applied to the filtered "unmapped" set only.
+    assert "set klt_input_mapped [list a_in b_in bus\\[1\\]]" in lines
+    assert "set klt_output_mapped [list q_a]" in lines
+    assert "    set_input_delay 0.0 -clock clk $klt_input_default_ports" in lines
+    assert "    set_output_delay 0.1 -clock clk $klt_output_default_ports" in lines
+    assert (
+        "set klt_input_candidates "
+        "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]"
+    ) in lines
+    # No blanket `$klt_non_clock_inputs`/`[all_outputs]` write that a later
+    # per-port line would have to partially override.
+    assert not any("$klt_non_clock_inputs" in ln for ln in lines)
+    assert not any(ln.startswith("set_output_delay 0.1") for ln in lines)
+
+
+def test_port_io_delay_lines_without_scalar_emits_no_default():
+    lines = post_route_sta._port_io_delay_lines(
+        "clk", None, None, {"a": {"max_ns": 1.0}}, None
+    )
+    assert lines == ["set_input_delay -max 1.0 -clock clk [get_ports a]"]
+
+
+@pytest.mark.parametrize(
+    ("port", "tcl"),
+    [
+        ("data[3]", "data\\[3\\]"),
+        ("a$b", "a\\$b"),
+        ("x{y}", "x\\{y\\}"),
+        ('q"r', 'q\\"r'),
+        ("s;t#u", "s\\;t\\#u"),
+        ("v\\w", "v\\\\w"),
+        ("sp ace", "sp\\ ace"),
+        ("u_sub/p", "u_sub/p"),
+    ],
+)
+def test_tcl_literal_port_names_never_substituted(port, tcl):
+    assert post_route_sta._tcl_literal(port) == tcl
+    lines = post_route_sta._port_io_delay_lines(
+        "clk", None, None, {port: {"min_ns": 0.1}}, None
+    )
+    assert lines == [f"set_input_delay -min 0.1 -clock clk [get_ports {tcl}]"]
+
+
+def test_port_check_lines_list_every_key_with_allowed_directions():
+    lines = post_route_sta._port_check_lines(
+        _BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS
+    )
+    script = "\n".join(lines)
+    assert (
+        "[list input a_in {input inout bidirect} input b_in {input inout bidirect} "
+        "input bus\\[1\\] {input inout bidirect} output q_a {output inout bidirect}]"
+    ) in script
+    assert f'puts "{post_route_sta._PORT_CHECK_BEGIN}"' in lines
+    assert f"    exit {post_route_sta._PORT_CHECK_EXIT_CODE}" in lines
+    # Literal match only: exactly one port, whose full name equals the key.
+    assert "[get_full_name $klt_port] ne $klt_name" in script
+
+
+@pytest.mark.parametrize("mode", ["def", "verilog"])
+def test_run_sta_both_modes_apply_same_port_semantics(tmp_path, monkeypatch, mode):
+    setup = _setup_success_env if mode == "def" else _setup_verilog_success_env
+    request_path = setup(tmp_path, monkeypatch, constraints=_boundary_constraints())
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    run_sta(request_path)
+
+    lines = scripts[0].splitlines()
+    expected = post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, _BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS
+    )
+    start = lines.index(expected[0])
+    assert lines[start : start + len(expected)] == expected
+    clock_idx = next(i for i, ln in enumerate(lines) if ln.startswith("create_clock"))
+    assert clock_idx < start
+    # The port check precedes every per-port delay write.
+    assert lines.index(f'puts "{post_route_sta._PORT_CHECK_END}"') < lines.index(
+        "set_input_delay -min 0.3 -clock clk [get_ports a_in]"
+    )
+
+
+def test_run_sta_corner_sweep_applies_same_port_tcl_per_corner(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path, monkeypatch, constraints=_boundary_constraints()
+    )
+    scripts = _stub_openroad_capture(
+        monkeypatch,
+        {
+            "tt_025C_1v80": "boundary_tt_025C_1v80",
+            "ss_100C_1v60": "boundary_ss_100C_1v60",
+        },
+    )
+
+    report = run_sta(request_path)
+
+    expected = "\n".join(
+        post_route_sta._request_io_delay_lines(
+            "clk", 0.0, 0.1, _BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS
+        )
+    )
+    assert len(scripts) == 2
+    assert all(expected in script for script in scripts)
+    tt_entry, ss_entry = report["corners"]
+    # Distinct per-corner identities/slacks from each corner's own session.
+    assert tt_entry["worst_hold_path"]["slack_ns"] == -0.29559
+    assert ss_entry["worst_hold_path"]["slack_ns"] == -0.6148
+    assert tt_entry["worst_setup_path"]["slack_ns"] == 0.69875
+    assert ss_entry["worst_setup_path"]["slack_ns"] == 0.54129
+
+
+def test_run_sta_scalar_only_request_tcl_unchanged(tmp_path, monkeypatch):
+    """No maps: the I/O-delay Tcl is exactly the pre-#2740 scalar block and
+    no port check is emitted."""
+    request_path = _setup_success_env(
+        tmp_path, monkeypatch, constraints=dict(_IO_DELAY_CONSTRAINTS)
+    )
+    _stub_openroad_success(monkeypatch)
+
+    run_sta(request_path)
+
+    script = _sta_script_text(tmp_path)
+    assert "\n".join([*_IO_INPUT_DELAY_LINES, _IO_OUTPUT_DELAY_LINE]) in script
+    assert post_route_sta._PORT_CHECK_BEGIN not in script
+    assert "klt_input_mapped" not in script
+
+
+# -- engine port check ------------------------------------------------------ #
+
+
+def test_run_sta_rejected_ports_raise_actionable_error(tmp_path, monkeypatch):
+    """Real engine output for a missing port, a whole-bus name, a wildcard
+    and wrong-direction entries on both maps."""
+    captured = _WORST_PATH_CAPTURES["scenarios"]["bad_ports_tt_025C_1v80"]
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(
+            input_delays=captured["input_delays"],
+            output_delays=captured["output_delays"],
+        ),
+    )
+    _stub_openroad_capture(monkeypatch, {None: "bad_ports_tt_025C_1v80"})
+
+    with pytest.raises(PostRouteStaError) as exc_info:
+        run_sta(request_path)
+
+    message = str(exc_info.value)
+    assert message.startswith("per-port I/O delay constraint(s) rejected")
+    assert "input_delays['nope']: no port with exactly this name" in message
+    assert "input_delays['bus']: matches 2 ports" in message
+    assert "input_delays['b*']: matches 3 ports" in message
+    assert "input_delays['q_a']: port direction is 'output'" in message
+    assert "output_delays['a_in']: port direction is 'input'" in message
+    assert "'a_in']: " not in message.split("output_delays")[0]
+
+
+def test_parse_port_check_errors_empty_block_and_absent_markers():
+    clean = _WORST_PATH_CAPTURES["scenarios"]["boundary_tt_025C_1v80"]["stdout"]
+    assert post_route_sta._parse_port_check_errors(clean) == []
+    assert post_route_sta._parse_port_check_errors("") == []
+
+
+# -- worst-path identity ---------------------------------------------------- #
+
+
+def test_worst_path_lines_query_each_group_and_catch_errors():
+    lines = post_route_sta._worst_path_lines()
+    script = "\n".join(lines)
+    assert (
+        "find_timing_paths -path_delay $klt_path_side "
+        "-group_path_count 1 -endpoint_path_count 1"
+    ) in script
+    assert "[$klt_pe check_role]" in script
+    assert lines[0] == f'puts "{post_route_sta._WORST_PATHS_BEGIN}"'
+    assert lines[-1] == f'puts "{post_route_sta._WORST_PATHS_END}"'
+    assert lines[1] == "if {[catch {"
+
+
+def test_run_sta_reports_removal_not_data_hold_as_worst_hold(tmp_path, monkeypatch):
+    """The issue's own symptom, on real engine output: the worst hold check
+    at the corner is the async-reset *removal* check, reported as such --
+    not as data hold -- while the boundary data ports carry their own
+    (better) slacks."""
+    request_path = _setup_verilog_success_env(
+        tmp_path, monkeypatch, constraints=_boundary_constraints()
+    )
+    _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert report["worst_hold_path"] == {
+        "status": "ok",
+        "check_type": "removal",
+        "engine_check_role": "removal",
+        "startpoint": "rst_n",
+        "endpoint": "ff_a/RESET_B",
+        "slack_ns": -0.29559,
+        "consistent_with_aggregate": True,
+        "reason": None,
+    }
+    assert report["worst_setup_path"] == {
+        "status": "ok",
+        "check_type": "setup",
+        "engine_check_role": "setup",
+        "startpoint": "b_in",
+        "endpoint": "ff_b/D",
+        "slack_ns": 0.69875,
+        "consistent_with_aggregate": True,
+        "reason": None,
+    }
+    # Aggregate contracts are untouched.
+    assert report["worst_hold_slack_ns"] == -0.29559
+    assert report["worst_slack_ns"] == 0.69875
+    assert report["hold_violation_count"] == 2
+    assert report["setup_violation_count"] == 0
+    assert report["timing_status"] == "constrained"
+
+
+def test_captured_worst_paths_match_direct_engine_queries():
+    """The selected records agree with the engine's direct per-port and
+    global queries made against the same constraints written as plain SDC
+    (fixture `direct_queries`)."""
+    direct = _WORST_PATH_CAPTURES["direct_queries"]["tt_025C_1v80"]
+    stdout = _WORST_PATH_CAPTURES["scenarios"]["boundary_tt_025C_1v80"]["stdout"]
+    setup, hold = post_route_sta._worst_paths(
+        stdout, direct["worst_slack_max_s"] * 1e9, direct["worst_slack_min_s"] * 1e9
+    )
+    b_in_max = direct["from"]["b_in"]["max"]
+    rst_min = direct["from"]["rst_n"]["min"]
+    assert (setup["engine_check_role"], setup["endpoint"]) == (b_in_max[0], b_in_max[2])
+    assert setup["slack_ns"] == round(b_in_max[1] * 1e9, 5)
+    assert (hold["engine_check_role"], hold["endpoint"]) == (rst_min[0], rst_min[2])
+    assert hold["slack_ns"] == round(rst_min[1] * 1e9, 5)
+    # Per-port semantics as the engine saw them: the min-only bus bit has
+    # no setup path at all; the defaulted sibling bit has both sides.
+    assert direct["from"]["bus[1]"]["max"] is None
+    assert direct["from"]["bus[0]"]["max"] is not None
+
+
+def test_run_sta_unconstrained_reports_no_paths(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(tmp_path, monkeypatch)
+    _stub_openroad_capture(monkeypatch, {None: "unconstrained_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert report["timing_status"] == "unconstrained"
+    for key in ("worst_setup_path", "worst_hold_path"):
+        assert report[key]["status"] == "no_paths"
+        assert report[key]["startpoint"] is None
+        assert report[key]["check_type"] is None
+        assert report[key]["slack_ns"] is None
+
+
+@pytest.mark.parametrize(
+    ("block", "reason"),
+    [
+        (None, "absent from engine output"),
+        (['ERROR\tinvalid command name "find_timing_paths"'], "introspection failed"),
+        (["PATH\tmax\tsetup\t1e-10\tonly_start"], "malformed worst-path record"),
+        (["PATH\tmax\tsetup\tfast\ta\tb"], "malformed worst-path slack"),
+        (["PATH\tsideways\tsetup\t1e-10\ta\tb"], "malformed worst-path record"),
+        (["PATH\tmax\tsetup\tinf\ta\tb"], "non-finite"),
+    ],
+)
+def test_worst_paths_unavailable_never_fabricated(block, reason):
+    if block is None:
+        stdout = "no markers here"
+    else:
+        stdout = "\n".join(
+            [post_route_sta._WORST_PATHS_BEGIN, *block, post_route_sta._WORST_PATHS_END]
+        )
+    setup, hold = post_route_sta._worst_paths(stdout, -0.1, 0.2)
+    for record in (setup, hold):
+        assert record["status"] == "unavailable"
+        assert reason in record["reason"]
+        assert record["startpoint"] is None
+        assert record["endpoint"] is None
+        assert record["check_type"] is None
+        assert record["slack_ns"] is None
+
+
+def _path_block(*rows: str) -> str:
+    return "\n".join(
+        [post_route_sta._WORST_PATHS_BEGIN, *rows, post_route_sta._WORST_PATHS_END]
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "check_type"),
+    [
+        ("setup", "setup"),
+        ("recovery", "recovery"),
+        ("clock gating setup", "clock_gating_setup"),
+        ("output setup", "output_setup"),
+        ("data check setup", "unknown"),
+    ],
+)
+def test_worst_path_check_type_mapping(role, check_type):
+    setup, _ = post_route_sta._worst_paths(
+        _path_block(f"PATH\tmax\t{role}\t-1e-10\ta\tb"), -0.1, None
+    )
+    assert setup["check_type"] == check_type
+    assert setup["engine_check_role"] == role
+
+
+def test_worst_path_selects_minimum_regardless_of_engine_order():
+    stdout = _path_block(
+        "PATH\tmin\thold\t2e-10\td\tff/D",
+        "PATH\tmin\tremoval\t-3e-10\trst\tff/RESET_B",
+        "PATH\tmin\tclock gating hold\t1e-10\ten\tcg/B",
+    )
+    _, hold = post_route_sta._worst_paths(stdout, None, -0.3)
+    assert (hold["check_type"], hold["startpoint"], hold["slack_ns"]) == (
+        "removal",
+        "rst",
+        -0.3,
+    )
+    assert hold["consistent_with_aggregate"] is True
+
+
+def test_worst_path_inconsistent_with_aggregate_is_flagged():
+    stdout = _path_block("PATH\tmax\tsetup\t-1e-10\ta\tff/D")
+    setup, hold = post_route_sta._worst_paths(stdout, -0.5, -0.2)
+    assert setup["status"] == "inconsistent"
+    assert setup["consistent_with_aggregate"] is False
+    assert setup["startpoint"] == "a"
+    assert "differs from the aggregate WNS -0.5" in setup["reason"]
+    # No hold path at all, yet a real hold WNS: inconsistent, no identity.
+    assert hold["status"] == "inconsistent"
+    assert hold["startpoint"] is None
+    assert hold["consistent_with_aggregate"] is False
+
+
+def test_worst_path_without_aggregate_is_ok_but_unchecked():
+    setup, hold = post_route_sta._worst_paths(
+        _path_block("PATH\tmax\tsetup\t1e-10\ta\tff/D"), None, None
+    )
+    assert setup["status"] == "ok"
+    assert setup["consistent_with_aggregate"] is None
+    assert hold["status"] == "no_paths"
+
+
+def test_run_sta_without_worst_path_block_preserves_aggregates(tmp_path, monkeypatch):
+    """An engine output with no worst-path block (older capture/stub) keeps
+    every aggregate field and reports the records as unavailable."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["worst_slack_ns"] == -0.15
+    assert report["setup_violation_count"] == 1
+    assert report["worst_setup_path"]["status"] == "unavailable"
+    assert report["worst_hold_path"]["status"] == "unavailable"
+
+
+# -- live engine ------------------------------------------------------------ #
+
+
+def _live_sky130_env() -> str | None:
+    import os
+    import shutil
+
+    if shutil.which("openroad") is None:
+        return None
+    if os.environ.get("KLT_SKIP_OPENROAD_TESTS") == "1":
+        return None
+    # The documented Docker wrapper only mounts the PDK when PDK_ROOT is set.
+    if not os.environ.get("PDK_ROOT"):
+        return None
+    try:
+        post_route_sta._resolve_liberty(
+            "sky130_fd_sc_hd", "tt_025C_1v80", variant="sky130A"
+        )
+    except PostRouteStaError:
+        return None
+    return "sky130A"
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_boundary_paths(tmp_path):
+    """Engine integration: the same boundary request against a real
+    OpenROAD session must reproduce the captured identities."""
+    _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
+    request = {
+        "verilog": "boundary.v",
+        "hdl_toplevel": "top",
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "constraints": _boundary_constraints(),
+    }
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    report = run_sta(request_path, pdk_variant="sky130A")
+
+    hold = report["worst_hold_path"]
+    setup = report["worst_setup_path"]
+    assert (hold["check_type"], hold["startpoint"], hold["endpoint"]) == (
+        "removal",
+        "rst_n",
+        "ff_a/RESET_B",
+    )
+    assert (setup["check_type"], setup["startpoint"], setup["endpoint"]) == (
+        "setup",
+        "b_in",
+        "ff_b/D",
+    )
+    assert hold["consistent_with_aggregate"] is True
+    assert setup["consistent_with_aggregate"] is True
