@@ -119,6 +119,12 @@ klt yield mc.json --limits spec-limits.json --format json
   originating corner raises a warning: each corner is its own population, so
   the pooled estimate is a worst-case envelope rather than a distribution
   anyone sampled (the same caveat `klt sim`'s "Pooled vs. per corner" states).
+- **A negative control cannot come from `klt sim` itself.** `klt sim` never
+  writes a `negative_control` onto its rollup, so a report read directly
+  always grades without one. To grade a control from a second, known-bad
+  campaign, derive a sample set from both reports with
+  [`klt yield-samples`](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples)
+  — never by hand-editing a committed response.
 
 ### Sample-set document
 
@@ -168,9 +174,152 @@ sim report's rollup entry has no effect.
 
 `negative_control` (below) takes `errored`/`failed_unmeasurable`/`censored`
 but **not** `inconclusive`: a negative control is a caller-supplied variant
-draw with no `klt sim` status grading behind it, and nothing in the pipeline
-produces an inconclusive negative-control sample today. If a future path does,
-adding it follows this same pattern.
+draw with no status channel of its own. When the control *is* taken from a
+`klt sim` report — via [`klt yield-samples`](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples)
+— its screened `inconclusive` draws are **added to its `errored`** count,
+which gives them the identical treatment (excluded from both the numerator
+and denominator of the control's `yield.empirical`, never counted as a design
+failure), and the two original counts are disclosed in that document's
+`derivation` block.
+
+### Deriving a sample set from two `klt sim` reports (`klt yield-samples`)
+
+Issue [#2563](https://github.com/2AMLogic/klayout-tools/issues/2563). A
+negative control (below) is a **second campaign** — the same testbench with a
+deliberate defect seeded in — and `klt sim` cannot attach one campaign's
+samples to another's report. `klt yield-samples` does it without any
+caller-written extraction code:
+
+```bash
+klt yield-samples nominal.json --negative-control known-bad.json \
+    --description 'seeded defect' --format json > samples.json
+klt yield samples.json --format json > yield.json
+```
+
+```
+klt yield-samples <nominal> --negative-control <report>
+                  [--description <text>] [--measurement <name>]...
+                  [--format text|json]
+```
+
+- `<nominal>` / `--negative-control` (required) — two **unedited** `klt sim
+  --format json` Monte Carlo reports. Anything else (a sample-set document,
+  a report with no `monte_carlo` corner, malformed JSON) is an error.
+- `--description` — optional; recorded as every derived control's
+  `description`.
+- `--measurement` — derive only these nominal measurements (repeatable,
+  comma-separated names accepted — the same convention as `klt yield`'s).
+  Default: every measurement in the nominal report's rollup.
+- `--format` — `text` (default, a summary) or `json`. **The `--format json`
+  output is the sample-set document**: redirect it to a file and pass that
+  file to `klt yield`. No unwrapping step is needed.
+
+The command neither runs a simulation nor grades yield, and needs no native
+extension.
+
+**How the two populations are read.** Both reports go through the exact
+reader `klt yield` applies to a sim report directly (above), so the rules
+live in one place: only corners carrying a `monte_carlo` block are draws; a
+`null` value is `errored`; a corner- or measurement-level `"inconclusive"`
+grade excludes the draw once (a draw distrusted at both levels counts once);
+`failed_unmeasurable`/`censored` come from each report's rollup entry. The
+nominal measurement is exported in the sample-set shape above with its
+`limits`, `source_corners`, all four counts, `analytic_cross_check` and
+`sampling` intact, so **`klt yield samples.json` reproduces `klt yield
+nominal.json`'s `distribution`, `capability`, `yield`, `sample_size` and
+counts exactly** — the only difference is the populated `negative_control`.
+
+**Matching.** Measurements match by **exact name**, never by position.
+Every selected nominal measurement needs exactly one companion measurement of
+the same name with the same `unit` (two absent units match; an absent and a
+present one do not). Extra companion measurements are ignored. Each of these
+is an error naming the file and measurement: a missing companion, a name that
+appears twice in either rollup, a unit mismatch, a measurement with no draw
+at all in either report (not one sampled corner reports it — a control made
+entirely of rollup `failed_unmeasurable` is still a valid draw), and a nominal
+measurement that **already declares a `negative_control`** (it is never
+silently replaced; deselect it with `--measurement` instead).
+
+**Limits.** The control is always graded against the **nominal**
+measurement's limits. The companion report's own limits are never read into
+the derived document.
+
+**The derived control.** `samples` are the companion's screened numeric
+values; `failed_unmeasurable`/`censored` are its own counts; `errored` is
+its `errored` **plus its `inconclusive`** count (the negative-control schema
+has no `inconclusive` field; see the note under "Sample-set document" above
+for why this is the same treatment, not a reclassification).
+
+**The output.** The flat `--format json` payload is a sample-set document
+plus two additive top-level keys `klt yield` ignores:
+
+```json
+{
+  "schema_version": 1,
+  "measurements": [
+    {
+      "name": "vos", "unit": "V",
+      "samples": [0.0012, -0.0031, "..."],
+      "errored": 1, "inconclusive": 4, "failed_unmeasurable": 2, "censored": 1,
+      "limits": { "min": -0.5, "max": 0.5 },
+      "source_corners": ["tt/1.800V/27C"],
+      "negative_control": {
+        "samples": [0.6012, 0.5969, "..."],
+        "errored": 3, "failed_unmeasurable": 3, "censored": 2,
+        "description": "seeded defect"
+      },
+      "analytic_cross_check": null,
+      "sampling": null
+    }
+  ],
+  "derivation": {
+    "nominal": { "path": "nominal.json", "content_hash": "sha256:9f2c..." },
+    "negative_control": {
+      "path": "known-bad.json",
+      "content_hash": "sha256:41ab...",
+      "description": "seeded defect"
+    },
+    "measurements": [
+      {
+        "name": "vos",
+        "negative_control": {
+          "source_corners": ["ss/1.620V/125C"],
+          "errored": 1,
+          "inconclusive": 2,
+          "errored_reported": 3
+        }
+      }
+    ]
+  }
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `schema_version` | This command's own payload version (`1`). |
+| `measurements[]` | Sample-set entries, in nominal-rollup order (or `--measurement` order). See "Sample-set document" above. |
+| `derivation.nominal` / `derivation.negative_control` | Each source's `path` as given on the command line, and the `sha256:` hash of **the exact bytes that were parsed** (each file is read once). Pass repo-relative paths if the document will be committed — see [`docs/json-contract.md`](../json-contract.md)'s committed-artifact rule. |
+| `derivation.measurements[].negative_control` | Per measurement: the companion's `source_corners`, its original `errored` and `inconclusive` counts, and `errored_reported` (their sum, as written into the derived control). |
+
+The output is deterministic — no timestamps; identical input bytes and
+arguments give identical output bytes — and the inputs are only ever read.
+
+**What `klt signoff` hashes.** A `klt yield` citation's freshness pin is the
+hash of the single document its `samples` field names. In this workflow that
+is the **derived sample set**, not the nominal campaign: adopting a negative
+control moves the pin from `nominal.json` to `samples.json`. The derived
+document carries both populations and both source hashes, so any change to
+either campaign that is **re-derived** changes the pin and a stale expected
+`content_hash` is rejected. The limitation: **`klt signoff` does not
+recursively re-hash the campaigns `derivation` names.** Editing a source
+report without re-running `klt yield-samples` leaves the pin satisfied — the
+recorded source hashes are an audit trail for a reader (or a CI job that
+re-derives and byte-compares), not live verification. Re-run the derivation
+whenever either campaign changes.
+
+Exit codes: `0` derived (document on stdout); `1` could not derive (any
+error above; JSON error envelope on stderr under `--format json`, stdout
+empty); `2` usage error (argparse — e.g. `--negative-control` missing).
 
 ### Spec-limits file (`--limits`)
 
@@ -454,6 +603,9 @@ point estimate:
 | --- | --- |
 | `detected` | The negative control's empirical yield is lower **and** its exact (Clopper-Pearson) confidence interval does not overlap the nominal measurement's — a difference too large to be sampling noise. |
 | `not_detected` | The point estimates may differ, but the intervals overlap (or the control isn't even lower) — the deliberate defect did not show up as a statistically distinguishable degradation. |
+
+To build this block from a second `klt sim` campaign rather than by hand, see
+["Deriving a sample set from two `klt sim` reports"](#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples).
 
 `negative_control` is `null` when a measurement declares none. **A campaign
 where no measurement declares a negative control at all — or whose negative
@@ -1268,6 +1420,8 @@ section.
   sensitivity ranking, [`klt yield-sensitivity`](yield-sensitivity.md);
   [#924](https://github.com/2AMLogic/klayout-tools/issues/924) delivered
   design centering, [`klt design-centering`](design-centering.md)).
+- [`docs/cli/yield-samples.md`](yield-samples.md) — `klt yield-samples`,
+  deriving a negative-control sample set from two `klt sim` reports.
 - [`docs/cli/yield-sensitivity.md`](yield-sensitivity.md) — Phase 3: which
   device/process parameters drive the spread.
 - [`docs/cli/design-centering.md`](design-centering.md) — Phase 3: turning
