@@ -1215,73 +1215,87 @@ def _validate_port_delay_maps(
     (:func:`_port_check_lines`); the clock port is rejected here, since
     ``constraints.clock_port`` already names it.
     """
-    result: list[dict[str, dict[str, float]] | None] = []
-    for which in ("input", "output"):
-        field = f"request.constraints.{which}_delays"
-        value = constraints.get(f"{which}_delays")
-        if value is None:
-            result.append(None)
+    return (
+        _validate_port_delay_map(constraints, "input", clock_port),
+        _validate_port_delay_map(constraints, "output", clock_port),
+    )
+
+
+def _validate_port_delay_map(
+    constraints: dict[str, Any], which: str, clock_port: str
+) -> dict[str, dict[str, float]] | None:
+    """Validate one of ``constraints.{input,output}_delays`` (see
+    :func:`_validate_port_delay_maps`)."""
+    field = f"request.constraints.{which}_delays"
+    value = constraints.get(f"{which}_delays")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise PostRouteStaError(
+            f"{field} must be a JSON object mapping port names to "
+            '{"min_ns": ..., "max_ns": ...} entries'
+        )
+    parsed: dict[str, dict[str, float]] = {}
+    for port, entry in value.items():
+        _check_port_delay_key(field, which, port, clock_port)
+        parsed[port] = _parse_port_delay_entry(field, port, entry)
+    return parsed or None
+
+
+def _check_port_delay_key(field: str, which: str, port: str, clock_port: str) -> None:
+    """Reject a malformed port-name key of an I/O delay map."""
+    if not port or port != port.strip():
+        raise PostRouteStaError(
+            f"{field} keys must be non-empty port names without "
+            f"leading/trailing whitespace (got {port!r})"
+        )
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
+        raise PostRouteStaError(f"{field} key {port!r} contains a control character")
+    if which == "input" and port == clock_port:
+        raise PostRouteStaError(
+            f"{field} must not name the clock port {port!r} -- "
+            "clock inputs are excluded from input delays"
+        )
+
+
+def _parse_port_delay_entry(field: str, port: str, entry: Any) -> dict[str, float]:
+    """Validate one ``{"min_ns": n, "max_ns": n}`` entry of an I/O delay map."""
+    if not isinstance(entry, dict):
+        raise PostRouteStaError(
+            f"{field}[{port!r}] must be a JSON object with 'min_ns' and/or 'max_ns'"
+        )
+    unknown = sorted(set(entry) - {"min_ns", "max_ns"})
+    if unknown:
+        raise PostRouteStaError(
+            f"{field}[{port!r}] has unknown key(s) "
+            + ", ".join(repr(k) for k in unknown)
+            + " -- only 'min_ns' and 'max_ns' are accepted"
+        )
+    if not entry:
+        raise PostRouteStaError(
+            f"{field}[{port!r}] is empty -- give 'min_ns', 'max_ns', or both"
+        )
+    bounds: dict[str, float] = {}
+    for bound in ("min_ns", "max_ns"):
+        if bound not in entry:
             continue
-        if not isinstance(value, dict):
+        bound_value = entry[bound]
+        if not _is_finite_number(bound_value):
             raise PostRouteStaError(
-                f"{field} must be a JSON object mapping port names to "
-                '{"min_ns": ..., "max_ns": ...} entries'
+                f"{field}[{port!r}].{bound} must be a finite number "
+                f"(got {bound_value!r})"
             )
-        parsed: dict[str, dict[str, float]] = {}
-        for port, entry in value.items():
-            if not port or port != port.strip():
-                raise PostRouteStaError(
-                    f"{field} keys must be non-empty port names without "
-                    f"leading/trailing whitespace (got {port!r})"
-                )
-            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
-                raise PostRouteStaError(
-                    f"{field} key {port!r} contains a control character"
-                )
-            if which == "input" and port == clock_port:
-                raise PostRouteStaError(
-                    f"{field} must not name the clock port {port!r} -- "
-                    "clock inputs are excluded from input delays"
-                )
-            if not isinstance(entry, dict):
-                raise PostRouteStaError(
-                    f"{field}[{port!r}] must be a JSON object with "
-                    "'min_ns' and/or 'max_ns'"
-                )
-            unknown = sorted(set(entry) - {"min_ns", "max_ns"})
-            if unknown:
-                raise PostRouteStaError(
-                    f"{field}[{port!r}] has unknown key(s) "
-                    + ", ".join(repr(k) for k in unknown)
-                    + " -- only 'min_ns' and 'max_ns' are accepted"
-                )
-            if not entry:
-                raise PostRouteStaError(
-                    f"{field}[{port!r}] is empty -- give 'min_ns', 'max_ns', or both"
-                )
-            bounds: dict[str, float] = {}
-            for bound in ("min_ns", "max_ns"):
-                if bound not in entry:
-                    continue
-                bound_value = entry[bound]
-                if not _is_finite_number(bound_value):
-                    raise PostRouteStaError(
-                        f"{field}[{port!r}].{bound} must be a finite number "
-                        f"(got {bound_value!r})"
-                    )
-                bounds[bound] = float(bound_value)
-            if (
-                "min_ns" in bounds
-                and "max_ns" in bounds
-                and bounds["min_ns"] > bounds["max_ns"]
-            ):
-                raise PostRouteStaError(
-                    f"{field}[{port!r}].min_ns ({bounds['min_ns']}) must not "
-                    f"exceed max_ns ({bounds['max_ns']})"
-                )
-            parsed[port] = bounds
-        result.append(parsed or None)
-    return result[0], result[1]
+        bounds[bound] = float(bound_value)
+    if (
+        "min_ns" in bounds
+        and "max_ns" in bounds
+        and bounds["min_ns"] > bounds["max_ns"]
+    ):
+        raise PostRouteStaError(
+            f"{field}[{port!r}].min_ns ({bounds['min_ns']}) must not "
+            f"exceed max_ns ({bounds['max_ns']})"
+        )
+    return bounds
 
 
 def _validate_corners(value: Any) -> list[str] | None:
