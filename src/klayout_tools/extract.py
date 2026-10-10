@@ -993,6 +993,7 @@ def run_extract(
     subcircuit_cell: str | None = None,
     subcircuit_output: str | None = None,
     substrate_spreading_net: str | None = None,
+    hierarchical_cells: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -1881,6 +1882,25 @@ def run_extract(
     ``excluded_parasitics`` counts every element the boundary rule attributed
     to the parent deck instead, so nothing is dropped silently.
 
+    ``hierarchical_cells`` (``klt extract --hierarchical-cells CELL[,CELL...]``,
+    issue #2722, increment 1) opts into **hierarchical SPICE emission**: one
+    ``.SUBCKT <cell>`` per named (non-nested) cell definition, holding that
+    cell's own devices, plus the top ``.SUBCKT`` carrying the remaining
+    devices and one ``X`` card per *placement* of each named cell. It exists
+    so per-circuit ``klt lvs`` options (``options.combine_devices_per_circuit``)
+    have layout-side circuits to key on. Unlike ``subcircuit_cell`` this is
+    the primary deck, not a second artifact; ``devices[]``/``nets[]``/
+    ``device_count`` keep describing the *flat* extraction (so they are
+    unchanged by the option) and a ``hierarchy`` block is added to the
+    response *only* when the option was given. Omitted/empty (the default),
+    the flat bytes and JSON are unchanged. Errors (all before any output is
+    written): an absent, top, or unreachable cell; a selection where one
+    cell contains another; placements of one cell that are not electrically
+    identical; and any combination with ``parasitics``, ``subcircuit_cell``
+    or ``abstract_cell_patterns`` (deferred to issue #2916). See
+    :mod:`klayout_tools.extract_hierarchy` and ``docs/cli/extract.md``'s
+    "Hierarchical output" section.
+
     The written SPICE gains one ``.SUBCKT <cell type> <pins...> ... .ENDS``
     block per distinct matched cell type (empty body -- a black box declares
     no devices) and one ``X<instance>`` card per matched instance in the top
@@ -2290,6 +2310,14 @@ def run_extract(
     _validate_subcircuit_flags(
         subcircuit_cell, subcircuit_output, abstract_cell_patterns
     )
+    hierarchical_names = _normalize_hierarchical_cells(
+        hierarchical_cells,
+        parasitics=parasitics,
+        subcircuit_cell=subcircuit_cell,
+        abstract_cell_patterns=abstract_cell_patterns,
+        abstract_cell_lef_paths=abstract_cell_lef_paths,
+    )
+    hierarchy_placements: dict[int, Any] = {}
     subcircuit_info: dict[str, Any] = {}
     missing_flavour_markers: list[dict[str, Any]] = []
 
@@ -2332,6 +2360,8 @@ def run_extract(
         pin_source_cells=pin_source_cells,
         subcircuit_cell=subcircuit_cell,
         subcircuit_info=subcircuit_info,
+        hierarchical_cells=hierarchical_names,
+        hierarchy_placements=hierarchy_placements,
         substrate_spreading_net=substrate_spreading_net,
         # Issue #2658: only consumed by the `--abstract-cell-lef` pin-layer
         # lookup (see that function's docstring); `None` unless `--pdk`/
@@ -2993,6 +3023,16 @@ def run_extract(
         substrate_global_nets = [
             entry["net"] for entry in parasitics_report["substrate_dc_tie"]["nets"]
         ]
+    # `--hierarchical-cells` (issue #2722): rebuild hierarchy in the live
+    # netlist now -- after every flat-view field above (devices[], nets[],
+    # counts) was computed and before the writer runs -- so the ordinary
+    # writer, model bindings and digest path stay authoritative. Every
+    # validation (placement identity, conservation) raises here, before any
+    # output file exists.
+    hierarchy_report = _apply_hierarchical_cells(
+        netlist, circuit, hierarchical_names, hierarchy_placements
+    )
+
     # Issue #2761: a FinFET deck gets its own card writer (`L`/`W`/`NFIN`,
     # the PDK reference CDL's parameter set); every other deck keeps the
     # model-binding delegate exactly as before.
@@ -3177,6 +3217,10 @@ def run_extract(
     # `docs/cli/extract.md`'s "Sub-circuit isolation" section.
     result["subcircuit"] = subcircuit_report
 
+    # Additive field (issue #2722): present *only* when
+    # `--hierarchical-cells` was given, so a flat run's JSON is unchanged.
+    result.update(_hierarchy_fields(hierarchy_report))
+
     # Additive `metrics` block (issue #1848, adopting the declared metric
     # namespace registry from #247 beyond its `layout-metrics`/`klt drc`
     # (#1847) adopters) -- see `run_extract`'s docstring "metrics" paragraph
@@ -3203,6 +3247,117 @@ def run_extract(
 # --------------------------------------------------------------------------- #
 # --check / --rerun: verify a previously committed report (issue #1149)
 # --------------------------------------------------------------------------- #
+
+
+def _normalize_hierarchical_cells(
+    hierarchical_cells: Sequence[str],
+    *,
+    parasitics: bool,
+    subcircuit_cell: str | None,
+    abstract_cell_patterns: tuple[str, ...],
+    abstract_cell_lef_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Normalize ``--hierarchical-cells`` (issue #2722) to a sorted, de-duped
+    tuple (``()`` when omitted) and reject the option combinations increment 1
+    does not support -- before the extraction engine runs."""
+    names = tuple(sorted({name.strip() for name in hierarchical_cells}))
+    if not hierarchical_cells:
+        return ()
+    if not all(names) or not names:
+        raise ExtractError("--hierarchical-cells was given an empty cell name")
+    from .extract_hierarchy import HierarchyError, reject_unsupported_combinations
+
+    try:
+        reject_unsupported_combinations(
+            parasitics=parasitics,
+            subcircuit_cell=subcircuit_cell,
+            abstract_cell_patterns=abstract_cell_patterns,
+            abstract_cell_lef_paths=abstract_cell_lef_paths,
+        )
+    except HierarchyError as exc:
+        raise ExtractError(str(exc)) from exc
+    return names
+
+
+def _validate_hierarchical_selection(
+    layout: Any, top_cell: Any, names: tuple[str, ...]
+) -> None:
+    """Validate ``--hierarchical-cells`` against the live hierarchy (absent /
+    top / unreachable / nested) before any extraction work (issue #2722).
+    No-op when the option was omitted."""
+    if not names:
+        return
+    from .extract_hierarchy import HierarchyError, validate_selection
+
+    try:
+        validate_selection(layout, top_cell, names)
+    except HierarchyError as exc:
+        raise ExtractError(str(exc)) from exc
+
+
+def _collect_hierarchy_placements(
+    netlist: Any,
+    top_cell: Any,
+    dbu: float,
+    names: tuple[str, ...],
+    out: dict[int, Any] | None,
+) -> None:
+    """Fill ``out`` with the per-device placement attribution
+    ``--hierarchical-cells`` needs (issue #2722); no-op when omitted."""
+    final_top = netlist.circuit_by_name(top_cell.name)
+    if not names or out is None or final_top is None:
+        return
+    from .extract_hierarchy import device_placements
+
+    out.update(device_placements(top_cell, final_top, frozenset(names), dbu))
+
+
+def _apply_hierarchical_cells(
+    netlist: Any,
+    circuit: Any | None,
+    names: tuple[str, ...],
+    placements: dict[int, Any],
+) -> dict[str, Any] | None:
+    """Rebuild hierarchy in the live netlist (issue #2722) and return the
+    response's ``hierarchy`` block, ``None`` when the option was omitted. Every
+    refusal raises here, before the writer runs."""
+    if not names:
+        return None
+    from .extract_hierarchy import HierarchyError, build_hierarchy
+
+    if circuit is None:
+        raise ExtractError(
+            "--hierarchical-cells matched no extracted device -- this deck "
+            "recognized no device anywhere in the layout"
+        )
+    try:
+        report = build_hierarchy(netlist, circuit, placements)
+    except HierarchyError as exc:
+        raise ExtractError(str(exc)) from exc
+    _require_hierarchy_cells_populated(report, names)
+    return report
+
+
+def _hierarchy_fields(report: dict[str, Any] | None) -> dict[str, Any]:
+    """The additive ``hierarchy`` response field: present only when
+    ``--hierarchical-cells`` was given, so a flat run's JSON is unchanged."""
+    return {} if report is None else {"hierarchy": report}
+
+
+def _require_hierarchy_cells_populated(
+    report: dict[str, Any], names: tuple[str, ...]
+) -> None:
+    """A selected cell that contributed no recognized device would silently
+    produce no ``.SUBCKT`` -- the "silently flat" outcome the option must not
+    have (issue #2722)."""
+    emitted = {entry["cell"] for entry in report["cells"]}
+    missing = [name for name in names if name not in emitted]
+    if missing:
+        raise ExtractError(
+            f"--hierarchical-cells {missing[0]!r} matched no extracted device "
+            "-- the cell is placed in the layout hierarchy but none of the "
+            "devices this deck recognized resolve to a placement of it"
+        )
 
 
 def _validate_subcircuit_flags(
@@ -3787,6 +3942,8 @@ def extract_netlist_from_layout(
     pin_source_cells: frozenset[str] | None = None,
     subcircuit_cell: str | None = None,
     subcircuit_info: dict[str, Any] | None = None,
+    hierarchical_cells: tuple[str, ...] = (),
+    hierarchy_placements: dict[int, Any] | None = None,
     substrate_spreading_net: str | None = None,
     pdk_info: dict[str, Any] | None = None,
     missing_flavour_markers: list[dict[str, Any]] | None = None,
@@ -4038,10 +4195,16 @@ def extract_netlist_from_layout(
             "--def-pins": bool(def_pins),
             "--pin-source-cells": bool(pin_source_cells),
             "--subcircuit": subcircuit_cell is not None,
+            "--hierarchical-cells": bool(hierarchical_cells),
             "--substrate-spreading": substrate_spreading_net is not None,
             "--pdk": pdk_info is not None,
         },
     )
+
+    # `--hierarchical-cells` (issue #2722): selection validated against the
+    # live hierarchy (absent / top / unreachable / nested) before any
+    # extraction work or output.
+    _validate_hierarchical_selection(layout, top_cell, hierarchical_cells)
 
     # `--subcircuit` (issue #2245): the one fact about the slice that needs the
     # live layout hierarchy, reported back through the out-parameter (see this
@@ -4234,6 +4397,14 @@ def extract_netlist_from_layout(
     warnings = warnings + missing_marker_prose_warnings
     if missing_flavour_markers is not None:
         missing_flavour_markers.extend(missing_marker_entries)
+
+    # Issue #2722: per-device placement attribution for
+    # `--hierarchical-cells`, keyed by `Device.id()`, filled into the
+    # out-parameter (same idiom as `subcircuit_info`). Read from the final
+    # top circuit, exactly as `run_extract` later reads it.
+    _collect_hierarchy_placements(
+        netlist, top_cell, layout.dbu, hierarchical_cells, hierarchy_placements
+    )
 
     return (
         netlist,

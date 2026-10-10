@@ -111,6 +111,21 @@ def _parse_pin_source_cells(raw: str | None) -> frozenset[str] | None:
     return names
 
 
+def _parse_hierarchical_cells(raw: str | None) -> tuple[str, ...]:
+    """Parse the ``--hierarchical-cells`` flag's comma-separated value (issue
+    #2722) into a tuple of cell names, ``()`` when the flag was omitted."""
+    if raw is None:
+        return ()
+    names = tuple(name.strip() for name in raw.split(",") if name.strip())
+    if not names:
+        raise ExtractError(
+            "--hierarchical-cells was given but contains no non-empty name "
+            f"(got {raw!r}) -- pass a comma-separated list of cell names, "
+            "e.g. --hierarchical-cells stage_a,stage_b"
+        )
+    return names
+
+
 def _parse_matched_groups(raw: list[str] | None) -> dict[str, tuple[str, ...]] | None:
     """Parse the ``--matched-group`` flag's ``NAME=INST1,INST2[,...]``
     entries (issue #1018, repeatable) into a ``dict``, or ``None`` when the
@@ -251,6 +266,7 @@ _REQUEST_FIELD_DESTS = {
         "abstract_cell_lef",
         "subcircuit",
         "subcircuit_output",
+        "hierarchical_cells",
         "matched_groups",
     )
 }
@@ -357,6 +373,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "abstract_cell_lef": _str_list("abstract_cell_lef", paths=True),
             "subcircuit": _str("subcircuit"),
             "subcircuit_output": _path("subcircuit_output"),
+            "hierarchical_cells": _comma_joined("hierarchical_cells"),
             "matched_groups": reqdoc.get_group_map_as_pairs(
                 request,
                 "matched_groups",
@@ -390,6 +407,7 @@ def run(args: argparse.Namespace) -> int:
         declared_pins = _parse_declared_pins(args.pins)
         def_pins = _parse_def_pins(args.def_pins)
         pin_source_cells = _parse_pin_source_cells(args.pin_source_cells)
+        hierarchical_cells = _parse_hierarchical_cells(args.hierarchical_cells)
         deck_options = _parse_deck_options(args.deck_options)
         label_layers = _parse_label_layers(args.label_layers)
         def_net_connections = _parse_def_net_connections(
@@ -508,6 +526,9 @@ def run(args: argparse.Namespace) -> int:
             # never given, unchanged from every call site that predates them.
             subcircuit_cell=args.subcircuit,
             subcircuit_output=args.subcircuit_output,
+            # `--hierarchical-cells` (issue #2722): opt-in hierarchical
+            # `.SUBCKT` emission. `()` when the flag was never given.
+            hierarchical_cells=hierarchical_cells,
         )
     except ExtractError as exc:
         # `error.code` is set only for classified failures (issue #2761's
@@ -738,6 +759,8 @@ def _print_text(report: dict) -> None:
 
     # Additive (issue #2245): a no-op unless --subcircuit was given.
     _print_subcircuit_text(report.get("subcircuit"))
+    # Additive (issue #2722): a no-op unless --hierarchical-cells was given.
+    _print_hierarchy_text(report.get("hierarchy"))
 
     # Additive (issue #2473): a no-op unless --def-pins was given and its
     # declared-vs-promoted reconciliation raised an error-severity finding.
@@ -770,6 +793,24 @@ def _print_def_pin_promotion_text(promotion: dict | None) -> None:
             f"  [{finding['severity']}] {finding['layer']}/"
             f"{finding['datatype']} (outside this deck's connectivity "
             f"graph): {', '.join(finding['pins'])}"
+        )
+
+
+def _print_hierarchy_text(hierarchy: dict | None) -> None:
+    """Render the `hierarchy` block (issue #2722) -- nothing at all when
+    `--hierarchical-cells` was never given."""
+    if hierarchy is None:
+        return
+    print(
+        f"hierarchy: {len(hierarchy['cells'])} cell(s)  "
+        f"top devices: {hierarchy['top_device_count']}  "
+        f"top instances: {hierarchy['top_instance_count']}"
+    )
+    for entry in hierarchy["cells"]:
+        print(
+            f"  {entry['cell']}: {entry['placements']} placement(s)  "
+            f"devices: {entry['device_count']}  "
+            f"pins: {' '.join(entry['pins'])}"
         )
 
 

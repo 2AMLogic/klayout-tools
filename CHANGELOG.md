@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --hierarchical-cells`** (issue #2722, increment 1): an
+  opt-in, additive hierarchical SPICE mode. Named non-nested cells are written
+  as their own `.SUBCKT` (one definition per cell, one `X` per placement) with
+  the top circuit instantiating them, so `klt lvs`
+  `options.combine_devices_per_circuit` can scope the layout side. Request
+  field `hierarchical_cells`; additive `hierarchy` response block, present
+  only when the option is given. Flat output and JSON are unchanged when it is
+  omitted; `devices[]`/`nets[]` keep describing the flat extraction. Nesting
+  and combination with `--parasitics`/`--subcircuit`/`--abstract-cells` are
+  refused before any output is written (deferred to #2916).
 - **`klt sim` `analysis_steps[]`** (issue #2482): an additive, ngspice-only
   alternative to the scalar `analysis` that runs several named solves in order
   inside each corner's single deck. Each step has optional `alter` source

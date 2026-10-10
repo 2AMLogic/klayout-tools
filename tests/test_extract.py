@@ -20748,6 +20748,7 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
                 "abstract_cell_lef": ["lib/cells.lef"],
                 "subcircuit": "delaywin_hv",
                 "subcircuit_output": "design.delaywin_hv.spice",
+                "hierarchical_cells": ["stage_a", "stage_b"],
                 "matched_groups": {"mirror": ["$1", "$2"]},
             }
         )
@@ -20786,6 +20787,7 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
     assert resolved.abstract_cell_lef == [str(tmp_path / "lib" / "cells.lef")]
     assert resolved.subcircuit == "delaywin_hv"
     assert resolved.subcircuit_output == str(tmp_path / "design.delaywin_hv.spice")
+    assert resolved.hierarchical_cells == "stage_a,stage_b"
     assert resolved.matched_groups == ["mirror=$1,$2"]
 
 
@@ -22206,3 +22208,382 @@ def test_flavour_marker_present_does_not_warn_missing(tmp_path, overlap):
         output=str(tmp_path / "g.spice"),
     )
     assert report["missing_flavour_markers"] == []
+
+
+# --------------------------------------------------------------------------- #
+# `--hierarchical-cells`: opt-in hierarchical .SUBCKT emission (issue #2722)
+# --------------------------------------------------------------------------- #
+
+#: right-head centre of the second series resistor inside a `STAGE`-shaped
+#: cell (`_make_subcircuit_slice_layout`'s geometry): used to land a top-cell
+#: pad on it.
+_HIER_OUT_HEAD_X_DBU = round((_STAGE_R2_X_UM + 12.0 - 1.5) * 1000)
+
+
+def _draw_hier_stage(layout: kdb.Layout, name: str, mid_label: str) -> kdb.Cell:
+    """A `STAGE`-shaped cell: two series sky130 poly resistors joined by an
+    in-cell li1 bridge labelled ``mid_label`` (an internal node)."""
+    cell = layout.create_cell(name)
+    bar_um = _draw_sky130_poly_resistor_at(layout, cell, head_b_label=mid_label)
+    _draw_sky130_poly_resistor_at(layout, cell, x_um=_STAGE_R2_X_UM)
+    cell.shapes(layout.layer(67, 20)).insert(
+        kdb.Box(
+            round((bar_um - 1.9) * 1000), 200, round((_STAGE_R2_X_UM + 1.9) * 1000), 800
+        )
+    )
+    return cell
+
+
+def _make_hier_two_children_layout() -> kdb.Layout:
+    """``TOP`` places two *distinct* cells, ``STAGE_A`` and ``STAGE_B`` (same
+    drawing, different names), each pad-labelled in the top cell:
+    ``IN_A``/``OUT_A`` and ``IN_B``/``OUT_B``. The top cell draws no device."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li1 = layout.layer(67, 20)
+    li1_label = layout.layer(67, 5)
+    for suffix, y in (("A", 0), ("B", 40000)):
+        stage = _draw_hier_stage(layout, f"STAGE_{suffix}", f"MID_{suffix}")
+        top.insert(kdb.CellInstArray(stage.cell_index(), kdb.Trans(0, y)))
+        top.shapes(li1).insert(kdb.Box(1100, 200 + y, 1900, 800 + y))
+        top.shapes(li1_label).insert(kdb.Text(f"IN_{suffix}", kdb.Trans(1500, 500 + y)))
+        top.shapes(li1).insert(
+            kdb.Box(
+                _HIER_OUT_HEAD_X_DBU - 800, 200 + y, _HIER_OUT_HEAD_X_DBU + 800, 800 + y
+            )
+        )
+        top.shapes(li1_label).insert(
+            kdb.Text(f"OUT_{suffix}", kdb.Trans(_HIER_OUT_HEAD_X_DBU, 500 + y))
+        )
+    return layout
+
+
+def _spice_circuits(path: str) -> dict[str, dict[str, Any]]:
+    """Parse a written deck into ``{circuit: {"pins": [...], "cards": [...]}}``
+    (comments dropped; each card is its whitespace-split tokens)."""
+    circuits: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    for line in Path(path).read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("*"):
+            continue
+        tokens = stripped.split()
+        head = tokens[0].upper()
+        if head == ".SUBCKT":
+            current = {"pins": tokens[2:], "cards": []}
+            circuits[tokens[1]] = current
+        elif head == ".ENDS":
+            current = None
+        elif current is not None and not head.startswith("."):
+            current["cards"].append(tokens)
+    return circuits
+
+
+def _run_hier(tmp_path: Path, layout: kdb.Layout, cells: tuple[str, ...], **kwargs):
+    path = _write_gds(layout, tmp_path / "block.gds")
+    output = tmp_path / "block.spice"
+    kwargs.setdefault("top_cell_pins_only", True)
+    report = run_extract(
+        path, "sky130", output=str(output), hierarchical_cells=cells, **kwargs
+    )
+    return report, output
+
+
+def test_hierarchical_cells_two_distinct_children_emit_two_subckts_plus_top(tmp_path):
+    report, output = _run_hier(
+        tmp_path, _make_hier_two_children_layout(), ("STAGE_A", "STAGE_B")
+    )
+    circuits = _spice_circuits(str(output))
+
+    assert set(circuits) == {"TOP", "STAGE_A", "STAGE_B"}
+    for suffix in ("A", "B"):
+        child = circuits[f"STAGE_{suffix}"]
+        assert len(child["cards"]) == 2  # the cell's own two resistors
+        assert all(card[0].startswith("R") for card in child["cards"])
+        assert sorted(child["pins"]) == sorted([f"IN_{suffix}", f"OUT_{suffix}"])
+    # The top holds no selected-child device, only the two X instances,
+    # wired to the top pad nets by name.
+    top_cards = circuits["TOP"]["cards"]
+    assert [card[0] for card in top_cards] == ["XSTAGE_A_1", "XSTAGE_B_1"]
+    assert top_cards[0][1:] == [*_pins_in_order(circuits, "STAGE_A"), "STAGE_A"]
+    assert top_cards[1][1:] == [*_pins_in_order(circuits, "STAGE_B"), "STAGE_B"]
+    # The flat view in the response is unchanged; the hierarchy block says
+    # what was emitted.
+    assert report["device_count"] == 4
+    hierarchy = report["hierarchy"]
+    assert [entry["cell"] for entry in hierarchy["cells"]] == ["STAGE_A", "STAGE_B"]
+    assert hierarchy["top_device_count"] == 0
+    assert hierarchy["top_instance_count"] == 2
+    assert hierarchy["circuits"] == ["TOP", "STAGE_A", "STAGE_B"]
+    from klayout_tools._provenance import sha256_file
+
+    assert report["netlist_sha256"] == sha256_file(str(output))
+
+
+def _pins_in_order(circuits: dict[str, dict[str, Any]], name: str) -> list[str]:
+    """Parent-side net names, in the child's pin order, for a child whose pin
+    names equal the parent's pad-net names (true for the pad-labelled
+    fixtures above)."""
+    return list(circuits[name]["pins"])
+
+
+def test_hierarchical_cells_repeated_placement_is_one_definition_two_instances(
+    tmp_path,
+):
+    layout = _make_subcircuit_slice_layout(
+        second_placement=kdb.Trans(kdb.Vector(0, 80000))
+    )
+    report, output = _run_hier(tmp_path, layout, ("STAGE",))
+    circuits = _spice_circuits(str(output))
+
+    assert list(circuits).count("STAGE") == 1
+    assert set(circuits) == {"TOP", "STAGE"}
+    assert len(circuits["STAGE"]["cards"]) == 2
+    instances = [c for c in circuits["TOP"]["cards"] if c[0].startswith("X")]
+    assert [card[0] for card in instances] == ["XSTAGE_1", "XSTAGE_2"]
+    first, second = instances[0][1:-1], instances[1][1:-1]
+    assert len(first) == len(second) == 2
+    # Independent connections: no net is shared between the two placements.
+    assert not set(first) & set(second)
+    # The one parent-side device (R3, flat in TOP) is still there, and its
+    # `OUT` net is the first placement's OUT pin connection.
+    top_resistors = [c for c in circuits["TOP"]["cards"] if c[0].startswith("R")]
+    assert len(top_resistors) == 1
+    assert top_resistors[0][1] in first
+    assert report["device_count"] == 5  # 2 + 2 (STAGE x2) + 1 (R3)
+    assert report["hierarchy"]["cells"][0]["placements"] == 2
+
+
+def test_hierarchical_cells_conserves_every_device(tmp_path):
+    flat = run_extract(
+        _write_gds(
+            _make_subcircuit_slice_layout(
+                second_placement=kdb.Trans(kdb.Vector(0, 80000))
+            ),
+            tmp_path / "flat.gds",
+        ),
+        "sky130",
+        output=str(tmp_path / "flat.spice"),
+        top_cell_pins_only=True,
+    )
+    report, output = _run_hier(
+        tmp_path,
+        _make_subcircuit_slice_layout(second_placement=kdb.Trans(kdb.Vector(0, 80000))),
+        ("STAGE",),
+    )
+    circuits = _spice_circuits(str(output))
+    top_devices = sum(1 for c in circuits["TOP"]["cards"] if c[0].startswith("R"))
+    child_devices = sum(1 for c in circuits["STAGE"]["cards"] if c[0].startswith("R"))
+    instances = sum(1 for c in circuits["TOP"]["cards"] if c[0].startswith("X"))
+    assert top_devices + child_devices * instances == flat["device_count"]
+
+
+def test_hierarchical_cells_conservation_failure_is_refused_before_output(
+    tmp_path, monkeypatch
+):
+    """Negative control: a transform that loses a device must fail the
+    conservation check rather than write a netlist missing it."""
+    from klayout_tools import extract_hierarchy
+
+    real = extract_hierarchy._build_child
+
+    def lossy(netlist, cell, group):
+        child, pin_sigs = real(netlist, cell, group)
+        child.remove_device(next(iter(child.each_device())))
+        return child, pin_sigs
+
+    monkeypatch.setattr(extract_hierarchy, "_build_child", lossy)
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "block.gds")
+    output = tmp_path / "block.spice"
+    with pytest.raises(ExtractError, match="conservation check failed"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("STAGE",),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_flat_mode_is_byte_identical(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    outputs = {}
+    reports = {}
+    for label, kwargs in (
+        ("omitted", {}),
+        ("empty", {"hierarchical_cells": ()}),
+        ("empty_list", {"hierarchical_cells": []}),
+    ):
+        path = _write_gds(layout, tmp_path / f"{label}.gds")
+        output = tmp_path / f"{label}.spice"
+        reports[label] = run_extract(
+            path, "sky130", output=str(output), top_cell_pins_only=True, **kwargs
+        )
+        outputs[label] = output.read_bytes()
+    assert outputs["omitted"] == outputs["empty"] == outputs["empty_list"]
+    for report in reports.values():
+        assert "hierarchy" not in report
+    keys = {frozenset(report) for report in reports.values()}
+    assert len(keys) == 1
+
+
+@pytest.mark.parametrize(
+    ("cells", "layout_kwargs", "match"),
+    [
+        (("NOPE",), {}, "names no cell in this layout"),
+        (("TOP",), {}, "names the top cell itself"),
+        (("STAGE", "WRAP"), {"wrapper_cell": "WRAP"}, "#2916"),
+        (("WRAP", "STAGE"), {"wrapper_cell": "WRAP"}, "nested selections"),
+    ],
+)
+def test_hierarchical_cells_rejects_bad_selection_before_output(
+    tmp_path, cells, layout_kwargs, match
+):
+    path = _write_gds(
+        _make_subcircuit_slice_layout(**layout_kwargs), tmp_path / "b.gds"
+    )
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match=match):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=cells,
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_rejects_unreachable_cell_before_output(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    layout.create_cell("ORPHAN")
+    layout.cell("ORPHAN").shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 10, 10))
+    path = _write_gds(layout, tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match="no reachable placement"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top="TOP",
+            top_cell_pins_only=True,
+            hierarchical_cells=("ORPHAN",),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_rejects_a_cell_with_no_extracted_device(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    empty = layout.create_cell("EMPTY")
+    empty.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 10, 10))
+    layout.cell("TOP").insert(
+        kdb.CellInstArray(empty.cell_index(), kdb.Trans(0, 90000))
+    )
+    path = _write_gds(layout, tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match="matched no extracted device"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("EMPTY",),
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "flag"),
+    [
+        ({"parasitics": True}, "--parasitics"),
+        ({"subcircuit_cell": "STAGE"}, "--subcircuit"),
+        ({"abstract_cell_patterns": ("SC_*",)}, "--abstract-cells"),
+    ],
+)
+def test_hierarchical_cells_rejects_unsupported_option_combinations(
+    tmp_path, kwargs, flag
+):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match=rf"cannot be combined with {flag}.*#2916"):
+        run_extract(
+            path, "sky130", output=str(output), hierarchical_cells=("STAGE",), **kwargs
+        )
+    assert not output.exists()
+    assert not list(tmp_path.glob("*.spice"))
+
+
+def test_hierarchical_cells_refuses_non_identical_placements(tmp_path):
+    """A top-cell wire shorting one placement's IN to its OUT makes the two
+    placements' net partitions differ: one shared definition would be wrong
+    for one of them, so it is refused rather than guessed."""
+    layout = _make_subcircuit_slice_layout(
+        second_placement=kdb.Trans(kdb.Vector(0, 80000))
+    )
+    layout.cell("TOP").shapes(layout.layer(67, 20)).insert(
+        kdb.Box(1100, 80200, _HIER_OUT_HEAD_X_DBU + 800, 80800)
+    )
+    path = _write_gds(layout, tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match="not electrically identical"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("STAGE",),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_cli_json_text_and_request(tmp_path, capsys):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    argv = [
+        "extract",
+        path,
+        "--deck",
+        "sky130",
+        "--output",
+        str(output),
+        "--top-cell-pins",
+        "--hierarchical-cells",
+        "STAGE",
+    ]
+    assert main([*argv, "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["hierarchy"]["cells"][0]["cell"] == "STAGE"
+    assert "STAGE" in _spice_circuits(str(output))
+
+    assert main(argv) == 0
+    text = capsys.readouterr().out
+    assert "hierarchy: 1 cell(s)" in text
+    assert "STAGE: 1 placement(s)" in text
+
+    request = tmp_path / "extract.request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": path,
+                "deck": "sky130",
+                "output": str(tmp_path / "r.spice"),
+                "top_cell_pins": True,
+                "hierarchical_cells": ["STAGE"],
+            }
+        )
+    )
+    assert main(["extract", str(request), "--format", "json"]) == 0
+    assert (
+        json.loads(capsys.readouterr().out)["hierarchy"]["cells"][0]["cell"] == "STAGE"
+    )
+    assert (tmp_path / "r.spice").read_bytes() == output.read_bytes()
+
+
+def test_hierarchical_cells_blank_flag_is_a_usage_error(tmp_path, capsys):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "b.gds")
+    message = _extract_error_message(
+        capsys, [path, "--deck", "sky130", "--hierarchical-cells", ","]
+    )
+    assert "--hierarchical-cells" in message
