@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1057",
-  "loom_commit": "2fc7252f2c11e4fbb1cc9655b14334ecc7966e26",
+  "loom_version": "0.19.1065",
+  "loom_commit": "33bb950d65b9038d5cf119a252820edca1192edf",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -403,7 +403,12 @@
     ".loom/docs/premise-gate.md",
     ".loom/scripts/tests/test-premise-check.sh",
     ".loom/runtimes/gemini.json",
-    ".loom/docs/runtime-model-trials.md"
+    ".loom/docs/runtime-model-trials.md",
+    ".claude/commands/loom/sweep-doctor-glm-escalation.md",
+    ".claude/commands/loom/sweep-arguments.md",
+    ".loom/docs/graphql-body-size-cap.md",
+    ".loom/docs/stale-check-inputs.md",
+    ".loom/scripts/tests/test-check-ci-status.sh"
   ],
   "last_resync": "2026-10-11",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
