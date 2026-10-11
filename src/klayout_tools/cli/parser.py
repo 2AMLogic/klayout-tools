@@ -59,6 +59,7 @@ from . import (
     wave_cmd,
     yield_campaign_cmd,
     yield_cmd,
+    yield_samples_cmd,
     yield_sensitivity_cmd,
 )
 from .color import add_color_args
@@ -285,6 +286,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_power_parser(subparsers)
 
     _add_yield_parser(subparsers)
+
+    _add_yield_samples_parser(subparsers)
 
     _add_yield_campaign_parser(subparsers)
 
@@ -1063,6 +1066,76 @@ def _add_yield_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(yield_parser)
     yield_parser.set_defaults(func=yield_cmd.run)
+
+
+def _add_yield_samples_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-samples`` verb (issue #2563).
+
+    Derives a `klt yield` sample-set document from two `klt sim` Monte Carlo
+    reports -- the nominal campaign and a seeded known-bad variant that
+    becomes each measurement's ``negative_control`` -- so a negative control
+    can be graded without hand-editing a committed sim response. Pure JSON
+    transformation; needs no native extension.
+    """
+    parser = subparsers.add_parser(
+        "yield-samples",
+        help=(
+            "two `klt sim` MC reports (nominal + known-bad) -> a `klt yield` "
+            "sample-set document carrying a negative control"
+        ),
+        description=(
+            "Derive a `klt yield` sample-set document from two unedited `klt "
+            "sim --format json` Monte Carlo reports: the nominal campaign and a "
+            "seeded known-bad variant whose draw becomes each matched "
+            "measurement's negative_control (issue #2563). Both reports are "
+            "read with `klt yield`'s own sim-report reader; measurements match "
+            "by exact name and unit; the control is graded against the nominal "
+            "limits. The --format json output is the sample-set document "
+            "itself (plus schema_version and a `derivation` block recording "
+            "both source paths and SHA-256 hashes) -- redirect it to a file "
+            "and pass that to `klt yield`. Does not run simulations or grade "
+            "yield. See docs/cli/yield.md's 'Deriving a sample set from two "
+            "`klt sim` reports'."
+        ),
+    )
+    parser.add_argument(
+        "nominal",
+        help=(
+            "path to the nominal campaign's `klt sim --format json` Monte Carlo report"
+        ),
+    )
+    parser.add_argument(
+        "--negative-control",
+        dest="negative_control",
+        required=True,
+        metavar="REPORT",
+        help=(
+            "path to the seeded known-bad variant's own `klt sim --format "
+            "json` Monte Carlo report; its draw becomes each matched "
+            "measurement's negative_control"
+        ),
+    )
+    parser.add_argument(
+        "--description",
+        default=None,
+        help=(
+            "optional description of the deliberate defect, recorded as every "
+            "derived negative_control's description"
+        ),
+    )
+    parser.add_argument(
+        "--measurement",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "derive only this nominal measurement; repeatable, and "
+            "comma-separated names are accepted (default: every measurement "
+            "in the nominal report's rollup)"
+        ),
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=yield_samples_cmd.run)
 
 
 def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:

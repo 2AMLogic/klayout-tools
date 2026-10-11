@@ -155,6 +155,8 @@ The `synthesize` verb maps RTL to a standard-cell netlist against a resolved lib
 
 **Naming trap**: there is no `yield.py` — the verb's core module is `yield_analysis.py`.
 
+`klt yield-samples` (issue #2563) is a separate verb whose CLI module is `cli/yield_samples_cmd.py`, but whose core (`derive_sample_set`) deliberately lives in `yield_analysis.py`: it reuses `klt yield`'s own sim-report reader so the draw-screening rules exist in exactly one place.
+
 **Not part of this split**: `klt yield-campaign` and `klt yield-sensitivity` are separate, independently-registered CLI verbs (their own `set_defaults` entries in `cli/parser.py`), not additional files of `klt yield` itself, despite the shared `yield*` module-name prefix:
 
 - `yield-campaign` = `cli/yield_campaign_cmd.py` + `yield_campaign.py` (multi-run campaign orchestration; also borrows `yield_cmd.py`'s text-report printer for its own text output)
