@@ -21879,3 +21879,110 @@ def test_label_layers_genuine_drift_is_still_detected(tmp_path):
     drifted = {entry["field"] for entry in result["drift"]}
     assert "counts.pins.layout" in drifted
     assert "label_layers" not in result["fresh"]
+
+
+# --------------------------------------------------------------------------- #
+# `klt extract --hierarchical-cells` x options.combine_devices_per_circuit
+# (issue #2722): layout-side per-circuit scoping needs layout-side circuits.
+# --------------------------------------------------------------------------- #
+
+# `stage_a` is a single lumped resistor in the reference (the layout's two
+# series 289.2-ohm segments must be folded: combine = true); `stage_b` keeps
+# its two series resistors device-for-device (combine = false).
+_HIER_EXTRACT_REFERENCE_SPICE = """
+.subckt stage_a IN_A OUT_A
+R1 IN_A OUT_A 578.4 res_generic_po L=12U W=1U
+.ends
+.subckt stage_b IN_B OUT_B
+R1 IN_B MID 289.2 res_generic_po L=6U W=1U
+R2 MID OUT_B 289.2 res_generic_po L=6U W=1U
+.ends
+.subckt top IN_A OUT_A IN_B OUT_B
+XSTAGE_A IN_A OUT_A stage_a
+XSTAGE_B IN_B OUT_B stage_b
+.ends
+"""
+
+
+def _hier_extract_lvs(tmp_path, layout_spice, options, reference_spice):
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    request = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_spice, "top": "TOP"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": options,
+        },
+    )
+    return run_lvs(request)
+
+
+def test_extract_hierarchical_cells_scopes_combine_devices_per_layout_circuit(
+    tmp_path,
+):
+    """`klt extract --hierarchical-cells` gives the layout side one circuit per
+    selected cell, so `combine_devices_per_circuit` can fold `STAGE_A`'s
+    series pair while leaving `STAGE_B`'s untouched -- opposite settings on
+    two layout-side children, honoured simultaneously."""
+    from klayout_tools.extract import run_extract
+    from test_extract import _make_hier_two_children_layout, _write_gds
+
+    gds = _write_gds(_make_hier_two_children_layout(), tmp_path / "block.gds")
+    hier_spice = tmp_path / "hier.spice"
+    run_extract(
+        gds,
+        "sky130",
+        output=str(hier_spice),
+        top_cell_pins_only=True,
+        hierarchical_cells=("STAGE_A", "STAGE_B"),
+    )
+    per_circuit = {"combine_devices_per_circuit": {"STAGE_A": True, "STAGE_B": False}}
+
+    report = _hier_extract_lvs(
+        tmp_path, str(hier_spice), per_circuit, _HIER_EXTRACT_REFERENCE_SPICE
+    )
+    assert report["status"] == "match"
+    # 1 (STAGE_A folded) + 2 (STAGE_B untouched) device pairs.
+    assert report["counts"]["devices"]["matched"] == 3
+
+    # Neither whole-netlist setting reproduces that: `true` also folds
+    # STAGE_B (only 2 pairs left, its own device-for-device reference lost);
+    # `false` never folds STAGE_A and mismatches.
+    folded_everywhere = _hier_extract_lvs(
+        tmp_path,
+        str(hier_spice),
+        {"combine_devices": True},
+        _HIER_EXTRACT_REFERENCE_SPICE,
+    )
+    assert folded_everywhere["counts"]["devices"]["matched"] == 2
+    never_folded = _hier_extract_lvs(
+        tmp_path, str(hier_spice), {}, _HIER_EXTRACT_REFERENCE_SPICE
+    )
+    assert never_folded["status"] == "mismatch"
+
+
+def test_extract_flat_output_has_no_layout_circuits_for_per_circuit_options(
+    tmp_path,
+):
+    """Negative control: without the hierarchical option the layout side is
+    one flat circuit, so the same per-circuit request cannot match."""
+    from klayout_tools.extract import run_extract
+    from test_extract import _make_hier_two_children_layout, _write_gds
+
+    gds = _write_gds(_make_hier_two_children_layout(), tmp_path / "block.gds")
+    flat_spice = tmp_path / "flat.spice"
+    run_extract(gds, "sky130", output=str(flat_spice), top_cell_pins_only=True)
+
+    report = _hier_extract_lvs(
+        tmp_path,
+        str(flat_spice),
+        {"combine_devices_per_circuit": {"STAGE_A": True, "STAGE_B": False}},
+        _HIER_EXTRACT_REFERENCE_SPICE,
+    )
+    assert report["status"] == "mismatch"
+    unmatched = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "combine_devices_per_circuit.unmatched"
+    ]
+    assert {m["side"] for m in unmatched} == {"layout"}

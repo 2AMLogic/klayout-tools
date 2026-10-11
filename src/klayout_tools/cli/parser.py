@@ -2198,6 +2198,28 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--hierarchical-cells",
+        dest="hierarchical_cells",
+        default=None,
+        metavar="CELL[,CELL...]",
+        help=(
+            "comma-separated cell name(s) to emit as their own '.SUBCKT' in "
+            "the written SPICE instead of flattening them into the top "
+            "circuit (issue #2722): one definition per named cell, one X "
+            "instance per placement, so per-circuit klt lvs options such as "
+            "options.combine_devices_per_circuit can scope the layout side. "
+            "Increment 1: the cells must be non-nested, reachable, "
+            "non-top cells, and every placement of one cell must be "
+            "electrically identical; nesting, absent/top/unreachable names "
+            "and combination with --parasitics, --subcircuit or "
+            "--abstract-cells are errors (deferred to #2916). devices[]/"
+            "nets[] keep describing the flat extraction and a 'hierarchy' "
+            "block is added to the JSON response. Off by default -- the "
+            "flat bytes and JSON are unchanged. See docs/cli/extract.md's "
+            "'Hierarchical output' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--matched-group",
         dest="matched_groups",
         action="append",
