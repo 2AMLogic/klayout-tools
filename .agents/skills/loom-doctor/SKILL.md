@@ -236,17 +236,22 @@ handoff below) are **GraphQL-backed mutations**. GitHub's GraphQL quota
 (5000/hr, shared across every agent + tool) and its REST quota are
 **independent** — confirmed live during long sweeps (#4526, #4670, #4856):
 GraphQL can read 0 remaining while REST still has ~4000 left. A rejection
-whose text contains one of these five signatures (case-insensitive) is a
-rate limit, not a real failure, and has a REST equivalent — do **not** give
-up or wait idly; retry the same mutation over REST:
+whose text contains one of these five signatures (case-insensitive; `·` is a
+space, #11411) is a rate limit, not a real failure, and has a REST
+equivalent — do **not** give up or wait idly; retry the same mutation over REST:
 
 | Signature | Seen as |
 |---|---|
-| `api rate limit exceeded` | REST itself throttling (rare on the fallback path) |
-| `api rate limit already exceeded` | GraphQL: `GraphQL: API rate limit already exceeded for user ID …` |
-| `secondary rate limit` | either transport, burst throttling |
-| `abuse detection mechanism` | either transport, burst throttling |
-| `was submitted too quickly` | either transport, burst throttling |
+| `api rate limit·exceeded` | REST throttling (rare here) |
+| `api rate limit·already exceeded` | GraphQL, as `GraphQL: … for user ID …` |
+| `secondary rate limit` | burst throttling |
+| `abuse detection mechanism` | burst throttling |
+| `was submitted too quickly` | burst throttling |
+
+A "GitHub API rate limit … sleep until reset" reminder on a tool result is a
+text match on its output (#11411), not a quota reading: check
+`gh api rate_limit` and keep working. Read role files with a file-read tool,
+not `cat`.
 
 REST equivalents for the mutations you actually need mid-fix:
 
@@ -497,7 +502,6 @@ operator-hold exclusion above and every filter keyed on it are unaffected:
 | `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
 | `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required (the typical Doctor case: a fix that requires a secret rotation or a machine you cannot reach) |
 | `loom:operator-decision` | The fix requires authority you structurally cannot hold — a preference call or an authority act (binds the entity, irreversible disclosure, spending, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action) |
-| `loom:operator-objective` | The fix is determined once the operator states an objective — name the candidate objectives and the answer under each (#5826) |
 
 ```bash
 ./.loom/scripts/post-comment.sh <number> --pr --body "Routing to the operator: <what a human must do>."
@@ -511,8 +515,8 @@ obvious — before applying it, run the falsifiability test from
 `.loom/docs/label-state-machine.md`: name the axis two well-informed people
 would still disagree on, and show it is a preference, not a fact. If you
 cannot name that axis, the fix is determined — finish diagnosing it instead of
-parking. If the only gap is a missing objective, that's
-`loom:operator-objective`, not `loom:operator-decision`.
+parking. If the only gap is a missing objective, file a decision
+whose options are the candidate objectives (#10000).
 
 **If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
 in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
@@ -522,10 +526,6 @@ does not satisfy this.
 
 **If you chose `loom:operator-decision`**, use `loom-daemon operator-decision
 apply` (`operator-decision.md`); the ranked whys name the axis.
-
-**If you chose `loom:operator-objective`**, the same comment MUST list the
-candidate objectives and the answer under each, not just "needs an
-objective."
 
 Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
 "`loom:operator-only` sub-kinds".
@@ -1257,7 +1257,7 @@ Read the full review, not just individual comments; check what the reviewer alre
 
 ### Make Focused Changes
 
-Address exactly what was requested — no new features or refactoring beyond the feedback (see "Scope Discipline"). Keep commits focused and well-described, and run tests after each change.
+Address exactly what was requested, nothing beyond it (see "Scope Discipline"); keep commits focused and run tests after each change.
 
 ### Fixing a Role Prompt or Dispatch Brief
 
@@ -1273,7 +1273,11 @@ Comment on the PR when pushing fixes ("Addressed: formatting, added tests for ed
 
 ### Quality Checks
 ```bash
-# Run full CI; Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated
+# Full CI; Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated.
+# Production shell changed + CI runs shell-budget --check? After the final commit, before re-review:
+# `loom-daemon shell-budget --check --base <PR base, default origin/main>`; nonzero = this branch's
+# growth (never pre-existing): cut counted shell or move it to the daemon, rerun to exit 0.
+# Comments, follow-up issues or arbitrary trailers are not permission.
 pnpm check:ci   # repo check: buildGate.command in .loom/config.json
 
 # If review mentioned tests / style / types:
@@ -1287,28 +1291,13 @@ pnpm exec tsc --noEmit
 When running tests during PR fixes, truncate verbose output to conserve tokens:
 
 ```bash
-# Failures + summary only (recommended)
+# Failures + summary only
 pnpm test 2>&1 | grep -E "(FAIL|PASS|Error|✓|✗|Summary|Tests:)" | head -100
-
-# Just the summary
-pnpm test 2>&1 | tail -30
-
-# Show only failures with context
-pnpm test 2>&1 | grep -A 5 -B 2 "FAIL\|Error\|✗"
 ```
 
-**Why truncate?**
-- Test output can exceed 10,000+ lines
-- Most of that is passing tests (not actionable)
-- Wastes tokens that could be used for actual fix work
-- Pollutes context for subsequent operations
+**Why truncate?** Output can exceed 10,000 lines of mostly passing, non-actionable tests that waste tokens and pollute context.
 
-**Report failures concisely:**
-```
-❌ 2 tests failing after fix:
-1. `state.test.ts:45` - still returns undefined (need null check)
-2. `worktree.test.ts:89` - timeout (async issue remains)
-```
+Report failures concisely: one `file:line` - cause line per failing test.
 
 ## Example Commands
 

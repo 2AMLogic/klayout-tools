@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1018",
-  "loom_commit": "13e54f1cfc513507a7ef84ec6908085638d9c187",
+  "loom_version": "0.19.1073",
+  "loom_commit": "abb0872ba7d1d3f6f3a14f71f51a562e89308181",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -390,9 +390,29 @@
     ".loom/scripts/post-verdict.sh",
     ".loom/scripts/tests/test-post-verdict-gate.sh",
     ".loom/scripts/tests/test-post-verdict.sh",
-    ".loom/scripts/tests/test-sweep-lease-renew-lifecycle.sh"
+    ".loom/scripts/tests/test-sweep-lease-renew-lifecycle.sh",
+    ".loom/scripts/tests/test-check-main-clean-build-trees.sh",
+    ".loom/scripts/tests/test-resync-installed-payload-fallback.sh",
+    ".agents/skills/loom-builder-pr/SKILL.md",
+    ".loom/docs/park-record.md",
+    ".claude/commands/loom/sweep-execution-model.md",
+    ".claude/commands/loom/sweep-summary-output.md",
+    ".loom/scripts/tests/test-champion-pr-merge-negation-guard.sh",
+    ".loom/scripts/tests/test-worktree-race-rescue.sh",
+    ".loom/docs/native-sweep.md",
+    ".loom/docs/premise-gate.md",
+    ".loom/scripts/tests/test-premise-check.sh",
+    ".loom/runtimes/gemini.json",
+    ".loom/docs/runtime-model-trials.md",
+    ".claude/commands/loom/sweep-doctor-glm-escalation.md",
+    ".claude/commands/loom/sweep-arguments.md",
+    ".loom/docs/graphql-body-size-cap.md",
+    ".loom/docs/stale-check-inputs.md",
+    ".loom/scripts/tests/test-check-ci-status.sh",
+    ".loom/docs/fleet-config-lifecycle.md",
+    ".loom/docs/session-output.md"
   ],
-  "last_resync": "2026-10-10",
+  "last_resync": "2026-10-11",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
   "requires_daemon": "0.19.772"
 }

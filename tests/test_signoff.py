@@ -5144,6 +5144,116 @@ def test_command_evidence_yield_hashes_samples_relative_to_command_cwd(
     assert item_6["citation"]["content_hash"] == expected_hash
 
 
+# --------------------------------------------------------------------------- #
+# `klt yield-samples` derived documents (issue #2563): signoff hashing is
+# unchanged -- it hashes the single document `samples` names, which for a
+# negative-control workflow is the derived sample set, not either campaign.
+# --------------------------------------------------------------------------- #
+
+
+def _mc_sim_report(path: Path, values: list) -> str:
+    """A minimal `klt sim` Monte Carlo report over one measurement."""
+    report = {
+        "schema_version": 3,
+        "status": "pass",
+        "measurements": [{"name": "vref", "unit": "V", "limits": {"max": 1.25}}],
+        "corners": [
+            {
+                "corner_id": f"tt/mc{i}",
+                "status": "pass",
+                "measurements": [{"name": "vref", "value": v, "status": "pass"}],
+                "monte_carlo": {"sample_index": i, "seed": i},
+            }
+            for i, v in enumerate(values)
+        ],
+    }
+    path.write_text(json.dumps(report))
+    return str(path)
+
+
+def _derive_samples(tmp_path: Path, capsys) -> Path:
+    """Run the documented first command of the two-command workflow and
+    commit its `--format json` output beside the yield report."""
+    argv = [
+        "yield-samples",
+        str(tmp_path / "nominal.json"),
+        "--negative-control",
+        str(tmp_path / "control.json"),
+        "--format",
+        "json",
+    ]
+    assert main(argv) == 0
+    derived = tmp_path / "mc-samples.json"
+    derived.write_text(capsys.readouterr().out)
+    return derived
+
+
+def _yield_item_6(tmp_path: Path, pin: str | None = None) -> dict:
+    yield_path = _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE)
+    evidence: dict | str = (
+        yield_path if pin is None else {"file": yield_path, "content_hash": pin}
+    )
+    result = build_tier_report(_manifest(evidence={"6": evidence}))
+    return next(item for item in result["items"] if item["id"] == 6)
+
+
+def test_yield_samples_derived_document_is_what_signoff_hashes(tmp_path, capsys):
+    _mc_sim_report(tmp_path / "nominal.json", [1.20, 1.21, 1.19])
+    _mc_sim_report(tmp_path / "control.json", [1.30, 1.31, 1.29])
+    derived = _derive_samples(tmp_path, capsys)
+
+    item_6 = _yield_item_6(tmp_path)
+
+    assert item_6["status"] == "met"
+    derived_hash = "sha256:" + hashlib.sha256(derived.read_bytes()).hexdigest()
+    assert item_6["citation"]["content_hash"] == derived_hash
+    # The pin moved from either campaign to the derived document; both
+    # campaigns' own hashes live *inside* it as audit metadata.
+    for name in ("nominal.json", "control.json"):
+        source_hash = (
+            "sha256:" + hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
+        )
+        assert item_6["citation"]["content_hash"] != source_hash
+        assert source_hash in derived.read_text()
+
+
+@pytest.mark.parametrize("changed", ["nominal.json", "control.json"])
+def test_yield_samples_regenerated_from_a_changed_campaign_rejects_the_old_pin(
+    tmp_path, capsys, changed
+):
+    _mc_sim_report(tmp_path / "nominal.json", [1.20, 1.21, 1.19])
+    _mc_sim_report(tmp_path / "control.json", [1.30, 1.31, 1.29])
+    derived = _derive_samples(tmp_path, capsys)
+    old_pin = "sha256:" + hashlib.sha256(derived.read_bytes()).hexdigest()
+    assert _yield_item_6(tmp_path, pin=old_pin)["status"] == "met"
+
+    _mc_sim_report(tmp_path / changed, [1.40, 1.41, 1.39])
+    _derive_samples(tmp_path, capsys)
+
+    item_6 = _yield_item_6(tmp_path, pin=old_pin)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "stale_evidence"
+
+
+def test_yield_samples_source_edit_without_regeneration_is_not_rechecked(
+    tmp_path, capsys
+):
+    """The documented freshness limitation: signoff does not recursively
+    re-hash the campaigns a derived document records. Editing a source
+    report without re-running `klt yield-samples` leaves the pin satisfied
+    -- regeneration is what folds a changed campaign into the evidence."""
+    _mc_sim_report(tmp_path / "nominal.json", [1.20, 1.21, 1.19])
+    _mc_sim_report(tmp_path / "control.json", [1.30, 1.31, 1.29])
+    derived = _derive_samples(tmp_path, capsys)
+    pin = "sha256:" + hashlib.sha256(derived.read_bytes()).hexdigest()
+
+    _mc_sim_report(tmp_path / "nominal.json", [9.0, 9.0, 9.0])
+
+    item_6 = _yield_item_6(tmp_path, pin=pin)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["content_hash"] == pin
+
+
 def test_mixed_signal_manifest_shares_bare_item_6_yield_evidence_across_partitions(
     tmp_path,
 ):
