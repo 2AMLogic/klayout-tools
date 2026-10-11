@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1031",
-  "loom_commit": "286d609f09342e7c84f2e23771edbac5b1914659",
+  "loom_version": "0.19.1039",
+  "loom_commit": "e83d19dc0a9b217339ea2f14040c50ad6f46700d",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -394,9 +394,13 @@
     ".loom/scripts/tests/test-check-main-clean-build-trees.sh",
     ".loom/scripts/tests/test-resync-installed-payload-fallback.sh",
     ".agents/skills/loom-builder-pr/SKILL.md",
-    ".loom/docs/park-record.md"
+    ".loom/docs/park-record.md",
+    ".claude/commands/loom/sweep-execution-model.md",
+    ".claude/commands/loom/sweep-summary-output.md",
+    ".loom/scripts/tests/test-champion-pr-merge-negation-guard.sh",
+    ".loom/scripts/tests/test-worktree-race-rescue.sh"
   ],
-  "last_resync": "2026-10-10",
+  "last_resync": "2026-10-11",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
   "requires_daemon": "0.19.772"
 }
