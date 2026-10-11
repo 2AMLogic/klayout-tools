@@ -4506,7 +4506,7 @@ table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py` / `sg13g2.py` /
 file** — `sky130.tech` / `gf180mcu.tech` in fossi-foundation/open-pdks
 (GPLv3), and `libs.tech/magic/ihp-sg13g2-extract.tech` in
 IHP-GmbH/IHP-Open-PDK and `libs.tech/magic/ihp-sg13cmos5l-extract.tech`
-in IHP-GmbH/ihp-sg13cmos5l (both Apache-2.0) — sheet resistances from its `resist`
+in IHP-GmbH/ihp-sg13cmos5l (archived; now IHP-Open-PDK `ihp-sg13cmos5l/`; both Apache-2.0) — sheet resistances from its `resist`
 entries, area/fringe capacitances from its `defaultareacap` /
 `defaultperimeter` entries, vertical-overlap coupling from its
 `defaultoverlap` entries — never NDA'd, the same public-source curation

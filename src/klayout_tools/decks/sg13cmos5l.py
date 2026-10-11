@@ -334,6 +334,12 @@ from . import (
 # `RuleProvenance.source_repo`/`.commit` for cmos5l's own (non-symlinked)
 # files -- the JSON threshold-value table and the .lyp/.lyt layer
 # definitions (see the module docstring's first source bullet).
+# Deliberately still the (archived 2026-09-23) standalone repo: the values
+# below were derived and verified at this exact commit, which only exists
+# there. `scripts/fetch-ihp-sg13cmos5l.sh` now fetches the `ihp-sg13cmos5l/`
+# subtree of IHP-Open-PDK `dev` (#2720); the pin here is NOT moved until the
+# values are re-verified against it (known upstream deltas since: .lyp
+# line 2170 colour, `rf[n|p]mos_minW` 0.15u -> 0.39u in sg13cmos5l_tech.json).
 _IHP_SG13CMOS5L_REPO = "IHP-GmbH/ihp-sg13cmos5l"
 _IHP_SG13CMOS5L_COMMIT = "607e18d4bd9214a52575c194b4181ef449f9252f"  # main, 2026-08-25
 
