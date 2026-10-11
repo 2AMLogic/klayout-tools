@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--format text|json]
 klt extract <request.json>|-|'{...}' [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -172,6 +172,14 @@ two disagree, this document (and the code) win.
   deck (default: the `--output` path with `.<cell>` inserted before its
   extension, e.g. `build/gcd.spice` → `build/gcd.delaywin_hv.spice`).
   Requires `--subcircuit`.
+- `--hierarchical-cells` — optional, unset by default (the output stays
+  flat). Comma-separated cell name(s) to emit as their **own `.SUBCKT`** in
+  the written deck instead of flattening them into the top circuit (issue
+  #2722, increment 1): one definition per named cell, one `X` instance per
+  placement, so per-circuit `klt lvs` options such as
+  `options.combine_devices_per_circuit` have layout-side circuits to key on.
+  Unlike `--subcircuit` this *is* the primary deck, not a second artifact.
+  See "Hierarchical output" below.
 - `--format` — `text` (default, a human-readable summary) or `json`. The
   extracted **netlist** always goes to `--output`; `--format` governs only
   the summary report.
@@ -246,6 +254,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `pins` | array\<string\> \| string | `--pins` (an array is joined with commas; an entry containing a comma is rejected, since the flag encoding cannot represent it) |
 | `def_pins` | string | `--def-pins` |
 | `pin_source_cells` | array\<string\> \| string | `--pin-source-cells` (same comma-joining rule as `pins`) |
+| `hierarchical_cells` | array\<string\> \| string | `--hierarchical-cells` (same comma-joining rule as `pins`) |
 | `deck_options` | object\<string, string\|number\|bool\> | repeatable `--deck-option KEY=VALUE`. A key containing `=` is rejected. |
 | `label_layers` | object\<string, [int, int] \| null\> | repeatable `--label-layer ROLE=LAYER/DATATYPE` (issue #2656), e.g. `{"metal0": [8, 25], "poly": null}`. `null` is the flag's `none` spelling. A role name containing `=`, or a value that is neither `null` nor a `[layer, datatype]` pair of non-negative integers, is rejected. |
 | `defer_resistor_fixed_offset` | bool | `--defer-resistor-fixed-offset` |
@@ -2512,7 +2521,8 @@ micrometres.
 `--parasitics`, `--pdk`/`--pdk-root`, `--top-cell-pins`, `--pins`,
 `--abstract-cells`, `--abstract-cell-lef`, `--mom-net`, `--def-net-names`,
 `--critical-net`, `--parasitics-net`, `--def-pins`, `--pin-source-cells`,
-`--subcircuit` and `--substrate-spreading` each exit 1, naming the option.
+`--subcircuit`, `--hierarchical-cells` and `--substrate-spreading` each exit 1,
+naming the option.
 None of them has a FinFET implementation. ASAP7 DRC is the separate
 DRC-DSL deck `src/klayout_tools/decks/asap7.drc` (issue #2760; see
 [`docs/cli/drc.md`](drc.md)), and `klt lvs` refuses a FinFET deck (see
@@ -3718,6 +3728,134 @@ Known limitations:
   `klt extract` flag — see "Full mode"), so a report committed from a
   `--subcircuit` run legitimately shows drift under `--rerun`. Use cheap
   `--check`.
+
+## Hierarchical output (`--hierarchical-cells`, issue #2722)
+
+`klt extract` is **flat by default**: one `.SUBCKT <top>` carries every
+recognized device (see "Engine"). That leaves `klt lvs`'s per-circuit options
+— `options.combine_devices_per_circuit` (issue #1552) above all — nothing to
+key on on the *layout* side of a composed layout: when two placed macros need
+opposite whole-netlist `combine_devices` settings, no single global value is
+right and the extracted side cannot be scoped.
+
+`--hierarchical-cells CELL[,CELL...]` (request field `hierarchical_cells`)
+rebuilds that hierarchy in the extracted netlist before the ordinary SPICE
+writer runs:
+
+```bash
+klt extract composed.gds --deck sky130 --top-cell-pins \
+  --hierarchical-cells macro_a,macro_b -o composed.spice
+```
+
+```spice
+.SUBCKT TOP IN_A IN_B OUT_A OUT_B
+XMACRO_A_1 IN_A OUT_A MACRO_A
+XMACRO_B_1 IN_B OUT_B MACRO_B
+.ENDS TOP
+
+.SUBCKT MACRO_A IN_A OUT_A
+R$1 IN_A MID_A 289.2 res_generic_po L=6U W=1U
+R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
+.ENDS MACRO_A
+...
+```
+
+- **One definition per cell, one instance per placement.** Two placements of
+  `macro_a` write one `.SUBCKT MACRO_A` and two `X` cards
+  (`XMACRO_A_1`, `XMACRO_A_2`, numbered in a deterministic placement order),
+  each wired to its own parent nets.
+- **Devices are attributed to a placement positionally**, with the same
+  instance-path query `devices[].instance_path` uses, but keyed on the
+  placement's accumulated transform so sibling placements stay distinct. The
+  top circuit keeps every device not drawn inside a named cell.
+- **Pins.** A net inside a named cell becomes a `.SUBCKT` pin when, in at
+  least one placement, it also touches a device outside that placement or is a
+  pin of the flat deck. In a placement where it is internal the pin is still
+  wired (to a parent net nothing else touches), so every placement
+  instantiates the same definition. Internal nets keep their layout label as
+  the child's net name. Model binding, net-name escaping, `.GLOBAL`
+  declarations, provenance and `netlist_sha256` are the existing writer's.
+- **Conservation.** Before anything is written, every pre-transform device
+  must appear exactly once (checked per device class, across the top circuit
+  and every child definition × instance count); a transform that lost or
+  duplicated a device is an error.
+- **Placements must be identical.** All placements of one cell must have the
+  same devices at the same cell-local positions with the same parameters and
+  the same net partition; otherwise one shared definition would be wrong for
+  some placement and the run fails naming the cell. (Typical cause: an
+  outside wire shorting two of a placement's nets.)
+
+### Flat vs hierarchical
+
+| | flat (default) | `--hierarchical-cells` |
+| - | - | - |
+| circuits written | one `.SUBCKT <top>` | `<top>` plus one per named cell |
+| `devices[]`, `nets[]`, `device_count`, `net_count`, `pin_count` | the flat extraction | **unchanged** — still the flat view |
+| `hierarchy` JSON field | absent | present |
+| `klt lvs` layout-side per-circuit options | no circuit to match | scope each named cell |
+
+### JSON (`hierarchy`)
+
+Absent unless `--hierarchical-cells` was given (a flat run's JSON is
+byte-for-byte what it was). Otherwise:
+
+```json
+"hierarchy": {
+  "cells": [
+    {"cell": "MACRO_A", "circuit": "MACRO_A", "placements": 2,
+     "device_count": 2, "pins": ["IN_A", "OUT_A"],
+     "instances": ["XMACRO_A_1", "XMACRO_A_2"]}
+  ],
+  "top_device_count": 1,
+  "top_instance_count": 2,
+  "circuits": ["TOP", "MACRO_A"]
+}
+```
+
+`device_count` is per definition (not multiplied by placements);
+`top_device_count`/`top_instance_count` describe the top circuit; `circuits`
+lists every emitted `.SUBCKT`, top first.
+
+### Worked example: opposite per-circuit combine settings
+
+```bash
+klt extract composed.gds --deck sky130 --top-cell-pins \
+  --hierarchical-cells macro_a,macro_b -o composed.spice
+```
+
+```json
+{
+  "layout": {"netlist": "composed.spice", "top": "TOP"},
+  "reference": {"netlist": "ref.spice", "top": "top"},
+  "options": {"combine_devices_per_circuit": {"MACRO_A": true, "MACRO_B": false}}
+}
+```
+
+folds `MACRO_A`'s series pair to its lumped reference resistor while leaving
+`MACRO_B` device-for-device (`tests/test_lvs.py`
+`test_extract_hierarchical_cells_scopes_combine_devices_per_layout_circuit`).
+Extracting the same layout flat reports `combine_devices_per_circuit.unmatched`
+for the layout side and a mismatch.
+
+### Errors and limitations (increment 1)
+
+All of these are application errors (exit 1) raised **before any output file
+is written**:
+
+- a named cell that is **absent**, **is the top cell**, or **has no reachable
+  placement** under the top cell;
+- a **nested selection** — a named cell that contains another named cell;
+- a named cell that **contributes no recognized device**;
+- **placements of one cell that are not electrically identical**;
+- combination with **`--parasitics`**, **`--subcircuit`** or
+  **`--abstract-cells`/`--abstract-cell-lef`** — the error names the
+  combination.
+
+Nesting and those three combinations (parasitic ownership at hierarchy
+boundaries, slicing a hierarchical deck, abstracted instances) are deferred
+to issue #2916. `--check --rerun` cannot reconstruct this flag (like every
+other optional flag — see "Full mode"); use cheap `--check`. Not supported for
+FinFET decks (see "Not supported (refused by name)").
 
 ## Matched-device geometry check (`--matched-group`, issue #1018)
 
