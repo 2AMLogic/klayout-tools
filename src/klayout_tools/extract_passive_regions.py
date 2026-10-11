@@ -144,8 +144,10 @@ def _resolve_resistors(
     ordinary conductor and the resistive segment as a hole, instead of one
     continuous short (see :class:`~klayout_tools.decks.ResistorDevice`).
 
-    A resistor body is ``body_layer & marker & all(requires) - any(excludes)``.
-    A spec whose body region comes out empty on this layout (the common case
+    A resistor body is ``body_layer & marker & all(requires) - any(excludes)``
+    (or, for a ``topology="abutting_heads"`` spec, issue #2679, ``marker &
+    all(requires) - any(excludes)`` kept only where it touches two separate
+    terminal-layer heads -- see :func:`_resistor_body_region`). A spec whose body region comes out empty on this layout (the common case
     -- no PDK resistor marker drawn anywhere) is dropped entirely and
     subtracts nothing, so extraction of a resistor-free layout is bit-for-bit
     what it was before this feature existed.

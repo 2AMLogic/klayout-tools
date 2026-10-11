@@ -896,7 +896,11 @@ device additionally requires; sg13g2's `PolyRes.drawing` `(128, 0)`, plus
 the `EXTBlock`/`Res` layers its own `rsil` device additionally requires — see
 below), so `klt gen res_array`'s output is directly recognised as a resistor
 device by `klt extract --deck <pdk>` rather than being absorbed into ordinary
-poly interconnect as a short (issue #369). Neither curated *DRC* deck checks
+poly interconnect as a short (issue #369). On sg13g2 (issue #2679) the
+poly layer (`GatPoly`) is drawn as only the two end heads, abutting the
+`PolyRes` body with zero overlap, matching IHP's own `rsil`/`rppd`/`rhigh`
+PCells (where `PolyRes` is the resistive body itself) rather than one
+continuous poly bar under the marker. Neither curated *DRC* deck checks
 any of these layers, so drawing them never affects `klt drc` status. On
 sky130 (issue #491), gf180mcu (issue #2599), sg13g2 (issue #2590) and
 sg13cmos5l (issue #2602), each *dummy* unit's body segment is additionally
