@@ -1239,7 +1239,7 @@ def test_sg13cmos5l_mom_capacitor_card_drops_params_keyword_and_suffixes_geometr
 
 #: The `cap_cmomi`/`cap_cmomf` `.subckt` parameters `klt extract` still does
 #: NOT measure and therefore does NOT write onto the card. Verbatim
-#: from IHP's own Apache-2.0 model libraries (`IHP-GmbH/ihp-sg13cmos5l` at
+#: from IHP's own Apache-2.0 model libraries (archived `IHP-GmbH/ihp-sg13cmos5l`, now IHP-Open-PDK `ihp-sg13cmos5l/`, at
 #: `607e18d4bd9214a52575c194b4181ef449f9252f`,
 #: `libs.tech/ngspice/models/cap_cmomi.lib:60` / `cap_cmomf.lib:53`):
 #:

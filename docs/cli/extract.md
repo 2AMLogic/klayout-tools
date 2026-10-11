@@ -1438,7 +1438,7 @@ card" section.
 **Written card parameters vs. the PDK subcircuit's own (issues #2408,
 #2435).** The upstream `.subckt` this card's trailing class-name token binds
 onto declares more than `klt extract` measures. Verbatim, from IHP's own
-Apache-2.0 model libraries (`IHP-GmbH/ihp-sg13cmos5l` at
+Apache-2.0 model libraries (archived `IHP-GmbH/ihp-sg13cmos5l`, now IHP-Open-PDK `ihp-sg13cmos5l/`, at
 `607e18d4bd9214a52575c194b4181ef449f9252f`,
 `libs.tech/ngspice/models/cap_cmomi.lib:60` and `cap_cmomf.lib:53`):
 

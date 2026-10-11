@@ -645,7 +645,7 @@ def _unbound_mom_capacitor_card(
     **Four of the upstream subcircuit's parameters are always written, plus
     ``feed`` when measured; ``subblock``/``mm_ok`` are never.** The
     subcircuit this card's trailing class-name token binds onto
-    declares (``IHP-GmbH/ihp-sg13cmos5l`` at
+    declares (archived ``IHP-GmbH/ihp-sg13cmos5l`` -- now IHP-Open-PDK ``ihp-sg13cmos5l/`` -- at
     ``607e18d4bd9214a52575c194b4181ef449f9252f``,
     ``libs.tech/ngspice/models/cap_cmomi.lib:60`` /
     ``cap_cmomf.lib:53``)::

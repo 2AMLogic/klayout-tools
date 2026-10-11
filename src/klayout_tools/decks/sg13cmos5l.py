@@ -96,7 +96,7 @@ recognition; it has since grown three follow-on increments the way
   diodes and non-metal parasitics.
 
 Source, read directly from a real ``ihp-sg13cmos5l`` install (standalone
-clone of https://github.com/IHP-GmbH/ihp-sg13cmos5l, Apache-2.0), **not**
+clone of https://github.com/IHP-GmbH/ihp-sg13cmos5l, Apache-2.0; archived 2026-09-23, now the ``ihp-sg13cmos5l/`` subtree of IHP-GmbH/IHP-Open-PDK), **not**
 inherited from ``sg13g2.py`` by analogy, per #1400's own Background note --
 every value below was independently re-verified against this deck's own
 on-disk source:
@@ -189,7 +189,7 @@ on-disk source:
   ``5_21_topvia1.drc``: "TopVia1 connects Metal4 to TopMetal1" -- cmos5l's
   own TopVia1 lands on Metal4, not sg13g2's Metal5, since cmos5l's stack
   has no Metal5). ``RuleProvenance`` for these four rule families therefore
-  cites ``IHP-GmbH/ihp-sg13cmos5l`` (this repo's own commit, via
+  cites ``IHP-GmbH/ihp-sg13cmos5l`` (archived; pinned commit, this repo's own commit, via
   ``_cmos5l_provenance``) rather than the shared-sibling
   ``_cmos5l_shared_g2_provenance`` every other DRC rule in this deck uses.
   Every threshold value transcribed below (``Mn_a``/``Mn_b`` 0.20/0.21um,
@@ -1446,6 +1446,7 @@ EXTRACTION_DECK = ExtractionDeck(
 # Source: this PDK's own non-symlinked, Apache-2.0 file
 # `libs.tech/magic/ihp-sg13cmos5l-extract.tech`, at
 # `_IHP_SG13CMOS5L_REPO` / `_IHP_SG13CMOS5L_COMMIT` above:
+# (archived repo, permalink still resolves; now IHP-Open-PDK ihp-sg13cmos5l/libs.tech/magic/...)
 # https://github.com/IHP-GmbH/ihp-sg13cmos5l/blob/607e18d4bd9214a52575c194b4181ef449f9252f/libs.tech/magic/ihp-sg13cmos5l-extract.tech
 # Resistances: `variants (),(lvs)`, lines 68-88, milliohms/square (line 59).
 # Capacitances: `variants ()`, lines 170-370, aF/um² for area/overlap and

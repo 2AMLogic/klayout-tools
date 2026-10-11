@@ -114,9 +114,9 @@ MARKER="$DEST/.fetched-version"
 # not just the first fetch, since the sibling could be removed later.
 if [[ ! -d "$SG13G2_DIR/libs.tech" || ! -d "$SG13G2_DIR/libs.ref" ]]; then
     echo "error: no ihp-sg13g2 checkout found at $SG13G2_DIR" >&2
-    echo "  ihp-sg13cmos5l's device symbols and HV model cards" >&2
-    echo "  (libs.tech/xschem/sg13cmos5l_pr/*.sym) are relative symlinks into" >&2
-    echo "  a sibling ihp-sg13g2 checkout (../../../../ihp-sg13g2/libs.tech/...)." >&2
+    echo "  ihp-sg13cmos5l's shared Verilog-A models, SRAM, gnucap and xschem" >&2
+    echo "  test files are relative symlinks into the sibling ihp-sg13g2" >&2
+    echo "  directory (../../../ihp-sg13g2/libs.tech/...)." >&2
     echo "  Fetching ihp-sg13cmos5l without it produces an install whose" >&2
     echo "  directory listing looks complete but whose device library cannot" >&2
     echo "  be opened -- the dangling-symlink failure mode from issue #1406." >&2

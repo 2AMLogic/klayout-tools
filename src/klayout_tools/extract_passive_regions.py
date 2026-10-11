@@ -504,7 +504,7 @@ MOM_FEED_TOKENS: dict[int, str] = {
 
 #: Device-class names whose upstream ``.subckt`` declares a ``feed``
 #: parameter. Exactly ``cap_cmomi`` -- ``cap_cmomf`` has no ``feed`` at all
-#: (``IHP-GmbH/ihp-sg13cmos5l`` ``libs.tech/ngspice/models/cap_cmomf.lib:53``),
+#: (archived ``IHP-GmbH/ihp-sg13cmos5l``, now IHP-Open-PDK ``ihp-sg13cmos5l/`` -- ``libs.tech/ngspice/models/cap_cmomf.lib:53``),
 #: so it must never gain the ``FEED`` parameter or token.
 _MOM_FEED_CLASS_NAMES = frozenset({"cap_cmomi"})
 
