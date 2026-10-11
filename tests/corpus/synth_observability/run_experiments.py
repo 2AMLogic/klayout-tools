@@ -428,15 +428,17 @@ def equivalence(vdir: str, gate_top: str, src_dir: str, lib: str) -> dict[str, A
     }
 
 
-def main() -> int:
+def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--klt", default="klt", help='klt command, e.g. "uv run klt"')
     ap.add_argument("--cell-library", default="gf180mcu_fd_sc_mcu7t5v0")
     ap.add_argument("--corner", default=None)
-    args = ap.parse_args()
+    return ap.parse_args()
 
-    work = os.path.abspath(args.workdir)
+
+def prepare_sources(work: str) -> tuple[str, dict[str, str]]:
+    """Create the work tree, copy fixtures, return (src_dir, fixture hashes)."""
     if os.path.exists(work) and os.listdir(work):
         raise SystemExit(f"--workdir '{work}' must be empty or absent")
     src_dir = os.path.join(work, "src")
@@ -454,7 +456,13 @@ def main() -> int:
         os.path.join(src_dir, "obs_core_attr_sub.v"),
         where=ATTR_SUB,
     )
+    return src_dir, fixture_hashes
 
+
+def run_klt_synthesis(
+    args: argparse.Namespace, work: str, src_dir: str
+) -> dict[str, Any]:
+    """Run `klt synthesize` for both tops and return the parsed responses."""
     klt = shlex.split(args.klt)
     responses: dict[str, Any] = {}
     for top in ("obs_core", "obs_core_func"):
@@ -477,16 +485,12 @@ def main() -> int:
             os.path.join(work, f"klt_response_{top}.json"), "w", encoding="utf-8"
         ) as handle:
             json.dump(responses[top], handle, indent=2)
+    return responses
 
-    base_prov = responses["obs_core"]["provenance"]
-    lib = (
-        base_prov["liberty"]["path"]
-        if isinstance(base_prov.get("liberty"), dict)
-        else None
-    )
+
+def make_klt_script_finder(src_dir: str, tops: Any) -> Any:
     run_dirs = {
-        top: os.path.join(src_dir, ".klt", "synthesize", f"klt_{top}")
-        for top in responses
+        top: os.path.join(src_dir, ".klt", "synthesize", f"klt_{top}") for top in tops
     }
 
     def klt_script(top: str) -> str:
@@ -494,119 +498,92 @@ def main() -> int:
         runs = [f for f in os.listdir(rd) if f.endswith(".run.ys")]
         return os.path.join(rd, runs[0] if runs else f"synth_{top}.ys")
 
-    if lib is None:
-        m = re.search(r"dfflibmap -liberty (\S+)", open(klt_script("obs_core")).read())
-        lib = m.group(1)
-    seq_cells = classify_liberty(lib)
+    return klt_script
 
-    results: dict[str, Any] = {
-        "issue": 2746,
-        "yosys_version": run(["yosys", "-V"]).strip(),
-        "liberty_path_basename": os.path.basename(lib),
-        "liberty_sha256": sha256(lib),
-        "fixture_sha256": fixture_hashes,
-        "klt_provenance": {
-            "engine_version": responses["obs_core"].get("engine_version"),
-            "pdk": base_prov.get("pdk"),
-            "deck": base_prov.get("deck"),
-        },
-        "klt_responses": {
-            top: {
-                "instance_count": r["instance_count"],
-                "area_um2": r["area_um2"],
-                "sequential_area_um2": r["sequential_area_um2"],
-                "netlist_sha256": r.get("netlist_sha256"),
-                "storage": storage_bits(r["instance_counts_by_type"], seq_cells),
-            }
-            for top, r in responses.items()
-        },
-        "variants": {},
+
+def variant_sources(variant: dict[str, Any], src_dir: str) -> list[str]:
+    if variant.get("attr") == ATTR_TOP:
+        return [os.path.join(src_dir, "obs_core_attr_top.v")]
+    if variant.get("attr") == ATTR_SUB:
+        return [os.path.join(src_dir, "obs_core_attr_sub.v")]
+    if variant["top"] == "obs_core_func":
+        return [os.path.join(src_dir, f) for f in FIXTURES]
+    return [os.path.join(src_dir, "obs_core.v")]
+
+
+def run_variant(
+    variant: dict[str, Any],
+    work: str,
+    src_dir: str,
+    base_top_script: str,
+    lib: str,
+    seq_cells: Any,
+) -> dict[str, Any]:
+    """Derive, run and measure one variant; return its results entry."""
+    vdir = os.path.join(work, variant["id"])
+    os.makedirs(vdir)
+    sources = variant_sources(variant, src_dir)
+    script = derive_script(base_top_script, variant, vdir, sources)
+    script_path = os.path.join(vdir, "synth.ys")
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write(script)
+    evidence_path = os.path.join(vdir, "premap_evidence.ys")
+    with open(evidence_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            derive_script(base_top_script, variant, vdir, sources, evidence_only=True)
+        )
+    proc = subprocess.run(["yosys", "-s", script_path], capture_output=True, text=True)
+    with open(os.path.join(vdir, "yosys.log"), "w", encoding="utf-8") as handle:
+        handle.write(proc.stdout + proc.stderr)
+    if proc.returncode == 0:
+        run(["yosys", "-q", "-s", evidence_path])
+    entry: dict[str, Any] = {
+        "mechanism": variant["mechanism"],
+        "top": variant["top"],
+        "prepass": variant["prepass"],
+        "flatten": bool(variant.get("flatten")),
+        "script_sha256": sha256(script_path),
+        "yosys_exit": proc.returncode,
+        "undriven_warnings": len(re.findall(r"is used but has no driver", proc.stdout)),
     }
+    if proc.returncode != 0:
+        entry["error"] = [
+            ln.strip()
+            for ln in (proc.stdout + proc.stderr).splitlines()
+            if "ERROR" in ln
+        ][-1:]
+        return entry
+    with open(os.path.join(vdir, "stats.json"), encoding="utf-8") as handle:
+        post = json.load(handle)["modules"]
+    with open(os.path.join(vdir, "premap_stats.json"), encoding="utf-8") as handle:
+        pre = json.load(handle)["modules"]
+    key = f"\\{variant['top']}"
+    post_counts = leaf_counts(post, key)
+    entry["premap"] = {
+        "storage": storage_bits(leaf_counts(pre, key), seq_cells),
+        "register_bits_by_module": premap_inventory(os.path.join(vdir, "premap.json")),
+    }
+    entry["mapped"] = {
+        # `synth -flatten` leaves non-physical `$scopeinfo` cells
+        # (Yosys >= 0.4x) in `stat`; exclude them so flattened and
+        # hierarchical variants count the same physical instances.
+        "instance_count": sum(n for t, n in post_counts.items() if t != "$scopeinfo"),
+        "scopeinfo_cells": post_counts.get("$scopeinfo", 0),
+        "area_um2": post[key].get("area"),
+        "netlist_sha256": sha256(os.path.join(vdir, "netlist.v")),
+        "storage": storage_bits(post_counts, seq_cells),
+    }
+    entry["equivalence"] = equivalence(vdir, variant["top"], src_dir, lib)
+    entry["expect_functional_change"] = bool(variant.get("expect_functional_change"))
+    return entry
 
-    for variant in VARIANTS:
-        vdir = os.path.join(work, variant["id"])
-        os.makedirs(vdir)
-        base_top_script = klt_script(
-            "obs_core_func" if variant["top"] == "obs_core_func" else "obs_core"
-        )
-        if variant.get("attr") == ATTR_TOP:
-            sources = [os.path.join(src_dir, "obs_core_attr_top.v")]
-        elif variant.get("attr") == ATTR_SUB:
-            sources = [os.path.join(src_dir, "obs_core_attr_sub.v")]
-        elif variant["top"] == "obs_core_func":
-            sources = [os.path.join(src_dir, f) for f in FIXTURES]
-        else:
-            sources = [os.path.join(src_dir, "obs_core.v")]
-        script = derive_script(base_top_script, variant, vdir, sources)
-        script_path = os.path.join(vdir, "synth.ys")
-        with open(script_path, "w", encoding="utf-8") as handle:
-            handle.write(script)
-        evidence_path = os.path.join(vdir, "premap_evidence.ys")
-        with open(evidence_path, "w", encoding="utf-8") as handle:
-            handle.write(
-                derive_script(
-                    base_top_script, variant, vdir, sources, evidence_only=True
-                )
-            )
-        proc = subprocess.run(
-            ["yosys", "-s", script_path], capture_output=True, text=True
-        )
-        with open(os.path.join(vdir, "yosys.log"), "w", encoding="utf-8") as handle:
-            handle.write(proc.stdout + proc.stderr)
-        if proc.returncode == 0:
-            run(["yosys", "-q", "-s", evidence_path])
-        entry: dict[str, Any] = {
-            "mechanism": variant["mechanism"],
-            "top": variant["top"],
-            "prepass": variant["prepass"],
-            "flatten": bool(variant.get("flatten")),
-            "script_sha256": sha256(script_path),
-            "yosys_exit": proc.returncode,
-            "undriven_warnings": len(
-                re.findall(r"is used but has no driver", proc.stdout)
-            ),
-        }
-        if proc.returncode != 0:
-            entry["error"] = [
-                ln.strip()
-                for ln in (proc.stdout + proc.stderr).splitlines()
-                if "ERROR" in ln
-            ][-1:]
-            results["variants"][variant["id"]] = entry
-            continue
-        with open(os.path.join(vdir, "stats.json"), encoding="utf-8") as handle:
-            post = json.load(handle)["modules"]
-        with open(os.path.join(vdir, "premap_stats.json"), encoding="utf-8") as handle:
-            pre = json.load(handle)["modules"]
-        key = f"\\{variant['top']}"
-        post_counts = leaf_counts(post, key)
-        entry["premap"] = {
-            "storage": storage_bits(leaf_counts(pre, key), seq_cells),
-            "register_bits_by_module": premap_inventory(
-                os.path.join(vdir, "premap.json")
-            ),
-        }
-        entry["mapped"] = {
-            # `synth -flatten` leaves non-physical `$scopeinfo` cells
-            # (Yosys >= 0.4x) in `stat`; exclude them so flattened and
-            # hierarchical variants count the same physical instances.
-            "instance_count": sum(
-                n for t, n in post_counts.items() if t != "$scopeinfo"
-            ),
-            "scopeinfo_cells": post_counts.get("$scopeinfo", 0),
-            "area_um2": post[key].get("area"),
-            "netlist_sha256": sha256(os.path.join(vdir, "netlist.v")),
-            "storage": storage_bits(post_counts, seq_cells),
-        }
-        entry["equivalence"] = equivalence(vdir, variant["top"], src_dir, lib)
-        entry["expect_functional_change"] = bool(
-            variant.get("expect_functional_change")
-        )
-        results["variants"][variant["id"]] = entry
 
-    # The derived mapping scripts must reproduce klt's own numbers exactly
-    # for the two variants that need no pre-pass; otherwise the derivation
-    # itself perturbed the flow and every comparison below is suspect.
+def check_reproduction(
+    results: dict[str, Any], responses: dict[str, Any]
+) -> dict[str, bool]:
+    """The derived mapping scripts must reproduce klt's own numbers exactly
+    for the two variants that need no pre-pass; otherwise the derivation
+    itself perturbed the flow and every comparison below is suspect."""
     reproduces = {}
     for vid, top in (("A_baseline", "obs_core"), ("B_wrapper", "obs_core_func")):
         mapped = results["variants"][vid]["mapped"]
@@ -614,9 +591,11 @@ def main() -> int:
             mapped["instance_count"] == responses[top]["instance_count"]
             and abs(mapped["area_um2"] - responses[top]["area_um2"]) < 1e-6
         )
-    results["derived_scripts_reproduce_klt"] = reproduces
+    return reproduces
 
-    # Selector validation probes (no synthesis).
+
+def selector_probes(src_dir: str) -> dict[str, Any]:
+    """Selector validation probes (no synthesis)."""
     probe = run(
         [
             "yosys",
@@ -647,7 +626,7 @@ def main() -> int:
         capture_output=True,
         text=True,
     )
-    results["selector_probes"] = {
+    return {
         "delete_nonexistent_port_warning_only": "did not match any object" in probe,
         "name_probe_q_matches": [
             ln.strip() for ln in probe.splitlines() if ln.strip().endswith("/probe_q")
@@ -655,12 +634,9 @@ def main() -> int:
         "wrapper_unknown_port_rejected": wrap.returncode != 0
         and "does not have a port named 'dbg_nope'" in wrap.stdout + wrap.stderr,
     }
-    after = {f: sha256(os.path.join(HERE, f)) for f in FIXTURES}
-    results["fixture_sources_unchanged"] = after == fixture_hashes
 
-    with open(os.path.join(work, "results.json"), "w", encoding="utf-8") as handle:
-        json.dump(results, handle, indent=2, sort_keys=True)
 
+def print_summary(results: dict[str, Any], work: str) -> None:
     header = ("variant", "pre ff", "map ff", "cells", "area", "bmc", "equiv_induct")
     print("{:28} {:>6} {:>6} {:>6} {:>9}  {:5} {}".format(*header))
     for vid, e in results["variants"].items():
@@ -674,6 +650,67 @@ def main() -> int:
             f"{mapped['area_um2']:>9.2f}  {equiv['bmc']:5} {equiv['equiv_induct']}"
         )
     print(f"results: {os.path.join(work, 'results.json')}")
+
+
+def main() -> int:
+    args = parse_args()
+    work = os.path.abspath(args.workdir)
+    src_dir, fixture_hashes = prepare_sources(work)
+    responses = run_klt_synthesis(args, work, src_dir)
+
+    base_prov = responses["obs_core"]["provenance"]
+    lib = (
+        base_prov["liberty"]["path"]
+        if isinstance(base_prov.get("liberty"), dict)
+        else None
+    )
+    klt_script = make_klt_script_finder(src_dir, responses)
+    if lib is None:
+        m = re.search(r"dfflibmap -liberty (\S+)", open(klt_script("obs_core")).read())
+        lib = m.group(1)
+    seq_cells = classify_liberty(lib)
+
+    results: dict[str, Any] = {
+        "issue": 2746,
+        "yosys_version": run(["yosys", "-V"]).strip(),
+        "liberty_path_basename": os.path.basename(lib),
+        "liberty_sha256": sha256(lib),
+        "fixture_sha256": fixture_hashes,
+        "klt_provenance": {
+            "engine_version": responses["obs_core"].get("engine_version"),
+            "pdk": base_prov.get("pdk"),
+            "deck": base_prov.get("deck"),
+        },
+        "klt_responses": {
+            top: {
+                "instance_count": r["instance_count"],
+                "area_um2": r["area_um2"],
+                "sequential_area_um2": r["sequential_area_um2"],
+                "netlist_sha256": r.get("netlist_sha256"),
+                "storage": storage_bits(r["instance_counts_by_type"], seq_cells),
+            }
+            for top, r in responses.items()
+        },
+        "variants": {},
+    }
+
+    for variant in VARIANTS:
+        base_top_script = klt_script(
+            "obs_core_func" if variant["top"] == "obs_core_func" else "obs_core"
+        )
+        results["variants"][variant["id"]] = run_variant(
+            variant, work, src_dir, base_top_script, lib, seq_cells
+        )
+
+    results["derived_scripts_reproduce_klt"] = check_reproduction(results, responses)
+    results["selector_probes"] = selector_probes(src_dir)
+    after = {f: sha256(os.path.join(HERE, f)) for f in FIXTURES}
+    results["fixture_sources_unchanged"] = after == fixture_hashes
+
+    with open(os.path.join(work, "results.json"), "w", encoding="utf-8") as handle:
+        json.dump(results, handle, indent=2, sort_keys=True)
+
+    print_summary(results, work)
     return 0
 
 
