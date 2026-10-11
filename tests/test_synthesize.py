@@ -5737,7 +5737,9 @@ def test_memory_evidence_failure_is_indeterminate_and_never_fails_run(
 
     def failing_evidence(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"] and cmd[2].endswith("_memory_evidence.ys"):
-            return fake_completed(returncode=1, stderr="ERROR: evidence boom\n")
+            return fake_completed(
+                returncode=1, stderr=f"ERROR: evidence boom in {cmd[2]}\n"
+            )
         return inner(cmd, **kwargs)
 
     monkeypatch.setattr(synthesize.subprocess, "run", failing_evidence)
@@ -5746,7 +5748,9 @@ def test_memory_evidence_failure_is_indeterminate_and_never_fails_run(
 
     mapping = report["memory_mapping"]
     assert mapping["status"] == "indeterminate"
-    assert "evidence boom" in mapping["reason"]
+    assert "evidence boom in .klt/synthesize/" in mapping["reason"]
+    # The engine's absolute path is reported repo-relative, never leaked.
+    assert str(tmp_path) not in mapping["reason"]
     assert mapping["modules"] == []
     assert report["blackbox_modules"] is None
     assert report["instance_count"] == _GCD_MODULE_STATS["num_cells"]

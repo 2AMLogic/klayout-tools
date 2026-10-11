@@ -207,6 +207,20 @@ def overall_status(module_statuses: list[str]) -> str:
     return "mixed"
 
 
+def _scrub_paths(text: str, repo_root: str | None) -> str:
+    """``text`` with the repo root prefix removed (paths become
+    repo-relative) and the home directory shown as ``~``. A Yosys error or
+    timeout message names absolute script/source paths, and ``reason`` lands
+    in a report that may be committed, like every other response path
+    (issue #1844)."""
+    if repo_root:
+        text = text.replace(repo_root.rstrip(os.sep) + os.sep, "")
+    home = os.path.expanduser("~")
+    if home and home != os.sep:
+        text = text.replace(home.rstrip(os.sep) + os.sep, "~" + os.sep)
+    return text
+
+
 def _indeterminate(reason: str, script_path: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "status": "indeterminate",
@@ -372,12 +386,8 @@ def collect_memory_evidence(
         )
         _run_yosys(script_path)
     except (SynthesizeError, OSError) as exc:
-        return (
-            _indeterminate(
-                f"memory evidence invocation failed: {exc}", reported_script
-            ),
-            None,
-        )
+        reason = _scrub_paths(f"memory evidence invocation failed: {exc}", repo_root)
+        return _indeterminate(reason, reported_script), None
 
     try:
         with open(blackbox_list_path, encoding="utf-8") as handle:
