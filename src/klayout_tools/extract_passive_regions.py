@@ -40,6 +40,7 @@ def _resistor_body_region(
     top_cell: kdb.Cell,
     resistor: ResistorDevice,
     base: kdb.Region | None = None,
+    heads: kdb.Region | None = None,
 ) -> kdb.Region:
     """The recognised device-body region for one :class:`ResistorDevice`
     entry against this layout: ``body & marker``, narrowed by ``requires``
@@ -61,18 +62,59 @@ def _resistor_body_region(
     :func:`_region` -- there is no black-box masking to inherit outside
     ``run_extract``'s own pipeline.
 
+    For a ``topology="abutting_heads"`` entry (issue #2679) the region is
+    instead ``marker & requires - excludes`` restricted to components that
+    touch the head conductor (``heads``, defaulting to the entry's
+    ``terminal``/``body`` layer) in two or more
+    separate regions; ``extract`` and ``erc`` share this one definition.
+
     Empty when the resistor's ``marker`` (or any ``requires`` layer) is not
     drawn anywhere on this layout -- matching :func:`_capacitor_plate_regions`'s
     own "no PDK marker drawn" convention.
     """
-    if base is None:
-        base = _region(layout, top_cell, resistor.body)
-    body = base & _region(layout, top_cell, resistor.marker)
+    if resistor.topology == "abutting_heads":
+        # Issue #2679: the marker *is* the resistive body (sg13g2 polyres);
+        # `base` is only the head conductor it abuts.
+        body = _region(layout, top_cell, resistor.marker)
+    else:
+        if base is None:
+            base = _region(layout, top_cell, resistor.body)
+        body = base & _region(layout, top_cell, resistor.marker)
     for layer in resistor.requires:
         body = body & _region(layout, top_cell, layer)
     for layer in resistor.excludes:
         body = body - _region(layout, top_cell, layer)
+    if resistor.topology == "abutting_heads":
+        if heads is None:
+            heads = _region(
+                layout,
+                top_cell,
+                resistor.terminal if resistor.terminal is not None else resistor.body,
+            )
+        body = _bodies_with_two_heads(body, heads)
     return body
+
+
+def _bodies_with_two_heads(body: kdb.Region, heads: kdb.Region) -> kdb.Region:
+    """Keep only the connected components of ``body`` that touch ``heads``
+    (abutting or overlapping) in at least two separate head regions.
+
+    The head regions are first reduced to ``heads - body`` so a head that
+    merely overlaps the body (a continuous bar) is judged by the pieces left
+    on either side of it, then merged; each surviving component needs two
+    distinct such pieces touching it. A missing head, or a head separated by
+    a gap, leaves fewer than two and the component is not a resistor.
+    """
+    import klayout.db as kdb
+
+    merged = body.merged()
+    outer = (heads - merged).merged()
+    kept = kdb.Region()
+    for component in merged.each():
+        comp = kdb.Region(component)
+        if outer.interacting(comp).count() >= 2:
+            kept += comp
+    return kept
 
 
 def _resolve_resistors(
@@ -164,7 +206,9 @@ def _resolve_resistors(
         terminal_layer = spec.terminal if spec.terminal is not None else spec.body
         _conductor(terminal_layer, "terminal", spec.name)
 
-        body = _resistor_body_region(layout, top_cell, spec, base=base)
+        body = _resistor_body_region(
+            layout, top_cell, spec, base=base, heads=bases[terminal_layer]
+        )
         if body.is_empty():
             continue
         if spec.body == deck.poly:

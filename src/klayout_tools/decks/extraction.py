@@ -168,6 +168,28 @@ class ResistorDevice:
     entry that does not set them extracts ``R`` bit-for-bit as before this
     field existed.
 
+    ``topology`` (issue #2679) selects how ``body``/``marker`` relate:
+
+    - ``"overlap"`` (the default, every deck entry before this field
+      existed) -- the marker lies *on* the body conductor and the segment is
+      ``body & marker``, as described above.
+    - ``"abutting_heads"`` -- the PDK draws the resistive body on the
+      ``marker`` layer itself and the ``body`` layer is only the two contact
+      heads, which *abut* (zero overlap) the marker. IHP sg13g2's
+      ``rsil``/``rppd``/``rhigh`` PCells draw ``polyres`` (128/0) as the whole
+      resistive body and ``GatPoly`` (5/0) only as the two head pads at either
+      end, so ``body & marker`` is empty there. The segment is then
+      ``marker & requires - excludes`` (mirroring upstream
+      ``res_derivations.lvs``'s ``polyres & extblock ...``), kept only
+      where it touches the ``terminal`` (default ``body``) conductor in **two
+      or more** separate head regions -- a body with a missing head, or one
+      separated from its heads by a gap, is not a resistor. The terminals
+      are the touching heads (``terminal`` minus the segment), which
+      KLayout's native extractor attaches directly to the abutting body
+      edge; the segment is still cut out of the ``body`` conductor, so a
+      layout that *does* overlap (a continuous bar marked by ``polyres``)
+      keeps extracting as before.
+
     ``name`` is the extracted device-class name (``devices[].class`` in the
     JSON response, and the model token on the written ``R`` card -- a
     consumer simulating the netlist supplies a matching ``.model``, exactly
@@ -244,6 +266,18 @@ class ResistorDevice:
     flavour_option: str | None = None
     flavours: tuple[ResistorFlavour, ...] = ()
     provenance: RuleProvenance | None = None
+    topology: str = "overlap"
+
+    def __post_init__(self) -> None:
+        if self.topology not in RESISTOR_TOPOLOGIES:
+            raise ValueError(
+                f"ResistorDevice '{self.name}': unknown topology "
+                f"{self.topology!r} (expected one of {RESISTOR_TOPOLOGIES})"
+            )
+
+
+#: Valid :attr:`ResistorDevice.topology` values.
+RESISTOR_TOPOLOGIES: tuple[str, ...] = ("overlap", "abutting_heads")
 
 
 @dataclass(frozen=True)

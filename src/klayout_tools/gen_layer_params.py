@@ -1699,6 +1699,14 @@ _PDK_RES_FLAVOR_MASK_ENCLOSURE_UM: dict[str, dict[tuple[int, int], float]] = {
 }
 
 
+#: PDK families whose poly resistors follow the ``abutting_heads`` topology
+#: (issue #2679): ``polyres`` is the whole resistive body and the poly layer
+#: is only the two abutting contact heads. Must match the families whose
+#: extraction-deck poly ``ResistorDevice`` entries declare
+#: ``topology="abutting_heads"`` (asserted in ``tests/test_sg13g2_deck.py``).
+_PDK_RES_POLY_HEADS_ONLY: frozenset[str] = frozenset({"sg13g2"})
+
+
 def _res_end_contact_um(
     family: str, flavor: str, metal_level: int = 0
 ) -> tuple[float, float]:
@@ -2818,6 +2826,7 @@ def _resistor_layer_params(
         "metal_layer": _role_layer_info(family, "metal"),
         "res_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "res_mark_present": mark is not None,
+        "res_poly_heads_only": family in _PDK_RES_POLY_HEADS_ONLY,
         **dummy_params,
     }
     for i in range(_MAX_RES_FLAVOR_LAYERS):

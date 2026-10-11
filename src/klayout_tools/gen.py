@@ -421,6 +421,9 @@ _HIDDEN_PARAMS = {
     # per (family, flavor) by `_res_end_contact_um`; never request-facing.
     "end_contact_w_um",
     "end_contact_h_um",
+    # sg13g2 PDK-PCell poly-resistor convention (issue #2679): poly drawn as
+    # the two abutting heads only; resolved per family, never request-facing.
+    "res_poly_heads_only",
 }
 
 #: ``res_array``'s flavour mask slots are generated from
@@ -1386,6 +1389,7 @@ def _res_unit_layout(
     via_enclosure_min_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
     of ``length_um`` between two contact+local-metal end pads.
@@ -1424,6 +1428,13 @@ def _res_unit_layout(
     resistor body, ``end_contact_h_um + 2 * enclosure`` tall, centred on the
     body (a "dogbone" head). The resistor-ID marker still spans only the
     body segment. With both ``0.0`` every existing caller is unchanged.
+
+    ``poly_heads_only`` (issue #2679, ``False`` by default) draws the
+    ``"poly"`` role as just the two end heads, leaving the body span between
+    them undrawn on the poly layer -- the IHP sg13g2 PCell convention where
+    ``GatPoly`` is only the two abutting contact heads and the resistive body
+    is the ``"marker"`` box alone (``polyres``). Default ``False`` keeps the
+    continuous poly bar with the marker overlaid on its interior.
     """
     rect_contact = end_contact_w_um > 0.0 and end_contact_h_um > 0.0
     contact_side_um = max(CONTACT_SIZE_UM, via_min_w_um)
@@ -1445,7 +1456,11 @@ def _res_unit_layout(
     ]
 
     boxes: dict[str, list[tuple[float, float, float, float]]] = {
-        "poly": [(0.0, 0.0, total_len_um, width_um)],
+        "poly": (
+            [(a0, 0.0, a1, width_um) for a0, a1 in seg_positions]
+            if poly_heads_only
+            else [(0.0, 0.0, total_len_um, width_um)]
+        ),
         "contact": [],
         "metal": [],
         "marker": [(contact_region_um, 0.0, contact_region_um + length_um, width_um)],
@@ -1497,6 +1512,7 @@ def _res_array_layout(
     min_spacing_um: float = 0.0,
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
+    poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
     into ``rows`` parallel rows in boustrophedon ("snake") order once
@@ -1551,6 +1567,7 @@ def _res_array_layout(
         via_enclosure_min_um,
         end_contact_w_um,
         end_contact_h_um,
+        poly_heads_only,
     )
     effective_spacing_um = max(spacing_um, min_spacing_um)
     pitch = unit["total_len_um"] + effective_spacing_um

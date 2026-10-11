@@ -1930,22 +1930,28 @@ EXTRACTION_DECK = ExtractionDeck(
     #   extract_devices(GeneralNTerminalExtractor.new('rsil', 2),
     #     { 'core' => rsil_res, 'ports' => rsil_ports, ... })   (ditto rppd)
     #
-    # Mapping onto this engine's `ResistorDevice` model (`body & marker &
-    # requires - excludes`, terminals = `body - segment`): `body` is GatPoly,
-    # `marker` is `polyres` (128/0), and each flavour's distinguishing
-    # implant/block masks become `requires`/`excludes`. This reproduces
-    # upstream's own terminal derivation exactly -- `rsil_ports`/`rppd_ports`
-    # are `gatpoly.interacting(core).not(core)`, i.e. the drawn poly heads on
-    # either side of the marked segment, which is what `terminal=None`
-    # (default: `body` minus the segment) already yields.
+    # Mapping onto this engine's `ResistorDevice` model (issue #2679,
+    # `topology="abutting_heads"`): IHP's own `SG13_dev/rsil|rppd|rhigh`
+    # PCells draw `polyres` (128/0) as the whole resistive body and `GatPoly`
+    # (5/0) only as the two head pads that *abut* it (zero overlap area), so
+    # the segment is `marker & requires - excludes` -- upstream's `core`,
+    # `polyres_mk` narrowed per flavour -- not `body & marker`. It is kept
+    # only where it touches the GatPoly heads in two separate regions
+    # (upstream's `polyres_mk.interacting(gatpoly)`, strengthened to both
+    # ends so a missing head is not a resistor). Terminals are the touching
+    # GatPoly heads (`gatpoly.interacting(core).not(core)`, i.e. what
+    # `terminal=None` -- `body` minus the segment -- yields), attached by
+    # KLayout's native resistor extractor directly across the shared edge
+    # (no upstream-style 5 nm port growth is needed). A layout that instead
+    # draws one continuous GatPoly bar under `polyres` still extracts the
+    # same way, since the segment is also cut out of GatPoly.
     #
     # Documented approximations, in this deck's usual "known-unmodelled beats
     # silently wrong" style:
     #
     # - Upstream's `core` is the *marker* region (`polyres & extblock`, merely
-    #   `interacting` GatPoly); this engine intersects it with the body layer.
-    #   For a real device cell -- where `polyres` is drawn coincident with the
-    #   poly bar it marks -- the two are the same region.
+    #   `interacting` GatPoly); so is this engine's segment in
+    #   `abutting_heads` mode -- it is never intersected with GatPoly.
     # - `polyres_exclude` is a 14-layer join. Only its two members this deck
     #   otherwise declares layers for are subtracted below (`Activ`, so a
     #   marked *gate* is never mistaken for a resistor -- the same guard
@@ -1999,7 +2005,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rsil",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # polyres.drawing
+            marker=(128, 0),  # polyres.drawing -- the resistive body itself
+            topology="abutting_heads",  # GatPoly is only the two abutting heads
             # `rsilG2_rspec` in sg13g2_tech.json (`techName == "SG13G2"`;
             # `rsil_code.py` reads the `G2` key unconditionally, and the
             # non-G2 key carries the same 7.0 value).
@@ -2031,7 +2038,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rppd",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # polyres.drawing
+            marker=(128, 0),  # polyres.drawing -- the resistive body itself
+            topology="abutting_heads",  # GatPoly is only the two abutting heads
             # `rppdG2_rspec` in sg13g2_tech.json -- `rppd_code.py` selects the
             # `G2` suffix for `techName == "SG13G2"` (260.0, vs the non-G2
             # 250.0 of the older SG13 flavour).
@@ -2063,7 +2071,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rhigh",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # polyres.drawing
+            marker=(128, 0),  # polyres.drawing -- the resistive body itself
+            topology="abutting_heads",  # GatPoly is only the two abutting heads
             # See the "sheet-rho ambiguity" note above: `rhighG2_rspec` in
             # sg13g2_tech.json, corroborated by `cornerRES.lib`'s
             # `res_typ` corner (`rsh_rhigh = 1360`) over `rhigh_code.py`'s
