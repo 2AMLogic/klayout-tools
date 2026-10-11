@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **sg13g2 poly resistors from PDK PCells** (issue #2679): `klt extract
+  --deck sg13g2` now recognises `rsil`/`rppd`/`rhigh` drawn the way IHP's own
+  PCells draw them (`polyres` 128/0 as the body, two abutting `GatPoly` 5/0
+  heads) via a new `ResistorDevice.topology="abutting_heads"` mode (default
+  `"overlap"` is unchanged). A body missing a head, or separated from one by
+  a gap, is not recognised. `klt gen res_array` on sg13g2 now draws the same
+  convention.
 - **`klt sim` `analysis_steps[]`** (issue #2482): an additive, ngspice-only
   alternative to the scalar `analysis` that runs several named solves in order
   inside each corner's single deck. Each step has optional `alter` source

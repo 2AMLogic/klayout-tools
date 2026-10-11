@@ -5851,6 +5851,43 @@ def test_sg13g2_res_array_default_params_recognised_as_rsil(tmp_path, sg13g2_pdk
     assert report["dummy_devices_dropped"] == 2
 
 
+@pytest.mark.parametrize(
+    ("flavor", "device"), [("generic", "rsil"), ("rppd", "rppd"), ("rhigh", "rhigh")]
+)
+def test_sg13g2_res_array_uses_pdk_pcell_polyres_body_abutting_gatpoly_heads(
+    tmp_path, sg13g2_pdk_root, flavor, device
+):
+    """Issue #2679: `res_array` on sg13g2 draws the IHP PCell convention --
+    `polyres` is the resistive body and `GatPoly` only the two abutting
+    heads (zero overlap) -- and every flavour round-trips through `klt
+    extract --deck sg13g2` to exactly `num` devices, each with two distinct
+    terminal nets (the body does not short its heads)."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_sg13g2_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": _SG13G2_VARIANT, "root": str(sg13g2_pdk_root)},
+            "params": {"flavor": flavor, "num": 3, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    gatpoly = kdb.Region(top.begin_shapes_rec(layout.layer(5, 0)))
+    polyres = kdb.Region(top.begin_shapes_rec(layout.layer(*_SG13G2_RES_MARK_LAYER)))
+    assert not polyres.is_empty()
+    assert (gatpoly & polyres).is_empty()
+    assert not (gatpoly.sized(1) & polyres).is_empty()
+
+    report = run_extract(str(output), "sg13g2")
+    assert report["device_counts"] == {device: 3}
+    for dev in report["devices"]:
+        assert dev["nets"]["a"] != dev["nets"]["b"]
+
+
 def test_sg13g2_res_array_explicit_generic_matches_default(tmp_path, sg13g2_pdk_root):
     """Widening this family's flavour set (issue #1451) must not move the
     `"generic"` (`rsil`) default: an explicit `flavor="generic"` request stays

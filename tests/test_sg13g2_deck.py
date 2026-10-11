@@ -1026,6 +1026,148 @@ def test_sg13g2_unmarked_poly_bar_is_not_a_resistor(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# PDK-PCell-shaped poly resistors: `polyres` body + abutting GatPoly heads
+# (issue #2679)
+# --------------------------------------------------------------------------- #
+
+_FLAVOUR_MASKS: dict[str, tuple[tuple[int, int], ...]] = {
+    "rsil": ((111, 0), (24, 0)),
+    "rppd": ((111, 0), (14, 0), (28, 0)),
+    "rhigh": ((111, 0), (14, 0), (7, 0), (28, 0)),
+}
+
+
+def _make_pcell_poly_resistor_layout(
+    masks: tuple[tuple[int, int], ...],
+    *,
+    head_a: bool = True,
+    head_b: bool = True,
+    gap_um: float = 0.0,
+) -> kdb.Layout:
+    """IHP `SG13_dev/rppd`-shaped geometry: one `polyres` (128/0) body
+    (`L=6um`/`W=1um`) with a 0.43um-long `GatPoly` head abutting each end
+    (zero overlap), flavour masks over the body, and a contacted, labelled
+    Metal1 pad on each head. `gap_um` pulls head B away from the body."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(text: str, x: float, y: float) -> None:
+        top.shapes(layout.layer(8, 25)).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(128, 0, _box_um(0.43, 0, 6.43, 1))
+    for layer, datatype in masks:
+        draw(layer, datatype, _box_um(0.43, -0.2, 6.43, 1.2))
+    bx = 6.43 + gap_um
+    if head_a:
+        draw(5, 0, _box_um(0, 0, 0.43, 1))
+        draw(6, 0, _box_um(0.1, 0.3, 0.3, 0.7))
+        draw(8, 0, _box_um(0, 0.2, 0.4, 0.8))
+        label("RA", 0.2, 0.5)
+    if head_b:
+        draw(5, 0, _box_um(bx, 0, bx + 0.43, 1))
+        draw(6, 0, _box_um(bx + 0.13, 0.3, bx + 0.33, 0.7))
+        draw(8, 0, _box_um(bx + 0.03, 0.2, bx + 0.43, 0.8))
+        label("RB", bx + 0.23, 0.5)
+    return layout
+
+
+@pytest.mark.parametrize("name", ["rsil", "rppd", "rhigh"])
+def test_pcell_shaped_poly_resistor_is_recognised(tmp_path: Path, name: str):
+    """A `polyres` body with two abutting GatPoly heads extracts as exactly
+    one `name` device whose terminals are the two separately-labelled head
+    nets (the body does not short them) and whose `L`/`W`/`r_ohm` are
+    measured from the 128/0 body with the #2652 corrections applied."""
+    resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == name)
+    assert resistor.topology == "abutting_heads"
+    path = _write_gds(
+        _make_pcell_poly_resistor_layout(_FLAVOUR_MASKS[name]), tmp_path / "r.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "r.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"]["l_um"] == pytest.approx(6.0)
+    assert device["params"]["w_um"] == pytest.approx(1.0)
+    expected = (
+        6.0 / (1.0 + resistor.width_offset_um) * resistor.sheet_rho_ohm_sq
+        + resistor.end_term_ohm_um / 1.0
+    )
+    assert device["params"]["r_ohm"] == pytest.approx(expected)
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"RA", "RB"}
+
+
+@pytest.mark.parametrize("name", ["rsil", "rppd", "rhigh"])
+@pytest.mark.parametrize(
+    "variant",
+    ["missing_head_b", "missing_head_a", "gap", "no_masks", "wrong_masks"],
+)
+def test_pcell_shaped_poly_resistor_negative_topology(
+    tmp_path: Path, name: str, variant: str
+):
+    """No false resistor from a missing head, a gap between body and head,
+    or flavour masks that do not select this device."""
+    masks = _FLAVOUR_MASKS[name]
+    kwargs: dict = {}
+    if variant == "missing_head_b":
+        kwargs["head_b"] = False
+    elif variant == "missing_head_a":
+        kwargs["head_a"] = False
+    elif variant == "gap":
+        kwargs["gap_um"] = 0.1
+    elif variant == "no_masks":
+        masks = ()
+    elif variant == "wrong_masks":
+        # Only the shared EXTBlock mask: selects no flavour.
+        masks = ((111, 0),)
+    path = _write_gds(
+        _make_pcell_poly_resistor_layout(masks, **kwargs), tmp_path / "n.gds"
+    )
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "n.spice"))
+    assert report["device_counts"] == {}
+
+
+def test_pcell_shaped_poly_resistor_conflicting_flavour_masks(tmp_path: Path):
+    """rppd's masks plus nSD_block (7/21) is neither rppd nor rhigh."""
+    masks = _FLAVOUR_MASKS["rppd"] + ((7, 21),)
+    path = _write_gds(_make_pcell_poly_resistor_layout(masks), tmp_path / "c.gds")
+    report = run_extract(path, "sg13g2", output=str(tmp_path / "c.spice"))
+    assert report["device_counts"] == {}
+
+
+def test_generator_heads_only_families_match_deck_topology():
+    """`gen_layer_params._PDK_RES_POLY_HEADS_ONLY` (res_array's PDK-PCell
+    poly layout) stays in step with the deck's `abutting_heads` entries."""
+    from klayout_tools.gen_layer_params import _PDK_RES_POLY_HEADS_ONLY
+
+    poly_res = [r for r in EXTRACTION_DECK.resistors if r.marker == (128, 0)]
+    assert poly_res
+    assert all(r.topology == "abutting_heads" for r in poly_res)
+    assert "sg13g2" in _PDK_RES_POLY_HEADS_ONLY
+
+
+def test_resistor_body_region_shared_with_erc_agrees_with_extraction(
+    tmp_path: Path,
+):
+    """`_resistor_body_region` (the ERC caller's entry point, no `base`)
+    returns the 128/0 body for a PCell-shaped resistor and nothing for a
+    head-less one -- the same decision extraction makes."""
+    from klayout_tools.extract import _resistor_body_region
+
+    rppd = next(r for r in EXTRACTION_DECK.resistors if r.name == "rppd")
+    for kwargs, expect_area in (({}, 6.0), ({"head_b": False}, 0.0)):
+        layout = _make_pcell_poly_resistor_layout(_FLAVOUR_MASKS["rppd"], **kwargs)
+        top = layout.top_cell()
+        body = _resistor_body_region(layout, top, rppd)
+        assert body.area() * layout.dbu * layout.dbu == pytest.approx(expect_area)
+
+
+# --------------------------------------------------------------------------- #
 # Drawn metal resistors (issue #1235)
 # --------------------------------------------------------------------------- #
 
