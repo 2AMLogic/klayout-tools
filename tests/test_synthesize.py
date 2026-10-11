@@ -537,6 +537,8 @@ def test_run_synthesize_corner_not_shipped_ihp_stdcell_shape(tmp_path, monkeypat
 _TEE_RE = re.compile(r"^tee -q -o (\S+) stat ")
 _ABC_TEE_RE = re.compile(r"^tee -q -o (\S+) abc ")
 _WRITE_VERILOG_RE = re.compile(r"^write_verilog -noattr (\S+)$")
+#: Issue #2745: the memory-evidence script's blackbox-listing `tee`.
+_BLACKBOX_TEE_RE = re.compile(r"^tee -q -o (\S+) select -list ")
 
 #: A real `abc -constr` run's own `stime -p` summary line as it reaches the
 #: Yosys log -- captured verbatim from a live Yosys 0.68+48 run of the GCD
@@ -652,6 +654,38 @@ def _script_stat_path(script_path: str, *, cwd: str | None = None) -> str:
     raise AssertionError("generated .ys script has no `tee -q -o ... stat` line")
 
 
+def _write_memory_evidence_stats(
+    script_path: str,
+    hdl_toplevel: str,
+    memory_evidence: tuple[dict, dict] | None,
+    *,
+    blackbox_listing: str = "",
+    cwd: str | None = None,
+) -> None:
+    """Write the two `tee -q -o <path> stat -json` outputs of a generated
+    memory-evidence script (issue #2745), in script order, plus its
+    `select -list` blackbox listing."""
+    stats_paths = []
+    blackbox_path = None
+    with open(script_path, encoding="utf-8") as handle:
+        for line in handle:
+            match = _TEE_RE.match(line.rstrip("\n"))
+            if match:
+                stats_paths.append(_resolve_against(match.group(1), cwd))
+            match = _BLACKBOX_TEE_RE.match(line.rstrip("\n"))
+            if match:
+                blackbox_path = _resolve_against(match.group(1), cwd)
+    assert len(stats_paths) == 2, stats_paths
+    if memory_evidence is None:
+        empty = {f"\\{hdl_toplevel}": {"num_memories": 0, "num_cells_by_type": {}}}
+        memory_evidence = (empty, empty)
+    for path, modules in zip(stats_paths, memory_evidence, strict=True):
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"modules": modules}, handle)
+    with open(blackbox_path, "w", encoding="utf-8") as handle:
+        handle.write(blackbox_listing)
+
+
 def _stub_yosys_success(
     monkeypatch,
     *,
@@ -663,8 +697,16 @@ def _stub_yosys_success(
     yosys_log: str = "",
     baseline_module_stats: dict | None = None,
     netlist_body: str | None = None,
+    memory_evidence: tuple[dict, dict] | None = None,
+    blackbox_listing: str = "",
 ) -> None:
     """Stub `synthesize.subprocess.run` for a successful `run_synthesize`.
+
+    ``memory_evidence`` (issue #2745) is ``(elaborated_modules,
+    pre_lowering_modules)`` -- the `stat -json` ``modules`` dicts the side
+    `<top>_memory_evidence.ys` invocation writes; ``None`` writes a
+    memory-free top module at both stages. ``blackbox_listing`` is that
+    invocation's `select -list =A:blackbox =A:whitebox` output.
 
     ``yosys_log`` (issue #1588) is returned as the main script invocation's
     own `stdout` -- `_run_yosys` now returns this text for
@@ -712,6 +754,18 @@ def _stub_yosys_success(
         # or this stub would silently fall back to resolving against the
         # *test runner's own* cwd instead and open the wrong file.
         cwd = kwargs.get("cwd")
+        if os.path.basename(script_path).endswith("_memory_evidence.ys"):
+            # Issue #2745: the side memory-evidence invocation. Writes the
+            # two stage stats files it `tee`s, from `memory_evidence`
+            # (default: no memories at either stage).
+            _write_memory_evidence_stats(
+                script_path,
+                hdl_toplevel,
+                memory_evidence,
+                blackbox_listing=blackbox_listing,
+                cwd=cwd,
+            )
+            return fake_completed(returncode=0)
         if os.path.basename(script_path).endswith("_baseline.ys"):
             stats_path = _script_stat_path(script_path, cwd=cwd)
             baseline_stats = (
@@ -1127,7 +1181,12 @@ def test_run_synthesize_reports_run_script_path_and_runs_that_script(
     assert script_path.endswith("synth_gcd.ys")
     assert run_path == synthesize.run_script_path(script_path)
     assert os.path.isfile(run_path)
-    assert scripts_run == [run_path]
+    # Issue #2745: the only other script run is the side memory-evidence
+    # invocation, after the production run.
+    assert scripts_run == [
+        run_path,
+        os.path.join(os.path.dirname(script_path), "gcd_memory_evidence.ys"),
+    ]
 
     # Both artifacts survive as debuggable files; only the committed one is
     # required to be scan-clean.
@@ -1825,6 +1884,8 @@ def test_run_synthesize_stubbed_stats_missing_top_module(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             script_path = cmd[2]
+            if script_path.endswith("_memory_evidence.ys"):
+                return fake_completed(returncode=0)  # Issue #2745 side run.
             stats_path, netlist_path = _script_output_paths(
                 script_path, cwd=kwargs.get("cwd")
             )
@@ -1852,6 +1913,8 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             script_path = cmd[2]
+            if script_path.endswith("_memory_evidence.ys"):
+                return fake_completed(returncode=0)  # Issue #2745 side run.
             stats_path, netlist_path = _script_output_paths(
                 script_path, cwd=kwargs.get("cwd")
             )
@@ -1952,6 +2015,8 @@ def _stub_hierarchical_yosys(
             return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
         assert cmd[:2] == ["yosys", "-s"]
         script_path = cmd[2]
+        if script_path.endswith("_memory_evidence.ys"):
+            return fake_completed(returncode=0)  # Issue #2745 side run.
         cwd = kwargs.get("cwd")
         stats_path, netlist_path = _script_output_paths(script_path, cwd=cwd)
         payload: dict = {"modules": modules}
@@ -4484,6 +4549,10 @@ def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
     assert report["engine"] == "yosys"
     assert report["instance_count"] > 0
     assert report["instance_counts_by_type"]["sky130_fd_sc_hd__dfrtp_1"] == 50
+    # Issue #2745: GCD infers no memory and instantiates no blackbox.
+    assert report["memory_mapping"]["status"] == "none_detected"
+    assert report["memory_mapping"]["modules"] == []
+    assert report["blackbox_modules"] == []
 
     # Issue #807: no power-domain isolation or test-probe cell survives the
     # `-dont_use` list (the pre-#807 flow mapped 19 of them into this exact
@@ -5524,3 +5593,232 @@ def test_synthesize_report_survives_the_envelope_lint(tmp_path, monkeypatch):
     report = run_synthesize(request_path)
 
     assert env_provenance.find_absolute_path_fields(report) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #2745: `memory_mapping` / `blackbox_modules` (stubbed Yosys). The
+# pure classification rules are covered in `test_synthesize_memory.py`;
+# these exercise the wiring through `run_synthesize`.
+# ---------------------------------------------------------------------------
+
+
+def _ram_evidence(pre_lowering: int = 1) -> tuple[dict, dict]:
+    elaborated = {
+        "\\gcd": {
+            "num_memories": 1,
+            "num_memory_bits": 128,
+            "num_cells_by_type": {"$memrd": 1, "$memwr_v2": 1},
+        }
+    }
+    pre = {"\\gcd": {"num_memories": 0, "num_cells_by_type": {"$mem_v2": pre_lowering}}}
+    return elaborated, pre
+
+
+def test_memory_mapping_default_is_none_detected_and_metrics_unchanged(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["memory_mapping"] == {
+        "status": "none_detected",
+        "reason": None,
+        "modules": [],
+        "script_path": report["memory_mapping"]["script_path"],
+    }
+    evidence_script = _abs_path(report["memory_mapping"]["script_path"], tmp_path)
+    assert evidence_script.endswith("gcd_memory_evidence.ys")
+    assert os.path.dirname(evidence_script) == os.path.dirname(
+        _abs_path(report["script_path"], tmp_path)
+    )
+    assert report["blackbox_modules"] == []
+    # Existing metrics come from the production stats only.
+    assert report["instance_count"] == _GCD_MODULE_STATS["num_cells"]
+    assert report["area_um2"] == _GCD_MODULE_STATS["area"]
+
+
+def test_memory_mapping_production_script_has_no_evidence_passes(tmp_path, monkeypatch):
+    """The production script stays the pre-#2745 pass sequence: the
+    evidence passes live only in the side script."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    production = Path(_abs_path(report["run_script_path"], tmp_path)).read_text()
+    assert "-run :fine" not in production
+    assert "select -list" not in production
+    assert production.count(" stat ") == 1
+    evidence = Path(_abs_path(report["memory_mapping"]["script_path"], tmp_path))
+    evidence_text = evidence.read_text()
+    assert "synth -top gcd -run :fine" in evidence_text
+    assert "abc" not in evidence_text and "dfflibmap" not in evidence_text
+    assert "write_verilog" not in evidence_text
+
+
+def test_memory_mapping_reports_lowered_ram(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, memory_evidence=_ram_evidence())
+
+    report = run_synthesize(request_path)
+
+    mapping = report["memory_mapping"]
+    assert mapping["status"] == "lowered_to_logic"
+    assert mapping["modules"] == [
+        {
+            "module": "gcd",
+            "status": "lowered_to_logic",
+            "elaborated_memories": 1,
+            "elaborated_memory_bits": 128,
+            "pre_lowering_memories": 1,
+            "final_memories": 0,
+        }
+    ]
+    assert report["instance_count"] == _GCD_MODULE_STATS["num_cells"]
+    assert report["area_um2"] == _GCD_MODULE_STATS["area"]
+
+
+def test_memory_mapping_reports_optimized_away(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, memory_evidence=_ram_evidence(pre_lowering=0))
+
+    report = run_synthesize(request_path)
+
+    assert report["memory_mapping"]["status"] == "optimized_away"
+
+
+def test_memory_mapping_reports_surviving_memory(tmp_path, monkeypatch):
+    stats = {
+        **_GCD_MODULE_STATS,
+        "num_cells_by_type": {**_GCD_MODULE_STATS["num_cells_by_type"], "$mem_v2": 1},
+    }
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(
+        monkeypatch, module_stats=stats, memory_evidence=_ram_evidence()
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["memory_mapping"]["status"] == "surviving"
+    assert report["memory_mapping"]["modules"][0]["final_memories"] == 1
+
+
+def test_unrelated_blackbox_reported_separately_not_as_memory(tmp_path, monkeypatch):
+    stats = {
+        **_GCD_MODULE_STATS,
+        "num_cells_by_type": {
+            **_GCD_MODULE_STATS["num_cells_by_type"],
+            "sram_like_macro": 1,
+        },
+    }
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(
+        monkeypatch,
+        module_stats=stats,
+        blackbox_listing="sram_like_macro\nsram_like_macro/a\nunused_bb\n",
+    )
+
+    report = run_synthesize(request_path)
+
+    # A memory-like *name* is not memory evidence; a declared blackbox with
+    # no surviving instance (`unused_bb`) is not reported as surviving.
+    assert report["memory_mapping"]["status"] == "none_detected"
+    assert report["blackbox_modules"] == ["sram_like_macro"]
+
+
+def test_memory_evidence_failure_is_indeterminate_and_never_fails_run(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    inner = synthesize.subprocess.run
+
+    def failing_evidence(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-s"] and cmd[2].endswith("_memory_evidence.ys"):
+            return fake_completed(returncode=1, stderr="ERROR: evidence boom\n")
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(synthesize.subprocess, "run", failing_evidence)
+
+    report = run_synthesize(request_path)
+
+    mapping = report["memory_mapping"]
+    assert mapping["status"] == "indeterminate"
+    assert "evidence boom" in mapping["reason"]
+    assert mapping["modules"] == []
+    assert report["blackbox_modules"] is None
+    assert report["instance_count"] == _GCD_MODULE_STATS["num_cells"]
+    assert report["area_um2"] == _GCD_MODULE_STATS["area"]
+
+
+def test_memory_evidence_missing_stage_is_indeterminate(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    inner = synthesize.subprocess.run
+
+    def silent_evidence(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-s"] and cmd[2].endswith("_memory_evidence.ys"):
+            return fake_completed(returncode=0)  # exits 0, writes nothing
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(synthesize.subprocess, "run", silent_evidence)
+
+    report = run_synthesize(request_path)
+
+    mapping = report["memory_mapping"]
+    assert mapping["status"] == "indeterminate"
+    assert "elaborated" in mapping["reason"]
+    assert "pre_lowering" in mapping["reason"]
+    assert report["blackbox_modules"] is None
+
+
+def test_unsupported_design_error_preserved_without_evidence_run(tmp_path, monkeypatch):
+    """A production failure (e.g. an undefined, non-blackbox module) is still
+    the same hard error; the evidence invocation never runs."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    inner = synthesize.subprocess.run
+    scripts: list[str] = []
+
+    def failing_production(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-s"]:
+            scripts.append(cmd[2])
+            return fake_completed(
+                returncode=1,
+                stderr="ERROR: Module `\\hard_macro' referenced in module `\\gcd' "
+                "in cell `\\u0' is not part of the design.\n",
+            )
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(synthesize.subprocess, "run", failing_production)
+
+    with pytest.raises(SynthesizeError, match="is not part of the design"):
+        run_synthesize(request_path)
+    assert len(scripts) == 1
+    assert not scripts[0].endswith("_memory_evidence.ys")
+
+
+def test_cli_text_format_renders_memory_mapping_and_blackboxes(
+    tmp_path, monkeypatch, capsys
+):
+    stats = {
+        **_GCD_MODULE_STATS,
+        "num_cells_by_type": {**_GCD_MODULE_STATS["num_cells_by_type"], "hm": 1},
+    }
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(
+        monkeypatch,
+        module_stats=stats,
+        memory_evidence=_ram_evidence(),
+        blackbox_listing="hm\n",
+    )
+
+    exit_code = main(["synthesize", request_path])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "memory_mapping: lowered_to_logic" in out
+    assert "gcd: lowered_to_logic (elaborated=1, pre_lowering=1, final=0)" in out
+    assert "blackbox_modules (area not included): hm" in out

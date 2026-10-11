@@ -252,6 +252,9 @@ retained directory next to that request.
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
 | `synth_<top>.run.log` | Captured stdout and stderr for the executed script, retained on success, nonzero exit, and timeout. Named `synth_<top>.log` when no rehydrated script is needed; trial/probe/baseline scripts have their own sibling logs. Abrupt process interruption preserves files already written. |
 | `<top>_abc.log` | The captured `abc` pass output, including ABC's own `stime -p` summary line this command parses into `timing` — same file, same `tee -q -o` discipline as the stats capture. |
+| `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. |
+| `<top>_blackboxes.txt` | The evidence script's `select -list =A:blackbox =A:whitebox` output, read for `blackbox_modules`. |
+| `<top>_memory_elaborated.json` / `<top>_memory_pre_lowering.json` | The evidence script's two `stat -json` captures — the `elaborated` and `pre_lowering` stages `memory_mapping` is derived from. |
 
 ### ABC constraints, delay target, and cell exclusions
 
@@ -1291,6 +1294,13 @@ caller decision rather than something this command should pick.
     "by_category": {},
     "representatives": []
   },
+  "memory_mapping": {
+    "status": "none_detected",
+    "reason": null,
+    "modules": [],
+    "script_path": { "path": ".klt/synthesize/run-example/gcd_memory_evidence.ys", "scope": "repo" }
+  },
+  "blackbox_modules": [],
   "netlist_path": { "path": ".klt/synthesize/run-example/gcd_synth.v", "scope": "repo" },
   "netlist_sha256": "<64 lowercase hex chars>",
   "script_path": { "path": ".klt/synthesize/run-example/synth_gcd.ys", "scope": "repo" },
@@ -1328,6 +1338,8 @@ caller decision rather than something this command should pick.
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
 | `cell_exclusions` | object | **Always present** (issue #2382) — the standard-cell exclusion this run actually applied, and how it was arrived at: `{mode, requested, library_defaults, effective, validated, engine_supports_dont_use}`. `mode` is the resolved `constraints.dont_use_mode` (`"additive"` by default); `requested` is the request's own `constraints.dont_use`, normalized and deduplicated; `library_defaults` is the built-in per-library table's entry for the resolved `pdk.cell_library` (always reported, even when `mode` suppressed it, so a report says what was *not* excluded too); **`effective` is exactly the `-dont_use` glob list handed to ABC**, deduplicated and order-preserved. `validated` is `true` when every `requested` pattern was matched against the resolved liberty's cell names, or `null` when there was nothing to check or that cell list could not be established. `engine_supports_dont_use` is the `yosys -p 'help abc'` probe result, or `null` when there was nothing to exclude and no probe was made — `false` with a non-empty `requested` and an empty `effective` is the "older Yosys build dropped it" case, also surfaced as a `dont_use_unsupported` warning. Additive field, no `schema_version` bump. See "Request-level cell exclusion" above. |
 | `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`, `dont_use_unsupported`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
+| `memory_mapping` | object | **Always present** (issue #2745) — bounded evidence of what happened to inferred memories: `{status, reason, modules, script_path}`. `status` is one of `"none_detected"`, `"lowered_to_logic"`, `"optimized_away"`, `"surviving"`, `"mixed"`, `"indeterminate"`; `reason` is a free-text explanation, non-`null` only when something is `"indeterminate"`. `modules` is one row per module definition with at least one memory at any stage, sorted by name: `{module, status, elaborated_memories, elaborated_memory_bits, pre_lowering_memories, final_memories}`. `script_path` is the side evidence script, the same `{path, scope}` shape as `script_path`. See "`memory_mapping`" below for the stages, the classification rules, overhead, and limitations. Additive field, no `schema_version` bump. |
+| `blackbox_modules` | array\<string\> \| null | **Always present** (issue #2745) — sorted names of modules declared `(* blackbox *)`/`(* whitebox *)` that still have at least one instance in the final mapped design. **Their area is not included in `area_um2`** (Yosys's `stat -liberty` has no area for them) and they are never counted as memories. `[]` when there are none; `null` when the evidence invocation failed and the list could not be established. Additive field, no `schema_version` bump. |
 | `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `netlist_sha256` | string | Lowercase 64-character SHA-256 of the exact bytes of the file `netlist_path` refers to, computed after signed-qualifier stripping (issue #2452). It is computed from the real file even when `netlist_path` is redacted as `external`, so two runs' outputs can be compared from their envelopes alone. It identifies output *bytes* only: it does not prove engine identity or semantic equivalence, and any byte difference (comments, ordering, a different Yosys/abc build) changes it. Additive field; `schema_version` stays 2. |
 | `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. This is the **commit-safe** form: every embedded path is either repo-relative or `$PDK_ROOT`-relative (issue #1870), so `klt env-provenance scan` on it is clean. Because Yosys does not expand environment variables, it is not the file Yosys was run on — see `run_script_path`. |
@@ -1381,6 +1393,86 @@ heuristic and Yosys's own optimization already resolve these structurally
 (the loop no longer exists in the mapped netlist by the time `write_verilog`
 runs) — `structural` only *reports* that the design carried the condition,
 it does not gate netlist production.
+
+## `memory_mapping`: inferred-memory evidence
+
+[Issue #2745](https://github.com/2AMLogic/klayout-tools/issues/2745) (part of
+#2281). `area_um2` and `instance_count` come from the final `stat`, after
+`synth` has already run `memory_map`, so they alone cannot say whether the RTL
+inferred a memory, whether it became flip-flops and muxes, or whether
+optimization removed it first. `memory_mapping` records what Yosys's own
+statistics show at three stages:
+
+| Stage | Where it is captured | What is counted |
+| --- | --- | --- |
+| `elaborated` | Side invocation, after `hierarchy -check -top <top>` and `proc` | `stat`'s `num_memories` (unconsolidated memories) plus `$mem`/`$mem_v2` cells; `num_memory_bits` is reported as `elaborated_memory_bits` |
+| `pre_lowering` | Side invocation, after `synth -top <top> -run :fine` — `synth`'s `begin` and `coarse` labels, every pass the production `synth` runs before `fine`'s `memory_map` | `$mem`/`$mem_v2` cells (plus any `num_memories`) |
+| `final` | The production run's own `<top>_stats.json` — no extra work | `$mem`/`$mem_v2` cells (plus any `num_memories`) left after mapping |
+
+Each module definition with a memory at any stage gets one `modules` row,
+classified from its three counts `e`, `p` and `f`:
+
+| `status` | Rule | Meaning |
+| --- | --- | --- |
+| `none_detected` | `e = p = f = 0` | No inferred memory (such modules have no row). |
+| `optimized_away` | `e > 0`, `p = 0`, `f = 0` | Every detected memory was gone before lowering. Optimization removed it: dead (never read), or folded into constants or logic by a `coarse` pass. It was **not** lowered by `memory_map`. |
+| `lowered_to_logic` | `p = e > 0`, `f = 0` | Every detected memory reached `memory_map` and none survived mapping. Its function is now in ordinary cells counted in `area_um2`. |
+| `surviving` | `f = p = e > 0` | Every detected memory is still an unmapped memory cell after mapping. |
+| `mixed` | Any other non-increasing combination | For example, one memory optimized away and another lowered (`e = 2`, `p = 1`, `f = 0`). |
+| `indeterminate` | `p > e` or `f > p` | A later stage has more memories than an earlier one, such as a memory inferred by a `coarse` pass. Its earlier state was never observed. |
+
+The top-level `status` folds the rows. It is `none_detected` with no rows, the
+shared status when every row agrees, and `mixed` when rows differ. It is
+`indeterminate` when any row is indeterminate, with that row's reason in
+`reason`.
+
+**Incomplete evidence is never classified.** If the side invocation fails or
+times out, a stage file is missing or unreadable, or the production stats
+cannot be re-read, `status` is `"indeterminate"`. `reason` names the failure
+and `modules` is `[]`. A partial chain never yields a guessed outcome.
+
+### Overhead and failure behaviour
+
+The evidence comes from **one extra Yosys invocation**,
+`<top>_memory_evidence.ys`. It runs only after the production run has
+succeeded. It uses the same sources, `hdl_toplevel` and arithmetic `techmap`
+insertion, and stops before `fine`. It reads no liberty and runs no
+`dfflibmap`/`abc`. The cost is roughly one RTL front end plus `synth`'s
+coarse passes, which is usually a small fraction of a full mapping run. It
+shares the per-invocation Yosys timeout. The production script (`script_path`
+/ `run_script_path`), netlist, stats and every existing metric are byte-for-byte
+what they were before this field existed. A production failure keeps its
+existing error, and the evidence invocation never runs. An evidence failure
+never fails the run: it yields `indeterminate`, `blackbox_modules: null` and
+the usual `status: "ok"` envelope.
+
+### `blackbox_modules`
+
+`blackbox_modules` lists modules carrying a `blackbox` or `whitebox`
+attribute (from the evidence script's `select -list`, read after `hierarchy`)
+that still have instances in the production run's final stats. Membership
+comes from the attribute, never the name, so a macro named `sram_*` is not a
+memory. A declared blackbox that optimization disconnected and removed is not
+listed. **Blackbox area is excluded from `area_um2`.** This command does not
+account for it, and an undefined, non-blackbox module is still the existing
+hard `hierarchy -check` error. Macro inputs and generic missing-area
+accounting belong to #2635.
+
+### Limitations
+
+- Counts are per module **definition**, not scaled by instance count. A
+  module instantiated twice reports its memories once.
+- No ROM/RAM identity is reported. A memory with no write port is not called
+  a ROM, and mapped cells are never attributed to a particular memory. Final
+  counts cannot support either claim.
+- `elaborated_memory_bits` is the only bit count. `stat` reports none for a
+  consolidated `$mem_v2` cell.
+- The `pre_lowering` stage relies on `synth`'s documented label layout, with
+  `memory -nomap` in `coarse` and `memory_map` in `fine`. This was verified
+  against Yosys 0.69 with the ROM, RAM, unused-memory, mixed and blackbox
+  fixtures in `tests/test_synthesize_memory.py`. A Yosys build that lowered
+  memories before `fine` would report them as `optimized_away`. Re-run those
+  fixtures when changing the pinned Yosys.
 
 ## `warnings`: engine diagnostics and missing library capabilities
 

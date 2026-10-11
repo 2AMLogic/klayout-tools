@@ -229,6 +229,25 @@ def _print_text(report: dict) -> None:
     for category in sorted(warnings["by_category"]):
         print(f"  {category}: {warnings['by_category'][category]}")
 
+    # Issue #2745: `.get` so a pre-#2745 report (e.g. `--check` input) still
+    # renders.
+    memory_mapping = report.get("memory_mapping")
+    if memory_mapping is not None:
+        line = f"memory_mapping: {memory_mapping['status']}"
+        if memory_mapping.get("reason"):
+            line += f" ({memory_mapping['reason']})"
+        print(line)
+        for row in memory_mapping.get("modules") or []:
+            print(
+                f"  {row['module']}: {row['status']} "
+                f"(elaborated={row['elaborated_memories']}, "
+                f"pre_lowering={row['pre_lowering_memories']}, "
+                f"final={row['final_memories']})"
+            )
+    blackboxes = report.get("blackbox_modules")
+    if blackboxes:
+        print(f"blackbox_modules (area not included): {', '.join(blackboxes)}")
+
     print()
     # Issue #1844: `netlist_path`/`script_path` are the `{path, scope}`
     # shape `env_provenance.repo_relative_path` defines -- `render_path_field`
