@@ -155,6 +155,13 @@ change), KLayout 0.30.12, ngspice 46, `sky130A` open_pdks
 ~20-35 from other jobs); wall time 42 min for 18 corners; per-corner
 `runtime_s` 570-1083 s (load-dependent).
 
+Every corner carries one `nonconvergence` warning diagnostic, `Warning:
+Dynamic gmin stepping failed`, from ngspice's operating-point solve. It is a
+warning, not an error: ngspice falls back to its next OP strategy (source
+stepping), the OP converges, the transient runs to 300 us, and every
+measurement is present and in limits. It is listed here so the 18 warnings
+in the report are not mistaken for an unexamined failure.
+
 ## Results: 18/18 corners pass
 
 Lock = window-B mean `vctrl` (lo / hi loop); period = range over both loops
