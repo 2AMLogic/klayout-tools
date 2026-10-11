@@ -1823,6 +1823,25 @@ area_um2: 0.0, critical_path_ns: 0.0}` — see
   composes this command with `klt place-and-route`/`klt eval` into one
   fleet-scheduled candidate job; this command itself takes no `--backend`/
   `--hosts` flag.
+- **Observability stripping and negative controls.** This command has no
+  flag, request field or pre-pass that removes debug or probe logic, and it
+  does not report a "before and after" flop delta. Synthesis is never
+  flattened: the generated script runs `synth -top` and leaves the
+  hierarchy intact.
+  One consequence matters for anyone building an observability negative
+  control. Suppose you write a wrapper top that leaves a module's debug
+  outputs unconnected and synthesize it here. The probe-only state inside
+  that module is **not** removed, because the module is still optimized
+  on its own with every output live. The run shows no collapse, which is
+  a false negative.
+  The design spike
+  [`docs/design/synthesize-observability-spike.md`](../design/synthesize-observability-spike.md)
+  (issue #2746) records reproducible experiments. It rejects a
+  general-purpose pre-pass driven by signal names or by attributes, and
+  proposes a bounded alternative: a caller-authored wrapper, measured as a
+  flatten-matched pair. Any production change, such as an opt-in flatten
+  control, needs a separately reviewed follow-up issue. The spike is not
+  a shipped feature.
 - **A second synthesis engine.** `request.engine` exists from day one so a
   later backend (e.g. a Siemens tool) is an additive enum value and a new
   glue module, never a contract-shape change — but only `"yosys"` is
