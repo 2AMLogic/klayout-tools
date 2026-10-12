@@ -173,6 +173,7 @@ view rather than a hole-aware multi-`RECT` decomposition).
   "obs": [{ "layer": "met1", "shape_count": 1 }],
   "obs_shape_count": 1,
   "warnings": [],
+  "self_check": { "status": "pass", "findings": [], "missing_macros": [], "unexpected_macros": [] },
   "provenance": {
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
@@ -201,19 +202,85 @@ view rather than a hole-aware multi-`RECT` decomposition).
 | `obs` | array\<object\> | `{layer, shape_count}` per LEF layer with obstruction geometry, layer-name sorted. |
 | `obs_shape_count` | integer | Sum of every `obs[].shape_count`. |
 | `warnings` | array\<string\> | Non-fatal notes: a pin fell back to synthesized geometry, or a pin's layer did not resolve to a known routing LEF layer. `[]` on a run with no such notes. |
+| `self_check` | object | Structural self-check of the LEF file **read back from disk** after writing (issue #2769) — see "Structural self-check" below. `{status, findings, missing_macros, unexpected_macros}`; `status` is `"pass"` or `"fail"` and is the verdict of record for whether `output` may be consumed. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names `--cell-library` and hashes the resolved tech LEF; `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `<file>`. |
+
+## Structural self-check
+
+After writing the LEF, the command reads the file back from disk and runs a
+small structural validator over **the bytes actually written** — not over
+its own in-memory pin data — against exactly one expected macro
+(`--macro-name`) whose expected pins are the socket descriptor's own
+declared `pins[].name`s. The result is the additive `self_check` object:
+
+```json
+"self_check": {
+  "status": "fail",
+  "findings": [
+    { "code": "missing_pin", "message": "declared pin VOUT is missing from MACRO analog_block", "line": 5, "macro": "analog_block", "pin": "VOUT" }
+  ],
+  "missing_macros": [],
+  "unexpected_macros": []
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `status` | string | `"pass"` iff `findings` is empty, else `"fail"`. |
+| `findings` | array\<object\> | Every defect found — all checks run, so one fault never hides another. Each entry always has the same five keys: `code` (stable, machine-readable; table below), `message` (prose, not part of the contract), `line` (1-based line in the emitted file, or `null`), `macro` / `pin` (the affected names, or `null` when not applicable). |
+| `missing_macros` | array\<string\> | Expected macro names not declared in the file, sorted. |
+| `unexpected_macros` | array\<string\> | Declared macro names that were not expected, sorted. |
+
+| `code` | Meaning |
+| --- | --- |
+| `missing_version` | No library-level `VERSION <value> ;` statement. |
+| `missing_end_library` | No `END LIBRARY`. |
+| `content_after_end_library` | Non-comment content after `END LIBRARY`. |
+| `unclosed_block` | A `MACRO`/`PIN`/`PORT`/`OBS` block never closed — at end of file (truncation), at `END LIBRARY`, or skipped over by an `END` naming an outer block. |
+| `end_name_mismatch` | `END <name>` that does not match the innermost open block (a `MACRO`/`PIN` with a different name, or an anonymous `PORT`/`OBS`). |
+| `unnamed_end` | Anonymous `END` where `END <name>` was required to close a `MACRO`/`PIN`. |
+| `orphan_end` | `END` with no open block. |
+| `misplaced_block` | Block in the wrong parent: a nested `MACRO`, a `PIN`/`OBS` not directly inside a `MACRO`, a `PORT` not directly inside a `PIN`. |
+| `missing_name` | `MACRO`/`PIN` with no name on its line. |
+| `unterminated_statement` | A statement with no `;` before end of file or before the next line starting with a block keyword. |
+| `duplicate_macro` / `duplicate_pin` | A macro, or a pin within one macro, declared more than once. |
+| `missing_macro` / `unexpected_macro` | Macro name set differs from the expected set (exact, case-sensitive comparison). |
+| `missing_pin` | A declared pin is not inside its macro (`macro` names the containing macro; `line` is that macro's `MACRO` line). |
+| `unexpected_pin` | A pin inside an expected macro that is not one of its declared pins (with `missing_pin`, this is how a pin placed in the wrong macro surfaces). |
+
+Codes are additive: a consumer must tolerate codes it does not recognise
+and gate on `status`.
+
+**Scope and limits.** The validator understands only the LEF subset this
+command emits: library-level `;`-terminated statements, `MACRO <name>` …
+`END <name>`, `PIN <name>` … `END <name>`, anonymous `PORT` … `END` and
+`OBS` … `END`, and a final `END LIBRARY`. `#` comments and ordinary
+whitespace (indentation, tabs, blank lines, a `;` glued to a token) are
+tolerated; identifiers are compared exactly, never case-folded. A name
+after `MACRO`/`PIN`/`END` must sit on the keyword's line. It is not a
+general LEF parser and checks no geometry, layer names or statement
+semantics. **A structural pass does not prove routability or P&R
+acceptance.** A `PORT`-less pin (`geometry_source: "none"`, listed in
+`unroutable_pins`) and a synthesized pin are structurally present and keep
+their `warnings` — neither is a structural failure.
+
+On `"fail"` the LEF is **left on disk** for diagnosis and the normal report
+is still emitted; callers must gate consumption of `output` on
+`self_check.status` (or the exit code below). Failing to read the written
+file back at all is an application error (exit `1`), not a finding.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The LEF abstract was written successfully. |
-| `1` | Failed to run — bad layout/socket descriptor, an ambiguous/missing top cell, an unresolvable PDK/tech-LEF/layer-map for `--cell-library`, or an unwritable output path. |
+| `0` | The LEF abstract was written and `self_check.status` is `"pass"`. |
+| `1` | Failed to run — bad layout/socket descriptor, an ambiguous/missing top cell, an unresolvable PDK/tech-LEF/layer-map for `--cell-library`, an unwritable output path, or the written file could not be read back for its self-check. Error envelope on stderr; no report. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
+| `3` | The LEF abstract was written and the full report emitted, but `self_check.status` is `"fail"` (issue #2769). Do not consume the file. |
 
-**No exit code `3`.** Unlike `klt socket-check`, this command has no
-pass/fail concept of its own — a pin resolving to synthesized (rather than
-drawn) geometry is reported in `warnings`, never treated as a failure.
+A pin resolving to synthesized (rather than drawn) geometry, or to no
+`PORT` at all, is reported in `warnings`/`unroutable_pins` and never by
+itself produces exit `3`.
 
 Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
 contract, a future release may still add a code above `2`; a consumer
