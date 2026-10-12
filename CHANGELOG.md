@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --resistance-path NET_ID FROM TO`: point-to-point shortest
+  series path resistance over a `--distributed-rc` ladder** (issue #2765):
+  a repeatable, opt-in query (requires `--parasitics --distributed-rc`)
+  selecting a net by `parasitics.nets[].net_id` and two exact
+  `terminals[].leg_net` node IDs. Results land in the additive
+  `parasitics.resistance_paths[]` (absent unless requested) with status
+  `ok`/`limit_exceeded`/`node_not_found`/`no_path`, `resistance_ohm`, and
+  ordered `path_nodes`/`path_resistors` (`seg<i>`, query-local indices into
+  that net's `segments[]`). Bounded by `--resistance-path-max-nodes`/
+  `--resistance-path-max-resistors` (default 10000 each). Reports the
+  shortest **series** path resistance -- not an effective two-port
+  resistance, not a physical-route resistance. The pure helper is
+  `klayout_tools.resistance_path`. No `schema_version` bump.
+
 - **`klt extract --parasitics` / `klt pex`: per-net parasitic RC network
   integrity report** (issue #2764): every `--parasitics` extraction now
   validates the RC network it just emitted and reports the result as

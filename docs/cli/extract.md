@@ -246,6 +246,8 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `parasitics_nets` | array\<string\> \| string | repeatable `--parasitics-net` |
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
 | `distributed_rc` | bool | `--distributed-rc` |
+| `resistance_paths` | array\<object\> | repeatable `--resistance-path NET_ID FROM TO` (issue #2765). Each entry is exactly `{"net_id": <int>, "from": <string>, "to": <string>}`; any other shape (a missing/extra key, a non-integer `net_id`, a bare array) is rejected. |
+| `resistance_path_max_nodes` / `resistance_path_max_resistors` | integer | `--resistance-path-max-nodes` / `--resistance-path-max-resistors` (a non-integer, including `2.5` or `true`, is rejected) |
 | `mom_rlc_net` | string | `--mom-rlc-net` |
 | `mom_rlc_resistance_ohm` / `mom_rlc_capacitance_ff` / `mom_rlc_inductance_nh` | number | the matching `--mom-rlc-*` flags |
 | `def_net_names` | bool | `--def-net-names` |
@@ -4820,6 +4822,170 @@ itself. `--distributed-rc` given without `--critical-net` is a clean
 `ExtractError` (`"--distributed-rc requires --critical-net"`) — there is no
 net set to scope this onto otherwise.
 
+### Point-to-point series resistance over a distributed ladder (`--resistance-path`, issue #2765)
+
+A net's `resistance_ohm` is one lumped number. Debugging a slow or
+IR-sensitive net usually needs the resistance **between two specific
+terminals** of it instead. `--resistance-path NET_ID FROM TO` (repeatable)
+answers that over the `--distributed-rc` ladder this same run emits:
+
+```
+klt extract block.gds --deck sky130 --parasitics --critical-net OUT --distributed-rc \
+    --resistance-path 3 OUT__t0 OUT__t1 --format json
+```
+
+**What is reported: the shortest series path resistance.** The query treats
+the selected net's ladder as an undirected resistor multigraph and returns
+the minimum *sum of series resistor values* over any path between the two
+nodes (Dijkstra), plus that path's ordered nodes and resistors
+(`quantity: "shortest_series_path_resistance"` on every result). It is
+**not**:
+
+- the *effective* two-port resistance — parallel paths are never combined
+  (two parallel 2 Ω and 3 Ω resistors report `2.0`, not `1.2`; the
+  effective value needs a Laplacian solve, a possible follow-up);
+- an extracted physical-route resistance — the ladder is the
+  `--distributed-rc` approximation (terminals ordered along their
+  approximate physical spread, the net's lumped total R split between
+  adjacent terminals; see the section above), not a geometrically recovered
+  route, and no geometry/bounding boxes are reported or implied;
+- an IR-drop solve.
+
+On today's ladder (a simple chain) the series path is unique, so the value
+is the sum of the segments between the two terminals; the query itself is a
+general multigraph search so later adapters can reuse it
+(`klayout_tools.resistance_path.shortest_series_resistance`).
+
+**Inputs.**
+
+- `NET_ID` — the net's `parasitics.nets[].net_id`, an integer. Selection is
+  by `net_id` only, never by display name: several distinct net islands can
+  share one name (and a ladder's middle node reuses the net's own name), so
+  a name cannot identify a graph unambiguously. `net_id` is a run-local
+  identifier (a "bookkeeping" field — see "Field classes" below): read it
+  from a report of the same layout/deck/flags and the same build; it is
+  deterministic for identical input. Each result echoes `net` so a caller
+  can confirm the selected net.
+- `FROM`/`TO` — exact emitted node IDs, i.e. that net's own
+  `terminals[].leg_net` values (the written netlist's node spellings). No
+  coordinate snapping, no device-pin aliasing.
+- `--resistance-path-max-nodes N` / `--resistance-path-max-resistors N` —
+  positive integers, default `10000` each, applied to every query. A
+  ladder over `N` terminals has `N` nodes and `N - 1` resistors.
+
+**Requirements and validation** (each a clean `ExtractError`, exit `1`):
+`--resistance-path` requires `--parasitics` and `--distributed-rc` (and so
+`--critical-net`); a non-integer `NET_ID`; a limit that is not a positive
+integer; a limit flag given without `--resistance-path`. A malformed emitted
+ladder (a negative/non-finite resistance, a duplicate node or segment, a
+segment endpoint naming no node) is refused the same way before any search
+— never answered over silently dropped segments. The pure helper raises
+`ValueError` for bad limits and `ResistanceGraphError` (a `ValueError`) for
+malformed graph data.
+
+**Statuses.** Checks run in this order, the first that applies decides:
+net resolution (`node_not_found`) → graph size against the caps
+(`limit_exceeded`) → graph validation (error, above) → endpoints
+(`node_not_found`) → identical endpoints (`ok`, `0.0`) → search (`ok` /
+`no_path`).
+
+| `status` | When | Payload |
+|---|---|---|
+| `node_not_found` | No `parasitics.nets[]` entry has this `net_id`, or that net's `rc_model` is not `"distributed"` (a lumped star is not queried), or `FROM`/`TO` is not one of that net's nodes. Holds for identical endpoints too: `FROM == TO` absent from the net is still `node_not_found`. | `reason` names which. |
+| `limit_exceeded` | The selected net has more nodes than `max_nodes` or more resistors than `max_resistors`, checked from the counts alone **before** validation, endpoint lookup, adjacency or search (a graph exactly at a cap is searched). | `node_count`/`resistor_count` say how big it was. |
+| `no_path` | Both endpoints exist but no resistor path joins them. Unreachable on a well-formed ladder (a chain is always connected); defined for the general helper. | `reason`. |
+| `ok` | A path exists. `FROM == TO` (present) is `0.0` with a one-node path. | finite `resistance_ohm`, ordered `path_nodes`/`path_resistors`. |
+
+**Result entry** (`parasitics.resistance_paths[]`, one per query, in
+request order):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `net_id` | integer | The query's `NET_ID`, echoed. |
+| `net` | string \| null | The selected entry's `net`; `null` when no entry has this `net_id`. |
+| `rc_model` | string \| null | The selected entry's `rc_model` (`"distributed"` for an answered query); `null` when no entry matched. |
+| `from` / `to` | string | The query's endpoints, echoed verbatim. |
+| `quantity` | string | Always `"shortest_series_path_resistance"`. |
+| `status` | string | `ok` / `limit_exceeded` / `node_not_found` / `no_path`. |
+| `reason` | string \| null | Human-readable explanation for every non-`ok` status; `null` for `ok`. |
+| `resistance_ohm` | number \| null | Ohms. `ok` only (always finite); `null` for every other status — no partial value is ever published. |
+| `path_nodes` | array\<string\> | `ok`: the path's node IDs from `from` to `to`, in order. `[]` otherwise. |
+| `path_resistors` | array\<string\> | `ok`: the path's resistor IDs in order (one fewer than `path_nodes`; resistor `i` joins nodes `i` and `i + 1`). `[]` otherwise. |
+| `node_count` / `resistor_count` | integer \| null | The selected net's graph size; `null` when no distributed net was selected. |
+| `max_nodes` / `max_resistors` | integer | The limits in force. |
+
+**Resistor IDs are query-local.** The report's `segments[]` records carry no
+device name, so a resistor is identified as `seg<i>` — an index into **that
+net's own** `segments[]` array (it is also the suffix of the written
+netlist's `R<net>_seg<i>` card, but treat it as the index). It is meaningful
+only together with the result's `net_id`.
+
+**Units and rounding.** Values are the report's serialized
+`segments[].resistance_ohm` (rounded to 4 decimals at emission; the netlist
+card carries the unrounded value, so they differ by at most `5e-5` Ω per
+segment). `resistance_ohm` is their sum, rounded to the same 4 decimals.
+
+**Tie-breaking.** Among equal-cost paths the result is fixed for a given
+input order: nodes are settled in `(distance, position in terminals[])`
+order, each node's resistors scanned in `segments[]` order, and a candidate
+replaces a node's current best only when strictly cheaper. The same report
+always gives the same path; a reordered input may pick a different equally
+cheap path, never a different `resistance_ohm`. Zero-ohm segments and
+zero-ohm cycles are handled (each node is settled once).
+
+**Scope of traversal.** A query's graph is exactly the selected entry's
+`terminals[].leg_net` nodes and `segments[]` resistors: it never crosses into
+another net (same-named or not), and never traverses a capacitor, coupling
+capacitor, functional device, inductor or the substrate DC tie.
+
+**Worked example.** `OUT` of a four-terminal fan-out fixture
+(`tests/test_extract.py`'s `_make_subcircuit_slice_layout(out_fanout=True)`)
+gets a 4-node ladder. Its `parasitics.nets[]` entry (abridged):
+
+```json
+{
+  "net": "OUT", "net_id": 3, "rc_model": "distributed",
+  "terminals": [
+    {"leg_net": "OUT__t0", "order": 0}, {"leg_net": "OUT__t3", "order": 1},
+    {"leg_net": "OUT", "order": 2}, {"leg_net": "OUT__t1", "order": 3}
+  ],
+  "segments": [
+    {"net_a": "OUT__t0", "net_b": "OUT__t3", "resistance_ohm": 466.6728},
+    {"net_a": "OUT__t3", "net_b": "OUT", "resistance_ohm": 466.6728},
+    {"net_a": "OUT", "net_b": "OUT__t1", "resistance_ohm": 466.6728}
+  ]
+}
+```
+
+`--resistance-path 3 OUT__t0 OUT__t1` then reports
+`3 × 466.6728 = 1400.0184` Ω:
+
+```json
+"resistance_paths": [
+  {
+    "net_id": 3, "net": "OUT", "rc_model": "distributed",
+    "from": "OUT__t0", "to": "OUT__t1",
+    "quantity": "shortest_series_path_resistance",
+    "status": "ok", "reason": null,
+    "resistance_ohm": 1400.0184,
+    "path_nodes": ["OUT__t0", "OUT__t3", "OUT", "OUT__t1"],
+    "path_resistors": ["seg0", "seg1", "seg2"],
+    "node_count": 4, "resistor_count": 3,
+    "max_nodes": 10000, "max_resistors": 10000
+  }
+]
+```
+
+Text mode prints one line per query, e.g.
+`resistance_path: net_id=3 OUT__t0 -> OUT__t1  status=ok  series_R=1400.0184 ohm  via OUT__t0 -> OUT__t3 -> OUT -> OUT__t1`.
+
+**Additive, no `schema_version` bump.** `parasitics.resistance_paths` is
+new and present only when `--resistance-path` was given; without it every
+field is byte-identical to before this feature existed, and with it every
+other field is unchanged. `klt pex` does not forward this flag; a `klt
+power` resistive-network adapter, rendering overlays and an effective
+(Laplacian) resistance are follow-ups.
+
 ### `klt mom` cross-check for one net (`--mom-net`, issue #798)
 
 `--parasitics` (above) is a fast, curated-coefficient model — the same
@@ -6036,6 +6202,7 @@ network integrity" below.
 | `critical_nets`        | array\<string\> | The `--critical-net` request, echoed back verbatim (issue #976). `[]` when the flag was never given. |
 | `parasitics_nets`      | array\<string\> | The `--parasitics-net` request, echoed back verbatim (issue #1700) — the nets the ground R/C pass was scoped to. `[]` when the flag was never given, i.e. a full-layout pass. See "Scoping the ground R/C pass to named nets" above. |
 | `distributed_rc`       | boolean         | `true` only when `--distributed-rc` was given (issue #977). `false` otherwise, `--critical-net`-only runs included. |
+| `resistance_paths`     | array\<object\> | Additive field (issue #2765), **present only when `--resistance-path` was given** (absent otherwise). One shortest-series-path-resistance result per query, in request order — see "Point-to-point series resistance over a distributed ladder (`--resistance-path`)" above for the entry shape and status values. |
 | `model`                | object          | Machine-readable declaration of the parasitic model's own scope — static text, the same regardless of the file/deck (issue #728). See "Parasitic model scope (`parasitics.model`)" below. |
 | `mom_crosscheck`       | object \| null  | Additive field (issue #798). `null` unless `--mom-net <net>` was given, in which case it is the swap-and-measure report for that one net — see "`klt mom` cross-check for one net" above and the field list below. |
 | `mom_rlc_override`     | object \| null  | Additive field (issue #988). `null` unless `--mom-rlc-net <net>` was given, in which case it is the substitution report for that one net — see "Substitute a caller-supplied `klt mom` R/L/C for a critical net" above and the field list below. |
