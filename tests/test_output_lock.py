@@ -394,6 +394,18 @@ def test_run_sim_explicit_artifacts_dir_contends_via_alias(
         sim.run_sim(str(request), artifacts_dir=str(alias))
 
 
+def test_run_sim_artifacts_dir_inside_plot_dir_does_not_self_contend(
+    tmp_path, stub_ngspice
+):
+    request = _sim_request(tmp_path, keep_artifacts=True)
+    plots = tmp_path / "plots"
+    report = sim.run_sim(
+        str(request), artifacts_dir=str(plots / "artifacts"), plot_dir=str(plots)
+    )
+    assert report["status"] == "pass"
+    _in_other_thread(plots)  # released afterwards
+
+
 def test_nested_sim_inherits_pex_style_ancestor_ownership(tmp_path, stub_ngspice):
     request = _sim_request(tmp_path, keep_artifacts=True)
     work = tmp_path / "pexroot"

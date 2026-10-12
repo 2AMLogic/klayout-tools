@@ -1793,6 +1793,22 @@ def _prepare_extracted_request(
     return extracted_request_path
 
 
+def _own_pex_root(
+    ownership: contextlib.ExitStack, artifacts_dir: str | None, layout_path: str
+) -> None:
+    """Own the PEX artifact root (``artifacts_dir`` or ``.klt/pex/``) (#2770)."""
+    ownership.enter_context(
+        output_lock.hold_output_dir(
+            artifacts_dir
+            if artifacts_dir
+            else os.path.join(
+                os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex"
+            )
+        )
+    )
+
+
+@output_lock.owns_run
 def run_pex(
     layout_path: str,
     testbench_paths: Sequence[str],
@@ -1984,41 +2000,7 @@ def run_pex(
     while this run holds the root. ``_ownership`` is internal: the exit
     stack that releases the lock when the run ends.
     """
-    if _ownership is None:
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(
-                output_lock.hold_output_dir(
-                    artifacts_dir
-                    if artifacts_dir
-                    else os.path.join(
-                        os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex"
-                    )
-                )
-            )
-            return run_pex(
-                layout_path,
-                testbench_paths,
-                deck_name,
-                output=output,
-                top=top,
-                pdk_variant=pdk_variant,
-                pdk_root=pdk_root,
-                artifacts_dir=artifacts_dir,
-                backend=backend,
-                deck_options=deck_options,
-                declared_pins=declared_pins,
-                label_layers=label_layers,
-                critical_nets=critical_nets,
-                distributed_rc=distributed_rc,
-                mom_rlc_net=mom_rlc_net,
-                mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
-                mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
-                mom_rlc_inductance_nh=mom_rlc_inductance_nh,
-                measure_command=measure_command,
-                reference_netlist=reference_netlist,
-                measure_timeout_s=measure_timeout_s,
-                _ownership=stack,
-            )
+    _own_pex_root(_ownership, artifacts_dir, layout_path)
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
     # mode and `None` in the default testbench mode -- the single flag every

@@ -1199,11 +1199,17 @@ def _own_persistent_roots(
     *,
     persistent: bool,
 ) -> None:
-    """Enter the output-directory lock for each persistent root (#2770)."""
-    if persistent:
-        ownership.enter_context(output_lock.hold_output_dir(artifacts_dir))
-    if plot_dir is not None:
-        ownership.enter_context(output_lock.hold_output_dir(plot_dir))
+    """Enter the output-directory lock for each persistent root (#2770).
+
+    Roots are taken outermost first (shortest canonical path), so a
+    ``plot_dir`` that contains ``artifacts_dir`` (or vice versa) is owned
+    once and the inner one re-enters for free instead of self-contending.
+    """
+    roots = ([artifacts_dir] if persistent else []) + (
+        [plot_dir] if plot_dir is not None else []
+    )
+    for root in sorted(map(output_lock.canonical_dir, roots), key=len):
+        ownership.enter_context(output_lock.hold_output_dir(root))
 
 
 @output_lock.owns_run

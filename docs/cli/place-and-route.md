@@ -2911,15 +2911,19 @@ a clean exit `1`, not a usage error.
 
 ## Output-directory ownership
 
-**Output-directory ownership (issue #2770).** `klt place-and-route` owns its fixed `.klt/place-and-route/` directory next to the request (it has no `--outdir` flag) for the whole run, including `--check <report> --rerun`. A second cooperating
-run on the same directory (any relative or symlink alias of it) -- or on an
-ancestor or descendant of it -- fails immediately with error code
-`outdir_locked`: exit `1`, empty stdout, the standard error envelope on
-stderr, and nothing under the directory modified. Two requests in the same directory therefore cannot run at once; copy one elsewhere or run them sequentially. A killed or crashed
-run releases ownership automatically; a leftover owner record never blocks
-the next run. `outdir_lock_unavailable` (same exit/streams) means locking
-itself is not possible here. Full policy, library exceptions and platform
-scope: [json-contract.md](../json-contract.md) "Output-directory ownership".
+**Output-directory ownership (issue #2770).** `klt place-and-route` owns its
+fixed `.klt/place-and-route/` directory next to the request (it has no
+`--outdir` flag) for the whole run, including `--check <report> --rerun`. A
+second cooperating run on the same directory (any relative or symlink alias
+of it) -- or on an ancestor or descendant of it -- fails immediately with
+error code `outdir_locked`: exit `1`, empty stdout, the standard error
+envelope on stderr, and nothing under the directory modified. Two requests
+in the same directory therefore cannot run at once; copy one elsewhere or
+run them sequentially. A killed or crashed run releases ownership
+automatically; a leftover owner record never blocks the next run.
+`outdir_lock_unavailable` (same exit/streams) means locking itself is not
+possible here. Full policy, library exceptions and platform scope:
+[json-contract.md](../json-contract.md) "Output-directory ownership".
 
 ## Exit codes
 
