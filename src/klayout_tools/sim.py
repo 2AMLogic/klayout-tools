@@ -1558,6 +1558,7 @@ def run_sim(
         plot_dir=plot_dir,
         fail_fast_probe=fail_fast_probe,
         fail_on_diagnostic=fail_on_diagnostic,
+        _ownership=_ownership,
     )
 
 
@@ -1644,6 +1645,7 @@ def _run_sim_corners(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
     request/response contract, and the deck-list dispatch alternative
