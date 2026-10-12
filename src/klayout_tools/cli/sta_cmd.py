@@ -57,6 +57,7 @@ def _print_text(report: dict) -> None:
     print(f"def_path: {report['def_path']}")
     print(f"verilog_path: {report['verilog_path']}")
     print(f"geometry_source: {report['geometry_source']}")
+    print(f"clock_mode: {report['clock_mode']}")
     if report["geometry_source"] == "netlist_estimate":
         print(f"wire_load_model: {report['wire_load_model']}")
         print(f"wire_load_mode: {report['wire_load_mode']}")
@@ -90,6 +91,17 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
                 f"({path['status']})"
             )
     print(f"{indent}clock_skew_ns: {fields['clock_skew_ns']}")
+    propagation = fields.get("clock_propagation")
+    if propagation is not None:
+        print(
+            f"{indent}clock_propagation: sinks={propagation['clock_sinks']} "
+            f"max_network_latency_ns={propagation['max_network_latency_ns']}"
+        )
+        if propagation["clock_sinks_sample"]:
+            print(
+                f"{indent}  sinks (sample): "
+                f"{', '.join(propagation['clock_sinks_sample'])}"
+            )
     print(f"{indent}estimated_power_mw: {fields['estimated_power_mw']}")
 
 
