@@ -30,6 +30,7 @@ gate-level netlist and liberty and compare against the recorded
 import argparse
 import sys
 
+from ..output_lock import OutputLockError
 from ..place_and_route import (
     PlaceAndRouteError,
     check_place_and_route_report,
@@ -62,6 +63,8 @@ def run(args: argparse.Namespace) -> int:
         )
     except PlaceAndRouteError as exc:
         return emit_error("place-and-route", str(exc), args.format)
+    except OutputLockError as exc:
+        return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
     emit_success(report, args.format, _print_text)
     # Issue #2086: the response's own `warnings` list also goes to stderr,
@@ -102,6 +105,8 @@ def _run_check(args: argparse.Namespace) -> int:
             )
     except PlaceAndRouteError as exc:
         return emit_error("place-and-route", str(exc), args.format)
+    except OutputLockError as exc:
+        return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
     text_renderer = render_rerun_drift if args.rerun else _print_check_text
     emit_success(result, args.format, text_renderer)

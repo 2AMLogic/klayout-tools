@@ -205,6 +205,7 @@ each row's comparison does and does not account for.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import math
@@ -215,7 +216,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import env_provenance
+from . import env_provenance, output_lock
 from ._paths import _fold_spice_continuations, _resolve_relative
 from .coverage import (
     REASON_NO_DELTA_ROWS,
@@ -1792,6 +1793,22 @@ def _prepare_extracted_request(
     return extracted_request_path
 
 
+def _own_pex_root(
+    ownership: contextlib.ExitStack, artifacts_dir: str | None, layout_path: str
+) -> None:
+    """Own the PEX artifact root (``artifacts_dir`` or ``.klt/pex/``) (#2770)."""
+    ownership.enter_context(
+        output_lock.hold_output_dir(
+            artifacts_dir
+            if artifacts_dir
+            else os.path.join(
+                os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex"
+            )
+        )
+    )
+
+
+@output_lock.owns_run
 def run_pex(
     layout_path: str,
     testbench_paths: Sequence[str],
@@ -1815,6 +1832,7 @@ def run_pex(
     measure_command: Sequence[str] | None = None,
     reference_netlist: str | None = None,
     measure_timeout_s: float | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
     testbench in ``testbench_paths`` against both the schematic DUT it
@@ -1970,7 +1988,19 @@ def run_pex(
     in testbench mode. See this module's "Measuring with a caller-supplied
     command" docstring section.
 
+
+    **Output-directory ownership (issue #2770).** The run owns its artifact
+    root (``artifacts_dir``, default ``.klt/pex/`` beside the layout) for its
+    whole lifetime through :func:`klayout_tools.output_lock.hold_output_dir`,
+    taken before anything is created: a competing cooperating run raises
+    :class:`~klayout_tools.output_lock.OutputDirLockedError`. The per-testbench
+    ``run_sim`` calls on ``<root>/<label>/schematic|extracted`` inherit that
+    ownership (they never re-acquire it), and a separate cooperating
+    ``run_sim``/``run_pex`` on one of those child directories is refused
+    while this run holds the root. ``_ownership`` is internal: the exit
+    stack that releases the lock when the run ends.
     """
+    _own_pex_root(_ownership, artifacts_dir, layout_path)
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
     # mode and `None` in the default testbench mode -- the single flag every
