@@ -1703,6 +1703,34 @@ _SPEF_NET_CHECK_BEGIN = "===KLT_SPEF_NET_CHECK_BEGIN==="
 _SPEF_NET_CHECK_END = "===KLT_SPEF_NET_CHECK_END==="
 _SPEF_NET_CHECK_RE = re.compile(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)")
 
+
+def _coverage_declaration():
+    """Issue #2781: fixed declaration of metal-density coverage.
+
+    Standard-cell gap fillers (`filler_placement`) are not metal density
+    fill, and a zero routing-DRC count is not density compliance.
+    """
+    return {
+        "metal_density_fill": {
+            "status": "unsupported",
+            "inserted": False,
+            "reason": (
+                "no metal density fill is inserted at any stage; "
+                "standard-cell gap fillers are not metal fill"
+            ),
+        },
+        "density_compliance": {
+            "status": "unsupported",
+            "evaluated": False,
+            "reason": (
+                "metal density rules are not evaluated by place-and-route; "
+                "a zero route_drc_violation_count does not imply density "
+                "compliance"
+            ),
+        },
+    }
+
+
 #: Response fields whose value is always "the last completed stage's own
 #: value, restated at top level" -- see the contract spike section 5's
 #: `stages` field description. Built once via `dict.get` so a field a stage
@@ -2585,6 +2613,8 @@ def run_place_and_route(
         "status": "ok",
         "stage_reached": target_stage,
         "seed": seed,
+        # Additive field (issue #2781): see `_coverage_declaration`.
+        "coverage": _coverage_declaration(),
         # Additive field (issue #1100): the tech-LEF parasitic-extraction
         # corner actually resolved (`"min"`/`"nom"`/`"max"`,
         # `request.pdk.interconnect_corner`, default `"nom"`) -- distinct
