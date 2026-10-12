@@ -312,7 +312,7 @@ class _FileAnalyzer(ast.NodeVisitor):
     visit_DictComp = _visit_comp
 
     def visit_Name(self, node: ast.Name) -> None:
-        if isinstance(node.ctx, (ast.Store, ast.Del)):
+        if isinstance(node.ctx, ast.Store | ast.Del):
             self.scope.bind(node.id, None)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
