@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1137",
-  "loom_commit": "240bb1a888bb79770ecc3acbc19c6425468fedca",
+  "loom_version": "0.19.1144",
+  "loom_commit": "9e4381cbbd2386393e44c7a979583252948a3998",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -439,7 +439,9 @@
     ".loom/scripts/tests/test-merge-pr-stale-check-redate.sh",
     ".loom/scripts/tests/test-merge-pr-verdict-label-guard.sh",
     ".loom/docs/forge-events.md",
-    ".loom/scripts/tests/test-merge-pr-closed-issue-cleanup.sh"
+    ".loom/scripts/tests/test-merge-pr-closed-issue-cleanup.sh",
+    ".loom/scripts/tests/test-resync-installed-retired-migrate.sh",
+    ".loom/scripts/tests/test-sync-labels-migrate-retired.sh"
   ],
   "last_resync": "2026-10-12",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
