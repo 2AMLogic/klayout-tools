@@ -14,6 +14,33 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --parasitics` / `klt pex`: per-net parasitic RC network
+  integrity report** (issue #2764): every `--parasitics` extraction now
+  validates the RC network it just emitted and reports the result as
+  additive, always-present status values an agent branches on — never
+  exceptions, never a changed verdict, never a repair. Each
+  `parasitics.nets[]` entry gains an `integrity` block (`open` —
+  `pass`/`open`/`not_applicable`, with `not_applicable` for lumped nets
+  whose star carries no measurable terminal-connectivity evidence;
+  `islands`; `orphan_nodes`; `suspicious_resistors` — negative, zero,
+  non-finite, self-loop; `short_candidates` — cross-net resistors at or
+  below the inclusive `1.0` Ω threshold; `capacitance` — declared total
+  vs. the sum of emitted ground capacitors (each read back from the
+  created device), pass/mismatch/not_applicable
+  at `1e-6` fF absolute + `1e-9` relative tolerance), and the `parasitics`
+  block gains a net-name-free `integrity` summary (check settings and
+  aggregate counts). Connectivity is judged over the emitted DC-conducting
+  elements (resistors/inductors — capacitors never join), by circuit-scoped
+  `net_id` owners rather than display names, so same-named nets stay
+  distinct. The checks validate the *generated RC model*, not geometric
+  opens/shorts. `klt pex` propagates the same diagnostics verbatim as
+  `extraction.parasitic_integrity` (summary + one entry per net,
+  `parasitics.nets[]` order). Non-finite input values are diagnosed and
+  serialize as `null` — the blocks are strict finite JSON; detail lists cap
+  at 20 entries with complete counts. The checker indexes the network by
+  owning net once, so it runs in time linear in the network size. No
+  existing field changes; `schema_version` stays 3 (extract) / 2 (pex).
+
 - **`klt synthesize` memory-mapping evidence** (issue #2745, part of #2281):
   the response gains two additive, always-present fields. `memory_mapping`
   reports per module definition whether inferred memories were
