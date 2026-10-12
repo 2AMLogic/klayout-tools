@@ -1703,10 +1703,7 @@ _SPEF_NET_CHECK_BEGIN = "===KLT_SPEF_NET_CHECK_BEGIN==="
 _SPEF_NET_CHECK_END = "===KLT_SPEF_NET_CHECK_END==="
 _SPEF_NET_CHECK_RE = re.compile(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)")
 
-#: Response fields whose value is always "the last completed stage's own
-#: value, restated at top level" -- see the contract spike section 5's
-#: `stages` field description. Built once via `dict.get` so a field a stage
-#: didn't populate degrades to `null`, never a `KeyError`.
+
 def _coverage_declaration():
     """Issue #2781: fixed declaration of metal-density coverage.
 
@@ -1734,6 +1731,10 @@ def _coverage_declaration():
     }
 
 
+#: Response fields whose value is always "the last completed stage's own
+#: value, restated at top level" -- see the contract spike section 5's
+#: `stages` field description. Built once via `dict.get` so a field a stage
+#: didn't populate degrades to `null`, never a `KeyError`.
 _TOP_LEVEL_METRIC_KEYS = (
     "die_area_um2",
     "core_area_um2",

@@ -254,6 +254,10 @@ def test_coverage_declares_metal_density_unsupported_at_every_stage(
     assert cov["density_compliance"]["evaluated"] is False
     assert result["schema_version"] == place_and_route.SCHEMA_VERSION
     if stage == "route":
-        # Zero routing DRC (and gap fillers) must not imply density compliance.
+        # Gap fillers in play plus zero routing DRC must still not imply
+        # density compliance (asserted above). With no `request.power`, the
+        # route stage's fillers come from the row-rail fallback.
+        power = result["power"]
+        fillers = power["filler_masters"] or power["row_rail"]["filler_masters"]
+        assert fillers, "route case must exercise standard-cell gap fillers"
         assert result["route_drc_violation_count"] == 0
-        assert cov["density_compliance"]["status"] != "clean"
