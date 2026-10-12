@@ -56,11 +56,14 @@ from .. import pdk as pdk_module
 from .._paths import looks_like_request_document
 from ..drc import (
     REQUEST_SCHEMA,
+    SKIP_REASON_NOT_SELECTED,
     DrcError,
     check_drc_report,
     drc_exit_code,
+    list_deck_rules,
     load_request_arg,
     load_rule_category_manifest,
+    parse_rule_selectors,
     rerun_drc_report,
     run_drc,
     run_drc_klayout_engine,
@@ -87,6 +90,9 @@ def run(args: argparse.Namespace) -> int:
     if args.rerun:
         return emit_error("drc", "--rerun requires --check <report>", args.format)
 
+    if args.list_rules:
+        return _run_list_rules(args)
+
     try:
         # Issue #1867: the positional slot carries either a layout path or a
         # request document; `_apply_request` normalizes the latter into the
@@ -110,7 +116,61 @@ def run(args: argparse.Namespace) -> int:
     return drc_exit_code(report)
 
 
+def _run_list_rules(args: argparse.Namespace) -> int:
+    """``--list-rules`` (issue #2768): enumerate a curated deck's rules.
+
+    Listing reads no layout and runs no check, so the only inputs it takes
+    are ``--deck`` (required) and the default ``--engine curated``; any other
+    input flag is rejected rather than silently ignored -- a caller passing
+    ``--rules`` or ``--top`` here almost certainly meant to run DRC. Exit 0
+    on success: a listing has no verdict, so it never borrows a DRC status.
+    """
+    try:
+        if args.engine == "klayout":
+            raise DrcError(
+                "--list-rules is not supported with --engine klayout: a "
+                "PDK-native runset does not share the curated rule registry "
+                "(see docs/cli/drc.md, 'Rule listing and selection')"
+            )
+        extra = _non_default_flags(args, allowed=("deck", "engine"))
+        if extra:
+            raise DrcError(
+                f"--list-rules takes only --deck; also given: {', '.join(extra)}"
+            )
+        if not args.deck:
+            raise DrcError("--list-rules requires --deck <name>")
+        listing = list_deck_rules(args.deck)
+    except DrcError as exc:
+        return emit_error("drc", str(exc), args.format)
+
+    emit_success(listing, args.format, _print_rule_list)
+    return EXIT_CLEAN
+
+
+def _non_default_flags(
+    args: argparse.Namespace, *, allowed: tuple[str, ...]
+) -> list[str]:
+    """Option strings of this command's input flags set away from their
+    parser default, other than ``allowed`` dests -- the same table
+    ``reject_argv_flags`` reads for request-document conflicts."""
+    return [
+        option
+        for dest, (option, default) in sorted(args.request_argv_flags.items())
+        if dest not in allowed and getattr(args, dest, default) != default
+    ]
+
+
 def _run_check(args: argparse.Namespace) -> int:
+    if args.rules is not None:
+        # Issue #2768: `--check` verifies a committed report as it was run;
+        # `--rerun` replays that report's own recorded `rule_selection`, so a
+        # second, argv-supplied selection would be ambiguous.
+        return emit_error(
+            "drc",
+            "--rules cannot be combined with --check: --check --rerun replays "
+            "the committed report's own recorded rule selection",
+            args.format,
+        )
     try:
         if args.rerun:
             result = rerun_drc_report(args.check)
@@ -149,6 +209,7 @@ _REQUEST_FIELD_DESTS = {
     "min_klayout_version": "min_klayout_version",
     "pdk": "pdk",
     "pdk_root": "pdk_root",
+    "rules": "rules",
 }
 
 
@@ -216,7 +277,26 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "min_klayout_version": _str("min_klayout_version"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
+            "rules": _request_rules(request),
         }
+    )
+
+
+def _request_rules(request: dict) -> str | list[str] | None:
+    """``request["rules"]`` (issue #2768): the ``--rules`` selection, as one
+    comma-separated string (the argv spelling) or a list of strings. Any
+    other type -- a number, an object, a list holding a non-string -- is a
+    clean error; token-level checks (empty/unmatched) are shared with the
+    argv form downstream in :func:`~klayout_tools.drc.parse_rule_selectors`
+    and :func:`~klayout_tools.drc.resolve_rule_selection`."""
+    value = request.get("rules")
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    raise DrcError(
+        "`klt drc` request field 'rules' must be a string of comma-separated "
+        f"rule ids/globs or a list of strings (got {value!r})"
     )
 
 
@@ -236,6 +316,15 @@ def _expect_rule_categories(request: dict) -> int | None:
 
 def _run(args: argparse.Namespace) -> dict:
     if args.engine == "klayout":
+        if args.rules is not None:
+            # Issue #2768: a native runset's rules are not the curated
+            # registry `--rules` resolves against (#2806 tracks native
+            # category discovery), so the selection is refused, not ignored.
+            raise DrcError(
+                "--rules is not supported with --engine klayout: a PDK-native "
+                "runset does not share the curated rule registry (see "
+                "docs/cli/drc.md, 'Rule listing and selection')"
+            )
         deck_file = args.deck_file
         if deck_file is None:
             deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
@@ -262,12 +351,17 @@ def _run(args: argparse.Namespace) -> dict:
 
     if not args.deck:
         raise DrcError("argument --deck is required for --engine curated")
+    # Token syntax (empty tokens) is checked here, before any file is read;
+    # matching against the deck happens in `run_drc`, still before the
+    # layout is loaded.
+    selectors = parse_rule_selectors(args.rules)
     return run_drc(
         args.file,
         args.deck,
         top=args.top,
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
+        rules=selectors,
     )
 
 
@@ -330,7 +424,13 @@ def _print_coverage_gaps(coverage: dict) -> None:
     - **Unchecked stream layers** (issue #189): geometry drawn on layers no
       active rule references at all.
     """
-    skipped_requested = coverage.get("skipped") or []
+    # Issue #2768: rules deliberately left out of a `--rules` subset are
+    # summarised by `_print_rule_selection` instead of listed one per line.
+    skipped_requested = [
+        record
+        for record in coverage.get("skipped") or []
+        if record.get("reason") != SKIP_REASON_NOT_SELECTED
+    ]
     if skipped_requested:
         print(f"skipped requested rules: {len(skipped_requested)}")
         for record in skipped_requested:
@@ -366,6 +466,42 @@ def _print_coverage_assertion(assertion: dict | None) -> None:
         )
 
 
+def _print_rule_selection(selection: dict | None) -> None:
+    """One line stating a ``--rules`` subset (issue #2768), so the text form
+    never renders a partial run as an unqualified full-deck result."""
+    if not selection:
+        return
+    selected = selection.get("selected") or []
+    omitted = selection.get("omitted") or []
+    total = selection.get("deck_rule_count", len(selected) + len(omitted))
+    kind = "partial run" if omitted else "full deck"
+    print(
+        f"rule selection: {len(selected)} of {total} rules "
+        f"({len(omitted)} omitted; {kind}) -- "
+        f"selectors: {_abbreviate(selection.get('selectors') or [])}"
+    )
+
+
+def _abbreviate(items: list[str], limit: int = 8) -> str:
+    """Comma-join ``items``, eliding past ``limit`` (text form only)."""
+    if len(items) <= limit:
+        return ", ".join(items)
+    return ", ".join(items[:limit]) + f", ... ({len(items) - limit} more)"
+
+
+def _print_rule_list(listing: dict) -> None:
+    print(f"deck: {listing['deck']}")
+    print(f"engine: {listing['engine']}")
+    print(f"rules: {listing['rule_count']}")
+    print()
+    for rule in listing["rules"]:
+        layers = rule["layer"]
+        if rule.get("other_layer"):
+            layers += f" vs {rule['other_layer']}"
+        scope = f"  [{rule['scope']}]" if rule.get("scope") else ""
+        print(f"{rule['id']}  {rule['check']}  {layers}{scope}  {rule['description']}")
+
+
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"deck: {report['deck']}")
@@ -386,6 +522,7 @@ def _print_text(report: dict) -> None:
         for line in deck_errors["error_lines"]:
             print(f"  {line}")
     print(f"violations: {report['violation_count']}")
+    _print_rule_selection(report.get("rule_selection"))
     _print_coverage_assertion(report.get("coverage_assertion"))
     _print_coverage_gaps(report["coverage"])
 

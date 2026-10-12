@@ -13323,3 +13323,127 @@ def test_signoff_help_lists_opt_in_kind_scopes(capsys):
     for kind in signoff_module._OPT_IN_KIND_ITEMS:
         assert f"{kind}:" in out
     assert "power: no T1 item" in out
+
+
+# --------------------------------------------------------------------------- #
+# `klt drc --rules` subsets (issue #2768): a report that executed only part of
+# its deck never earns full DRC credit, in either entry point.
+# --------------------------------------------------------------------------- #
+
+
+def _sky130_clean_drc_report(tmp_path, *, rules=None) -> dict:
+    """A real curated `klt drc` report over a clean one-poly-shape layout."""
+    import klayout.db as kdb
+
+    from klayout_tools.drc import run_drc
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    poly = layout.layer(66, 20)
+    top.shapes(poly).insert(kdb.Box(0, 0, 1000, 1000))
+    gds = tmp_path / "clean.gds"
+    layout.write(str(gds))
+    return run_drc(str(gds), "sky130", rules=rules)
+
+
+def _item_3(path: str) -> dict:
+    result = build_tier_report(_manifest(evidence={"3": path}))
+    return next(item for item in result["items"] if item["id"] == 3)
+
+
+def test_drc_rule_subset_is_refused_full_credit_in_both_entry_points(tmp_path):
+    report = _sky130_clean_drc_report(tmp_path, rules=["poly.*"])
+    assert report["status"] == "clean_partial"
+    path = _write(tmp_path, "subset.drc.json", report)
+
+    check = build_signoff([path])["checks"][0]
+    item_3 = _item_3(path)
+
+    assert check["passed"] is False
+    assert check["detail"]["rule_selection"] == report["rule_selection"]
+    skipped = check["detail"]["coverage_qualification"]["skipped"]
+    assert skipped and {r["reason"] for r in skipped} == {"not_selected"}
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "partial_coverage"
+    assert item_3["citation"] is None
+
+
+def test_drc_subset_doctored_to_clean_is_still_refused(tmp_path):
+    """Belt and braces: a hand-edited subset report whose status reads
+    `"clean"` still declares its omissions in `rule_selection`, and that
+    alone keeps it from counting as full DRC credit."""
+    report = _sky130_clean_drc_report(tmp_path, rules=["poly.*"])
+    report["status"] = "clean"
+    report["coverage"] = build_check_coverage(checked=["poly.width.1"])
+    path = _write(tmp_path, "doctored.drc.json", report)
+
+    check = build_signoff([path])["checks"][0]
+    item_3 = _item_3(path)
+
+    assert check["passed"] is False
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "partial_coverage"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "poly.*",
+        {"omitted": "poly.width.1"},
+        {"omitted": [], "subset": True},
+        {"omitted": []},
+    ],
+)
+def test_drc_malformed_or_inconsistent_rule_selection_never_passes(selection, tmp_path):
+    report = _sky130_clean_drc_report(tmp_path)
+    assert report["status"] == "clean"
+    report["rule_selection"] = selection
+    path = _write(tmp_path, "odd.drc.json", report)
+
+    try:
+        checks = build_signoff([path])["checks"]
+    except SignoffError:
+        return  # refused as an unrecognised envelope: also not credit
+    assert checks[0]["passed"] is False
+
+
+def test_drc_selection_of_every_rule_grades_like_a_full_run(tmp_path):
+    from klayout_tools.decks import get_deck
+
+    every = [rule.id for rule in get_deck("sky130")]
+    full_dir = tmp_path / "full"
+    all_dir = tmp_path / "all"
+    full_dir.mkdir()
+    all_dir.mkdir()
+    full = _sky130_clean_drc_report(full_dir)
+    selected = _sky130_clean_drc_report(all_dir, rules=every)
+    assert selected["rule_selection"]["subset"] is False
+    full_path = _write(full_dir, "full.drc.json", full)
+    selected_path = _write(all_dir, "all.drc.json", selected)
+
+    full_check = build_signoff([full_path])["checks"][0]
+    selected_check = build_signoff([selected_path])["checks"][0]
+
+    assert full_check["passed"] is selected_check["passed"] is True
+    assert "rule_selection" not in full_check["detail"]
+    full_item, selected_item = _item_3(full_path), _item_3(selected_path)
+    assert full_item["status"] == selected_item["status"] == "met"
+
+
+def test_drc_subset_that_found_violations_is_check_failed(tmp_path):
+    report = _sky130_clean_drc_report(tmp_path, rules=["poly.*"])
+    report["status"] = "violations"
+    report["violation_count"] = 1
+    path = _write(tmp_path, "failing.drc.json", report)
+
+    assert _item_3(path)["reason"] == "check_failed"
+
+
+def test_drc_list_rules_output_is_not_signoff_evidence(tmp_path):
+    from klayout_tools.drc import list_deck_rules
+
+    path = _write(tmp_path, "rules.json", list_deck_rules("sky130"))
+
+    with pytest.raises(SignoffError):
+        build_signoff([path])
+    assert _item_3(path)["status"] == "unmet"
