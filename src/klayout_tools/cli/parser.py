@@ -4707,10 +4707,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "first non-whitespace byte is '{' is a request document; "
             "anything else is a layout path. A request document is mutually "
             "exclusive with this command's own flags (--deck/--top/--engine/"
-            "--deck-file/--deck-var/--pdk/--pdk-root/--timeout-s), which it "
-            "carries as fields instead -- see docs/cli/drc.md, 'Request "
-            "document'. Omit when using --check (the input path is read "
-            "from the committed report instead)"
+            "--deck-file/--deck-var/--pdk/--pdk-root/--timeout-s/--rules), "
+            "which it carries as fields instead -- see docs/cli/drc.md, "
+            "'Request document'. Omit when using --check (the input path is "
+            "read from the committed report instead) or --list-rules (no "
+            "layout is read)"
         ),
     )
     drc_parser.add_argument(
@@ -4911,8 +4912,40 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "error (exit 1) otherwise"
         ),
     )
+    # Issue #2768: a third input mode beside `file` and `--check` -- listing
+    # reads no layout, so argparse itself rejects combining it with either.
+    drc_input_group.add_argument(
+        "--list-rules",
+        dest="list_rules",
+        action="store_true",
+        help=(
+            "list the curated --deck's registered rules (id, description, "
+            "check kind, layers, scope) and their total count instead of "
+            "running DRC: no layout is read and the output is not a DRC "
+            "verdict. Requires --deck; not supported with --engine klayout "
+            "(see #2806). See docs/cli/drc.md, 'Rule listing and selection'"
+        ),
+    )
+    drc_parser.add_argument(
+        "--rules",
+        default=None,
+        metavar="ID[,ID...]",
+        help=(
+            "run only these curated deck rules (issue #2768): comma-separated "
+            "exact rule ids and/or case-sensitive shell-style globs over ids "
+            "-- quote globs, e.g. --rules 'met1.*,via.width.1'. Whitespace is "
+            "trimmed; empty or unmatched tokens are an error. Unselected "
+            "rules are not executed; a proper subset is reported as partial "
+            "(status clean_partial when clean) and recorded in the report's "
+            "rule_selection block, so it never counts as full DRC signoff. "
+            "Not supported with --engine klayout or --check (--check --rerun "
+            "replays a report's recorded selection)"
+        ),
+    )
     _add_format_arg(drc_parser)
-    _record_request_argv_flags(drc_parser)
+    _record_request_argv_flags(
+        drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
+    )
     drc_parser.set_defaults(func=drc_cmd.run)
 
 

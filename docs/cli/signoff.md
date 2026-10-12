@@ -686,6 +686,36 @@ coverage is reported, not graded" above) and is never re-read as a common
 `partial` statement — absence of the versioned block is absence of evidence,
 in both directions.
 
+### A `--rules` subset is never full DRC credit
+
+`klt drc --rules '<id|glob>,...'` (issue #2768) runs only part of a curated
+deck. Such a report is evidence about the rules it ran and nothing else, so
+`klt signoff` never counts it as a passing DRC check — in envelope
+aggregation (`checks[].passed: false`) or numbered-citation grading (T1 item
+3 renders `unmet` with `reason: "partial_coverage"`):
+
+- The producer already reports a clean proper subset as `clean_partial`:
+  every omitted rule is a `coverage.skipped` record with reason
+  `not_selected`, so the row above ("partial token") applies unchanged.
+- Independently, a `klt drc` envelope whose top-level `rule_selection` block
+  declares a subset — a non-empty `omitted` list, `subset` not `false`, or a
+  present but malformed block — never passes, even if its `status` reads
+  `"clean"` (e.g. a hand-edited report). Its reason is `partial_coverage`
+  too, not `check_failed`: the run found no defect, it omitted rules.
+- A subset that **found** violations still fails as `check_failed`, like any
+  other failing DRC report.
+- `checks[].detail.rule_selection` quotes the block verbatim, so the omitted
+  rules are visible in the report; `coverage_qualification.skipped` lists them
+  with reason `not_selected`, distinguishable from a naturally inapplicable
+  rule (which is never listed there) and from an `absent_input_layer` skip.
+
+A `--rules` run that selected **every** registered rule has `omitted: []` and
+`subset: false`, and grades exactly like a full run. A report with no
+`rule_selection` key — every report written before the flag, and every
+default run — grades exactly as before. A `klt drc --list-rules` listing is
+not a DRC report at all (no `status`/`violations`) and is refused as an
+unrecognised envelope. To earn DRC credit, re-run without `--rules`.
+
 ### Device-body bias is reported, not graded
 
 [`extract.md`](extract.md#coverage) states that a device body left on an

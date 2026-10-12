@@ -2857,6 +2857,43 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     return None if _erc_connectivity_state(envelope) is not None else refusal
 
 
+def _drc_rule_subset(envelope: Mapping[str, Any]) -> bool:
+    """Whether a `klt drc` envelope declares a deliberate ``--rules`` subset
+    (issue #2768) -- a run that executed only some of its deck's registered
+    rules.
+
+    The producer already rolls such a run up as ``"clean_partial"`` (each
+    omitted rule is a ``coverage.skipped`` record with reason
+    ``not_selected``), so :func:`_check_passed`'s ``status == "clean"`` test
+    declines it on its own. This is the belt to that braces, read off the
+    envelope's own ``rule_selection`` block so a hand-edited or
+    inconsistent envelope cannot claim full-deck credit either: ``True`` for
+    a non-empty ``omitted`` list, a ``subset: true`` flag, or a present but
+    malformed block (which proves nothing about the deck it skipped).
+    ``False`` when the key is absent -- every report written before the flag
+    existed, and every full-deck run, keeps grading exactly as before.
+    Applied inside :func:`_check_passed`, so envelope aggregation and
+    numbered-citation grading share it.
+    """
+    if "rule_selection" not in envelope:
+        return False
+    selection = envelope.get("rule_selection")
+    if not isinstance(selection, dict):
+        return True
+    omitted = selection.get("omitted")
+    if not isinstance(omitted, list):
+        return True
+    return bool(omitted) or selection.get("subset") is not False
+
+
+def _drc_rule_selection_detail(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """``{"rule_selection": <block>}`` quoted verbatim off a `klt drc --rules`
+    envelope (issue #2768), or ``{}`` when it carries none."""
+    if "rule_selection" not in envelope:
+        return {}
+    return {"rule_selection": envelope.get("rule_selection")}
+
+
 def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     """Whether this one check counts as passing.
 
@@ -2996,7 +3033,9 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     - ``error`` never passes.
     """
     if kind == "drc":
-        passed = envelope.get("status") == "clean"
+        # Issue #2768: a `--rules` subset never earns full DRC credit, even
+        # if its status somehow reads "clean" -- see `_drc_rule_subset`.
+        passed = envelope.get("status") == "clean" and not _drc_rule_subset(envelope)
     elif kind == "lvs":
         power_connectivity = envelope.get("power_connectivity") or {}
         passed = (
@@ -3195,6 +3234,14 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
     if _critical_metric_blockers(envelope):
         return _REASON_CHECK_FAILED
     if _reports_partial_status(kind, envelope):
+        return _REASON_PARTIAL_COVERAGE
+    # Issue #2768: a `klt drc --rules` subset whose only shortfall is the
+    # rules it deliberately omitted is a coverage gap, not a defect.
+    if (
+        kind == "drc"
+        and envelope.get("status") == "clean"
+        and _drc_rule_subset(envelope)
+    ):
         return _REASON_PARTIAL_COVERAGE
     return _REASON_CHECK_FAILED
 
@@ -3504,6 +3551,9 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
         coverage = _drc_coverage_disclosure(kind, envelope)
         if coverage is not None:
             detail["coverage"] = coverage
+        # Issue #2768: a `--rules` subset says so in the check itself, quoted
+        # verbatim; absent for a full-deck run, so old detail is unchanged.
+        detail.update(_drc_rule_selection_detail(envelope))
     elif kind == "lvs":
         detail = {
             "layout": envelope.get("layout"),
