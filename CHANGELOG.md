@@ -236,7 +236,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   code, timeout status, engine identity (`engine_version`,
   `deck_sha256`), and which declared `outputs[]` exist vs. are missing.
   Deck bytes are preserved (unit `deck_sha256` hashes what the engine
-  read); the deck's `.include`/`.inc` closure is staged at its declared
+  read); the deck's `.include`/`.inc` closure and every
+  `.lib <file> <section>` model file are staged at their declared
   relative paths so unmodified directives resolve on the worker, with
   `$VAR`/PDK-rooted targets left to the executing host and anything
   unstageable rejected before any billable launch. `models.pdk` keeps its
@@ -245,10 +246,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   with exit 1 up front, and off-host job failures/poll timeouts report
   every unit with `batch_job_failed`/`batch_job_timeout`/
   `batch_poll_timeout` diagnostics carrying any recoverable klt error
-  envelope. New module `klayout_tools.sim_decks`; the corner request
+  envelope; a `remote` SSH-run failure pulls the instance's unit trees
+  back before teardown and reports `remote_job_failed` per unit with the
+  recovered streams. `stdout.bin`/`stderr.bin` are reserved unit names. New module `klayout_tools.sim_decks`; the corner request
   contract, its reports, and its exit codes are unchanged. Documented in
-  `docs/cli/sim.md` ("Pre-composed decks"); no `schema_version` bump (new
-  report shape under the same verb, new request kind).
+  `docs/cli/sim.md` ("Pre-composed decks"); no `schema_version` bump -- a
+  deck report carries `klt sim`'s own `schema_version` with `mode:
+  "decks"` as the additive discriminator.
 
 - **`klt lef-abstract`: structural self-check of the emitted LEF** (issue
   #2769): after writing, the command reads the file back from disk and

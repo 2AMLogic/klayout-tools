@@ -226,6 +226,38 @@ class TestValidation:
         with pytest.raises(sim.SimError, match="collides with a staged"):
             run_local(tmp_path, request)
 
+    @pytest.mark.parametrize("stream", ["stdout.bin", "stderr.bin"])
+    def test_output_naming_a_stream_rejected(self, tmp_path, stream):
+        request = deck_request(tmp_path)
+        request["decks"][0]["outputs"] = [stream]
+        with pytest.raises(sim.SimError, match="collides with a staged"):
+            run_local(tmp_path, request)
+
+    def test_input_naming_a_stream_rejected(self, tmp_path):
+        request = deck_request(tmp_path)
+        request["decks"][0]["inputs"] = [{"path": "extra.spice", "name": "stdout.bin"}]
+        with pytest.raises(sim.SimError, match="reserved for the unit's captured"):
+            run_local(tmp_path, request)
+
+    @pytest.mark.parametrize("backend", ["remote", "batch"])
+    def test_worker_form_refused_on_off_host_submit(self, tmp_path, backend):
+        """A caller-written worker-form deck would skip the closure scan on
+        its way to a billable launch -- refused by name before staging."""
+        request = deck_request(tmp_path, backend=backend)
+        request["decks"] = [
+            {"id": "u0", "deck": {"staged": "deck.spice", "name": "deck.spice"}}
+        ]
+        with pytest.raises(sim.SimError, match="worker {staged, name} form"):
+            sd.stage_deck_job(request, request_dir=str(tmp_path))
+
+    def test_worker_form_staged_resolves_against_request_dir(self, tmp_path):
+        request = deck_request(tmp_path)
+        request["decks"] = [
+            {"id": "u0", "deck": {"staged": "deck.spice", "name": "deck.spice"}}
+        ]
+        unit = sd.plan_deck_units(request, request_dir=str(tmp_path))[0]
+        assert unit["deck"]["staged"] == os.path.join(str(tmp_path), "deck.spice")
+
     @pytest.mark.parametrize("bad_timeout", [0, -1, "30", True])
     def test_bad_timeouts_rejected(self, tmp_path, bad_timeout):
         request = deck_request(tmp_path)
@@ -362,6 +394,85 @@ class TestIncludeClosure:
             "$PDK_ROOT/sky130A/libs.ref/sky130_fd_pr/models/all.spice"
         ]
 
+    # -- `.lib <file> <section>` model references (judge feedback, #2804) --
+
+    def test_relative_lib_reference_staged_and_followed(self, tmp_path):
+        (tmp_path / "models").mkdir()
+        (tmp_path / "models" / "corners.lib").write_text(
+            "* lib\n.lib tt\n.include tt.spice\n.endl tt\n", encoding="utf-8"
+        )
+        (tmp_path / "models" / "tt.spice").write_text("* tt\n", encoding="utf-8")
+        request = self._deck(tmp_path, '* deck\n.lib "models/corners.lib" tt\n')
+        unit = sd.plan_deck_units(request, request_dir=str(tmp_path))[0]
+        assert unit["includes"] == [
+            {
+                "staged": str(tmp_path / "models" / "corners.lib"),
+                "name": "models/corners.lib",
+            },
+            {
+                "staged": str(tmp_path / "models" / "tt.spice"),
+                "name": "models/tt.spice",
+            },
+        ]
+        assert unit["host_resolved"] == []
+
+    def test_lib_section_definition_is_not_a_file_reference(self, tmp_path):
+        request = self._deck(tmp_path, "* deck\n.lib tt\n.endl tt\n")
+        unit = sd.plan_deck_units(request, request_dir=str(tmp_path))[0]
+        assert unit["includes"] == [] and unit["host_resolved"] == []
+
+    def test_pdk_rooted_lib_left_to_the_executing_host(self, tmp_path):
+        pdk = tmp_path / "pdk"
+        target = f"{pdk}/sky130A/libs.tech/ngspice/sky130.lib.spice"
+        request = self._deck(tmp_path, f"* deck\n.lib {target} tt\n")
+        request["models"] = {"pdk_root": str(pdk)}
+        unit = sd.plan_deck_units(request, request_dir=str(tmp_path))[0]
+        assert unit["includes"] == []
+        assert unit["host_resolved"] == [target]
+
+    def test_env_var_lib_left_to_the_executing_host(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PDK_ROOT", raising=False)
+        target = "$PDK_ROOT/sky130A/libs.tech/ngspice/sky130.lib.spice"
+        request = self._deck(tmp_path, f"* deck\n.lib {target} tt\n")
+        unit = sd.plan_deck_units(request, request_dir=str(tmp_path))[0]
+        assert unit["host_resolved"] == [target]
+
+    def test_missing_relative_lib_rejected(self, tmp_path):
+        request = self._deck(tmp_path, "* deck\n.lib models.lib tt\n")
+        with pytest.raises(sim.SimError, match=r"`\.lib` target 'models.lib' does"):
+            sd.plan_deck_units(request, request_dir=str(tmp_path))
+
+    def test_absolute_nonexistent_pdk_lib_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PDK_ROOT", raising=False)
+        request = self._deck(
+            tmp_path, "* deck\n.lib /nonexistent/pdk/sky130.lib.spice tt\n"
+        )
+        with pytest.raises(sim.SimError, match=r"absolute `\.lib` target"):
+            sd.plan_deck_units(request, request_dir=str(tmp_path))
+
+    def test_parent_climbing_lib_rejected(self, tmp_path):
+        (tmp_path / "up.lib").write_text("* up\n", encoding="utf-8")
+        (tmp_path / "decks").mkdir()
+        request = deck_request(
+            tmp_path, decks=[{"id": "u0", "deck": "decks/deck.spice"}]
+        )
+        (tmp_path / "decks" / "deck.spice").write_text(
+            "* deck\n.lib ../up.lib tt\n", encoding="utf-8"
+        )
+        with pytest.raises(sim.SimError, match="climbs above the deck"):
+            sd.plan_deck_units(request, request_dir=str(tmp_path))
+
+    def test_unsupported_lib_form_rejected(self, tmp_path):
+        request = self._deck(tmp_path, "* deck\n.lib a.lib tt extra\n")
+        with pytest.raises(sim.SimError, match="unsupported `.lib` directive form"):
+            sd.plan_deck_units(request, request_dir=str(tmp_path))
+
+    def test_bad_lib_refused_before_any_staging(self, tmp_path):
+        request = self._deck(tmp_path, "* deck\n.lib models.lib tt\n")
+        request["backend"] = "batch"
+        with pytest.raises(sim.SimError, match="does not resolve"):
+            sd.stage_deck_job(request, request_dir=str(tmp_path))
+
     def test_closure_caps_bounded(self, tmp_path):
         for index in range(70):
             (tmp_path / f"inc{index}.spice").write_text("* inc\n", encoding="utf-8")
@@ -383,7 +494,9 @@ class TestLocalRunner:
         write_stub_engine(tmp_path)
         report = run_local(tmp_path, deck_request(tmp_path))
         assert report["mode"] == "decks"
-        assert report["schema_version"] == 1
+        # Versioned per command (docs/json-contract.md): klt sim's version,
+        # with `mode` as the additive discriminator.
+        assert report["schema_version"] == sim.SCHEMA_VERSION
         assert report["status"] == "pass"
         assert report["passed"] == 2
         assert report["unit_count"] == 2
@@ -746,16 +859,76 @@ class TestRemoteDispatch:
             run_local(tmp_path, request, outdir="out")
         assert _FakeRemoteLauncher.last_instance is None
 
-    def test_transport_failure_raises_sim_error(self, tmp_path, monkeypatch):
+    def test_transport_failure_recovers_evidence_before_teardown(
+        self, tmp_path, monkeypatch
+    ):
+        """An SSH drop mid-job must not lose what the box already wrote:
+        the unit trees are pulled back *before* teardown and every unit
+        reports ``remote_job_failed`` with the transport error, pointing at
+        the streams that were recovered."""
+        from klayout_tools import remote_transport
+
         write_stub_engine(tmp_path)
-        install_fake_remote(monkeypatch)
+        state = install_fake_remote(monkeypatch)
+        real_run = sd.remote_transport.run_remote_job
 
         def failing_run(**kwargs):
-            from klayout_tools import remote_transport
-
+            # The worker ran (streams exist on the box), then SSH dropped.
+            real_run(**kwargs)
+            assert _FakeRemoteLauncher.last_instance.terminated is False
             raise remote_transport.RemoteTransportError("ssh went away")
 
         monkeypatch.setattr(sd.remote_transport, "run_remote_job", failing_run)
+        report = run_local(tmp_path, remote_deck_request(tmp_path), outdir="out")
+        assert state["pull_called"] is True
+        assert _FakeRemoteLauncher.last_instance.terminated is True
+        assert report["status"] == "error"
+        assert report["backend"] == "remote"
+        assert report["schema_version"] == sim.SCHEMA_VERSION
+        assert report["environment"]["remote"]["instance_id"] == "i-fake"
+        outdir = Path(report["outdir"])
+        unit = report["units"][0]
+        diagnostic = unit["diagnostics"][0]
+        assert diagnostic["code"] == "remote_job_failed"
+        assert "ssh went away" in diagnostic["message"]
+        assert (
+            "recovered from the instance: stdout.bin, stderr.bin"
+            in (diagnostic["message"])
+        )
+        assert (outdir / unit["stdout"]).read_bytes() == b"ngspice-46 stub banner\n"
+        assert unit["outputs"] == ["out/measure.raw"]
+
+    def test_transport_failure_with_failed_recovery_still_reports(
+        self, tmp_path, monkeypatch
+    ):
+        from klayout_tools import remote_transport
+
+        write_stub_engine(tmp_path)
+        install_fake_remote(monkeypatch)
+
+        def failing(**kwargs):
+            raise remote_transport.RemoteTransportError("ssh went away")
+
+        monkeypatch.setattr(sd.remote_transport, "run_remote_job", failing)
+        monkeypatch.setattr(sd.remote_transport, "pull_artifacts", failing)
+        report = run_local(tmp_path, remote_deck_request(tmp_path), outdir="out")
+        assert report["status"] == "error"
+        assert _FakeRemoteLauncher.last_instance.terminated is True
+        message = report["units"][0]["diagnostics"][0]["message"]
+        assert "artifact recovery failed" in message
+        assert "no unit streams were recovered" in message
+        assert report["units"][0]["missing_outputs"] == ["out/measure.raw"]
+
+    def test_push_failure_still_raises_sim_error(self, tmp_path, monkeypatch):
+        from klayout_tools import remote_transport
+
+        write_stub_engine(tmp_path)
+        install_fake_remote(monkeypatch)
+
+        def failing_push(**kwargs):
+            raise remote_transport.RemoteTransportError("scp refused")
+
+        monkeypatch.setattr(sd.remote_transport, "push_job", failing_push)
         with pytest.raises(sim.SimError, match="remote backend failed"):
             run_local(tmp_path, remote_deck_request(tmp_path), outdir="out")
 

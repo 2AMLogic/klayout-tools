@@ -1205,20 +1205,25 @@ The corner-only CLI knobs are likewise refused for deck requests:
 - **Deck bytes are preserved.** Unlike the corner path — whose stager
   rewrites `.include` directives to flat staged names — a deck ships
   byte-for-byte (the unit's `deck_sha256` hashes exactly what the engine
-  read). The deck's `.include`/`.inc` closure is staged instead at each
+  read). The deck's `.include`/`.inc` closure — and the file of every
+  `.lib <file> <section>` model reference — is staged instead at each
   target's *declared relative path* inside the unit directory, so the
   unmodified directives resolve there. A target that cannot be staged that
   way — an absolute path outside the PDK roots, a `..`-climbing relative,
   a file that resolves nowhere on the submitting host — is a named error
   before any billable launch. `$VAR`-bearing and PDK-rooted targets stay
-  the executing host's to resolve, exactly as in the corner path. Only
-  `.include`/`.inc` is followed, bounded by the same 64-file / 32 MiB
-  caps as corner staging; `.lib <file> <section>` references are left for
-  the executing host (point them under the PDK root).
+  the executing host's to resolve, exactly as in the corner path (and are
+  listed in the unit's `host_resolved`). Staged files are followed
+  recursively, bounded by the same 64-file / 32 MiB caps as corner
+  staging. A one-token `.lib <section>` … `.endl` *definition* names no
+  file and is left alone; any other `.lib` shape (no arguments, more than
+  two, unbalanced quotes) is rejected by name.
 - **Units are isolated.** Each unit runs in its own directory
   (`<outdir>/<id>/`), recreated fresh every run. Its deck, declared
   inputs, and staged closure are copied there under the declared names, so
-  two units may share filenames freely. `ngspice -b <deck>` runs with the
+  two units may share filenames freely. `stdout.bin` and `stderr.bin` at
+  the unit root are reserved for the captured streams: no deck, input,
+  staged include, or declared output may claim them. `ngspice -b <deck>` runs with the
   unit directory as `cwd` — the invocation a local `ngspice -b` in the
   caller's own harness would be.
 - **Streams are evidence, untouched.** Each unit's engine stdout and
@@ -1232,7 +1237,9 @@ The corner-only CLI knobs are likewise refused for deck requests:
 ### Response
 
 The report carries `"mode": "decks"` so a consumer can tell it from a
-corner report at a glance. Stream and output paths are **relative to
+corner report at a glance. `schema_version` is `klt sim`'s own (versioned
+per command, see [`docs/json-contract.md`](../json-contract.md)); the deck
+report is the additive `mode: "decks"` shape under that version. Stream and output paths are **relative to
 `outdir`** (which is absolute on the machine that assembled the report —
 the caller's, after an off-host run's collection), so a unit's evidence is
 `<outdir>/<id>/stdout.bin` and so on, under any backend.
@@ -1242,7 +1249,7 @@ the caller's, after an off-host run's collection), so a unit's evidence is
 | `mode` | `"decks"` |
 | `status` | `"pass"` when every unit exited 0 within its timeout; `"error"` otherwise. klt never grades the deck's electrical result. |
 | `unit_count` / `passed` / `errored` / `timed_out` | Counts over `units[]`. |
-| `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (best-effort from the engine's own stdout banner — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable). |
+| `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (best-effort from the engine's own stdout banner — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable, or `remote_job_failed` when the `remote` backend's SSH run fails — the unit trees already written on the instance are pulled back before teardown, so `stdout`/`stderr`/`outputs` point at whatever evidence was recovered and the message says which streams came back). |
 | `outdir` | Absolute path of the artifacts directory on the reporting host. |
 | `environment` | `engine`, `engine_version`, `ngspice_binary`, `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`bucket` for batch, `runner_klt_version` identity, ...). |
 

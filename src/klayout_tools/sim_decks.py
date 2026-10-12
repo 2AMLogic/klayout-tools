@@ -35,14 +35,15 @@ Preservation contract (the point of this module):
 - **Deck bytes are never modified.** Unlike the corner path, whose stager
   rewrites ``.include`` directives to flat staged names
   (:mod:`klayout_tools.sim_staging`), a deck ships byte-for-byte. Its
-  ``.include``/``.inc`` closure is instead staged at the *declared relative
-  paths* inside the unit's own directory, so the unmodified directives
-  resolve there. A target that cannot be staged that way -- absolute paths
-  outside the PDK roots, ``..``-climbing relatives, files that resolve
-  nowhere on the submitting host -- is a named error *before* any billable
-  launch, never a silent remote failure. ``$VAR``-bearing and PDK-rooted
-  targets stay the executing host's to resolve, exactly as in the corner
-  path.
+  ``.include``/``.inc`` closure -- and the file of every
+  ``.lib <file> <section>`` model reference -- is instead staged at the
+  *declared relative paths* inside the unit's own directory, so the
+  unmodified directives resolve there. A target that cannot be staged
+  that way -- absolute paths outside the PDK roots, ``..``-climbing
+  relatives, files that resolve nowhere on the submitting host -- is a
+  named error *before* any billable launch, never a silent remote
+  failure. ``$VAR``-bearing and PDK-rooted targets stay the executing
+  host's to resolve, exactly as in the corner path.
 - **Units are isolated.** Every unit runs in its own directory
   (``<outdir>/<id>/``); its deck, declared inputs and include closure are
   copied there under the declared names, so two units may share filenames
@@ -75,6 +76,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -98,6 +100,12 @@ DECK_MODE = "decks"
 #: success or failure.
 DECK_STDOUT_FILENAME = "stdout.bin"
 DECK_STDERR_FILENAME = "stderr.bin"
+
+#: Unit-relative names the runner itself writes (the captured engine
+#: streams). No staged file or declared output may claim them -- a stream
+#: write would silently overwrite the one, and the other would misreport a
+#: stream as a declared output.
+_RESERVED_UNIT_NAMES = frozenset({DECK_STDOUT_FILENAME, DECK_STDERR_FILENAME})
 
 #: Exit codes a remote deck job may return with a parseable report on
 #: stdout: 0 (every unit passed) and 4 (at least one unit errored/timed
@@ -191,7 +199,7 @@ def _deck_error(message: str):
 
 
 def plan_deck_units(
-    request: dict[str, Any], *, request_dir: str
+    request: dict[str, Any], *, request_dir: str, allow_worker_form: bool = True
 ) -> list[dict[str, Any]]:
     """Validate a deck-list request and return its units in **worker form**:
     one dict per unit with every file reference normalized to
@@ -211,7 +219,10 @@ def plan_deck_units(
     ``{"staged", "name"}`` objects naming files that sit beside the request
     document (``staged`` resolves against ``request_dir``). No closure scan
     happens -- the closure ships precomputed -- but existence is checked, so
-    a truncated upload is a named error on the worker too.
+    a truncated upload is a named error on the worker too. Worker form is
+    only meaningful on the executing host: with ``allow_worker_form=False``
+    (every remote/batch submit) it is rejected by name, so a caller-written
+    request can never skip the closure scan on its way to a billable launch.
 
     Raises ``sim.SimError`` naming the offending ``request.decks[i]`` field
     for every rejection.
@@ -267,6 +278,7 @@ def plan_deck_units(
                 roots=roots,
                 request_dir=request_dir,
                 default_timeout=default_timeout,
+                allow_worker_form=allow_worker_form,
             )
         )
     return units
@@ -293,6 +305,7 @@ def _plan_one_unit(
     roots: tuple[str, ...],
     request_dir: str,
     default_timeout: float,
+    allow_worker_form: bool = True,
 ) -> dict[str, Any]:
     """Validate and normalize one deck entry (see :func:`plan_deck_units`
     for the two forms): shared id/timeout/output checks around the
@@ -304,6 +317,13 @@ def _plan_one_unit(
         timeout_s = default_timeout
 
     if _is_worker_form(entry.get("deck")):
+        if not allow_worker_form:
+            raise _deck_error(
+                f"{where}.deck uses the worker {{staged, name}} form, which only "
+                "the off-host worker's own request may carry -- a remote/batch "
+                "submit takes the deck as a path so its include closure is "
+                "validated before launch"
+            )
         unit = _plan_worker_unit(entry, request_dir=request_dir, where=where)
     else:
         unit = _plan_caller_unit(
@@ -316,6 +336,14 @@ def _plan_one_unit(
     unit["timeout_s"] = timeout_s
     occupied = {unit["deck"]["name"], *(item["name"] for item in unit["inputs"])}
     occupied |= {item["name"] for item in unit["includes"]}
+    reserved = occupied & _RESERVED_UNIT_NAMES
+    if reserved:
+        raise _deck_error(
+            f"{where}: staged destination {sorted(reserved)[0]!r} is reserved "
+            "for the unit's captured engine stream -- rename the deck, input, "
+            "or include"
+        )
+    occupied |= _RESERVED_UNIT_NAMES
     unit["outputs"] = _validated_outputs(entry, occupied=occupied, where=where)
     return unit
 
@@ -468,7 +496,9 @@ def _worker_ref(value: Any, *, request_dir: str, where: str) -> dict[str, Any]:
             f"request document: {path}"
         )
     name = _validate_relative_dest(value.get("name"), f"{where}.name")
-    return {"staged": staged, "name": name}
+    # Resolved against request_dir here, so the copy step never reads it
+    # relative to the process cwd.
+    return {"staged": path, "name": name}
 
 
 def _claim_destination(
@@ -496,9 +526,10 @@ def _scan_deck_closure(
     occupied: dict[str, str],
     where: str,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Resolve the deck's ``.include``/``.inc`` closure *without modifying
-    the deck*: every stageable target ships at its declared relative path
-    inside the unit directory, so the directive resolves there verbatim.
+    """Resolve the deck's ``.include``/``.inc`` and file-bearing
+    ``.lib <file> <section>`` closure *without modifying the deck*: every
+    stageable target ships at its declared relative path inside the unit
+    directory, so the directive resolves there verbatim.
 
     Per target: ``$VAR`` targets and paths under the executing host's roots
     (``models.pdk_root``/``$PDK_ROOT``) are left to the executing host
@@ -533,16 +564,19 @@ def _scan_deck_closure(
             )
         text = raw.decode("utf-8", errors="replace")
         for index, line in enumerate(text.splitlines(), start=1):
-            match = sim_staging._INCLUDE_RE.match(line)
-            if match is None:
+            directive_target = _closure_directive_target(
+                line, where=f"{where} line {index}"
+            )
+            if directive_target is None:
                 continue
-            target = sim_staging._unquote(match.group("target"))
+            directive, target = directive_target
             staged, host_target = _classify_include_target(
                 target,
                 origin_path=path,
                 origin_dest=dest,
                 roots=roots,
                 where=f"{where} line {index}",
+                directive=directive,
             )
             if host_target is not None:
                 host_resolved.append(host_target)
@@ -569,6 +603,44 @@ def _scan_deck_closure(
     return includes, host_resolved
 
 
+def _closure_directive_target(line: str, *, where: str) -> tuple[str, str] | None:
+    """The file a deck line references, as ``(directive, target)``, or
+    ``None`` for a line that names no file.
+
+    ``.include``/``.inc`` always name one. ``.lib`` is two-faced (the same
+    split ``sim_staging._Stager._parse_lib`` makes, #2668): one token is a
+    section *definition* (``.lib tt`` ... ``.endl``) and names no file; two
+    tokens are a file-bearing ``.lib <file> <section>`` reference -- the
+    model-reference form PDK corner selection uses -- whose file must be
+    staged, left to the executing host, or rejected exactly like an include
+    target. Any other ``.lib`` shape is rejected by name rather than
+    guessed at, so it cannot slip past the pre-launch check."""
+    from .sim import SimError
+
+    match = sim_staging._INCLUDE_RE.match(line)
+    if match is not None:
+        return "`.include`", sim_staging._unquote(match.group("target"))
+    lib_match = sim_staging._LIB_RE.match(line)
+    if lib_match is None:
+        return None
+    try:
+        tokens = shlex.split(lib_match.group("rest"))
+    except ValueError as exc:
+        tokens = []
+        problem = str(exc)
+    else:
+        problem = f"{len(tokens)} argument(s)"
+    if len(tokens) == 1:
+        return None
+    if len(tokens) == 2:
+        return "`.lib`", tokens[0]
+    raise SimError(
+        f"{where}: unsupported `.lib` directive form ({problem}) -- deck-list "
+        "requests understand `.lib <section>` definitions and "
+        "`.lib <file> <section>` references only"
+    )
+
+
 def _read_closure_file(path: str, *, where: str) -> bytes:
     from .sim import SimError
 
@@ -586,6 +658,7 @@ def _classify_include_target(
     origin_dest: str,
     roots: tuple[str, ...],
     where: str,
+    directive: str = "`.include`",
 ) -> tuple[tuple[str, str] | None, str | None]:
     """Decide what one ``.include`` target means for the preservation
     contract: ``("staged", (resolved_path, unit_relative_destination)),
@@ -604,7 +677,7 @@ def _classify_include_target(
         if any(sim_staging._is_under(resolved, root) for root in roots):
             return None, target
         raise SimError(
-            f"{where}: absolute `.include` target {target!r} cannot be "
+            f"{where}: absolute {directive} target {target!r} cannot be "
             "staged without modifying the deck -- reference the file by a "
             "path relative to the deck, or move it under the PDK root so "
             "the executing host resolves it"
@@ -617,14 +690,14 @@ def _classify_include_target(
     rel_dest = os.path.normpath(os.path.join(os.path.dirname(origin_dest), target))
     if rel_dest.startswith(".."):
         raise SimError(
-            f"{where}: `.include` target {target!r} climbs above the deck's "
+            f"{where}: {directive} target {target!r} climbs above the deck's "
             "directory and cannot be staged without modifying the deck -- "
             "reference the file by a path relative to the deck's own "
             "directory"
         )
     if not os.path.isfile(resolved):
         raise SimError(
-            f"{where}: `.include` target {target!r} does not resolve to a "
+            f"{where}: {directive} target {target!r} does not resolve to a "
             f"readable file on this host (looked for '{resolved}'). A "
             "deck-list request ships the deck byte-for-byte, so every "
             "stageable include must exist here -- fix the path, inline the "
@@ -674,7 +747,7 @@ def stage_deck_job(
     every deck, input, and staged include, plus the ``host_resolved``
     targets left verbatim for provenance.
     """
-    units = plan_deck_units(request, request_dir=request_dir)
+    units = plan_deck_units(request, request_dir=request_dir, allow_worker_form=False)
     used: set[str] = {remote_transport.REMOTE_REQUEST_FILENAME}
     files: list[sim_staging.StagedFile] = []
     worker_units: list[dict[str, Any]] = []
@@ -1001,8 +1074,13 @@ def _build_deck_report(
         (item["engine_version"] for item in filled if item["engine_version"]),
         None,
     )
+    from .sim import SCHEMA_VERSION
+
     return {
-        "schema_version": 1,
+        # Versioned per command (docs/json-contract.md): a deck report is a
+        # `klt sim` payload, so it carries `klt sim`'s version; `mode` is
+        # the additive discriminator.
+        "schema_version": SCHEMA_VERSION,
         "mode": DECK_MODE,
         "backend": backend,
         "engine": "ngspice",
@@ -1194,34 +1272,34 @@ def _run_decks_remote(
                 remote_job_dir=remote_job_dir,
                 job=job,
             )
-            report = remote_transport.run_remote_job(
-                host=public_ip,
-                user=ssh_user,
-                identity_file=ssh_key_path,
-                remote_job_dir=remote_job_dir,
-                job=job,
-                timeout_s=ssh_timeout_s,
-            )
-            if not (isinstance(report, dict) and report.get("mode") == DECK_MODE):
-                raise SimError(
-                    "remote backend failed: the remote klt did not return a "
-                    "deck-list report -- is the runner image's klt new "
-                    "enough to know deck-list requests?"
+            transport = {
+                "host": public_ip,
+                "user": ssh_user,
+                "identity_file": ssh_key_path,
+                "remote_job_dir": remote_job_dir,
+            }
+            try:
+                report = remote_transport.run_remote_job(
+                    **transport, job=job, timeout_s=ssh_timeout_s
                 )
-            remote_transport.pull_artifacts(
-                host=public_ip,
-                user=ssh_user,
-                identity_file=ssh_key_path,
-                remote_job_dir=remote_job_dir,
-                local_artifacts_dir=outdir,
-                job=job,
-            )
-            remote_transport.cleanup_job(
-                host=public_ip,
-                user=ssh_user,
-                identity_file=ssh_key_path,
-                remote_job_dir=remote_job_dir,
-            )
+            except remote_transport.RemoteTransportError as exc:
+                # Recover what the box already wrote *before* the launcher's
+                # teardown destroys it -- the remote analogue of batch's
+                # `_recover_failed_deck_job`.
+                report = _recover_failed_remote_deck_job(
+                    exc, worker_request, job=job, transport=transport, outdir=outdir
+                )
+            else:
+                if not (isinstance(report, dict) and report.get("mode") == DECK_MODE):
+                    raise SimError(
+                        "remote backend failed: the remote klt did not return a "
+                        "deck-list report -- is the runner image's klt new "
+                        "enough to know deck-list requests?"
+                    )
+                remote_transport.pull_artifacts(
+                    **transport, local_artifacts_dir=outdir, job=job
+                )
+                remote_transport.cleanup_job(**transport)
     except (RemoteLaunchError, remote_transport.RemoteTransportError) as exc:
         raise SimError(f"remote backend failed: {exc}") from exc
 
@@ -1239,6 +1317,58 @@ def _run_decks_remote(
         "spin_up_s": spin_up_s,
     }
     report.setdefault("environment", {})["remote"] = remote_environment
+    return report
+
+
+def _recover_failed_remote_deck_job(
+    error: Exception,
+    worker_request: dict[str, Any],
+    *,
+    job: remote_transport.JobDescription,
+    transport: dict[str, Any],
+    outdir: str,
+) -> dict[str, Any]:
+    """Best-effort evidence recovery after the remote job's SSH run failed
+    (a dropped connection, an unaccepted exit): one ``pull_artifacts`` of
+    the unit trees the worker already wrote, then a synthesized
+    ``remote_job_failed`` report naming the transport error on every unit.
+    Streams and declared outputs that made it back are reported where they
+    landed under ``outdir`` (paths are unit-relative, as always). Never
+    raises -- a recovery problem is recorded on the units while the
+    transport failure stays authoritative."""
+    message = f"remote job failed: {error}"
+    try:
+        remote_transport.pull_artifacts(
+            **transport, local_artifacts_dir=outdir, job=job
+        )
+    except remote_transport.RemoteTransportError as pull_exc:
+        message += f" [artifact recovery failed: {pull_exc}]"
+    report = _synthesized_deck_report(
+        worker_request,
+        code="remote_job_failed",
+        message=message,
+        outdir=outdir,
+        environment={},
+        backend="remote",
+    )
+    for unit_report, unit in zip(
+        report["units"], worker_request[DECKS_FIELD], strict=True
+    ):
+        unit_dir = os.path.join(outdir, unit["id"])
+        recovered = [
+            name
+            for name in (DECK_STDOUT_FILENAME, DECK_STDERR_FILENAME)
+            if os.path.isfile(os.path.join(unit_dir, name))
+        ]
+        outputs, missing = _resolve_declared_outputs(unit, unit_dir=unit_dir)
+        unit_report["outputs"] = outputs
+        unit_report["missing_outputs"] = missing
+        diagnostic = unit_report["diagnostics"][0]
+        diagnostic["message"] += (
+            f" (recovered from the instance: {', '.join(recovered)})"
+            if recovered
+            else " (no unit streams were recovered from the instance)"
+        )
     return report
 
 
@@ -1313,10 +1443,13 @@ def _synthesized_deck_report(
     outdir: str,
     environment: dict[str, Any],
     runner_code: str | None = None,
+    backend: str = "batch",
 ) -> dict[str, Any]:
     """Every unit of a job that never produced a usable deck report,
     reported through the unrun-unit shape rather than aborting -- the
     client never retries these (a genuine job failure is terminal)."""
+    from .sim import SCHEMA_VERSION
+
     units = [
         _failed_deck_unit(unit, code, message) for unit in worker_request[DECKS_FIELD]
     ]
@@ -1324,9 +1457,9 @@ def _synthesized_deck_report(
         for unit in units:
             unit["diagnostics"][0]["runner_code"] = runner_code
     return {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "mode": DECK_MODE,
-        "backend": "batch",
+        "backend": backend,
         "engine": "ngspice",
         "status": "error",
         "unit_count": len(units),
@@ -1533,7 +1666,11 @@ def run_deck_request(
         or max_workers < 1
     ):
         raise SimError("options.max_workers must be a positive integer")
-    units = plan_deck_units(request, request_dir=request_dir)
+    units = plan_deck_units(
+        request,
+        request_dir=request_dir,
+        allow_worker_form=backend not in ("remote", "batch"),
+    )
     options = request.get("options") or {}
     ngspice_binary = _resolve_ngspice_binary(options, request_dir)
     outdir = artifacts_dir or os.path.join(request_dir, ".klt", "sim")
