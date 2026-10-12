@@ -259,6 +259,10 @@ from .synthesize_arithmetic import (
 )
 from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
 
+# Issue #2745: same one-directional split as `synthesize_arithmetic.py` --
+# `synthesize_memory.py` imports this module's helpers at call time only.
+from .synthesize_memory import collect_memory_evidence
+
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
 #:
@@ -1225,6 +1229,19 @@ def run_synthesize(
     leakage_power_nw, leakage_by_type_nw = _compute_leakage(
         liberty_path, instance_counts_by_type
     )
+    # Issue #2745: memory-mapping evidence from a *separate* Yosys
+    # invocation run only after the production run above succeeded -- the
+    # production script, netlist and stats are never touched, and this call
+    # never raises (an evidence failure is reported as `indeterminate`).
+    memory_mapping, blackbox_modules = collect_memory_evidence(
+        output_dir=output_dir,
+        resolved_sources=resolved_sources,
+        hdl_toplevel=hdl_toplevel,
+        final_stats_path=stats_path,
+        adder_sources=adder_sources,
+        adder_techmap_path=adder_techmap_path,
+        repo_root=repo_root,
+    )
 
     equivalence = None
     if verify_equivalence:
@@ -1295,6 +1312,15 @@ def run_synthesize(
         # `schema_version` bump (docs/json-contract.md).
         "cell_exclusions": cell_exclusions,
         "warnings": warnings_summary,
+        # Issue #2745: whether inferred memories were lowered to logic,
+        # optimized away before lowering, or survived mapping -- per module
+        # definition, bounded to what Yosys's own `stat` counts establish
+        # (`indeterminate` otherwise). `blackbox_modules` lists modules
+        # declared `blackbox`/`whitebox` that still have instances after
+        # mapping; their area is not in `area_um2`. Both additive, no
+        # `schema_version` bump (docs/json-contract.md).
+        "memory_mapping": memory_mapping,
+        "blackbox_modules": blackbox_modules,
         "netlist_path": _report_path(netlist_path, repo_root=repo_root),
         # Issue #2452: SHA-256 of the exact bytes of the file `netlist_path`
         # refers to, taken from the internal absolute path (never the
