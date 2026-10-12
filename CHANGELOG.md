@@ -54,6 +54,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   owning net once, so it runs in time linear in the network size. No
   existing field changes; `schema_version` stays 3 (extract) / 2 (pex).
 
+- **Added** (#2739, `klt sta`; additive JSON only): opt-in propagated-clock
+  timing for `def`-mode requests. `constraints.propagated_clock: true`
+  emits `set_propagated_clock [get_clocks <clock_port>]` immediately after
+  `create_clock` in every analyzed corner (and a `report_clock_latency`
+  evidence dump after any `read_spef`, before the metrics), so hold/removal
+  checks include a real clock tree's insertion delay and skew — the
+  boundary hold check ideal timing can call MET that the propagated
+  analysis calls VIOLATED (reproduced on OpenROAD `26Q3-1510-g6cb3f2b704`;
+  captures in `tests/fixtures/sta_clock_propagation/`). Every response
+  gains two additive fields: `clock_mode` (`"ideal"`/`"propagated"`,
+  hoisted on `corners` responses) and `clock_propagation` (what
+  propagation actually reached: `clock_sinks`, `max_network_latency_ns`,
+  `clock_sinks_sample`; a tree-less DEF reports `clock_sinks: 0` — explicit
+  evidence propagation could not be established, never a silent claim of
+  insertion delay). Omitted/`false` keeps the ideal-clock default
+  byte-for-byte (no `schema_version` bump); `true` is rejected with
+  `verilog` (no placed clock tree there) and for non-boolean values.
+  Documented in `docs/cli/sta.md` ("Propagated-clock timing").
+
 - **`klt synthesize` memory-mapping evidence** (issue #2745, part of #2281):
   the response gains two additive, always-present fields. `memory_mapping`
   reports per module definition whether inferred memories were
