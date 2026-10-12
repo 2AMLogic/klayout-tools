@@ -6071,8 +6071,8 @@ def test_active_layer_omitted_mixed_net_uses_raw_combined_poly_area(tmp_path):
 def _shared_diffusion_two_finger_fixture(path) -> None:
     """Two electrically separate poly fingers (A, B) crossing ONE shared
     diffusion strip, plus a third poly-only resistor net (R) away from it.
-    The derived `poly & active` gate-oxide conductor (issue #2751) must not
-    short A to B through the shared diffusion, and must not give R any area.
+    Each finger must own only its own crossing (issue #2751), diffusion must
+    not short A to B, and R must get no gate area.
     """
     layout = kdb.Layout()
     layout.dbu = DBU
