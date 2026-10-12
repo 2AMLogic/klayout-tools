@@ -714,6 +714,8 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                     "base": _fmt_layer(derived.base),
                     "intersect_with": _fmt_layer(derived.intersect_with),
                     "sized_by_um": derived.sized_by_um,
+                    "exclude_layers": [_fmt_layer(x) for x in derived.exclude_layers],
+                    "exclude_holed": derived.exclude_holed,
                 },
                 "scope": rule.scope or None,
             }
@@ -1047,6 +1049,7 @@ def run_drc(
             deck_layer_tuples.add(rule.derived_layer.base)
             if rule.derived_layer.intersect_with is not None:
                 deck_layer_tuples.add(rule.derived_layer.intersect_with)
+            deck_layer_tuples.update(rule.derived_layer.exclude_layers)
 
     # Reuse layers.py's existing per-layer enumeration (used today by
     # `klt layers`) for stream-layer enumeration, rather than a second
@@ -1103,6 +1106,14 @@ def run_drc(
                 if rule.derived_layer.intersect_with is not None
                 else None
             )
+            exclude_indices = [
+                i
+                for i in (
+                    layout.find_layer(*lyr)
+                    for lyr in rule.derived_layer.exclude_layers
+                )
+                if i is not None
+            ]
             if base_index is None:
                 # The derived region's own source shapes are absent from this
                 # stream -> no violations possible in any mode, skip like any
@@ -1184,11 +1195,23 @@ def run_drc(
                     # Marker-scoped whole-polygon selection (#1110): here
                     # `sized_by_um` is a guard band around the *marker*
                     # (`intersect_with`), not around `base`.
+                    # `exclude_layers` (#2835) widen the marker set; an
+                    # undrawn one contributes nothing.
+                    for ex_index in exclude_indices:
+                        intersect_region = intersect_region + kdb.Region(
+                            cell.begin_shapes_rec(ex_index)
+                        )
                     marker_region = (
                         intersect_region.sized(size_dbu)
                         if size_dbu
                         else intersect_region
                     )
+                    if rule.derived_layer.exclude_holed:
+                        # Ring-shaped base polygons (merged, so a ring drawn
+                        # as abutting bars counts) are exempt (#2835).
+                        base_region = base_region.merged().with_holes(
+                            0, 1, False
+                        )
                     if rule.derived_layer.mode == "overlapping":
                         # Whole `base` polygons sharing area with the marker
                         # -- the marked ("_MV") half of a rule pair.
@@ -1984,6 +2007,7 @@ def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
         layers.add(rule.derived_layer.base)
         if rule.derived_layer.intersect_with is not None:
             layers.add(rule.derived_layer.intersect_with)
+        layers.update(rule.derived_layer.exclude_layers)
     else:
         layers.add(rule.layer)
     if rule.other_layer is not None:
@@ -2007,6 +2031,15 @@ def _validate_derived_layer(rule: DrcRule) -> None:
         raise DrcError(
             f"rule '{rule.id}': unknown derived_layer mode "
             f"'{derived.mode}' (known: {', '.join(sorted(_DERIVED_LAYER_MODES))})"
+        )
+    if (
+        derived is not None
+        and (derived.exclude_layers or derived.exclude_holed)
+        and derived.mode != "not_interacting"
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer exclude_layers/exclude_holed "
+            "are only supported for mode 'not_interacting'"
         )
 
 

@@ -45,7 +45,7 @@ def build() -> kdb.Layout:
     layout.set_info(poly, kdb.LayerInfo(66, 20, "poly.drawing"))
     top.shapes(poly).insert(kdb.Box(0, 0, 100, 2000))
 
-    # diff.drawing (65/20) enclosing licon1.drawing (66/44) by only 10 dbu
+    # diff.drawing (65/20) enclosing licon1.drawing (66/44) by only 15 dbu
     # on each side -- less than the diff.enclosing.licon.1 threshold of
     # 40 dbu (0.04 um) -> a second seeded violation.
     diff = layout.layer(65, 20)
@@ -53,7 +53,7 @@ def build() -> kdb.Layout:
     licon = layout.layer(66, 44)
     layout.set_info(licon, kdb.LayerInfo(66, 44, "licon1.drawing"))
     top.shapes(diff).insert(kdb.Box(3000, 0, 3200, 200))
-    top.shapes(licon).insert(kdb.Box(3010, 10, 3190, 190))
+    top.shapes(licon).insert(kdb.Box(3015, 15, 3185, 185))
 
     # met1.drawing (68/20): a clean, wide bar -- passes every rule.
     met1 = layout.layer(68, 20)

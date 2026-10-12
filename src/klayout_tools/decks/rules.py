@@ -146,12 +146,32 @@ class DerivedLayer:
     express a holes-area rule like ``m1.7``: the checked "region" becomes
     each hole polygon, and the area threshold applies to each one
     individually, exactly matching ``with_area``'s official semantics.
+
+    **Compound exemptions on ``"not_interacting"`` (issue #2835).** A
+    fixed-size cut rule that the source deck narrows with a compound
+    expression -- sky130's ``licon.1`` (``licon.not(prec_resistor)``) and
+    ``ct.1`` (``mcon.not(ring-shaped mcon).outside(areaid_ce)``) -- needs
+    "``base`` minus several exempt populations", which one ``intersect_with``
+    marker cannot say. Two additive fields (both default to "no extra
+    exemption", so every existing rule is unchanged) widen the
+    ``"not_interacting"`` selection, and are rejected for any other mode:
+
+    - ``exclude_layers``: further marker layers, unioned with
+      ``intersect_with`` before the whole-polygon ``not_interacting``
+      selection (so ``(rpm | urpm)`` is ``intersect_with=rpm,
+      exclude_layers=(urpm,)``). Like ``intersect_with``, an absent layer
+      is an empty marker, never a skip.
+    - ``exclude_holed``: drop every merged ``base`` polygon that has at
+      least one hole (a ring), the shape ``ct.1`` carves out for its
+      separate ring rules ``ct.3``/``ct.3_a``.
     """
 
     base: tuple[int, int]
     sized_by_um: float
     intersect_with: tuple[int, int] | None = None
     mode: str = "sized_intersection"
+    exclude_layers: tuple[tuple[int, int], ...] = ()
+    exclude_holed: bool = False
 
 
 @dataclass(frozen=True)
