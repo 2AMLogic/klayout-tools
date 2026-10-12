@@ -383,6 +383,49 @@ def _body_bias_report(extract_report: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parasitic_integrity_report(
+    parasitics: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """The ``extraction.parasitic_integrity`` block (issue #2764):
+    propagate the extraction's own per-net parasitic RC network integrity
+    diagnostics into this command's summary.
+
+    ``klt pex`` re-simulates the netlist the extraction wrote, so a broken
+    emitted network (a ladder split into islands, a shorted pair, a
+    NaN-valued resistor) is exactly the kind of defect that would otherwise
+    surface only as a confusing ``delta[]`` row. ``klt extract --parasitics``
+    already checks the network it emits and reports per-net status values;
+    `klt pex` carries them through so a committed pex record is
+    self-describing about the health of the network its numbers were
+    measured on.
+
+    ``None`` when the extraction report carries no ``integrity`` summary
+    (never for this command's own runs -- extraction always runs with
+    ``--parasitics`` here -- but kept for a caller-supplied report from an
+    older build). The per-net entries are re-attached from the extraction's
+    ``parasitics.nets[]`` entries (where ``run_extract`` inlines them, so
+    rerun canonicalization re-sorts them together) in that same order,
+    verbatim, under the summary's ``nets`` key -- byte-identical payloads to
+    ``klt extract``'s own inline blocks. This block is reported, never
+    folded into ``status``: like ``body_bias`` above, grading on it is a
+    policy decision for the evidence consumer, not one this command makes.
+    """
+    summary = parasitics.get("integrity")
+    if not isinstance(summary, dict):
+        return None
+    nets = [
+        {
+            "net": entry.get("net"),
+            "net_id": entry.get("net_id"),
+            "rc_model": entry.get("rc_model"),
+            "integrity": entry.get("integrity"),
+        }
+        for entry in parasitics.get("nets") or []
+        if isinstance(entry, dict) and entry.get("integrity") is not None
+    ]
+    return {**summary, "nets": nets}
+
+
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
     """Normalise one input-path field for this module's own JSON response
     (issue #1261) -- a thin, module-local wrapper over
@@ -2354,6 +2397,12 @@ def run_pex(
             # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
             # or `None` when the flag was never given.
             "label_layers": extract_report.get("label_layers"),
+            # Additive field (issue #2764): the extraction's own
+            # per-net parasitic RC network integrity diagnostics --
+            # threshold/tolerances, aggregate counts, and one entry per net
+            # (verbatim per-net payloads, `parasitics.nets[]` order). See
+            # `_parasitic_integrity_report`.
+            "parasitic_integrity": _parasitic_integrity_report(parasitics),
         },
         # Additive field (issue #1983): whether the extracted netlist this
         # run re-simulated has a DC bias path for every device body, reduced

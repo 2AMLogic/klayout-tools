@@ -14,6 +14,86 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt drc --list-rules` / `--rules`** (issue #2768): `--deck <name>
+  --list-rules` lists a curated deck's registered rules (id, description,
+  check kind, layers, scope, per-kind/per-scope counts) without reading a
+  layout; the listing is not a DRC verdict. `--rules '<id|glob>,...'` (and
+  the request-document field `rules`) runs only the selected rules -- exact
+  ids or case-sensitive quoted globs, validated before any geometry is read;
+  unselected rules are never dispatched. A `--rules` report gains an additive
+  top-level `rule_selection` block, and each omitted rule is a
+  `coverage.skipped` record with the new reason `not_selected`, so a proper
+  subset rolls up `clean_partial` and `klt signoff` never grants it full DRC
+  credit. `--check --rerun` replays the recorded selection. Curated engine
+  only; rejected with `--engine klayout`. `schema_version` stays 2.
+
+- **`klt extract --parasitics` / `klt pex`: per-net parasitic RC network
+  integrity report** (issue #2764): every `--parasitics` extraction now
+  validates the RC network it just emitted and reports the result as
+  additive, always-present status values an agent branches on — never
+  exceptions, never a changed verdict, never a repair. Each
+  `parasitics.nets[]` entry gains an `integrity` block (`open` —
+  `pass`/`open`/`not_applicable`, with `not_applicable` for lumped nets
+  whose star carries no measurable terminal-connectivity evidence;
+  `islands`; `orphan_nodes`; `suspicious_resistors` — negative, zero,
+  non-finite, self-loop; `short_candidates` — cross-net resistors at or
+  below the inclusive `1.0` Ω threshold; `capacitance` — declared total
+  vs. the sum of emitted ground capacitors (each read back from the
+  created device), pass/mismatch/not_applicable
+  at `1e-6` fF absolute + `1e-9` relative tolerance), and the `parasitics`
+  block gains a net-name-free `integrity` summary (check settings and
+  aggregate counts). Connectivity is judged over the emitted DC-conducting
+  elements (resistors/inductors — capacitors never join), by circuit-scoped
+  `net_id` owners rather than display names, so same-named nets stay
+  distinct. The checks validate the *generated RC model*, not geometric
+  opens/shorts. `klt pex` propagates the same diagnostics verbatim as
+  `extraction.parasitic_integrity` (summary + one entry per net,
+  `parasitics.nets[]` order). Non-finite input values are diagnosed and
+  serialize as `null` — the blocks are strict finite JSON; detail lists cap
+  at 20 entries with complete counts. The checker indexes the network by
+  owning net once, so it runs in time linear in the network size. No
+  existing field changes; `schema_version` stays 3 (extract) / 2 (pex).
+
+- **Added** (#2739, `klt sta`; additive JSON only): opt-in propagated-clock
+  timing for `def`-mode requests. `constraints.propagated_clock: true`
+  emits `set_propagated_clock [get_clocks <clock_port>]` immediately after
+  `create_clock` in every analyzed corner (and a `report_clock_latency`
+  evidence dump after any `read_spef`, before the metrics), so hold/removal
+  checks include a real clock tree's insertion delay and skew — the
+  boundary hold check ideal timing can call MET that the propagated
+  analysis calls VIOLATED (reproduced on OpenROAD `26Q3-1510-g6cb3f2b704`;
+  captures in `tests/fixtures/sta_clock_propagation/`). Every response
+  gains two additive fields: `clock_mode` (`"ideal"`/`"propagated"`,
+  hoisted on `corners` responses) and `clock_propagation` (what
+  propagation actually reached: `clock_sinks`, `max_network_latency_ns`,
+  `clock_sinks_sample`; a tree-less DEF reports `clock_sinks: 0` — explicit
+  evidence propagation could not be established, never a silent claim of
+  insertion delay). Omitted/`false` keeps the ideal-clock default
+  byte-for-byte (no `schema_version` bump); `true` is rejected with
+  `verilog` (no placed clock tree there) and for non-boolean values.
+  Documented in `docs/cli/sta.md` ("Propagated-clock timing").
+
+- **`klt synthesize` memory-mapping evidence** (issue #2745, part of #2281):
+  the response gains two additive, always-present fields. `memory_mapping`
+  reports per module definition whether inferred memories were
+  `lowered_to_logic`, `optimized_away` before lowering, `surviving`, `mixed`
+  or `indeterminate`. It is derived from `stat` counts at elaboration and
+  before `memory_map`, captured by a separate side Yosys invocation
+  (`<top>_memory_evidence.ys`), plus the production final stats.
+  `blackbox_modules` lists surviving `blackbox`/`whitebox` modules, whose area
+  is not in `area_um2`. The production script, netlist and metrics are
+  unchanged. An evidence failure yields `indeterminate`, never a failed run.
+  `schema_version` stays 2.
+
+- **`scripts/fetch-ihp-sg13cmos5l.sh` repointed to IHP-Open-PDK** (issue
+  #2720): the standalone `IHP-GmbH/ihp-sg13cmos5l` repo was archived on
+  2026-09-23, so the script now fetches the `ihp-sg13cmos5l/` subtree of
+  `IHP-GmbH/IHP-Open-PDK` `dev`, pinned to commit `f7bca326` (after
+  `e8fba183`, which removed the prebuilt x86-64 `cap_cmom{i,f}.osdi`) with a
+  new fail-closed tarball sha256. The whole-repo tarball is ~400 MB (about
+  96 MB is extracted). The deck's own rule-provenance pin
+  (`_IHP_SG13CMOS5L_COMMIT`) is deliberately unchanged.
+
 - **`klt extract --hierarchical-cells`** (issue #2722, increment 1): an
   opt-in, additive hierarchical SPICE mode. Named non-nested cells are written
   as their own `.SUBCKT` (one definition per cell, one `X` per placement) with

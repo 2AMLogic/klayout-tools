@@ -11,7 +11,7 @@ scripts/
   deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
   fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
   fetch-ihp-sg13g2.sh            # pinned fetch of IHP-Open-PDK into pdks/ so `klt pdk` resolves a real SG13G2 install (#522)
-  fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of IHP ihp-sg13cmos5l into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
+  fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of the IHP-Open-PDK ihp-sg13cmos5l/ subtree into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
   fetch-sg13g2-sim-toolchain.sh  # provision the ngspice/OSDI half of an SG13G2 sim flow that fetch-ihp-sg13g2.sh does not (#1628)
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs

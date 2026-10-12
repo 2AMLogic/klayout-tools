@@ -3890,6 +3890,37 @@ def _register_label_layer(
     l2n.connect(conductor_region, label_texts)
 
 
+class _ActiveIndex:
+    """Bbox-indexed copy of the whole-layout active region (issue #2751).
+
+    ``(net_poly & whole_active).merged()`` visits every active polygon in the
+    chip once per candidate net -- candidates x active polygons, quadratic in
+    design size. Here the active polygons are loaded once into a scratch
+    cell, and :meth:`intersect` pulls only those whose bounding box touches
+    the net's own poly bbox through the shape tree's spatial query before
+    intersecting. Active polygons outside that window cannot intersect the
+    net's poly, so the result is geometrically identical to the whole-layout
+    boolean (same merged polygons, same area, same ``gates[]``).
+    """
+
+    def __init__(self, active_region: Any) -> None:
+        import klayout.db as kdb
+
+        self._kdb = kdb
+        self._layout = kdb.Layout()
+        self._cell = self._layout.create_cell("ACTIVE")
+        self._layer = self._layout.layer(0, 0)
+        self._cell.shapes(self._layer).insert(active_region)
+
+    def intersect(self, poly_region: Any) -> Any:
+        if poly_region.is_empty():
+            return poly_region
+        local = self._kdb.Region(
+            self._cell.begin_shapes_rec_touching(self._layer, poly_region.bbox())
+        )
+        return (poly_region & local).merged()
+
+
 def _extract_connectivity(
     layout: Any,
     top_cell: Any,
@@ -4407,10 +4438,13 @@ def run_erc(
     # diffusion/active layer on `stackup[0]`, gate identification and the
     # antenna-ratio denominator below are computed from `poly ∩ diff` --
     # true gate (oxide) area -- rather than raw poly-net area. This is a
-    # plain geometric intersection against the whole-layout active region,
-    # *not* a connectivity-graph registration: diffusion never needs to be
-    # traced for connectivity here, only intersected against each gate net's
-    # own merged poly region. When omitted, `active_region` stays `None` and
+    # plain geometric intersection against the active region, *not* a
+    # connectivity-graph registration: diffusion never needs to be traced
+    # for connectivity here (registering a derived layer would also renumber
+    # the clusters and so reorder `gates[]`). The region is loaded once into
+    # a bbox-indexed `_ActiveIndex` (issue #2751) so each net is intersected
+    # only with the active polygons near its own poly, not the whole chip.
+    # When omitted, `active_region` stays `None` and
     # every net's raw poly area is used unchanged (today's behaviour) -- see
     # docs/cli/erc.md's "Spec file" section for the documented caveat this
     # leaves for tie/decap/filler-cell nets.
@@ -4418,6 +4452,7 @@ def run_erc(
     active_region = (
         _region(layout, top_cell, active_layer) if active_layer is not None else None
     )
+    active_index = _ActiveIndex(active_region) if active_region is not None else None
 
     # Every distinct net (cluster) is already one electrically-connected
     # island by construction (`LayoutToNetlist` clusters connected geometry
@@ -4451,8 +4486,8 @@ def run_erc(
         # and is correctly excluded below by the existing zero-area skip.
         # Falls back to raw poly-net area (today's behaviour) when
         # `active_layer` is omitted.
-        if active_region is not None:
-            gate_area_region = (gate_poly_region & active_region).merged()
+        if active_index is not None:
+            gate_area_region = active_index.intersect(gate_poly_region)
         else:
             gate_area_region = gate_poly_region
         gate_area_um2 = gate_area_region.area() * dbu2_um2
