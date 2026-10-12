@@ -199,7 +199,9 @@ DECISIONS: Mapping[str, Mapping[str, Decision]] = MappingProxyType(
                     "unsupported", "No implemented sg13cmos5l family corner resolver."
                 ),
                 "remote_ami_transport": Decision(
-                    "unsupported", "No maintained sg13cmos5l AMI transport."
+                    "supported",
+                    "Registered AMI transport (#2727); image publication is "
+                    "tracked separately.",
                 ),
                 "mos_array_well_taps": Decision(
                     "supported",
