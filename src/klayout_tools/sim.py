@@ -4835,6 +4835,15 @@ def _run_corner(
     )
     diagnostics.extend(measurement_diagnostics)
 
+    # Issue #2846: the engine's abort trailer gets its own analysis-level
+    # diagnostic, always at `severity: "error"`, reported alongside (not
+    # instead of) the per-measurement ones. Appended before
+    # `disqualifying` is sampled so `fail_on_diagnostic` can name it.
+    aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE
+    aborted_diagnostic = _analysis_aborted_diagnostic(log_text, aborted_re)
+    if aborted_diagnostic is not None:
+        diagnostics.append(aborted_diagnostic)
+
     # A recovered `singular_matrix`/`nonconvergence` classification (the
     # engine's own stepping-recovery narration -- routine noise on the way
     # to a *successful* analysis, not evidence the run failed) does not
@@ -4853,13 +4862,6 @@ def _run_corner(
     # downgrade exists to forgive, so reading this after the downgrade (or
     # reading `severity` instead of `code`) would make the option a no-op
     # for its single most important use.
-    aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE
-    aborted_diagnostic = _analysis_aborted_diagnostic(
-        log_text, measurements_spec, measurement_results, aborted_re
-    )
-    if aborted_diagnostic is not None:
-        diagnostics.append(aborted_diagnostic)
-
     disqualifying = sorted(
         {d["code"] for d in diagnostics if d["code"] in fail_on_diagnostic}
     )
@@ -4868,7 +4870,7 @@ def _run_corner(
         measurements_spec,
         measurement_results,
         log_text,
-        aborted_re=(_XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE),
+        aborted_re=aborted_re,
     ):
         for diagnostic in diagnostics:
             if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
@@ -6388,18 +6390,17 @@ _ABORT_ERROR_LINE_RE = re.compile(r"\b(?:error|fatal)\b", re.IGNORECASE)
 
 def _analysis_aborted_diagnostic(
     log_text: str,
-    measurements_spec: list[dict[str, Any]],
-    measurement_results: list[dict[str, Any]],
     aborted_re: re.Pattern[str],
 ) -> dict[str, str] | None:
     """The analysis-level ``analysis_aborted`` diagnostic (issue #2846), or
     ``None`` when the engine's abort trailer is absent.
 
-    Quotes the engine's own error line(s) preceding the trailer. A corner
-    that hit the trailer but still returned every requested measurement
-    (the singular-matrix/nonconvergence recovery shape, issue #205) gets it
-    at ``severity: "warning"`` rather than a spurious error; with no
-    measurements declared there is no such evidence, so it stays an error.
+    Quotes the engine's own error line(s) preceding the trailer. Always
+    ``severity: "error"``: the trailer means the analysis never produced a
+    trustworthy result regardless of which measurement values happen to be
+    parseable -- the same rule :func:`_recovered_from_stepping` applies
+    (issue #205). A stepping-recovered corner has no trailer, so it never
+    gets this diagnostic at all.
     """
     match = aborted_re.search(log_text or "")
     if match is None:
@@ -6411,11 +6412,8 @@ def _analysis_aborted_diagnostic(
     if trailer and trailer not in quoted:
         quoted.append(trailer)
     quoted = quoted[-_ABORT_MAX_QUOTED:]
-    recovered = bool(measurements_spec) and not any(
-        m["status"] == "error" for m in measurement_results
-    )
     return {
-        "severity": "warning" if recovered else "error",
+        "severity": "error",
         "code": "analysis_aborted",
         "message": "analysis aborted by the engine: " + " | ".join(quoted),
     }

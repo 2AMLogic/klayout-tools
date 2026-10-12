@@ -12129,30 +12129,71 @@ def test_run_sim_stubbed_fail_on_diagnostic_accepts_analysis_aborted(
     assert report["corners"][0]["status"] == "error"
 
 
-def test_analysis_aborted_not_error_when_all_measurements_returned():
-    diag = sim._analysis_aborted_diagnostic(
-        _TSTOP_ABORTED_LOG,
-        [{"name": "m"}],
-        [{"name": "m", "status": "pass"}],
-        sim._SIMULATION_ABORTED_RE,
-    )
-    assert diag is not None and diag["severity"] == "warning"
+def test_analysis_aborted_is_error_even_when_all_measurements_returned(
+    tmp_path, monkeypatch
+):
+    # The trailer means "no trustworthy result" regardless of which values
+    # are parseable (issue #205's rule): a tran that aborts after
+    # `find ... at=1n` was captured must not read as a clean pass.
+    request = _aborted_request(tmp_path)
+    log = "vout_meas = 1.000000e+00\n" + _TSTOP_ABORTED_LOG
+    _stub_subprocess_run(monkeypatch, log_text=log)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["value"] == 1.0
+    aborted = [d for d in corner["diagnostics"] if d["code"] == "analysis_aborted"]
+    assert len(aborted) == 1
+    assert aborted[0]["severity"] == "error"
+    assert corner["status"] == "error"
 
 
 def test_analysis_aborted_absent_without_trailer():
     assert (
         sim._analysis_aborted_diagnostic(
-            _RECOVERED_SINGULAR_MATRIX_LOG, [], [], sim._SIMULATION_ABORTED_RE
+            _RECOVERED_SINGULAR_MATRIX_LOG, sim._SIMULATION_ABORTED_RE
         )
         is None
     )
 
 
+def test_run_sim_stubbed_recovered_stepping_has_no_analysis_aborted(
+    tmp_path, monkeypatch
+):
+    # A stepping-recovered corner (issue #205) has no abort trailer, so it
+    # must not pick up an `analysis_aborted` diagnostic end to end.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1n"},
+            "measurements": [
+                {
+                    "name": "vout_meas",
+                    "spice": ".meas tran vout_meas find v(vout_node) at=1n",
+                },
+                {
+                    "name": "tail_meas",
+                    "spice": ".meas tran tail_meas find v(tail_node) at=1n",
+                },
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["status"] == "pass"
+    assert all(d["code"] != "analysis_aborted" for d in corner["diagnostics"])
+    assert "analysis_aborted" not in report["diagnostic_counts"]["by_code"]
+
+
 def test_analysis_aborted_xyce_trailer():
     log = "Fatal: bad thing\nSimulation aborted due to error. There are 1 MSG_FATAL\n"
-    diag = sim._analysis_aborted_diagnostic(
-        log, [], [], sim._XYCE_SIMULATION_ABORTED_RE
-    )
+    diag = sim._analysis_aborted_diagnostic(log, sim._XYCE_SIMULATION_ABORTED_RE)
     assert diag["severity"] == "error"
     assert "bad thing" in diag["message"]
 
