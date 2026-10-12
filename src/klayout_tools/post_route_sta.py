@@ -2792,28 +2792,36 @@ def _parse_constraint_completeness(stdout: str) -> dict[str, Any]:
     }
 
 
-def _parse_completeness_check(block: str, name: str) -> dict[str, Any]:
-    """One check's record from the completeness block -- see
-    :func:`_parse_constraint_completeness`."""
+def _completeness_rows(
+    block: str, name: str
+) -> tuple[list[str], list[str], str | None]:
+    """``(totals, items, error)`` -- the ``CHECK`` totals and ``ITEM`` pin
+    names the completeness block carries for check ``name``, or a non-null
+    ``error`` reason on an engine ``ERROR`` row or a malformed row. Rows of
+    any other kind or check are ignored."""
     totals: list[str] = []
     items: list[str] = []
     for line in block.splitlines():
         parts = line.split("\t")
-        if len(parts) < 2 or parts[0] not in ("CHECK", "ITEM", "ERROR"):
-            continue
-        if parts[1] != name:
+        if len(parts) < 2 or parts[1] != name:
             continue
         if parts[0] == "ERROR":
             message = "\t".join(parts[2:]).strip()
-            return _unavailable_completeness_check(
-                f"engine {name} query failed: {message}"
-            )
+            return totals, items, f"engine {name} query failed: {message}"
+        if parts[0] not in ("CHECK", "ITEM"):
+            continue
         if len(parts) != 3 or not parts[2]:
-            return _unavailable_completeness_check(f"malformed {name} record: {line!r}")
-        if parts[0] == "CHECK":
-            totals.append(parts[2])
-        else:
-            items.append(parts[2])
+            return totals, items, f"malformed {name} record: {line!r}"
+        (totals if parts[0] == "CHECK" else items).append(parts[2])
+    return totals, items, None
+
+
+def _parse_completeness_check(block: str, name: str) -> dict[str, Any]:
+    """One check's record from the completeness block -- see
+    :func:`_parse_constraint_completeness`."""
+    totals, items, error = _completeness_rows(block, name)
+    if error is not None:
+        return _unavailable_completeness_check(error)
     if not totals:
         return _unavailable_completeness_check(f"no {name} total in engine output")
     if len(totals) > 1:
