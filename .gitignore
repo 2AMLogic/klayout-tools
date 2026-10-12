@@ -2,6 +2,8 @@ __pycache__/
 *.egg-info/
 dist/
 .venv/
+# foreign environments moved aside by scripts/bootstrap-auditor-python.sh --replace-venv
+.venv.foreign-*/
 site/node_modules/
 site/dist/
 .pytest_cache/

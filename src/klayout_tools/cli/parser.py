@@ -3253,6 +3253,16 @@ def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="output LEF path (default: <macro-name>.lef)",
     )
+    lef_abstract_parser.add_argument(
+        "--require-power-pins",
+        action="store_true",
+        help=(
+            "exit 3 when the supply-pin verdict (power_pins, issue #2839) "
+            "fails: no USE POWER or no USE GROUND pin, a supply pin whose "
+            "written USE differs, or a supply PORT that is not drawn layout "
+            "geometry. Without it the verdict is reported only."
+        ),
+    )
     _add_format_arg(lef_abstract_parser)
     lef_abstract_parser.set_defaults(func=lef_abstract_cmd.run)
 
@@ -5095,6 +5105,27 @@ def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "top cell to check when the stream has more than one; omit to "
             "check every top cell"
+        ),
+    )
+    socket_check_parser.add_argument(
+        "--require-power-ports",
+        action="store_true",
+        help=(
+            "run the power_ports check (issue #2839) even when the descriptor "
+            "declares no 'power_ports' object: every POWER/GROUND pin name "
+            "needs an edge-accessible port, and at least one POWER and one "
+            "GROUND pin must be declared. See docs/cli/socket-check.md."
+        ),
+    )
+    socket_check_parser.add_argument(
+        "--edge-band-um",
+        type=float,
+        default=None,
+        metavar="UM",
+        help=(
+            "power_ports edge band in micrometres, overriding the "
+            "descriptor's power_ports.edge_band_um (default 0: the port must "
+            "touch the outline; provisional, see docs/cli/socket-check.md)"
         ),
     )
     _add_format_arg(socket_check_parser)

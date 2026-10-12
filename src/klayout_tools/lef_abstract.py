@@ -82,27 +82,31 @@ mapping.
 from __future__ import annotations
 
 import os
-import re
 from typing import Any
 
 from ._layout import load_layout, resolve_top_cell
 from ._provenance import build_provenance
 from .lef_header import read_lef_header
 from .pdk import PdkNotFoundError, find_pdk, lef_files
-from .socket_check import SocketCheckError, _load_descriptor
+from .socket_check import (
+    GROUND_NAME_TOKENS,
+    POWER_NAME_TOKENS,
+    SocketCheckError,
+    _load_descriptor,
+    classify_pin_by_name,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
 
-#: Name substrings (checked case-insensitively as whole ``_``-delimited
-#: tokens, e.g. ``AVDD33`` matches ``VDD``, ``VD`` does not) that classify a
-#: pin as a supply when the descriptor does not declare an explicit
-#: ``use``/``direction`` -- this repo's own documented heuristic (there is
-#: no mechanical way to derive this from geometry alone), not an
-#: open_pdks/LEF-spec convention. See :func:`_classify_pin`.
-_GROUND_TOKENS = ("VSS", "VGND", "GND", "VNB")
-_POWER_TOKENS = ("VDD", "VPWR", "VCC", "VPB")
+#: The supply-pin name heuristic (``_GROUND_TOKENS``/``_POWER_TOKENS``) and
+#: :func:`_classify_pin` live in :mod:`klayout_tools.socket_check` since
+#: issue #2839 (as :func:`~klayout_tools.socket_check.classify_pin_by_name`),
+#: so `klt socket-check`'s ``power_ports`` check and this command's emitted
+#: ``PIN USE`` share one classification and can never disagree.
+_GROUND_TOKENS = GROUND_NAME_TOKENS
+_POWER_TOKENS = POWER_NAME_TOKENS
 
 #: Fallback synthesized-pin square size (micrometres) when neither the
 #: descriptor's ``width_um``/``height_um`` nor a resolved tech-LEF routing
@@ -110,8 +114,6 @@ _POWER_TOKENS = ("VDD", "VPWR", "VCC", "VPB")
 #: real sky130 deck (every routing layer declares ``WIDTH``), kept only as a
 #: last-resort so pin emission never raises for missing geometry data.
 _DEFAULT_SYNTHESIZED_PIN_UM = 0.1
-
-_NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 
 class LefAbstractError(Exception):
@@ -173,8 +175,13 @@ def run_lef_abstract(
                 "missing_macros": [...],
                 "unexpected_macros": [...],
             },
+            "power_pins": {...},   # issue #2839, see check_power_pins
             "provenance": {...},
         }
+
+    ``power_pins`` (issue #2839) is :func:`check_power_pins`'s supply-pin
+    verdict over the same read-back bytes. It never changes the exit code
+    unless the CLI's ``--require-power-pins`` asks it to.
 
     ``self_check`` (issue #2769) is :func:`check_lef_structure` run on the
     file read back from ``output_path`` after writing -- the on-disk bytes,
@@ -295,10 +302,13 @@ def run_lef_abstract(
     # Issue #2769: validate the bytes actually written, not `pins_report`.
     # Expected pins come from the original descriptor, so a pin the writer
     # dropped (or put in the wrong macro) cannot pass by construction.
+    lef_text = _read_back_lef(output_path)
     self_check = check_lef_structure(
-        _read_back_lef(output_path),
+        lef_text,
         {macro_name: [pin["name"] for pin in descriptor["pins"]]},
     )
+    # Issue #2839: the supply-pin verdict, also graded on the bytes on disk.
+    power_pins = check_power_pins(pins_report, lef_text)
 
     provenance = build_provenance(
         deck_name=cell_library,
@@ -325,6 +335,10 @@ def run_lef_abstract(
                 "direction": pin["direction"],
                 "use": pin["use"],
                 "layer": pin["lef_layer"],
+                # Issue #2839: the descriptor's declared GDS (layer,
+                # datatype), so a consumer can match this PIN against the
+                # same pin's `klt socket-check` port facts.
+                "gds_layer": pin["gds_layer"],
                 "geometry_source": pin["geometry_source"],
                 "rects_um": pin["rects_um"],
             }
@@ -339,6 +353,7 @@ def run_lef_abstract(
         "obs_shape_count": sum(len(shapes) for _layer_name, shapes in obs_report),
         "warnings": warnings,
         "self_check": self_check,
+        "power_pins": power_pins,
         "provenance": provenance,
     }
 
@@ -350,23 +365,9 @@ def run_lef_abstract(
 
 def _classify_pin(name: str) -> tuple[str, str]:
     """``(direction, use)`` heuristic for a pin the descriptor does not
-    explicitly classify (see module docstring's "Translation from socket
-    descriptor to LEF MACRO" section). Name tokens are matched
-    case-insensitively as whole alphanumeric runs (``AVDD33`` matches
-    ``VDD`` via its ``AVDD`` token containing it; ``VD`` alone does not
-    match anything) against :data:`_GROUND_TOKENS`/:data:`_POWER_TOKENS`.
-    Falls back to ``("INOUT", "ANALOG")`` -- LEF has no way to derive true
-    signal direction from geometry alone, and ``ANALOG`` is the LEF-spec
-    ``USE`` value for exactly this class of pin (this module's macros are
-    analog blocks, per Epic #393's own scope).
-    """
-    tokens = [tok.upper() for tok in _NAME_TOKEN_RE.findall(name)]
-    for token in tokens:
-        if any(marker in token for marker in _GROUND_TOKENS):
-            return "INOUT", "GROUND"
-        if any(marker in token for marker in _POWER_TOKENS):
-            return "INOUT", "POWER"
-    return "INOUT", "ANALOG"
+    explicitly classify -- :func:`~klayout_tools.socket_check.classify_pin_by_name`
+    (moved there by issue #2839; see that function for the rule)."""
+    return classify_pin_by_name(name)
 
 
 # --------------------------------------------------------------------------- #
@@ -517,6 +518,7 @@ def _resolve_pins(
                     "direction": direction,
                     "use": use,
                     "lef_layer": None,
+                    "gds_layer": [layer_tuple[0], layer_tuple[1]],
                     "geometry_source": "none",
                     "rects_um": [],
                     "rects_dbu": [],
@@ -602,6 +604,7 @@ def _resolve_pins(
                 "direction": direction,
                 "use": use,
                 "lef_layer": lef_layer,
+                "gds_layer": [layer_tuple[0], layer_tuple[1]],
                 "geometry_source": geometry_source,
                 "rects_um": [
                     [round(v * dbu_um, 6) for v in box] for box in local_boxes
@@ -1342,9 +1345,104 @@ def check_lef_structure(
     }
 
 
+def _read_back_pin_uses(text: str) -> dict[str, str]:
+    """``{pin_name: USE value}`` as actually written in LEF ``text`` (issue
+    #2839) -- the ``USE`` statement inside each ``PIN <name>`` ... ``END
+    <name>`` block. A pin with no ``USE`` statement is absent."""
+    uses: dict[str, str] = {}
+    tokens = _lef_tokens(text)
+    current: str | None = None
+    for index, (token, line, first) in enumerate(tokens):
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        if token == "PIN" and first and following and following[1] == line:
+            current = following[0]
+        elif token == "END" and current is not None and following:
+            if following[1] == line and following[0] == current:
+                current = None
+        elif token == "USE" and first and current is not None and following:
+            uses.setdefault(current, following[0])
+    return uses
+
+
+def check_power_pins(pins: list[dict[str, Any]], lef_text: str) -> dict[str, Any]:
+    """The LEF abstract's supply-pin verdict (issue #2839, T1 item 11 port
+    accessibility -- provisional until 2AMLogic/product#134 ratifies the
+    amendment). ``pins`` are this command's own resolved pins (``use``,
+    ``geometry_source``, ``lef_layer``); ``lef_text`` is the file read back
+    from disk, whose ``USE`` statements are what is checked.
+
+    Returns::
+
+        {
+            "status": "pass" | "fail",
+            "findings": [{"code", "pin", "message"}, ...],
+            "pins": [{"name", "use", "use_read_back", "layer",
+                      "geometry_source"}, ...],   # supply pins only
+        }
+
+    Finding codes: ``no_power_pin``/``no_ground_pin`` (no pin is ``USE
+    POWER``/``USE GROUND``; ``pin`` is ``null``), ``use_not_written`` (the
+    file's own ``USE`` for a supply pin is absent or differs), and
+    ``port_not_drawn`` (a supply pin's ``PORT`` is a synthesized placeholder
+    or missing, not drawn layout geometry). ``status`` is ``"pass"`` iff
+    there are no findings.
+    """
+    read_back = _read_back_pin_uses(lef_text)
+    supply = [pin for pin in pins if pin["use"] in ("POWER", "GROUND")]
+    findings: list[dict[str, Any]] = []
+    uses = {pin["use"] for pin in supply}
+    for use, code in (("POWER", "no_power_pin"), ("GROUND", "no_ground_pin")):
+        if use not in uses:
+            findings.append(
+                {
+                    "code": code,
+                    "pin": None,
+                    "message": f"no PIN with USE {use} in the abstract",
+                }
+            )
+    for pin in supply:
+        if read_back.get(pin["name"]) != pin["use"]:
+            findings.append(
+                {
+                    "code": "use_not_written",
+                    "pin": pin["name"],
+                    "message": (
+                        f"PIN {pin['name']}: expected USE {pin['use']} in the "
+                        f"written file, found {read_back.get(pin['name'])!r}"
+                    ),
+                }
+            )
+        if pin["geometry_source"] != "drawn":
+            findings.append(
+                {
+                    "code": "port_not_drawn",
+                    "pin": pin["name"],
+                    "message": (
+                        f"PIN {pin['name']}: PORT geometry is "
+                        f"{pin['geometry_source']!r}, not drawn layout geometry"
+                    ),
+                }
+            )
+    return {
+        "status": "fail" if findings else "pass",
+        "findings": findings,
+        "pins": [
+            {
+                "name": pin["name"],
+                "use": pin["use"],
+                "use_read_back": read_back.get(pin["name"]),
+                "layer": pin["lef_layer"],
+                "geometry_source": pin["geometry_source"],
+            }
+            for pin in supply
+        ],
+    }
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "LefAbstractError",
     "check_lef_structure",
+    "check_power_pins",
     "run_lef_abstract",
 ]
