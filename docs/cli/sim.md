@@ -281,6 +281,10 @@ JSON, in the same corner order**, for the same request; the backend only
 changes how fast (and where) the sweep runs. An unsupported name is an
 application error (exit 1), exactly like an unsupported `engine`.
 
+Every backend also accepts **deck-list requests** (a request with a `decks`
+list — pre-composed caller-owned decks transported, not re-composed; see
+"Pre-composed decks" below), with the same backend semantics.
+
 **Host default — `$KLT_SIM_BACKEND`.** Precedence is `--backend` >
 `request.backend` > `$KLT_SIM_BACKEND` > `local`. A fleet host that must not
 run SPICE grids itself sets it in its daemon environment (2am#1004: the AWS
@@ -1129,6 +1133,136 @@ network), but a *live* run does.
 The same 5-corner ring-oscillator matrix as `examples/sim-remote/`, with
 `backend: "batch"` — the live-run report slot is deliberately empty until
 those 2am prerequisites are done.
+
+## Pre-composed decks (`decks` requests)
+
+`klt sim`'s off-host backends are the sanctioned route to off-host
+simulation capacity, but the corner contract above has klt *compose* each
+per-corner deck itself from `corners.*`, `analysis` and `measurements[]`.
+A verification harness that already renders its own decks (PDK `.lib`
+section selection, derived `.meas` expressions, per-point `.param`s,
+`.save` retention lists) and mints its own evidence from the raw logs needs
+the **transport, not the corner engine**: re-expressing the campaign as a
+corner request would mint a *different* artifact from the one its existing
+evidence was minted by ([#2804](https://github.com/2AMLogic/klayout-tools/issues/2804),
+re-filing #2464).
+
+A request carrying a **`decks` list** is a deck-list request: klt runs each
+deck verbatim with `ngspice -b`, in an isolated directory, and returns each
+unit's raw stdout/stderr and declared output files. There is no corner
+expansion, no deck composition, no measurement parsing, and no pass/fail
+grading of the circuit — the caller diffs its own evidence. All four
+backends accept deck-list requests (`local`, `local-parallel`, `remote`,
+`batch`); the off-host ones push the deck closure and run the *same* deck
+runner on the worker (`klt sim … --backend local-parallel` there lands back
+in the deck path), exactly as corner jobs do.
+
+```json
+{
+  "backend": "batch",
+  "models": { "pdk": "sky130A" },
+  "decks": [
+    {
+      "id": "tt_27c_3v30",
+      "deck": "rendered/tt_27c_3v30.spice",
+      "inputs": ["dut.spice"],
+      "outputs": ["out/measure.raw"],
+      "timeout_s": 3600
+    }
+  ],
+  "options": { "max_workers": 4 }
+}
+```
+
+### Request fields
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `decks[]` | array\<object\>, required | The units to run. Each entry: `id`, `deck`, optional `inputs[]`, `outputs[]`, `timeout_s`. Every rejectable condition below fails before any upload, SSH push, or fleet launch (exit 1). |
+| `decks[].id` | string, required | Unique unit identifier; doubles as the unit's directory name under `outdir`, so it must be a single path segment (no `/`, no `..`). |
+| `decks[].deck` | string, required | Path to the pre-composed deck. Relative paths resolve against the request file's directory. **Shipped byte-for-byte** — never rewritten. |
+| `decks[].inputs[]` | array\<string \| {path, name}\> | Extra input files copied into the unit directory. A bare string lands at its basename; the object form names the destination explicitly. Destinations must be relative and traversal-free. |
+| `decks[].outputs[]` | array\<string\> | Unit-relative paths the deck is expected to write (parent directories are created up front). After the run each is reported as present (`outputs`) or absent (`missing_outputs`) — a missing output is evidence, never a silent drop. Outputs must not name a staged input. |
+| `decks[].timeout_s` | number | Per-unit wall-clock budget. Defaults to `options.timeout_s`, then `120` (the corner default). Exceeding it kills the engine; whatever it emitted first is kept. |
+| `engine` | string | Must be `"ngspice"` (the default). Deck transport composes and grades nothing, so there is no `xyce` deck path. |
+| `models.pdk` / `models.pdk_root` | string | Image selection for `remote`/`batch` — the same field, semantics, and validation as corner requests (`remote` refuses to provision without `models.pdk`; `batch` validates it against the published fleet images). Independent of any corner axis; PDK model files stay on the image. |
+| `options.timeout_s` | number | Default per-unit timeout (see `decks[].timeout_s`). |
+| `options.max_workers` | integer | Worker-pool size for `local-parallel`; overridable with `--max-workers`, capped by `$KLT_SIM_MAX_WORKERS`, same as corners. |
+| `options.ngspice_binary` | string | Same resolution rules as corners (issue #2423). Interpreted on the *executing* host. |
+| `remote.*` / `batch.*` | object | The same backend blocks corner requests carry; only read for the matching backend. `remote.hosts` sharding is refused for deck requests — one off-host job runs the whole list across its own worker pool. |
+
+A deck-list request must not also declare `netlist`, `corners`, `analysis`,
+`analysis_steps`, `measurements`, `monte_carlo`, `exclude`, or
+`netlist_source` — a document declaring both is ambiguous about what
+should run, so it is rejected by name.
+
+The corner-only CLI knobs are likewise refused for deck requests:
+`--hosts`, `--resume`, `--budget-s`, `--plot`, `--fail-fast-probe`, and
+`--fail-on-diagnostic`.
+
+### Preservation and isolation
+
+- **Deck bytes are preserved.** Unlike the corner path — whose stager
+  rewrites `.include` directives to flat staged names — a deck ships
+  byte-for-byte (the unit's `deck_sha256` hashes exactly what the engine
+  read). The deck's `.include`/`.inc` closure is staged instead at each
+  target's *declared relative path* inside the unit directory, so the
+  unmodified directives resolve there. A target that cannot be staged that
+  way — an absolute path outside the PDK roots, a `..`-climbing relative,
+  a file that resolves nowhere on the submitting host — is a named error
+  before any billable launch. `$VAR`-bearing and PDK-rooted targets stay
+  the executing host's to resolve, exactly as in the corner path. Only
+  `.include`/`.inc` is followed, bounded by the same 64-file / 32 MiB
+  caps as corner staging; `.lib <file> <section>` references are left for
+  the executing host (point them under the PDK root).
+- **Units are isolated.** Each unit runs in its own directory
+  (`<outdir>/<id>/`), recreated fresh every run. Its deck, declared
+  inputs, and staged closure are copied there under the declared names, so
+  two units may share filenames freely. `ngspice -b <deck>` runs with the
+  unit directory as `cwd` — the invocation a local `ngspice -b` in the
+  caller's own harness would be.
+- **Streams are evidence, untouched.** Each unit's engine stdout and
+  stderr are captured as separate **binary** files (`stdout.bin`,
+  `stderr.bin`) with no decoding, stripping, or normalization.
+  Byte-for-byte means preserving what the worker's engine emitted:
+  equality with a separate local run requires matching engine build,
+  inputs, and environment — paths, banners, and timing can differ. klt
+  never normalizes logs to manufacture equality.
+
+### Response
+
+The report carries `"mode": "decks"` so a consumer can tell it from a
+corner report at a glance. Stream and output paths are **relative to
+`outdir`** (which is absolute on the machine that assembled the report —
+the caller's, after an off-host run's collection), so a unit's evidence is
+`<outdir>/<id>/stdout.bin` and so on, under any backend.
+
+| Field | Description |
+| ----- | ----------- |
+| `mode` | `"decks"` |
+| `status` | `"pass"` when every unit exited 0 within its timeout; `"error"` otherwise. klt never grades the deck's electrical result. |
+| `unit_count` / `passed` / `errored` / `timed_out` | Counts over `units[]`. |
+| `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (best-effort from the engine's own stdout banner — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable). |
+| `outdir` | Absolute path of the artifacts directory on the reporting host. |
+| `environment` | `engine`, `engine_version`, `ngspice_binary`, `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`bucket` for batch, `runner_klt_version` identity, ...). |
+
+### Exit codes (deck mode)
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Every unit ran to completion with engine exit 0 (`status: "pass"`). |
+| `1` | Failed to run at all — bad deck list, unstageable include, unsupported engine/image selection, backend failure before or during dispatch. |
+| `2` | Usage error (argparse), as always. |
+| `4` | At least one unit errored or timed out (`status: "error"`) — the run is incomplete. Per-unit exit codes, streams, and missing-output lists say which and why. |
+
+Exit `3` cannot arise: deck requests carry no graded measurements. Gate on
+the payload's `status` field, not the exit code.
+
+**Worked shape:** render your decks, list them, submit. A paired
+re-take campaign points `models.pdk` at the same image the original record
+used and diffs the returned `stdout.bin`/`outputs` against its own
+evidence — the artifact is the one its harness mints, not one klt
+re-composed.
 
 ## Sequential (adaptive) campaigns on the batch backend
 
@@ -3781,6 +3915,7 @@ the *response* echoes back.
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
+| `decks[]`                | array\<object\>   | Issue #2804. **Deck-list request**: declares pre-composed caller-owned ngspice decks to transport, instead of the corner matrix above. When present, `netlist`/`corners`/`analysis`/`measurements` and friends must be absent, and the report takes the deck shape (`mode: "decks"`). Per-unit fields (`id`, `deck`, `inputs`, `outputs`, `timeout_s`) and the preservation/isolation contract are documented in "Pre-composed decks" above. |
 
 ### Response
 
@@ -4079,11 +4214,11 @@ and platform scope: [json-contract.md](../json-contract.md)
 
 | Code | Meaning                                                                    |
 | ---- | ---------------------------------------------------------------------------- |
-| `0`  | Checked at least one measurement/bound and no corner or rollup failed. Aggregate `status` is `"pass"` (nothing requested was skipped) or `"pass_partial"` (issue #2109 — every executed check passed, but `coverage.skipped` is nonempty).                                                         |
+| `0`  | Checked at least one measurement/bound and no corner or rollup failed. Aggregate `status` is `"pass"` (nothing requested was skipped) or `"pass_partial"` (issue #2109 — every executed check passed, but `coverage.skipped` is nonempty). For a **deck-list request** ("Pre-composed decks" above): every unit ran to completion with engine exit 0.                                                         |
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
-| `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
-| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), at least one corner errored (aggregate `status: "error"`), or at least one corner was graded `"inconclusive"` (aggregate `status: "inconclusive"` — `options.fail_on_diagnostic` named a code the solve emitted, issue #2492, or a measured value fell outside a declared `options.node_voltage_bounds`/`measurements[].plausible_range`, issue #2493; see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
+| `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. Cannot arise for a deck-list request (no graded measurements). |
+| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), at least one corner errored (aggregate `status: "error"`), or at least one corner was graded `"inconclusive"` (aggregate `status: "inconclusive"` — `options.fail_on_diagnostic` named a code the solve emitted, issue #2492, or a measured value fell outside a declared `options.node_voltage_bounds`/`measurements[].plausible_range`, issue #2493; see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. For a **deck-list request**: at least one unit errored or timed out — per-unit exit codes, streams, and missing-output lists say which and why. |
 
 Under `--op-lint` the same four codes keep the same *meanings* against that
 mode's own verdict: `0` ran with no `error`-severity finding (a

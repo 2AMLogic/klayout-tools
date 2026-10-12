@@ -225,6 +225,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   differences (see `docs/cli/lvs.md`, "FinFET decks"). The shared JSON
   envelope is unchanged.
 
+- **`klt sim`: pre-composed deck transport to the `remote`/`batch`
+  backends** (issue #2804, re-filing #2464): a request carrying a `decks`
+  list -- caller-composed ngspice decks -- is now transported verbatim to
+  the selected backend instead of being re-composed from the corner
+  contract. Each unit runs `ngspice -b` in an isolated directory
+  (`<outdir>/<id>/`) with its own timeout and the pool sizing corners use;
+  the run returns each unit's raw stdout/stderr as separate **binary**
+  stream artifacts (`stdout.bin`/`stderr.bin`, never normalized), its exit
+  code, timeout status, engine identity (`engine_version`,
+  `deck_sha256`), and which declared `outputs[]` exist vs. are missing.
+  Deck bytes are preserved (unit `deck_sha256` hashes what the engine
+  read); the deck's `.include`/`.inc` closure is staged at its declared
+  relative paths so unmodified directives resolve on the worker, with
+  `$VAR`/PDK-rooted targets left to the executing host and anything
+  unstageable rejected before any billable launch. `models.pdk` keeps its
+  corner meaning (image selection) for `remote`/`batch`; invalid ids,
+  path traversal, destination collisions, and corner-field mixing fail
+  with exit 1 up front, and off-host job failures/poll timeouts report
+  every unit with `batch_job_failed`/`batch_job_timeout`/
+  `batch_poll_timeout` diagnostics carrying any recoverable klt error
+  envelope. New module `klayout_tools.sim_decks`; the corner request
+  contract, its reports, and its exit codes are unchanged. Documented in
+  `docs/cli/sim.md` ("Pre-composed decks"); no `schema_version` bump (new
+  report shape under the same verb, new request kind).
+
 - **`klt lef-abstract`: structural self-check of the emitted LEF** (issue
   #2769): after writing, the command reads the file back from disk and
   validates the emitted subset -- a library-level `VERSION`, properly nested
