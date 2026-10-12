@@ -522,7 +522,7 @@ def _job_failure(
         code = None
     if code is None:
         code = BATCH_JOB_TIMEOUT_CODE if state == "timeout" else BATCH_JOB_FAILED_CODE
-    message += " (no local fallback: xschem was not run on this host)"
+    message += f" {_NO_FALLBACK}"
     return NetlistError(message, code=code, job_id=job_id)
 
 
@@ -578,7 +578,8 @@ def _read_runner_report(collected: str, job_id: str) -> dict[str, Any]:
     kind, error = sim_batch._classify_collected_report(report)
     if kind == "error" and error is not None:
         raise NetlistError(
-            f"batch job {job_id}: the runner's klt reported: {error['message']}",
+            f"batch job {job_id}: the runner's klt reported: "
+            f"{error['message']} {_NO_FALLBACK}",
             code=error.get("code") or BATCH_JOB_FAILED_CODE,
             job_id=job_id,
         )
@@ -589,7 +590,7 @@ def _read_runner_report(collected: str, job_id: str) -> dict[str, Any]:
     ):
         raise NetlistError(
             f"batch job {job_id}: the collected {sim_batch.BATCH_REPORT_FILENAME} "
-            "is not a `klt netlist` generate report",
+            f"is not a `klt netlist` generate report {_NO_FALLBACK}",
             code=BATCH_JOB_FAILED_CODE,
             job_id=job_id,
         )
@@ -606,7 +607,8 @@ def _read_collected_netlist(
     except OSError as exc:
         raise NetlistError(
             f"batch job {job_id}: collected outputs hold no "
-            f"{BATCH_NETLIST_FILENAME} although the runner reported one",
+            f"{BATCH_NETLIST_FILENAME} although the runner reported one "
+            f"{_NO_FALLBACK}",
             code=BATCH_JOB_FAILED_CODE,
             job_id=job_id,
         ) from exc
@@ -614,7 +616,8 @@ def _read_collected_netlist(
     if expected is not None and expected != _sha256_file_hash(data):
         raise NetlistError(
             f"batch job {job_id}: the collected {BATCH_NETLIST_FILENAME} does "
-            f"not match the content_hash the runner reported ({expected})",
+            f"not match the content_hash the runner reported ({expected}) "
+            f"{_NO_FALLBACK}",
             code=BATCH_JOB_FAILED_CODE,
             job_id=job_id,
         )
