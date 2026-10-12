@@ -1106,13 +1106,7 @@ def run_drc(
                 if rule.derived_layer.intersect_with is not None
                 else None
             )
-            exclude_indices = [
-                i
-                for i in (
-                    layout.find_layer(*lyr) for lyr in rule.derived_layer.exclude_layers
-                )
-                if i is not None
-            ]
+            exclude_indices = _exclude_layer_indices(layout, rule.derived_layer)
             if base_index is None:
                 # The derived region's own source shapes are absent from this
                 # stream -> no violations possible in any mode, skip like any
@@ -1194,21 +1188,14 @@ def run_drc(
                     # Marker-scoped whole-polygon selection (#1110): here
                     # `sized_by_um` is a guard band around the *marker*
                     # (`intersect_with`), not around `base`.
-                    # `exclude_layers` (#2835) widen the marker set; an
-                    # undrawn one contributes nothing.
-                    for ex_index in exclude_indices:
-                        intersect_region = intersect_region + kdb.Region(
-                            cell.begin_shapes_rec(ex_index)
-                        )
-                    marker_region = (
-                        intersect_region.sized(size_dbu)
-                        if size_dbu
-                        else intersect_region
+                    base_region, marker_region = _not_interacting_inputs(
+                        cell,
+                        rule.derived_layer,
+                        base_region,
+                        intersect_region,
+                        exclude_indices,
+                        size_dbu,
                     )
-                    if rule.derived_layer.exclude_holed:
-                        # Ring-shaped base polygons (merged, so a ring drawn
-                        # as abutting bars counts) are exempt (#2835).
-                        base_region = base_region.merged().with_holes(0, 1, False)
                     if rule.derived_layer.mode == "overlapping":
                         # Whole `base` polygons sharing area with the marker
                         # -- the marked ("_MV") half of a rule pair.
@@ -2010,6 +1997,38 @@ def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
     if rule.other_layer is not None:
         layers.add(rule.other_layer)
     return layers
+
+
+def _exclude_layer_indices(layout: Any, derived: Any) -> list[int]:
+    """Layout layer indices of ``derived.exclude_layers`` (issue #2835) that
+    are actually drawn in ``layout``; an undrawn one is simply an empty
+    marker, never a skip."""
+    indices = (layout.find_layer(*lyr) for lyr in derived.exclude_layers)
+    return [i for i in indices if i is not None]
+
+
+def _not_interacting_inputs(
+    cell: Any,
+    derived: Any,
+    base_region: Any,
+    marker_region: Any,
+    exclude_indices: list[int],
+    size_dbu: int,
+) -> tuple[Any, Any]:
+    """The ``(base, marker)`` regions of a marker-scoped derived layer, with
+    the ``exclude_layers`` (extra markers unioned into the exempt set) and
+    ``exclude_holed`` (ring-shaped base polygons dropped, merged first so a
+    ring drawn as abutting bars counts) refinements of issue #2835 applied;
+    the marker is guard-banded by ``size_dbu`` last."""
+    import klayout.db as kdb
+
+    for ex_index in exclude_indices:
+        marker_region = marker_region + kdb.Region(cell.begin_shapes_rec(ex_index))
+    if size_dbu:
+        marker_region = marker_region.sized(size_dbu)
+    if derived.exclude_holed:
+        base_region = base_region.merged().with_holes(0, 1, False)
+    return base_region, marker_region
 
 
 def _validate_derived_layer(rule: DrcRule) -> None:
