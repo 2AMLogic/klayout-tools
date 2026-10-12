@@ -281,6 +281,8 @@ def _fake_yosys_run(cmd, **kwargs) -> subprocess.CompletedProcess:
     if cmd[:3] == ["yosys", "-p", "help abc"]:
         return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
     assert cmd[:2] == ["yosys", "-s"]
+    if cmd[2].endswith("_memory_evidence.ys"):
+        return fake_completed(returncode=0)  # Issue #2745 side run.
     stats_path, netlist_path = _script_output_paths(cmd[2])
     with open(stats_path, "w", encoding="utf-8") as handle:
         json.dump({"modules": {"\\gcd": _GCD_MODULE_STATS}}, handle)

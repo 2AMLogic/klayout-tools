@@ -552,9 +552,16 @@ contact, and every `klt gen compose` li1↔met1 via drop — drew an oversized
 cut. One upstream exemption is worth knowing because this per-layer clamp
 cannot express it: a licon on a **precision poly resistor** (`rpm`/`urpm`,
 i.e. `res_array`'s `flavor: "high"`/`"xhigh"`) is instead held to 0.19 µm /
-2.0 µm edges by `licon.1b/c`, which neither the pre-#2594 0.22 µm cut nor the
-clamped 0.17 µm one satisfies; that context-dependent case is tracked
-separately (issue #2449).
+2.0 µm edges by `licon.1b/c`. Since issue #2449 those two flavours draw
+0.19 µm × 2.0 µm end contacts (long edge across the current flow) on
+2.2 µm-tall poly and `li1` head pads, resolved per request from the flavour
+rather than from the layer; `describe` reports the taller pad as the port
+`width_um` and adds a note. Upstream `sky130A_mr.drc` exempts a licon from
+`licon.1` only inside `(rpm | urpm) & psdm & poly.interacting(poly_rs)`, so
+for those flavours `psdm` and `rpm`/`urpm` cover the whole unit including the
+heads (0.11 µm / 0.2 µm enclosure, per `rpm.4` / `rpm.3`), grown to meet
+neighbouring units so the masks merge rather than leave sub-spacing gaps.
+The `poly.res` resistor-ID marker still covers only the body.
 
 On those layers every drawn cut is clamped **down** to the fixed size, about
 its own centre, *inside* the unchanged 0.22 µm-derived contact region —

@@ -304,6 +304,57 @@ _GEOMETRY_SOURCES = ("routed", "placement_estimate")
 #: section).
 _WIRE_LOAD_MODES = ("top", "enclosed", "segmented")
 
+#: Issue #2740: brackets the per-port I/O-delay port-existence/direction
+#: check (:func:`_port_check_lines`). One ``<side>\t<port>\t<problem>`` row
+#: per failing ``constraints.input_delays``/``output_delays`` key; an empty
+#: block means every key named exactly one port of an allowed direction.
+_PORT_CHECK_BEGIN = "===KLT_STA_PORT_CHECK_BEGIN==="
+_PORT_CHECK_END = "===KLT_STA_PORT_CHECK_END==="
+#: Exit status the generated script uses to stop a session whose per-port
+#: map named a missing/ambiguous/wrong-direction port, *before* any timing is
+#: reported -- so a typo can never silently constrain no ports.
+_PORT_CHECK_EXIT_CODE = 3
+
+#: Issue #2740: brackets the per-path-group worst setup/hold path records
+#: (:func:`_worst_path_lines`), one
+#: ``PATH\t<max|min>\t<check_role>\t<slack_s>\t<startpoint>\t<endpoint>`` row
+#: per path group per side, or a single ``ERROR\t<message>`` row when the
+#: engine's path introspection itself failed.
+_WORST_PATHS_BEGIN = "===KLT_STA_WORST_PATHS_BEGIN==="
+_WORST_PATHS_END = "===KLT_STA_WORST_PATHS_END==="
+
+#: OpenSTA ``PathEnd::checkRole()`` names -> this command's ``check_type``
+#: values. Verified live (OpenROAD ``openroad/orfs:latest`` image, 2026-10-10)
+#: for ``setup``, ``hold``, ``recovery``, ``removal``, ``clock gating
+#: setup``, ``clock gating hold`` and ``output setup``; ``output hold``,
+#: ``latch setup`` and ``latch hold`` are the remaining OpenSTA
+#: ``TimingRole`` names a path end can carry. Any role not listed here is
+#: reported as ``check_type: "unknown"`` (with the engine's own spelling kept
+#: in ``engine_check_role``) -- never guessed into a setup/hold bucket.
+_CHECK_ROLE_TYPES = {
+    "setup": "setup",
+    "hold": "hold",
+    "recovery": "recovery",
+    "removal": "removal",
+    "clock gating setup": "clock_gating_setup",
+    "clock gating hold": "clock_gating_hold",
+    "output setup": "output_setup",
+    "output hold": "output_hold",
+    "latch setup": "latch_setup",
+    "latch hold": "latch_hold",
+}
+
+#: Largest |path slack - aggregate WNS| (ns) still treated as "the same
+#: number": the aggregate comes from ``report_worst_slack_metric`` (printed
+#: to 6 decimals in the engine's time unit) while the path slack is the
+#: engine's own full-precision value in seconds.
+_SLACK_CONSISTENCY_TOL_NS = 1e-4
+
+#: The direction strings OpenSTA's ``get_property <port> direction`` may
+#: return that a per-port input/output delay may be applied to.
+_INPUT_PORT_DIRECTIONS = ("input", "inout", "bidirect")
+_OUTPUT_PORT_DIRECTIONS = ("output", "inout", "bidirect")
+
 
 class PostRouteStaError(Exception):
     """Raised when a standalone STA run cannot be completed: a missing/
@@ -445,6 +496,9 @@ def run_sta(
         input_delay_ns,
         output_delay_ns,
     ) = _validate_constraints(request["constraints"])
+    input_delays, output_delays = _validate_port_delay_maps(
+        request["constraints"], clock_port
+    )
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
         request["constraints"], has_verilog
     )
@@ -500,6 +554,8 @@ def run_sta(
             clock_period_ns=clock_period_ns,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            input_delays=input_delays,
+            output_delays=output_delays,
             spef_path=spef_path,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
@@ -521,6 +577,8 @@ def run_sta(
         clock_period_ns=clock_period_ns,
         input_delay_ns=input_delay_ns,
         output_delay_ns=output_delay_ns,
+        input_delays=input_delays,
+        output_delays=output_delays,
         spef_path=spef_path,
         wire_load_model=wire_load_model,
         wire_load_mode=wire_load_mode,
@@ -588,6 +646,8 @@ def run_sta(
         "timing_status": corner_fields["timing_status"],
         "setup_violation_count": corner_fields["setup_violation_count"],
         "hold_violation_count": corner_fields["hold_violation_count"],
+        "worst_setup_path": corner_fields["worst_setup_path"],
+        "worst_hold_path": corner_fields["worst_hold_path"],
         "clock_skew_ns": corner_fields["clock_skew_ns"],
         "estimated_power_mw": corner_fields["estimated_power_mw"],
         "provenance": provenance,
@@ -613,6 +673,8 @@ def _run_corner_session(
     clock_period_ns: float,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
+    input_delays: dict[str, dict[str, float]] | None,
+    output_delays: dict[str, dict[str, float]] | None,
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
@@ -669,6 +731,8 @@ def _run_corner_session(
             spef_net_names=spef_net_names,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            input_delays=input_delays,
+            output_delays=output_delays,
         )
     else:
         spef_net_names = None
@@ -685,11 +749,19 @@ def _run_corner_session(
             wire_load_mode=wire_load_mode,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            input_delays=input_delays,
+            output_delays=output_delays,
         )
     _write_script(script_path, lines)
 
     completed = _run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
     with completed.diagnostics(PostRouteStaError):
+        # Issue #2740: a rejected per-port map key stops the session before
+        # any timing is reported -- surface that as the actionable request
+        # error it is, ahead of the generic engine-failure message.
+        port_errors = _parse_port_check_errors(completed.stdout or "")
+        if port_errors:
+            raise PostRouteStaError(_port_check_error_message(port_errors))
         if completed.returncode != 0:
             raise PostRouteStaError(_engine_error_message(completed))
 
@@ -708,6 +780,9 @@ def _run_corner_session(
     fmax_hz = metrics.get("timing__fmax")
     power_w = metrics.get("power__total")
     clock_skew = metrics.get("clock__skew__setup")
+    worst_setup_path, worst_hold_path = _worst_paths(
+        completed.stdout or "", worst_slack, worst_hold_slack
+    )
 
     corner_fields: dict[str, Any] = {
         "engine_log": completed.engine_log,
@@ -723,6 +798,10 @@ def _run_corner_session(
         "timing_status": _timing_status((worst_slack, worst_hold_slack)),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
+        # Additive fields (issue #2740): identity of the worst setup-side /
+        # hold-side path end this session found -- see `_worst_path_record`.
+        "worst_setup_path": worst_setup_path,
+        "worst_hold_path": worst_hold_path,
         "clock_skew_ns": round(clock_skew, 5) if clock_skew is not None else None,
         "estimated_power_mw": (
             round(power_w * 1000, 4) if power_w is not None else None
@@ -754,6 +833,8 @@ def _run_multi_corner(
     clock_period_ns: float,
     input_delay_ns: float | None,
     output_delay_ns: float | None,
+    input_delays: dict[str, dict[str, float]] | None,
+    output_delays: dict[str, dict[str, float]] | None,
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
@@ -811,6 +892,8 @@ def _run_multi_corner(
             clock_period_ns=clock_period_ns,
             input_delay_ns=input_delay_ns,
             output_delay_ns=output_delay_ns,
+            input_delays=input_delays,
+            output_delays=output_delays,
             spef_path=spef_path,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
@@ -1095,6 +1178,126 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
     return float(value)
 
 
+def _is_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value == value  # NaN
+        and value not in (float("inf"), float("-inf"))
+    )
+
+
+def _validate_port_delay_maps(
+    constraints: dict[str, Any], clock_port: str
+) -> tuple[dict[str, dict[str, float]] | None, dict[str, dict[str, float]] | None]:
+    """``constraints.input_delays``/``.output_delays`` (issue #2740):
+    optional per-port, per-bound I/O delay maps. Returns ``(input_delays,
+    output_delays)``, each ``None`` when the field is omitted *or* empty
+    (an empty map constrains nothing, so it reproduces the scalar-only
+    generated Tcl byte-for-byte).
+
+    Each map is ``{"<literal port name>": {"min_ns": n, "max_ns": n}}``
+    with both bounds independently optional but at least one required. A
+    supplied bound is never copied to the other side: an entry with only
+    ``min_ns`` constrains only the min (hold-side) arrival of that port, and
+    its max side stays unconstrained -- the scalar default does **not**
+    fill it in, because an explicit entry replaces the scalar default for
+    that port entirely.
+
+    Unlike the legacy scalars (non-negative), per-port bounds may be
+    negative (a boundary reference point can legitimately sit after the
+    launching edge); they must still be finite, non-boolean numbers, and
+    ``min_ns <= max_ns`` when both are given.
+
+    Keys are literal port (or single bus-bit) names -- never Tcl, never a
+    wildcard pattern. Existence and direction can only be checked against
+    the loaded design, so they are verified inside the engine session
+    (:func:`_port_check_lines`); the clock port is rejected here, since
+    ``constraints.clock_port`` already names it.
+    """
+    return (
+        _validate_port_delay_map(constraints, "input", clock_port),
+        _validate_port_delay_map(constraints, "output", clock_port),
+    )
+
+
+def _validate_port_delay_map(
+    constraints: dict[str, Any], which: str, clock_port: str
+) -> dict[str, dict[str, float]] | None:
+    """Validate one of ``constraints.{input,output}_delays`` (see
+    :func:`_validate_port_delay_maps`)."""
+    field = f"request.constraints.{which}_delays"
+    value = constraints.get(f"{which}_delays")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise PostRouteStaError(
+            f"{field} must be a JSON object mapping port names to "
+            '{"min_ns": ..., "max_ns": ...} entries'
+        )
+    parsed: dict[str, dict[str, float]] = {}
+    for port, entry in value.items():
+        _check_port_delay_key(field, which, port, clock_port)
+        parsed[port] = _parse_port_delay_entry(field, port, entry)
+    return parsed or None
+
+
+def _check_port_delay_key(field: str, which: str, port: str, clock_port: str) -> None:
+    """Reject a malformed port-name key of an I/O delay map."""
+    if not port or port != port.strip():
+        raise PostRouteStaError(
+            f"{field} keys must be non-empty port names without "
+            f"leading/trailing whitespace (got {port!r})"
+        )
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
+        raise PostRouteStaError(f"{field} key {port!r} contains a control character")
+    if which == "input" and port == clock_port:
+        raise PostRouteStaError(
+            f"{field} must not name the clock port {port!r} -- "
+            "clock inputs are excluded from input delays"
+        )
+
+
+def _parse_port_delay_entry(field: str, port: str, entry: Any) -> dict[str, float]:
+    """Validate one ``{"min_ns": n, "max_ns": n}`` entry of an I/O delay map."""
+    if not isinstance(entry, dict):
+        raise PostRouteStaError(
+            f"{field}[{port!r}] must be a JSON object with 'min_ns' and/or 'max_ns'"
+        )
+    unknown = sorted(set(entry) - {"min_ns", "max_ns"})
+    if unknown:
+        raise PostRouteStaError(
+            f"{field}[{port!r}] has unknown key(s) "
+            + ", ".join(repr(k) for k in unknown)
+            + " -- only 'min_ns' and 'max_ns' are accepted"
+        )
+    if not entry:
+        raise PostRouteStaError(
+            f"{field}[{port!r}] is empty -- give 'min_ns', 'max_ns', or both"
+        )
+    bounds: dict[str, float] = {}
+    for bound in ("min_ns", "max_ns"):
+        if bound not in entry:
+            continue
+        bound_value = entry[bound]
+        if not _is_finite_number(bound_value):
+            raise PostRouteStaError(
+                f"{field}[{port!r}].{bound} must be a finite number "
+                f"(got {bound_value!r})"
+            )
+        bounds[bound] = float(bound_value)
+    if (
+        "min_ns" in bounds
+        and "max_ns" in bounds
+        and bounds["min_ns"] > bounds["max_ns"]
+    ):
+        raise PostRouteStaError(
+            f"{field}[{port!r}].min_ns ({bounds['min_ns']}) must not "
+            f"exceed max_ns ({bounds['max_ns']})"
+        )
+    return bounds
+
+
 def _validate_corners(value: Any) -> list[str] | None:
     """Optional ``request.pdk.corners`` (issue #1871) -- the additive,
     multi-corner alternative to the scalar ``request.pdk.corner``: a list of
@@ -1318,6 +1521,185 @@ def _io_delay_lines(
     return lines
 
 
+_TCL_SPECIAL = frozenset(' \t\r\n\\"$[]{};#')
+
+
+def _tcl_literal(text: str) -> str:
+    """Backslash-quote ``text`` into one literal Tcl word: no word
+    splitting, no ``$``/``[...]``/backslash substitution, no brace
+    matching. Control characters never reach here
+    (:func:`_validate_port_delay_maps` rejects them), so only the
+    Tcl-special printable characters need escaping. Same idiom as
+    ``lvs_netgen.py``'s ``_tcl_word``, kept module-local per this module's
+    self-contained convention."""
+    return "".join("\\" + ch if ch in _TCL_SPECIAL else ch for ch in text)
+
+
+def _request_io_delay_lines(
+    clock_port: str,
+    input_delay_ns: float | None,
+    output_delay_ns: float | None,
+    input_delays: dict[str, dict[str, float]] | None,
+    output_delays: dict[str, dict[str, float]] | None,
+) -> list[str]:
+    """All I/O-delay Tcl for one session. With no per-port map this is
+    exactly :func:`_io_delay_lines` (the scalar-only contract, byte-for-byte
+    the same Tcl as before issue #2740); otherwise
+    :func:`_port_check_lines` followed by :func:`_port_io_delay_lines`."""
+    if not input_delays and not output_delays:
+        return _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    return _port_check_lines(input_delays, output_delays) + _port_io_delay_lines(
+        clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
+    )
+
+
+def _port_check_lines(
+    input_delays: dict[str, dict[str, float]] | None,
+    output_delays: dict[str, dict[str, float]] | None,
+) -> list[str]:
+    """Verify every per-port map key against the loaded design before any
+    delay is applied (issue #2740): each must match **exactly one** port
+    whose full name equals the key literally (so a wildcard, a whole bus
+    name, or a near-miss is rejected rather than expanded), with a direction
+    the map allows. Failures are printed between
+    :data:`_PORT_CHECK_BEGIN`/:data:`_PORT_CHECK_END` and the session exits
+    with :data:`_PORT_CHECK_EXIT_CODE`, so a bad key is an actionable error
+    -- never a request that silently constrains nothing."""
+    entries: list[str] = []
+    for side, mapping, allowed in (
+        ("input", input_delays, _INPUT_PORT_DIRECTIONS),
+        ("output", output_delays, _OUTPUT_PORT_DIRECTIONS),
+    ):
+        for port in mapping or {}:
+            entries.append(f"{side} {_tcl_literal(port)} {{{' '.join(allowed)}}}")
+    return [
+        "proc klt_port_problem {klt_name klt_allowed} {",
+        "    set klt_ports [get_ports -quiet $klt_name]",
+        "    set klt_count [llength $klt_ports]",
+        "    if {$klt_count == 0} { return not_found }",
+        '    if {$klt_count != 1} { return "matches_${klt_count}_ports" }',
+        "    set klt_port [lindex $klt_ports 0]",
+        "    if {[get_full_name $klt_port] ne $klt_name} { return not_found }",
+        "    set klt_dir [get_property $klt_port direction]",
+        "    if {[lsearch -exact $klt_allowed $klt_dir] < 0} {",
+        '        return "direction_$klt_dir"',
+        "    }",
+        '    return ""',
+        "}",
+        "set klt_port_errors {}",
+        "foreach {klt_side klt_name klt_allowed} [list " + " ".join(entries) + "] {",
+        "    set klt_problem [klt_port_problem $klt_name $klt_allowed]",
+        '    if {$klt_problem ne ""} {',
+        "        lappend klt_port_errors [list $klt_side $klt_name $klt_problem]",
+        "    }",
+        "}",
+        f'puts "{_PORT_CHECK_BEGIN}"',
+        "foreach klt_err $klt_port_errors {",
+        '    puts "[lindex $klt_err 0]\\t[lindex $klt_err 1]\\t[lindex $klt_err 2]"',
+        "}",
+        f'puts "{_PORT_CHECK_END}"',
+        "if {[llength $klt_port_errors] > 0} {",
+        f"    exit {_PORT_CHECK_EXIT_CODE}",
+        "}",
+    ]
+
+
+def _port_io_delay_lines(
+    clock_port: str,
+    input_delay_ns: float | None,
+    output_delay_ns: float | None,
+    input_delays: dict[str, dict[str, float]] | None,
+    output_delays: dict[str, dict[str, float]] | None,
+) -> list[str]:
+    """Per-port ``set_input_delay``/``set_output_delay`` (issue #2740).
+
+    Precedence: a scalar (``input_delay_ns``/``output_delay_ns``) is the
+    default for every port **absent** from the corresponding map -- the
+    default is applied to that filtered set only, so it is never written to
+    a mapped port and later partially overwritten. Each mapped port then gets
+    exactly the bounds its entry gives (``-min``/``-max``), and nothing for a
+    bound it omits. The clock port is excluded from the input default
+    exactly as in :func:`_io_delay_lines`. ``all_inputs``/``all_outputs``
+    enumerate bit-level ports (verified live), so a mapped bus bit
+    (``b[0]``) is excluded from the default individually while its sibling
+    bits keep it.
+    """
+    lines: list[str] = []
+    sides = (
+        ("input", "set_input_delay", input_delay_ns, input_delays, "[all_inputs]"),
+        ("output", "set_output_delay", output_delay_ns, output_delays, "[all_outputs]"),
+    )
+    for side, command, scalar, mapping, all_ports in sides:
+        mapping = mapping or {}
+        if scalar is not None:
+            mapped = " ".join(_tcl_literal(port) for port in mapping)
+            if side == "input":
+                lines += [
+                    f"set klt_clock_port [get_ports {clock_port}]",
+                    "set klt_input_candidates "
+                    "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
+                ]
+                candidates = "$klt_input_candidates"
+            else:
+                candidates = all_ports
+            lines += [
+                f"set klt_{side}_mapped [list {mapped}]",
+                f"set klt_{side}_default_ports {{}}",
+                f"foreach klt_port {candidates} {{",
+                f"    if {{[lsearch -exact $klt_{side}_mapped "
+                "[get_full_name $klt_port]] < 0} {",
+                f"        lappend klt_{side}_default_ports $klt_port",
+                "    }",
+                "}",
+                f"if {{[llength $klt_{side}_default_ports] > 0}} {{",
+                f"    {command} {scalar} -clock {clock_port} $klt_{side}_default_ports",
+                "}",
+            ]
+        for port, bounds in mapping.items():
+            for bound, flag in (("min_ns", "-min"), ("max_ns", "-max")):
+                if bound in bounds:
+                    lines.append(
+                        f"{command} {flag} {bounds[bound]!r} -clock {clock_port} "
+                        f"[get_ports {_tcl_literal(port)}]"
+                    )
+    return lines
+
+
+def _worst_path_lines() -> list[str]:
+    """Per-path-group worst setup (``max``) and hold (``min``) path ends,
+    marker-delimited (issue #2740).
+
+    ``find_timing_paths -group_path_count 1 -endpoint_path_count 1`` returns
+    the single worst constrained path end of every path group (data clock
+    groups, ``asynchronous``, ``gated clock``, ...); every constrained path
+    end belongs to exactly one group, so the minimum over these records is
+    the same population ``report_worst_slack_metric`` reduces over --
+    :func:`_worst_path_record` re-checks that equality per run rather than
+    assuming it. ``check_role`` is OpenSTA's own name for the check at the
+    endpoint (``setup``, ``recovery``, ``clock gating hold``, ...), so
+    recovery/removal are never relabelled as data setup/hold. Output is
+    bounded by the number of path groups, not design size. The whole query
+    is ``catch``-wrapped: an engine without these commands yields an
+    ``ERROR`` row (reported as ``status: "unavailable"``), never a fabricated
+    path."""
+    return [
+        f'puts "{_WORST_PATHS_BEGIN}"',
+        "if {[catch {",
+        "    foreach klt_path_side {max min} {",
+        "        foreach klt_pe [find_timing_paths -path_delay $klt_path_side "
+        "-group_path_count 1 -endpoint_path_count 1] {",
+        '            puts "PATH\\t$klt_path_side\\t[$klt_pe check_role]\\t'
+        "[$klt_pe slack]\\t[get_full_name [get_property $klt_pe startpoint]]\\t"
+        '[get_full_name [get_property $klt_pe endpoint]]"',
+        "        }",
+        "    }",
+        "} klt_worst_path_error]} {",
+        '    puts "ERROR\\t[string map [list \\n { } \\t { }] $klt_worst_path_error]"',
+        "}",
+        f'puts "{_WORST_PATHS_END}"',
+    ]
+
+
 def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     """The net-name-correlation sanity check (``place_and_route.py``'s
     ``_spef_sta_script_lines`` docstring explains the rationale in full):
@@ -1447,6 +1829,8 @@ def _sta_script_lines(
     spef_net_names: list[str] | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    input_delays: dict[str, dict[str, float]] | None = None,
+    output_delays: dict[str, dict[str, float]] | None = None,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
     this verb runs: load the LEF/DEF pair directly (no netlist, no
@@ -1473,7 +1857,9 @@ def _sta_script_lines(
         f"read_liberty {liberty_path}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
-    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += _request_io_delay_lines(
+        clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
+    )
     if spef_path is not None:
         lines += _spef_net_check_lines(spef_net_names or [])
         lines += _delay_fingerprint_lines(_DELAY_PRE_BEGIN, _DELAY_PRE_END)
@@ -1492,6 +1878,7 @@ def _sta_script_lines(
         "report_clock_skew_metric -setup",
     ]
     lines += _violation_count_lines()
+    lines += _worst_path_lines()
     return lines
 
 
@@ -1508,6 +1895,8 @@ def _sta_netlist_script_lines(
     wire_load_mode: str | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    input_delays: dict[str, dict[str, float]] | None = None,
+    output_delays: dict[str, dict[str, float]] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
     session (issue #1825): no DEF, no placement, no routing. Links a
@@ -1551,7 +1940,9 @@ def _sta_netlist_script_lines(
         f"link_design {hdl_toplevel}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
-    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+    lines += _request_io_delay_lines(
+        clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
+    )
     if wire_load_mode is not None:
         lines.append(f"set_wire_load_mode {wire_load_mode}")
     if wire_load_model is not None:
@@ -1566,6 +1957,7 @@ def _sta_netlist_script_lines(
         "report_clock_skew_metric -setup",
     ]
     lines += _violation_count_lines()
+    lines += _worst_path_lines()
     return lines
 
 
@@ -1805,4 +2197,171 @@ def _parse_parasitic_annotation(stdout: str) -> tuple[int | None, int | None]:
     return (
         int(unannotated_match.group(1)) if unannotated_match else None,
         int(partial_match.group(1)) if partial_match else None,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Per-port I/O-delay check + worst-path identity parsing (issue #2740)
+# --------------------------------------------------------------------------- #
+
+
+def _parse_port_check_errors(stdout: str) -> list[tuple[str, str, str]]:
+    """``(side, port, problem)`` rows from :func:`_port_check_lines`' block,
+    or ``[]`` when the block is absent or empty."""
+    block = _extract_block(stdout, _PORT_CHECK_BEGIN, _PORT_CHECK_END)
+    if block is None:
+        return []
+    rows: list[tuple[str, str, str]] = []
+    for line in block.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3:
+            rows.append((parts[0], parts[1], parts[2]))
+    return rows
+
+
+def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
+    details = []
+    for side, port, problem in rows:
+        field = f"constraints.{side}_delays[{port!r}]"
+        if problem == "not_found":
+            details.append(f"{field}: no port with exactly this name in the design")
+        elif problem.startswith("matches_"):
+            count = problem[len("matches_") :].split("_", 1)[0]
+            details.append(
+                f"{field}: matches {count} ports -- name a single port or "
+                "an individual bus bit (e.g. 'data[3]'); keys are literal, "
+                "never wildcards or whole buses"
+            )
+        elif problem.startswith("direction_"):
+            direction = problem[len("direction_") :]
+            details.append(
+                f"{field}: port direction is '{direction}', not an {side} "
+                "-- move it to the other map or drop it"
+            )
+        else:
+            details.append(f"{field}: {problem}")
+    return "per-port I/O delay constraint(s) rejected: " + "; ".join(details)
+
+
+def _empty_path_record(status: str, reason: str | None) -> dict[str, Any]:
+    return {
+        "status": status,
+        "check_type": None,
+        "engine_check_role": None,
+        "startpoint": None,
+        "endpoint": None,
+        "slack_ns": None,
+        "consistent_with_aggregate": None,
+        "reason": reason,
+    }
+
+
+def _parse_worst_path_rows(
+    stdout: str,
+) -> tuple[dict[str, list[dict[str, Any]]] | None, str | None]:
+    """``({"max": [...], "min": [...]}, None)`` from
+    :func:`_worst_path_lines`' block, or ``(None, reason)`` when the block is
+    absent, reports an engine error, or carries a malformed ``PATH`` row.
+    Lines that are neither ``PATH`` nor ``ERROR`` rows (stray engine
+    warnings) are ignored -- they can never be mistaken for a path."""
+    block = _extract_block(stdout, _WORST_PATHS_BEGIN, _WORST_PATHS_END)
+    if block is None:
+        return None, "worst-path records absent from engine output"
+    rows: dict[str, list[dict[str, Any]]] = {"max": [], "min": []}
+    for line in block.splitlines():
+        if line.startswith("ERROR\t"):
+            return None, (
+                "engine path introspection failed: " + line[len("ERROR\t") :].strip()
+            )
+        if not line.startswith("PATH\t"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 6 or parts[1] not in rows or not all(parts[2:]):
+            return None, f"malformed worst-path record: {line!r}"
+        try:
+            slack_s = float(parts[3])
+        except ValueError:
+            return None, f"malformed worst-path slack: {line!r}"
+        if slack_s != slack_s or abs(slack_s) == float("inf"):
+            return None, f"non-finite worst-path slack: {line!r}"
+        rows[parts[1]].append(
+            {
+                "engine_check_role": parts[2],
+                "slack_ns": slack_s * 1e9,
+                "startpoint": parts[4],
+                "endpoint": parts[5],
+            }
+        )
+    return rows, None
+
+
+def _worst_path_record(
+    rows: list[dict[str, Any]], aggregate_ns: float | None
+) -> dict[str, Any]:
+    """The worst (minimum-slack) record among one side's per-group rows,
+    cross-checked against that side's aggregate WNS from the same session.
+
+    ``status``:
+
+    - ``"ok"`` -- a path was found and its slack equals the aggregate WNS
+      (within :data:`_SLACK_CONSISTENCY_TOL_NS`), or the aggregate was not
+      reported at all (``consistent_with_aggregate: null``).
+    - ``"no_paths"`` -- the engine found no constrained path on this side,
+      and the aggregate agrees (sentinel or absent). Identity fields null.
+    - ``"inconsistent"`` -- the path population and the aggregate WNS
+      disagree (no path but a real WNS, or a different slack). The record
+      is still the engine's real worst *found* path, but it must not be
+      read as the path that binds the aggregate.
+    """
+    aggregate_real = aggregate_ns is not None and abs(aggregate_ns) < 1e29
+    if not rows:
+        if aggregate_real:
+            record = _empty_path_record(
+                "inconsistent",
+                "engine reported no constrained path but an aggregate WNS of "
+                f"{aggregate_ns}",
+            )
+            record["consistent_with_aggregate"] = False
+            return record
+        return _empty_path_record("no_paths", None)
+    worst = min(rows, key=lambda row: row["slack_ns"])
+    role = worst["engine_check_role"]
+    record = {
+        "status": "ok",
+        "check_type": _CHECK_ROLE_TYPES.get(role, "unknown"),
+        "engine_check_role": role,
+        "startpoint": worst["startpoint"],
+        "endpoint": worst["endpoint"],
+        "slack_ns": round(worst["slack_ns"], 5),
+        "consistent_with_aggregate": None,
+        "reason": None,
+    }
+    if aggregate_ns is None:
+        return record
+    consistent = aggregate_real and (
+        abs(worst["slack_ns"] - aggregate_ns) <= _SLACK_CONSISTENCY_TOL_NS
+    )
+    record["consistent_with_aggregate"] = consistent
+    if not consistent:
+        record["status"] = "inconsistent"
+        record["reason"] = (
+            f"worst path slack {record['slack_ns']} ns differs from the "
+            f"aggregate WNS {aggregate_ns}"
+        )
+    return record
+
+
+def _worst_paths(
+    stdout: str, setup_ws: float | None, hold_ws: float | None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(worst_setup_path, worst_hold_path)`` for one session."""
+    rows, reason = _parse_worst_path_rows(stdout)
+    if rows is None:
+        return (
+            _empty_path_record("unavailable", reason),
+            _empty_path_record("unavailable", reason),
+        )
+    return (
+        _worst_path_record(rows["max"], setup_ws),
+        _worst_path_record(rows["min"], hold_ws),
     )

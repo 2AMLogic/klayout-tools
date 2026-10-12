@@ -2,6 +2,10 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-09
+
+- **Issue #2913** (closed): Champion: Merge-Risk Hold Digest
+
 ### 2026-10-08
 
 - **PR #2859**: release: klayout-tools 0.7.0

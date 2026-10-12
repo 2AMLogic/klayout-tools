@@ -1316,6 +1316,48 @@ def test_run_sim_batch_uploads_a_local_parallel_request_document(tmp_path, monke
     assert "remote" not in document
 
 
+def test_run_sim_batch_accepts_an_analysis_steps_request(tmp_path, monkeypatch):
+    """Issue #2482: an ordered `analysis_steps[]` request reaches the batch
+    fleet unchanged -- the sequence is request/deck text the worker's own
+    `klt sim` regenerates, so no caller-side post-processing is involved."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    uploaded: dict[str, str] = {}
+    real_open = open
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            with real_open(argv[-3], encoding="utf-8") as handle:
+                uploaded["request"] = handle.read()
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+
+    steps = [
+        {
+            "name": name,
+            "analysis": {"kind": "op", "args": ""},
+            "alter": {"Vdd": vdd},
+            "measurements": [{"name": "vout", "expr": "v(out)", "unit": "V"}],
+        }
+        for name, vdd in (("lo", 0.9), ("hi", 1.1))
+    ]
+    derived = [{"name": "sens", "expr": "(hi.vout - lo.vout) / 0.2"}]
+    request = _batch_request(tmp_path, analysis_steps=steps, measurements=derived)
+    request.pop("analysis")
+    _write_body(tmp_path)
+    sim.run_sim(str(_write_request(tmp_path, request)))
+
+    document = json.loads(uploaded["request"])
+    assert document["analysis_steps"] == steps
+    assert document["measurements"] == derived
+    assert "analysis" not in document
+    assert document["backend"] == "local-parallel"
+
+
 def test_run_sim_batch_report_is_structurally_identical_to_remote(
     tmp_path, monkeypatch
 ):

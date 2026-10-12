@@ -124,6 +124,7 @@ A request naming both, or neither, is a request error.
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). **Both required** — unlike `klt place-and-route` (where a clock is optional until `target_stage` reaches `"place"`), a standalone STA run has no meaning without one; there is no earlier stage to fall back to. |
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful). Omitted (the default) emits no `set_input_delay` line, leaving this command's generated Tcl byte-identical to before this field existed. Validated and emitted **here**, independently of `klt place-and-route` — this command can run standalone against an externally-produced DEF/netlist with no place-and-route request anywhere upstream, so nothing is inherited. See "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
+| `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. See "Per-port I/O delays and worst-path identity" below. |
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
 | `spef` | string \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. |
 | `geometry_source` | string \| omitted | In `def` mode (issue #1826): `"routed"` (the default, when omitted) declares `def` a fully-implemented, detailed-SPEF-eligible signoff geometry — this command's original and only behaviour. `"placement_estimate"` declares `def` a pre-route DEF from `klt place-and-route`'s `"place"`/`"cts"` stages (its own `unrouted_def_path` output) — nothing about this command's OpenSTA session construction actually changes (it is a plain `read_def` either way), but a placement-/CTS-stage DEF's parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so the resulting slack numbers are real but less accurate than the same fields on a routed DEF. Purely a caller-supplied label — a bare DEF file carries no stage provenance, so this command cannot infer it — echoed back verbatim as the response's own `geometry_source` field (see "Pre-route DEFs" below). Any other value is a request error in `def` mode. In `verilog` mode (issue #1825): this field is forced to `"netlist_estimate"` regardless of whether the request supplies it — omit it, or set it explicitly to `"netlist_estimate"`; any other explicit value is a request error. |
@@ -151,6 +152,16 @@ A request naming both, or neither, is a request error.
   "fmax_mhz": 512.3456,
   "setup_violation_count": 3,
   "hold_violation_count": 0,
+  "worst_setup_path": {
+    "status": "ok", "check_type": "setup", "engine_check_role": "setup",
+    "startpoint": "req_val", "endpoint": "_412_/D", "slack_ns": -0.15321,
+    "consistent_with_aggregate": true, "reason": null
+  },
+  "worst_hold_path": {
+    "status": "ok", "check_type": "hold", "engine_check_role": "hold",
+    "startpoint": "_398_/CLK", "endpoint": "_405_/D", "slack_ns": 0.03812,
+    "consistent_with_aggregate": true, "reason": null
+  },
   "clock_skew_ns": 0.0421,
   "estimated_power_mw": 11.6,
   "spef_annotation": null,
@@ -189,6 +200,7 @@ string" for the full enumeration and rationale.
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
 | `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
 | `setup_violation_count` / `hold_violation_count` | integer | Number of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group — not every enumerated timing path), counted over the **same timing-check families** the WNS/TNS fields above measure: setup side = data setup (`-max_delay`, incl. output-delay checks) + asynchronous **recovery** + inferred **clock-gating setup**; hold side = data hold (`-min_delay`) + asynchronous **removal** + inferred **clock-gating hold** (issue #2741). See "Violation counts: check families" below. |
+| `worst_setup_path` / `worst_hold_path` | object | Additive fields (issue #2740), present on every response and every `corners[]` entry. Identity of the worst setup-side / hold-side path end in this session: `{status, check_type, engine_check_role, startpoint, endpoint, slack_ns, consistent_with_aggregate, reason}`. `check_type` is one of `setup`, `hold`, `recovery`, `removal`, `clock_gating_setup`, `clock_gating_hold`, `output_setup`, `output_hold`, `latch_setup`, `latch_hold`, or `unknown`, so async recovery/removal is never reported as data setup/hold. `status` is `"ok"`, `"no_paths"`, `"unavailable"` or `"inconsistent"`. Identity fields are `null` unless a path was found. See "Per-port I/O delays and worst-path identity" below. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
@@ -513,15 +525,159 @@ derivation — this command emits byte-identical Tcl for the same field values,
 so a design constrained through `klt place-and-route` and re-analysed here
 gets the same constraints both times.
 
-Per-port delay maps and a full caller-supplied SDC passthrough (`read_sdc`,
-which would also cover false paths, multicycle paths and clock uncertainty) are
-deliberately **not** in scope here; both are tracked as follow-on work.
+Per-port delay maps are covered in the next section (issue #2740). A full
+caller-supplied SDC passthrough (`read_sdc`, which would also cover false
+paths, multicycle paths and clock uncertainty) is still **not** in scope.
 
 **Detect the sentinel mechanically.** Independent of any constraint the caller
 sets, `timing_status` reports `"constrained"` when every slack value in the
 response is a real measurement, `"unconstrained"` when any is the sentinel, and
 `null` when no slack metric was reported at all. Key a timing gate on that
 field rather than special-casing `1e+39` by value.
+
+## Per-port I/O delays and worst-path identity (issue #2740)
+
+The scalar `input_delay_ns`/`output_delay_ns` above put one delay on every
+port. That cannot express a **block-to-block boundary**: block A's flops drive
+block B's inputs on the same clock, and the check needs A's measured
+clock-to-q range on just those ports. Setting the small hold-side value
+globally also forces it onto unrelated ports, such as a bus driven from
+elsewhere or an async reset. The aggregate `worst_hold_slack_ns` then
+reports whichever unrelated check is worst.
+
+### Request: `constraints.input_delays` / `constraints.output_delays`
+
+```json
+"constraints": {
+  "clock_port": "clk",
+  "clock_period_ns": 2.0,
+  "input_delay_ns": 0.0,
+  "output_delay_ns": 0.1,
+  "input_delays": {
+    "a_in":   { "min_ns": 0.3,  "max_ns": 0.6 },
+    "b_in":   { "min_ns": 0.05, "max_ns": 1.2 },
+    "bus[1]": { "min_ns": -0.2 }
+  },
+  "output_delays": { "q_a": { "max_ns": 0.5 } }
+}
+```
+
+- **Bounds.** `min_ns` emits `set_input_delay -min` (or `set_output_delay
+  -min`), and `max_ns` emits the matching `-max` command. Each bound is
+  optional, but every entry needs at least one. **A missing bound is not
+  filled in.** An entry with only `min_ns` constrains that port's hold-side
+  arrival, and its setup-side arrival stays **unconstrained**: there is no
+  setup path from that port at all. Neither the other bound nor the scalar
+  default is copied into it. To constrain both sides, give both bounds.
+- **Values.** Values must be finite numbers. Booleans, `null`, strings, NaN
+  and infinity are rejected. Negative values are allowed, because a boundary
+  reference point can sit after the launching edge. When both bounds are
+  given, `min_ns <= max_ns`. The legacy scalars keep their existing
+  non-negative contract.
+- **Precedence.** A scalar is the default for every port **absent** from the
+  corresponding map. The default is applied to that filtered set only, so a
+  mapped port never receives the scalar, even on the side its entry omits.
+  Ports absent from the map with no scalar remain unconstrained, as before.
+  Clock inputs never receive an input delay, and naming
+  `constraints.clock_port` in `input_delays` is a request error.
+- **Literal names.** Keys are exact port names, never Tcl and never
+  patterns. Each key is backslash-quoted into the generated script, so
+  `[`, `$`, `{`, `"`, `;` and spaces are inert. Inside the engine session,
+  each key must match **exactly one** port whose full name equals the key.
+  A scalar port or a single bus bit (`data[3]`) qualifies, while a whole bus
+  (`data`, which matches every bit) or a wildcard (`d*`) is rejected. The
+  port's direction must suit the map: `input`/`inout` for `input_delays`,
+  `output`/`inout` for `output_delays`. A failing key stops the session
+  before any timing is reported, with an error such as:
+
+  ```text
+  per-port I/O delay constraint(s) rejected: constraints.input_delays['nope']: no port with exactly this name in the design; constraints.input_delays['bus']: matches 2 ports -- name a single port or an individual bus bit ...; constraints.output_delays['a_in']: port direction is 'input', not an output ...
+  ```
+
+- **Both modes, every corner.** `def` and `verilog` mode emit the same
+  Tcl, and every `pdk.corners` session repeats it unchanged.
+- **Scalar-only requests are unchanged.** If both maps are omitted or `{}`,
+  the generated Tcl is byte-identical to the scalar-only Tcl above.
+
+### Response: `worst_setup_path` / `worst_hold_path`
+
+Every response gains two additive objects. On a `pdk.corners` response, each
+`corners[]` entry carries its own pair from its own session:
+
+```json
+"worst_hold_path": {
+  "status": "ok",
+  "check_type": "removal",
+  "engine_check_role": "removal",
+  "startpoint": "rst_n",
+  "endpoint": "ff_a/RESET_B",
+  "slack_ns": -0.29559,
+  "consistent_with_aggregate": true,
+  "reason": null
+}
+```
+
+**How the path is found.** In the same session, `find_timing_paths
+-path_delay max|min -group_path_count 1 -endpoint_path_count 1` returns the
+worst path end of every path group: the clock groups, `asynchronous` and
+`gated clock`. The record is the minimum-slack path end among them. Every
+constrained path end belongs to exactly one group, so this is the population
+`report_worst_slack_metric` reduces over. Each run re-checks that claim:
+`consistent_with_aggregate` is `true` only when `slack_ns` equals the
+aggregate `worst_slack_ns` / `worst_hold_slack_ns` within 1e-4 ns.
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `"ok"`: a path was found, and it agrees with the aggregate (or no aggregate was reported, in which case `consistent_with_aggregate` is `null`). `"no_paths"`: no constrained path on this side, matching an unconstrained (`1e+39`) or absent aggregate. `"unavailable"`: the engine's path introspection failed or its output was missing or malformed, so every identity field is `null` and `reason` says why. `"inconsistent"`: the path population and the aggregate disagree. The record is still the engine's real worst *found* path, but do **not** read it as the path that sets the aggregate WNS. |
+| `check_type` | The normalized check at the endpoint: `setup`, `hold`, `recovery`, `removal`, `clock_gating_setup`, `clock_gating_hold`, `output_setup`, `output_hold`, `latch_setup` or `latch_hold`. Any other engine role is reported as `unknown`, never guessed. Recovery and removal are async-reset checks, not data setup/hold. |
+| `engine_check_role` | OpenSTA's own `check_role` spelling, kept verbatim. |
+| `startpoint` / `endpoint` | The engine's full names for the path's start pin or port and its end pin or port. Output-delay checks end at the port, for example `q_a`. |
+| `slack_ns` | Slack of that path in ns, rounded to 5 decimals like the aggregate fields. |
+| `consistent_with_aggregate` | `true` / `false` / `null`, as described above. |
+| `reason` | A human-readable reason when `status` is not `"ok"`. Otherwise `null`. |
+
+The aggregate fields (`worst_slack_ns`, `worst_hold_slack_ns`, the TNS
+fields, both violation counts and `timing_status`) are unchanged.
+Violation-count semantics are covered in "Violation counts: check families"
+above.
+
+### Boundary example
+
+Here is the request above on a small netlist, `tests/fixtures/sta_worst_paths/`:
+`a_in`/`b_in` drive data flops, `rst_n` drives the `RESET_B` of `ff_a`, and
+`bus[0..1]` drive two flops. `rst_n` and `bus[0]` take the `0.0` scalar
+default. At `tt_025C_1v80` the response reports:
+
+- `worst_hold_path`: `removal`, `rst_n → ff_a/RESET_B`, `-0.29559` ns. The
+  worst hold-side check is the async-reset removal check, not a boundary
+  data port.
+- `worst_setup_path`: `setup`, `b_in → ff_b/D`, `0.69875` ns. This is the
+  boundary port with the large `max_ns`.
+- `hold_violation_count: 2`, meaning the removal check plus the `bus[1]`
+  data hold driven by its `-0.2` min-only delay.
+
+These values were compared against direct engine queries
+(`find_timing_paths -from [get_ports X]`) with the same constraints written
+as plain SDC. Those queries show `a_in` hold `+0.33` ns and `b_in` hold
+`+0.08` ns, which are the boundary ports' own margins. They also show no
+setup path at all from `bus[1]` (min-only) and no hold check on `q_a`
+(max-only).
+
+### What this is not
+
+- **Not a selected-port query.** The records give the identity of the
+  *global* worst setup and hold path end. They explain which check sets the
+  aggregate, but they do not answer "what is the hold slack from port X".
+  When an unrelated check is worse, as in the example, the boundary port's
+  own margin is not in the response. Per-port slack queries are tracked
+  separately in #3042.
+- **Not a completeness proof.** A port left out of a map with no scalar
+  default stays unconstrained, and a `min_ns`-only entry leaves the setup
+  side unconstrained. Neither produces a path record, so a clean
+  `worst_*_path` does not mean every port was constrained.
+- **Not SDC.** Only one clock and only `set_input_delay`/`set_output_delay`
+  are supported: there are no false or multicycle paths, no clock
+  uncertainty, and no `read_sdc`.
 
 ## Pre-route DEFs (`geometry_source`, issue #1826)
 

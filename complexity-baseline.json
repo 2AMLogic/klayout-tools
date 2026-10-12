@@ -195,11 +195,6 @@
     },
     {
       "file": "src/klayout_tools/extract.py",
-      "function": "_build_mom_capacitor_extractor",
-      "complexity": 11
-    },
-    {
-      "file": "src/klayout_tools/extract.py",
       "function": "_detect_diode_substrate_label_divergence",
       "complexity": 19
     },
@@ -207,11 +202,6 @@
       "file": "src/klayout_tools/extract.py",
       "function": "_extract_netlist",
       "complexity": 120
-    },
-    {
-      "file": "src/klayout_tools/extract.py",
-      "function": "_resolve_resistors",
-      "complexity": 15
     },
     {
       "file": "src/klayout_tools/extract.py",
@@ -247,6 +237,16 @@
       "file": "src/klayout_tools/extract_parasitics.py",
       "function": "_inject_parasitics",
       "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/extract_passive_regions.py",
+      "function": "_build_mom_capacitor_extractor",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/extract_passive_regions.py",
+      "function": "_resolve_resistors",
+      "complexity": 15
     },
     {
       "file": "src/klayout_tools/extract_report.py",

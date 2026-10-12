@@ -77,6 +77,18 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
     print(f"{indent}fmax_mhz: {fields['fmax_mhz']}")
     print(f"{indent}setup_violation_count: {fields['setup_violation_count']}")
     print(f"{indent}hold_violation_count: {fields['hold_violation_count']}")
+    for key in ("worst_setup_path", "worst_hold_path"):
+        path = fields.get(key)
+        if not path:
+            continue
+        if path.get("startpoint") is None:
+            print(f"{indent}{key}: {path.get('status')}")
+        else:
+            print(
+                f"{indent}{key}: {path['check_type']} {path['startpoint']} -> "
+                f"{path['endpoint']} slack_ns={path['slack_ns']} "
+                f"({path['status']})"
+            )
     print(f"{indent}clock_skew_ns: {fields['clock_skew_ns']}")
     print(f"{indent}estimated_power_mw: {fields['estimated_power_mw']}")
 

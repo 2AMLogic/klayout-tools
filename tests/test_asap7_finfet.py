@@ -391,6 +391,8 @@ def test_cli_json_success_uses_shared_envelope(tmp_path, capsys):
         {"parasitics": True},
         {"abstract_cell_patterns": ("X*",)},
         {"pdk_variant": "asap7"},
+        # Issue #2722: hierarchical emission is planar-only in increment 1.
+        {"hierarchical_cells": ("STAGE",)},
     ],
 )
 def test_planar_only_options_are_refused_by_name(tmp_path, kwargs):

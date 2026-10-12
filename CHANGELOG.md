@@ -14,10 +14,79 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt synthesize` memory-mapping evidence** (issue #2745, part of #2281):
+  the response gains two additive, always-present fields. `memory_mapping`
+  reports per module definition whether inferred memories were
+  `lowered_to_logic`, `optimized_away` before lowering, `surviving`, `mixed`
+  or `indeterminate`. It is derived from `stat` counts at elaboration and
+  before `memory_map`, captured by a separate side Yosys invocation
+  (`<top>_memory_evidence.ys`), plus the production final stats.
+  `blackbox_modules` lists surviving `blackbox`/`whitebox` modules, whose area
+  is not in `area_um2`. The production script, netlist and metrics are
+  unchanged. An evidence failure yields `indeterminate`, never a failed run.
+  `schema_version` stays 2.
+
+- **`scripts/fetch-ihp-sg13cmos5l.sh` repointed to IHP-Open-PDK** (issue
+  #2720): the standalone `IHP-GmbH/ihp-sg13cmos5l` repo was archived on
+  2026-09-23, so the script now fetches the `ihp-sg13cmos5l/` subtree of
+  `IHP-GmbH/IHP-Open-PDK` `dev`, pinned to commit `f7bca326` (after
+  `e8fba183`, which removed the prebuilt x86-64 `cap_cmom{i,f}.osdi`) with a
+  new fail-closed tarball sha256. The whole-repo tarball is ~400 MB (about
+  96 MB is extracted). The deck's own rule-provenance pin
+  (`_IHP_SG13CMOS5L_COMMIT`) is deliberately unchanged.
+
+- **`klt extract --hierarchical-cells`** (issue #2722, increment 1): an
+  opt-in, additive hierarchical SPICE mode. Named non-nested cells are written
+  as their own `.SUBCKT` (one definition per cell, one `X` per placement) with
+  the top circuit instantiating them, so `klt lvs`
+  `options.combine_devices_per_circuit` can scope the layout side. Request
+  field `hierarchical_cells`; additive `hierarchy` response block, present
+  only when the option is given. Flat output and JSON are unchanged when it is
+  omitted; `devices[]`/`nets[]` keep describing the flat extraction. Nesting
+  and combination with `--parasitics`/`--subcircuit`/`--abstract-cells` are
+  refused before any output is written (deferred to #2916).
+- **`klt yield-samples`** (issue #2563): a new verb that derives a `klt yield`
+  sample-set document from two unedited `klt sim --format json` Monte Carlo
+  reports — the nominal campaign and a seeded known-bad variant whose draw
+  becomes each matched measurement's `negative_control`. Both reports are
+  read with `klt yield`'s own sim-report reader; measurements match by exact
+  name and unit; the control is graded against the nominal limits, and its
+  screened `inconclusive` draws are folded into its `errored` count (same
+  denominator treatment), with the original counts disclosed. The flat
+  `--format json` payload (`schema_version: 1`, `measurements`, and an
+  additive `derivation` block carrying both source paths and SHA-256 hashes)
+  is consumed by `klt yield` unchanged. `klt signoff` hashing is unchanged:
+  a yield citation's pin is the derived document, and signoff does not
+  recursively re-hash the source campaigns — re-derive when either changes.
+  `klt yield`'s own inputs and outputs are unchanged.
+- **`klt sim` `analysis_steps[]`** (issue #2482): an additive, ngspice-only
+  alternative to the scalar `analysis` that runs several named solves in order
+  inside each corner's single deck. Each step has optional `alter` source
+  overrides and step-scoped measurements, reported as `<step>.<name>`. The
+  top-level `measurements[]` become derived expressions over `<step>.<name>`
+  results (e.g. a load regulation or a `d(out)/d(in)` sensitivity), graded
+  through the existing `limits`. Additive report fields:
+  `measurements[].step`, `measurements[].derived_from`, and
+  `corners[].steps[]`. New diagnostic codes: `step_failed` and
+  `derived_input_unavailable`. Duplicate, unknown, forward, and ambiguous
+  references are refused before dispatch, as are invalid overrides. The
+  sequence is refused for `engine: "xyce"` and with `options.waveforms` or
+  `--plot`. It works unchanged on `remote`/`batch`. `schema_version` is
+  unchanged, and scalar-`analysis` requests produce byte-identical decks and
+  reports. See `docs/cli/sim.md`, "Several solves per corner".
 - **`klt mcp serve`** (issue #2830): stdio MCP server, one tool per verb derived
   from the argparse registry, executing `klt <verb> --format json` in a
   subprocess. Optional `[mcp]` extra; fleet verbs hidden by default. See
   `docs/guides/mcp-server.md`.
+- `klt gen res_array` on sky130 `flavor: "high"`/`"xhigh"` now draws the
+  precision-poly end contacts as 0.19 um x 2.0 um slots (`licon.1b/c`) on
+  taller poly/`li1` head pads (issue #2449); R<i>_A/R<i>_B port `width_um`
+  reports the pad height for those flavours. The `psdm` and `rpm`/`urpm`
+  requires-masks now cover the whole unit, end heads included (`rpm.3` 0.2 um /
+  `rpm.4` 0.11 um enclosure, merged across neighbouring units), so the slots
+  sit inside upstream `sky130A_mr.drc`'s `prec_resistor` region. This also
+  clears the `rpm.1a` width violation; `poly.res` stays on the body only.
+  Other flavours and families are unchanged. Audit: no supported generator draws sg13g2/sg13cmos5l `TopVia1`.
 
 ## 0.7.0 (2026-10-08)
 
