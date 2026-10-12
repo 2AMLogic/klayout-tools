@@ -2729,6 +2729,17 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     return result
 
 
+def _strict_top_level_pin_count_replay_options(
+    echoed: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Issue #2845: re-assert ``strict_top_level_pin_count`` only when it was
+    on (``false`` is the default). A helper keeps
+    :func:`_reconstruct_lvs_request` within its complexity baseline."""
+    if echoed.get("strict_top_level_pin_count") is True:
+        return {"strict_top_level_pin_count": True}
+    return {}
+
+
 def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     """Best-effort reconstruction of a ``klt lvs`` request document from a
     previously committed report, for :func:`rerun_lvs_report`.
@@ -2889,8 +2900,7 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     # `_reconstruct_lvs_request` is complexity-baselined (see
     # `scripts/check_complexity_baseline.py`).
     options.update(_anchor_top_level_pins_replay_options(echoed))
-    if echoed.get("strict_top_level_pin_count") is True:
-        options["strict_top_level_pin_count"] = True
+    options.update(_strict_top_level_pin_count_replay_options(echoed))
     # Issue #2682: replay the echoed retry budget verbatim (never through the
     # boolean flag loop); a malformed recorded value stays malformed so the
     # parser rejects it rather than it becoming an unrelated valid budget.
