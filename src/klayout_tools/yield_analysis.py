@@ -136,6 +136,58 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
     return limits
 
 
+def _spec_row_from(raw: Any, name: str, where: str) -> str | None:
+    """Validate an optional per-measurement ``spec_row`` (issue #2840).
+
+    Echoed verbatim on the report entry; never graded.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise YieldError(f"{where}: measurement '{name}' spec_row must be a string")
+    return raw
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _provenance_from(raw: Any, where: str) -> dict[str, Any] | None:
+    """Validate the optional run-level ``provenance`` block (issue #2840).
+
+    Types are checked, values are never interpreted; the block is echoed
+    verbatim (unknown keys included) into ``source.provenance``. Named
+    ``provenance`` rather than ``campaign`` because ``klt yield-campaign``
+    already emits a differently-shaped top-level ``campaign`` object.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise YieldError(f"{where}: 'provenance' must be an object")
+    seed = raw.get("seed")
+    if seed is not None and not _is_int(seed):
+        raise YieldError(f"{where}: provenance.seed must be an integer")
+    rng = raw.get("rng")
+    if rng is not None and not isinstance(rng, str):
+        raise YieldError(f"{where}: provenance.rng must be a string")
+    draws = raw.get("draws_per_population")
+    if draws is not None and (not _is_int(draws) or draws <= 0):
+        raise YieldError(
+            f"{where}: provenance.draws_per_population must be a positive integer"
+        )
+    crn = raw.get("common_random_numbers")
+    if crn is not None and not isinstance(crn, bool):
+        raise YieldError(f"{where}: provenance.common_random_numbers must be a boolean")
+    matrix = raw.get("corner_matrix")
+    if matrix is not None and (
+        not isinstance(matrix, list) or not all(isinstance(c, str) for c in matrix)
+    ):
+        raise YieldError(
+            f"{where}: provenance.corner_matrix must be an array of strings"
+        )
+    return dict(raw)
+
+
 def _failed_unmeasurable_from(raw: Any, name: str, where: str) -> int:
     """Normalise a ``failed_unmeasurable`` count -- draws that left the
     regime a measurement is only defined in and produced no value (issue
@@ -512,6 +564,7 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 # way regardless of input shape -- same as the two blocks
                 # above.
                 "sampling": _sampling_from(entry.get("sampling"), name, "sim report"),
+                "spec_row": _spec_row_from(entry.get("spec_row"), name, "sim report"),
             }
         )
     return out
@@ -582,6 +635,7 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                     entry.get("analytic_cross_check"), name, "sample set"
                 ),
                 "sampling": _sampling_from(entry.get("sampling"), name, "sample set"),
+                "spec_row": _spec_row_from(entry.get("spec_row"), name, "sample set"),
             }
         )
     return out
@@ -626,6 +680,7 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
             "kind": "sim-report",
             "netlist": _source_netlist(doc.get("netlist")),
             "monte_carlo": mc,
+            "provenance": _provenance_from(doc.get("provenance"), "sim report"),
         }
         return "sim-report", measurements, source
 
@@ -634,7 +689,12 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
         return (
             "sample-set",
             measurements,
-            {"kind": "sample-set", "netlist": None, "monte_carlo": None},
+            {
+                "kind": "sample-set",
+                "netlist": None,
+                "monte_carlo": None,
+                "provenance": _provenance_from(doc.get("provenance"), "sample set"),
+            },
         )
 
     raise YieldError(
@@ -643,8 +703,10 @@ def _read_samples(path: str) -> tuple[str, list[dict[str, Any]], dict[str, Any]]
     )
 
 
-def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Read a spec-limits file into ``(per_measurement_limits, run_defaults)``."""
+def _read_spec(
+    path: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, str]]:
+    """Read a spec-limits file into ``(limits, run_defaults, spec_rows)``."""
     doc = _load_json(path, "limits")
     if not isinstance(doc, dict):
         raise YieldError(f"limits '{path}' must be a JSON object")
@@ -669,7 +731,16 @@ def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
         name: _limits_from(value, name, f"limits '{path}'")
         for name, value in raw.items()
     }
-    return limits, defaults
+    spec_rows: dict[str, str] = {}
+    for name, value in raw.items():
+        row = _spec_row_from(
+            value.get("spec_row") if isinstance(value, dict) else None,
+            name,
+            f"limits '{path}'",
+        )
+        if row is not None:
+            spec_rows[name] = row
+    return limits, defaults, spec_rows
 
 
 # --------------------------------------------------------------------------- #
@@ -701,8 +772,9 @@ def run_yield(
 
     spec_limits: dict[str, dict[str, Any]] = {}
     spec_defaults: dict[str, Any] = {}
+    spec_rows: dict[str, str] = {}
     if limits_path is not None:
-        spec_limits, spec_defaults = _read_spec(limits_path)
+        spec_limits, spec_defaults, spec_rows = _read_spec(limits_path)
 
     by_name = {e["name"]: e for e in entries}
     if measurements is not None:
@@ -719,6 +791,7 @@ def run_yield(
     run_target_yield = spec_defaults.get("target_yield")
     warnings: list[str] = []
     request_measurements: list[dict[str, Any]] = []
+    row_by_name: dict[str, str] = {}
     for entry in selected:
         name = entry["name"]
         limits = dict(entry["limits"])
@@ -740,6 +813,11 @@ def run_yield(
             )
             continue
         request_measurements.append({**entry, "limits": limits})
+        # spec_row is Python-side provenance: a --limits row wins over the
+        # sample document's, and it never reaches the native core.
+        row = spec_rows.get(name, entry.get("spec_row"))
+        if row is not None:
+            row_by_name[name] = row
 
     if not request_measurements:
         raise YieldError(
@@ -756,7 +834,10 @@ def run_yield(
             spec_defaults.get("target_ci_halfwidth"),
             DEFAULT_TARGET_CI_HALFWIDTH,
         ),
-        "measurements": request_measurements,
+        "measurements": [
+            {k: v for k, v in m.items() if k != "spec_row"}
+            for m in request_measurements
+        ],
     }
     resolved_min = _resolve(
         min_samples, spec_defaults.get("min_samples"), ABSOLUTE_MIN_SAMPLES
@@ -780,6 +861,9 @@ def run_yield(
         },
     }
     payload.update(response)
+    for out_entry in payload.get("measurements") or []:
+        if isinstance(out_entry, dict):
+            out_entry["spec_row"] = row_by_name.get(out_entry.get("name"))
     # The native core owns the payload's shape version; this module's
     # constant mirrors it (and is asserted against it below) so a crate-side
     # bump that Python never noticed cannot ship silently.
@@ -990,6 +1074,8 @@ def _derived_entry(
         "analytic_cross_check": nominal["analytic_cross_check"],
         "sampling": nominal["sampling"],
     }
+    if nominal.get("spec_row") is not None:
+        entry["spec_row"] = nominal["spec_row"]
     disclosure = {
         "name": nominal["name"],
         "negative_control": {
@@ -1065,8 +1151,21 @@ def derive_sample_set(
         out_measurements.append(entry)
         disclosures.append(disclosure)
 
+    doc: dict[str, Any] = {"schema_version": SAMPLE_SET_SCHEMA_VERSION}
+    # Issue #2840: carry the nominal campaign's RNG provenance so the seed
+    # survives the two-step flow. Only well-typed fields are lifted.
+    env = nominal_report.get("environment")
+    mc = env.get("monte_carlo") if isinstance(env, dict) else None
+    if isinstance(mc, dict):
+        prov: dict[str, Any] = {}
+        if _is_int(mc.get("seed")):
+            prov["seed"] = mc["seed"]
+        if _is_int(mc.get("n")) and mc["n"] > 0:
+            prov["draws_per_population"] = mc["n"]
+        if prov:
+            doc["provenance"] = prov
     return {
-        "schema_version": SAMPLE_SET_SCHEMA_VERSION,
+        **doc,
         "measurements": out_measurements,
         "derivation": {
             "nominal": {"path": nominal_path, "content_hash": nominal_hash},
