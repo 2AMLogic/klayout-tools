@@ -108,6 +108,16 @@ next to whatever timing the engine produced (which, for such a design, is
 indistinguishable from ideal -- exactly the not-silently-claimed signal a
 consumer needs).
 
+**Constraint completeness (issue #2780).** ``timing_status`` only says
+whether the slack fields are measurements; a design whose WNS is finite can
+still leave endpoints unconstrained and registers unclocked. Every session
+therefore ends with :func:`_constraint_completeness_lines` -- OpenSTA's
+structured ``sta::check_timing_cmd`` query, one check per call -- and every
+response/``corners[]`` entry carries the parsed ``constraint_completeness``
+block (:func:`_parse_constraint_completeness`): counts, a bounded identity
+sample with explicit truncation, and ``unavailable``/``unknown`` (never a
+fabricated zero) when the query could not run.
+
 **Pre-route DEFs (issue #1826).** Nothing about this module's OpenSTA session
 construction (``read_lef`` x2, ``read_def`` -- no ``-floorplan_initialize``,
 ``read_liberty``, ``create_clock``) actually requires the DEF to be *routed*
@@ -384,6 +394,30 @@ _NETWORK_LATENCY_RE = re.compile(r"^\s*([-+0-9.eE]+)\s+network latency (.+?)\s*$
 #: into ``clock_propagation.clock_sinks_sample`` -- a diagnostic sample, not
 #: an exhaustive list (a real CTS tree reaches thousands of clock pins).
 _CLOCK_SINK_SAMPLE_LIMIT = 20
+
+#: Issue #2780: brackets the per-session constraint-completeness query
+#: (:func:`_constraint_completeness_lines`). One ``CHECK\t<check>\t<total>``
+#: row per check, followed by at most :data:`_COMPLETENESS_SAMPLE_LIMIT`
+#: ``ITEM\t<check>\t<pin>`` rows naming that check's offending pins, or a
+#: single ``ERROR\t<check>\t<message>`` row when the engine query itself
+#: failed. Parsed by :func:`_parse_constraint_completeness`.
+_COMPLETENESS_BEGIN = "===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN==="
+_COMPLETENESS_END = "===KLT_STA_CONSTRAINT_COMPLETENESS_END==="
+#: Upper bound on how many offending pin names each completeness check
+#: echoes into its ``sample`` -- the ``count`` is always the engine's full
+#: total, and ``truncated`` says when the sample is shorter than it.
+_COMPLETENESS_SAMPLE_LIMIT = 20
+#: ``check name -> sta::check_timing_cmd`` positional flags, in the engine's
+#: own argument order (``no_input_delay no_output_delay reg_multiple_clks
+#: reg_no_clks unconstrained_endpoints loops generated_clks``, verified on
+#: OpenROAD ``26Q3-1510-g6cb3f2b704``). Exactly one flag is set per call so
+#: every returned record belongs to that one check -- the engine's
+#: human-readable message (the record's first element) is never parsed;
+#: only the pin names after it are used.
+_COMPLETENESS_CHECKS = (
+    ("unconstrained_endpoints", "0 0 0 0 1 0 0"),
+    ("unclocked_registers", "0 0 0 1 0 0 0"),
+)
 
 #: OpenSTA ``PathEnd::checkRole()`` names -> this command's ``check_type``
 #: values. Verified live (OpenROAD ``openroad/orfs:latest`` image, 2026-10-10)
@@ -715,6 +749,11 @@ def run_sta(
         # never timed. Check this field before trusting any slack number in
         # this response.
         "timing_status": corner_fields["timing_status"],
+        # Additive field (issue #2780): constraint completeness -- unconstrained
+        # endpoints and unclocked registers, with counts and identities. A
+        # finite WNS (`timing_status: "constrained"`) only says *some* path
+        # was timed; this says whether any endpoint/register was left out.
+        "constraint_completeness": corner_fields["constraint_completeness"],
         "setup_violation_count": corner_fields["setup_violation_count"],
         "hold_violation_count": corner_fields["hold_violation_count"],
         "worst_setup_path": corner_fields["worst_setup_path"],
@@ -882,6 +921,13 @@ def _run_corner_session(
         ),
         "fmax_mhz": round(fmax_hz / 1e6, 4) if fmax_hz is not None else None,
         "timing_status": _timing_status((worst_slack, worst_hold_slack)),
+        # Additive field (issue #2780): whether every endpoint is constrained
+        # and every register is clocked in this session -- independent of
+        # `timing_status`, which only says whether the slack numbers are
+        # measurements. See `_parse_constraint_completeness`.
+        "constraint_completeness": _parse_constraint_completeness(
+            completed.stdout or ""
+        ),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         # Additive fields (issue #2740): identity of the worst setup-side /
@@ -1875,6 +1921,49 @@ def _worst_path_lines() -> list[str]:
     ]
 
 
+def _constraint_completeness_lines() -> list[str]:
+    """Per-session constraint-completeness query, marker-delimited (issue
+    #2780).
+
+    Calls OpenSTA's own ``sta::check_timing_cmd`` -- the structured engine
+    query behind ``check_setup`` -- once per check in
+    :data:`_COMPLETENESS_CHECKS`, with exactly that one check enabled. The
+    command returns a list of records, each ``{message pin pin ...}``; this
+    script discards the message and emits the pin names, so identities come
+    from the engine's own object list, never from scraping a warning line.
+    ``count`` is the full number of pins the engine returned; only the
+    sample is capped at :data:`_COMPLETENESS_SAMPLE_LIMIT`.
+
+    Each check is ``catch``-wrapped on its own: an engine whose
+    ``check_timing_cmd`` is missing or takes a different argument list
+    yields an ``ERROR`` row for that check (reported as ``status:
+    "unavailable"``), never a fabricated zero. Tabs/newlines inside a pin
+    name or an error message are flattened to spaces so every row stays one
+    tab-separated line."""
+    checks = " ".join(f"{name} {{{flags}}}" for name, flags in _COMPLETENESS_CHECKS)
+    last = _COMPLETENESS_SAMPLE_LIMIT - 1
+    return [
+        f'puts "{_COMPLETENESS_BEGIN}"',
+        f"foreach {{klt_cc_check klt_cc_flags}} {{{checks}}} {{",
+        "    if {[catch {",
+        "        set klt_cc_pins {}",
+        "        foreach klt_cc_record [sta::check_timing_cmd {*}$klt_cc_flags] {",
+        "            lappend klt_cc_pins {*}[lrange $klt_cc_record 1 end]",
+        "        }",
+        '        puts "CHECK\\t$klt_cc_check\\t[llength $klt_cc_pins]"',
+        f"        foreach klt_cc_pin [lrange $klt_cc_pins 0 {last}] {{",
+        '            puts "ITEM\\t$klt_cc_check\\t'
+        '[string map [list \\n { } \\t { }] $klt_cc_pin]"',
+        "        }",
+        "    } klt_cc_error]} {",
+        '        puts "ERROR\\t$klt_cc_check\\t'
+        '[string map [list \\n { } \\t { }] $klt_cc_error]"',
+        "    }",
+        "}",
+        f'puts "{_COMPLETENESS_END}"',
+    ]
+
+
 def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     """The net-name-correlation sanity check (``place_and_route.py``'s
     ``_spef_sta_script_lines`` docstring explains the rationale in full):
@@ -2068,6 +2157,7 @@ def _sta_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _constraint_completeness_lines()
     return lines
 
 
@@ -2147,6 +2237,7 @@ def _sta_netlist_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _constraint_completeness_lines()
     return lines
 
 
@@ -2638,3 +2729,120 @@ def _worst_paths(
         _worst_path_record(rows["max"], setup_ws),
         _worst_path_record(rows["min"], hold_ws),
     )
+
+
+def _unavailable_completeness_check(reason: str) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "count": None,
+        "sample": [],
+        "truncated": None,
+        "reason": reason,
+    }
+
+
+def _parse_constraint_completeness(stdout: str) -> dict[str, Any]:
+    """The ``constraint_completeness`` block for one session (issue #2780),
+    parsed from :func:`_constraint_completeness_lines`' marker-delimited
+    output.
+
+    Each check in :data:`_COMPLETENESS_CHECKS` becomes
+    ``{status, count, sample, truncated, reason}``:
+
+    - ``"ok"`` -- the engine query ran: ``count`` is the engine's full
+      total (``0`` only when the engine returned no offending pin),
+      ``sample`` the first :data:`_COMPLETENESS_SAMPLE_LIMIT` pin names in
+      engine order, ``truncated`` whether ``sample`` is shorter than
+      ``count``.
+    - ``"unavailable"`` -- the block is absent, the engine query failed
+      (``ERROR`` row), or the rows are malformed (missing/duplicate
+      ``CHECK`` row, non-integer count, an ``ITEM`` count that disagrees
+      with the total and the sample cap). ``count``/``truncated`` are
+      ``null`` and ``reason`` says why -- a check that did not run never
+      reports ``0``.
+
+    Lines that are not ``CHECK``/``ITEM``/``ERROR`` rows (stray engine
+    warnings interleaved in stdout) are ignored; they can never become an
+    identity.
+
+    The roll-up ``status`` is ``"incomplete"`` when any check that ran
+    reported at least one offending pin, ``"complete"`` when every check ran
+    and reported none, and ``"unknown"`` otherwise (no check found a gap
+    but at least one could not run)."""
+    names = [name for name, _flags in _COMPLETENESS_CHECKS]
+    block = _extract_block(stdout, _COMPLETENESS_BEGIN, _COMPLETENESS_END)
+    checks: dict[str, dict[str, Any]]
+    if block is None:
+        reason = "constraint-completeness records absent from engine output"
+        checks = {name: _unavailable_completeness_check(reason) for name in names}
+    else:
+        checks = {name: _parse_completeness_check(block, name) for name in names}
+
+    statuses = [check["status"] for check in checks.values()]
+    if any(check["status"] == "ok" and check["count"] > 0 for check in checks.values()):
+        overall = "incomplete"
+    elif all(status == "ok" for status in statuses):
+        overall = "complete"
+    else:
+        overall = "unknown"
+    return {
+        "status": overall,
+        **checks,
+        "sample_limit": _COMPLETENESS_SAMPLE_LIMIT,
+    }
+
+
+def _completeness_rows(
+    block: str, name: str
+) -> tuple[list[str], list[str], str | None]:
+    """``(totals, items, error)`` -- the ``CHECK`` totals and ``ITEM`` pin
+    names the completeness block carries for check ``name``, or a non-null
+    ``error`` reason on an engine ``ERROR`` row or a malformed row. Rows of
+    any other kind or check are ignored."""
+    totals: list[str] = []
+    items: list[str] = []
+    for line in block.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2 or parts[1] != name:
+            continue
+        if parts[0] == "ERROR":
+            message = "\t".join(parts[2:]).strip()
+            return totals, items, f"engine {name} query failed: {message}"
+        if parts[0] not in ("CHECK", "ITEM"):
+            continue
+        if len(parts) != 3 or not parts[2]:
+            return totals, items, f"malformed {name} record: {line!r}"
+        (totals if parts[0] == "CHECK" else items).append(parts[2])
+    return totals, items, None
+
+
+def _parse_completeness_check(block: str, name: str) -> dict[str, Any]:
+    """One check's record from the completeness block -- see
+    :func:`_parse_constraint_completeness`."""
+    totals, items, error = _completeness_rows(block, name)
+    if error is not None:
+        return _unavailable_completeness_check(error)
+    if not totals:
+        return _unavailable_completeness_check(f"no {name} total in engine output")
+    if len(totals) > 1:
+        return _unavailable_completeness_check(
+            f"duplicate {name} totals in engine output: {totals!r}"
+        )
+    total_text = totals[0]
+    if re.fullmatch(r"[0-9]+", total_text) is None:
+        return _unavailable_completeness_check(
+            f"malformed {name} total: {total_text!r}"
+        )
+    count = int(total_text)
+    if len(items) != min(count, _COMPLETENESS_SAMPLE_LIMIT):
+        return _unavailable_completeness_check(
+            f"{name} sample has {len(items)} pin(s) for a total of {count} "
+            f"(sample limit {_COMPLETENESS_SAMPLE_LIMIT})"
+        )
+    return {
+        "status": "ok",
+        "count": count,
+        "sample": items,
+        "truncated": count > len(items),
+        "reason": None,
+    }

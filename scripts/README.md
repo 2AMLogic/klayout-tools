@@ -332,3 +332,46 @@ python scripts/ingest-canary.py --repo 2AMLogic/some-block --pdk sg13g2
 slug doesn't follow the `<pdk>-<name>` convention the script otherwise
 guesses from; an unknown name exits `1`, and an unguessable slug with no
 `--pdk` simply omits the field.
+
+## `check_import_boundaries.py`
+
+Static CI gate (issue #2767) for `docs/ARCHITECTURE.md`'s "verb modules stay
+self-contained, except PDK resolution" rule. Pure stdlib AST analysis of
+`src/klayout_tools/**/*.py` -- it never imports the package, so it needs no
+KLayout or EDA tooling, and runs as a non-`continue-on-error` step of the
+`lint` job. Policy lives in [`import-boundaries.json`](../import-boundaries.json).
+
+```
+python scripts/check_import_boundaries.py                # check (read-only)
+python scripts/check_import_boundaries.py --strict-stale # also fail on unused entries
+python scripts/check_import_boundaries.py --inventory    # list internal imports as JSON
+```
+
+Exit `0` clean, `1` boundary violations, `2` invalid policy or unparseable
+source. Diagnostics are `path:line: [rule] message`, sorted deterministically.
+
+**Policy sections.** `groups` classify every module (a new, unclassified
+module fails with instructions); a `verb` group is a verb's core modules plus
+its `cli/*_cmd.py` adapter, so same-verb helper imports are free. Name
+mismatches are explicit (`sta` -> `post_route_sta`, `yield` ->
+`yield_analysis`, `gen` vs `gen_compose`, `sta`/`stats`). `shared` groups
+(`shared-core`, `pdk`) may be imported publicly by anyone. Cross-group public
+imports need `allowed_group_edges`. Importing a *private* (leading underscore)
+symbol across groups needs an exact `(consumer, exporter, symbol)` entry in
+`shared_private_permissions` (intended) or `legacy_exceptions.private_symbols`
+(grandfathered debt); `legacy_exceptions.module_edges` is the equivalent for
+module-edge debt. Privacy follows the original name, never the alias.
+Line numbers are not part of an exception's identity.
+
+**Maintenance.** Edit the JSON by hand and review it; CI never regenerates
+it. When a legacy import is cleaned up, delete its entry (`--strict-stale`
+lists entries that no longer match anything). Adding a new exception is a
+policy change that needs explicit review.
+
+**Limits.** Static and best-effort, not a sandbox or runtime dependency
+proof: `importlib`/`__import__`/`getattr`, values copied through variables
+(`m = alias; m._x`), re-export chains, and string annotations are not
+followed; a name bound more than once in a scope is not resolved for
+`alias._x` access; internal `from x import *` is rejected outright.
+`import-linter` 2.15 was evaluated and rejected: it models module-to-module
+edges only and cannot allow `_a` but forbid `_b` from the same module.

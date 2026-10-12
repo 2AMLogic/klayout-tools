@@ -4,6 +4,16 @@
   "generated_by": "scripts/check_complexity_baseline.py --update-baseline (ruff 0.16.2)",
   "violations": [
     {
+      "file": "scripts/check_import_boundaries.py",
+      "function": "evaluate",
+      "complexity": 19
+    },
+    {
+      "file": "scripts/check_import_boundaries.py",
+      "function": "load_policy",
+      "complexity": 31
+    },
+    {
       "file": "scripts/derive-module-ownership.py",
       "function": "find_related_modules",
       "complexity": 21
