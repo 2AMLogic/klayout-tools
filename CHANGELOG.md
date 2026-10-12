@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt drc --list-rules` / `--rules`** (issue #2768): `--deck <name>
+  --list-rules` lists a curated deck's registered rules (id, description,
+  check kind, layers, scope, per-kind/per-scope counts) without reading a
+  layout; the listing is not a DRC verdict. `--rules '<id|glob>,...'` (and
+  the request-document field `rules`) runs only the selected rules -- exact
+  ids or case-sensitive quoted globs, validated before any geometry is read;
+  unselected rules are never dispatched. A `--rules` report gains an additive
+  top-level `rule_selection` block, and each omitted rule is a
+  `coverage.skipped` record with the new reason `not_selected`, so a proper
+  subset rolls up `clean_partial` and `klt signoff` never grants it full DRC
+  credit. `--check --rerun` replays the recorded selection. Curated engine
+  only; rejected with `--engine klayout`. `schema_version` stays 2.
+
 - **`klt extract --parasitics` / `klt pex`: per-net parasitic RC network
   integrity report** (issue #2764): every `--parasitics` extraction now
   validates the RC network it just emitted and reports the result as
