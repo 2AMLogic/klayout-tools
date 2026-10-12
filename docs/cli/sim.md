@@ -2469,29 +2469,22 @@ a `prerequisite missing: ...` diagnostic naming the capability:
 `tests/test_asap7_bsimcmg_sim.py` skips with the missing capability named
 when the corpus, the module or a loading ngspice is absent.
 
-**Recorded evidence (2026-10-12).** ngspice-47 (built from the
-`docker/eda-sim/pdk-versions.json` recipe plus `--enable-osdi`, Ubuntu 24.04
-linux/amd64 container), openvaf-r `osdi_0.4-153-g2e066436`, `bsimcmg.osdi`
-sha256 `cfcc4405ecee9a3b78a05ce132c215bd7871567fbc81f4c108ad216e87f76c22`,
-lambdapdk 0.2.17 TT card sha256
-`684708eec0f7d5960be1df6a045de811c8dd2d6b0e1ed7d0f805a3f697f262fc`. Extracted
-`INVx1_ASAP7_75t_R` and `NAND2xp5_ASAP7_75t_R`, Vdd = 0.7 V, 25 C, 1 fF load,
-`klt sim` (`status: pass`, 3/3 corners each):
-
-| cell | corner | output low (V) | output high (V) | `tpd_fall` (ps) |
-|------|--------|---------------:|----------------:|----------------:|
-| INVx1 | tt | 1.06e-7 | 0.700 | 9.18 |
-| INVx1 | ff | 1.18e-7 | 0.700 | 8.06 |
-| INVx1 | ss | 9.30e-8 | 0.700 | 10.45 |
-| NAND2xp5 | tt | 2.84e-7 | 0.700 | 11.82 |
-| NAND2xp5 | ff | 3.17e-7 | 0.700 | 10.18 |
-| NAND2xp5 | ss | 2.51e-7 | 0.700 | 13.93 |
-
-A DC sweep of INVx1 at TT gives a switching point near Vin = 0.35 V
-(`Vout` = 0.69 V at 0.30 V, 0.26 V at 0.35 V, 0.012 V at 0.40 V). A
-single `NFIN=3` RVT NMOS at Vgs = Vds = 0.7 V draws about 107 uA. The
-negative control (unadapted cards on the host's ngspice-46) produces the
-`unsupported_model_level` diagnostic above.
+**Verification status (2026-10-12).** The real-run evidence (extracted
+`INVx1_ASAP7_75t_R` / `NAND2xp5_ASAP7_75t_R` simulated at TT through
+`klt sim`, with the VTC switching point or delay recorded) is **outstanding**:
+it needs a host with ngspice >= 44 built with OSDI support and a Linux x86-64
+OpenVAF-Reloaded compile, which the fleet worker (ngspice-42, no OSDI/OpenVAF)
+does not provide. The integration test in `tests/test_asap7_bsimcmg_sim.py`
+runs that simulation and skips, naming the missing capability, until the
+toolchain and the ASAP7 corpus are present. What *is* pinned and verified:
+the BSIM-CMG Verilog-A tarball sha256
+`357d69569a6fbfd7632887f28a1b3f26102605e1e64ccfcfb2de85b2399af0ab`
+(dwarning/VA-Models `6099b4e1`, contains `code/bsimcmg/vacode111/bsimcmg.va`),
+and the lambdapdk 0.2.17 TT card sha256
+`684708eec0f7d5960be1df6a045de811c8dd2d6b0e1ed7d0f805a3f697f262fc`. The
+`.osdi` hash, simulator build and electrical results are to be recorded here
+by the first run on a provisioned host. The unadapted cards on a stock ngspice
+produce the `unsupported_model_level` diagnostic above.
 
 ## Corner axes
 
