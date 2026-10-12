@@ -1,4 +1,4 @@
-"""Tests for the in-repo ASAP7 DRC deck (issue #2760, phase 1: FEOL/MOL).
+"""Tests for the in-repo ASAP7 DRC deck (#2760 FEOL/MOL, #2810 BEOL M1-M3/V1-V3).
 
 The deck is a KLayout DRC-DSL script (``src/klayout_tools/decks/asap7.drc``)
 run through ``klt drc --engine klayout --deck-file``. Its rule ids are
@@ -62,7 +62,26 @@ _needs_asap7 = pytest.mark.skipif(
 
 _DECK_LAYER_RE = re.compile(r"^(\w+)\s*=\s*input\((\d+),\s*(\d+)\)", re.M)
 _LYP_ENTRY_RE = re.compile(r"<name>(\S+) drawing - (\d+)/(\d+)</name>")
-_SELECT_FAMILY = ("NSELECT", "PSELECT", "SLVT", "LVT", "SRAMVT")
+#: ``{ "<NAME>" => ..., ... }.each do |name, ...| ... end`` -- a rule family
+#: whose ids are ``"#{name}.<suffix>"`` (DRM sections 3.7, 3.12, 3.13).
+_FAMILY_RE = re.compile(
+    r"^\{(?P<names>[^}]*)\}\.each do \|name,[^|]*\|\n(?P<body>.*?)^end$", re.M | re.S
+)
+_TEMPLATED_RE = re.compile(r'output\("#\{name\}\.([^"]+)",\s*"Table')
+#: The rule families the deck must declare, by DRM section.
+_FAMILIES = (
+    ("NSELECT", "PSELECT", "SLVT", "LVT", "SRAMVT"),
+    ("M1", "M2", "M3"),
+    ("V1", "V2", "V3"),
+)
+#: Every drawing layer the deck reads (asap7.lyp names): FEOL/MOL, then the
+#: BEOL stack M1-M9 / V1-V9.
+_DECK_LAYERS = {
+    "well", "fin", "gate", "gcut", "active", "nselect", "pselect", "lig",
+    "lisd", "v0", "sdt", "slvt", "lvt", "sramdrc", "sramvt",
+    *(f"m{i}" for i in range(1, 10)),
+    *(f"v{i}" for i in range(1, 10)),
+}  # fmt: skip
 _CASES = fx.all_cases()
 
 
@@ -100,18 +119,32 @@ def test_every_rule_cites_a_drm_table():
 def test_deck_declares_exactly_the_declared_ids():
     """Every literal ``output("<id>", "Table ...")`` in the script is a
     declared id with a DRM table citation, and every declared id is either
-    literal in the script or produced by the section-3.7 layer loop."""
+    literal in the script or produced by one of the layer-family loops
+    (section 3.7 selects, 3.12 M1-M3, 3.13 V1-V3), each expanded over the
+    names that loop actually iterates. No id is produced twice."""
     text = _deck_text()
     literal = re.findall(r'output\("([^"#]+)",\s*"(Table [^"]*)"', text)
     literal_ids = [rule for rule, _ in literal]
     assert len(literal_ids) == len(set(literal_ids))
     assert set(literal_ids) <= set(RULE_IDS)
-    templated = set(re.findall(r'output\("#\{name\}\.([^"]+)",\s*"Table', text))
-    for name in _SELECT_FAMILY:
-        assert f'"{name}" =>' in text
-    expanded = {f"{name}.{suffix}" for name in _SELECT_FAMILY for suffix in templated}
-    assert set(literal_ids) | expanded == set(RULE_IDS)
-    assert not set(literal_ids) & expanded
+
+    expanded: list[str] = []
+    families: list[tuple[str, ...]] = []
+    in_families = 0
+    for block in _FAMILY_RE.finditer(text):
+        names = tuple(re.findall(r'"(\w+)"\s*=>', block["names"]))
+        suffixes = _TEMPLATED_RE.findall(block["body"])
+        assert names and suffixes, block.group(0)[:80]
+        assert len(suffixes) == len(set(suffixes)), names
+        families.append(names)
+        in_families += len(suffixes)
+        expanded += [f"{name}.{suffix}" for name in names for suffix in suffixes]
+    # No templated output outside a recognised family loop.
+    assert len(_TEMPLATED_RE.findall(text)) == in_families
+    assert sorted(families) == sorted(_FAMILIES)
+    assert len(expanded) == len(set(expanded))
+    assert not set(literal_ids) & set(expanded)
+    assert sorted([*literal_ids, *expanded]) == sorted(RULE_IDS)
 
 
 def test_every_rule_has_a_fail_and_a_boundary_pass_fixture():
@@ -257,7 +290,7 @@ def test_deck_layers_match_pinned_lyp():
         var: (int(layer), int(dt))
         for var, layer, dt in _DECK_LAYER_RE.findall(_deck_text())
     }
-    assert len(deck) == 16
+    assert set(deck) == _DECK_LAYERS
     for var, source in deck.items():
         assert lyp.get(var) == source, var
 

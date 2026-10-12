@@ -1,4 +1,4 @@
-"""Generated per-rule fixtures for the ASAP7 DRC deck (issue #2760).
+"""Generated per-rule fixtures for the ASAP7 DRC deck (#2760, #2810).
 
 Every rule id in :data:`klayout_tools.decks.asap7_rules.RULES` gets at least
 one *fail* case, which must trip that id, and one *pass* case, drawn at the
@@ -38,6 +38,23 @@ LAYERS = {
     "LISD": 17,
     "V0": 18,
     "M1": 19,
+    "M2": 20,
+    "V1": 21,
+    "V2": 25,
+    "M3": 30,
+    "V3": 35,
+    "M4": 40,
+    "V4": 45,
+    "M5": 50,
+    "V5": 55,
+    "M6": 60,
+    "V6": 65,
+    "M7": 70,
+    "V7": 75,
+    "M8": 80,
+    "V8": 85,
+    "M9": 90,
+    "V9": 95,
     "SDT": 88,
     "SLVT": 97,
     "LVT": 98,
@@ -684,19 +701,189 @@ def _v0_cases() -> list[Case]:
             shapes.append(box(under, 0, 0, 24, 100))
         return shapes
 
-    return [
+    c = [
         _fail("V0.W.1", via(18 - D)),
         _pass("V0.W.1", via(18)),
         _fail("V0.AUX.1", via(18, under=None)),
         _pass("V0.AUX.1", via(18)),
     ]
 
+    # V0 landing on the end of an 18 nm LIG bar (x 0..100) under an M1 bar:
+    # the V0/LIG overlap is `ov` x 18 nm, 288 nm^2 at ov = 16 nm.
+    def on_lig(ov: float) -> list[Shape]:
+        x0 = 100 - ov
+        return [
+            box("LIG", 0, 0, 100, 18),
+            box("V0", x0, 0, x0 + 18, 18),
+            box("M1", -50, 0, 150, 18),
+        ]
+
+    c += [_fail("V0.LIG.A.1", on_lig(16 - D)), _pass("V0.LIG.A.1", on_lig(16))]
+    # A V0 inside LISD is exempt even when its LIG overlap is small (here
+    # 5 x 18 = 90 nm^2): the rule is scoped to V0 not inside LISD. The LIG
+    # overlaps LISD by exactly the LIG.LISD.OV.1 / LIG.LISD.A.2 minimums.
+    c.append(
+        _pass(
+            "V0.LIG.A.1",
+            [
+                box("LISD", 0, 0, 24, 100),
+                box("V0", 3, 40, 21, 58),
+                box("LIG", 16, 40, 116, 58),
+                box("M1", -50, 40, 100, 58),
+            ],
+        )
+    )
+    return c
+
+
+def _metal_cases(layer: str) -> list[Case]:
+    """Table 3.12.1, identical for M1, M2 and M3."""
+    c: list[Case] = []
+    c += [
+        _fail(f"{layer}.W.1", [box(layer, 0, 0, 18 - D, 100)]),
+        _pass(f"{layer}.W.1", [box(layer, 0, 0, 18, 100)]),
+    ]
+    for gap, mk in ((18 - D, _fail), (18, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.1",
+                [box(layer, 0, 0, 18, 100), box(layer, 18 + gap, 0, 36 + gap, 100)],
+            )
+        )
+    # The side-to-side rule is not axis-bound: the same pair rotated by 90
+    # degrees (horizontal bars) trips it too.
+    c.append(
+        _fail(
+            f"{layer}.S.1",
+            [box(layer, 0, 0, 100, 18), box(layer, 0, 36 - D, 100, 54 - D)],
+        )
+    )
+    for gap, mk in ((25 - D, _fail), (25, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.2",
+                [
+                    box(layer, 0, 0, 24, 100),
+                    box(layer, -100, 100 + gap, 124, 118 + gap),
+                ],
+            )
+        )
+    for gap, mk in ((27 - D, _fail), (27, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.3",
+                [box(layer, 0, 0, 24, 100), box(layer, 0, 100 + gap, 24, 200 + gap)],
+            )
+        )
+    for gap, mk in ((31 - D, _fail), (31, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.4",
+                [box(layer, 0, 0, 18, 100), box(layer, 0, 100 + gap, 18, 200 + gap)],
+            )
+        )
+        c.append(
+            mk(
+                f"{layer}.S.5",
+                [box(layer, 0, 0, 24, 100), box(layer, 0, 100 + gap, 18, 200 + gap)],
+            )
+        )
+    # Corner-to-corner: 12 nm across, `dy` up, no projected overlap; 20 nm
+    # Euclidean at dy = 16 nm.
+    for dy, mk in ((16 - D, _fail), (16, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.6",
+                [box(layer, 0, 0, 100, 40), box(layer, 112, 40 + dy, 212, 80 + dy)],
+            )
+        )
+    # Side-to-side bars at exactly 18 nm whose facing edges overlap by one
+    # database unit are a side-to-side pair, not a corner pair: no S.6.
+    c.append(
+        _pass(
+            f"{layer}.S.6",
+            [box(layer, 0, 0, 100, 40), box(layer, 100 - D, 58, 200 - D, 98)],
+        )
+    )
+    c += [
+        _fail(f"{layer}.A.1", [box(layer, 0, 0, 18, 28 - D)]),
+        _pass(f"{layer}.A.1", [box(layer, 0, 0, 18, 28)]),
+    ]
+    return c
+
+
+#: Via -> (metal below, metal above), DRM section 3.13.
+_VIA_METALS = {"V1": ("M1", "M2"), "V2": ("M2", "M3"), "V3": ("M3", "M4")}
+
+
+def _stack(
+    via: str,
+    w: float = 18,
+    lower: tuple[float, float, float, float] | None = (0, -50, 18, 68),
+    upper: tuple[float, float, float, float] | None = (-50, 0, 68, 18),
+) -> list[Shape]:
+    """A ``w`` x 18 nm via at the origin on a vertical lower-metal bar and a
+    horizontal upper-metal bar, each 18 nm wide and flush with the via across
+    its track (``None`` omits that metal)."""
+    lo, up = _VIA_METALS[via]
+    shapes: list[Shape] = [box(via, 0, 0, w, 18)]
+    if lower is not None:
+        shapes.append(box(lo, *lower))
+    if upper is not None:
+        shapes.append(box(up, *upper))
+    return shapes
+
+
+def _via_cases() -> list[Case]:
+    c: list[Case] = []
+    for via in _VIA_METALS:
+        c += [
+            _fail(f"{via}.W.1", _stack(via, 18 - D)),
+            _pass(f"{via}.W.1", _stack(via)),
+        ]
+        c += [
+            _fail(f"{via}.AUX.1", _stack(via, upper=None)),
+            _fail(f"{via}.AUX.1", _stack(via, lower=None)),
+            # Partly off the upper metal: the via sticks out 1 nm across it.
+            _fail(f"{via}.AUX.1", _stack(via, upper=(-50, 1, 68, 19))),
+            _pass(f"{via}.AUX.1", _stack(via)),
+        ]
+
+    # "At least two opposite sides": the enclosing metal is a 26 nm bar
+    # (4 nm past the via on both sides across it, short of every threshold)
+    # that extends `e0` / `e1` past the via at its two ends -- top/bottom
+    # for a vertical bar, left/right for a horizontal one. The 26 nm width
+    # keeps the bar above the 504 nm^2 M2/M3 area minimum even at e = 5 nm.
+    # The other metal keeps its long default bar.
+    def capped(
+        via: str, which: str, e0: float, e1: float, vertical: bool
+    ) -> list[Shape]:
+        bar = (-4, -e0, 22, 18 + e1) if vertical else (-e0, -4, 18 + e1, 22)
+        return _stack(via, **{which: bar})
+
+    for rule, via, which, e in (
+        ("V2.M2.EN.1", "V2", "lower", 5),
+        ("V3.M3.EN.1", "V3", "lower", 5),
+        ("V3.M4.EN.2", "V3", "upper", 11),
+    ):
+        for vertical in (True, False):
+            c.append(_fail(rule, capped(via, which, e - D, e - D, vertical)))
+            c.append(_pass(rule, capped(via, which, e, e, vertical)))
+        # Short at one end only is still short on that pair.
+        c.append(_fail(rule, capped(via, which, e, e - D, True)))
+    return c
+
 
 def _geometry_cases() -> list[Case]:
     chamfered = poly("WELL", (0, 0), (0, 300), (240, 300), (300, 240), (300, 0))
+    # An upper BEOL layer with no other rule in the deck yet: only the
+    # geometry check can see it.
+    beol = poly("M9", (0, 0), (0, 300), (240, 300), (300, 240), (300, 0))
     return [
         _fail("GEOMETRY.NONORTHOGONAL", [chamfered]),
         _pass("GEOMETRY.NONORTHOGONAL", [box("WELL", 0, 0, 300, 300)]),
+        _fail("GEOMETRY.NONORTHOGONAL", [beol]),
+        _pass("GEOMETRY.NONORTHOGONAL", [box("M9", 0, 0, 300, 300)]),
     ]
 
 
@@ -714,6 +901,10 @@ def all_cases() -> list[Case]:
         *_lisd_cases(),
         *_lig_cases(),
         *_v0_cases(),
+        *_metal_cases("M1"),
+        *_metal_cases("M2"),
+        *_metal_cases("M3"),
+        *_via_cases(),
     ]
 
 
