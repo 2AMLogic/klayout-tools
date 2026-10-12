@@ -3935,6 +3935,9 @@ def test_every_recognized_kind_declares_a_typed_shape():
         "functional-verification",
         "erc",
         "place-and-route",
+        # Issue #2839: T1 item 11's port-accessibility evidence.
+        "socket-check",
+        "lef-abstract",
         "generic",
         "error",
     }
@@ -13447,3 +13450,531 @@ def test_drc_list_rules_output_is_not_signoff_evidence(tmp_path):
     with pytest.raises(SignoffError):
         build_signoff([path])
     assert _item_3(path)["status"] == "unmet"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2839: T1 item 11 port accessibility -- an edge-accessible power /
+# ground port (`klt socket-check` facts) plus a matching LEF `PIN` with
+# `USE POWER`/`USE GROUND` (`klt lef-abstract`). Provisional until
+# 2AMLogic/product#134 ratifies the amendment, so graded only when the
+# manifest requires it or the cited set includes port evidence.
+# --------------------------------------------------------------------------- #
+
+_PORT_OUTLINE = {"x0": 0.0, "y0": 0.0, "x1": 5.0, "y1": 5.0}
+_VPWR_BOX = (0.0, 2.0, 0.2, 3.0)  # on the left edge
+_VGND_BOX = (4.8, 2.0, 5.0, 3.0)  # on the right edge
+
+
+def _socket_port(
+    name: str,
+    use: str,
+    box: tuple[float, float, float, float],
+    *,
+    layer: str = "68/20",
+    label_found: bool = True,
+    geometry_source: str = "drawn",
+    channel_clear: bool = True,
+) -> dict:
+    x0, y0, x1, y1 = box
+    drawn = geometry_source == "drawn"
+    return {
+        "name": name,
+        "use": use,
+        "use_source": "declared",
+        "layer": layer,
+        "metal_layer": layer,
+        "x_um": (x0 + x1) / 2,
+        "y_um": (y0 + y1) / 2,
+        "label_found": label_found,
+        "label_reason": None if label_found else "missing",
+        "geometry_source": geometry_source,
+        "bbox_um": {"x0": x0, "y0": y0, "x1": x1, "y1": y1} if drawn else None,
+        "edge_distance_um": (
+            {
+                "left": round(x0 - _PORT_OUTLINE["x0"], 6),
+                "bottom": round(y0 - _PORT_OUTLINE["y0"], 6),
+                "right": round(_PORT_OUTLINE["x1"] - x1, 6),
+                "top": round(_PORT_OUTLINE["y1"] - y1, 6),
+            }
+            if drawn
+            else None
+        ),
+        "channel_clear": (
+            {edge: channel_clear for edge in ("left", "bottom", "right", "top")}
+            if drawn
+            else None
+        ),
+    }
+
+
+def _socket_check_envelope(ports: list[dict] | None = None, **overrides) -> dict:
+    if ports is None:
+        ports = [
+            _socket_port("VPWR", "POWER", _VPWR_BOX),
+            _socket_port("VGND", "GROUND", _VGND_BOX),
+        ]
+    envelope = {
+        "schema_version": 1,
+        "file": "block.gds",
+        "socket": "socket.json",
+        "socket_name": "demo",
+        "dbu_um": 0.001,
+        "status": "pass",
+        "check_count": 4,
+        "checks": [],
+        "budgets": [],
+        "power_ports": {
+            "requested": False,
+            "parameters": {
+                "edge_band_um": 0.0,
+                "edges": ["left", "bottom", "right", "top"],
+                "allowed_layers": None,
+                "provisional": True,
+            },
+            "outline_um": dict(_PORT_OUTLINE),
+            "ports": ports,
+        },
+    }
+    envelope.update(overrides)
+    return envelope
+
+
+def _lef_pin(
+    name: str,
+    use: str,
+    box: tuple[float, float, float, float],
+    *,
+    layer: str | None = "met1",
+    gds_layer: list[int] | None = None,
+    geometry_source: str = "drawn",
+) -> dict:
+    return {
+        "name": name,
+        "direction": "INOUT",
+        "use": use,
+        "layer": layer,
+        "gds_layer": gds_layer if gds_layer is not None else [68, 20],
+        "geometry_source": geometry_source,
+        "rects_um": [list(box)] if geometry_source != "none" else [],
+    }
+
+
+def _lef_abstract_envelope(
+    pins: list[dict] | None = None, *, size=(5.0, 5.0), self_check="pass"
+) -> dict:
+    if pins is None:
+        pins = [
+            _lef_pin("VGND", "GROUND", _VGND_BOX),
+            _lef_pin("VPWR", "POWER", _VPWR_BOX),
+        ]
+    return {
+        "schema_version": 1,
+        "file": "block.gds",
+        "socket": "socket.json",
+        "output": "block.lef",
+        "macro_name": "demo",
+        "class": "BLOCK",
+        "size_um": {"width": size[0], "height": size[1]},
+        "pins": pins,
+        "pin_count": len(pins),
+        "unroutable_pins": [],
+        "obs": [],
+        "obs_shape_count": 0,
+        "warnings": [],
+        "self_check": {
+            "status": self_check,
+            "findings": [],
+            "missing_macros": [],
+            "unexpected_macros": [],
+        },
+        "power_pins": {
+            "status": "pass",
+            "findings": [],
+            "pins": [
+                {
+                    "name": pin["name"],
+                    "use": pin["use"],
+                    "use_read_back": pin["use"],
+                    "layer": pin["layer"],
+                    "geometry_source": pin["geometry_source"],
+                }
+                for pin in pins
+                if pin["use"] in ("POWER", "GROUND")
+            ],
+        },
+    }
+
+
+def _port_evidence(
+    tmp_path,
+    *,
+    socket: dict | None | bool = True,
+    lef: dict | None | bool = True,
+    **power_delivery_kwargs,
+) -> list[str]:
+    """A passing analog item-11 citation (ERC + LVS) plus, by default, the
+    two port-accessibility parts. Pass `socket=None`/`lef=None` to leave a
+    part out, or an envelope dict to cite that one instead."""
+    parts = _power_delivery_evidence(tmp_path, **power_delivery_kwargs)
+    if socket is True:
+        socket = _socket_check_envelope()
+    if lef is True:
+        lef = _lef_abstract_envelope()
+    if socket is not None:
+        parts.append(_write(tmp_path, "pd-socket.json", socket))
+    if lef is not None:
+        parts.append(_write(tmp_path, "pd-lef.json", lef))
+    return parts
+
+
+def _port_item(tmp_path, power_ports=None, **kwargs) -> dict:
+    manifest = _manifest(evidence={"11": _port_evidence(tmp_path, **kwargs)})
+    if power_ports is not None:
+        manifest["power_ports"] = power_ports
+    return _item_11(build_tier_report(manifest))
+
+
+def test_item_11_met_with_edge_port_and_matching_lef_pin(tmp_path):
+    item = _port_item(tmp_path)
+
+    assert item["status"] == "met", item
+    assert [part["kind"] for part in item["citation"]["parts"]] == [
+        "erc",
+        "lvs",
+        "socket-check",
+        "lef-abstract",
+    ]
+    block = item["citation"]["power_delivery"]["power_ports"]
+    assert block["policy"] == {
+        "required": False,
+        "edge_band_um": 0.0,
+        "edges": ["left", "bottom", "right", "top"],
+        "allowed_layers": None,
+        "source": "default",
+        "provisional": True,
+    }
+    assert block["findings"] == []
+    assert [(entry["net"], entry["use"]) for entry in block["ports"]] == [
+        ("VPWR", "POWER"),
+        ("VGND", "GROUND"),
+    ]
+    assert block["ports"][0]["port"]["accessible_edges"] == ["left"]
+    assert block["ports"][1]["port"]["accessible_edges"] == ["right"]
+    assert block["ports"][0]["lef_pin"]["layer"] == "met1"
+
+
+def test_item_11_without_port_requirement_is_unchanged(tmp_path):
+    """Not required and no port evidence cited: graded exactly as before
+    #2839 -- no `power_ports` key on the citation."""
+    item = _item_11(
+        build_tier_report(
+            _manifest(evidence={"11": _power_delivery_evidence(tmp_path)})
+        )
+    )
+
+    assert item["status"] == "met"
+    assert "power_ports" not in item["citation"]["power_delivery"]
+
+
+def test_item_11_required_without_socket_check_is_power_port_unproven(tmp_path):
+    item = _port_item(tmp_path, power_ports={"required": True}, socket=None, lef=None)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "power_port_unproven"
+    assert item["detail"]["power_ports"]["policy"]["required"] is True
+    assert item["detail"]["power_ports"]["policy"]["source"] == "manifest"
+
+
+def test_item_11_socket_check_predating_power_ports_is_unproven(tmp_path):
+    old = _socket_check_envelope()
+    del old["power_ports"]
+    item = _port_item(tmp_path, socket=old)
+
+    assert item["reason"] == "power_port_unproven"
+
+
+def test_item_11_missing_supply_port_is_no_edge_power_port(tmp_path):
+    """The ERC spec declares VGND but the socket descriptor has no
+    POWER/GROUND port of that name."""
+    socket = _socket_check_envelope([_socket_port("VPWR", "POWER", _VPWR_BOX)])
+    item = _port_item(tmp_path, socket=socket)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "no_edge_power_port"
+    assert item["detail"]["power_ports"]["findings"] == [
+        {
+            "net": "VGND",
+            "reason": "no_edge_power_port",
+            "aspect": "missing",
+            "message": "supply VGND: missing",
+        }
+    ]
+
+
+def test_item_11_label_without_conductor_is_no_edge_power_port(tmp_path):
+    socket = _socket_check_envelope(
+        [
+            _socket_port("VPWR", "POWER", _VPWR_BOX, geometry_source="none"),
+            _socket_port("VGND", "GROUND", _VGND_BOX),
+        ]
+    )
+    item = _port_item(tmp_path, socket=socket)
+
+    assert item["reason"] == "no_edge_power_port"
+    assert item["detail"]["power_ports"]["findings"][0]["aspect"] == (
+        "no_drawn_geometry"
+    )
+
+
+def test_item_11_interior_only_port(tmp_path):
+    interior = (2.0, 2.0, 2.2, 3.0)
+    socket = _socket_check_envelope(
+        [
+            _socket_port("VPWR", "POWER", interior),
+            _socket_port("VGND", "GROUND", _VGND_BOX),
+        ]
+    )
+    item = _port_item(
+        tmp_path,
+        socket=socket,
+        lef=_lef_abstract_envelope(
+            [
+                _lef_pin("VGND", "GROUND", _VGND_BOX),
+                _lef_pin("VPWR", "POWER", interior),
+            ]
+        ),
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "power_port_interior_only"
+
+
+def test_item_11_band_boundary_and_manifest_override(tmp_path):
+    """A port 0.5 um in from the edge fails the default (touching) band,
+    passes a manifest band of exactly 0.5 um, and fails one just under."""
+    inset = (0.5, 2.0, 0.7, 3.0)
+    socket = _socket_check_envelope(
+        [
+            _socket_port("VPWR", "POWER", inset),
+            _socket_port("VGND", "GROUND", _VGND_BOX),
+        ]
+    )
+    lef = _lef_abstract_envelope(
+        [_lef_pin("VGND", "GROUND", _VGND_BOX), _lef_pin("VPWR", "POWER", inset)]
+    )
+
+    assert _port_item(tmp_path, socket=socket, lef=lef)["reason"] == (
+        "power_port_interior_only"
+    )
+    at_band = _port_item(tmp_path, {"edge_band_um": 0.5}, socket=socket, lef=lef)
+    assert at_band["status"] == "met"
+    assert (
+        at_band["citation"]["power_delivery"]["power_ports"]["policy"]["edge_band_um"]
+        == 0.5
+    )
+    assert (
+        _port_item(tmp_path, {"edge_band_um": 0.49}, socket=socket, lef=lef)["reason"]
+        == "power_port_interior_only"
+    )
+
+
+def test_item_11_edges_policy_restricts_which_sides_count(tmp_path):
+    item = _port_item(tmp_path, {"edges": ["top", "bottom"]})
+
+    assert item["reason"] == "power_port_interior_only"
+
+
+def test_item_11_blocked_channel_is_interior_only(tmp_path):
+    inset = (0.5, 2.0, 0.7, 3.0)
+    socket = _socket_check_envelope(
+        [
+            _socket_port("VPWR", "POWER", inset, channel_clear=False),
+            _socket_port("VGND", "GROUND", _VGND_BOX),
+        ]
+    )
+    item = _port_item(tmp_path, {"edge_band_um": 1.0}, socket=socket)
+
+    assert item["reason"] == "power_port_interior_only"
+    assert item["detail"]["power_ports"]["findings"][0]["aspect"] == "channel_blocked"
+
+
+def test_item_11_port_on_non_routing_layer_is_disallowed(tmp_path):
+    """Default policy: the port must resolve to a LEF routing layer."""
+    lef = _lef_abstract_envelope(
+        [
+            _lef_pin("VGND", "GROUND", _VGND_BOX),
+            _lef_pin("VPWR", "POWER", _VPWR_BOX, layer=None, geometry_source="none"),
+        ]
+    )
+    item = _port_item(tmp_path, lef=lef)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "power_port_layer_disallowed"
+
+
+def test_item_11_explicit_allowed_layers(tmp_path):
+    disallowed = _port_item(tmp_path, {"allowed_layers": ["met4"]})
+    assert disallowed["reason"] == "power_port_layer_disallowed"
+
+    by_lef_name = _port_item(tmp_path, {"allowed_layers": ["met1"]})
+    assert by_lef_name["status"] == "met"
+
+    by_gds_pair = _port_item(tmp_path, {"allowed_layers": ["68/20"]})
+    assert by_gds_pair["status"] == "met"
+
+
+def test_item_11_required_without_lef_abstract_is_lef_pin_missing(tmp_path):
+    item = _port_item(tmp_path, power_ports={"required": True}, lef=None)
+
+    assert item["reason"] == "lef_power_pin_missing"
+
+
+def test_item_11_lef_without_the_supply_pin_is_lef_pin_missing(tmp_path):
+    lef = _lef_abstract_envelope([_lef_pin("VPWR", "POWER", _VPWR_BOX)])
+    item = _port_item(tmp_path, lef=lef)
+
+    assert item["reason"] == "lef_power_pin_missing"
+    assert item["detail"]["power_ports"]["findings"][0]["net"] == "VGND"
+
+
+@pytest.mark.parametrize(
+    ("vpwr_pin", "aspect"),
+    [
+        # LEF pin present with the wrong USE.
+        (_lef_pin("VPWR", "SIGNAL", _VPWR_BOX), "use"),
+        # Supply polarity disagrees with the GDS port.
+        (_lef_pin("VPWR", "GROUND", _VPWR_BOX), "use"),
+        # Synthesized placeholder PORT, not drawn layout geometry.
+        (
+            _lef_pin("VPWR", "POWER", _VPWR_BOX, geometry_source="synthesized"),
+            "geometry",
+        ),
+        # Emitted from a different GDS layer than the socket-check port.
+        (_lef_pin("VPWR", "POWER", _VPWR_BOX, gds_layer=[71, 20]), "layer"),
+        # PORT somewhere else entirely.
+        (_lef_pin("VPWR", "POWER", (2.0, 2.0, 2.2, 3.0)), "location"),
+    ],
+)
+def test_item_11_lef_pin_disagreeing_with_gds_port_is_mismatch(
+    tmp_path, vpwr_pin, aspect
+):
+    lef = _lef_abstract_envelope([_lef_pin("VGND", "GROUND", _VGND_BOX), vpwr_pin])
+    item = _port_item(tmp_path, lef=lef)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lef_power_pin_mismatch"
+    finding = item["detail"]["power_ports"]["findings"][0]
+    assert (finding["net"], finding["aspect"]) == ("VPWR", aspect)
+
+
+def test_item_11_lef_size_disagreeing_with_outline_is_mismatch(tmp_path):
+    item = _port_item(tmp_path, lef=_lef_abstract_envelope(size=(6.0, 5.0)))
+
+    assert item["reason"] == "lef_power_pin_mismatch"
+    assert item["detail"]["power_ports"]["findings"][0]["aspect"] == "size"
+
+
+def test_item_11_lef_structural_failure_is_check_failed(tmp_path):
+    item = _port_item(tmp_path, lef=_lef_abstract_envelope(self_check="fail"))
+
+    assert item["reason"] == "check_failed"
+
+
+def test_item_11_multiple_supplies_each_need_a_port(tmp_path):
+    """Three declared supplies: one port each, by name."""
+    spec = {
+        **ERC_SUPPLY_SPEC,
+        "nets": [*ERC_SUPPLY_SPEC["nets"], {"name": "VDDA", "kind": "supply"}],
+    }
+    lvs = {
+        **LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+        "net_correspondence": [
+            *LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE["net_correspondence"],
+            {"layout": "VDDA", "reference": "VDDA", "pin": True},
+        ],
+    }
+    vdda_box = (2.0, 4.8, 3.0, 5.0)  # top edge
+    item = _port_item(tmp_path, erc_spec=spec, lvs_envelope=lvs)
+    assert item["reason"] == "no_edge_power_port"
+    assert item["detail"]["power_ports"]["findings"][0]["net"] == "VDDA"
+
+    socket = _socket_check_envelope(
+        [
+            _socket_port("VPWR", "POWER", _VPWR_BOX),
+            _socket_port("VGND", "GROUND", _VGND_BOX),
+            _socket_port("VDDA", "POWER", vdda_box),
+        ]
+    )
+    lef = _lef_abstract_envelope(
+        [
+            _lef_pin("VDDA", "POWER", vdda_box),
+            _lef_pin("VGND", "GROUND", _VGND_BOX),
+            _lef_pin("VPWR", "POWER", _VPWR_BOX),
+        ]
+    )
+    met = _port_item(tmp_path, erc_spec=spec, lvs_envelope=lvs, socket=socket, lef=lef)
+    assert met["status"] == "met", met
+    assert [
+        entry["net"]
+        for entry in met["citation"]["power_delivery"]["power_ports"]["ports"]
+    ] == ["VPWR", "VGND", "VDDA"]
+
+
+def test_item_11_existing_reasons_take_precedence_over_port_checks(tmp_path):
+    """The ERC/LVS half is graded first and unchanged: a block whose supply
+    is not continuous still says so, even when its ports are also missing."""
+    erc = {
+        **ERC_CLEAN_ENVELOPE,
+        "status": "violations",
+        "erc_findings": [{"rule": "erc.unconnected_net", "net": "VPWR", "islands": 2}],
+    }
+    item = _port_item(
+        tmp_path,
+        power_ports={"required": True},
+        erc_envelope=erc,
+        socket=None,
+        lef=None,
+    )
+
+    assert item["reason"] == "supply_not_continuous"
+
+
+@pytest.mark.parametrize(
+    "power_ports",
+    [
+        "yes",
+        {"required": "true"},
+        {"edge_band_um": -0.1},
+        {"edges": ["north"]},
+        {"allowed_layers": [68]},
+        {"band": 1},
+    ],
+)
+def test_malformed_manifest_power_ports_is_rejected(power_ports):
+    with pytest.raises(SignoffError, match="power_ports"):
+        build_tier_report(_manifest(power_ports=power_ports))
+
+
+def test_port_evidence_kinds_cannot_satisfy_other_items(tmp_path):
+    """`socket-check`/`lef-abstract` are opt-in kinds scoped to item 11, so
+    a passing one never borrows a pass for an unrestricted item."""
+    socket_path = _write(tmp_path, "socket.json", _socket_check_envelope())
+    lef_path = _write(tmp_path, "lef.json", _lef_abstract_envelope())
+    result = build_tier_report(_manifest(evidence={"1": socket_path, "2": lef_path}))
+
+    for item_id in (1, 2):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["status"] == "unmet"
+        assert item["reason"] == "wrong_kind"
+
+
+def test_build_signoff_classifies_port_evidence(tmp_path):
+    socket_path = _write(tmp_path, "socket.json", _socket_check_envelope())
+    lef_path = _write(tmp_path, "lef.json", _lef_abstract_envelope())
+
+    result = build_signoff([socket_path, lef_path])
+
+    assert [(check["kind"], check["passed"]) for check in result["checks"]] == [
+        ("socket-check", True),
+        ("lef-abstract", True),
+    ]
