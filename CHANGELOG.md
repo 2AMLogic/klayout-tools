@@ -248,8 +248,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   `batch_poll_timeout` diagnostics carrying any recoverable klt error
   envelope; a `remote` SSH-run failure pulls the instance's unit trees
   back before teardown and reports `remote_job_failed` per unit with the
-  recovered streams. `stdout.bin`/`stderr.bin` are reserved unit names. New module `klayout_tools.sim_decks`; the corner request
-  contract, its reports, and its exit codes are unchanged. Documented in
+  recovered streams. Each run replaces (never merges into) every unit's
+  `<outdir>/<id>/`, so a previous run's files are never reported as
+  recovered evidence. `stdout.bin`/`stderr.bin` are reserved unit names.
+  New module `klayout_tools.sim_decks`; the corner request contract,
+  its reports, and its exit codes are unchanged. Documented in
   `docs/cli/sim.md` ("Pre-composed decks"); no `schema_version` bump -- a
   deck report carries `klt sim`'s own `schema_version` with `mode:
   "decks"` as the additive discriminator.

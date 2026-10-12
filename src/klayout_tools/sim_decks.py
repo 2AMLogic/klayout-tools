@@ -1179,6 +1179,48 @@ def _require_remote_config(request: dict[str, Any]) -> tuple[Any, str]:
     return pdk, ssh_key_path
 
 
+def _install_unit_trees(
+    units: list[dict[str, Any]], *, outdir: str, source_root: str | None
+) -> None:
+    """Make every unit's ``outdir/<id>/`` reflect *only* this run: each
+    unit directory is removed, then -- when ``source_root`` (a fresh
+    collection directory holding just what this run brought back) has that
+    unit's tree -- replaced by it. ``outdir`` is reused across runs (the
+    default ``.klt/sim`` especially), so merging into it would let a
+    previous run's streams or outputs masquerade as this run's evidence --
+    the off-host analogue of :func:`run_deck_unit` recreating its unit
+    directory. Only the request's own unit directories are touched; any
+    other content of ``outdir`` is left alone."""
+    for unit in units:
+        target = os.path.join(outdir, unit["id"])
+        shutil.rmtree(target, ignore_errors=True)
+        if source_root is None:
+            continue
+        source = os.path.join(source_root, unit["id"])
+        if os.path.isdir(source):
+            os.makedirs(outdir, exist_ok=True)
+            shutil.copytree(source, target)
+
+
+def _pull_unit_trees(
+    units: list[dict[str, Any]],
+    *,
+    job: remote_transport.JobDescription,
+    transport: dict[str, Any],
+    outdir: str,
+) -> None:
+    """Pull the remote job's unit trees into a fresh temp directory and
+    install them via :func:`_install_unit_trees`. Every unit directory in
+    ``outdir`` is cleared *before* the pull, so a pull that fails (and
+    raises ``RemoteTransportError``) leaves no stale tree behind either."""
+    _install_unit_trees(units, outdir=outdir, source_root=None)
+    with tempfile.TemporaryDirectory(prefix="klt-sim-decks-pull-") as pulled:
+        remote_transport.pull_artifacts(
+            **transport, local_artifacts_dir=pulled, job=job
+        )
+        _install_unit_trees(units, outdir=outdir, source_root=pulled)
+
+
 def _run_decks_remote(
     request: dict[str, Any],
     files: list[sim_staging.StagedFile],
@@ -1296,9 +1338,7 @@ def _run_decks_remote(
                         "deck-list report -- is the runner image's klt new "
                         "enough to know deck-list requests?"
                     )
-                remote_transport.pull_artifacts(
-                    **transport, local_artifacts_dir=outdir, job=job
-                )
+                _pull_unit_trees(units, job=job, transport=transport, outdir=outdir)
                 remote_transport.cleanup_job(**transport)
     except (RemoteLaunchError, remote_transport.RemoteTransportError) as exc:
         raise SimError(f"remote backend failed: {exc}") from exc
@@ -1333,15 +1373,17 @@ def _recover_failed_remote_deck_job(
     the unit trees the worker already wrote, then a synthesized
     ``remote_job_failed`` report naming the transport error on every unit.
     Streams and declared outputs that made it back are reported where they
-    landed under ``outdir`` (paths are unit-relative, as always). Never
-    raises -- a recovery problem is recorded on the units while the
-    transport failure stays authoritative."""
+    landed under ``outdir`` (paths are unit-relative, as always); each
+    unit directory is replaced, never merged into, so "recovered" names
+    only what this pull actually returned. Never raises -- a recovery
+    problem is recorded on the units while the transport failure stays
+    authoritative."""
     message = f"remote job failed: {error}"
     try:
-        remote_transport.pull_artifacts(
-            **transport, local_artifacts_dir=outdir, job=job
+        _pull_unit_trees(
+            worker_request[DECKS_FIELD], job=job, transport=transport, outdir=outdir
         )
-    except remote_transport.RemoteTransportError as pull_exc:
+    except (remote_transport.RemoteTransportError, OSError) as pull_exc:
         message += f" [artifact recovery failed: {pull_exc}]"
     report = _synthesized_deck_report(
         worker_request,
@@ -1484,15 +1526,19 @@ def _recover_failed_deck_job(
     worker_request: dict[str, Any],
     status: dict[str, Any],
     *,
+    outdir: str,
     runner: remote_transport.CommandRunner | None,
 ) -> dict[str, Any]:
     """Bounded, collection-only recovery after a terminal job failure: one
     outputs download; a complete deck report in it wins (evidence beats the
-    state label); otherwise the job's klt error envelope (report.json or
-    the stderr tee) is attached to every unit's diagnostic. Never
-    resubmits and never raises -- a collection problem is recorded on the
-    units while the primary job failure stays authoritative. The caller
-    fills in ``outdir`` and the ``environment.remote`` block."""
+    state label) and its unit trees replace ``outdir/<id>/``; otherwise the
+    job's klt error envelope (report.json or the stderr tee) is attached to
+    every unit's diagnostic and every unit directory in ``outdir`` is
+    cleared (no previous run's files may pose as this job's evidence).
+    Never resubmits and never raises -- a collection problem is recorded on
+    the units while the primary job failure stays authoritative. The caller
+    fills in the report's ``outdir`` and the ``environment.remote`` block."""
+    units = worker_request[DECKS_FIELD]
     state = str(status.get("state") or "")
     code = "batch_job_timeout" if state == "timeout" else "batch_job_failed"
     detail = str(status.get("detail") or "").strip()
@@ -1513,12 +1559,22 @@ def _recover_failed_deck_job(
                 **sim_batch._read_runner_identity(collected),
             }
             try:
-                return _read_deck_report(collected)
+                report = _read_deck_report(collected)
             except sim_batch.BatchError:
                 pass
+            else:
+                _install_unit_trees(
+                    units,
+                    outdir=outdir,
+                    source_root=os.path.join(
+                        collected, sim_batch.BATCH_ARTIFACTS_DIRNAME
+                    ),
+                )
+                return report
             runner_error, note = sim_batch._read_stderr_envelope(collected)
-    except sim_batch.BatchError as exc:
+    except (sim_batch.BatchError, OSError) as exc:
         note = str(exc)
+    _install_unit_trees(units, outdir=outdir, source_root=None)
     message = base_message
     if runner_error is not None:
         message += f": the job's klt reported: {runner_error['message']}"
@@ -1587,6 +1643,7 @@ def _run_decks_batch(
         try:
             status = sim_batch.poll_status(config, job_id)
         except sim_batch.BatchPollTimeout as exc:
+            _install_unit_trees(units, outdir=outdir, source_root=None)
             return _synthesized_deck_report(
                 worker_request,
                 code="batch_poll_timeout",
@@ -1609,7 +1666,7 @@ def _run_decks_batch(
             not in sim_batch._BATCH_SIM_SUCCESS_EXIT_CODES
         ):
             recovered = _recover_failed_deck_job(
-                config, job_id, worker_request, status, runner=None
+                config, job_id, worker_request, status, outdir=outdir, runner=None
             )
             recovered["outdir"] = os.path.abspath(outdir)
             recovered.setdefault("environment", {})["remote"] = environment
@@ -1621,9 +1678,11 @@ def _run_decks_batch(
                 **sim_batch._batch_environment(config, job_id, status),
                 **sim_batch._read_runner_identity(collected),
             }
-            source = os.path.join(collected, sim_batch.BATCH_ARTIFACTS_DIRNAME)
-            if os.path.isdir(source):
-                shutil.copytree(source, outdir, dirs_exist_ok=True)
+            _install_unit_trees(
+                units,
+                outdir=outdir,
+                source_root=os.path.join(collected, sim_batch.BATCH_ARTIFACTS_DIRNAME),
+            )
     except sim_batch.BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
     report["outdir"] = os.path.abspath(outdir)

@@ -1223,8 +1223,8 @@ The corner-only CLI knobs are likewise refused for deck requests:
   inputs, and staged closure are copied there under the declared names, so
   two units may share filenames freely. `stdout.bin` and `stderr.bin` at
   the unit root are reserved for the captured streams: no deck, input,
-  staged include, or declared output may claim them. `ngspice -b <deck>` runs with the
-  unit directory as `cwd` — the invocation a local `ngspice -b` in the
+  staged include, or declared output may claim them. `ngspice -b <deck>`
+  runs with the unit directory as `cwd` — the invocation a local `ngspice -b` in the
   caller's own harness would be.
 - **Streams are evidence, untouched.** Each unit's engine stdout and
   stderr are captured as separate **binary** files (`stdout.bin`,
@@ -1239,10 +1239,20 @@ The corner-only CLI knobs are likewise refused for deck requests:
 The report carries `"mode": "decks"` so a consumer can tell it from a
 corner report at a glance. `schema_version` is `klt sim`'s own (versioned
 per command, see [`docs/json-contract.md`](../json-contract.md)); the deck
-report is the additive `mode: "decks"` shape under that version. Stream and output paths are **relative to
-`outdir`** (which is absolute on the machine that assembled the report —
-the caller's, after an off-host run's collection), so a unit's evidence is
-`<outdir>/<id>/stdout.bin` and so on, under any backend.
+report is the additive `mode: "decks"` shape under that version. Stream
+and output paths are **relative to `outdir`** (which is absolute on the
+machine that assembled the report — the caller's, after an off-host run's
+collection), so a unit's evidence is `<outdir>/<id>/stdout.bin` and so
+on, under any backend.
+
+Every `<outdir>/<id>/` reflects only the current run, on every backend.
+`outdir` is reused across runs (the default `.klt/sim` always is), so an
+off-host run never merges into it: each unit directory is cleared, then
+replaced by the tree this run collected from the instance or the fleet.
+A unit whose tree did not come back has no directory, and its declared
+outputs are listed in `missing_outputs`. A previous run's files are never
+reported as this run's evidence. Content of `outdir` that is not a unit
+directory of the request is left alone.
 
 | Field | Description |
 | ----- | ----------- |

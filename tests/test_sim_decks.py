@@ -919,6 +919,92 @@ class TestRemoteDispatch:
         assert "no unit streams were recovered" in message
         assert report["units"][0]["missing_outputs"] == ["out/measure.raw"]
 
+    def test_failed_recovery_never_reports_stale_local_files(
+        self, tmp_path, monkeypatch
+    ):
+        """Judge repro: a previous run left unit trees in the (reused)
+        outdir; this run's SSH run and pull both fail. Nothing came back
+        from the instance, so nothing may be reported as recovered and
+        every declared output is missing -- the stale trees are cleared,
+        while non-unit content of the outdir is left alone."""
+        from klayout_tools import remote_transport
+
+        write_stub_engine(tmp_path)
+        local = run_local(tmp_path, deck_request(tmp_path), outdir="out")
+        assert local["status"] == "pass"
+        outdir = tmp_path / "out"
+        assert (outdir / "tt_27c" / "stdout.bin").is_file()
+        assert (outdir / "tt_27c" / "out" / "measure.raw").is_file()
+        (outdir / "keep.txt").write_text("not a unit\n", encoding="utf-8")
+
+        install_fake_remote(monkeypatch)
+
+        def failing(**kwargs):
+            raise remote_transport.RemoteTransportError("ssh went away")
+
+        monkeypatch.setattr(sd.remote_transport, "run_remote_job", failing)
+        monkeypatch.setattr(sd.remote_transport, "pull_artifacts", failing)
+        report = run_local(tmp_path, remote_deck_request(tmp_path), outdir="out")
+        assert report["status"] == "error"
+        for unit in report["units"]:
+            message = unit["diagnostics"][0]["message"]
+            assert "recovered from the instance:" not in message
+            assert "no unit streams were recovered" in message
+            assert unit["outputs"] == []
+            assert not (outdir / unit["id"]).exists()
+        assert report["units"][0]["missing_outputs"] == ["out/measure.raw"]
+        assert (outdir / "keep.txt").read_text(encoding="utf-8") == "not a unit\n"
+
+    def test_recovery_reports_only_what_the_pull_returned(self, tmp_path, monkeypatch):
+        """A partial pull over a pre-filled outdir: only the files this
+        pull brought back count as recovered, per unit."""
+        from klayout_tools import remote_transport
+
+        write_stub_engine(tmp_path)
+        run_local(tmp_path, deck_request(tmp_path), outdir="out")
+        outdir = tmp_path / "out"
+        assert (outdir / "ss_125c" / "stdout.bin").is_file()
+
+        install_fake_remote(monkeypatch)
+
+        def failing_run(**kwargs):
+            raise remote_transport.RemoteTransportError("ssh went away")
+
+        def partial_pull(*, local_artifacts_dir, **kwargs):
+            unit_dir = os.path.join(local_artifacts_dir, "tt_27c")
+            os.makedirs(unit_dir, exist_ok=True)
+            with open(os.path.join(unit_dir, "stdout.bin"), "wb") as handle:
+                handle.write(b"partial\n")
+
+        monkeypatch.setattr(sd.remote_transport, "run_remote_job", failing_run)
+        monkeypatch.setattr(sd.remote_transport, "pull_artifacts", partial_pull)
+        report = run_local(tmp_path, remote_deck_request(tmp_path), outdir="out")
+        tt, ss = report["units"]
+        assert tt["diagnostics"][0]["message"].endswith(
+            "(recovered from the instance: stdout.bin)"
+        )
+        assert tt["outputs"] == []
+        assert tt["missing_outputs"] == ["out/measure.raw"]
+        assert (outdir / "tt_27c" / "stdout.bin").read_bytes() == b"partial\n"
+        assert not (outdir / "tt_27c" / "stderr.bin").exists()
+        assert not (outdir / "tt_27c" / "out").exists()
+        assert "no unit streams were recovered" in ss["diagnostics"][0]["message"]
+        assert not (outdir / "ss_125c").exists()
+
+    def test_success_replaces_stale_unit_trees(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        stale_unit = tmp_path / "out" / "tt_27c"
+        (stale_unit / "out").mkdir(parents=True)
+        (stale_unit / "stale.txt").write_text("old\n", encoding="utf-8")
+        (stale_unit / "out" / "old.raw").write_bytes(b"old")
+        install_fake_remote(monkeypatch)
+        report = run_local(tmp_path, remote_deck_request(tmp_path), outdir="out")
+        assert report["status"] == "pass"
+        assert not (stale_unit / "stale.txt").exists()
+        assert not (stale_unit / "out" / "old.raw").exists()
+        assert (stale_unit / "out" / "measure.raw").is_file()
+        assert (stale_unit / "stdout.bin").read_bytes() == b"ngspice-46 stub banner\n"
+
     def test_push_failure_still_raises_sim_error(self, tmp_path, monkeypatch):
         from klayout_tools import remote_transport
 
@@ -1081,6 +1167,53 @@ class TestBatchDispatch:
         assert report["mode"] == "decks"
         assert report["status"] == "error"
         assert report["units"][0]["exit_code"] == 3
+
+    def test_success_replaces_stale_unit_trees(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        stale_unit = tmp_path / "out" / "tt_27c"
+        stale_unit.mkdir(parents=True)
+        (stale_unit / "stale.txt").write_text("old\n", encoding="utf-8")
+        install_fake_batch(monkeypatch, _FakeFleet({"state": "done", "exit_code": "0"}))
+        report = run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        assert report["status"] == "pass"
+        assert not (stale_unit / "stale.txt").exists()
+        assert (stale_unit / "out" / "measure.raw").is_file()
+
+    def test_failed_job_installs_the_collected_unit_trees(self, tmp_path, monkeypatch):
+        """A collected deck report from a failed job is delivered with its
+        unit trees in the local outdir (replacing any previous run's), so
+        the report's unit-relative paths resolve to this job's evidence."""
+        request = batch_deck_request(
+            tmp_path, decks=[{"id": "u0", "deck": "deck.spice"}]
+        )
+        (tmp_path / "deck.spice").write_text("* stub-exit: 3\n", encoding="utf-8")
+        stale_unit = tmp_path / "out" / "u0"
+        stale_unit.mkdir(parents=True)
+        (stale_unit / "stdout.bin").write_bytes(b"stale\n")
+        (stale_unit / "stale.txt").write_bytes(b"stale\n")
+        install_fake_batch(
+            monkeypatch, _FakeFleet({"state": "failed", "exit_code": "4"})
+        )
+        report = run_local(tmp_path, request, outdir="out")
+        assert report["units"][0]["exit_code"] == 3
+        outdir = Path(report["outdir"])
+        assert (outdir / report["units"][0]["stdout"]).read_bytes() == (
+            b"ngspice-46 stub banner\n"
+        )
+        assert not (stale_unit / "stale.txt").exists()
+
+    def test_failed_collection_clears_stale_unit_trees(self, tmp_path, monkeypatch):
+        write_stub_engine(tmp_path)
+        run_local(tmp_path, deck_request(tmp_path), outdir="out")
+        outdir = tmp_path / "out"
+        assert (outdir / "tt_27c" / "out" / "measure.raw").is_file()
+        fleet = _FakeFleet({"state": "failed", "exit_code": "1"}, fail_collect=True)
+        install_fake_batch(monkeypatch, fleet)
+        report = run_local(tmp_path, batch_deck_request(tmp_path), outdir="out")
+        assert report["status"] == "error"
+        assert report["units"][0]["missing_outputs"] == ["out/measure.raw"]
+        assert not (outdir / "tt_27c").exists()
+        assert not (outdir / "ss_125c").exists()
 
     def test_stderr_error_envelope_reaches_the_units(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
