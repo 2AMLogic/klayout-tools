@@ -1025,83 +1025,95 @@ def _odd_grid_top(g: float, need: float) -> float:
     return top
 
 
-def _lele_via_one(via: str, p: _Lele) -> list[Case]:
-    a, c, s, g = p.along, p.across, p.s, p.g_lo
-    lo, up = p.lower, p.upper
-    m8 = up == "M8"
+def _lele_upper_bar(
+    p: _Lele, y0: float, y1: float, x0: float = 0, x1: float | None = None
+) -> Box:
+    """The upper metal over ``x0..x1`` (default: flush with the via) and
+    ``y0..y1``. M8 (no track grid, 40 nm minimum width, 7520 nm^2 minimum
+    area) is drawn 4 nm wider than the via on each side and 50 nm longer at
+    both ends."""
+    x1 = p.across if x1 is None else x1
+    if p.upper == "M8":
+        return box(p.upper, x0 - 4, y0 - 50, x1 + 4, y1 + 50)
+    return box(p.upper, x0, y0, x1, y1)
 
-    def upper_bar(y0: float, y1: float, x0: float = 0, x1: float = c) -> Box:
-        # M8 (no track grid, 40 nm minimum width, 7520 nm^2 minimum
-        # area) is drawn 4 nm wider than the via on each side and long.
-        if m8:
-            return box(up, x0 - 4, y0 - 50, x1 + 4, y1 + 50)
-        return box(up, x0, y0, x1, y1)
 
-    def stack(
-        v: tuple[float, float, float, float] = (0, 0, c, a),
-        lower: Box | None = None,
-        upper: Box | None = None,
-        no_lower: bool = False,
-        no_upper: bool = False,
-    ) -> list[Shape]:
-        shapes: list[Shape] = [box(via, *v)]
-        if not no_lower:
-            shapes.append(lower or box(lo, -50, 0, c + 50, a))
-        if not no_upper:
-            shapes.append(upper or upper_bar(-50, a + 50))
-        return shapes
+def _lele_stack(
+    via: str,
+    p: _Lele,
+    v: tuple[float, float, float, float] | None = None,
+    lower: Box | None = None,
+    upper: Box | None = None,
+    no_lower: bool = False,
+    no_upper: bool = False,
+) -> list[Shape]:
+    """One clean via (``v`` overrides its box) on its default lower and
+    upper bars; ``lower`` / ``upper`` replace a bar, ``no_*`` omit it."""
+    a, c = p.along, p.across
+    shapes: list[Shape] = [box(via, *(v or (0, 0, c, a)))]
+    if not no_lower:
+        shapes.append(lower or box(p.lower, -50, 0, c + 50, a))
+    if not no_upper:
+        shapes.append(upper or _lele_upper_bar(p, -50, a + 50))
+    return shapes
 
-    cs: list[Case] = []
-    if p.direction_known:
-        w1 = f"{via}.W.1"
-        wide_lower = box(lo, -50, -g, c + 50, a + g)
-        cs += [
-            _fail(w1, stack((0, 0, c, a - D))),
-            _fail(w1, stack((0, 0, c, a + D), lower=wide_lower)),
-            _pass(w1, stack()),
-        ]
-        aux2 = f"{via}.{up}.AUX.2"
-        cs += [
-            _fail(aux2, stack((0, 0, c - D, a))),
-            # A 3-track-wide upper metal with a 1-track via.
-            _fail(aux2, stack(upper=box(up, 0, -50, 3 * c, a + 50))),
-            _pass(aux2, stack()),
-            _pass(
-                aux2,
-                stack(
-                    (0, 0, 3 * c, a),
-                    lower=box(lo, -50, 0, 3 * c + 50, a),
-                    upper=box(up, 0, -50, 3 * c, a + 50),
-                ),
+
+def _lele_size_cases(via: str, p: _Lele) -> list[Case]:
+    """W.1 (exact size along the upper metal) and AUX.2 (exactly as wide as
+    the upper metal), V4-V6 only."""
+    a, c, g, lo, up = p.along, p.across, p.g_lo, p.lower, p.upper
+    w1, aux2 = f"{via}.W.1", f"{via}.{up}.AUX.2"
+    wide_lower = box(lo, -50, -g, c + 50, a + g)
+    return [
+        _fail(w1, _lele_stack(via, p, (0, 0, c, a - D))),
+        _fail(w1, _lele_stack(via, p, (0, 0, c, a + D), lower=wide_lower)),
+        _pass(w1, _lele_stack(via, p)),
+        _fail(aux2, _lele_stack(via, p, (0, 0, c - D, a))),
+        # A 3-track-wide upper metal with a 1-track via.
+        _fail(aux2, _lele_stack(via, p, upper=box(up, 0, -50, 3 * c, a + 50))),
+        _pass(aux2, _lele_stack(via, p)),
+        _pass(
+            aux2,
+            _lele_stack(
+                via,
+                p,
+                (0, 0, 3 * c, a),
+                lower=box(lo, -50, 0, 3 * c + 50, a),
+                upper=box(up, 0, -50, 3 * c, a + 50),
             ),
-        ]
+        ),
+    ]
 
-    # S.1: two vias stacked along one upper bar, `gap` apart, on one
-    # lower bar wide enough (an odd number of grid units) for both.
+
+def _lele_corner_dy(p: _Lele) -> tuple[float, float, float]:
+    """``(dx, dy_fail, dy_pass)`` for S.3. On M5-M7 the second via sits on
+    the next track (dx = one track width) and s is not a lattice distance,
+    so the fail / pass pair straddles it by one dbu in dy. Under M8 one
+    wide bar holds both vias and (dx, dy) = (27, 36) is exactly 45 nm."""
+    if p.upper == "M8":
+        return 27.0, 36 - D, 36.0
+    dx = p.across
+    dy0 = math.sqrt(p.s * p.s - dx * dx)
+    dy_fail, dy_pass = math.floor(dy0 / D) * D, math.ceil(dy0 / D) * D
+    assert dy_fail < dy0 < dy_pass
+    return dx, dy_fail, dy_pass
+
+
+def _lele_spacing_cases(via: str, p: _Lele) -> list[Case]:
+    a, c, s, g, lo = p.along, p.across, p.s, p.g_lo, p.lower
+
+    # S.1: two vias stacked along one upper bar, `gap` apart, on one lower
+    # bar wide enough (an odd number of grid units) for both.
     def pair(gap: float) -> list[Shape]:
-        top = _odd_grid_top(g, 2 * a + s)
         return [
             box(via, 0, 0, c, a),
             box(via, 0, a + gap, c, 2 * a + gap),
-            box(lo, -50, -g, c + 50, top),
-            upper_bar(-50, 2 * a + s + 50),
+            box(lo, -50, -g, c + 50, _odd_grid_top(g, 2 * a + s)),
+            _lele_upper_bar(p, -50, 2 * a + s + 50),
         ]
 
-    cs += [_fail(f"{via}.S.1", pair(s - D)), _pass(f"{via}.S.1", pair(s))]
-
-    # S.3: two vias diagonally apart with no projected overlap. On
-    # M5-M7 the second via sits on the next track (dx = one track
-    # width); s is not a lattice distance there, so the fail / pass
-    # pair straddles it by one dbu in dy. Under M8 one wide bar holds
-    # both vias and (dx, dy) = (27, 36) is exactly 45 nm.
-    if m8:
-        dx, dy_fail, dy_pass = 27.0, 36 - D, 36.0
-    else:
-        dx = c
-        dy0 = math.sqrt(s * s - dx * dx)
-        dy_fail = math.floor(dy0 / D) * D
-        dy_pass = math.ceil(dy0 / D) * D
-        assert dy_fail < dy0 < dy_pass
+    # S.3: two vias diagonally apart with no projected overlap.
+    dx, dy_fail, dy_pass = _lele_corner_dy(p)
 
     def corner(dy: float) -> list[Shape]:
         x1 = c + dx
@@ -1110,57 +1122,68 @@ def _lele_via_one(via: str, p: _Lele) -> list[Case]:
             box(via, x1, a + dy, x1 + c, 2 * a + dy),
             box(lo, -50, -g, x1 + c + 50, _odd_grid_top(g, 2 * a + dy)),
         ]
-        if m8:
-            shapes.append(upper_bar(-50, 2 * a + dy + 50, 0, x1 + c))
-        else:
-            shapes += [
-                upper_bar(-50, a + 50),
-                upper_bar(a + dy - 50, 2 * a + dy + 50, x1, x1 + c),
-            ]
-        return shapes
+        if p.upper == "M8":
+            return [*shapes, _lele_upper_bar(p, -50, 2 * a + dy + 50, 0, x1 + c)]
+        return [
+            *shapes,
+            _lele_upper_bar(p, -50, a + 50),
+            _lele_upper_bar(p, a + dy - 50, 2 * a + dy + 50, x1, x1 + c),
+        ]
 
-    cs += [
+    return [
+        _fail(f"{via}.S.1", pair(s - D)),
+        _pass(f"{via}.S.1", pair(s)),
         _fail(f"{via}.S.3", corner(dy_fail)),
         _pass(f"{via}.S.3", corner(dy_pass)),
     ]
 
-    # Enclosure by the lower metal (along x past both via ends; flush
-    # across), 11 nm.
-    en1 = f"{via}.{lo}.EN.1"
 
+def _lele_enclosure_cases(via: str, p: _Lele) -> list[Case]:
+    a, c, g, lo, up = p.along, p.across, p.g_lo, p.lower, p.upper
+    en1, en2 = f"{via}.{lo}.EN.1", f"{via}.{up}.EN.2"
+
+    # Enclosure by the lower metal, 11 nm past the via ends along x (flush
+    # across).
     def lower_capped(e0: float, e1: float) -> list[Shape]:
-        return stack(lower=box(lo, -e0, 0, c + e1, a))
+        return _lele_stack(via, p, lower=box(lo, -e0, 0, c + e1, a))
 
-    cs += [
+    def upper_box(x0: float, y0: float, x1: float, y1: float) -> list[Shape]:
+        return _lele_stack(via, p, upper=box(up, x0, y0, x1, y1))
+
+    cs = [
         _fail(en1, lower_capped(11 - D, 11 - D)),
         _fail(en1, lower_capped(11, 11 - D)),
         _pass(en1, lower_capped(11, 11)),
-        # Short along the bar, but 3 grid units tall: the other pair
-        # of sides meets the minimum.
-        _pass(en1, stack(lower=box(lo, -(11 - D), -g, c + 11 - D, a + g))),
+        # Short along the bar, but 3 grid units tall: the other pair of
+        # sides meets the minimum.
+        _pass(
+            en1, _lele_stack(via, p, lower=box(lo, -(11 - D), -g, c + 11 - D, a + g))
+        ),
+    ]
+    # Enclosure by the upper metal, 11 nm past the via ends along y.
+    if up == "M8":
+        # M8 needs 7520 nm^2: one end stays long; across is 4 nm.
+        return cs + [
+            _fail(en2, upper_box(-4, -(11 - D), c + 4, a + 200)),
+            _pass(en2, upper_box(-4, -11, c + 4, a + 200)),
+            _pass(en2, upper_box(-11, -4, c + 11, a + 200)),
+        ]
+    return cs + [
+        _fail(en2, upper_box(0, -(11 - D), c, a + 11 - D)),
+        _fail(en2, upper_box(0, -11, c, a + 11 - D)),
+        _pass(en2, upper_box(0, -11, c, a + 11)),
     ]
 
-    # Enclosure by the upper metal, 11 nm past the via ends along y.
-    en2 = f"{via}.{up}.EN.2"
-    if m8:
-        # M8 needs 7520 nm^2: one end stays long; across is 4 nm.
-        cs += [
-            _fail(en2, stack(upper=box(up, -4, -(11 - D), c + 4, a + 200))),
-            _pass(en2, stack(upper=box(up, -4, -11, c + 4, a + 200))),
-            _pass(en2, stack(upper=box(up, -11, -4, c + 11, a + 200))),
-        ]
-    else:
-        cs += [
-            _fail(en2, stack(upper=box(up, 0, -(11 - D), c, a + 11 - D))),
-            _fail(en2, stack(upper=box(up, 0, -11, c, a + 11 - D))),
-            _pass(en2, stack(upper=box(up, 0, -11, c, a + 11))),
-        ]
 
+def _lele_via_one(via: str, p: _Lele) -> list[Case]:
     aux1 = f"{via}.AUX.1"
-    cs += [
-        _fail(aux1, stack(no_lower=True)),
-        _fail(aux1, stack(no_upper=True)),
-        _pass(aux1, stack()),
+    cs = [
+        *(_lele_size_cases(via, p) if p.direction_known else []),
+        *_lele_spacing_cases(via, p),
+        *_lele_enclosure_cases(via, p),
+        _fail(aux1, _lele_stack(via, p, no_lower=True)),
+        _fail(aux1, _lele_stack(via, p, no_upper=True)),
+        _pass(aux1, _lele_stack(via, p)),
     ]
     return [_flip(x) for x in cs] if p.flip else cs
 
