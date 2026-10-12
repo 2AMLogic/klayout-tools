@@ -24,6 +24,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   reasons in `asap7_rules.NOT_IMPLEMENTED` and `docs/cli/drc.md` (#3147,
   #3155, #3156). Additive: no existing rule id changes.
 
+- **`klt sta`: per-corner constraint completeness** (issue #2780): every
+  response and every `corners[]` entry carries an additive
+  `constraint_completeness` block. It reports `unconstrained_endpoints` and
+  `unclocked_registers`, each as `{status, count, sample, truncated, reason}`,
+  plus a roll-up `status` of `complete`/`incomplete`/`unknown`. The data comes
+  from OpenSTA's structured `sta::check_timing_cmd`, one check per call, and
+  identities come from the engine's pin list, not from warning text. A finite
+  WNS (`timing_status: "constrained"`) can now come with `status:
+  "incomplete"`. A check that could not run, or that returned malformed
+  output, reports `unavailable` with `count: null`, never `0`. Samples are
+  capped at 20 pins with explicit truncation. Slack fields, `timing_status` and
+  violation counts are unchanged. No `schema_version` bump.
+
 - **`klt lef-abstract`: structural self-check of the emitted LEF** (issue
   #2769): after writing, the command reads the file back from disk and
   validates the emitted subset -- a library-level `VERSION`, properly nested
