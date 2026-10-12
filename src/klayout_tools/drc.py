@@ -35,6 +35,7 @@ instance rather than only the top cell.
 
 from __future__ import annotations
 
+import fnmatch
 import itertools
 import json
 import os
@@ -546,12 +547,205 @@ def _curated_nothing_checked_reasons(
     return [REASON_DECK_HAS_NO_RULES if not deck else REASON_ALL_RULES_SKIPPED]
 
 
+#: The curated engine's ``coverage.skipped[].reason`` for a deck rule the
+#: caller deliberately left out of a ``--rules`` subset (issue #2768). A
+#: requested-work gap by definition -- the full registered deck is what a
+#: DRC verdict is about -- so any omission makes the run partial, whatever
+#: the omitted rule's input layers would have done. Recorded as its own code
+#: so an intentional omission stays distinguishable from a rule that was
+#: naturally inapplicable (:data:`INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY`)
+#: or skipped for an absent layer (:data:`SKIP_REASON_ABSENT_INPUT_LAYER`).
+SKIP_REASON_NOT_SELECTED = "not_selected"
+
+#: Characters that make a ``--rules`` token a shell-style glob rather than an
+#: exact rule id (``fnmatch`` syntax). Used only to word the "matched no
+#: rule" error; matching itself always goes through :func:`fnmatch.fnmatchcase`.
+_GLOB_CHARS = frozenset("*?[")
+
+
+def parse_rule_selectors(raw: str | list[str] | None) -> list[str] | None:
+    """Split a ``--rules`` value (or a request document's ``rules`` field)
+    into its trimmed selector tokens (issue #2768).
+
+    ``raw`` is either one comma-separated string (the argv form,
+    ``--rules 'met1.*,via.width.1'``) or a list of such strings (the request
+    form); every element is comma-split the same way, so the two forms
+    cannot disagree. ``None`` (no selection at all) passes through as
+    ``None`` -- the full-deck run every caller gets by default.
+
+    Raises :class:`DrcError` for an empty selection or an empty token (a
+    stray/trailing comma, a whitespace-only element): silently dropping one
+    would quietly change which rules run.
+    """
+    if raw is None:
+        return None
+    pieces = [raw] if isinstance(raw, str) else list(raw)
+    tokens: list[str] = []
+    for piece in pieces:
+        for token in piece.split(","):
+            token = token.strip()
+            if not token:
+                raise DrcError(
+                    f"--rules has an empty rule selector in {piece!r} -- pass "
+                    "comma-separated rule ids or quoted globs, e.g. "
+                    "--rules 'met1.*,via.width.1'"
+                )
+            tokens.append(token)
+    if not tokens:
+        raise DrcError("--rules selects no rules -- pass at least one rule id")
+    return tokens
+
+
+def resolve_rule_selection(deck: list[DrcRule], selectors: list[str]) -> dict[str, Any]:
+    """Resolve ``selectors`` against the full registered ``deck`` once, before
+    any geometry is read (issue #2768).
+
+    Each token matches an exact rule id, or -- when it is not one -- every id
+    it matches as a case-sensitive shell-style glob
+    (:func:`fnmatch.fnmatchcase`). Overlapping tokens are deduplicated; the
+    selected ids come back in deck order (the order :func:`run_drc` executes
+    in), never selector order. A token that matches nothing is an error
+    naming it, so a typo cannot silently shrink the run.
+
+    Returns the report's ``rule_selection`` block: ``selectors`` (the
+    trimmed tokens, as given), ``selected`` and ``omitted`` (both in deck
+    order, partitioning the deck), ``deck_rule_count`` and ``subset``
+    (``True`` exactly when something was omitted).
+    """
+    ids = [rule.id for rule in deck]
+    known = set(ids)
+    chosen: set[str] = set()
+    unmatched: list[str] = []
+    for token in selectors:
+        if token in known:
+            chosen.add(token)
+            continue
+        matches = {rule_id for rule_id in ids if fnmatch.fnmatchcase(rule_id, token)}
+        if not matches:
+            unmatched.append(token)
+        chosen |= matches
+    if unmatched:
+        kinds = [
+            "glob" if _GLOB_CHARS.intersection(token) else "rule id"
+            for token in unmatched
+        ]
+        listed = ", ".join(
+            f"{kind} {token!r}" for kind, token in zip(kinds, unmatched, strict=True)
+        )
+        raise DrcError(
+            f"--rules selector(s) matched no rule in this deck: {listed} -- "
+            "ids and globs are case-sensitive; see `klt drc --deck <name> "
+            "--list-rules` for the registered ids"
+        )
+    selected = [rule_id for rule_id in ids if rule_id in chosen]
+    omitted = [rule_id for rule_id in ids if rule_id not in chosen]
+    return {
+        "selectors": list(selectors),
+        "selected": selected,
+        "omitted": omitted,
+        "deck_rule_count": len(ids),
+        "subset": bool(omitted),
+    }
+
+
+def _resolve_optional_selection(
+    deck: list[DrcRule], rules: list[str] | None
+) -> tuple[dict[str, Any] | None, set[str]]:
+    """:func:`run_drc`'s ``(rule_selection, omitted ids)`` -- ``(None,
+    set())`` for a default full-deck run with no ``rules`` at all."""
+    if rules is None:
+        return None, set()
+    selection = resolve_rule_selection(deck, list(rules))
+    return selection, set(selection["omitted"])
+
+
+def _dispatched_rules(deck: list[DrcRule], omitted_ids: set[str]) -> list[DrcRule]:
+    """The deck rules :func:`run_drc` actually dispatches, in deck order:
+    every rule except those deliberately omitted from a ``--rules`` subset
+    (issue #2768)."""
+    return [rule for rule in deck if rule.id not in omitted_ids]
+
+
+def _fmt_layer(layer_tuple: tuple[int, int] | None) -> str | None:
+    if layer_tuple is None:
+        return None
+    return f"{layer_tuple[0]}/{layer_tuple[1]}"
+
+
+def list_deck_rules(deck_name: str) -> dict[str, Any]:
+    """``klt drc --deck <name> --list-rules`` (issue #2768): enumerate a
+    curated deck's registered rules without reading any layout.
+
+    Deterministic: rules in deck (registration) order, which is also the
+    order a ``--rules`` subset executes in; the two grouping maps are sorted
+    by key. Deliberately carries no ``status``/``violations``/``coverage``
+    field -- a listing is not a DRC result, and ``klt signoff`` refuses it as
+    an unrecognised envelope rather than grading it.
+
+    Raises :class:`DrcError` for an unknown deck name.
+    """
+    try:
+        deck = get_deck(deck_name)
+    except UnknownDeckError as exc:
+        raise DrcError(str(exc)) from exc
+    layer_names = get_layer_names(deck_name)
+
+    def _name(layer_tuple: tuple[int, int] | None) -> str | None:
+        return None if layer_tuple is None else layer_names.get(layer_tuple)
+
+    rules = []
+    scope_counts: dict[str, int] = {}
+    check_counts: dict[str, int] = {}
+    for rule in deck:
+        derived = rule.derived_layer
+        rules.append(
+            {
+                "id": rule.id,
+                "description": rule.description,
+                "check": rule.check,
+                "layer": _fmt_layer(rule.layer),
+                "layer_name": _name(rule.layer),
+                "other_layer": _fmt_layer(rule.other_layer),
+                "other_layer_name": _name(rule.other_layer),
+                "derived_layer": None
+                if derived is None
+                else {
+                    "mode": derived.mode,
+                    "base": _fmt_layer(derived.base),
+                    "intersect_with": _fmt_layer(derived.intersect_with),
+                    "sized_by_um": derived.sized_by_um,
+                },
+                "scope": rule.scope or None,
+            }
+        )
+        if rule.scope:
+            scope_counts[rule.scope] = scope_counts.get(rule.scope, 0) + 1
+        check_counts[rule.check] = check_counts.get(rule.check, 0) + 1
+    return {
+        "schema_version": 2,
+        "mode": "list_rules",
+        "deck": deck_name,
+        "engine": "curated",
+        "rule_count": len(rules),
+        "groups": {
+            "check": dict(sorted(check_counts.items())),
+            "scope": dict(sorted(scope_counts.items())),
+        },
+        "rules": rules,
+        "provenance": build_provenance(
+            deck_name=deck_name,
+            deck_path=deck_source_path(deck_name),
+        ),
+    }
+
+
 def run_drc(
     path: str,
     deck_name: str,
     top: str | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    rules: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run ``deck_name``'s rules against the layout at ``path``.
 
@@ -589,6 +783,11 @@ def run_drc(
                 "deck_scope": [<scope identifier>, ...],
                 "nothing_checked": bool,
                 "nothing_checked_reasons": [<reason code>, ...],
+            },
+            "rule_selection": {  # only when `rules` is given (issue #2768)
+                "selectors": [str, ...], "selected": [<rule id>, ...],
+                "omitted": [<rule id>, ...], "deck_rule_count": int,
+                "subset": bool,
             },
             "provenance": {  # shared reproducibility block, see _provenance.py
                 "klt_version": <str | None>,
@@ -760,10 +959,30 @@ def run_drc(
     Omitting both (the default) leaves ``provenance.pdk`` ``None``, matching
     every prior release's behaviour.
 
+    ``rules`` (issue #2768, the ``--rules`` flag) is a list of selector
+    tokens -- exact rule ids or case-sensitive shell-style globs, already
+    split by :func:`parse_rule_selectors` -- restricting which deck rules are
+    *executed*. It is resolved once against the full registered deck by
+    :func:`resolve_rule_selection` before the layout is even read, so an
+    unmatched token fails fast. Unselected rules are never dispatched (not
+    filtered out afterwards). The full deck still drives every deck-static
+    field (``coverage.deck_layers``/``layers_checked``/
+    ``layers_in_stream_without_rules``/``deck_scope``) and ``provenance``;
+    each omitted rule is recorded as a common-coverage ``skipped`` record
+    with reason :data:`SKIP_REASON_NOT_SELECTED` -- never as inapplicable,
+    whatever its layers -- so a proper subset rolls up ``"clean_partial"``
+    (or ``"violations"``/``"not_checked"`` by the usual precedence) and can
+    never read as an unconditional ``"clean"``. A top-level
+    ``rule_selection`` block (:func:`resolve_rule_selection`) records the
+    selectors, selected and omitted ids; it is absent when ``rules`` is
+    ``None``, so a default run's report is unchanged. Selecting every rule is
+    equivalent to a full run (``omitted: []``).
+
     Raises :class:`DrcError` if the file is missing/unreadable, the deck
     name is unknown, ``top`` names a cell absent from the stream, a rule is
-    malformed (e.g. a two-layer check missing ``other_layer``), or
-    ``pdk_variant``/``pdk_root`` is given but no matching PDK can be found.
+    malformed (e.g. a two-layer check missing ``other_layer``),
+    ``pdk_variant``/``pdk_root`` is given but no matching PDK can be found,
+    or a ``rules`` selector matches no rule.
     """
     # Resolved only when `--pdk`/`--pdk-root` was given -- this engine's
     # rules come entirely from `deck_name`, so the resolved PDK is used for
@@ -792,6 +1011,11 @@ def run_drc(
     except UnknownDeckError as exc:
         raise DrcError(str(exc)) from exc
     layer_names = get_layer_names(deck_name)
+
+    # Issue #2768: resolved against the full deck before the layout is read,
+    # so a bad selector never costs a stream load. `omitted_ids` is empty for
+    # a full run (no selection, or a selection naming every rule).
+    rule_selection, omitted_ids = _resolve_optional_selection(deck, rules)
 
     layout = load_layout(path, DrcError)
 
@@ -840,7 +1064,11 @@ def run_drc(
     rules_skipped: list[str] = []
     rules_checked: list[str] = []
 
-    for rule in deck:
+    # Issue #2768: a rule left out of a `--rules` subset is never dispatched
+    # -- not run-and-filtered (see `_dispatched_rules`). It is recorded
+    # separately from `rules_skipped` (absent-layer skips) so the omission
+    # cannot be reclassified as inapplicable work below.
+    for rule in _dispatched_rules(deck, omitted_ids):
         # A `threshold_max_dbu` (#2370) attached to a check kind with no
         # upper-bound branch is a deck-authoring mistake that must fail
         # loudly, including on a stream where this rule's layer is absent
@@ -1291,7 +1519,9 @@ def run_drc(
     # threshold, right or wrong.
     voltage_domain_warnings: list[dict[str, str]] = []
     unmodeled_markers = get_unmodeled_voltage_markers(deck_name)
-    skipped_rule_ids = set(rules_skipped)
+    # A rule omitted from a `--rules` subset (issue #2768) applied no
+    # threshold either, exactly like a skipped one.
+    skipped_rule_ids = set(rules_skipped) | omitted_ids
     for marker, description in sorted(unmodeled_markers.items()):
         if marker not in stream_layer_tuples:
             continue
@@ -1333,6 +1563,13 @@ def run_drc(
     skipped_records, inapplicable_records = _classify_skipped_rules(
         deck, rules_skipped, layout
     )
+    # Issue #2768: every deliberately omitted rule is requested work that did
+    # not run -- a skip, never inapplicable, even when its layers are absent
+    # (the full registered deck is what a DRC verdict is about).
+    skipped_records += [
+        {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
+        for rule_id in sorted(omitted_ids)
+    ]
     coverage = {
         "deck_layers": [_fmt(t) for t in sorted(deck_layer_tuples)],
         "layers_checked": [_fmt(t) for t in sorted(layers_checked)],
@@ -1363,7 +1600,7 @@ def run_drc(
     # list are `clean_partial` (exit 0, a real result that is *not* this
     # verb's unconditional success). See `docs/coverage-contract.md`.
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
-    return {
+    report: dict[str, Any] = {
         "schema_version": 2,
         "file": path,
         "deck": deck_name,
@@ -1374,14 +1611,18 @@ def run_drc(
         "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
         "violations": violations,
         "coverage": coverage,
-        "provenance": build_provenance(
-            deck_name=deck_name,
-            deck_path=deck_source_path(deck_name),
-            pdk=pdk_info,
-            input_path=path,
-            include_klayout_version_mismatch=True,
-        ),
+        # Issue #2768: present only for a `--rules` run, so a default run's
+        # report (and every committed one) is byte-identical to before.
+        **({} if rule_selection is None else {"rule_selection": rule_selection}),
     }
+    report["provenance"] = build_provenance(
+        deck_name=deck_name,
+        deck_path=deck_source_path(deck_name),
+        pdk=pdk_info,
+        input_path=path,
+        include_klayout_version_mismatch=True,
+    )
+    return report
 
 
 def drc_exit_code(report: dict[str, Any]) -> int:
@@ -1465,6 +1706,31 @@ def check_drc_report(report_path: str) -> dict[str, Any]:
     return build_check_result(report_path=report_path, checks=checks)
 
 
+def _recorded_rule_selectors(committed: dict[str, Any]) -> list[str] | None:
+    """The ``--rules`` selectors a committed curated report was run with
+    (issue #2768), or ``None`` for a full-deck report (no ``rule_selection``
+    key -- including every report predating the flag).
+
+    Raises :class:`DrcError` for a present but malformed block rather than
+    silently replaying it as a full run, which would turn a recorded subset
+    into a full-deck claim.
+    """
+    selection = committed.get("rule_selection")
+    if selection is None:
+        return None
+    selectors = selection.get("selectors") if isinstance(selection, dict) else None
+    if (
+        not isinstance(selectors, list)
+        or not selectors
+        or not all(isinstance(token, str) and token.strip() for token in selectors)
+    ):
+        raise DrcError(
+            "committed report's 'rule_selection.selectors' must be a non-empty "
+            "list of rule selector strings to replay the selection"
+        )
+    return parse_rule_selectors(selectors)
+
+
 def rerun_drc_report(report_path: str) -> dict[str, Any]:
     """``klt drc --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt drc --format json`` report at
@@ -1474,7 +1740,9 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
     Re-runs against exactly the ``file``/``deck``/``engine`` the committed
     report itself names -- :func:`run_drc_klayout_engine` when
     ``committed["engine"] == "klayout"``, :func:`run_drc` (the curated
-    engine) otherwise. **Known limitation**: neither the curated nor the
+    engine) otherwise -- replaying a curated ``--rules`` subset's recorded
+    ``rule_selection.selectors`` (issue #2768, :func:`_recorded_rule_selectors`).
+    **Known limitation**: neither the curated nor the
     ``klayout`` engine's report records which ``--top`` (if any) the
     original run used, so ``--rerun`` always re-checks every top cell
     (``top=None``) -- a report originally scoped to one top cell via
@@ -1521,7 +1789,13 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
             **_rerun_assertion_kwargs(committed),
         )
     else:
-        fresh = run_drc(file_path, deck, top=None)
+        # Issue #2768: a committed `--rules` subset replays its own recorded
+        # selectors (so a deck change that alters what a glob matches shows
+        # up as drift); a report without `rule_selection` -- every report
+        # written before the flag existed -- keeps its full-deck meaning.
+        fresh = run_drc(
+            file_path, deck, top=None, rules=_recorded_rule_selectors(committed)
+        )
 
     return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
 

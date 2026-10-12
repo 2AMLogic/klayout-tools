@@ -5912,6 +5912,14 @@ pre-1.0 caveat issue #547's R/C value change established. `substrate_dc_tie`
 also gains the additive `node_scope` field (always `"global"`). See
 "Substrate DC reference" above.
 
+**Additive fields, no `schema_version` bump (issue #2764):** the
+`integrity` summary and each `nets[]` entry's inline `integrity` block are
+new — no documented field is renamed or retyped, every existing count,
+total and verdict keeps its exact meaning, and the diagnostics are
+**status values, not exceptions**: an agent branches on them, and a
+reported finding never changes `status` or adds a warning. See "Parasitic
+network integrity" below.
+
 ```json
 "parasitics": {
   "r_count": 6,
@@ -5955,7 +5963,28 @@ also gains the additive `node_scope` field (always `"global"`). See
           "levels": [[0, 1]],
           "lateral_levels": []
         }
-      ]
+      ],
+      "integrity": {
+        "open": {
+          "status": "not_applicable",
+          "reason": "lumped model: terminal legs attach to the hub by construction; no distributed segments to check connectivity over",
+          "disconnected_count": 0,
+          "disconnected_terminals": [],
+          "details_truncated": false
+        },
+        "islands": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+        "orphan_nodes": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+        "suspicious_resistors": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+        "short_candidates": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+        "capacitance": {
+          "status": "pass",
+          "declared_ff": 1.910204,
+          "computed_ff": 1.910204,
+          "delta_ff": 0.0,
+          "reason": null,
+          "tolerance": { "absolute_ff": 1e-06, "relative": 1e-09 }
+        }
+      }
     }
   ],
   "metals_without_coefficient": [],
@@ -5969,6 +5998,19 @@ also gains the additive `node_scope` field (always `"global"`). See
     "node_scope": "global"
   },
   "substrate_spreading": null,
+  "integrity": {
+    "short_threshold_ohm": 1.0,
+    "cap_tolerance": { "absolute_ff": 1e-06, "relative": 1e-09 },
+    "max_detail_items": 20,
+    "nets_checked": 1,
+    "nets_with_findings": 0,
+    "open_nets": 0,
+    "island_components": 0,
+    "orphan_nodes": 0,
+    "suspicious_resistors": 0,
+    "short_candidates": 0,
+    "capacitance_mismatches": 0
+  },
   "model": {
     "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
     "coupling": "vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled",
@@ -5999,6 +6041,7 @@ also gains the additive `node_scope` field (always `"global"`). See
 | `mom_rlc_override`     | object \| null  | Additive field (issue #988). `null` unless `--mom-rlc-net <net>` was given, in which case it is the substitution report for that one net — see "Substitute a caller-supplied `klt mom` R/L/C for a critical net" above and the field list below. |
 | `substrate_dc_tie`     | object          | Additive field (issue #1263, extended by issue #1503). The DC reference written for every synthesized substrate net — see "Substrate DC reference" above and the field list below. Always present (never `null`); `nets` is `[]` when this extraction synthesized no substrate identity at all. |
 | `substrate_spreading`  | object \| null  | Additive field (issue #2561). `null` unless `--substrate-spreading <net>` was given, in which case it is the **two-terminal closed-form** bulk-resistance estimate between that net's substrate taps — see "Substrate spreading resistance between taps" above and the field list below. Reported only; nothing is injected into the netlist, and this is **not** the N-terminal network solve issue #2515 tracks. |
+| `integrity`            | object          | Additive field (issue #2764). The emitted RC network's own integrity summary — the check settings in force and aggregate counts across every net. Each net's per-net diagnostics ride inline on its `nets[].integrity` entry. See "Parasitic network integrity" below. |
 
 `substrate_dc_tie`:
 
@@ -6238,6 +6281,111 @@ tuple; pair index 0 is between the bottom two levels), sorted by
 `defaultoverlap` coefficient per adjacent pair its stack declares — and
 trivially empty for a deck with fewer than two metal levels. A non-empty list
 is mirrored into top-level `warnings[]` the same way.
+
+### Parasitic network integrity (`parasitics.integrity`, `nets[].integrity`, issue #2764)
+
+Nothing before issue #2764 checked that the emitted RC network itself is
+well formed: an extractor bookkeeping bug — a ladder split into islands, a
+near-zero resistor bridging two nets, a negative or non-finite R, a
+capacitor that no longer sums back to the net's declared total — silently
+flowed into `klt sim` and surfaced only as a confusing simulation result.
+Every `--parasitics` run therefore validates the network it just emitted
+and reports the result as **per-net status values, not exceptions**: an
+agent branches on them, and a finding never changes `status`, never adds a
+warning, and never repairs the network.
+
+**What is checked — and the model limit.** These diagnostics validate the
+*generated RC model*: the `R`/`C`/`L` cards injection actually wrote and the
+bookkeeping that produced them. A `pass` here does **not** certify that the
+layout is free of geometric opens or shorts — a layout-level discontinuity
+that the extractor measured faithfully is a good model of a bad layout, and
+detecting that is layout signoff's job, not this report's. Conversely, a
+finding is a defect in the emitted model (or the extraction that produced
+it), not evidence about the silicon.
+
+Connectivity is judged over the DC-conducting elements only — resistors and
+inductors join nodes; **capacitors never do** (an open at DC is not bridged
+by a coupling cap, and a legitimate capacitor endpoint is not automatically
+an orphan). Node identity is the original net's circuit-scoped `net_id`
+(`Net.cluster_id`), not its display name: two same-named nets (issue #765's
+un-strapped `VGND` islands) keep distinct identities, and a resistor is a
+cross-net candidate because its endpoints' *owners* differ, never because
+their names do.
+
+Top-level `parasitics.integrity`:
+
+| Field | Type | Description |
+|---|---|---|
+| `short_threshold_ohm` | number | The cross-net short-candidate threshold in force (ohms). Default `1.0`. See the `short_candidates` semantics below. |
+| `cap_tolerance` | object | The ground-capacitance reconciliation tolerances in force: `absolute_ff` (`1e-06` — below the report's own 6-decimal fF resolution) and `relative` (`1e-09`). |
+| `max_detail_items` | integer | The cap on every `details` list (`20`). Counts are always complete even when a list truncates. |
+| `nets_checked` | integer | Number of nets the checks ran on (== `len(nets)`). `0` on a run that injected nothing (the block is still present — schema stability). |
+| `nets_with_findings` | integer | Nets with at least one finding (`open`, any island/orphan/suspicious/short count, or a `mismatch` capacitance). `not_applicable` never counts as a finding. |
+| `open_nets` | integer | Nets whose `open.status` is `"open"`. |
+| `island_components` | integer | Total island components across all nets. A fully detached node is both an island and an orphan — the two definitions genuinely overlap, by design. |
+| `orphan_nodes` | integer | Total orphan nodes across all nets. |
+| `suspicious_resistors` | integer | Total malformed resistors across all nets. |
+| `short_candidates` | integer | Total cross-net short candidates across all nets. |
+| `capacitance_mismatches` | integer | Nets whose ground-capacitance reconciliation status is `"mismatch"`. |
+
+The summary carries no net names — per-net detail lives on the nets
+themselves, so rerun canonicalization re-sorts it together with each entry.
+
+Per net, `nets[].integrity`:
+
+| Field | Type | Description |
+|---|---|---|
+| `open` | object | Terminal-connectivity status. `status` is `"pass"` (every required terminal in one DC component), `"open"` (some are not — `disconnected_count`/`disconnected_terminals[]` name them, first required terminal's component is the reference), or `"not_applicable"` (`reason` says why: a **lumped** net's star hangs every terminal leg off the hub by construction, so the model carries no measurable terminal-connectivity evidence — reported as `not_applicable`, never a pass; a net with no required terminals cannot support the check; a single required terminal is vacuously connected). Only a **distributed** net gets the real union-find over its emitted segment resistors. Zero/one-terminal behavior: zero terminals → `not_applicable`; one terminal → `pass`. |
+| `islands` | object | Connected components of the net's DC graph containing none of its required terminals: `count` (always complete), `details[]` (capped at `max_detail_items`, each `{"nodes": [...]}` with sorted members, islands ordered by first member), `details_truncated`, `reason` (`null`; a no-required-terminals net reports `count: 0` with the reason instead — with no main body, every component would be an island and the count would carry no finding value). |
+| `orphan_nodes` | object | Nodes of the net's universe with no element attached at all — same `{count, details[], details_truncated, reason}` shape, each detail `{"node": ...}`. A node attached even only by a capacitor is a legitimate capacitor endpoint, **not** an orphan. A fully detached node is both an orphan and (degenerately) an island. |
+| `suspicious_resistors` | object | Malformed resistors this net emitted, diagnosed before any graph arithmetic so a malformed value can neither crash the checker nor leak into the JSON: `negative`, `zero`, `non_finite` (NaN/±Inf — the value serializes as `null`), `self_loop` (a resistor with both endpoints on one node). Each detail: `{"device", "node_a", "node_b", "resistance_ohm", "issues"}` with `issues` sorted, details sorted by device name. Intentional substrate DC ties are excluded. |
+| `short_candidates` | object | Injected parasitic resistors whose endpoints resolve to **different owners** — a different original net, or the shared ground — at or below `short_threshold_ohm` (default `1.0`, comparison **inclusive**: exactly at the threshold is a candidate). Each detail adds `owner_a`/`owner_b` (net ids, or `"ground"`). Attributed to exactly the net that emitted the resistor — never double-reported. Ordinary within-net segments (including ones clamped to the extractor's `1e-3` Ω minimum), drawn functional resistors (which are not part of this network at all), and the `1e12` Ω substrate DC ties are never short candidates. |
+| `capacitance` | object | Ground-capacitance reconciliation: `declared_ff` (the net's declared total) vs `computed_ff` (the sum of its emitted ground-capacitor values — each read back from the created device's own `C` parameter, so a capacitor whose emitted value went wrong is caught rather than the declared total being compared to a copy of itself — **each capacitor counted exactly once**; coupling capacitance is kept separate and never enters the sum), `delta_ff` = computed − declared, `status` (`"pass"` when `|delta| <= max(absolute_ff, relative × |declared|)`; `"mismatch"` otherwise — including when either side is non-finite, which also serializes its value as `null`; `"not_applicable"` only for a replacement model that declares itself incomparable, with its `reason`), plus the echoed `tolerance`. The current MoM substitutions stay checkable: they rewrite the declared entry *before* emission, so declared and emitted still describe the same capacitance. |
+
+Example — a healthy lumped net (and the summary of a clean run) as emitted:
+
+```json
+"integrity": {
+  "short_threshold_ohm": 1.0,
+  "cap_tolerance": { "absolute_ff": 1e-06, "relative": 1e-09 },
+  "max_detail_items": 20,
+  "nets_checked": 6,
+  "nets_with_findings": 0,
+  "open_nets": 0,
+  "island_components": 0,
+  "orphan_nodes": 0,
+  "suspicious_resistors": 0,
+  "short_candidates": 0,
+  "capacitance_mismatches": 0
+}
+```
+
+```json
+"integrity": {
+  "open": {
+    "status": "not_applicable",
+    "reason": "lumped model: terminal legs attach to the hub by construction; no distributed segments to check connectivity over",
+    "disconnected_count": 0,
+    "disconnected_terminals": [],
+    "details_truncated": false
+  },
+  "islands": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+  "orphan_nodes": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+  "suspicious_resistors": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+  "short_candidates": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+  "capacitance": {
+    "status": "pass",
+    "declared_ff": 1.910204,
+    "computed_ff": 1.910204,
+    "delta_ff": 0.0,
+    "reason": null,
+    "tolerance": { "absolute_ff": 1e-06, "relative": 1e-09 }
+  }
+}
+```
+
+`klt pex` propagates the same diagnostics as
+`extraction.parasitic_integrity` — see [`pex.md`](pex.md)'s field table.
 
 ### Parasitic model scope (`parasitics.model`)
 
@@ -6738,7 +6886,7 @@ Every field in this report falls into exactly one of three classes:
 
 | Class | Meaning | Examples |
 | ----- | ------- | -------- |
-| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `warnings[]`, `netlist_sha256` (a hash *of* content). |
+| **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `parasitics.integrity` and `parasitics.nets[].integrity` (issue #2764 — derived deterministically from the same emitted model the rest of the block reports; detail strings naming anonymous nets inherit those spellings' bookkeeping class), `warnings[]`, `netlist_sha256` (a hash *of* content). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
 
