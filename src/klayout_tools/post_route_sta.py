@@ -2393,35 +2393,17 @@ def _parse_clock_latency(stdout: str, clock_name: str) -> dict[str, Any]:
     that the tree is empty.
     """
     block = _extract_block(stdout, _CLOCK_LATENCY_BEGIN, _CLOCK_LATENCY_END)
+    section_seen, rows = (
+        _clock_latency_rows(block, clock_name) if block is not None else (False, [])
+    )
     seen: set[str] = set()
     sample: list[str] = []
-    max_latency: float | None = None
-    section_seen = False
-    current_section: str | None = None
-    if block is not None:
-        for line in block.splitlines():
-            header = _CLOCK_SECTION_RE.match(line.rstrip())
-            if header:
-                current_section = header.group(1)
-                if current_section == clock_name:
-                    section_seen = True
-                continue
-            if current_section != clock_name:
-                continue
-            row = _NETWORK_LATENCY_RE.match(line.rstrip())
-            if row is None:
-                continue
-            latency_s, pin = row.groups()
-            if pin not in seen:
-                seen.add(pin)
-                if len(sample) < _CLOCK_SINK_SAMPLE_LIMIT:
-                    sample.append(pin)
-            try:
-                latency = float(latency_s)
-            except ValueError:
-                continue
-            if max_latency is None or latency > max_latency:
-                max_latency = latency
+    for _latency_s, pin in rows:
+        if pin not in seen:
+            seen.add(pin)
+            if len(sample) < _CLOCK_SINK_SAMPLE_LIMIT:
+                sample.append(pin)
+    max_latency = _max_network_latency(rows)
     return {
         "clock_sinks": len(seen) if section_seen else None,
         "max_network_latency_ns": (
@@ -2429,6 +2411,45 @@ def _parse_clock_latency(stdout: str, clock_name: str) -> dict[str, Any]:
         ),
         "clock_sinks_sample": sample,
     }
+
+
+def _clock_latency_rows(
+    block: str, clock_name: str
+) -> tuple[bool, list[tuple[str, str]]]:
+    """``(section_seen, rows)`` for *clock_name* in a ``report_clock_latency``
+    block: whether the clock's section header appeared at all, and the
+    ``(latency, pin)`` string pairs of every ``network latency`` row under
+    it, in report order (duplicates across rise/fall tables kept)."""
+    rows: list[tuple[str, str]] = []
+    section_seen = False
+    current_section: str | None = None
+    for line in block.splitlines():
+        header = _CLOCK_SECTION_RE.match(line.rstrip())
+        if header:
+            current_section = header.group(1)
+            section_seen = section_seen or current_section == clock_name
+            continue
+        if current_section != clock_name:
+            continue
+        row = _NETWORK_LATENCY_RE.match(line.rstrip())
+        if row is not None:
+            latency_s, pin = row.groups()
+            rows.append((latency_s, pin))
+    return section_seen, rows
+
+
+def _max_network_latency(rows: list[tuple[str, str]]) -> float | None:
+    """The largest parseable latency among *rows* (see
+    :func:`_clock_latency_rows`), or ``None`` when none parses."""
+    max_latency: float | None = None
+    for latency_s, _pin in rows:
+        try:
+            latency = float(latency_s)
+        except ValueError:
+            continue
+        if max_latency is None or latency > max_latency:
+            max_latency = latency
+    return max_latency
 
 
 def _parse_parasitic_annotation(stdout: str) -> tuple[int | None, int | None]:
