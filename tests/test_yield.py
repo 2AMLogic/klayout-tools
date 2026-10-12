@@ -2497,6 +2497,36 @@ def test_spec_row_in_limits_file_wins_and_is_echoed(tmp_path):
 
 
 @requires_native
+def test_spec_row_on_a_skipped_measurement_is_simply_not_reported(tmp_path):
+    # A measurement with no resolvable limits is skipped with a warning and
+    # never reaches the report -- its spec_row goes nowhere, and the run
+    # still succeeds for the measurements that do have limits (issue #2840).
+    doc = {
+        "measurements": [
+            {
+                "name": "unlimited",
+                "unit": "V",
+                "samples": _normal_grid(300, 1.2, 0.01),
+                "spec_row": "ROW-UNREACHABLE",
+            },
+            {
+                "name": "m",
+                "unit": "V",
+                "samples": _normal_grid(300, 1.2, 0.01),
+                "limits": {"min": 1.1, "max": 1.3},
+                "spec_row": "ROW-M",
+            },
+        ]
+    }
+    path = tmp_path / "doc.json"
+    path.write_text(json.dumps(doc))
+    report = run_yield(str(path))
+    assert [m["name"] for m in report["measurements"]] == ["m"]
+    assert report["measurements"][0]["spec_row"] == "ROW-M"
+    assert any("unlimited" in w for w in report["warnings"])
+
+
+@requires_native
 def test_sim_report_monte_carlo_is_not_double_written(tmp_path):
     report = run_yield(
         _sim_report(
