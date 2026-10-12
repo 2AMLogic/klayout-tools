@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt synthesize` memory-mapping evidence** (issue #2745, part of #2281):
+  the response gains two additive, always-present fields. `memory_mapping`
+  reports per module definition whether inferred memories were
+  `lowered_to_logic`, `optimized_away` before lowering, `surviving`, `mixed`
+  or `indeterminate`. It is derived from `stat` counts at elaboration and
+  before `memory_map`, captured by a separate side Yosys invocation
+  (`<top>_memory_evidence.ys`), plus the production final stats.
+  `blackbox_modules` lists surviving `blackbox`/`whitebox` modules, whose area
+  is not in `area_um2`. The production script, netlist and metrics are
+  unchanged. An evidence failure yields `indeterminate`, never a failed run.
+  `schema_version` stays 2.
+
 - **`klt extract --hierarchical-cells`** (issue #2722, increment 1): an
   opt-in, additive hierarchical SPICE mode. Named non-nested cells are written
   as their own `.SUBCKT` (one definition per cell, one `X` per placement) with
