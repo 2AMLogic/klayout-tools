@@ -12687,6 +12687,28 @@ def test_parasitics_summary_block_shape(tmp_path):
         "mom_rlc_override",
         "substrate_dc_tie",
         "substrate_spreading",
+        # Additive field (issue #2764): the emitted-network integrity
+        # summary -- present on every `--parasitics` run for schema
+        # stability, exactly like the blocks above.
+        "integrity",
+    }
+    # `integrity` (issue #2764): a healthy extraction trips nothing. The
+    # summary carries the knob values the per-net checks ran with (echoed
+    # verbatim from `parasitic_integrity`'s documented defaults) and
+    # aggregate counts only -- no net names, so rerun canonicalization has
+    # nothing to reorder.
+    assert para["integrity"] == {
+        "short_threshold_ohm": 1.0,
+        "cap_tolerance": {"absolute_ff": 1e-06, "relative": 1e-09},
+        "max_detail_items": 20,
+        "nets_checked": len(para["nets"]),
+        "nets_with_findings": 0,
+        "open_nets": 0,
+        "island_components": 0,
+        "orphan_nodes": 0,
+        "suspicious_resistors": 0,
+        "short_candidates": 0,
+        "capacitance_mismatches": 0,
     }
     # `substrate_spreading` (issue #2561): `None` unless
     # `--substrate-spreading <net>` was given -- present in every
@@ -12759,6 +12781,9 @@ def test_parasitics_summary_block_shape(tmp_path):
             "by_layer",
             "resistance_ohm_top_cell",
             "capacitance_ff_top_cell",
+            # Additive field (issue #2764): this net's emitted-network
+            # integrity diagnostics -- see the per-net assertions below.
+            "integrity",
         }
         # `resistance_ohm_top_cell`/`capacitance_ff_top_cell` (issue #1704):
         # `None` unless `--parasitics-top-cell-only` was given -- additive,
@@ -12775,6 +12800,35 @@ def test_parasitics_summary_block_shape(tmp_path):
         assert entry["coupled"] == []
         assert entry["capacitance_ff"] > 0.0
         assert entry["resistance_ohm"] >= 0.0
+        # `integrity` (issue #2764): every check runs on every net; a
+        # healthy lumped net reports a vacuous-open `not_applicable` (the
+        # star model carries no measurable terminal-connectivity evidence),
+        # zero findings everywhere else, and a capacitance reconciliation
+        # that passes against the net's own declared total.
+        integrity = entry["integrity"]
+        assert set(integrity) == {
+            "open",
+            "islands",
+            "orphan_nodes",
+            "suspicious_resistors",
+            "short_candidates",
+            "capacitance",
+        }
+        assert integrity["open"]["status"] == "not_applicable"
+        assert integrity["open"]["reason"]
+        assert integrity["islands"]["count"] == 0
+        assert integrity["orphan_nodes"]["count"] == 0
+        assert integrity["suspicious_resistors"]["count"] == 0
+        assert integrity["short_candidates"]["count"] == 0
+        assert integrity["capacitance"]["status"] == "pass"
+        assert integrity["capacitance"]["declared_ff"] == pytest.approx(
+            entry["capacitance_ff"], abs=1e-6
+        )
+        assert integrity["capacitance"]["computed_ff"] == pytest.approx(
+            entry["capacitance_ff"], abs=1e-6
+        )
+        assert integrity["capacitance"]["delta_ff"] is not None
+        assert abs(integrity["capacitance"]["delta_ff"]) <= 1e-6
         # `by_layer` (issue #1701): per-role/per-metal-level breakdown of the
         # scalar totals above -- non-empty whenever the net's totals are
         # non-zero (every net in this fixture), one entry per shape, and each
@@ -15656,6 +15710,297 @@ def test_distributed_rc_falls_back_to_star_below_two_terminals(tmp_path):
     assert any(
         "VGND" in w and "fewer than 2 device terminals" in w for w in report["warnings"]
     )
+
+
+# --------------------------------------------------------------------------- #
+# Emitted-network integrity (--parasitics, issue #2764)
+# --------------------------------------------------------------------------- #
+
+
+def _integrity_summary(report: dict) -> dict:
+    return report["parasitics"]["integrity"]
+
+
+def test_distributed_ladder_integrity_reports_pass(tmp_path):
+    """A healthy `--distributed-rc` ladder passes the open check over its
+    own emitted segments, while every lumped net stays `not_applicable` --
+    the two models report different evidence, in the same run."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_distributed.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == net_name)
+    assert entry["rc_model"] == "distributed"
+    assert entry["integrity"]["open"]["status"] == "pass"
+    lumped = next(
+        n
+        for n in report["parasitics"]["nets"]
+        if n["net"] != net_name and n["rc_model"] == "lumped"
+    )
+    assert lumped["integrity"]["open"]["status"] == "not_applicable"
+    assert _integrity_summary(report)["nets_with_findings"] == 0
+
+
+def test_parasitic_integrity_corrupted_ladder_trips_open(tmp_path, monkeypatch):
+    """The canary (issue #2764): a deliberately corrupted network -- the
+    distributed ladder built with its segment resistor dropped -- trips the
+    `open` status end to end, naming the disconnected terminal, with the
+    summary counters agreeing."""
+    from klayout_tools import extract_parasitics
+
+    original = extract_parasitics._distributed_rc_segments
+
+    def drop_last_segment(positions, r_total_ohm, c_total_ff):
+        order, segment_r_ohm, node_c_ff = original(positions, r_total_ohm, c_total_ff)
+        return order, segment_r_ohm[:-1], node_c_ff
+
+    monkeypatch.setattr(
+        extract_parasitics, "_distributed_rc_segments", drop_last_segment
+    )
+
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_broken.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == net_name)
+    open_block = entry["integrity"]["open"]
+    assert open_block["status"] == "open"
+    assert open_block["disconnected_count"] == 1
+    # The ladder's middle position reuses the net object itself (issue
+    # #977), so with the single segment dropped, the *net* node is the
+    # disconnected required terminal -- not the fresh `__t0` leg.
+    assert open_block["disconnected_terminals"] == [net_name]
+    summary = _integrity_summary(report)
+    assert summary["nets_with_findings"] == 1
+    assert summary["open_nets"] == 1
+    # Everything else on this run stays clean.
+    assert summary["island_components"] == 0
+    assert summary["orphan_nodes"] == 0
+    assert summary["suspicious_resistors"] == 0
+    assert summary["short_candidates"] == 0
+    assert summary["capacitance_mismatches"] == 0
+
+
+def test_parasitic_integrity_corrupted_record_trips_every_status(tmp_path, monkeypatch):
+    """One deliberately-corrupted record trips all six diagnostics through
+    the real `run_extract` wiring: an open ladder, an island, an orphan
+    node, a malformed resistor, a cross-net short candidate and an
+    altered ground capacitor -- while the rest of the report still
+    serializes as strict finite JSON."""
+    from dataclasses import replace as dc_replace
+
+    from klayout_tools import extract_parasitics
+    from klayout_tools.parasitic_integrity import (
+        IntegrityCapacitor,
+        IntegrityNode,
+        IntegrityResistor,
+    )
+
+    real_check = extract_parasitics.check_parasitic_network
+
+    def corrupt_and_check(
+        record,
+    ):  # 1. open: drop the distributed ladder's segment resistors (star
+        #    legs and DC ties are untouched -- only `_seg` names them).
+        record.resistors[:] = [r for r in record.resistors if "_seg" not in r.name]
+        distributed_net = next(n for n in record.nets if n.rc_model == "distributed")
+        other_net = next(n for n in record.nets if n.net_id != distributed_net.net_id)
+        dist_node = next(
+            n.uid for n in record.nodes if n.owner_net_id == distributed_net.net_id
+        )
+        other_node = next(
+            n.uid for n in record.nodes if n.owner_net_id == other_net.net_id
+        )
+        # 2. short candidate: cross-net resistor at/below the threshold.
+        record.resistors.append(
+            IntegrityResistor(
+                "bug_short", dist_node, other_node, 0.5, distributed_net.net_id
+            )
+        )
+        # 3. suspicious resistor: zero-valued self-loop.
+        record.resistors.append(
+            IntegrityResistor(
+                "bug_zero", dist_node, dist_node, 0.0, distributed_net.net_id
+            )
+        )
+        # 4. orphan: a registered node with no element attached.
+        orphan_uid = len(record.nodes)
+        record.nodes.append(
+            IntegrityNode(
+                uid=orphan_uid, name="bug_orphan", owner_net_id=distributed_net.net_id
+            )
+        )
+        # 5. island: a floating node that *is* attached (a ground cap), so
+        #    it is an island and not a second orphan.
+        island_uid = len(record.nodes)
+        record.nodes.append(
+            IntegrityNode(
+                uid=island_uid, name="bug_island", owner_net_id=distributed_net.net_id
+            )
+        )
+        ground_uid = next(n.uid for n in record.nodes if n.owner_net_id is None)
+        record.capacitors.append(
+            IntegrityCapacitor(
+                name="bug_island_cap",
+                node_a=island_uid,
+                node_b=ground_uid,
+                capacitance_ff=0.1,
+                kind="ground",
+                owner_net_id=distributed_net.net_id,
+            )
+        )
+        # 6. capacitance mismatch: alter one emitted ground capacitor while
+        #    the declared total stays fixed.
+        first_ground = next(
+            i
+            for i, c in enumerate(record.capacitors)
+            if c.kind == "ground" and c.owner_net_id == distributed_net.net_id
+        )
+        record.capacitors[first_ground] = dc_replace(
+            record.capacitors[first_ground],
+            capacitance_ff=record.capacitors[first_ground].capacitance_ff / 2.0,
+        )
+        return real_check(record)
+
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    # Patch only now: the baseline run above must flow through uncorrupted
+    # (its record carries no distributed net to corrupt).
+    monkeypatch.setattr(
+        extract_parasitics, "check_parasitic_network", corrupt_and_check
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_corrupted.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+
+    summary = _integrity_summary(report)
+    assert summary["open_nets"] == 1
+    # Both injected defect nodes are islands (a component without a required
+    # terminal): the cap-attached bug_island node and the fully detached
+    # bug_orphan node -- the island and orphan definitions genuinely
+    # overlap for a detached node, by design (documented in
+    # docs/cli/extract.md).
+    assert summary["island_components"] == 2
+    assert summary["orphan_nodes"] == 1
+    assert summary["suspicious_resistors"] == 1
+    assert summary["short_candidates"] == 1
+    assert summary["capacitance_mismatches"] == 1
+    assert summary["nets_with_findings"] == 1
+
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == net_name)
+    integrity = entry["integrity"]
+    assert integrity["open"]["status"] == "open"
+    assert integrity["islands"]["count"] == 2
+    assert integrity["islands"]["details"] == [
+        {"nodes": ["bug_island"]},
+        {"nodes": ["bug_orphan"]},
+    ]
+    assert integrity["orphan_nodes"]["details"] == [{"node": "bug_orphan"}]
+    assert integrity["suspicious_resistors"]["details"][0]["device"] == "bug_zero"
+    assert integrity["suspicious_resistors"]["details"][0]["issues"] == [
+        "self_loop",
+        "zero",
+    ]
+    (short,) = integrity["short_candidates"]["details"]
+    assert short["device"] == "bug_short"
+    assert short["resistance_ohm"] == 0.5
+    assert integrity["capacitance"]["status"] == "mismatch"
+
+    # Strict finite JSON: the full report (integrity blocks included)
+    # round-trips with the encoder's non-finite ban in force.
+    assert "NaN" not in json.dumps(report, allow_nan=False)
+    assert "Infinity" not in json.dumps(report, allow_nan=False)
+
+
+def test_parasitic_integrity_healthy_report_is_strict_finite_json(tmp_path):
+    """A healthy extraction's whole report -- integrity blocks included --
+    serializes under `allow_nan=False` with no NaN/Infinity literals."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    text = json.dumps(report, allow_nan=False)
+    assert "NaN" not in text
+    assert "Infinity" not in text
+
+
+def test_parasitic_integrity_same_label_nets_keep_distinct_identities(tmp_path):
+    """Issue #765's two same-named `VGND` islands each get their own
+    integrity diagnostics under their own `net_id` -- neither absorbs the
+    other's findings, and neither invents a cross-net short against its
+    name-twin."""
+    layout = _make_two_disjoint_nmos_shared_label_layout()
+    path = _write_gds(layout, tmp_path / "two_vgnd.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "two_vgnd.spice"), parasitics=True
+    )
+    para_nets = [n for n in report["parasitics"]["nets"] if n["net"] == "VGND"]
+    assert len(para_nets) == 2
+    assert len({n["net_id"] for n in para_nets}) == 2
+    for entry in para_nets:
+        integrity = entry["integrity"]
+        assert integrity["open"]["status"] == "not_applicable"
+        assert integrity["short_candidates"]["count"] == 0
+        assert integrity["capacitance"]["status"] == "pass"
+    assert _integrity_summary(report)["nets_with_findings"] == 0
+
+
+def test_rerun_extract_report_clean_pass_with_parasitics(tmp_path):
+    """Rerun comparison (issue #2764): the integrity fields ride inline on
+    `parasitics.nets[]` (so canonicalization re-sorts them with their
+    entry) and the summary is net-name-free, so they introduce no drift
+    paths of their own.
+
+    `--rerun`'s documented known limitation (see `rerun_extract_report`)
+    already shows a parasitics report as `drifted` -- the `--parasitics`
+    flag is not replayed, so the fresh run is a schematic-equivalent
+    extraction and the whole `parasitics`/parasitics-metrics half drifts.
+    What issue #2764 must not add is drift *attributable to the integrity
+    fields*: none of the reported drift paths may name them."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path,
+        run_extract(
+            path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+        ),
+    )
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "drifted"  # the pre-existing --parasitics gap
+    integrity_drift = [
+        d
+        for d in result["drift"]
+        if "integrity" in d["field"] and d["field"] != "parasitics"
+    ]
+    assert integrity_drift == []
 
 
 def test_distributed_rc_requires_critical_net(tmp_path):
@@ -20186,6 +20531,57 @@ def test_canonicalize_extract_report_still_detects_content_drift(tmp_path):
     assert drift  # not swallowed
     drifted_fields = {entry["field"] for entry in drift}
     assert any(field.endswith("resistance_ohm") for field in drifted_fields)
+
+
+def test_canonicalize_integrity_fields_ride_parasitics_net_reorder(tmp_path):
+    """Issue #2764's integrity fields under rerun comparison: each net's
+    inline `integrity` block must (a) travel *with* its `parasitics.nets[]`
+    entry through the canonicalization re-sort -- reordering the list,
+    permuting `net_id`s and renaming anonymous nets silences bookkeeping
+    churn exactly as before -- while (b) a genuine change inside an
+    integrity block (an `open` status flipping) still diffs as drifted,
+    naming the integrity path."""
+    from klayout_tools._report_verify import (
+        VOLATILE_PROVENANCE_PATHS,
+        diff_verdict_fields,
+    )
+    from klayout_tools.extract import _canonicalize_extract_report_for_rerun_diff
+
+    path = _write_gds(_make_gf180mcu_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        str(path), "gf180mcu", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    assert report["parasitics"]["nets"]
+    pfet = next(d for d in report["devices"] if d["class"] == "pfet")
+    anon_name = pfet["nets"]["b"]
+
+    mutated = _mutate_bookkeeping_fields(
+        report, old_name=anon_name, new_name="\\$999", net_id_offset=1000
+    )
+    # The inline integrity blocks ride their entries through the reversal.
+    mutated["parasitics"]["nets"] = list(reversed(mutated["parasitics"]["nets"]))
+
+    normalized_committed = _canonicalize_extract_report_for_rerun_diff(mutated)
+    normalized_fresh = _canonicalize_extract_report_for_rerun_diff(report)
+    assert (
+        diff_verdict_fields(
+            normalized_committed, normalized_fresh, exclude=VOLATILE_PROVENANCE_PATHS
+        )
+        == []
+    )
+
+    # Genuine integrity-content drift is not swallowed: flip one entry's
+    # capacitance verdict on the (reordered) committed side.
+    mutated["parasitics"]["nets"][0]["integrity"]["capacitance"]["status"] = "mismatch"
+    normalized_committed = _canonicalize_extract_report_for_rerun_diff(mutated)
+    drift = diff_verdict_fields(
+        normalized_committed, normalized_fresh, exclude=VOLATILE_PROVENANCE_PATHS
+    )
+    assert drift
+    assert any(
+        "integrity" in entry["field"] and "capacitance" in entry["field"]
+        for entry in drift
+    )
 
 
 def test_rerun_extract_report_missing_deck_field_raises(tmp_path):

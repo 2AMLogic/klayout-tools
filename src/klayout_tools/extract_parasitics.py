@@ -14,7 +14,12 @@ helpers that measure a net's resistive squares and area/perimeter
 (:func:`_terminal_star_positions_um`, :func:`_terminal_star_weights`,
 :func:`_distributed_rc_order`, :func:`_distributed_rc_segments`), the writer
 that turns a computed model into netlist devices
-(:func:`_inject_parasitics`, 518 lines), the substrate DC-tie pass
+(:func:`_inject_parasitics`, 518 lines), the per-net emitted-network
+integrity record that writer feeds
+(:mod:`klayout_tools.parasitic_integrity`, issue #2764 -- built alongside
+the devices via :class:`klayout_tools.parasitic_integrity.
+IntegrityRecordBuilder` and checked once before the report returns), the
+substrate DC-tie pass
 (:func:`_tie_substrate_nets_to_ground`), and the net-naming helpers shared by
 all of the above (:func:`spice_safe_net_name`, :func:`_net_identity_name`,
 :func:`_unique_net_name`).
@@ -61,6 +66,12 @@ from typing import TYPE_CHECKING, Any
 from ._layout import region as _region
 from .decks import ExtractionDeck, ParasiticsDeck
 from .extract_abstract import _sanitize_instance_name
+from .parasitic_integrity import (
+    GROUND_OWNER,
+    IntegrityRecordBuilder,
+    ParasiticNetworkRecord,
+    check_parasitic_network,
+)
 from .pdk_models import equivalent_rectangle_um
 
 if TYPE_CHECKING:
@@ -1822,6 +1833,67 @@ def _tag_slice_hub(hub: kdb.Net, origin_id: int, enabled: bool) -> None:
         hub.set_property(PARASITIC_HUB_PROPERTY, origin_id)
 
 
+def _record_substrate_ties(
+    integ: IntegrityRecordBuilder, substrate_dc_tie: dict[str, Any]
+) -> None:
+    """Mirror the substrate DC-reference shunts (issue #1263) into the
+    integrity record (issue #2764) as **intentional** DC ties.
+
+    Each tie is a large (``1e12`` ohm) resistor from a synthesized substrate
+    identity to SPICE's global ground node ``0`` -- a deliberate cross-net
+    (net-to-ground) element, so it is flagged ``intentional_dc_tie`` and
+    excluded from the suspicious-resistor and short-candidate checks
+    entirely. Both endpoints are owned by :data:`GROUND_OWNER`: the tied
+    identities are substrate references, not modeled nets, and nothing in
+    the per-net checks should claim them.
+    """
+    from .extract import _SPICE_GLOBAL_GROUND_NODE
+
+    zero_uid = integ.add_node(_SPICE_GLOBAL_GROUND_NODE, GROUND_OWNER)
+    for tied in substrate_dc_tie["nets"]:
+        tied_uid = integ.add_node(spice_safe_net_name(tied["net"]), GROUND_OWNER)
+        integ.add_resistor(
+            tied["device"],
+            tied_uid,
+            zero_uid,
+            substrate_dc_tie["resistance_ohm"],
+            GROUND_OWNER,
+            intentional_dc_tie=True,
+        )
+
+
+def _attach_network_integrity(
+    integ: IntegrityRecordBuilder,
+    report_nets: list[dict[str, Any]],
+    substrate_dc_tie: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the emitted-network integrity check (issue #2764) over the
+    record ``integ`` accumulated during injection and return the summary
+    block, inlining each net's diagnostics onto its ``report_nets`` entry.
+
+    Module-level rather than inline in :func:`_inject_parasitics` (its
+    record-keeping loop would add a branch to that complexity-baselined
+    function) and so the canary tests can monkeypatch
+    :func:`check_parasitic_network` at this module to corrupt the finished
+    record before the real checker sees it.
+    """
+    _record_substrate_ties(integ, substrate_dc_tie)
+    record = integ.build(ParasiticNetworkRecord())
+    integrity = check_parasitic_network(record)
+    identity_keys = ("net", "net_id", "rc_model")
+    for net_entry, net_integrity in zip(
+        report_nets, integrity.pop("nets"), strict=True
+    ):
+        # The identity fields stay on the parent entry only -- inlining a
+        # second copy would invite the two to drift.
+        net_entry["integrity"] = {
+            key: value
+            for key, value in net_integrity.items()
+            if key not in identity_keys
+        }
+    return integrity
+
+
 def _inject_parasitics(
     kdb: Any,
     circuit: kdb.Circuit,
@@ -1973,6 +2045,16 @@ def _inject_parasitics(
     if ground is None:
         ground = circuit.create_net(ground_net_name)
 
+    # Emitted-network integrity record (issue #2764): every node minted and
+    # every R/L/C device created below is registered here as a straight-line
+    # builder call (no added branching -- this function is complexity-
+    # baselined), and the finished record is checked once, after the
+    # substrate ties, just before the report returns. Node display names use
+    # the report-boundary spelling (`spice_safe_net_name`, issue #1162) so
+    # integrity details name nodes exactly as the rest of the report does.
+    integ = IntegrityRecordBuilder()
+    ground_uid = integ.add_node(spice_safe_net_name(ground.name), GROUND_OWNER)
+
     # Keyed by `cluster_id`, not by name (issue #765): `cluster_id` is
     # unique per net *object* within a circuit (it is the id
     # `LayoutToNetlist` itself uses to tie a net to its layout cluster),
@@ -2029,6 +2111,7 @@ def _inject_parasitics(
 
     report_nets: list[dict[str, Any]] = []
     hub_by_net: dict[str, kdb.Net] = {}
+    hub_uid_by_net: dict[str, int] = {}
     total_r = 0.0
     total_c_ff = 0.0
     total_r_count = 0
@@ -2055,6 +2138,19 @@ def _inject_parasitics(
         # exactly why `nets_by_id` above is keyed by it.
         origin_id = int(entry["net_id"])
         _tag_slice_origin(net, origin_id, record_slice_topology)
+
+        # Issue #2764: this entry's own node in the integrity record -- the
+        # hub of the star model and the ladder's middle position, both of
+        # which reuse the net object itself. Fresh leg/hub nodes register
+        # below, at their creation sites. `hub_uid` tracks whichever node
+        # ended up as this entry's hub (the Gamma-shunt's fresh internal
+        # node overwrites it below); `c_ground_uid` tracks the node the
+        # lumped ground capacitor hangs off (the MoM inductor's far node
+        # overwrites it below).
+        net_uid = integ.add_node(spice_safe_net_name(entry["net"]), origin_id)
+        leg_uids: list[int] = []
+        hub_uid = net_uid
+        c_ground_uid = net_uid
 
         base_instance_name = _sanitize_instance_name(entry["net"])
         dup_count = instance_name_counts.get(base_instance_name, 0)
@@ -2111,6 +2207,10 @@ def _inject_parasitics(
 
             legs: list[kdb.Net] = [net] * len(order)
             leg_names: list[str] = [entry["net"]] * len(order)
+            # Issue #2764: parallel integrity-record uids. The middle
+            # position reuses the net object itself, so it reuses `net_uid`
+            # exactly the way `legs`/`leg_names` reuse `net`/`entry["net"]`.
+            leg_uids = [net_uid] * len(order)
             for position_in_order, terminal_index in enumerate(order):
                 term_ref = terminal_refs[terminal_index]
                 device = term_ref.device()
@@ -2129,6 +2229,9 @@ def _inject_parasitics(
                     _tag_slice_origin(leg, origin_id, record_slice_topology)
                     device.disconnect_terminal(terminal_def.id())
                     device.connect_terminal(terminal_def.id(), leg)
+                    leg_uids[position_in_order] = integ.add_node(
+                        spice_safe_net_name(leg_name), origin_id
+                    )
 
                 legs[position_in_order] = leg
                 leg_names[position_in_order] = leg_name
@@ -2141,6 +2244,13 @@ def _inject_parasitics(
                 node_cap.connect_terminal("B", ground)
                 node_cap.set_parameter("C", node_c_farad)
                 net_c_count += 1
+                integ.add_ground_capacitor(
+                    f"{instance_name}_n{position_in_order}",
+                    leg_uids[position_in_order],
+                    ground_uid,
+                    node_c_farad * 1e15,
+                    origin_id,
+                )
 
                 terminal_reports.append(
                     {
@@ -2166,6 +2276,13 @@ def _inject_parasitics(
                 r_dev.connect_terminal("B", legs[seg_index + 1])
                 r_dev.set_parameter("R", seg_r_ohm_clamped)
                 total_r_count += 1
+                integ.add_resistor(
+                    f"{instance_name}_seg{seg_index}",
+                    leg_uids[seg_index],
+                    leg_uids[seg_index + 1],
+                    seg_r_ohm_clamped,
+                    origin_id,
+                )
                 segment_reports.append(
                     {
                         # Report-boundary escape (issue #1162), same
@@ -2208,6 +2325,11 @@ def _inject_parasitics(
                 r_dev.connect_terminal("B", hub)
                 r_dev.set_parameter("R", leg_r_ohm)
                 total_r_count += 1
+                leg_uid = integ.add_node(spice_safe_net_name(leg_name), origin_id)
+                leg_uids.append(leg_uid)
+                integ.add_resistor(
+                    f"{instance_name}_t{i}", leg_uid, net_uid, leg_r_ohm, origin_id
+                )
 
                 terminal_reports.append(
                     {
@@ -2229,11 +2351,14 @@ def _inject_parasitics(
             hub = circuit.create_net(hub_name)
             _tag_slice_origin(hub, origin_id, record_slice_topology)
 
+            hub_uid = integ.add_node(spice_safe_net_name(hub_name), origin_id)
+            c_ground_uid = hub_uid
             r_dev = circuit.create_device(res_class, instance_name)
             r_dev.connect_terminal("A", net)
             r_dev.connect_terminal("B", hub)
             r_dev.set_parameter("R", r_total_ohm)
             total_r_count += 1
+            integ.add_resistor(instance_name, net_uid, hub_uid, r_total_ohm, origin_id)
 
         net_inductance_nh = 0.0
         if rc_model == "lumped":
@@ -2259,11 +2384,14 @@ def _inject_parasitics(
                 existing_names.add(l_node_name)
                 l_node = circuit.create_net(l_node_name)
                 _tag_slice_origin(l_node, origin_id, record_slice_topology)
+                l_node_uid = integ.add_node(spice_safe_net_name(l_node_name), origin_id)
                 l_dev = circuit.create_device(ind_class, f"{instance_name}_l")
                 l_dev.connect_terminal("A", hub)
                 l_dev.connect_terminal("B", l_node)
                 l_dev.set_parameter("L", net_inductance_nh * 1e-9)
                 c_ground_node = l_node
+                c_ground_uid = l_node_uid
+                integ.add_inductor(f"{instance_name}_l", hub_uid, l_node_uid, origin_id)
                 total_l_count += 1
                 total_l_nh += net_inductance_nh
             # The distributed ladder above already created one capacitor per
@@ -2276,6 +2404,9 @@ def _inject_parasitics(
             c_dev.connect_terminal("B", ground)
             c_dev.set_parameter("C", c_farad)
             net_c_count = 1
+            integ.add_ground_capacitor(
+                instance_name, c_ground_uid, ground_uid, c_farad * 1e15, origin_id
+            )
 
         # Marks this net's coupling/ground-capacitor attachment point (issue
         # #2245) -- the star's centre (`net` itself), the ladder's middle leg,
@@ -2284,9 +2415,21 @@ def _inject_parasitics(
         # net crosses the slice boundary.
         _tag_slice_hub(hub, origin_id, record_slice_topology)
         hub_by_net[entry["net"]] = hub
+        hub_uid_by_net[entry["net"]] = hub_uid
         total_r += r_total_ohm
         total_c_ff += entry["capacitance_ff"]
         total_c_count += net_c_count
+        # Issue #2764: declare this net's emitted topology to the integrity
+        # checker -- required terminals (the per-terminal leg nodes, in
+        # emission order) and the declared total ground capacitance the
+        # emitted capacitors must sum back to.
+        integ.add_net(
+            origin_id,
+            spice_safe_net_name(entry["net"]),
+            rc_model,
+            tuple(leg_uids),
+            entry["capacitance_ff"],
+        )
         report_nets.append(
             {
                 # Report-boundary escape (issue #1162): `entry["net"]` is
@@ -2372,6 +2515,16 @@ def _inject_parasitics(
         cc_dev.set_parameter("C", pair["capacitance_ff"] * 1e-15)
         total_cc_ff += pair["capacitance_ff"]
         cc_count += 1
+        # Issue #2764: mirror the coupling capacitor into the integrity
+        # record -- kept `kind="coupling"`, so the ground-capacitance
+        # reconciliation never sums it, and ownerless (its endpoints carry
+        # their own owners, which is what a cross-net element is judged by).
+        integ.add_coupling_capacitor(
+            f"cc_{cc_instance_name}",
+            hub_uid_by_net[pair["net_a"]],
+            hub_uid_by_net[pair["net_b"]],
+            pair["capacitance_ff"],
+        )
 
     # DC reference for the deck's synthesized substrate identities (issue
     # #1263) -- last, so it sees every net this function created and cannot
@@ -2379,6 +2532,12 @@ def _inject_parasitics(
     substrate_dc_tie = _tie_substrate_nets_to_ground(
         circuit, res_class, ground_net_name
     )
+
+    # Issue #2764: check the emitted network and attach the results -- the
+    # summary lands on the report's `integrity` field and each net's
+    # diagnostics inline on its `parasitics.nets[]` entry, so report readers
+    # and rerun canonicalization (which re-sorts `nets[]`) both see them.
+    integrity = _attach_network_integrity(integ, report_nets, substrate_dc_tie)
 
     return {
         "r_count": total_r_count,
@@ -2397,6 +2556,10 @@ def _inject_parasitics(
         # written into the `.SUBCKT` body -- see
         # `_tie_substrate_nets_to_ground`'s docstring.
         "substrate_dc_tie": substrate_dc_tie,
+        # Additive field (issue #2764): the emitted-network integrity
+        # summary -- threshold/tolerances in force and aggregate counts.
+        # Each net's own diagnostics ride inline on its `nets[]` entry.
+        "integrity": integrity,
     }
 
 
