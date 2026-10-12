@@ -431,6 +431,28 @@ class BatchJobSpec:
         return document
 
 
+def _release_segment(version: str) -> str | None:
+    """The release segment of a ``klt --version`` build string, or ``None``
+    when it has none (issue #3184).
+
+    The runner version gate compares release segments only, so a
+    git-installed client (``0.7.0+g<sha>``, ``0.7.0+g<sha>.dirty``,
+    ``0.7.0+unknown``) matches a ``0.7.0`` release runner while ``0.7.0``
+    against ``0.7.1`` still differs. Steps: drop the PEP 440 local part
+    (``+...``), keep the leading ``[0-9.]`` run, drop one trailing ``.``, and
+    accept the result only if it is ``N(.N)*``. This equals
+    ``packaging.version.Version(v).release`` for the strings klt produces,
+    without importing ``packaging`` (not a runtime dependency).
+    :func:`_runner_preflight_script` repeats the same steps in POSIX shell on
+    the runner, so both sides of the gate use one rule.
+    """
+    head = version.strip().split("+", 1)[0]
+    prefix = re.match(r"[0-9.]*", head).group(0)  # always matches
+    if prefix.endswith("."):
+        prefix = prefix[:-1]
+    return prefix if re.fullmatch(r"\d+(?:\.\d+)*", prefix) else None
+
+
 def _runner_preflight_script(client_version: str, *, enforce: bool) -> str:
     """The shell prefix of the job command that pins the runner's ``klt``
     identity (issue #2719).
@@ -442,25 +464,34 @@ def _runner_preflight_script(client_version: str, *, enforce: bool) -> str:
     :data:`BATCH_RUNNER_IDENTITY_FILENAME` (``null`` when it cannot be read),
     and (2) under ``enforce`` writes a klt error envelope to ``report.json``
     and exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` *before* ``klt sim`` runs
-    unless the runner's build string equals the client's exactly. The runner
-    string is reduced to ``[A-Za-z0-9._+ -]`` so it is safe inside the JSON
-    the script prints.
+    unless the runner's release segment equals the client's
+    (:func:`_release_segment`, issue #3184; the mismatch message keeps both
+    full build strings). A runner version that is empty or has no release
+    segment is ``batch_runner_version_unknown``. The runner string is reduced
+    to ``[A-Za-z0-9._+ -]`` so it is safe inside the JSON the script prints.
 
     Redirects here deliberately have no space before ``>`` so the
     ``> "$EDA_OUTPUT_DIR/report.json"`` marker of the main command stays the
     first such occurrence.
 
-    A client version string outside ``[A-Za-z0-9._+-]`` cannot be embedded
-    safely and raises :class:`~klayout_tools.sim.SimError` (a structured CLI
-    error, never a traceback) before any S3 write.
+    A client version string outside ``[A-Za-z0-9._+-]``, or one with no
+    release segment, cannot be pinned and raises
+    :class:`~klayout_tools.sim.SimError` (a structured CLI error, never a
+    traceback) before any S3 write.
     """
-    if not re.fullmatch(r"[A-Za-z0-9._+-]+", client_version):
+    client_release = (
+        _release_segment(client_version)
+        if re.fullmatch(r"[A-Za-z0-9._+-]+", client_version)
+        else None
+    )
+    if client_release is None:
         from .sim import SimError
 
         raise SimError(
             f"the submitting client's klt version {client_version!r} cannot be "
-            "pinned against the fleet runner (expected only [A-Za-z0-9._+-]) "
-            "-- submit from a klt install with a well-formed version"
+            "pinned against the fleet runner (expected only [A-Za-z0-9._+-] "
+            "and a release segment such as 0.7.0) -- submit from a klt install "
+            "with a well-formed version"
         )
     out = '"$EDA_OUTPUT_DIR/{}"'
     identity_path = out.format(BATCH_RUNNER_IDENTITY_FILENAME)
@@ -468,9 +499,16 @@ def _runner_preflight_script(client_version: str, *, enforce: bool) -> str:
     lines = [
         "rv=$(klt --version 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._+ -'"
         " | cut -c1-80); rv=${rv#klt }; rv=${rv# }",
+        # _release_segment in shell: drop +local, keep the leading [0-9.]
+        # run, drop one trailing dot, require N(.N)*.
+        "rr=${rv%%+*}; rr=${rr%%[!0-9.]*}; rr=${rr%.}",
+        'case "$rr" in ""|.*|*.|*..*) rr= ;; esac',
         'if [ -z "$rv" ]; then rj=null; rcode=' + BATCH_RUNNER_UNKNOWN_CODE + "; "
         'rmsg="the fleet runner klt version could not be established"; '
-        'elif [ "$rv" = "' + client_version + '" ]; then rj="\\"$rv\\""; rcode=; '
+        'elif [ -z "$rr" ]; then rj="\\"$rv\\""; '
+        "rcode=" + BATCH_RUNNER_UNKNOWN_CODE + "; "
+        'rmsg="the fleet runner klt version $rv has no release segment"; '
+        'elif [ "$rr" = "' + client_release + '" ]; then rj="\\"$rv\\""; rcode=; '
         "rmsg=; "
         'else rj="\\"$rv\\""; rcode=' + BATCH_RUNNER_MISMATCH_CODE + "; "
         'rmsg="the fleet runner runs klt $rv but the submitting client is '
@@ -1491,12 +1529,14 @@ def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
     ``runner_klt_version`` is what the fleet image's own ``klt --version``
     printed -- never the client's. It is ``None`` when the identity file is
     absent, malformed, or the preflight could not read a version, and
-    ``runner_compatibility`` is then ``"unknown"``. Otherwise the runner's
-    build string is compared with the client's by exact equality
-    (``"match"`` / ``"mismatch"``). The comparison is done here, not trusted
-    from the file. A non-match carries ``runner_compatibility_warning``.
-    Equal strings do not prove identical code (two builds can share one
-    version string); see docs/cli/sim.md.
+    ``runner_compatibility`` is then ``"unknown"``; so it is when either
+    version has no release segment. Otherwise the two release segments are
+    compared (:func:`_release_segment`, issue #3184 -- ``0.7.0`` matches
+    ``0.7.0+g<sha>``), giving ``"match"`` / ``"mismatch"``; both fields keep
+    the full build strings. The comparison is done here, not trusted from the
+    file. A non-match carries ``runner_compatibility_warning``. A match does
+    not prove identical code (two builds can share one release); see
+    docs/cli/sim.md.
     """
     client = _provenance._klt_version()
     runner: str | None = None
@@ -1512,13 +1552,15 @@ def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
                 runner = value.strip()
         except (OSError, ValueError, AttributeError):
             runner = None
-    if runner is None:
+    runner_release = _release_segment(runner) if runner is not None else None
+    client_release = _release_segment(client)
+    if runner_release is None or client_release is None:
         status = "unknown"
         warning = (
             "the fleet runner's klt version could not be established; request "
             "options newer than the runner may have been ignored"
         )
-    elif runner == client:
+    elif runner_release == client_release:
         status, warning = "match", None
     else:
         status = "mismatch"

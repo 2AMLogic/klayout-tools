@@ -869,12 +869,18 @@ report a pass. Policy: **reject before simulating**.
 - Every job command starts with a client-generated shell preflight that uses
   only `klt --version` (so it works on images that predate any new request
   key). It records the runner's build string in `outputs/runner_identity.json`
-  and compares it with the client's `klt --version` by **exact string
-  equality**. Anything else is not treated as compatible: a numerically newer
-  runner, a development build (`+g<sha>`, `.dirty`, `+unknown`) against a
-  release, or an unparseable/absent version.
-- On a mismatch (`batch_runner_version_mismatch`) or an unreadable runner
-  version (`batch_runner_version_unknown`) the preflight writes a klt error
+  and compares it with the client's `klt --version` by **release segment**
+  ([#3184](https://github.com/2AMLogic/klayout-tools/issues/3184)): the
+  version with its PEP 440 local part (`+...`) and any pre/dev/post suffix
+  removed. So a git-installed client (`0.7.0+g<sha>`, `0.7.0+g<sha>.dirty`,
+  `0.7.0+unknown`) matches a `0.7.0` runner, in either direction, while
+  `0.7.0` against `0.7.1` or `0.8.0` is a mismatch. A numerically newer or
+  older runner is never treated as compatible. Both full build strings are
+  kept in `runner_identity.json`, the mismatch message and
+  `environment.remote`.
+- On a mismatch (`batch_runner_version_mismatch`) or a runner version that is
+  absent or has no release segment (`batch_runner_version_unknown`) the
+  preflight writes a klt error
   envelope to `report.json` and exits `87` **without running `klt sim`**. The
   client recovers it through the normal failed-job path, so every unit gets a
   `batch_job_failed` diagnostic with `runner_code` set to the code above, the
@@ -883,13 +889,14 @@ report a pass. Policy: **reject before simulating**.
   `hosts > 1`, so mixed-version shards stay distinguishable) always carries
   `runner_klt_version` (the runner's own version, or `null` when it could not
   be established -- never the client's), `client_klt_version`, and
-  `runner_compatibility` (`match` / `mismatch` / `unknown`). A non-`match`
+  `runner_compatibility` (`match` / `mismatch` / `unknown`; `unknown` also
+  when either version has no release segment). A non-`match`
   value also carries `runner_compatibility_warning`. The report's
   `provenance.klt_version` stays the client's.
 - `batch.runner_version_check` (`"enforce"`, default, or `"warn"`) selects the
   behavior. `warn` runs the simulation anyway and only reports the skew in
-  `environment.remote`; use it deliberately (for example a development client
-  against a release image), because it is detection after execution and does
+  `environment.remote`; use it deliberately (for example a client on a newer
+  release than the image), because it is detection after execution and does
   not guarantee request options were honored.
 
 ```json
@@ -906,7 +913,8 @@ report a pass. Policy: **reject before simulating**.
 ```
 
 Limits: version identity does not prove equivalent behavior between two
-differently built copies that share one version string. **Remediation:**
+differently built copies that share one release (a `+g<sha>` client can carry
+unreleased changes the `0.7.0` runner lacks). **Remediation:**
 update the runner image to the client's `klt` build, or submit from a client
 matching the image. Jobs that never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.

@@ -2930,6 +2930,124 @@ def test_hostile_runner_version_output_cannot_break_the_envelope(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Release-segment version gate (issue #3184)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("version", "release"),
+    [
+        ("0.7.0", "0.7.0"),
+        ("0.7.0+gabc123", "0.7.0"),
+        ("0.7.0+gabc123.dirty", "0.7.0"),
+        ("0.7.0+unknown", "0.7.0"),
+        ("0.7.1.dev3+gabc123", "0.7.1"),
+        ("0.7.0rc1", "0.7.0"),
+        ("10.20", "10.20"),
+        ("", None),
+        ("+gabc123", None),
+        ("dirty", None),
+        (".7.0", None),
+        ("0..7", None),
+    ],
+)
+def test_release_segment(version, release):
+    assert sb._release_segment(version) == release
+
+
+def _gate_spec(tmp_path, client_version, **kwargs):
+    return sb._build_batch_job_spec(
+        {"models": {}, "options": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=True,
+        client_version=client_version,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("runner", "client"),
+    [("0.7.0", "0.7.0+gabc123"), ("0.7.0+gabc123", "0.7.0"), ("0.7.0", "0.7.0")],
+)
+def test_same_release_passes_the_preflight_in_both_directions(tmp_path, runner, client):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+    identity = json.loads((out_dir / "runner_identity.json").read_text())
+    assert identity == {"runner_klt_version": runner, "client_klt_version": client}
+
+
+@pytest.mark.parametrize(
+    ("runner", "client"),
+    [
+        ("0.7.1", "0.7.0"),
+        ("0.8.0", "0.7.0"),
+        ("0.7.0", "0.7.1+gabc123"),
+        ("0.8.0+gdef456", "0.7.0+gabc123"),
+    ],
+)
+def test_different_release_is_still_rejected_with_both_full_strings(
+    tmp_path, runner, client
+):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+    assert runner in error["message"] and client in error["message"]
+
+
+@pytest.mark.parametrize("runner", ["dirty", "+gabc123", "v", "..1"])
+def test_runner_version_without_a_release_segment_is_unknown(tmp_path, runner):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, "0.7.0"), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_UNKNOWN_CODE
+    assert (
+        json.loads((out_dir / "runner_identity.json").read_text())["runner_klt_version"]
+        == runner
+    )
+
+
+@pytest.mark.parametrize("version", ["+gabc123", "dirty", "v1.0"])
+def test_client_version_without_a_release_segment_cannot_be_pinned(tmp_path, version):
+    with pytest.raises(sim.SimError, match="cannot be pinned"):
+        _gate_spec(tmp_path, version)
+
+
+@pytest.mark.parametrize(
+    ("runner", "client", "status"),
+    [
+        ("0.7.0", "0.7.0+gabc123", "match"),
+        ("0.7.0+gabc123", "0.7.0", "match"),
+        ("0.7.1", "0.7.0+gabc123", "mismatch"),
+        ("dirty", "0.7.0", "unknown"),
+    ],
+)
+def test_runner_identity_compares_release_segments(
+    tmp_path, monkeypatch, runner, client, status
+):
+    _pin_client_version(monkeypatch, client)
+    (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+        json.dumps({"runner_klt_version": runner, "client_klt_version": client})
+    )
+    fields = sb._read_runner_identity(str(tmp_path))
+    assert fields["runner_klt_version"] == runner
+    assert fields["client_klt_version"] == client
+    assert fields["runner_compatibility"] == status
+    assert ("runner_compatibility_warning" in fields) == (status != "match")
+
+
+# --------------------------------------------------------------------------- #
 # Whole-job ceiling: pre-submit runtime-risk assessment (issue #2833)
 # --------------------------------------------------------------------------- #
 
