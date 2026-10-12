@@ -49,6 +49,10 @@
 # approximated, are listed with reasons in asap7_rules.py and
 # docs/cli/drc.md.
 #
+# DENSITY. The DRM states no density rule (no density rule type in Table
+# 1.2.1, no density threshold in sections 3.1-3.19), so none is checked and
+# no threshold is invented (#2811; asap7_rules.DENSITY_DISPOSITION).
+#
 # GRID ORIGIN. The M4-M7 grid and track rules (M4.AUX.1 / AUX.2 and their
 # M5-M7 counterparts) use the DRM's default metal-grid offset of 0 nm
 # (Tables 3.14.2 / 3.16.2, note 1).
