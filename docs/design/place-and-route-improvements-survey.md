@@ -444,6 +444,168 @@ than a foregone conclusion.
   3.1–3.5, and the most speculative of the six (no existing evidence in
   this repo either way, unlike 3.1's §2.4 grounding).
 
+### 3.7 Corner-aware slew/capacitance repair — verification spike (issue #2782, part of #2734 item 3)
+
+**Question.** The original #2734 report said library slew/capacitance
+violations appear at low-voltage corners and that "no repair pass or request
+control exists". Do the existing knobs address that, and is a corner-aware
+repair follow-up warranted?
+
+**Evidence tier.** Source and generated-Tcl claims below are
+source-inspected (checked against `main` @ `c35b8e1c`). The violation counts
+are **measured**, from live runs recorded in "Experiment" below. They are
+one small, combinational design on one PDK: they establish the *mechanism*
+and a reproducible procedure, not general repair effectiveness.
+
+#### 3.7.1 Which liberty drives each pass (acceptance criterion 1)
+
+Source: `_stage_script_lines` (`src/klayout_tools/place_and_route.py`) and
+`_corner_sweep_script_lines` (`src/klayout_tools/place_and_route_sta.py`).
+Generated Tcl: `<out>/.klt/place-and-route/pnr_<top>_<stage>.tcl` and
+`pnr_<top>_route_corners.tcl` (excerpts from the live runs below).
+
+| Step | Liberty loaded | Role |
+|---|---|---|
+| `place`: `estimate_parasitics -placement`, `repair_design`, `repair_timing` | the single deck `read_liberty <pdk.corner>` (default: the nominal corner) | **Repair.** Only one corner is ever visible to the optimiser. |
+| `cts`: `repair_timing -hold` | same single `pdk.corner` deck | Repair (hold). |
+| `route`: `repair_antennas` | same single deck | Antenna repair only; no slew/cap repair runs after routing. |
+| `route_corners` sweep (`define_corners` + `read_liberty -corner X` per corner; per-corner `pnr_*_route_corner_<X>.tcl`) | every deck in `pdk.sweep_corners` (default: all shipped) | **Analysis only.** `estimate_parasitics -global_routing`, then `report_check_types -max_slew/-max_capacitance -violators`, once before and once after `set_max_transition`/`set_max_capacitance`. Nothing is modified and the checkpoint is not rewritten. |
+
+`constraints.max_transition_ns` / `.max_capacitance_pf` become
+`set_max_transition <v> [current_design]` / `set_max_capacitance <v> ...`
+(`_design_rule_constraint_lines`), emitted before `repair_design` in each
+stage script. They are one number applied to the one repair deck, and the
+same number is re-applied unchanged to every swept corner during analysis.
+The limit is a design-wide scalar, not per-corner, and not scaled by
+supply voltage.
+
+So the #2734 statement is partly right and partly too broad:
+
+- **Right:** repair is single-corner. No pass repairs against more than one
+  deck, and sweep results never feed back into the design.
+- **Too broad:** a repair pass and request controls do exist, and
+  `pdk.corner` already lets a caller aim the whole repair at a low-voltage
+  deck (e.g. `ss_n40C_1v28`). This is undocumented as a repair control: the
+  docs describe `pdk.corner` as a "liberty corner selector" and describe
+  the sweep, but never state that it picks the repair deck.
+
+#### 3.7.2 Experiment (criteria 2 and 3)
+
+Environment: `openroad 26Q3-1510-g6cb3f2b704`, `yosys 0.67+post`, `klt
+0.7.0`, sky130A (`sky130_fd_sc_hd`) from `~/.volare`, host single-corner
+local runs, one at a time. No SPICE and no grids were launched. Design:
+`tests/corpus/statime/mult8.v` (combinational 8x8 multiplier, 260 cells after
+`klt synthesize`; `constraints.clock_port: p[15]`, period 6.0 ns,
+`input_delay_ns`/`output_delay_ns` 1.0 ns, `utilization_pct` 38 unless
+stated, seed 1, `target_stage: route`). Swept corners (`pdk.sweep_corners`):
+`tt_025C_1v80`, `ss_n40C_1v28`, `ss_100C_1v40`, `ff_n40C_1v95`.
+Requests differ only in the columns below. Reproduce with
+`klt synthesize` on `mult8.v` (as in `scripts/place-and-route-smoke.sh`) and
+then `klt place-and-route` with `PDK_ROOT`/`PDK` set; request JSON is
+exactly the smoke script's `par_request.json` plus the `sweep_corners`,
+delay and `constraints` fields named here.
+
+Violation counts are `effective / library-only` per swept corner
+(`corners[].max_transition_violation_count` /
+`..._vs_library`). Max-capacitance counts were 0/0 at every corner in every
+run, so they are omitted.
+
+| Run | Repair deck (`pdk.corner`) | Constraint | Cells (excl. fillers) | tt | ss_n40C_1v28 | ss_100C_1v40 | ff | tt setup slack (ns) | ss_n40C_1v28 setup slack (ns) | Wirelength (um) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A default | tt_025C_1v80 | none | 261 | 0/0 | 0/0 | 0/0 | 0/0 | 0.41 | -24.75 | 5197 |
+| B tight, tt repair | tt_025C_1v80 | max_transition 0.5 ns, max_cap 0.05 pF | 261 | 0/0 | **646/0** | **126/0** | 0/0 | 0.41 | -24.75 | 5197 |
+| C low-V repair | ss_n40C_1v28 | none | 353 | 0/0 | 0/0 | 0/0 | 0/0 | 0.55 | -23.04 | 5986 |
+| D low-V repair, tight | ss_n40C_1v28 | as B | -- (failed) | -- | -- | -- | -- | -- | -- | -- |
+| E low-V repair, 20% util | ss_n40C_1v28 | none | 350 | 0/0 | 0/0 | 0/0 | 0/0 | 0.62 | -22.90 | 6303 |
+| F low-V repair, tight, 20% util | ss_n40C_1v28 | as B | 892 | 0/0 | **314/0** | **2/0** | 0/0 | -19.30 | -157.41 | 20919 |
+
+Run D aborted in `place` with `[ERROR DPL-0038] Utilization greater than
+100%, impossible to legalize`: the repair under a tight limit grew the design
+past the floorplan, so the 38%-utilization floorplan of A-C could not
+absorb it. F reran D with a 20% floorplan.
+
+Findings:
+
+1. **The original claim is not reproducible as a library violation.** In
+   every run the library-only counts (`..._vs_library`) were 0 at every
+   corner, including `ss_n40C_1v28` (the lowest-voltage deck) after an
+   unconstrained tt repair (A). The sky130_fd_sc_hd decks on this design do
+   not break their own slew/capacitance limits at low voltage, so there was
+   no library-limit gap to close here. The reported observation stays
+   unverified; it may need a design with high-fanout or long-wire nets, or a
+   different library. This criterion is satisfied only as "not reproduced
+   on `mult8`/sky130_fd_sc_hd", not as "cannot occur".
+2. **A cross-corner violation *is* reproducible, but only against a
+   caller-stated limit (B).** A tt-only repair against a 0.5 ns guard-band
+   passes at tt (0) and leaves 646 / 126 effective violations at the two
+   slow corners, because slew grows as supply falls and the limit is one
+   fixed number. Run B's cell count, timing and wirelength equal A's to the reported
+   precision, consistent with `repair_design` having nothing to do at tt. This shows a single-corner
+   repair gives no information about other corners. The existing response
+   fields (`corners[]`, `..._vs_library`) detect it correctly.
+3. **Aiming the existing knob at the low-voltage deck repairs more but is
+   not bounded (C, E, F).** With no override, repairing at `ss_n40C_1v28`
+   (C) added about 90 cells, improved the slow-corner setup slack by about
+   1.7 ns and tt setup slack by 0.14 ns, and cost about 15% wirelength;
+   reported power fell 0.50 to 0.32 mW (estimate, the sizing differs). With
+   the tight guard-band (F) the same pass inflated the design to 892 cells,
+   87% utilization, 4x wirelength, worst setup slack
+   -157 ns (from -25), and still left 314 violations at `ss_n40C_1v28`. Setup
+   timing was not met in A either (the multiplier cannot meet 6 ns at ss), so
+   timing deltas here mainly show that tight slew targets at an infeasible
+   corner make repair diverge, not that D/F "break" a closing design.
+4. **Not measured:** the `ss_n40C_1v28` slew limit at a different tight value,
+   other designs, other seeds, `max_capacitance_pf` (never violated), and the
+   effect of the pass on a design that is otherwise timing-clean. No
+   conclusion is drawn about repair effectiveness beyond this mult8 data.
+
+#### 3.7.3 Recommendation (criterion 4)
+
+**Existing knobs suffice for now; no new repair flag or optimiser is
+warranted by this evidence.** Specifically:
+
+- The library-limit gap in the original report is not reproduced (finding 1),
+  so a corner-aware repair has no demonstrated failing case to fix.
+- The cross-corner gap that *is* reproduced (finding 2) is already detected
+  by `corners[]` and the effective/library-only violation counts.
+- The existing remedies are `pdk.corner` (choose the repair deck) and
+  `constraints.max_transition_ns`/`.max_capacitance_pf` (choose the target),
+  plus re-running with a different `pdk.corner`. Finding 3 shows these can
+  overshoot, so the work needed is **documentation** (done in this change:
+  `docs/cli/place-and-route.md`), not a new mechanism.
+
+**Reopen conditions for a scoped follow-up.** Open a follow-up only if a
+reproducer shows a *library-only* (`..._vs_library` > 0) violation at a
+swept corner that survives repair at the best single `pdk.corner`. If so,
+the bounded shape would be (a design sketch, not a promise):
+
+1. One extra repair-and-reanalyze round at most (no loop), triggered only
+   by `..._vs_library` > 0 at a swept corner, repairing against the
+   worst-violating swept deck via the existing `repair_design` command.
+2. Stopping rules: stop on zero library-only violations, or when the round
+   fails to reduce the violation count, or when cell count grows beyond a
+   caller-given cap (finding 3, run F, and the DPL-0038 failure in D show
+   why a cap is needed), or when setup WNS at the repair corner worsens.
+3. Residual reporting: always report the post-round per-corner effective and
+   library-only counts and the stop reason, with `null` where not measured.
+   Do not promise zero violations at every corner; some corner/limit pairs
+   are infeasible (F).
+4. Keep the sweep analysis-only unless the round is explicitly requested.
+
+No such follow-up is opened by this spike because the trigger condition has
+not been observed.
+
+#### 3.7.4 Limitations
+
+- One design, one library, one seed; run B equals run A exactly, so the
+  tight-limit effect at tt is a null result, not a tuned one.
+- The slew limit applied to every corner is the same absolute 0.5 ns; no
+  per-corner or voltage-scaled limit was tried.
+- Slack figures include a design that cannot meet its clock at ss; they
+  indicate repair behaviour, not timing closure.
+- Raw reports and generated Tcl were kept in a scratch directory and are not
+  committed.
+
 ## 4. Measurement harness — common to every item above
 
 - **Corpus.** Epic #520 (Tiny Tapeout, 4,572 project slots, 3,169 on
