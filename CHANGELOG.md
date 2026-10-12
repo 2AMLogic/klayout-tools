@@ -31,6 +31,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `schema_version` bump; see `docs/cli/version.md`. Release managers now bump
   `base-version` instead of `[project] version` (`RELEASING.md`).
 
+- **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
+  (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
+  persistent artifact root; a competing cooperating run fails fast with the
+  additive `error.code` `outdir_locked` (exit `1`, empty stdout, existing
+  error envelope) instead of interleaving artifacts. Ancestor/descendant
+  roots exclude each other, aliases contend, dead owners release
+  automatically. See `docs/json-contract.md` "Output-directory ownership".
+
 - **ASAP7 KLayout DRC deck: BEOL M1-M9 / V0-V9** (issue #2810): the in-repo
   deck (`src/klayout_tools/decks/asap7.drc`) grows from 106 to 232 rule
   categories, adding `V0.LIG.A.1` and the M1-M9 / V1-V9 width, spacing,

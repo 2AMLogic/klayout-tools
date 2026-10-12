@@ -1416,10 +1416,72 @@ the exit code alone is authoritative.
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
   | `extract` | `finfet_malformed_geometry` | A FinFET deck (`--deck asap7`) found device geometry it refuses to approximate (no crossing fin, clipped fin, wrong gate length, missing select, VT conflict, ...). `error.message` lists each finding with its bounding box. Not retryable: the layout must change. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `extract` | `finfet_dbu_mismatch` | A FinFET deck was run on a layout whose database unit differs from the deck's; it is refused rather than rescaled. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
+  | `pex`, `sim`, `place-and-route` | `outdir_locked` | Another cooperating `klt` run owns this run's persistent output directory (or an ancestor/descendant of it). Exit `1`, empty stdout. Transient: retry after the owner finishes. See "Output-directory ownership" below. |
+  | `pex`, `sim`, `place-and-route` | `outdir_lock_unavailable` | Ownership could not be established for a reason other than contention (unwritable lock registry, no `flock` on this platform or filesystem). Not retryable without changing the environment. Exit `1`, empty stdout. |
 
 Under `--format text` (the default), errors remain the pre-existing
 plain-text stderr line: `klt <command>: <message>`. Text is a courtesy
 rendering, not the contract, so this shape is not versioned.
+
+
+### Output-directory ownership (`outdir_locked`, issue #2770)
+
+`klt pex`, `klt sim` and `klt place-and-route` (and the `run_pex` /
+`run_sim` / `run_place_and_route` library entry points) take a non-blocking,
+OS-backed advisory lock on each persistent artifact root for the run's whole
+lifetime. A second cooperating run fails fast instead of interleaving
+artifacts:
+
+```json
+{
+  "schema_version": 1,
+  "error": {
+    "command": "pex",
+    "message": "output directory '/w/.klt/pex' is owned by another run (pid 4242 since 2026-10-12T10:00:00+00:00); wait for it to finish and retry",
+    "code": "outdir_locked"
+  }
+}
+```
+
+- **Exit code and streams.** Contention is an application error without a
+  report: exit `1`, stdout empty, the envelope above on stderr (`--format
+  text`: `klt <command>: <message>`). The exit-code table is unchanged; tell
+  contention apart by `error.code`, not by a new exit code. Library callers
+  get `klayout_tools.output_lock.OutputDirLockedError` (attributes
+  `directory`, `locked_directory`, `relation` = `same`/`ancestor`/
+  `descendant`, `owner_pid`, `owner_acquired_at`) or
+  `OutputLockUnavailableError`; both derive from `OutputLockError` (`.code`).
+- **Diagnostics are best effort.** PID and acquisition time come from an
+  owner record that may be missing, malformed or momentarily unreadable, in
+  which case the message says `owner unknown`. The record is never used to
+  decide whether a lock may be broken: ownership is the OS lock, so a killed
+  owner releases it automatically and no PID-liveness or PID-reuse guesses
+  exist. A refused run changes nothing under the protected directory.
+- **Which roots.** `pex`: `--outdir` (default `.klt/pex/` beside the layout).
+  `sim`: `--outdir`/default `.klt/sim/` beside the request, but only
+  for runs that write there (`options.keep_artifacts`, `--resume`, `--plot`
+  (the plot directory), or the `remote`/`batch` backends that collect results
+  locally); a temporary-only run takes no lock. `place-and-route`: the
+  existing `.klt/place-and-route/` beside the request (no new flag).
+- **Identity and policy.** Paths are canonicalised (relative, `..` and
+  symlink aliases contend). Same root: exclusive. Ancestor and descendant
+  exclude each other (a `klt sim` on `<pex outdir>/<testbench>/schematic`
+  is refused while `klt pex` owns `<pex outdir>`). Unrelated roots, and
+  distinct siblings under a common ancestor, run concurrently. `run_pex`'s
+  own `run_sim` calls inherit its ownership and never self-contend; within
+  one thread, re-entry on an owned root or its descendants is free, while
+  owning a descendant and then requesting its ancestor is refused (acquire
+  outermost first). Acquisition never blocks, so it cannot deadlock.
+- **Scope and limits.** Cooperating `klt` writers on one host that resolve
+  the same lock registry (`$KLT_LOCK_DIR`, default `/tmp/klt-locks-<uid>`)
+  on a filesystem where `flock` works. Other tools, writers that do not use
+  `klt`, and distributed remote writers are not covered; there is no
+  cross-host lock service. Lock files live in the registry, never in the
+  artifact root, and are never deleted (so all processes lock the same
+  inode). If `fcntl.flock` is unavailable (Windows) or the registry is
+  unusable, the run fails with `outdir_lock_unavailable` rather than running
+  unprotected. A `fork()` without `exec` shares the lock descriptor; such
+  workers outliving a killed owner keep the lock until they exit.
 
 ## Exit codes
 

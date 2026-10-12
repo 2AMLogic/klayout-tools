@@ -389,6 +389,7 @@
         "klayout_tools.lef_header",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
+        "klayout_tools.output_lock",
         "klayout_tools.verilog_netlist"
       ]
     },

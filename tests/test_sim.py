@@ -6687,6 +6687,75 @@ def test_run_sim_stubbed_missing_measurement_is_error(tmp_path, monkeypatch):
     assert any(d["code"] == "measurement" for d in corner["diagnostics"])
 
 
+_MEAS_ERR_LOG = (
+    "  Measurements for Transient Analysis\n\n"
+    "Error: measure  bad  when(WHEN) : Expressions like 0.5*1.62 are not "
+    "supported.\n"
+    " .meas tran bad when v(o)=0.5*1.62 failed!\n\n"
+    "good                =   1.23448e-06\n"
+)
+
+
+def _meas_err_corner(tmp_path, monkeypatch, log_text, names):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": n, "spice": f".meas tran {n} when v(o)=0.81"} for n in names
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=log_text)
+    report = sim.run_sim(str(request))
+    (corner,) = report["corners"]
+    return report, corner
+
+
+def test_missing_meas_value_carries_ngspice_error_text(tmp_path, monkeypatch):
+    report, corner = _meas_err_corner(
+        tmp_path, monkeypatch, _MEAS_ERR_LOG, ["good", "bad"]
+    )
+    by_name = {m["name"]: m for m in corner["measurements"]}
+    assert by_name["good"]["value"] == pytest.approx(1.23448e-06)
+    msgs = [d["message"] for d in corner["diagnostics"] if d["code"] == "measurement"]
+    assert len(msgs) == 1  # only the failing one, no unrelated attribution
+    assert msgs[0].startswith("measurement 'bad' produced no value")
+    assert "Expressions like 0.5*1.62 are not supported." in msgs[0]
+    assert report["status"] == "error"
+
+
+def test_missing_meas_value_without_matching_error_stays_generic(tmp_path, monkeypatch):
+    _, corner = _meas_err_corner(
+        tmp_path,
+        monkeypatch,
+        "  Measurements for Transient Analysis\n\nError: something else\n",
+        ["bad"],
+    )
+    msgs = [d["message"] for d in corner["diagnostics"] if d["code"] == "measurement"]
+    assert msgs == ["measurement 'bad' produced no value"]
+
+
+def test_unattributed_meas_error_surfaces_at_corner_level(tmp_path, monkeypatch):
+    _, corner = _meas_err_corner(tmp_path, monkeypatch, _MEAS_ERR_LOG, ["other"])
+    msgs = [d for d in corner["diagnostics"] if d["code"] == "measurement"]
+    assert msgs[0]["message"] == "measurement 'other' produced no value"
+    assert msgs[1]["severity"] == "warning"
+    assert "bad: Expressions like 0.5*1.62" in msgs[1]["message"]
+
+
+def test_parse_meas_errors_is_bounded():
+    log = "".join(
+        f"Error: measure  m{i}  when(WHEN) : {'x' * 500}\n" for i in range(20)
+    )
+    errors = sim._parse_meas_errors(log)
+    assert len(errors) == sim._MEAS_ERROR_MAX_ENTRIES
+    assert all(len(t) <= sim._MEAS_ERROR_MAX_CHARS for t in errors.values())
+    assert sim._parse_meas_errors("garbage\nError: measure\n") == {}
+
+
 def test_run_sim_stubbed_uppercase_measurement_name_harvests_against_lowercase_log(
     tmp_path, monkeypatch
 ):
