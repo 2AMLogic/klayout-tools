@@ -192,7 +192,7 @@ def test_stdio_round_trip():
         text=True,
         check=True,
     )
-    assert not good.isError
-    assert good.structuredContent == json.loads(cli.stdout)
-    assert bad.isError
-    assert bad.structuredContent["error"]["command"] == "layers"
+    assert not good.is_error
+    assert good.structured_content == json.loads(cli.stdout)
+    assert bad.is_error
+    assert bad.structured_content["error"]["command"] == "layers"
