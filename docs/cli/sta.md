@@ -34,6 +34,19 @@ optionally `read_spef`) and reports the same timing/power fields
 This is what makes N-corner characterization correct: the same DEF,
 unmodified, is loaded fresh for every corner run.
 
+**Selected-corner iteration on a routed artifact.** After one
+`klt place-and-route` run, point `def` at its routed DEF and list only the
+corners you need in `pdk.corners` (optionally with `spef` and
+`constraints.propagated_clock`). This is the supported way to iterate on
+corner timing without repeating implementation; it times the DEF's wires
+with the parasitics you supply, so its slack is not guaranteed equal to the
+in-flow sweep's — compare, don't assume. Without `spef` no wire RC is
+attached, so the result is optimistic relative to the in-flow sweep's
+global-route estimate. With the run's own `post_route_spef` SPEF it matched
+`spef_sta` exactly on the measured fixtures. The in-flow sweep is
+ideal-clock. See
+`docs/design/place-and-route-improvements-survey.md` section 6 (issue #2783).
+
 (This section describes `klt sta`'s original `def`-mode request. Issue
 #1825 additionally added a `verilog`-mode request that *does* run
 `link_design` against a from-scratch structural netlist, with no DEF at
