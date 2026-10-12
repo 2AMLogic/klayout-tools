@@ -188,6 +188,41 @@ def _provenance_from(raw: Any, where: str) -> dict[str, Any] | None:
     return dict(raw)
 
 
+def _request_without_spec_rows(
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip ``spec_row`` from request measurements: it is Python-side
+    provenance, echoed onto the report afterwards, and never reaches the
+    native core (issue #2840).
+    """
+    return [{k: v for k, v in m.items() if k != "spec_row"} for m in entries]
+
+
+def _attach_spec_rows(payload: dict[str, Any], row_by_name: dict[str, str]) -> None:
+    """Echo each measurement's resolved ``spec_row`` onto its report entry
+    (`null` where unset -- issue #2840).
+    """
+    for out_entry in payload.get("measurements") or []:
+        if isinstance(out_entry, dict):
+            out_entry["spec_row"] = row_by_name.get(out_entry.get("name"))
+
+
+def _spec_rows_for(
+    entries: list[dict[str, Any]], limits_rows: dict[str, str]
+) -> dict[str, str]:
+    """Resolve each measurement's ``spec_row``: a ``--limits`` row wins over
+    the sample document's own (issue #2840). Only measurements that produced
+    a request entry appear here, and the result never reaches the native
+    core -- it is echoed onto the report afterwards.
+    """
+    rows: dict[str, str] = {}
+    for entry in entries:
+        row = limits_rows.get(entry["name"], entry.get("spec_row"))
+        if row is not None:
+            rows[entry["name"]] = row
+    return rows
+
+
 def _failed_unmeasurable_from(raw: Any, name: str, where: str) -> int:
     """Normalise a ``failed_unmeasurable`` count -- draws that left the
     regime a measurement is only defined in and produced no value (issue
@@ -791,7 +826,6 @@ def run_yield(
     run_target_yield = spec_defaults.get("target_yield")
     warnings: list[str] = []
     request_measurements: list[dict[str, Any]] = []
-    row_by_name: dict[str, str] = {}
     for entry in selected:
         name = entry["name"]
         limits = dict(entry["limits"])
@@ -813,17 +847,13 @@ def run_yield(
             )
             continue
         request_measurements.append({**entry, "limits": limits})
-        # spec_row is Python-side provenance: a --limits row wins over the
-        # sample document's, and it never reaches the native core.
-        row = spec_rows.get(name, entry.get("spec_row"))
-        if row is not None:
-            row_by_name[name] = row
 
     if not request_measurements:
         raise YieldError(
             "no measurement has spec limits to estimate a yield against -- supply "
             "them via --limits (see docs/cli/yield.md)"
         )
+    row_by_name = _spec_rows_for(request_measurements, spec_rows)
 
     request: dict[str, Any] = {
         "confidence": _resolve(
@@ -834,10 +864,7 @@ def run_yield(
             spec_defaults.get("target_ci_halfwidth"),
             DEFAULT_TARGET_CI_HALFWIDTH,
         ),
-        "measurements": [
-            {k: v for k, v in m.items() if k != "spec_row"}
-            for m in request_measurements
-        ],
+        "measurements": _request_without_spec_rows(request_measurements),
     }
     resolved_min = _resolve(
         min_samples, spec_defaults.get("min_samples"), ABSOLUTE_MIN_SAMPLES
@@ -861,9 +888,7 @@ def run_yield(
         },
     }
     payload.update(response)
-    for out_entry in payload.get("measurements") or []:
-        if isinstance(out_entry, dict):
-            out_entry["spec_row"] = row_by_name.get(out_entry.get("name"))
+    _attach_spec_rows(payload, row_by_name)
     # The native core owns the payload's shape version; this module's
     # constant mirrors it (and is asserted against it below) so a crate-side
     # bump that Python never noticed cannot ship silently.
