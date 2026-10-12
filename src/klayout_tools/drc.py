@@ -1109,8 +1109,7 @@ def run_drc(
             exclude_indices = [
                 i
                 for i in (
-                    layout.find_layer(*lyr)
-                    for lyr in rule.derived_layer.exclude_layers
+                    layout.find_layer(*lyr) for lyr in rule.derived_layer.exclude_layers
                 )
                 if i is not None
             ]
@@ -1209,9 +1208,7 @@ def run_drc(
                     if rule.derived_layer.exclude_holed:
                         # Ring-shaped base polygons (merged, so a ring drawn
                         # as abutting bars counts) are exempt (#2835).
-                        base_region = base_region.merged().with_holes(
-                            0, 1, False
-                        )
+                        base_region = base_region.merged().with_holes(0, 1, False)
                     if rule.derived_layer.mode == "overlapping":
                         # Whole `base` polygons sharing area with the marker
                         # -- the marked ("_MV") half of a rule pair.

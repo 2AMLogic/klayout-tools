@@ -9337,9 +9337,10 @@ _CUT_RING = kdb.Region(kdb.Box(0, 0, 1000, 1000)) - kdb.Region(
 def test_sky130_fixed_size_cut_max_ordinary(tmp_path, rule_id, layer):
     """Ordinary 0.17um cuts stay clean; an oversized square or an elongated
     bar violates the rule's maximum half."""
-    assert _fixed_cut_report(tmp_path, [(layer, kdb.Box(0, 0, 170, 170))])[
-        "status"
-    ] == "clean"
+    assert (
+        _fixed_cut_report(tmp_path, [(layer, kdb.Box(0, 0, 170, 170))])["status"]
+        == "clean"
+    )
     for box in (kdb.Box(0, 0, 200, 200), kdb.Box(0, 0, 170, 400)):
         report = _fixed_cut_report(tmp_path, [(layer, box)])
         assert report["rule_counts"] == {rule_id: 1}
