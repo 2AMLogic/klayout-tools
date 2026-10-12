@@ -18,6 +18,7 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
+from klayout_tools import erc
 from klayout_tools.cli import main
 from klayout_tools.erc import ErcError, run_erc
 
@@ -6101,14 +6102,11 @@ def _shared_diffusion_two_finger_fixture(path) -> None:
     layout.write(str(path))
 
 
-def test_active_layer_derived_gate_oxide_is_connectivity_neutral(tmp_path):
-    """Issue #2751: the once-computed `poly & active` conductor is per-net
-    exact (A, B each own only their own 0.5 um^2 crossing; R excluded) and
-    leaves the extracted connectivity unchanged vs. omitting `active_layer`.
-    """
+def test_active_layer_shared_diffusion_gates_stay_separate_and_exact(tmp_path):
+    """Issue #2751: two fingers sharing one diffusion strip each own only
+    their own 0.5 um^2 crossing; the poly-only resistor R is excluded."""
     gds = tmp_path / "shared.gds"
     _shared_diffusion_two_finger_fixture(gds)
-
     with_active = tmp_path / "with.json"
     without_active = tmp_path / "without.json"
     _write_spec(with_active, _antenna_spec_variant(active_layer="8/0"))
@@ -6117,21 +6115,38 @@ def test_active_layer_derived_gate_oxide_is_connectivity_neutral(tmp_path):
     on = run_erc(str(gds), str(with_active))
     off = run_erc(str(gds), str(without_active))
 
-    # A and B stay separate gates with exactly their own oxide area; the
-    # shared diffusion strip is not a connection, and R is excluded.
     assert on["gate_count"] == 2
     assert [g["gate_area_um2"] for g in on["gates"]] == [
         pytest.approx(0.5),
         pytest.approx(0.5),
     ]
     assert sorted(g["net"] for g in on["gates"]) == ["A", "B"]
-    # Without active_layer R is a gate too (raw poly), A/B areas are raw poly.
+    # Omitted active_layer: R is a gate too (raw poly area), same A/B nets,
+    # and the gate order of the shared nets is unchanged.
     assert off["gate_count"] == 3
-    # Connectivity is identical either way: same named nets, same findings.
-    assert on["erc_findings"] == off["erc_findings"] or all(
-        f in off["erc_findings"] for f in on["erc_findings"]
-    )
-    assert {g["net"] for g in on["gates"]} <= {g["net"] for g in off["gates"]}
+    assert [g["net"] for g in off["gates"] if g["net"] != "R"] == [
+        g["net"] for g in on["gates"]
+    ]
+
+
+def test_active_index_matches_whole_layout_boolean():
+    """The bbox-indexed lookup equals `(poly & whole_active).merged()` for
+    polygons near, straddling, and far from the active shapes."""
+    active = kdb.Region()
+    for k in range(50):
+        active.insert(kdb.Box(k * 1000, 0, k * 1000 + 600, 400))
+    idx = erc._ActiveIndex(active)
+    for poly in (
+        kdb.Region(kdb.Box(100, -100, 300, 900)),
+        kdb.Region(kdb.Box(500, 100, 2600, 200)),
+        kdb.Region(kdb.Box(-5000, 0, 100000, 400)),
+        kdb.Region(kdb.Box(700, 0, 900, 400)),
+        kdb.Region(),
+    ):
+        got = idx.intersect(poly)
+        want = (poly & active).merged()
+        assert (got ^ want).is_empty()
+        assert got.area() == want.area()
 
 
 def test_active_layer_gate_area_matches_whole_layout_boolean(tmp_path):
@@ -6151,17 +6166,6 @@ def test_active_layer_gate_area_matches_whole_layout_boolean(tmp_path):
     areas = [(kdb.Region(p) & diff).merged().area() for p in poly.each_merged()]
     legacy = sorted(round(a * DBU * DBU, 9) for a in areas if a > 0)
     assert sorted(g["gate_area_um2"] for g in report["gates"]) == legacy
-
-
-def test_active_layer_derived_name_collision_is_rejected(tmp_path):
-    gds = tmp_path / "shared.gds"
-    _shared_diffusion_two_finger_fixture(gds)
-    variant = _antenna_spec_variant(active_layer="8/0")
-    variant["stackup"].append({"name": "poly__gate_oxide", "layer": "50/0"})
-    spec = tmp_path / "spec.json"
-    _write_spec(spec, variant)
-    with pytest.raises(ErcError, match="reserved"):
-        run_erc(str(gds), str(spec))
 
 
 def test_active_layer_rejected_on_non_gate_stackup_entry(tmp_path):

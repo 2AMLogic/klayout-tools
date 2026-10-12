@@ -119,10 +119,7 @@ def test_phases_partition_end_to_end_and_report_is_unchanged(
         sum(v["seconds"] for v in walk.values())
         <= top["candidate_walk"]["seconds"] + 0.005
     )
-    # Issue #2751: the active_layer region build and the `poly & active`
-    # intersection now happen once, before the walk starts (in the primary
-    # extraction), so the walk itself no longer builds any region.
-    assert "_region" not in walk
+    assert walk["_region"]["calls"] == 1  # the active_layer region build
 
     assert run["counts"]["gates"] == 2
     assert run["counts"]["candidates"] == 2

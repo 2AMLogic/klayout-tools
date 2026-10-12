@@ -3890,6 +3890,37 @@ def _register_label_layer(
     l2n.connect(conductor_region, label_texts)
 
 
+class _ActiveIndex:
+    """Bbox-indexed copy of the whole-layout active region (issue #2751).
+
+    ``(net_poly & whole_active).merged()`` visits every active polygon in the
+    chip once per candidate net -- candidates x active polygons, quadratic in
+    design size. Here the active polygons are loaded once into a scratch
+    cell, and :meth:`intersect` pulls only those whose bounding box touches
+    the net's own poly bbox through the shape tree's spatial query before
+    intersecting. Active polygons outside that window cannot intersect the
+    net's poly, so the result is geometrically identical to the whole-layout
+    boolean (same merged polygons, same area, same ``gates[]``).
+    """
+
+    def __init__(self, active_region: Any) -> None:
+        import klayout.db as kdb
+
+        self._kdb = kdb
+        self._layout = kdb.Layout()
+        self._cell = self._layout.create_cell("ACTIVE")
+        self._layer = self._layout.layer(0, 0)
+        self._cell.shapes(self._layer).insert(active_region)
+
+    def intersect(self, poly_region: Any) -> Any:
+        if poly_region.is_empty():
+            return poly_region
+        local = self._kdb.Region(
+            self._cell.begin_shapes_rec_touching(self._layer, poly_region.bbox())
+        )
+        return (poly_region & local).merged()
+
+
 def _extract_connectivity(
     layout: Any,
     top_cell: Any,
@@ -3899,8 +3930,6 @@ def _extract_connectivity(
     device_cuts: dict[str, Any],
     verb: str | None,
     label_layers: list[dict[str, Any]] | None = None,
-    active_region: Any | None = None,
-    gate_oxide_out: list[int] | None = None,
 ) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
     """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
     over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
@@ -3917,32 +3946,6 @@ def _extract_connectivity(
     condition without reading stderr.
 
     Returns ``(l2n, circuit, layer_index, tie_layers)``.
-
-    **`active_region` registers a derived gate-oxide conductor (issues
-    #1979, #2751).** When the caller passes the whole-layout diffusion
-    region behind ``stackup[0].active_layer`` (only the primary
-    :func:`run_erc` extraction does; the tie re-extraction passes ``None``
-    and pays nothing), the gate role's *device-cut* conductor region is
-    intersected with it once, and the resulting gate-oxide geometry is
-    registered as one extra conductor connected to the gate role. Each
-    net's true gate (oxide) area is then a per-net
-    ``polygons_of_net(net, gate_oxide_index)`` lookup -- the same shape of
-    lookup every other role already uses -- instead of one whole-layout
-    ``(poly & active).merged()`` boolean per candidate net, which is what
-    made the #2751 walk quadratic in design size. The extra conductor
-    cannot change the extracted connectivity: the derived region is
-    geometrically contained in the gate role's own registered region (the
-    same device cuts are applied to both), so each of its polygons lies
-    inside a single net's poly geometry -- two electrically separate poly
-    clusters are disjoint, and a connected piece of their common
-    intersection with a third region cannot straddle both -- so it only
-    ever attaches derived geometry to the cluster that already owns it,
-    merging nothing and splitting nothing. ``tests/test_erc.py`` pins this
-    with a shared-diffusion two-finger fixture. The derived index is
-    appended to the ``gate_oxide_out`` list (left empty when
-    ``active_region`` is ``None``) and never enters ``layer_index``, whose
-    keys stay exactly the declared ``stackup`` roles -- ``_island_entry``
-    measures every key of that dict.
 
     **A declared device body is not a wire (issue #2183).** ``device_cuts``
     (from :func:`_device_body_cuts`, ``{}`` when the spec declares no
@@ -4008,24 +4011,6 @@ def _extract_connectivity(
 
     l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
 
-    # The reserved name the derived gate-oxide conductor registers under
-    # (`active_region`, issue #2751). Guarded against a spec that declares
-    # the same name for one of its own conductors, so the derived layer can
-    # never shadow a declared one.
-    gate_oxide_name = f"{stackup[0]['name']}__gate_oxide"
-    declared_names = (
-        {entry["name"] for entry in stackup}
-        | {via["name"] for via in vias}
-        | {tie["name"] for tie in ties}
-    )
-    if active_region is not None and gate_oxide_name in declared_names:
-        raise ErcError(
-            f"conductor name {gate_oxide_name!r} is reserved for the derived "
-            f"gate-oxide layer of stackup[0] ({stackup[0]['name']!r}) when "
-            "stackup[0].active_layer is declared -- rename the stackup/vias/"
-            "ties entry"
-        )
-
     layer_index: dict[str, int] = {}
     regions: dict[str, Any] = {}
     for entry in stackup:
@@ -4038,20 +4023,6 @@ def _extract_connectivity(
         _register_label_layer(
             l2n, layout, top_cell, entry, conductor_region, verb, label_layers
         )
-        if entry is stackup[0] and active_region is not None:
-            # The derived gate-oxide conductor (issue #2751): the gate
-            # role's own device-cut region restricted to the diffusion
-            # layer, computed once, merged so each net's per-net polygon
-            # set below is disjoint and its areas sum exactly. Connected to
-            # the gate role -- the containment argument in this function's
-            # docstring is why that is connectivity-neutral -- and read
-            # back per net through `polygons_of_net` by `run_erc`'s walk.
-            gate_oxide_region = (conductor_region & active_region).merged()
-            gate_oxide_index = l2n.register(gate_oxide_region, gate_oxide_name)
-            if gate_oxide_out is not None:
-                gate_oxide_out.append(gate_oxide_index)
-            l2n.connect(gate_oxide_region)
-            l2n.connect(gate_oxide_region, conductor_region)
 
     for via in vias:
         via_region = _cut_device_bodies(
@@ -4448,21 +4419,6 @@ def run_erc(
     # `provenance.label_layers` (issue #2415): measured by the primary
     # extraction only -- the tie re-extraction below passes no collector.
     label_layers: list[dict[str, Any]] = []
-    # `active_layer` (issue #1979, optional): when the spec supplies a
-    # diffusion/active layer on `stackup[0]`, gate identification and the
-    # antenna-ratio denominator below are computed from `poly ∩ diff` --
-    # true gate (oxide) area -- rather than raw poly-net area. The
-    # intersection is computed ONCE inside the primary extraction and
-    # registered as a derived conductor connected to the gate role (issue
-    # #2751); each net's share is a per-net `polygons_of_net` lookup below.
-    # When omitted, `active_region` stays `None` and every net's raw poly
-    # area is used unchanged -- see docs/cli/erc.md's "Spec file" section
-    # for the documented caveat this leaves for tie/decap/filler-cell nets.
-    active_layer = stackup[0]["active_layer"]
-    active_region = (
-        _region(layout, top_cell, active_layer) if active_layer is not None else None
-    )
-    gate_oxide_out: list[int] = []
     l2n, circuit, layer_index, _ = _extract_connectivity(
         layout,
         top_cell,
@@ -4472,14 +4428,31 @@ def run_erc(
         device_cuts,
         verb="klt erc",
         label_layers=label_layers,
-        active_region=active_region,
-        gate_oxide_out=gate_oxide_out,
     )
 
     gate_role = stackup[0]["name"]
     gate_layer_index = layer_index[gate_role]
-    gate_oxide_index = gate_oxide_out[0] if gate_oxide_out else None
     dbu2_um2 = dbu * dbu
+
+    # `active_layer` (issue #1979, optional): when the spec supplies a
+    # diffusion/active layer on `stackup[0]`, gate identification and the
+    # antenna-ratio denominator below are computed from `poly ∩ diff` --
+    # true gate (oxide) area -- rather than raw poly-net area. This is a
+    # plain geometric intersection against the active region, *not* a
+    # connectivity-graph registration: diffusion never needs to be traced
+    # for connectivity here (registering a derived layer would also renumber
+    # the clusters and so reorder `gates[]`). The region is loaded once into
+    # a bbox-indexed `_ActiveIndex` (issue #2751) so each net is intersected
+    # only with the active polygons near its own poly, not the whole chip.
+    # When omitted, `active_region` stays `None` and
+    # every net's raw poly area is used unchanged (today's behaviour) -- see
+    # docs/cli/erc.md's "Spec file" section for the documented caveat this
+    # leaves for tie/decap/filler-cell nets.
+    active_layer = stackup[0]["active_layer"]
+    active_region = (
+        _region(layout, top_cell, active_layer) if active_layer is not None else None
+    )
+    active_index = _ActiveIndex(active_region) if active_region is not None else None
 
     # Every distinct net (cluster) is already one electrically-connected
     # island by construction (`LayoutToNetlist` clusters connected geometry
@@ -4513,8 +4486,8 @@ def run_erc(
         # and is correctly excluded below by the existing zero-area skip.
         # Falls back to raw poly-net area (today's behaviour) when
         # `active_layer` is omitted.
-        if gate_oxide_index is not None:
-            gate_area_region = l2n.polygons_of_net(net, gate_oxide_index).merged()
+        if active_index is not None:
+            gate_area_region = active_index.intersect(gate_poly_region)
         else:
             gate_area_region = gate_poly_region
         gate_area_um2 = gate_area_region.area() * dbu2_um2

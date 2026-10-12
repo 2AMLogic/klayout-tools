@@ -287,26 +287,19 @@ def _attribute_walk(args: argparse.Namespace) -> dict[str, Any]:
     vias = erc._validate_vias(spec, args.spec, [e["name"] for e in stackup])
     layout = erc.load_layout(args.layout, erc.ErcError)
     top_cell = erc.select_top_cells(layout, args.top, erc.ErcError)[0]
+    l2n, circuit, layer_index, _ = erc._extract_connectivity(
+        layout, top_cell, stackup, vias, [], {}, verb=None
+    )
+    gate_index = layer_index[stackup[0]["name"]]
     active_layer = stackup[0]["active_layer"]
     active_region = (
         erc._region(layout, top_cell, active_layer)
         if active_layer is not None
         else None
     )
-    oxide_out: list[int] = []
-    l2n, circuit, layer_index, _ = erc._extract_connectivity(
-        layout,
-        top_cell,
-        stackup,
-        vias,
-        [],
-        {},
-        verb=None,
-        active_region=active_region,
-        gate_oxide_out=oxide_out,
+    active_index = (
+        erc._ActiveIndex(active_region) if active_region is not None else None
     )
-    gate_index = layer_index[stackup[0]["name"]]
-    oxide_index = oxide_out[0] if oxide_out else None
     candidates = sorted(
         (n for n in circuit.each_net() if n.cluster_id != 0), key=lambda n: n.cluster_id
     )
@@ -318,12 +311,8 @@ def _attribute_walk(args: argparse.Namespace) -> dict[str, Any]:
         t0 = time.perf_counter()
         gate_poly = l2n.polygons_of_net(net, gate_index).merged()
         t1 = time.perf_counter()
-        # Post-#2751 path: per-net lookup of the derived gate-oxide layer
-        # (the whole-layout `& active_region` boolean is gone from run_erc).
         gate_area_region = (
-            l2n.polygons_of_net(net, oxide_index).merged()
-            if oxide_index is not None
-            else gate_poly
+            active_index.intersect(gate_poly) if active_index is not None else gate_poly
         )
         t2 = time.perf_counter()
         area = gate_area_region.area()
