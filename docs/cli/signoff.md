@@ -1400,9 +1400,9 @@ identically:
 
 | How the pinned commit `<sha>` was provisioned | What the `build` block says |
 | --- | --- |
-| `uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>"` | real git facts recorded by `hatch_build.py` from the package manager's own scratch checkout: `git_commit: "<sha>"`, `version: "X.Y.Z+g<sha>"`. Before issue #2248 that checkout's untracked build residue (`uv` drops a checkout-completion sentinel into the tree) also made `dirty: true` and `version: "X.Y.Z+g<sha>.dirty"`. |
+| `uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>"` | real git facts recorded by `hatch_build.py` from the package manager's own scratch checkout: `git_commit: "<sha>"`, a version such as `"X.Y.(Z+1).devN+g<sha>"` (issue #2823; `"X.Y.Z+g<sha>"` before it). Before issue #2248 that checkout's untracked build residue (`uv` drops a checkout-completion sentinel into the tree) also made `dirty: true` and `version: "X.Y.Z+g<sha>.dirty"`. |
 | A clean `git worktree add <sha>` / `git clone` + local `uv build` | the same commit, `dirty: false` |
-| `pip install` of a source **tarball** of `<sha>` (a GitHub `/archive/<sha>.tar.gz`, a vendored copy) | no `.git` exists at build time, so no facts are recorded at all: `git_commit: null`, `version: "X.Y.Z+unknown"`, `is_release: null` |
+| `pip install` of a source **tarball** of `<sha>` (a GitHub `/archive/<sha>.tar.gz`, a vendored copy) | no `.git` exists at build time, so no facts are recorded at all: `git_commit: null`, `version: "X.Y.Z.dev0+unknown"`, `is_release: null` |
 
 Every row is honest about the build it names — that is exactly why issue
 #2176 put the block in the report — and the last row is **not fixable**: the

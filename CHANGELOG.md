@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
+  absorbing #2888): the distribution version is now computed at build time
+  from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the
+  checkout's git facts. A clean build exactly at tag `vX.Y.Z` still declares
+  bare `X.Y.Z`. A post-tag build now declares `X.Y.(Z+1).devN+g<sha>` in its
+  wheel/sdist metadata (a commit before the base is tagged declares
+  `X.Y.Z.devN+g<sha>`, uncommitted changes add `.dirty`, no git facts gives
+  `X.Y.Z.dev0+unknown`). Previously only `klt`'s output carried `+g<sha>`, so
+  a cached or tool-installed dev build silently satisfied an exact pin. A
+  wheel rebuilt from the sdist keeps the originating version. **Contract
+  change:** `klt version --format json`'s `package_version` (and `klt
+  signoff`'s `build.package_version`) is the distribution's own version, so
+  on non-release builds it now carries the same dev form as `version`
+  instead of the static base. Field names and types are unchanged, so no
+  `schema_version` bump; see `docs/cli/version.md`. Release managers now bump
+  `base-version` instead of `[project] version` (`RELEASING.md`).
+
 - **`klt sta`: per-corner constraint completeness** (issue #2780): every
   response and every `corners[]` entry carries an additive
   `constraint_completeness` block. It reports `unconstrained_endpoints` and
