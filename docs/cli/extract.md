@@ -1438,7 +1438,7 @@ card" section.
 **Written card parameters vs. the PDK subcircuit's own (issues #2408,
 #2435).** The upstream `.subckt` this card's trailing class-name token binds
 onto declares more than `klt extract` measures. Verbatim, from IHP's own
-Apache-2.0 model libraries (`IHP-GmbH/ihp-sg13cmos5l` at
+Apache-2.0 model libraries (archived `IHP-GmbH/ihp-sg13cmos5l`, now IHP-Open-PDK `ihp-sg13cmos5l/`, at
 `607e18d4bd9214a52575c194b4181ef449f9252f`,
 `libs.tech/ngspice/models/cap_cmomi.lib:60` and `cap_cmomf.lib:53`):
 
@@ -4506,7 +4506,7 @@ table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py` / `sg13g2.py` /
 file** — `sky130.tech` / `gf180mcu.tech` in fossi-foundation/open-pdks
 (GPLv3), and `libs.tech/magic/ihp-sg13g2-extract.tech` in
 IHP-GmbH/IHP-Open-PDK and `libs.tech/magic/ihp-sg13cmos5l-extract.tech`
-in IHP-GmbH/ihp-sg13cmos5l (both Apache-2.0) — sheet resistances from its `resist`
+in IHP-GmbH/ihp-sg13cmos5l (archived; now IHP-Open-PDK `ihp-sg13cmos5l/`; both Apache-2.0) — sheet resistances from its `resist`
 entries, area/fringe capacitances from its `defaultareacap` /
 `defaultperimeter` entries, vertical-overlap coupling from its
 `defaultoverlap` entries — never NDA'd, the same public-source curation

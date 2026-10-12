@@ -26,6 +26,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged. An evidence failure yields `indeterminate`, never a failed run.
   `schema_version` stays 2.
 
+- **`scripts/fetch-ihp-sg13cmos5l.sh` repointed to IHP-Open-PDK** (issue
+  #2720): the standalone `IHP-GmbH/ihp-sg13cmos5l` repo was archived on
+  2026-09-23, so the script now fetches the `ihp-sg13cmos5l/` subtree of
+  `IHP-GmbH/IHP-Open-PDK` `dev`, pinned to commit `f7bca326` (after
+  `e8fba183`, which removed the prebuilt x86-64 `cap_cmom{i,f}.osdi`) with a
+  new fail-closed tarball sha256. The whole-repo tarball is ~400 MB (about
+  96 MB is extracted). The deck's own rule-provenance pin
+  (`_IHP_SG13CMOS5L_COMMIT`) is deliberately unchanged.
+
 - **`klt extract --hierarchical-cells`** (issue #2722, increment 1): an
   opt-in, additive hierarchical SPICE mode. Named non-nested cells are written
   as their own `.SUBCKT` (one definition per cell, one `X` per placement) with
