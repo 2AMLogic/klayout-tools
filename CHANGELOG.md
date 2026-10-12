@@ -31,6 +31,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   `schema_version` bump; see `docs/cli/version.md`. Release managers now bump
   `base-version` instead of `[project] version` (`RELEASING.md`).
 
+- **ASAP7 KLayout DRC deck: BEOL M1-M9 / V0-V9** (issue #2810): the in-repo
+  deck (`src/klayout_tools/decks/asap7.drc`) grows from 106 to 232 rule
+  categories, adding `V0.LIG.A.1` and the M1-M9 / V1-V9 width, spacing,
+  area, grid/track and enclosure rules from DRM Tables 3.11.2-3.19.1, and
+  applies `GEOMETRY.NONORTHOGONAL` to every BEOL layer. Pass
+  `--expect-rule-categories 232`. Rules that need routing-track assignment,
+  net connectivity, an M8 routing direction or the PAD layer are listed with
+  reasons in `asap7_rules.NOT_IMPLEMENTED` and `docs/cli/drc.md` (#3147,
+  #3155, #3156). Additive: no existing rule id changes.
+
 - **`klt sta`: per-corner constraint completeness** (issue #2780): every
   response and every `corners[]` entry carries an additive
   `constraint_completeness` block. It reports `unconstrained_endpoints` and
