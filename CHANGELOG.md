@@ -21,6 +21,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   error envelope) instead of interleaving artifacts. Ancestor/descendant
   roots exclude each other, aliases contend, dead owners release
   automatically. See `docs/json-contract.md` "Output-directory ownership".
+- **`klt lef-abstract`: structural self-check of the emitted LEF** (issue
+  #2769): after writing, the command reads the file back from disk and
+  validates the emitted subset -- a library-level `VERSION`, properly nested
+  `MACRO`/`PIN` blocks with matching named `END`s, anonymous `PORT`/`OBS`
+  `END`s, `END LIBRARY`, no truncation, no duplicate macros/pins, exactly the
+  expected macro name, and every descriptor-declared pin inside its own
+  macro. Results land in the additive `self_check` object (`status`
+  `pass`/`fail`, `findings[]` of `{code, message, line, macro, pin}`, sorted
+  `missing_macros`/`unexpected_macros`). A structural failure still emits the
+  report, leaves the file on disk, and exits **`3`** (new for this verb);
+  failing to read the file back is exit `1`. Synthesized and `PORT`-less pins
+  are not structural failures; a pass does not prove routability. The pure
+  validator is `klayout_tools.lef_abstract.check_lef_structure`. No
+  `schema_version` bump.
 
 - **`klt extract --resistance-path NET_ID FROM TO`: point-to-point shortest
   series path resistance over a `--distributed-rc` ladder** (issue #2765):

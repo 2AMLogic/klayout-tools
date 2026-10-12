@@ -167,8 +167,24 @@ def run_lef_abstract(
             "obs": [{"layer": str, "shape_count": int}, ...],
             "obs_shape_count": <int>,
             "warnings": [...],
+            "self_check": {
+                "status": "pass" | "fail",
+                "findings": [{"code", "message", "line", "macro", "pin"}, ...],
+                "missing_macros": [...],
+                "unexpected_macros": [...],
+            },
             "provenance": {...},
         }
+
+    ``self_check`` (issue #2769) is :func:`check_lef_structure` run on the
+    file read back from ``output_path`` after writing -- the on-disk bytes,
+    not this function's in-memory pin data -- against the expected macro
+    ``{macro_name}`` and the descriptor's own declared pins. A ``"fail"``
+    still returns the report (the file is left on disk for diagnosis); a
+    caller must gate consumption of the LEF on ``self_check.status``. A
+    structural pass says nothing about routability or P&R acceptance, and a
+    PORT-less (``geometry_source: "none"``) or synthesized pin is not a
+    structural failure.
 
     ``unroutable_pins`` (issue #464) is a programmatically-checkable echo of
     every ``pins[]`` entry emitted with ``geometry_source: "none"`` -- a pin
@@ -187,7 +203,8 @@ def run_lef_abstract(
 
     Raises :class:`LefAbstractError` for a missing/unreadable layout or
     socket descriptor, an ambiguous/missing top cell, an unresolvable PDK or
-    tech LEF for ``cell_library``, or a write failure.
+    tech LEF for ``cell_library``, a write failure, or a failure to read the
+    written file back for its self-check.
     """
     layout = load_layout(layout_path, LefAbstractError)
     top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
@@ -275,6 +292,14 @@ def run_lef_abstract(
         obs=obs_report,
     )
 
+    # Issue #2769: validate the bytes actually written, not `pins_report`.
+    # Expected pins come from the original descriptor, so a pin the writer
+    # dropped (or put in the wrong macro) cannot pass by construction.
+    self_check = check_lef_structure(
+        _read_back_lef(output_path),
+        {macro_name: [pin["name"] for pin in descriptor["pins"]]},
+    )
+
     provenance = build_provenance(
         deck_name=cell_library,
         deck_path=tech_lef,
@@ -313,6 +338,7 @@ def run_lef_abstract(
         ],
         "obs_shape_count": sum(len(shapes) for _layer_name, shapes in obs_report),
         "warnings": warnings,
+        "self_check": self_check,
         "provenance": provenance,
     }
 
@@ -827,8 +853,498 @@ def _write_lef(
         ) from exc
 
 
+# --------------------------------------------------------------------------- #
+# structural self-check of the emitted LEF (issue #2769)
+# --------------------------------------------------------------------------- #
+#
+# A deliberately small validator for exactly the LEF subset `_write_lef`
+# emits -- library-level statements (`VERSION`, `BUSBITCHARS`, ...), `MACRO
+# <name>` ... `END <name>`, `PIN <name>` ... `END <name>`, anonymous `PORT`
+# ... `END` / `OBS` ... `END`, `;`-terminated statements inside them, and a
+# final `END LIBRARY`. It is NOT a general LEF parser and validates no
+# geometry: a structural pass says the file is well-nested and names exactly
+# the expected macros/pins, not that a router or P&R tool will accept it.
+#
+# Conventions it relies on (all true of `_write_lef`'s own output): `#`
+# starts a comment running to end of line; tokens are whitespace-separated
+# (a `;` glued to the end of a token is split off); the name after `MACRO`,
+# `PIN` or a named `END` sits on the same line as the keyword; keywords are
+# matched upper-case, identifiers are compared exactly (case preserved).
+
+
+def _read_back_lef(output_path: str) -> str:
+    """Read the just-written LEF back from disk for :func:`check_lef_structure`.
+
+    The self-check deliberately validates the bytes actually on disk, not the
+    in-memory data the writer was handed. A read/decode failure is an
+    application error (:class:`LefAbstractError`, CLI exit 1), not a
+    structural finding."""
+    try:
+        with open(output_path, encoding="utf-8") as handle:
+            return handle.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LefAbstractError(
+            f"could not read back LEF abstract '{output_path}' for its "
+            f"structural self-check: {exc}"
+        ) from exc
+
+
+#: Keywords that open or close a block in the emitter's subset. Only
+#: recognised in statement-initial position.
+_LEF_BLOCK_KEYWORDS = frozenset({"MACRO", "PIN", "PORT", "OBS", "END"})
+
+
+def _lef_tokens(text: str) -> list[tuple[str, int, bool]]:
+    """Tokenise LEF text into ``(token, line_number, first_on_line)``
+    triples, dropping ``#`` comments and splitting a trailing ``;`` off any
+    token it is glued to."""
+    tokens: list[tuple[str, int, bool]] = []
+    for line_number, raw in enumerate(text.splitlines(), start=1):
+        first = True
+        for word in raw.split("#", 1)[0].split():
+            pieces = (
+                [word[:-1], ";"] if len(word) > 1 and word.endswith(";") else [word]
+            )
+            for piece in pieces:
+                tokens.append((piece, line_number, first))
+                first = False
+    return tokens
+
+
+def _finding(
+    code: str,
+    message: str,
+    *,
+    line: int | None = None,
+    macro: str | None = None,
+    pin: str | None = None,
+) -> dict[str, Any]:
+    return {"code": code, "message": message, "line": line, "macro": macro, "pin": pin}
+
+
+class _LefStructureParser:
+    """Single-pass nesting/naming walk over :func:`_lef_tokens` output.
+
+    Records findings rather than stopping at the first one, and recovers
+    from each defect conservatively so later checks still run (one fault
+    must not conceal another)."""
+
+    def __init__(self, tokens: list[tuple[str, int, bool]]) -> None:
+        self.tokens = tokens
+        self.pos = 0
+        # Each open block: {"kind", "name", "line", "decl"}.
+        self.stack: list[dict[str, Any]] = []
+        # Each MACRO declaration: {"name", "line", "pins": {name: line}}.
+        self.macros: list[dict[str, Any]] = []
+        self.findings: list[dict[str, Any]] = []
+        self.version_seen = False
+        self.end_library_line: int | None = None
+
+    # -- token helpers ------------------------------------------------------
+
+    def _take_name(self, line: int) -> str | None:
+        """Consume and return the token after a keyword when it is on the
+        same line and is not a ``;``; else ``None`` (consumes nothing)."""
+        if self.pos < len(self.tokens):
+            token, token_line, _first = self.tokens[self.pos]
+            if token_line == line and token != ";":
+                self.pos += 1
+                return token
+        return None
+
+    def _block_label(self, block: dict[str, Any]) -> str:
+        if block["name"] is None:
+            return block["kind"]
+        return f"{block['kind']} {block['name']}"
+
+    def _enclosing_macro(self) -> str | None:
+        for block in reversed(self.stack):
+            if block["kind"] == "MACRO":
+                return block["name"]
+        return None
+
+    def _report_unclosed(self, block: dict[str, Any], reason: str) -> None:
+        self.findings.append(
+            _finding(
+                "unclosed_block",
+                f"{self._block_label(block)} opened on line {block['line']} "
+                f"is never closed ({reason})",
+                line=block["line"],
+                macro=block["name"]
+                if block["kind"] == "MACRO"
+                else self._macro_of(block),
+                pin=block["name"] if block["kind"] == "PIN" else None,
+            )
+        )
+
+    def _macro_of(self, block: dict[str, Any]) -> str | None:
+        decl = block.get("decl")
+        return decl["name"] if decl is not None else None
+
+    # -- main loop ----------------------------------------------------------
+
+    def run(self) -> None:
+        handlers = {
+            "MACRO": self._open_macro,
+            "PIN": self._open_pin,
+            "PORT": self._open_anonymous,
+            "OBS": self._open_anonymous,
+            "END": self._close,
+            "VERSION": self._version,
+        }
+        while self.pos < len(self.tokens):
+            token, line, _first = self.tokens[self.pos]
+            if self.end_library_line is not None:
+                self.findings.append(
+                    _finding(
+                        "content_after_end_library",
+                        f"unexpected content '{token}' after END LIBRARY "
+                        f"(line {self.end_library_line})",
+                        line=line,
+                    )
+                )
+                break
+            handler = handlers.get(token)
+            if handler is None:
+                self._skip_statement(line)
+            else:
+                handler(token, line)
+        self._finish()
+
+    def _skip_statement(self, line: int) -> None:
+        """Consume a ``;``-terminated statement. Stops early -- reporting
+        ``unterminated_statement`` -- at EOF or at a block keyword that
+        starts a new line, so a missing ``;`` cannot swallow an ``END``."""
+        start = self.pos
+        while self.pos < len(self.tokens):
+            token, _line, first = self.tokens[self.pos]
+            if self.pos > start and first and token in _LEF_BLOCK_KEYWORDS:
+                break
+            self.pos += 1
+            if token == ";":
+                return
+        self.findings.append(
+            _finding(
+                "unterminated_statement",
+                f"statement '{self.tokens[start][0]}' starting on line {line} "
+                "has no terminating ';'",
+                line=line,
+                macro=self._enclosing_macro(),
+            )
+        )
+
+    def _version(self, _token: str, line: int) -> None:
+        value_pos = self.pos + 1
+        if not self.stack and value_pos < len(self.tokens):
+            value, value_line, _first = self.tokens[value_pos]
+            if value != ";" and value_line == line:
+                self.version_seen = True
+        self._skip_statement(line)
+
+    # -- block openers ------------------------------------------------------
+
+    def _open_macro(self, _token: str, line: int) -> None:
+        self.pos += 1
+        name = self._take_name(line)
+        if name is None:
+            self.findings.append(
+                _finding("missing_name", f"MACRO on line {line} has no name", line=line)
+            )
+        if self.stack:
+            self.findings.append(
+                _finding(
+                    "misplaced_block",
+                    f"MACRO {name} on line {line} is nested inside "
+                    f"{self._block_label(self.stack[-1])}",
+                    line=line,
+                    macro=name,
+                )
+            )
+        decl = None
+        if name is not None:
+            decl = {"name": name, "line": line, "pins": {}}
+            self.macros.append(decl)
+        self.stack.append({"kind": "MACRO", "name": name, "line": line, "decl": decl})
+
+    def _open_pin(self, _token: str, line: int) -> None:
+        self.pos += 1
+        name = self._take_name(line)
+        parent = self.stack[-1] if self.stack else None
+        decl = parent["decl"] if parent and parent["kind"] == "MACRO" else None
+        macro = self._enclosing_macro()
+        if name is None:
+            self.findings.append(
+                _finding(
+                    "missing_name",
+                    f"PIN on line {line} has no name",
+                    line=line,
+                    macro=macro,
+                )
+            )
+        if parent is None or parent["kind"] != "MACRO":
+            where = "library level" if parent is None else self._block_label(parent)
+            self.findings.append(
+                _finding(
+                    "misplaced_block",
+                    f"PIN {name} on line {line} is not directly inside a MACRO "
+                    f"(found at {where})",
+                    line=line,
+                    macro=macro,
+                    pin=name,
+                )
+            )
+        elif decl is not None and name is not None:
+            self._record_pin(decl, name, line)
+        self.stack.append({"kind": "PIN", "name": name, "line": line, "decl": decl})
+
+    def _record_pin(self, decl: dict[str, Any], name: str, line: int) -> None:
+        if name in decl["pins"]:
+            self.findings.append(
+                _finding(
+                    "duplicate_pin",
+                    f"PIN {name} declared again in MACRO {decl['name']} on line "
+                    f"{line} (first on line {decl['pins'][name]})",
+                    line=line,
+                    macro=decl["name"],
+                    pin=name,
+                )
+            )
+            return
+        decl["pins"][name] = line
+
+    def _open_anonymous(self, token: str, line: int) -> None:
+        self.pos += 1
+        required_parent = "PIN" if token == "PORT" else "MACRO"
+        parent = self.stack[-1] if self.stack else None
+        if parent is None or parent["kind"] != required_parent:
+            where = "library level" if parent is None else self._block_label(parent)
+            self.findings.append(
+                _finding(
+                    "misplaced_block",
+                    f"{token} on line {line} must be directly inside a "
+                    f"{required_parent} (found at {where})",
+                    line=line,
+                    macro=self._enclosing_macro(),
+                )
+            )
+        decl = parent.get("decl") if parent else None
+        self.stack.append({"kind": token, "name": None, "line": line, "decl": decl})
+
+    # -- END ----------------------------------------------------------------
+
+    def _close(self, _token: str, line: int) -> None:
+        self.pos += 1
+        name = self._take_name(line)
+        if name == "LIBRARY" and not (
+            self.stack and self.stack[-1]["name"] == "LIBRARY"
+        ):
+            for block in reversed(self.stack):
+                self._report_unclosed(block, f"END LIBRARY reached on line {line}")
+            self.stack.clear()
+            self.end_library_line = line
+            return
+        if not self.stack:
+            label = f"END {name}" if name else "END"
+            self.findings.append(
+                _finding(
+                    "orphan_end",
+                    f"{label} on line {line} closes nothing",
+                    line=line,
+                    macro=name,
+                )
+            )
+            return
+        top = self.stack[-1]
+        if top["name"] == name:
+            self.stack.pop()
+            return
+        if name is None:
+            self._unnamed_end(top, line)
+            return
+        self._mismatched_end(top, name, line)
+
+    def _unnamed_end(self, top: dict[str, Any], line: int) -> None:
+        self.findings.append(
+            _finding(
+                "unnamed_end",
+                f"anonymous END on line {line} where 'END {top['name']}' is "
+                f"required to close {self._block_label(top)} (line {top['line']})",
+                line=line,
+                macro=top["name"] if top["kind"] == "MACRO" else self._macro_of(top),
+                pin=top["name"] if top["kind"] == "PIN" else None,
+            )
+        )
+        self.stack.pop()
+
+    def _mismatched_end(self, top: dict[str, Any], name: str, line: int) -> None:
+        for index in range(len(self.stack) - 2, -1, -1):
+            if self.stack[index]["name"] == name:
+                # A deeper block's name: the blocks above it were never closed.
+                for block in reversed(self.stack[index + 1 :]):
+                    self._report_unclosed(block, f"END {name} reached on line {line}")
+                del self.stack[index:]
+                return
+        expected = f"END {top['name']}" if top["name"] else "END"
+        self.findings.append(
+            _finding(
+                "end_name_mismatch",
+                f"END {name} on line {line} does not match {self._block_label(top)} "
+                f"(line {top['line']}); expected '{expected}'",
+                line=line,
+                macro=top["name"] if top["kind"] == "MACRO" else self._macro_of(top),
+                pin=top["name"] if top["kind"] == "PIN" else None,
+            )
+        )
+        self.stack.pop()
+
+    # -- EOF ----------------------------------------------------------------
+
+    def _finish(self) -> None:
+        for block in reversed(self.stack):
+            self._report_unclosed(block, "end of file reached -- truncated output?")
+        self.stack.clear()
+        if self.end_library_line is None:
+            self.findings.append(
+                _finding("missing_end_library", "no END LIBRARY statement")
+            )
+        if not self.version_seen:
+            self.findings.append(
+                _finding("missing_version", "no library-level VERSION statement")
+            )
+
+
+def _macro_identity_findings(
+    macros: list[dict[str, Any]], expected: dict[str, list[str]]
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """Compare declared MACRO names against the expected set: duplicates,
+    missing and unexpected names (exact, case-sensitive)."""
+    findings: list[dict[str, Any]] = []
+    first_line: dict[str, int] = {}
+    for decl in macros:
+        if decl["name"] in first_line:
+            findings.append(
+                _finding(
+                    "duplicate_macro",
+                    f"MACRO {decl['name']} declared again on line {decl['line']} "
+                    f"(first on line {first_line[decl['name']]})",
+                    line=decl["line"],
+                    macro=decl["name"],
+                )
+            )
+        else:
+            first_line[decl["name"]] = decl["line"]
+    missing = sorted(set(expected) - set(first_line))
+    unexpected = sorted(set(first_line) - set(expected))
+    for name in missing:
+        findings.append(
+            _finding(
+                "missing_macro", f"expected MACRO {name} is not declared", macro=name
+            )
+        )
+    for name in unexpected:
+        findings.append(
+            _finding(
+                "unexpected_macro",
+                f"MACRO {name} (line {first_line[name]}) is not an expected macro",
+                line=first_line[name],
+                macro=name,
+            )
+        )
+    return findings, missing, unexpected
+
+
+def _pin_identity_findings(
+    macros: list[dict[str, Any]], expected: dict[str, list[str]]
+) -> list[dict[str, Any]]:
+    """For each expected macro that is declared, every expected pin must be
+    declared inside it and no other pin may be. Pins are unioned across
+    duplicate declarations of the same macro (the duplicate itself is
+    already a finding)."""
+    findings: list[dict[str, Any]] = []
+    declared: dict[str, dict[str, int]] = {}
+    macro_line: dict[str, int] = {}
+    for decl in macros:
+        macro_line.setdefault(decl["name"], decl["line"])
+        pins = declared.setdefault(decl["name"], {})
+        for pin, line in decl["pins"].items():
+            pins.setdefault(pin, line)
+    for macro in sorted(set(expected) & set(declared)):
+        wanted = set(expected[macro])
+        have = declared[macro]
+        for pin in sorted(wanted - set(have)):
+            findings.append(
+                _finding(
+                    "missing_pin",
+                    f"declared pin {pin} is missing from MACRO {macro}",
+                    line=macro_line[macro],
+                    macro=macro,
+                    pin=pin,
+                )
+            )
+        for pin in sorted(set(have) - wanted):
+            findings.append(
+                _finding(
+                    "unexpected_pin",
+                    f"PIN {pin} (line {have[pin]}) is not a declared pin of "
+                    f"MACRO {macro}",
+                    line=have[pin],
+                    macro=macro,
+                    pin=pin,
+                )
+            )
+    return findings
+
+
+def check_lef_structure(
+    text: str, expected_pins: dict[str, list[str]]
+) -> dict[str, Any]:
+    """Structurally check LEF ``text`` (the subset ``klt lef-abstract``
+    emits) against ``expected_pins`` -- a ``{macro_name: [pin_name, ...]}``
+    mapping of exactly the macros the file must declare, each with exactly
+    the pins it must contain.
+
+    Returns the additive ``self_check`` report block::
+
+        {
+            "status": "pass" | "fail",
+            "findings": [
+                {"code", "message", "line", "macro", "pin"}, ...
+            ],
+            "missing_macros": [<sorted names>],
+            "unexpected_macros": [<sorted names>],
+        }
+
+    ``line``/``macro``/``pin`` are ``null`` when not applicable. Every check
+    runs regardless of earlier findings. ``status`` is ``"pass"`` iff
+    ``findings`` is empty. Checks: a library-level ``VERSION``; MACRO/PIN/
+    PORT/OBS nesting with named ``END <name>`` for MACRO/PIN, anonymous
+    ``END`` for PORT/OBS and a final ``END LIBRARY`` (orphan, mismatched,
+    unnamed and unclosed ENDs, truncation, unterminated statements, content
+    after ``END LIBRARY``); duplicate MACRO/PIN declarations; exact macro
+    name set; every expected pin inside its own macro and no unexpected pin.
+    Geometry and non-structural LEF semantics are not checked.
+    """
+    parser = _LefStructureParser(_lef_tokens(text))
+    parser.run()
+    macro_findings, missing, unexpected = _macro_identity_findings(
+        parser.macros, expected_pins
+    )
+    findings = (
+        parser.findings
+        + macro_findings
+        + _pin_identity_findings(parser.macros, expected_pins)
+    )
+    return {
+        "status": "fail" if findings else "pass",
+        "findings": findings,
+        "missing_macros": missing,
+        "unexpected_macros": unexpected,
+    }
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "LefAbstractError",
+    "check_lef_structure",
     "run_lef_abstract",
 ]
