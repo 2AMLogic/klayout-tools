@@ -172,6 +172,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   capped at 20 pins with explicit truncation. Slack fields, `timing_status` and
   violation counts are unchanged. No `schema_version` bump.
 
+- **`klt lvs`: ASAP7 FinFET compare** (issue #2813, part of #2761): a
+  `layout.deck` of `asap7` is no longer refused. The reference reader
+  preserves and validates `nfin=` on `M` cards, `NFIN` is compared exactly
+  (and `L` to 1e-5 um) on both sides, and options that could relax the
+  compare (`parameter_tolerance`, `compare_parameters`, `combine_devices*`,
+  non-`plain-element` reference forms, the netgen engine, pre-extracted
+  layout netlists) are refused. Additive: opt-in `options.finfet_bulk`
+  (`{"nmos": <net>, "pmos": <net>}`, echoed under `options.finfet_bulk`,
+  `null` when omitted) and the new `device.finfet_bulk_tied` warning
+  category disclosing every applied bulk tie. The pinned RVT corpus passes
+  191 cells; 11 folded-stack cells are listed as unsupported and 6
+  series-order cells are adjudicated as reference-vs-layout topology
+  differences (see `docs/cli/lvs.md`, "FinFET decks"). The shared JSON
+  envelope is unchanged.
+
 - **`klt lef-abstract`: structural self-check of the emitted LEF** (issue
   #2769): after writing, the command reads the file back from disk and
   validates the emitted subset -- a library-level `VERSION`, properly nested
