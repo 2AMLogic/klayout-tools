@@ -255,7 +255,7 @@ also the order a `--rules` subset executes in.
 | `mode` | Always `"list_rules"` — this payload is a listing, not a report. |
 | `rule_count` | Total registered rules in the deck. |
 | `groups.check` / `groups.scope` | Rule counts per check kind and per non-empty `scope` (the existing `DrcRule.scope` metadata `coverage.deck_scope` is built from), sorted by key. |
-| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `scope` (`null` when unset). |
+| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um, exclude_layers, exclude_holed}` or `null`), `scope` (`null` when unset). |
 | `provenance` | The shared block, pinning the deck's content hash; no `input`, since no layout was read. |
 
 A listing **is not a DRC verdict**: it carries no `status`, `violations` or
@@ -827,6 +827,7 @@ identity (`violations[].layer`, `coverage`), independent of
 | `"sized_intersection"` (default) | `intersect_with.interacting(base) & base.sized(sized_by_um)` — only shapes of `intersect_with` that already touch the *unsized* `base` region somewhere, clipped to `base`'s outline oversized by `sized_by_um` | gf180mcu `mim.enclosing.via4.1`, `mim.space.1` |
 | `"overlapping"` | `base.overlapping(intersect_with.sized(sized_by_um))` — whole `base` polygons that share **area** with the (optionally guard-banded) second layer | gf180mcu `comp.width.mv.1`, `comp.space.mv.1` |
 | `"not_interacting"` | `base.not_interacting(intersect_with.sized(sized_by_um))` — whole `base` polygons that do not touch it at all | gf180mcu `comp.width.1`, `comp.space.1` |
+| `"not_interacting"` + `exclude_layers`/`exclude_holed` (issue #2835) | the same selection with extra marker layers unioned into the exempt set and/or ring-shaped (holed) `base` polygons dropped first | sky130 `licon1.width.1` (rpm/urpm), `mcon.width.1` (areaid:ce, rings) |
 
 An unknown `mode` is a `DrcError` naming the rule id, not a silent fallback
 to the default.
