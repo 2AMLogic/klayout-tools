@@ -12045,3 +12045,133 @@ def test_parse_measurements_long_token_with_trailer():
     assert values["tphl"] == 4.020000000001e-11
     assert values["avgv"] == 6.666777774074e-01
     assert set(values) == {"tphl", "avgv"}
+
+
+# --- Issue #2846: analysis_aborted + {param} braces in analysis.args --------
+
+_TSTOP_ABORTED_LOG = (
+    "Error: TSTOP is invalid, must be greater than zero.\n"
+    " Error: unknown parameter on .tran - ignored\n"
+    "in   .tran 2e-06 stop_s\n"
+    "tran simulation(s) aborted\n"
+)
+
+
+def _aborted_request(tmp_path, **extra):
+    _write_body(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "2e-06 1u"},
+            "measurements": [
+                {"name": "vout_meas", "spice": ".meas tran vout_meas find v(o) at=1n"}
+            ],
+            **extra,
+        },
+    )
+
+
+def test_analysis_aborted_in_diagnostic_codes():
+    assert "analysis_aborted" in sim.DIAGNOSTIC_CODES
+
+
+def test_run_sim_stubbed_aborted_analysis_gets_distinct_diagnostic(
+    tmp_path, monkeypatch
+):
+    request = _aborted_request(tmp_path)
+    _stub_subprocess_run(monkeypatch, log_text=_TSTOP_ABORTED_LOG)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    by_code = {d["code"]: d for d in corner["diagnostics"]}
+    aborted = by_code["analysis_aborted"]
+    assert aborted["severity"] == "error"
+    assert "TSTOP is invalid" in aborted["message"]
+    assert "simulation(s) aborted" in aborted["message"]
+    # In addition to, not instead of, the per-measurement diagnostic.
+    assert "measurement" in by_code
+    assert report["diagnostic_counts"]["by_code"]["analysis_aborted"] == 1
+
+
+def test_run_sim_stubbed_aborted_analysis_without_measurements_still_reported(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_TSTOP_ABORTED_LOG)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    assert any(
+        d["code"] == "analysis_aborted" and d["severity"] == "error"
+        for d in corner["diagnostics"]
+    )
+
+
+def test_run_sim_stubbed_fail_on_diagnostic_accepts_analysis_aborted(
+    tmp_path, monkeypatch
+):
+    request = _aborted_request(
+        tmp_path, options={"fail_on_diagnostic": ["analysis_aborted"]}
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_TSTOP_ABORTED_LOG)
+
+    report = sim.run_sim(str(request))
+
+    assert report["corners"][0]["status"] == "error"
+
+
+def test_analysis_aborted_not_error_when_all_measurements_returned():
+    diag = sim._analysis_aborted_diagnostic(
+        _TSTOP_ABORTED_LOG,
+        [{"name": "m"}],
+        [{"name": "m", "status": "pass"}],
+        sim._SIMULATION_ABORTED_RE,
+    )
+    assert diag is not None and diag["severity"] == "warning"
+
+
+def test_analysis_aborted_absent_without_trailer():
+    assert (
+        sim._analysis_aborted_diagnostic(
+            _RECOVERED_SINGULAR_MATRIX_LOG, [], [], sim._SIMULATION_ABORTED_RE
+        )
+        is None
+    )
+
+
+def test_analysis_aborted_xyce_trailer():
+    log = "Fatal: bad thing\nSimulation aborted due to error. There are 1 MSG_FATAL\n"
+    diag = sim._analysis_aborted_diagnostic(
+        log, [], [], sim._XYCE_SIMULATION_ABORTED_RE
+    )
+    assert diag["severity"] == "error"
+    assert "bad thing" in diag["message"]
+
+
+def test_param_brace_in_analysis_args_rejected_for_ngspice(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "2e-06 {stop_s}"},
+        },
+    )
+    with pytest.raises(sim.SimError, match=r"\.param"):
+        sim.run_sim(str(request))
+
+
+def test_param_brace_in_step_analysis_args_rejected():
+    from klayout_tools import sim_steps
+
+    with pytest.raises(sim.SimError, match="brace"):
+        sim_steps._resolve_step_analysis({"kind": "tran", "args": "1n {stop_s}"}, "s1")

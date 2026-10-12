@@ -226,6 +226,8 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "unsupported_model_level",
         "osdi_abi_mismatch",
         "osdi_load_failed",
+        # The analysis never completed (engine abort trailer), issue #2846.
+        "analysis_aborted",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
         "engine_killed",
@@ -916,6 +918,24 @@ def _resolve_analysis_and_measurements(
     return analysis, measurements_spec
 
 
+def _reject_param_braces(analysis: dict[str, Any]) -> None:
+    """Reject a ``{...}`` brace reference in a scalar ``analysis.args``
+    (issue #2846). ngspice emits the analysis as a ``.control`` command and
+    does not expand ``.param`` braces in control mode, so ``tran 2e-06
+    {stop_s}`` aborts the analysis. Xyce emits a ``.tran`` dot card where
+    braces are valid, so the caller skips this check for it."""
+    args = analysis.get("args")
+    if isinstance(args, str) and re.search(r"[{}]", args):
+        raise SimError(
+            f"request.analysis.args {args!r} contains a '{{...}}' brace "
+            "reference: ngspice runs the analysis as a .control command, "
+            "which does not expand .param braces (the analysis aborts with "
+            "'TSTOP is invalid'), and klt does not expand them. Write the "
+            "numeric value literally in analysis.args (or use engine 'xyce', "
+            "whose .tran card accepts braces)"
+        )
+
+
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
     """Normalise one input-path field for this module's own JSON response
     (issue #1261) -- a thin, module-local wrapper over
@@ -1573,6 +1593,8 @@ def run_sim(
     # `analysis_steps[]` sequence, resolved -- every structural error raised
     # -- here, before any corner is dispatched.
     analysis, measurements_spec = _resolve_analysis_and_measurements(request)
+    if engine != "xyce":
+        _reject_param_braces(analysis)
     for spec in measurements_spec:
         if spec.get("spice") is not None:
             _validate_meas_card(spec["name"], spec["spice"])
@@ -4831,6 +4853,13 @@ def _run_corner(
     # downgrade exists to forgive, so reading this after the downgrade (or
     # reading `severity` instead of `code`) would make the option a no-op
     # for its single most important use.
+    aborted_re = _XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE
+    aborted_diagnostic = _analysis_aborted_diagnostic(
+        log_text, measurements_spec, measurement_results, aborted_re
+    )
+    if aborted_diagnostic is not None:
+        diagnostics.append(aborted_diagnostic)
+
     disqualifying = sorted(
         {d["code"] for d in diagnostics if d["code"] in fail_on_diagnostic}
     )
@@ -6350,6 +6379,46 @@ def _recovered_from_stepping(
     if aborted_re.search(log_text):
         return False
     return True
+
+
+_ABORT_CONTEXT_LINES = 12
+_ABORT_MAX_QUOTED = 4
+_ABORT_ERROR_LINE_RE = re.compile(r"\b(?:error|fatal)\b", re.IGNORECASE)
+
+
+def _analysis_aborted_diagnostic(
+    log_text: str,
+    measurements_spec: list[dict[str, Any]],
+    measurement_results: list[dict[str, Any]],
+    aborted_re: re.Pattern[str],
+) -> dict[str, str] | None:
+    """The analysis-level ``analysis_aborted`` diagnostic (issue #2846), or
+    ``None`` when the engine's abort trailer is absent.
+
+    Quotes the engine's own error line(s) preceding the trailer. A corner
+    that hit the trailer but still returned every requested measurement
+    (the singular-matrix/nonconvergence recovery shape, issue #205) gets it
+    at ``severity: "warning"`` rather than a spurious error; with no
+    measurements declared there is no such evidence, so it stays an error.
+    """
+    match = aborted_re.search(log_text or "")
+    if match is None:
+        return None
+    lines = log_text[: match.end()].splitlines()
+    window = lines[-_ABORT_CONTEXT_LINES:]
+    quoted = [ln.strip() for ln in window if _ABORT_ERROR_LINE_RE.search(ln)]
+    trailer = lines[-1].strip() if lines else ""
+    if trailer and trailer not in quoted:
+        quoted.append(trailer)
+    quoted = quoted[-_ABORT_MAX_QUOTED:]
+    recovered = bool(measurements_spec) and not any(
+        m["status"] == "error" for m in measurement_results
+    )
+    return {
+        "severity": "warning" if recovered else "error",
+        "code": "analysis_aborted",
+        "message": "analysis aborted by the engine: " + " | ".join(quoted),
+    }
 
 
 def _parse_measurements(log_text: str) -> dict[str, float]:
