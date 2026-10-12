@@ -1,4 +1,4 @@
-"""Tests for the in-repo ASAP7 DRC deck (#2760 FEOL/MOL, #2810 BEOL M1-M3/V1-V3).
+"""Tests for the in-repo ASAP7 DRC deck (#2760 FEOL/MOL, #2810 BEOL M1-M9/V0-V9).
 
 The deck is a KLayout DRC-DSL script (``src/klayout_tools/decks/asap7.drc``)
 run through ``klt drc --engine klayout --deck-file``. Its rule ids are
@@ -63,7 +63,7 @@ _needs_asap7 = pytest.mark.skipif(
 _DECK_LAYER_RE = re.compile(r"^(\w+)\s*=\s*input\((\d+),\s*(\d+)\)", re.M)
 _LYP_ENTRY_RE = re.compile(r"<name>(\S+) drawing - (\d+)/(\d+)</name>")
 #: ``{ "<NAME>" => ..., ... }.each do |name, ...| ... end`` -- a rule family
-#: whose ids are ``"#{name}.<suffix>"`` (DRM sections 3.7, 3.12, 3.13).
+#: whose ids are ``"#{name}.<suffix>"`` (DRM sections 3.7, 3.12-3.19).
 _FAMILY_RE = re.compile(
     r"^\{(?P<names>[^}]*)\}\.each do \|name,[^|]*\|\n(?P<body>.*?)^end$", re.M | re.S
 )
@@ -73,6 +73,10 @@ _FAMILIES = (
     ("NSELECT", "PSELECT", "SLVT", "LVT", "SRAMVT"),
     ("M1", "M2", "M3"),
     ("V1", "V2", "V3"),
+    ("M4", "M5", "M6", "M7"),
+    ("V4", "V5", "V6", "V7"),
+    ("M8", "M9"),
+    ("V8", "V9"),
 )
 #: Every drawing layer the deck reads (asap7.lyp names): FEOL/MOL, then the
 #: BEOL stack M1-M9 / V1-V9.
@@ -120,7 +124,8 @@ def test_deck_declares_exactly_the_declared_ids():
     """Every literal ``output("<id>", "Table ...")`` in the script is a
     declared id with a DRM table citation, and every declared id is either
     literal in the script or produced by one of the layer-family loops
-    (section 3.7 selects, 3.12 M1-M3, 3.13 V1-V3), each expanded over the
+    (section 3.7 selects, 3.12 M1-M3, 3.13 V1-V3, 3.14 / 3.16 M4-M7,
+    3.15 / 3.17 V4-V7, 3.18 M8-M9, 3.19 V8-V9), each expanded over the
     names that loop actually iterates. No id is produced twice."""
     text = _deck_text()
     literal = re.findall(r'output\("([^"#]+)",\s*"(Table [^"]*)"', text)

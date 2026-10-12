@@ -90,6 +90,105 @@ def _via_family(layer: str, upper: str) -> tuple[Asap7Rule, ...]:
     )
 
 
+_OFFSET_0 = (
+    "uses the DRM's default metal-grid offset of 0 nm (note 1); a layout "
+    "built with a non-zero offset is not supported"
+)
+
+
+def _sadp_metal_family(layer: str, t1: str, t2: str) -> tuple[Asap7Rule, ...]:
+    # DRM sections 3.14 / 3.16: rules stated for M4 (M6) apply to M5 (M7),
+    # perpendicular for the vertically routed layer.
+    return (
+        Asap7Rule(f"{layer}.W.1", t1),
+        Asap7Rule(f"{layer}.W.2", t1),
+        Asap7Rule(
+            f"{layer}.W.3",
+            t1,
+            "even multiples are enumerated up to the W.2 maximum; wider shapes "
+            f"are reported by {layer}.W.2 only",
+        ),
+        Asap7Rule(f"{layer}.W.5", t1),
+        Asap7Rule(f"{layer}.S.1", t1),
+        Asap7Rule(f"{layer}.S.2", t1),
+        Asap7Rule(f"{layer}.AUX.1", t2, _OFFSET_0),
+        Asap7Rule(
+            f"{layer}.AUX.2",
+            t2,
+            "applied to rectangles exactly W.1 wide across the track; " + _OFFSET_0,
+        ),
+        Asap7Rule(f"{layer}.AUX.3", t2),
+    )
+
+
+def _lele_via_family(layer: str, t: str) -> tuple[Asap7Rule, ...]:
+    # DRM sections 3.15 / 3.17: rules for V4 (V6) apply to V5 (V7).
+    return (
+        Asap7Rule(
+            f"{layer}.S.1",
+            t,
+            "checked between any two vias whatever their nets: the same-net "
+            f"(S.1) and different-net ({layer}.S.2) thresholds are equal, so "
+            "different-net pairs are reported under S.1",
+        ),
+        Asap7Rule(
+            f"{layer}.S.3",
+            t,
+            "corner-to-corner read as Euclidean spacing between edges whose "
+            "projections onto each other overlap by less than one database unit",
+        ),
+        Asap7Rule(f"{layer}.AUX.1", t),
+    )
+
+
+def _two_sides(text: str) -> str:
+    return (
+        f"the DRM says '{text}'; read like 'at least two opposite sides' "
+        "(Fig. 3.15.1(b)): either opposite pair may meet the minimum"
+    )
+
+
+def _top_metal_family(layer: str) -> tuple[Asap7Rule, ...]:
+    # DRM section 3.18: rules stated for M8 apply to M9.
+    t1, t2 = "Table 3.18.1", "Table 3.18.2"
+    length = "a shape's length is the longer side of its bounding box"
+    return (
+        Asap7Rule(f"{layer}.W.1", t1),
+        Asap7Rule(f"{layer}.W.2", t1, length),
+        Asap7Rule(f"{layer}.W.3", t1, length),
+        Asap7Rule(f"{layer}.W.4", t1, length),
+        Asap7Rule(
+            f"{layer}.W.5",
+            t1,
+            "the DRM prints the operator of this maximum as '>='; read as '<='",
+        ),
+        Asap7Rule(f"{layer}.S.1", t1),
+        Asap7Rule(f"{layer}.S.2", t1),
+        Asap7Rule(f"{layer}.S.3", t1),
+        Asap7Rule(f"{layer}.A.1", t2),
+        Asap7Rule(
+            f"{layer}.L.1",
+            t2,
+            "feature length read as polygon edge length (no definition in the DRM)",
+        ),
+    )
+
+
+def _top_via_family(layer: str) -> tuple[Asap7Rule, ...]:
+    # DRM section 3.19: rules for V8 apply to V9.
+    t = "Table 3.19.1"
+    return (
+        Asap7Rule(f"{layer}.W.1", t),
+        Asap7Rule(f"{layer}.S.1", t),
+        Asap7Rule(
+            f"{layer}.S.2",
+            t,
+            "corner-to-corner read as Euclidean spacing between edges whose "
+            "projections onto each other overlap by less than one database unit",
+        ),
+    )
+
+
 def _select_family(layer: str) -> tuple[Asap7Rule, ...]:
     # DRM section 3.7: rules stated for NSELECT apply to PSELECT, SLVT, LVT
     # and SRAMVT as well, unless otherwise stated.
@@ -239,6 +338,45 @@ RULES: tuple[Asap7Rule, ...] = (
     Asap7Rule("V2.M2.EN.1", "Table 3.13.1"),
     Asap7Rule("V3.M3.EN.1", "Table 3.13.1", "stated by Table 3.13.1 note 2"),
     Asap7Rule("V3.M4.EN.2", "Table 3.13.1"),
+    # M4-M7 (Tables 3.14.1-3.14.2, 3.16.1-3.16.2)
+    *_sadp_metal_family("M4", "Table 3.14.1", "Table 3.14.2"),
+    *_sadp_metal_family("M5", "Table 3.14.1", "Table 3.14.2"),
+    *_sadp_metal_family("M6", "Table 3.16.1", "Table 3.16.2"),
+    *_sadp_metal_family("M7", "Table 3.16.1", "Table 3.16.2"),
+    # V4-V7 (Tables 3.15.1, 3.17.1)
+    *_lele_via_family("V4", "Table 3.15.1"),
+    *_lele_via_family("V5", "Table 3.15.1"),
+    *_lele_via_family("V6", "Table 3.17.1"),
+    *_lele_via_family("V7", "Table 3.17.1"),
+    Asap7Rule("V4.W.1", "Table 3.15.1", "checked on the via's bounding box"),
+    Asap7Rule("V5.W.1", "Table 3.15.1", "checked on the via's bounding box"),
+    Asap7Rule(
+        "V6.W.1",
+        "Table 3.17.1",
+        "the DRM says 'along the length of M5'; read as M7, the metal V6 "
+        "lands on (V6.M7.AUX.2); checked on the via's bounding box",
+    ),
+    Asap7Rule("V4.M5.AUX.2", "Table 3.15.1"),
+    Asap7Rule("V5.M6.AUX.2", "Table 3.15.1"),
+    Asap7Rule("V6.M7.AUX.2", "Table 3.17.1"),
+    Asap7Rule("V4.M4.EN.1", "Table 3.15.1", _two_sides("on two opposite sides")),
+    Asap7Rule("V4.M5.EN.2", "Table 3.15.1"),
+    Asap7Rule("V5.M5.EN.1", "Table 3.15.1", _two_sides("on two opposite sides")),
+    Asap7Rule("V5.M6.EN.2", "Table 3.15.1"),
+    Asap7Rule("V6.M6.EN.1", "Table 3.17.1"),
+    Asap7Rule("V6.M7.EN.2", "Table 3.17.1", _two_sides("on two opposite sides")),
+    Asap7Rule("V7.M7.EN.1", "Table 3.17.1"),
+    Asap7Rule("V7.M8.EN.2", "Table 3.17.1", _two_sides("on two opposite sides")),
+    # M8-M9 (Tables 3.18.1-3.18.2)
+    *_top_metal_family("M8"),
+    *_top_metal_family("M9"),
+    # V8-V9 (Table 3.19.1)
+    *_top_via_family("V8"),
+    *_top_via_family("V9"),
+    Asap7Rule("V8.M8.EN.1", "Table 3.19.1"),
+    Asap7Rule("V8.M9.EN.2", "Table 3.19.1"),
+    Asap7Rule("V9.M9.EN.1", "Table 3.19.1"),
+    Asap7Rule("V8.AUX.1", "Table 3.19.1"),
 )
 
 RULE_IDS: tuple[str, ...] = tuple(r.id for r in RULES)
@@ -263,11 +401,32 @@ _EXACT_EN = (
     "needs routing direction and a per-side enclosure predicate"
 )
 _EXACT_W = "exact width across the metal track needs the metal routing direction"
-_M4_M7 = (
-    "M4-M7 (SADP) / V4-V7 (LELE) rules land in a follow-up; mask-colour and "
-    "track-grid conditions need separate treatment"
+_SADP_TRACK = (
+    "defined against the routing tracks (adjacent tracks, number of tracks "
+    "spanned); the deck has no per-shape track assignment"
 )
-_M8_M9 = "M8-M9 / V8-V9 rules land in a follow-up"
+_WIDE_EDGE = (
+    "'wide' is not defined, and with the default 0 nm offset every multiple "
+    "of the AUX.1 grid is a track edge, so the rule has no checkable reading"
+)
+_VIA_NETS = (
+    "needs net connectivity to tell different-net pairs from same-net ones; "
+    "the threshold equals S.1's, and the deck's net-independent S.1 check "
+    "reports these pairs"
+)
+_M8_DIRECTION = (
+    "stated along / across the M8 length, but the DRM gives no M8 routing "
+    "direction (Table 3.18.1 is direction-free)"
+)
+_WIDE_SPACING = (
+    "read literally (edge length) they override M8.S.1-S.3: every edge of "
+    "80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; "
+    "the intended width-class reading is not stated"
+)
+_PAD = (
+    "PAD (DRM mask 96) is not a layer of the pinned asap7.lyp, so the deck "
+    "does not read it"
+)
 
 
 def _gaps(
@@ -277,56 +436,23 @@ def _gaps(
 
 
 def _sadp_metal_gaps(layer: str, t1: str, t2: str) -> tuple[Asap7RuleGap, ...]:
-    return _gaps(
-        tuple(f"{layer}.W.{n}" for n in range(1, 6))
-        + tuple(f"{layer}.S.{n}" for n in range(1, 6)),
-        t1,
-        _M4_M7,
-        "#3155",
-    ) + _gaps(tuple(f"{layer}.AUX.{n}" for n in range(1, 5)), t2, _M4_M7, "#3155")
-
-
-def _lele_via_gaps(
-    layer: str, lower: str, upper: str, t: str
-) -> tuple[Asap7RuleGap, ...]:
-    ids = (
-        f"{layer}.W.1",
-        f"{layer}.S.1",
-        f"{layer}.S.2",
-        f"{layer}.S.3",
-        f"{layer}.{lower}.EN.1",
-        f"{layer}.{upper}.EN.2",
-        f"{layer}.AUX.1",
-        f"{layer}.{upper}.AUX.2",
+    return (
+        Asap7RuleGap(f"{layer}.W.4", t1, _SADP_TRACK, "#3155"),
+        *_gaps(tuple(f"{layer}.S.{n}" for n in (3, 4, 5)), t1, _SADP_TRACK, "#3155"),
+        Asap7RuleGap(f"{layer}.AUX.4", t2, _WIDE_EDGE, "#3155"),
     )
-    return _gaps(ids, t, _M4_M7, "#3155")
 
 
 def _top_metal_gaps(layer: str) -> tuple[Asap7RuleGap, ...]:
-    return _gaps(
-        tuple(f"{layer}.W.{n}" for n in range(1, 6))
-        + tuple(f"{layer}.S.{n}" for n in range(1, 5)),
-        "Table 3.18.1",
-        _M8_M9,
-        "#3156",
-    ) + _gaps(
-        tuple(f"{layer}.S.{n}" for n in range(5, 9)) + (f"{layer}.A.1", f"{layer}.L.1"),
-        "Table 3.18.2",
-        _M8_M9,
-        "#3156",
+    return (
+        Asap7RuleGap(f"{layer}.S.4", "Table 3.18.1", _WIDE_SPACING, "#3156"),
+        *_gaps(
+            tuple(f"{layer}.S.{n}" for n in range(5, 9)),
+            "Table 3.18.2",
+            _WIDE_SPACING,
+            "#3156",
+        ),
     )
-
-
-def _top_via_gaps(layer: str, lower: str, upper: str) -> tuple[Asap7RuleGap, ...]:
-    ids = (
-        f"{layer}.W.1",
-        f"{layer}.S.1",
-        f"{layer}.S.2",
-        f"{layer}.{lower}.EN.1",
-        f"{layer}.{upper}.EN.2",
-        f"{layer}.AUX.1",
-    )
-    return _gaps(ids, "Table 3.19.1", _M8_M9, "#3156")
 
 
 def _v123_gaps(layer: str, upper: str) -> tuple[Asap7RuleGap, ...]:
@@ -398,17 +524,19 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     # M4-M7 / V4-V7 (Tables 3.14-3.17)
     *_sadp_metal_gaps("M4", "Table 3.14.1", "Table 3.14.2"),
     *_sadp_metal_gaps("M5", "Table 3.14.1", "Table 3.14.2"),
-    *_lele_via_gaps("V4", "M4", "M5", "Table 3.15.1"),
-    *_lele_via_gaps("V5", "M5", "M6", "Table 3.15.1"),
     *_sadp_metal_gaps("M6", "Table 3.16.1", "Table 3.16.2"),
     *_sadp_metal_gaps("M7", "Table 3.16.1", "Table 3.16.2"),
-    *_lele_via_gaps("V6", "M6", "M7", "Table 3.17.1"),
-    *_lele_via_gaps("V7", "M7", "M8", "Table 3.17.1"),
+    Asap7RuleGap("V4.S.2", "Table 3.15.1", _VIA_NETS, "#3155"),
+    Asap7RuleGap("V5.S.2", "Table 3.15.1", _VIA_NETS, "#3155"),
+    Asap7RuleGap("V6.S.2", "Table 3.17.1", _VIA_NETS, "#3155"),
+    Asap7RuleGap("V7.S.2", "Table 3.17.1", _VIA_NETS, "#3155"),
+    Asap7RuleGap("V7.W.1", "Table 3.17.1", _M8_DIRECTION, "#3155"),
+    Asap7RuleGap("V7.M8.AUX.2", "Table 3.17.1", _M8_DIRECTION, "#3155"),
     # M8-M9 / V8-V9 (Tables 3.18-3.19)
     *_top_metal_gaps("M8"),
     *_top_metal_gaps("M9"),
-    *_top_via_gaps("V8", "M8", "M9"),
-    *_top_via_gaps("V9", "M9", "PAD"),
+    Asap7RuleGap("V9.PAD.EN.2", "Table 3.19.1", _PAD, "#3156"),
+    Asap7RuleGap("V9.AUX.1", "Table 3.19.1", _PAD, "#3156"),
 )
 
 #: Shipped standard cells (lambdapdk v0.2.17, asap7sc7p5t_28_{R,L,SL}) that
