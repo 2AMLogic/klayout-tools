@@ -375,7 +375,11 @@ fetched IHP-Open-PDK v0.3.0 install (``bjt_derivations.lvs``/
   pwell_allowed.not(nwell_drw).not(digisub_gap)`` in
   ``general_derivations.lvs`` -- the same "sg13g2 draws no separate
   PWell layer" gap this module's MOS-recognition note above already
-  documents for the NMOS body/``substrate_net`` fallback).
+  documents for the NMOS body/``substrate_net`` fallback). Issue #2860 has
+  since let ``marker`` be a derived :class:`~klayout_tools.decks.LayerExpr`
+  (AND/NOT of drawn layers, nestable), which can express this boolean; the
+  remaining bullets here are still open (#2861-#2863), so no ``npn13G2``
+  entry is declared.
 - **Collector/base/emitter pins are shape-filtered, not boolean-filtered.**
   E.g. ``npn13G2_e_pin = npn13G2_e_.with_bbox_min(0.07.um)
   .with_bbox_max(0.9.um).with_area(0.063.um)`` -- ``npn13G2``,
