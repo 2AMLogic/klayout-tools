@@ -787,6 +787,7 @@ _APT_STEP_NAMES = (
     "Install Yosys build dependencies",
     "Install SymbiYosys (sby) + Bitwuzla runtime dependencies",
     "Install Icarus Verilog + Verilator build dependencies",
+    "Install the klayout binary",
 )
 
 # Every workflow that invokes `scripts/ci-apt-install.sh`, with the apt steps

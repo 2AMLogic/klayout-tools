@@ -64,13 +64,24 @@ evidence of nothing.
 
 **Not every item has a tool behind it.** Items 3-7 each name a `klt` verb
 that can mechanically grade them, and item 8 has a purpose-built generic
-evidence envelope — but items **1**, **2**, **9**, and **10** have none.
-`klt signoff --manifest` therefore grades those four on whether *some*
-passing envelope was cited at all, not on whether the cited evidence is
-topically relevant to the claim; see
-[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10: `klt
-signoff` cannot check topical relevance". Citing them honestly is the
-claimant's responsibility, not something the tool verifies.
+evidence envelope — but items **1**, **2**, **9**, and **10** have no
+`klt` verb. For those four, the evidence the tool can read is an
+**artifact-anchored generic envelope** (issue #2718). The envelope declares
+the item it attests (`"t1_item": <id>`) and pins the audited artifact by
+path and content hash, and the manifest pins the same hash. The row is
+`met` only when the artifact still re-hashes to that value. The artifact
+per item:
+
+- item 1: the design-source inventory;
+- item 2: the committed layout stream;
+- item 9: the testbench inventory;
+- item 10: the repo-hygiene audit record, for example the CI workflow
+  file or a checklist covering README, spec table and license.
+
+A passing native envelope cited for one of these four is still accepted,
+for compatibility. Its citation carries no `artifact_binding`, which marks
+it as a cited pass the tool could not judge for relevance. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10".
 
 ### What a T1 claim is scoped to
 
@@ -352,11 +363,12 @@ written to every block.
    report) rather than one `klt` verb's own JSON output. `klt signoff
    --manifest` grades it via an opt-in **generic evidence envelope**
    (`"kind": "generic"`, issue #1152) — a minimal, hand-rolled JSON wrapper
-   asserting `status: "pass"|"fail"` for whatever record backs it — and,
-   unlike every other item, item 8 is the *only* T1 item this generic kind
-   may satisfy: see `docs/cli/signoff.md`'s "Generic evidence (opt-in,
-   non-`klt`-native)" section for the envelope shape and why items 3–7 keep
-   rejecting it. The full opt-in kind -> item mapping (including kinds
+   asserting `status: "pass"|"fail"` for whatever record backs it. Item 8
+   is the only T1 item that accepts a *bare* generic envelope. Items 1, 2,
+   9 and 10 accept only the artifact-anchored form (issue #2718), and items
+   3–7 and 11 reject the generic kind entirely: see `docs/cli/signoff.md`'s
+   "Generic evidence (opt-in, non-`klt`-native)" section for the envelope
+   shape. The full opt-in kind -> item mapping (including kinds
    whose scope is currently empty) is published by `klt signoff
    --describe-grader` and the `klt signoff --help` epilog.
 9. **Testbenches shipped** — every claimed measurement's testbench
@@ -656,6 +668,33 @@ written to every block.
       `provenance.devices` before treating a clean `erc.supply_short` read
       as covered by auto-detection rather than a hand-declaration that
       happens to be present.
+    - **Port accessibility — PROVISIONAL, not yet in force** (issue #2839;
+      operator ruling 2AMLogic/product#134, amendment text drafted in
+      2AMLogic/product PR #168 and awaiting the two-key ratification). Every
+      supply the cited `klt erc` spec declares must be published as an
+      **edge-accessible boundary port** and named in a **machine-readable
+      abstract**: (1) a `klt socket-check` envelope whose `power_ports`
+      facts show, for each declared supply, a `POWER`/`GROUND` pin of that
+      name with drawn conductor under its label lying within the edge band
+      of a counted outline edge with a clear approach channel (no other
+      conductor on its layer between it and the edge), on an allowed layer;
+      and (2) a `klt lef-abstract` envelope whose LEF carries a `PIN` of the
+      same name with `USE POWER`/`USE GROUND` matching the port, a drawn
+      `PORT` on the same layer touching the port, and a `SIZE` equal to the
+      outline. Parameters, with their provisional defaults, are set per
+      block in the `klt signoff` manifest's `power_ports` object: the edge
+      band (`edge_band_um`, default `0` — the port must touch the outline;
+      the draft proposes one minimum metal pitch), the counted edges (all
+      four), and the allowed layers (default: any layer that resolves to a
+      LEF routing layer, the draft's recommendation). Until ratification
+      `klt signoff` grades this clause only for a block that opts in
+      (`power_ports.required: true`, or port evidence cited in item 11's
+      list), after the ERC/LVS rules above are proven, rendering
+      `power_port_unproven`, `no_edge_power_port`,
+      `power_port_interior_only`, `power_port_layer_disallowed`,
+      `lef_power_pin_missing` or `lef_power_pin_mismatch` when it fails —
+      see `docs/cli/signoff.md` → "Item 11 port accessibility". Not graded
+      yet: one port per declared island of a multi-island supply.
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 

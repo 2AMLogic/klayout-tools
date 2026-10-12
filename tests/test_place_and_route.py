@@ -3564,6 +3564,168 @@ def test_post_route_spef_reports_spef_sta_block(tmp_path, monkeypatch):
     assert extract_calls[0]["spef_output"] == spef_sta["spef_path"]
 
 
+# --------------------------------------------------------------------------- #
+# Violation-count check families (issue #2741): the nominal-stage report and
+# the post-route SPEF re-time share `place_and_route._violation_count_lines`,
+# so both count recovery/removal and clock-gating violators alongside data
+# setup/hold -- the same populations their WNS/TNS fields measure. Replayed
+# from the real OpenROAD `26Q3-1510-g6cb3f2b704` captures
+# `tests/test_post_route_sta.py` also parses.
+# --------------------------------------------------------------------------- #
+
+_CHECK_FAMILY_CAPTURES = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "sta_check_families"
+        / "openroad_26Q3-1510_captures.json"
+    ).read_text(encoding="utf-8")
+)
+
+_COMBINED_SETUP_REPORT = (
+    "report_check_types -max_delay -recovery -clock_gating_setup -violators -format end"
+)
+_COMBINED_HOLD_REPORT = (
+    "report_check_types -min_delay -removal -clock_gating_hold -violators -format end"
+)
+
+
+def _replayed_violation_region(scenario: str, script_text: str) -> list[str]:
+    """The real captured setup/hold violator region for `scenario`,
+    re-delimited with this module's markers -- the combined-command capture
+    when the generated script requests the combined commands, else the
+    legacy data-only capture (what the pinned engine prints for that Tcl)."""
+    captured = _CHECK_FAMILY_CAPTURES["scenarios"][scenario]
+    script_lines = script_text.splitlines()
+    if _COMBINED_SETUP_REPORT in script_lines and _COMBINED_HOLD_REPORT in script_lines:
+        text = (
+            captured["stdout"]
+            .replace("===KLT_STA_SETUP", "===KLT_SETUP")
+            .replace("===KLT_STA_HOLD", "===KLT_HOLD")
+        )
+    else:
+        text = (
+            captured["legacy_stdout"]
+            .replace(
+                "===LEGACY_SETUP_BEGIN===", place_and_route._SETUP_VIOLATIONS_BEGIN
+            )
+            .replace("===LEGACY_SETUP_END===", place_and_route._SETUP_VIOLATIONS_END)
+            .replace("===LEGACY_HOLD_BEGIN===", place_and_route._HOLD_VIOLATIONS_BEGIN)
+            .replace("===LEGACY_HOLD_END===", place_and_route._HOLD_VIOLATIONS_END)
+        )
+    return text.splitlines()
+
+
+def _with_replayed_violations(stdout: str, region: list[str]) -> str:
+    """Swap the stub's own (empty) setup/hold marker region for `region`,
+    leaving every other marker block the base stub emitted untouched."""
+    lines = stdout.splitlines()
+    begin = lines.index(place_and_route._SETUP_VIOLATIONS_BEGIN)
+    end = lines.index(place_and_route._HOLD_VIOLATIONS_END)
+    return "\n".join(lines[:begin] + region + lines[end + 1 :])
+
+
+def _replay_check_family_capture(monkeypatch, scenario: str, *, script_suffix: str):
+    """Wrap whatever `openroad` fake is already installed: for scripts
+    ending in `script_suffix`, replace the setup/hold violator region with
+    the real captured engine output for `scenario`."""
+    base_fake_run = place_and_route.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        completed = base_fake_run(cmd, **kwargs)
+        if cmd[:2] == ["openroad", "-version"] or not cmd[5].endswith(script_suffix):
+            return completed
+        region = _replayed_violation_region(scenario, Path(cmd[5]).read_text())
+        return fake_completed(
+            returncode=completed.returncode,
+            stdout=_with_replayed_violations(completed.stdout, region),
+            stderr=completed.stderr,
+        )
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
+
+
+def test_pnr_violation_count_lines_request_every_check_family():
+    assert place_and_route._violation_count_lines() == [
+        f'puts "{place_and_route._SETUP_VIOLATIONS_BEGIN}"',
+        _COMBINED_SETUP_REPORT,
+        f'puts "{place_and_route._SETUP_VIOLATIONS_END}"',
+        f'puts "{place_and_route._HOLD_VIOLATIONS_BEGIN}"',
+        _COMBINED_HOLD_REPORT,
+        f'puts "{place_and_route._HOLD_VIOLATIONS_END}"',
+    ]
+
+
+def test_spef_sta_script_reuses_check_family_violation_report():
+    """The post-route SPEF re-time reuses the P&R helper rather than a
+    third implementation, so it carries the same check families."""
+    lines = place_and_route._spef_sta_script_lines(
+        checkpoint_in="/tmp/x.odb",
+        liberty_path="/tmp/x.lib",
+        clock_port="clk",
+        clock_period_ns=1.1,
+        spef_path="/tmp/x.spef",
+        net_names=["_019_"],
+    )
+    region = place_and_route._violation_count_lines()
+    start = lines.index(region[0])
+    assert lines[start : start + len(region)] == region
+
+
+def test_nominal_stage_counts_removal_violations(tmp_path, monkeypatch):
+    """Nominal-stage scope is unchanged (floorplan still reports no counts)
+    but each place/cts/route stage's hold count now includes asynchronous
+    removal violators."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _replay_check_family_capture(
+        monkeypatch, "removal_only", script_suffix="_route.tcl"
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["hold_violation_count"] == 2
+    assert report["setup_violation_count"] == 0
+    assert "hold_violation_count" not in report["stages"][0]
+    # place/cts were not replayed: their counts stay the stub's own zeros.
+    assert report["stages"][1]["hold_violation_count"] == 0
+    assert report["stages"][3]["hold_violation_count"] == 2
+
+
+def test_nominal_stage_counts_recovery_and_data_without_duplication(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _replay_check_family_capture(monkeypatch, "mixed_setup", script_suffix="_route.tcl")
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    # 3 data setup endpoints + 2 recovery endpoints, each counted once.
+    assert report["setup_violation_count"] == 5
+    assert report["hold_violation_count"] == 0
+
+
+def test_post_route_spef_counts_removal_violations(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    _stub_openroad_success_with_post_route_spef(monkeypatch)
+    _replay_check_family_capture(
+        monkeypatch, "removal_only", script_suffix="_route_spef.tcl"
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+    _stub_run_extract_for_post_route_spef(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    spef_sta = report["spef_sta"]
+    assert spef_sta["hold_violation_count"] == 2
+    assert spef_sta["setup_violation_count"] == 0
+    # The nominal route stage (not replayed here) keeps its own count.
+    assert report["hold_violation_count"] == 0
+
+
 def test_post_route_spef_flags_unmatched_nets(tmp_path, monkeypatch):
     """Net-name correlation is explicitly checked and reported, not assumed
     (issue #948 scope item 3) -- a partial match still returns a usable

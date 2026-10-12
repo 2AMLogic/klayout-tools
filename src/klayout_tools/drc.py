@@ -35,7 +35,9 @@ instance rather than only the top cell.
 
 from __future__ import annotations
 
+import fnmatch
 import itertools
+import json
 import os
 import re
 import subprocess
@@ -549,12 +551,205 @@ def _curated_nothing_checked_reasons(
     return [REASON_DECK_HAS_NO_RULES if not deck else REASON_ALL_RULES_SKIPPED]
 
 
+#: The curated engine's ``coverage.skipped[].reason`` for a deck rule the
+#: caller deliberately left out of a ``--rules`` subset (issue #2768). A
+#: requested-work gap by definition -- the full registered deck is what a
+#: DRC verdict is about -- so any omission makes the run partial, whatever
+#: the omitted rule's input layers would have done. Recorded as its own code
+#: so an intentional omission stays distinguishable from a rule that was
+#: naturally inapplicable (:data:`INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY`)
+#: or skipped for an absent layer (:data:`SKIP_REASON_ABSENT_INPUT_LAYER`).
+SKIP_REASON_NOT_SELECTED = "not_selected"
+
+#: Characters that make a ``--rules`` token a shell-style glob rather than an
+#: exact rule id (``fnmatch`` syntax). Used only to word the "matched no
+#: rule" error; matching itself always goes through :func:`fnmatch.fnmatchcase`.
+_GLOB_CHARS = frozenset("*?[")
+
+
+def parse_rule_selectors(raw: str | list[str] | None) -> list[str] | None:
+    """Split a ``--rules`` value (or a request document's ``rules`` field)
+    into its trimmed selector tokens (issue #2768).
+
+    ``raw`` is either one comma-separated string (the argv form,
+    ``--rules 'met1.*,via.width.1'``) or a list of such strings (the request
+    form); every element is comma-split the same way, so the two forms
+    cannot disagree. ``None`` (no selection at all) passes through as
+    ``None`` -- the full-deck run every caller gets by default.
+
+    Raises :class:`DrcError` for an empty selection or an empty token (a
+    stray/trailing comma, a whitespace-only element): silently dropping one
+    would quietly change which rules run.
+    """
+    if raw is None:
+        return None
+    pieces = [raw] if isinstance(raw, str) else list(raw)
+    tokens: list[str] = []
+    for piece in pieces:
+        for token in piece.split(","):
+            token = token.strip()
+            if not token:
+                raise DrcError(
+                    f"--rules has an empty rule selector in {piece!r} -- pass "
+                    "comma-separated rule ids or quoted globs, e.g. "
+                    "--rules 'met1.*,via.width.1'"
+                )
+            tokens.append(token)
+    if not tokens:
+        raise DrcError("--rules selects no rules -- pass at least one rule id")
+    return tokens
+
+
+def resolve_rule_selection(deck: list[DrcRule], selectors: list[str]) -> dict[str, Any]:
+    """Resolve ``selectors`` against the full registered ``deck`` once, before
+    any geometry is read (issue #2768).
+
+    Each token matches an exact rule id, or -- when it is not one -- every id
+    it matches as a case-sensitive shell-style glob
+    (:func:`fnmatch.fnmatchcase`). Overlapping tokens are deduplicated; the
+    selected ids come back in deck order (the order :func:`run_drc` executes
+    in), never selector order. A token that matches nothing is an error
+    naming it, so a typo cannot silently shrink the run.
+
+    Returns the report's ``rule_selection`` block: ``selectors`` (the
+    trimmed tokens, as given), ``selected`` and ``omitted`` (both in deck
+    order, partitioning the deck), ``deck_rule_count`` and ``subset``
+    (``True`` exactly when something was omitted).
+    """
+    ids = [rule.id for rule in deck]
+    known = set(ids)
+    chosen: set[str] = set()
+    unmatched: list[str] = []
+    for token in selectors:
+        if token in known:
+            chosen.add(token)
+            continue
+        matches = {rule_id for rule_id in ids if fnmatch.fnmatchcase(rule_id, token)}
+        if not matches:
+            unmatched.append(token)
+        chosen |= matches
+    if unmatched:
+        kinds = [
+            "glob" if _GLOB_CHARS.intersection(token) else "rule id"
+            for token in unmatched
+        ]
+        listed = ", ".join(
+            f"{kind} {token!r}" for kind, token in zip(kinds, unmatched, strict=True)
+        )
+        raise DrcError(
+            f"--rules selector(s) matched no rule in this deck: {listed} -- "
+            "ids and globs are case-sensitive; see `klt drc --deck <name> "
+            "--list-rules` for the registered ids"
+        )
+    selected = [rule_id for rule_id in ids if rule_id in chosen]
+    omitted = [rule_id for rule_id in ids if rule_id not in chosen]
+    return {
+        "selectors": list(selectors),
+        "selected": selected,
+        "omitted": omitted,
+        "deck_rule_count": len(ids),
+        "subset": bool(omitted),
+    }
+
+
+def _resolve_optional_selection(
+    deck: list[DrcRule], rules: list[str] | None
+) -> tuple[dict[str, Any] | None, set[str]]:
+    """:func:`run_drc`'s ``(rule_selection, omitted ids)`` -- ``(None,
+    set())`` for a default full-deck run with no ``rules`` at all."""
+    if rules is None:
+        return None, set()
+    selection = resolve_rule_selection(deck, list(rules))
+    return selection, set(selection["omitted"])
+
+
+def _dispatched_rules(deck: list[DrcRule], omitted_ids: set[str]) -> list[DrcRule]:
+    """The deck rules :func:`run_drc` actually dispatches, in deck order:
+    every rule except those deliberately omitted from a ``--rules`` subset
+    (issue #2768)."""
+    return [rule for rule in deck if rule.id not in omitted_ids]
+
+
+def _fmt_layer(layer_tuple: tuple[int, int] | None) -> str | None:
+    if layer_tuple is None:
+        return None
+    return f"{layer_tuple[0]}/{layer_tuple[1]}"
+
+
+def list_deck_rules(deck_name: str) -> dict[str, Any]:
+    """``klt drc --deck <name> --list-rules`` (issue #2768): enumerate a
+    curated deck's registered rules without reading any layout.
+
+    Deterministic: rules in deck (registration) order, which is also the
+    order a ``--rules`` subset executes in; the two grouping maps are sorted
+    by key. Deliberately carries no ``status``/``violations``/``coverage``
+    field -- a listing is not a DRC result, and ``klt signoff`` refuses it as
+    an unrecognised envelope rather than grading it.
+
+    Raises :class:`DrcError` for an unknown deck name.
+    """
+    try:
+        deck = get_deck(deck_name)
+    except UnknownDeckError as exc:
+        raise DrcError(str(exc)) from exc
+    layer_names = get_layer_names(deck_name)
+
+    def _name(layer_tuple: tuple[int, int] | None) -> str | None:
+        return None if layer_tuple is None else layer_names.get(layer_tuple)
+
+    rules = []
+    scope_counts: dict[str, int] = {}
+    check_counts: dict[str, int] = {}
+    for rule in deck:
+        derived = rule.derived_layer
+        rules.append(
+            {
+                "id": rule.id,
+                "description": rule.description,
+                "check": rule.check,
+                "layer": _fmt_layer(rule.layer),
+                "layer_name": _name(rule.layer),
+                "other_layer": _fmt_layer(rule.other_layer),
+                "other_layer_name": _name(rule.other_layer),
+                "derived_layer": None
+                if derived is None
+                else {
+                    "mode": derived.mode,
+                    "base": _fmt_layer(derived.base),
+                    "intersect_with": _fmt_layer(derived.intersect_with),
+                    "sized_by_um": derived.sized_by_um,
+                },
+                "scope": rule.scope or None,
+            }
+        )
+        if rule.scope:
+            scope_counts[rule.scope] = scope_counts.get(rule.scope, 0) + 1
+        check_counts[rule.check] = check_counts.get(rule.check, 0) + 1
+    return {
+        "schema_version": 2,
+        "mode": "list_rules",
+        "deck": deck_name,
+        "engine": "curated",
+        "rule_count": len(rules),
+        "groups": {
+            "check": dict(sorted(check_counts.items())),
+            "scope": dict(sorted(scope_counts.items())),
+        },
+        "rules": rules,
+        "provenance": build_provenance(
+            deck_name=deck_name,
+            deck_path=deck_source_path(deck_name),
+        ),
+    }
+
+
 def run_drc(
     path: str,
     deck_name: str,
     top: str | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    rules: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run ``deck_name``'s rules against the layout at ``path``.
 
@@ -592,6 +787,11 @@ def run_drc(
                 "deck_scope": [<scope identifier>, ...],
                 "nothing_checked": bool,
                 "nothing_checked_reasons": [<reason code>, ...],
+            },
+            "rule_selection": {  # only when `rules` is given (issue #2768)
+                "selectors": [str, ...], "selected": [<rule id>, ...],
+                "omitted": [<rule id>, ...], "deck_rule_count": int,
+                "subset": bool,
             },
             "provenance": {  # shared reproducibility block, see _provenance.py
                 "klt_version": <str | None>,
@@ -763,10 +963,30 @@ def run_drc(
     Omitting both (the default) leaves ``provenance.pdk`` ``None``, matching
     every prior release's behaviour.
 
+    ``rules`` (issue #2768, the ``--rules`` flag) is a list of selector
+    tokens -- exact rule ids or case-sensitive shell-style globs, already
+    split by :func:`parse_rule_selectors` -- restricting which deck rules are
+    *executed*. It is resolved once against the full registered deck by
+    :func:`resolve_rule_selection` before the layout is even read, so an
+    unmatched token fails fast. Unselected rules are never dispatched (not
+    filtered out afterwards). The full deck still drives every deck-static
+    field (``coverage.deck_layers``/``layers_checked``/
+    ``layers_in_stream_without_rules``/``deck_scope``) and ``provenance``;
+    each omitted rule is recorded as a common-coverage ``skipped`` record
+    with reason :data:`SKIP_REASON_NOT_SELECTED` -- never as inapplicable,
+    whatever its layers -- so a proper subset rolls up ``"clean_partial"``
+    (or ``"violations"``/``"not_checked"`` by the usual precedence) and can
+    never read as an unconditional ``"clean"``. A top-level
+    ``rule_selection`` block (:func:`resolve_rule_selection`) records the
+    selectors, selected and omitted ids; it is absent when ``rules`` is
+    ``None``, so a default run's report is unchanged. Selecting every rule is
+    equivalent to a full run (``omitted: []``).
+
     Raises :class:`DrcError` if the file is missing/unreadable, the deck
     name is unknown, ``top`` names a cell absent from the stream, a rule is
-    malformed (e.g. a two-layer check missing ``other_layer``), or
-    ``pdk_variant``/``pdk_root`` is given but no matching PDK can be found.
+    malformed (e.g. a two-layer check missing ``other_layer``),
+    ``pdk_variant``/``pdk_root`` is given but no matching PDK can be found,
+    or a ``rules`` selector matches no rule.
     """
     # Resolved only when `--pdk`/`--pdk-root` was given -- this engine's
     # rules come entirely from `deck_name`, so the resolved PDK is used for
@@ -795,6 +1015,11 @@ def run_drc(
     except UnknownDeckError as exc:
         raise DrcError(str(exc)) from exc
     layer_names = get_layer_names(deck_name)
+
+    # Issue #2768: resolved against the full deck before the layout is read,
+    # so a bad selector never costs a stream load. `omitted_ids` is empty for
+    # a full run (no selection, or a selection naming every rule).
+    rule_selection, omitted_ids = _resolve_optional_selection(deck, rules)
 
     layout = load_layout(path, DrcError)
 
@@ -843,7 +1068,11 @@ def run_drc(
     rules_skipped: list[str] = []
     rules_checked: list[str] = []
 
-    for rule in deck:
+    # Issue #2768: a rule left out of a `--rules` subset is never dispatched
+    # -- not run-and-filtered (see `_dispatched_rules`). It is recorded
+    # separately from `rules_skipped` (absent-layer skips) so the omission
+    # cannot be reclassified as inapplicable work below.
+    for rule in _dispatched_rules(deck, omitted_ids):
         # A `threshold_max_dbu` (#2370) attached to a check kind with no
         # upper-bound branch is a deck-authoring mistake that must fail
         # loudly, including on a stream where this rule's layer is absent
@@ -1307,7 +1536,9 @@ def run_drc(
     # threshold, right or wrong.
     voltage_domain_warnings: list[dict[str, str]] = []
     unmodeled_markers = get_unmodeled_voltage_markers(deck_name)
-    skipped_rule_ids = set(rules_skipped)
+    # A rule omitted from a `--rules` subset (issue #2768) applied no
+    # threshold either, exactly like a skipped one.
+    skipped_rule_ids = set(rules_skipped) | omitted_ids
     for marker, description in sorted(unmodeled_markers.items()):
         if marker not in stream_layer_tuples:
             continue
@@ -1349,6 +1580,13 @@ def run_drc(
     skipped_records, inapplicable_records = _classify_skipped_rules(
         deck, rules_skipped, layout
     )
+    # Issue #2768: every deliberately omitted rule is requested work that did
+    # not run -- a skip, never inapplicable, even when its layers are absent
+    # (the full registered deck is what a DRC verdict is about).
+    skipped_records += [
+        {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
+        for rule_id in sorted(omitted_ids)
+    ]
     coverage = {
         "deck_layers": [_fmt(t) for t in sorted(deck_layer_tuples)],
         "layers_checked": [_fmt(t) for t in sorted(layers_checked)],
@@ -1379,7 +1617,7 @@ def run_drc(
     # list are `clean_partial` (exit 0, a real result that is *not* this
     # verb's unconditional success). See `docs/coverage-contract.md`.
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
-    return {
+    report: dict[str, Any] = {
         "schema_version": 2,
         "file": path,
         "deck": deck_name,
@@ -1390,14 +1628,18 @@ def run_drc(
         "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
         "violations": violations,
         "coverage": coverage,
-        "provenance": build_provenance(
-            deck_name=deck_name,
-            deck_path=deck_source_path(deck_name),
-            pdk=pdk_info,
-            input_path=path,
-            include_klayout_version_mismatch=True,
-        ),
+        # Issue #2768: present only for a `--rules` run, so a default run's
+        # report (and every committed one) is byte-identical to before.
+        **({} if rule_selection is None else {"rule_selection": rule_selection}),
     }
+    report["provenance"] = build_provenance(
+        deck_name=deck_name,
+        deck_path=deck_source_path(deck_name),
+        pdk=pdk_info,
+        input_path=path,
+        include_klayout_version_mismatch=True,
+    )
+    return report
 
 
 def drc_exit_code(report: dict[str, Any]) -> int:
@@ -1481,6 +1723,31 @@ def check_drc_report(report_path: str) -> dict[str, Any]:
     return build_check_result(report_path=report_path, checks=checks)
 
 
+def _recorded_rule_selectors(committed: dict[str, Any]) -> list[str] | None:
+    """The ``--rules`` selectors a committed curated report was run with
+    (issue #2768), or ``None`` for a full-deck report (no ``rule_selection``
+    key -- including every report predating the flag).
+
+    Raises :class:`DrcError` for a present but malformed block rather than
+    silently replaying it as a full run, which would turn a recorded subset
+    into a full-deck claim.
+    """
+    selection = committed.get("rule_selection")
+    if selection is None:
+        return None
+    selectors = selection.get("selectors") if isinstance(selection, dict) else None
+    if (
+        not isinstance(selectors, list)
+        or not selectors
+        or not all(isinstance(token, str) and token.strip() for token in selectors)
+    ):
+        raise DrcError(
+            "committed report's 'rule_selection.selectors' must be a non-empty "
+            "list of rule selector strings to replay the selection"
+        )
+    return parse_rule_selectors(selectors)
+
+
 def rerun_drc_report(report_path: str) -> dict[str, Any]:
     """``klt drc --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt drc --format json`` report at
@@ -1490,7 +1757,9 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
     Re-runs against exactly the ``file``/``deck``/``engine`` the committed
     report itself names -- :func:`run_drc_klayout_engine` when
     ``committed["engine"] == "klayout"``, :func:`run_drc` (the curated
-    engine) otherwise. **Known limitation**: neither the curated nor the
+    engine) otherwise -- replaying a curated ``--rules`` subset's recorded
+    ``rule_selection.selectors`` (issue #2768, :func:`_recorded_rule_selectors`).
+    **Known limitation**: neither the curated nor the
     ``klayout`` engine's report records which ``--top`` (if any) the
     original run used, so ``--rerun`` always re-checks every top cell
     (``top=None``) -- a report originally scoped to one top cell via
@@ -1530,9 +1799,20 @@ def rerun_drc_report(report_path: str) -> dict[str, Any]:
             deck,
             top=None,
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
+            # Issue #2697: reproduce the original coverage assertion too,
+            # or a committed `clean` would always drift to `coverage_unknown`.
+            # Issue #2806: dispatched on its `kind`; a set assertion replays
+            # its embedded names, never the original manifest file.
+            **_rerun_assertion_kwargs(committed),
         )
     else:
-        fresh = run_drc(file_path, deck, top=None)
+        # Issue #2768: a committed `--rules` subset replays its own recorded
+        # selectors (so a deck change that alters what a glob matches shows
+        # up as drift); a report without `rule_selection` -- every report
+        # written before the flag existed -- keeps its full-deck meaning.
+        fresh = run_drc(
+            file_path, deck, top=None, rules=_recorded_rule_selectors(committed)
+        )
 
     return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
 
@@ -2714,6 +2994,106 @@ def _missing_deck_host_commands(deck_file: str) -> dict[str, str]:
     }
 
 
+_KLAYOUT_EXECUTABLE = "klayout"
+
+KLAYOUT_VERSION_PROBE_TIMEOUT_S = 15.0
+"""Wall-clock budget for the ``klayout -v`` version probe (issue #2689)."""
+
+_REQUESTED_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
+_REPORTED_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
+
+
+def _parse_requested_klayout_version(value: str) -> tuple[int, ...]:
+    """Validate a caller-declared ``min_klayout_version`` (issue #2689): dotted
+    decimal components only (``0.30.12``). Raises :class:`DrcError` otherwise."""
+    text = value.strip() if isinstance(value, str) else value
+    if not isinstance(text, str) or not _REQUESTED_VERSION_RE.match(text):
+        raise DrcError(
+            f"invalid minimum KLayout version {value!r}: expected dotted "
+            "decimal components such as '0.30.12'"
+        )
+    return tuple(int(part) for part in text.split("."))
+
+
+def _klayout_version_at_least(
+    found: tuple[int, ...], required: tuple[int, ...]
+) -> bool:
+    """Numeric component-wise comparison (``0.30.12 > 0.30.9``); missing
+    trailing components count as zero."""
+    width = max(len(found), len(required))
+    pad = lambda v: v + (0,) * (width - len(v))  # noqa: E731
+    return pad(found) >= pad(required)
+
+
+def _preflight_klayout_version(executable: str, min_version: str | None) -> None:
+    """Refuse to run a deck on a standalone ``klayout`` application older than
+    the caller-declared minimum (issue #2689).
+
+    A no-op when ``min_version`` is ``None`` (existing behaviour: no
+    compatibility is claimed or checked). Otherwise probes the *same*
+    executable the deck will run with (``<executable> -v``, bounded by
+    :data:`KLAYOUT_VERSION_PROBE_TIMEOUT_S`) and raises :class:`DrcError` for
+    an invalid minimum, a missing/failed/timed-out/unparseable probe, or a
+    detected version below the minimum. Never bypassed by
+    ``allow_deck_errors`` or ``allow_missing_host_tools``. Passing proves only
+    the version, not that an arbitrary deck is compatible.
+    """
+    if min_version is None:
+        return
+    required = _parse_requested_klayout_version(min_version)
+    required_text = ".".join(str(c) for c in required)
+    try:
+        probe = subprocess.run(
+            [executable, "-v"],
+            capture_output=True,
+            text=True,
+            timeout=KLAYOUT_VERSION_PROBE_TIMEOUT_S,
+        )
+    except FileNotFoundError as exc:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"{executable!r} binary not found on PATH. Install KLayout "
+            f">= {required_text} (https://www.klayout.de/build.html) or omit "
+            f"the minimum version. ({exc})"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"'{executable} -v' did not complete within "
+            f"{KLAYOUT_VERSION_PROBE_TIMEOUT_S}s. Check the installation."
+        ) from exc
+    except OSError as exc:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"could not launch '{executable} -v' ({exc}). Check that the "
+            f"binary is executable and install KLayout >= {required_text}."
+        ) from exc
+    output = ((probe.stdout or "") + "\n" + (probe.stderr or "")).strip()
+    if probe.returncode != 0:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"'{executable} -v' exited with status {probe.returncode}. "
+            f"Reinstall or update KLayout. Output:\n{output}"
+        )
+    match = _REPORTED_VERSION_RE.search(output)
+    if match is None:
+        raise DrcError(
+            f"cannot verify the minimum KLayout version ({required_text}): "
+            f"could not parse a version from '{executable} -v' output. "
+            f"Check the installation. Output:\n{output}"
+        )
+    found = tuple(int(part) for part in match.group(0).split("."))
+    if not _klayout_version_at_least(found, required):
+        raise DrcError(
+            f"the standalone KLayout application on PATH is version "
+            f"{match.group(0)}, but this run requires >= {required_text}. "
+            f"Install or update the KLayout application to {required_text} "
+            "or newer (https://www.klayout.de/build.html); the pip `klayout` "
+            "package is a separate install and is not used by --engine "
+            "klayout. See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        )
+
+
 def _preflight_deck_host_tools(deck_file: str, allow_missing_host_tools: bool) -> None:
     """Raise :class:`DrcError` if the deck script shells out to a command
     this host does not have (issue #2333), naming the command and where it is
@@ -2762,6 +3142,263 @@ def _cleanup_klayout_drc_work_dir(work_dir: str) -> None:
     shutil.rmtree(work_dir, ignore_errors=True)
 
 
+#: ``coverage_assertion.kind`` of the count assertion (issue #2697).
+COVERAGE_ASSERTION_COUNT_KIND = "expected_rule_categories"
+#: ``coverage_assertion.kind`` of the exact-set assertion (issue #2806).
+COVERAGE_ASSERTION_NAMES_KIND = "expected_rule_category_names"
+
+
+def _evaluate_category_assertion(
+    expected: int | None,
+    rule_categories: list[str],
+    deck_errored: bool,
+    expected_names: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Evaluate the opt-in ``expected_rule_categories`` assertion (issue
+    #2697) -- or its exact-set sibling ``expected_rule_category_names``
+    (issue #2806) -- against the deduplicated declared categories. ``None``
+    when neither is requested; raises :class:`DrcError` on a mismatch of a
+    run that did not tolerate deck errors; a tolerated-error run is never
+    satisfied."""
+    if expected_names is not None:
+        return _evaluate_category_set_assertion(
+            expected_names, rule_categories, deck_errored
+        )
+    if expected is None:
+        return None
+    observed = len(set(rule_categories))
+    if observed != expected and not deck_errored:
+        raise DrcError(
+            "rule-category coverage assertion failed: expected "
+            f"{expected} unique rule categories "
+            f"(--expect-rule-categories) but the deck's report "
+            f"declared {observed} -- the deck did not declare the "
+            "rule set you vouched for (a gated-off rule group, a "
+            "missing --deck-var, or a changed deck?). Fix the deck "
+            "invocation or update the expected count."
+        )
+    return {
+        "kind": COVERAGE_ASSERTION_COUNT_KIND,
+        "expected": expected,
+        "observed": observed,
+        "satisfied": observed == expected and not deck_errored,
+    }
+
+
+def _evaluate_category_set_assertion(
+    expected_names: list[str], rule_categories: list[str], deck_errored: bool
+) -> dict[str, Any]:
+    """The exact-set variant (issue #2806): the unique declared RDB category
+    names must equal ``expected_names`` exactly (case-sensitive; order and
+    duplicate declarations are irrelevant). A same-size swap fails just like
+    a missing or extra category. Raises :class:`DrcError` listing the sorted
+    missing and unexpected names unless the run tolerated deck errors, in
+    which case the assertion is recorded unsatisfied instead."""
+    expected_set = set(expected_names)
+    observed_set = set(rule_categories)
+    missing = sorted(expected_set - observed_set)
+    unexpected = sorted(observed_set - expected_set)
+    if (missing or unexpected) and not deck_errored:
+        raise DrcError(
+            "rule-category coverage assertion failed: the deck's report "
+            "declared a different set of rule categories than the "
+            "expected set (--expect-rule-categories-file) vouched for "
+            f"(expected {len(expected_set)}, declared {len(observed_set)}). "
+            f"missing (expected, not declared): {json.dumps(missing)}; "
+            f"unexpected (declared, not expected): {json.dumps(unexpected)}"
+            " -- a gated-off rule group, a missing --deck-var, a "
+            "data-dependent declaration, or a changed deck? Fix the deck "
+            "invocation or re-review the expected category list."
+        )
+    return {
+        "kind": COVERAGE_ASSERTION_NAMES_KIND,
+        "expected_names": sorted(expected_set),
+        "observed_names": sorted(observed_set),
+        "missing_names": missing,
+        "unexpected_names": unexpected,
+        "satisfied": not missing and not unexpected and not deck_errored,
+    }
+
+
+def _klayout_engine_coverage(
+    rule_counts: dict[str, int],
+    rule_categories: list[str],
+    coverage_assertion: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The klayout engine's ``coverage`` block. Categories are declarations,
+    not execution instrumentation, unless the caller's satisfied
+    ``expected_rule_categories`` assertion vouches for them (issue #2697);
+    otherwise only finding-producing rules are checked and the
+    ``unmeasured_rule_execution`` sentinel keeps coverage unknown."""
+    asserted = bool(coverage_assertion and coverage_assertion["satisfied"])
+    checked = (
+        sorted(set(rule_counts) | set(rule_categories))
+        if asserted
+        else sorted(rule_counts)
+    )
+    unknown = (
+        []
+        if asserted
+        else [
+            {
+                # `work_id` namespaces this sentinel so it cannot collide
+                # with a real (caller-chosen) RDB category name.
+                "id": work_id("engine_execution", "klayout"),
+                "reason": "unmeasured_rule_execution",
+            }
+        ]
+    )
+    return {
+        "deck_layers": [],
+        "layers_checked": [],
+        "rule_categories": rule_categories,
+        "rules_checked": checked,
+        "layers_in_stream_without_rules": [],
+        "rules_skipped": [],
+        "voltage_domain_warnings": [],
+        "deck_scope": [],
+        **build_check_coverage(checked=checked, unknown=unknown),
+    }
+
+
+def _validate_expected_rule_categories(value: Any) -> None:
+    """Reject anything but ``None`` or a positive ``int`` (issue #2697)."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise DrcError(
+            "expected_rule_categories (--expect-rule-categories) must be a "
+            f"positive integer (got {value!r})"
+        )
+
+
+def _validate_expected_rule_category_names(
+    value: Any, expected_count: Any = None
+) -> list[str] | None:
+    """Normalize the exact-set assertion's ``expected_rule_category_names``
+    (issue #2806) into a sorted, deduplicated list, or ``None`` when omitted.
+
+    Accepts any list/tuple/set/frozenset of non-empty strings, compared
+    exactly (case-sensitive, no stripping, no glob interpretation -- the
+    manifest loader :func:`load_rule_category_manifest` has already trimmed
+    its lines). A bare string, an empty collection, a non-string or a
+    blank name raises :class:`DrcError`, as does combining it with the count
+    assertion ``expected_count`` -- the two are mutually exclusive.
+    """
+    if value is None:
+        return None
+    if expected_count is not None:
+        raise DrcError(
+            "expected_rule_categories (--expect-rule-categories) and "
+            "expected_rule_category_names (--expect-rule-categories-file) "
+            "are mutually exclusive -- pass one rule-category assertion"
+        )
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        raise DrcError(
+            "expected_rule_category_names (--expect-rule-categories-file) "
+            f"must be a list of rule category names (got {type(value).__name__})"
+        )
+    names: set[str] = set()
+    for name in value:
+        if not isinstance(name, str) or not name.strip():
+            raise DrcError(
+                "expected_rule_category_names (--expect-rule-categories-file) "
+                f"must contain only non-empty strings (got {name!r})"
+            )
+        names.add(name)
+    if not names:
+        raise DrcError(
+            "expected_rule_category_names (--expect-rule-categories-file) "
+            "must name at least one rule category (got an empty set)"
+        )
+    return sorted(names)
+
+
+def load_rule_category_manifest(path: str) -> list[str]:
+    """Read an ``--expect-rule-categories-file`` manifest (issue #2806):
+    UTF-8 text, one exact rule category name per line. Surrounding
+    whitespace is trimmed, blank lines are ignored and duplicates are
+    deduplicated; there is no comment syntax and no glob expansion, so a
+    line ``# M1.a`` names the category ``# M1.a``. Returns the sorted,
+    deduplicated names.
+
+    Raises :class:`DrcError` for an unreadable file, invalid UTF-8, or a
+    manifest that resolves to no names at all -- all before KLayout is
+    ever launched.
+    """
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        raise DrcError(
+            f"could not read rule-category manifest "
+            f"(--expect-rule-categories-file) '{path}': {exc.strerror or exc}"
+        ) from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DrcError(
+            f"rule-category manifest (--expect-rule-categories-file) '{path}' "
+            f"is not valid UTF-8: {exc}"
+        ) from exc
+    if text.startswith("﻿"):
+        text = text[1:]
+    names = {line.strip() for line in text.splitlines()}
+    names.discard("")
+    if not names:
+        raise DrcError(
+            f"rule-category manifest (--expect-rule-categories-file) '{path}' "
+            "names no rule categories (empty or blank-only file)"
+        )
+    return sorted(names)
+
+
+def _rerun_assertion_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
+    """The ``run_drc_klayout_engine`` keyword reproducing a committed
+    report's ``coverage_assertion`` on ``--rerun`` (issues #2697/#2806),
+    dispatched on ``kind``. A set assertion replays its embedded
+    ``expected_names`` -- the original manifest file is not needed. A
+    malformed assertion raises :class:`DrcError` rather than leaking an
+    array into the count path."""
+    assertion = committed.get("coverage_assertion")
+    if assertion is None:
+        return {}
+    if not isinstance(assertion, dict):
+        raise DrcError(
+            "committed report's 'coverage_assertion' is malformed (expected "
+            f"an object, got {type(assertion).__name__})"
+        )
+    kind = assertion.get("kind", COVERAGE_ASSERTION_COUNT_KIND)
+    if kind == COVERAGE_ASSERTION_COUNT_KIND:
+        expected = assertion.get("expected")
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+            raise DrcError(
+                "committed report's 'coverage_assertion.expected' is "
+                f"malformed (expected a positive integer, got {expected!r})"
+            )
+        return {"expected_rule_categories": expected}
+    if kind == COVERAGE_ASSERTION_NAMES_KIND:
+        names = assertion.get("expected_names")
+        if not isinstance(names, list):
+            raise DrcError(
+                "committed report's 'coverage_assertion.expected_names' is "
+                f"malformed (expected a list of names, got {names!r})"
+            )
+        try:
+            resolved = _validate_expected_rule_category_names(names)
+        except DrcError as exc:
+            raise DrcError(
+                "committed report's 'coverage_assertion.expected_names' is "
+                f"malformed: {exc}"
+            ) from exc
+        return {"expected_rule_category_names": resolved}
+    raise DrcError(
+        f"committed report's 'coverage_assertion.kind' {kind!r} is not "
+        f"recognized (expected {COVERAGE_ASSERTION_COUNT_KIND!r} or "
+        f"{COVERAGE_ASSERTION_NAMES_KIND!r})"
+    )
+
+
 def run_drc_klayout_engine(
     path: str,
     deck_file: str,
@@ -2772,6 +3409,9 @@ def run_drc_klayout_engine(
     pdk_root: str | None = None,
     allow_deck_errors: bool = False,
     allow_missing_host_tools: bool = False,
+    expected_rule_categories: int | None = None,
+    min_klayout_version: str | None = None,
+    expected_rule_category_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -2859,6 +3499,13 @@ def run_drc_klayout_engine(
     ``PATH`` fail the run with a :class:`DrcError` naming them and where they
     are used (``deck requires 'pmap' (not found on PATH)``), instead of
     letting the deck surface an unrelated downstream traceback.
+    ``min_klayout_version`` (CLI: ``--min-klayout-version``, issue #2689)
+    declares the minimum standalone application version; the same executable
+    is probed with ``-v`` before the deck launches and an older, missing or
+    unparseable probe raises :class:`DrcError`. Omitted: no probe. Neither
+    allow flag bypasses it, and passing proves nothing about deck
+    compatibility beyond the version.
+
     ``allow_missing_host_tools=True`` (CLI: ``--allow-missing-host-tools``)
     skips the check, for a driver whose shell-out is on a branch this run
     never takes. The scan is static and deliberately conservative -- it
@@ -2927,6 +3574,38 @@ def run_drc_klayout_engine(
     rule's id is recorded as checked, regardless of coverage unknownness
     elsewhere in the same run.
 
+    ``expected_rule_categories`` (CLI ``--expect-rule-categories N``, issue
+    #2697) is an opt-in, caller-supplied coverage assertion: "this deck, with
+    these inputs, declares exactly ``N`` unique RDB rule categories, and I
+    vouch that declaring them means they ran". It must be a positive ``int``
+    (``0``, negatives, ``bool`` and non-integers raise :class:`DrcError`
+    before KLayout is launched). After a successful run the count is compared
+    with ``len(coverage.rule_categories)``: a mismatch raises
+    :class:`DrcError` naming both counts; an exact match marks every declared
+    category as checked, sets ``coverage.known`` and clears the
+    ``unmeasured_rule_execution`` sentinel, so zero findings derive
+    ``status: "clean"`` (exit 0) through the shared rollup. Findings still
+    yield ``"violations"``. The assertion is recorded under the additive
+    top-level ``coverage_assertion`` field. A run that tolerated deck errors
+    (``allow_deck_errors``) can never satisfy it: no mismatch error is raised
+    for such a partial run, but ``coverage_assertion.satisfied`` is ``False``
+    and coverage stays unknown. Omitted, behaviour is unchanged.
+
+    ``expected_rule_category_names`` (CLI ``--expect-rule-categories-file
+    PATH``, issue #2806) is the exact-set form of the same caller-vouched
+    assertion: a non-empty collection of exact (case-sensitive) category
+    names, mutually exclusive with ``expected_rule_categories`` (both
+    validated before KLayout is launched). The unique declared categories
+    must equal that set exactly -- a same-size swap fails just like a
+    missing or extra name, raising :class:`DrcError` that lists the sorted
+    missing and unexpected names. A match grants the same caller-vouched
+    coverage as a count match; the report records it under
+    ``coverage_assertion`` with ``kind: "expected_rule_category_names"``
+    (``expected_names``/``observed_names``/``missing_names``/
+    ``unexpected_names``/``satisfied``). Neither form proves rule execution
+    independently: the names must be reviewed for the deck revision,
+    switches and inputs in use, not copied from the accepted run.
+
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
     #1901) are resolved via :func:`klayout_tools.pdk.find_pdk`, when either
     is given, purely so ``provenance.pdk`` can record which PDK revision the
@@ -2942,6 +3621,10 @@ def run_drc_klayout_engine(
     launched, the same fail-fast order :func:`run_drc` uses for ``path``),
     or ``pdk_variant``/``pdk_root`` given but no matching PDK found.
     """
+    _validate_expected_rule_categories(expected_rule_categories)
+    expected_names = _validate_expected_rule_category_names(
+        expected_rule_category_names, expected_rule_categories
+    )
     if top is not None:
         raise DrcError(
             "the klayout engine does not support --top yet -- omit --top, "
@@ -2969,6 +3652,10 @@ def run_drc_klayout_engine(
     # names the wrong thing. Fail before the subprocess, naming the utility.
     _preflight_deck_host_tools(deck_file, allow_missing_host_tools)
 
+    # Issue #2689: opt-in application-version floor, probed on the very
+    # executable launched below, before any deck work.
+    _preflight_klayout_version(_KLAYOUT_EXECUTABLE, min_klayout_version)
+
     # Validates `path` (missing/directory/unreadable) before the subprocess
     # is launched, the same fail-fast order `run_drc` uses -- and gives this
     # engine the input layout's own `dbu`, needed to convert the RDB report's
@@ -2981,7 +3668,7 @@ def run_drc_klayout_engine(
     try:
         report_path = os.path.join(work_dir, "report.lyrdb")
         cmd = [
-            "klayout",
+            _KLAYOUT_EXECUTABLE,
             "-b",
             "-r",
             deck_file,
@@ -3049,6 +3736,9 @@ def run_drc_klayout_engine(
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
         )
+        coverage_assertion = _evaluate_category_assertion(
+            expected_rule_categories, rule_categories, deck_errored, expected_names
+        )
     finally:
         _cleanup_klayout_drc_work_dir(work_dir)
 
@@ -3063,6 +3753,10 @@ def run_drc_klayout_engine(
         )
     )
 
+    coverage = _klayout_engine_coverage(
+        rule_counts, rule_categories, coverage_assertion
+    )
+    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     return {
         "schema_version": 2,
         "file": path,
@@ -3083,36 +3777,16 @@ def run_drc_klayout_engine(
             else {}
         ),
         "dbu_um": dbu,
-        "status": "violations" if violations else "coverage_unknown",
+        "status": rollup_status(rollup, success="clean", failure="violations"),
         "violation_count": len(violations),
         "rule_counts": dict(sorted(rule_counts.items())),
         "violations": violations,
-        "coverage": {
-            "deck_layers": [],
-            "layers_checked": [],
-            # Categories are declarations, not execution instrumentation.
-            # An actual finding proves only that finding's rule ran.
-            "rule_categories": rule_categories,
-            "rules_checked": sorted(rule_counts),
-            "layers_in_stream_without_rules": [],
-            "rules_skipped": [],
-            "voltage_domain_warnings": [],
-            "deck_scope": [],
-            **build_check_coverage(
-                checked=sorted(rule_counts),
-                # `work_id` namespaces this sentinel (via its JSON-encoded
-                # parts) so it cannot collide with a real RDB category name
-                # in `rule_counts` -- an external deck's rule names are
-                # caller-chosen and could otherwise coincidentally match a
-                # bare literal like "klayout:execution".
-                unknown=[
-                    {
-                        "id": work_id("engine_execution", "klayout"),
-                        "reason": "unmeasured_rule_execution",
-                    }
-                ],
-            ),
-        },
+        "coverage": coverage,
+        **(
+            {"coverage_assertion": coverage_assertion}
+            if coverage_assertion is not None
+            else {}
+        ),
         "provenance": build_provenance(
             deck_name=os.path.basename(deck_file),
             deck_path=deck_file,

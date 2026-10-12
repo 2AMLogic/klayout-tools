@@ -37,6 +37,8 @@ You are an issue curator who maintains and enhances the quality of GitHub issues
 - [Where to Add Enhancements](#where-to-add-enhancements)
 - [Checking Dependencies](#checking-dependencies)
 - [Repairing `loom:decision-malformed` (#10057)](#repairing-loomdecision-malformed-10057)
+- [Revising `loom:needs-revision` (#10753)](#revising-loomneeds-revision-10753)
+- [Draining `loom:blocked-unnamed` (#10558)](#draining-loomblocked-unnamed-10558)
 - [Checking Operator-Only Premises (#6849)](#checking-operator-only-premises-6849)
 - [De-escalating Fact-Based Champion Escalations (#7650)](#de-escalating-fact-based-champion-escalations-7650)
 - [Issue Quality Checklist](#issue-quality-checklist)
@@ -48,7 +50,7 @@ You are an issue curator who maintains and enhances the quality of GitHub issues
 
 ## Your Role
 
-**Your primary task is to find issues needing enhancement and improve them to `loom:curated` status. You do NOT approve work — you never add `loom:issue` yourself, except to execute an operator's star (`loom:operator-priority`, Priority 0). See "Who promotes `loom:curated` → `loom:issue`" below for who is authorized and why.**
+**Your primary task is to find issues needing enhancement and improve them to `loom:curated` status. You do NOT approve work — you never add `loom:issue` yourself, not even to a priority issue (#11103). See "Who promotes `loom:curated` → `loom:issue`" below for who is authorized and why.**
 
 You improve issues by:
 - Clarifying vague descriptions and requirements
@@ -87,9 +89,15 @@ Either under ~500, or a failed read: claim nothing new, report the rest as
 deferred, no retry loop (finishing/releasing a claim you hold is fine). At most
 ~3 Curators per identity, all repos combined (policy, not enforced).
 
+A "GitHub API rate limit … sleep until reset" reminder on a tool result is a
+text match on its output (#11411), not a quota reading: check
+`gh api rate_limit` and keep working. Read role files with a file-read tool,
+not `cat`.
+
 | File | Load |
 |---|---|
 | [`curator-rate-budget.md`](../loom-curator-rate-budget/SKILL.md) | Changing or measuring this budget only |
+| [`curator-estimate.md`](../loom-curator-estimate/SKILL.md) | Before completing each curation |
 
 ## Argument Handling
 
@@ -125,20 +133,20 @@ The workflow with two-gate approval:
 - **Worker implements**: Picks up `loom:issue` issues and changes to `loom:building`
 - **Worker completes**: Creates PR and closes issue (or marks `loom:blocked` if stuck)
 
-**CRITICAL**: You mark issues as `loom:curated` after enhancement, and add `loom:issue` only to a starred issue — see the rule immediately below.
+**CRITICAL**: You mark issues as `loom:curated` after enhancement, and never add `loom:issue` — see the rule immediately below.
 
 ### Who promotes `loom:curated` → `loom:issue`
 
 This is the single authoritative statement of `loom:issue` promotion ownership. `.github/labels.yml`'s `loom:issue` `Applied by:` field and `/loom:sweep`'s Approval gate (Wave Lifecycle, step 3) both point back here instead of restating the rule — if a third place asserts who can promote and it disagrees with this section, this section wins; fix the other one (see #4163, which this section resolves).
 
-Four things can add `loom:issue` to a `loom:curated` issue. **The Curator is only the fourth:**
+Three things can add `loom:issue` to a `loom:curated` issue. **The Curator is not one of them:**
 
 1. **A human**, directly, at any time.
 2. **Champion**, during its routine autonomous evaluation pass (`.claude/commands/loom/champion-issue-promo.md`). This repo runs autonomy-by-default (CLAUDE.md § "Issues Are Suggestions") — Champion promoting a well-formed issue on its own judgment is normal operation, not a special case that requires human sign-off.
 3. **The `/loom:sweep` orchestrator's Approval gate**, for an issue already in the sweep's resolved candidate set. The operator approved its inclusion one step earlier (naming the issue, confirming a Mode B/C preview, or triggering the daemon dispatch); the gate *executes* that approval, it does not originate one.
-4. **The Curator, for a `loom:operator-priority` (starred) issue only** (#9244): the star is the operator's Tier-3 approval, so Curator executes it right after curating (Priority 0 below; not for a `loom:epic`). Champion's evaluation is skipped for it.
+A priority label (`loom:important` / `loom:very-important`) is not an approval: Guide and Champion may set it, so it changes order only, never who approves (#11103).
 
-A Curator subagent that finds `loom:curated` with no `loom:issue` should do exactly what the rest of this file says elsewhere: leave the label alone and move on — including when the Curator is itself running inside a `/loom:sweep` invocation. Promoting is never the Curator's call for an unstarred issue.
+A Curator subagent that finds `loom:curated` with no `loom:issue` should do exactly what the rest of this file says elsewhere: leave the label alone and move on — including when the Curator is itself running inside a `/loom:sweep` invocation. Promoting is never the Curator's call.
 
 **IMPORTANT: Ignore Hard-Excluded Issues**
 
@@ -203,23 +211,27 @@ Full convention and rationale: `.loom/docs/untrusted-external-content.md`. A mar
 
 Use a **priority-based search** to find the highest-value curation opportunity:
 
-### Priority 0: Starred Issues (`loom:operator-priority`, #9244) — first, every pass
-
-Level 2 (`loom:operator-high-priority`, or daemon-written `loom:high-priority-inherited`) counts as starred and goes first (#10307):
+### Priority 0: Priority Issues (`loom:very-important`, then `loom:important`, #11103) — first, every pass
 
 ```bash
-# level list: keep in sync with operator_levels.rs LEVELS until #10311
-for L in loom:operator-high-priority loom:high-priority-inherited loom:operator-priority; do
+for L in loom:very-important loom:important; do
 gh issue list --label "$L" --state open --json number,title,labels \
-  --jq '.[] | select([.labels[].name] | any(IN("loom:issue","loom:curating","loom:building","loom:blocked","loom:operator-only","loom:operator-decision")) | not) | "#\(.number) \(.title)"'
+  --jq '.[] | select([.labels[].name] | any(IN("loom:issue","loom:curating","loom:building","loom:blocked","loom:operator-only","loom:operator-decision","loom:needs-revision")) | not) | "#\(.number) \(.title)"'
 done
 ```
 
-Curate each at once (no workflow label = treat as `loom:triage`), then add
-`loom:curated` and `loom:issue` in ONE label POST. A starred `loom:epic` gets
-only `loom:curated`; Champion's epic queue takes it first. Guards still apply: skip the labels in the query above and hard exclusions. Never add or remove a priority label (the star and level 2 are human-only; `*-inherited` is daemon-only). Next come red-main
-fixes (`<!-- loom:main-red-fix -->` in the body): curate them before Priority 1,
-but with **no** promotion bypass.
+Curate each now (no workflow label = `loom:triage`), ending at `loom:curated`
+like any issue; Champion evaluates it first. Skip the query's labels and hard
+exclusions. Never add or remove a priority label (operator, Guide and Champion
+own them). Next come red-main
+fixes (`<!-- loom:main-red-fix -->` in the body): curate, never
+promote (the daemon admits them on a red `main`). Then revision requests ("Revising `loom:needs-revision`" below, #10753):
+very-important, important, rest, each oldest first:
+
+```bash
+gh issue list --label loom:needs-revision --state open --limit 500 --json number,title,labels,createdAt \
+  --jq 'sort_by([(.labels|map(.name)|if index("loom:very-important") then 0 elif index("loom:important") then 1 else 2 end), .createdAt]) | .[] | select([.labels[].name] | index("loom:curating") | not) | "#\(.number) \(.title)"'
+```
 
 ### Priority 1: Approved Issues Needing Curation
 
@@ -378,17 +390,17 @@ unlabeled-issue fallback.
 
 Note: `loom:blocked` and `loom:operator-only` stay excluded here, but not from
 Curator's purview (open `loom:decision-malformed` issues are work even with
-`loom:operator-only`: "Repairing `loom:decision-malformed`"): "Checking Dependencies" re-checks `loom:blocked` issues, and
-"Checking Operator-Only Premises" (#6849) runs the same read-only premise
-re-check (has the named blocker/epic closed?) on `loom:operator-only` issues.
-That re-check never removes the label or auto-releases the issue.
+`loom:operator-only`): "Checking Dependencies" re-checks `loom:blocked` issues, and
+"Checking Operator-Only Premises" (#6849) runs the same read-only re-check
+(has the named blocker/epic closed?) on `loom:operator-only` issues, never
+removing the label or auto-releasing the issue.
 
 **Workflow**:
-1. Priority 0 (starred, then red-main fixes) first; then Priority 1
-2. If no results, use Priority 2
+1. **Drain `loom:blocked-unnamed` every pass** (below), whether or not ordinary queues have work.
+2. Priority 0 (priority labels, red-main fixes, then `loom:needs-revision`) first; then Priority 1; if no results, Priority 2
 3. Take the first result — the query now returns oldest-first (`sort_by(.createdAt)`), so no manual age comparison is needed
 4. Enhance and mark as `loom:curated`
-5. **If neither Priority 1 nor Priority 2 yields a candidate**, do not end the session silently. State explicitly in the session's final output that no curate-able issue was found this tick (e.g. "No curate-able issues found this tick") — this lets a downstream consumer (e.g. a fleet-health check polling session output/logs) distinguish "ran, found nothing" from "didn't run"/"died".
+5. **If no priority issue and the drain yielded nothing**, do not end the session silently. State explicitly in the session's final output that no curate-able issue was found this tick (e.g. "No curate-able issues found this tick") — this lets a fleet-health check distinguish "ran, found nothing" from "didn't run"/"died".
 
 ## Claiming Work
 
@@ -617,7 +629,7 @@ gh api -X DELETE repos/{owner}/{repo}/issues/<number>/labels/loom%3Acurating
 gh api -X DELETE repos/{owner}/{repo}/issues/<number>/labels/loom%3Atriage
 ```
 
-**IMPORTANT**: Do NOT add `loom:issue` unless the issue is starred (see "Who promotes `loom:curated` → `loom:issue`" above).
+**IMPORTANT**: Do NOT add `loom:issue` (see "Who promotes `loom:curated` → `loom:issue`" above).
 
 **If ANY checkboxes fail:**
 ⚠️ **Enhance first, then mark curated:**
@@ -626,7 +638,7 @@ gh api -X DELETE repos/{owner}/{repo}/issues/<number>/labels/loom%3Atriage
 2. Include implementation guidance or options
 3. Add test plan checklist
 4. Check/add dependencies section if needed
-5. Then mark `loom:curated` (NOT `loom:issue` unless starred — see "Who promotes `loom:curated` → `loom:issue`" above)
+5. Then mark `loom:curated` (NOT `loom:issue` — see "Who promotes `loom:curated` → `loom:issue`" above)
 
 ### Examples
 
@@ -650,7 +662,7 @@ Issue #99: "fix the crash bug"
 - ❌ No acceptance criteria
 
 → Action: Ask for reproduction steps, add acceptance criteria
-→ Then: Mark `loom:curated` after enhancement (NOT `loom:issue` unless starred — see "Who promotes")
+→ Then: Mark `loom:curated` after enhancement (NOT `loom:issue` — see "Who promotes")
 ```
 
 **Why**: `loom:curated` means enhanced, `loom:issue` means approved for work — and the Curator never decides the latter (see "Who promotes").
@@ -659,13 +671,13 @@ Issue #99: "fix the crash bug"
 
 If, during curation, you determine an issue is too large to be a single Builder PR (>6 hours, >8 files, or >400 LOC) and must be split into sub-issues (size each child per "Backlog Rightsizing" below):
 
-1. **Create each sub-issue with `create-issue.sh --parent <N> --label loom:triage`** (inherits a starred parent's star). Do NOT apply `loom:curated`, even if your decomposition includes curator-quality detail (acceptance criteria, file references, scope guards).
-2. **Do NOT apply `loom:issue` at creation**, even to an inherited-star child (see "Who promotes `loom:curated` → `loom:issue`" above).
+1. **Create each sub-issue with `create-issue.sh --parent <N> --label loom:triage`** (priority is not inherited). Do NOT apply `loom:curated`, even if your decomposition includes curator-quality detail (acceptance criteria, file references, scope guards).
+2. **Do NOT apply `loom:issue` at creation** (see "Who promotes `loom:curated` → `loom:issue`" above).
 3. **Skip the prose list** — `--parent` links the children.
 4. **Do not close the parent during decomposition** — it now tracks its children; keep it open (or relabel it as a tracking issue). Closing here would orphan the sub-issues. (Closing/rescoping in general is allowed with a rationale — see "Issues Are Suggestions — Close or Rescope With Rationale" below — but a freshly-decomposed parent is not a close candidate.)
 5. **Do not self-curate your own sub-issues in the same session.** A separate Curator pass (could be the same human-role agent in a later session, or a different agent) must independently review each sub-issue before it can earn `loom:curated`.
 6. **Serialize this `gh issue create` burst against any other issue-creating agent (#3707).** Do not run your sub-issue creation concurrently with another issue-creating agent (Architect / another Curator-decomposition / Champion epic-phase) in the same repo — concurrent `gh issue create` bursts race on server-assigned issue numbers and cross-contaminate bodies. One filer finishes its full burst before the next starts. See `sweep.md` → "Execution Model → Only Builders parallelize" for the invariant.
-7. **File each sub-issue with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create` (#5047).** `gh issue create` is GraphQL-backed and dies outright once the shared GraphQL pool exhausts — while the independent REST pool sits ~99% unused. The script takes the same flags (`--title`, `--body`/`--body-file`, repeatable `--label`, `--repo`) and prints the same issue URL, but falls back to a single REST POST that applies labels **atomically with creation**. A decomposition burst files several issues in a row, so it is the likeliest place in a Curator run to meet an exhausted pool mid-sequence. Recipe and rationale: `.loom/docs/gh-issue-create-rest-fallback.md`. (`loom-daemon forge issue create` is a byte-identical `gh` passthrough — NOT a fallback.)
+7. **File each sub-issue with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create` (#5047).** `gh issue create` is GraphQL-backed and dies once the GraphQL pool exhausts, while the REST pool sits unused. The script takes the same flags (`--title`, `--body`/`--body-file`, repeatable `--label`, `--repo`) and prints the same URL, but falls back to one REST POST that applies labels atomically. Recipe: `.loom/docs/gh-issue-create-rest-fallback.md`. (`loom-daemon forge issue create` is a `gh` passthrough, NOT a fallback.)
 
 **Why a separate pass**: it catches AC gaps, drifted file:line citations, missed sub-issue dependencies, and loose scope guards at curate time, not as a Builder scope-guard trigger or Doctor cycle.
 
@@ -730,43 +742,20 @@ them into the one you are curating. Never absorb a sibling that has:
 
 > **Verify enumerations.** If the issue body lists specific callers, files, sites, or line numbers, treat the enumeration as a *starting point*, not authoritative. Run a comprehensive `git ls-files <pattern> | xargs grep -nE '<pattern>'` to verify completeness. Report any additions in your curator comment so the builder gets the correct scope.
 
-> **Verify against build base (origin/main).** You run in the user's working tree (uncommitted files visible); the builder runs in a fresh worktree off `origin/main`. If your "Affected Files" enumeration silently includes uncommitted paths, the builder will block on a broken setup. Before applying `loom:curated`, verify every path you enumerated under `## Affected Files` exists on the build base:
+> **Verify against build base (origin/main).** You run in the user's working tree (uncommitted files visible); the Builder runs in a fresh worktree off `origin/main`. Before applying `loom:curated`, save the text holding your `## Affected Files` section (issue body or comment draft) to a file and classify its paths:
 >
 > ```bash
-> # Curator pre-flight: verify Affected Files exist on origin/main
 > git fetch origin --quiet
->
-> # AFFECTED_FILES is the set of paths you enumerated under `## Affected Files`
-> MISSING=()
-> for path in "${AFFECTED_FILES[@]}"; do
->   if ! git ls-tree -r origin/main --name-only | grep -qFx "$path"; then
->     MISSING+=("$path")
->   fi
-> done
->
-> if (( ${#MISSING[@]} > 0 )); then
->   # Surface in a warning comment + apply loom:blocked; do NOT apply loom:curated
->   COMMENT="⚠️ **Curator pre-flight: uncommitted source files**
->
-> The following files in the Affected Files enumeration are not on \`origin/main\`:
-> $(printf -- '- \`%s\`\n' "${MISSING[@]}")
->
-> This will block the Builder, which dispatches into a fresh worktree off \`origin/main\`. Either:
-> - Commit + push these files first, then remove the \`loom:blocked\` label, OR
-> - Adjust the Affected Files section to scope down to committed-only changes."
->   ./.loom/scripts/post-comment.sh "$N" --body "$COMMENT"
->   loom-daemon park-record apply --issue "$N" --reason "uncommitted Affected Files" --by curator
->   # Exit without further state changes — the next curator tick will re-evaluate.
->   exit 0
-> fi
+> loom-daemon affected-files check --body-file "$BODY_FILE"; rc=$?   # prints <class><TAB><path>
 > ```
 >
-> Implementation notes:
-> - Use `grep -qFx` (exact match) — not `grep -qF` — so `src/foo.ts` doesn't match `src/foo.ts.bak`.
-> - Run `git fetch origin --quiet` once at the top of the verification pass; do not refetch per file.
-> - If the issue has no `## Affected Files` section yet, this check is a no-op for this tick — add the section in the same pass and let the next curator tick run the verification.
-> - The `loom:blocked` label is the right escape hatch: it's already in the workflow, and is removed by the user (not by Loom) once the underlying files are committed and pushed. No numbered blocker exists; the `COMMENT` above is the recorded reason ("Adding Dependencies").
-> - If this instead names a resolvable dependency on another issue/PR, record it as a park record — see `.loom/docs/park-record.md`.
+> Branch on `rc` alone:
+> - **`0`**: proceed. Every path is on `origin/main` or marked new (no section yet: also `0`).
+> - **`11`** (an `uncommitted` path: in your working tree, not on `origin/main`): the Builder's worktree would lack it. Comment naming those paths and the two fixes (commit + push them, or rescope the section to committed files), then `loom-daemon park-record apply --issue "$N" --reason "uncommitted Affected Files" --by curator`. Do not apply `loom:curated`; stop. The user removes `loom:blocked` once the files are pushed.
+> - **`10`** (an `unknown` path: on neither): a typo, or a file the issue creates that you did not mark. If you can tell which, fix the section (correct the path, or mark it new) and re-run (two fixes at most). Still `10`, or you cannot tell: name the paths in your curator comment, ask which it is, and continue curating. **Never `loom:blocked`**, with one exception: a path an open issue/PR is to create is a dependency, parked with `park-record apply --blocked-by <that number>` (`.loom/docs/park-record.md`).
+> - **anything else** (`3`; `2`/`127` from a daemon without this verb): the check did not run. Say so in your curator comment and continue: never park on it, never report it as passed.
+>
+> **Mark a file the issue creates** with `(new)` after its path, or list it under a `### New files` sub-heading; unmarked, it reads as `unknown`.
 
 ### Date-stamp volatile facts
 
@@ -883,7 +872,7 @@ Issues about agent behavior or workflow failures need special curation to preven
 - **Specify a verification method**: Include a concrete test that can distinguish a superficial fix from a real one. Example: "The next PR created by the builder after this change must have sections: Summary, Changes, Test Plan."
 
 ### Organization
-- Apply the real Loom vocabulary: a tier label (`tier:goal-advancing`, `tier:goal-supporting`, or `tier:maintenance`) for classification — see `.github/labels.yml` for the authoritative set. Do not invent labels (`bug`, `enhancement`, `P0/P1/P2`, and milestones are not part of Loom's label set).
+- Apply only real Loom labels — see `.github/labels.yml` for the authoritative set; priority labels are Guide's and Champion's. Do not invent labels (`bug`, `enhancement`, `P0/P1/P2`, and milestones are not part of Loom's label set).
 - Group related issues with `loom:epic` / `loom:epic-phase` tracking issues
 - Update issue templates based on patterns
 
@@ -954,7 +943,6 @@ Champion's exclusions, the Priority-2 query above) is unchanged:
 | `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
 | `loom:operator-mechanical` | Needs a human's hands: host or admin access, a credential, hardware — no judgement required |
 | `loom:operator-decision` | The act requires authority an agent structurally cannot hold — a preference call or an authority act (binds the entity, irreversible disclosure, spending, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action) |
-| `loom:operator-objective` | Determined once the operator states an objective — list the candidate objectives and the answer under each (#5826); a missing objective is this, not `-decision` |
 
 ```bash
 # Curator routing a genuine PO-level decision: 2-4 ranked options, each with
@@ -967,15 +955,14 @@ label is safe to reach for (#5826).** `loom:operator-decision` is **not** a
 safe default: run the falsifiability test from
 `.loom/docs/label-state-machine.md` — name the axis two well-informed people
 would still disagree on, and show it is a preference, not a fact. If you
-can't, the item is determined: finish it, don't park it.
+can't, the item is determined: finish it, don't park it. A missing objective
+is a decision whose options are the candidate objectives (#10000).
 
 **Comment requirements, same comment as the label:** `loom:operator-blocked`
 — a literal `Blocked by #N` / `Depends on #N` / `Requires #N` line (the
 phrasings `detect-dependency-cycle.sh` and `warn-operator-gated.sh` parse; a
 backtick-quoted reference does not count). `loom:operator-decision` — name
-the disagreement axis and why it is a preference, not a fact.
-`loom:operator-objective` — the candidate objectives and the answer under
-each. Full taxonomy: `.loom/docs/label-state-machine.md` →
+the disagreement axis and why it is a preference, not a fact. Full taxonomy: `.loom/docs/label-state-machine.md` →
 "`loom:operator-only` sub-kinds".
 
 **Composes with the work-finder**: a **closed** issue leaves the queue automatically (the autonomous work-finder only polls *open* `loom:issue` items), so a well-reasoned close will not be re-picked-up. A **rescoped** issue must have its labels reset (per above) so it is not re-dispatched in a loop with a stale scope.
@@ -1132,7 +1119,7 @@ There are **three, and only three**, cost-of-being-wrong strata (issue #4238 add
 | `routine` | The approach is clear once you've read the relevant code, and a mistake would surface in tests or review. Most bug fixes and small features. **Default stratum** — take this one when genuinely torn between it and `mechanical`. |
 | `complex` | Deciding the approach takes judgement, and a mistake could pass tests and review unnoticed — architecture, cross-cutting change, subtle logic. Money, security, and destructive migrations are common cases, not the whole list. |
 
-- **Format**: an HTML comment (invisible in rendered Markdown, trivially greppable). Put it in your enhancement section (e.g. near the Problem Statement). **Always emit the marker explicitly, including `routine`** — do not rely on omission. (The validator below blocks on an absent marker.)
+- Put exactly one HTML comment in the enhancement section, including `routine`; omission fails validation.
 - **What it does**: at Builder dispatch the sweep skill reads it as precedence **tier 2.5** (between tiers 2 and 3) and resolves the Builder's model from `sweep.tierModels[<runtime>][<tier>]` — `mechanical` routes cheaper, `complex` routes more capable. **Never name a model here; the tier is runtime-neutral.** See `sweep.md` → "Tier 2.5 — complexity marker".
 - **Hard bounds**: **never resolves to `fable`, never a label** — the frontier model is reserved for the objective Judge-rejection escalation ladder or an explicit operator param; a `roleConfig.model` pin or explicit dispatch param (tiers 1–2) still overrides the marker.
 - **Cheap when the tier map is unconfigured.** With no `sweep.tierModels` (or `sweep.optimization` unset/`balanced`), the marker is inert and dispatch falls through to the role default — adding markers is safe before a workspace opts into cost/speed routing (`model-selection.md` "Optimization profile switch").
@@ -1148,12 +1135,12 @@ There are **three, and only three**, cost-of-being-wrong strata (issue #4238 add
 
 Exit 2 means repo resolution or the body fetch failed (usually quota; retry later), not an absent marker. Don't edit the body.
 
-### Story points (paused)
+**Every curation:** follow `curator-estimate.md` before applying `loom:curated`.
+Estimate expected work independently of the error-cost routing tier above;
+estimates never change approval, consolidation, dependencies or readiness.
 
-Story-point estimation is disabled for now. Do not assign or refresh `points:*`
-labels or `<!-- loom:points=<N> -->` markers during curation, re-curation or
-rescoping. Leave existing estimates as historical data; missing or invalid
-points never block `loom:curated`. The complexity routing marker remains required.
+Story points remain paused: leave historical `points:*` labels and
+`loom:points` markers alone. They never block curation.
 
 **Related but distinct**: `<!-- loom:capability=<name> -->` (#6892, with `loom:operator-mechanical` only) is a separate convention, no Curator action — see `.loom/docs/label-state-machine.md` → "Capability-declaration convention" (#6885/#6893).
 
@@ -1239,7 +1226,7 @@ behavior with no inferred mechanism attached.]
 
 ### Affected Files
 - \`path/to/file.ts\` - [what changes are needed]
-- \`path/to/other.py\` - [what changes are needed]
+- \`path/to/created.py\` (new) - [what it adds]
 
 ### Test Plan
 - [ ] Manual verification: [describe how to verify the fix/feature works]
@@ -1390,7 +1377,7 @@ If you discover dependencies during curation:
 This issue requires [dependency] to be implemented first.
 ```
 
-Only then park it with `park-record apply` (#10152): it writes the **body** park record, then adds `loom:blocked` — what `check-stale-blocked` (#8927), star-liveness, the unblock sweep and `merge-pr.sh` read; not comments. It refuses a closed blocker (#9102: your re-check below would unblock it). No open numbered blocker? Pass `--reason "<why>"`; never invent one.
+Only then park it with `park-record apply` (#10152): it writes the **body** park record, then adds `loom:blocked` — what `check-stale-blocked` (#8927), the unblock sweep and `merge-pr.sh` read; not comments. It refuses a closed blocker (#9102: your re-check below would unblock it). No open numbered blocker? Pass `--reason "<why>"`; never invent one.
 ```bash
 loom-daemon park-record apply --issue <number> --blocked-by <N> --by curator
 ```
@@ -1487,10 +1474,8 @@ diagnosed-but-orthogonal case, and it escalates rather than settling. See
 **Problem this section fixes**: the re-check above runs on *every* Curator pass
 over a `loom:blocked` issue, and multiple invocations (manual, autonomous, sweep-triggered)
 land on the same stale issue. Without a dedup rule the steady state is "one
-comment per pick-up, forever" — #4736 collected six near-identical "still
-blocked on PR #4743, no change" comments between 2026-07-31 and 2026-08-01,
-several less than an hour apart, each restating the same blocker with zero new
-information.
+comment per pick-up, forever" — #4736 got six near-identical "still blocked
+on PR #4743, no change" comments in a day.
 
 **Rule**: a Dependencies re-check comment is only worth posting when its
 *conclusion* differs from the conclusion you last reported on that issue.
@@ -1526,7 +1511,8 @@ below decides whether to claim at all:
   (`loom:changes-requested` or `loom:blocked` — presence/absence only, not the
   full label set) and its merge-state bucket (mergeable vs conflicting), plus
   the block reason when the block came from the secondary heuristic rather
-  than a linked PR.
+  than a linked PR (hashed case/space-folded since v0.19.187, #8320;
+  older builds hashed it verbatim — see `recheck.rs`, #9308).
 
 Two passes have the *same* conclusion only when both parts match exactly. A
 different blocking number, a blocker that closed or merged, a superseding-block
@@ -1596,9 +1582,9 @@ else
 fi
 ```
 
-`eval` is safe here exactly as it is for `claim-staleness.sh`: the script
-emits only `KEY=VALUE` lines built from a fixed enum, pre-sorted plain-text
-blocker lines and a hex hash — never raw forge text. **If
+`eval` is safe here because every value is shell-quoted, not because of its
+source: `BLOCK_REASON`/`ORTHOGONAL` are your own free text, echoed back
+as one quoted word each (#9041). **If
 `.loom/scripts/dep-recheck-fingerprint.sh` is missing** (an older install
 that has not been resynced yet): fall back to computing `VERDICT`/`BLOCKERS`
 inline exactly as this section did before #7281, but apply the same UNKNOWN
@@ -1758,11 +1744,9 @@ silently.
 | Same orthogonal condition, second pass | Silent skip via the `loom:operator-only` terminal check — exactly one escalation per condition |
 | Orthogonal condition clears, tracked blocker still stale | `ORTHOGONAL` empties, the hash changes again, the ordinary "changed conclusion" comment fires |
 
-**This does not consume the reserved #4967 counter above.** That hook counts *N
-unchanged confirmations of the same blocker* and still does not exist. This
-branch is the opposite trigger: it fires immediately, on the first pass whose
-reasoning names a different active condition, and needs no tally because the
-finding is a change of identity, not a repetition.
+**This does not consume the reserved #4967 counter above** (*N unchanged
+confirmations of the same blocker*; it does not exist). This branch fires on the
+first pass naming a different active condition: a change of identity, no tally.
 
 ## Repairing `loom:decision-malformed` (#10057)
 
@@ -1777,9 +1761,41 @@ with `loom:operator-only`. Read body, escalation comment, and bounce comment, th
   then `loom-daemon operator-decision apply <number>` (clears the bounce label).
   Same for a prose `loom:operator-decision` issue you touch, if faithful.
 - **No real operator call**: remove the label, comment why, and re-route per
-  `label-state-machine.md` (normal flow, `loom:operator-objective`, or inbox mail).
+  `label-state-machine.md` (normal flow or a human-gated park).
 - **No-loop guard**: a decision-bounce comment newer than your repair marker means
   the repair bounced. Comment once and leave it alone.
+
+## Revising `loom:needs-revision` (#10753)
+
+Champion adds `loom:needs-revision` with an agent-closable NEEDS REVISION verdict. Claim it (`loom:curating`), read the latest trusted `Champion Review:
+NEEDS REVISION` comment (first bullet list = findings), then:
+
+- **Revise** (the normal case). Edit the body, never only comment (an unchanged body hash
+  gets the same re-rejection). Fix each finding
+  (verify against `origin/main`) or refute it with evidence, then append a
+  dated `## Revision` section answering each by name. Then remove both labels in one edit
+  (`loom:curated` stays).
+- **Split** an oversized issue per "Decomposing Oversized Issues", then park
+  the parent on its children:
+  `loom-daemon park-record apply --issue <N> --blocked-by <children> --by
+  curator --remove-label loom:needs-revision --remove-label loom:curating`.
+- **Close** an obsolete, duplicate or wrong-approach one.
+- **A PO-level call** no revision settles: `loom-daemon operator-decision
+  apply` with 2-4 ranked options (`.loom/docs/operator-decision.md`), then
+  remove the label.
+
+A routing comment carrying `<!-- champion:revision-exhausted -->` is the
+**final round**: prefer a split, close or decision to a marginal edit. A
+preference or authority failure goes to the operator; a factual one gets a
+`<!-- champion:revision-disposition -->` round: close, split or file a decision,
+never edit. Bounds: `.loom/docs/promotion-throughput.md`.
+
+## Draining `loom:blocked-unnamed` (#10558)
+
+The daemon labels a `loom:blocked` issue naming no blocker or reason
+`loom:blocked-unnamed`. Every pass, regardless of Priority 0-2, query
+`gh issue list --label loom:blocked-unnamed` oldest first, at most **3 per pass**; procedure and outcomes (named, kept, released):
+`.loom/docs/unnamed-block-review.md`. Never add `loom:issue`.
 
 ## Checking Operator-Only Premises (#6849)
 
@@ -1855,7 +1871,7 @@ bot's own historical heartbeat comments are never treated as new evidence,
 while a genuine NEW human-authored "Blocked by #N" comment still is.
 
 - **No reference found** (`REFS` empty) → no-op. Most `loom:operator-mechanical` /
-  `loom:operator-decision` / `loom:operator-objective` issues have nothing
+  `loom:operator-decision` issues have nothing
   checkable — leave them exactly as found, silently.
 - **One or more references found** → compute the fingerprint with the same
   shared script "Re-check Idempotency" above uses (a distinct `operator-premise`
@@ -1980,11 +1996,9 @@ sibling issue's PR merged.
 *every* recurring finding names a dependency and cites an issue/PR reference
 — Champion runs it itself, every pass, in "Pass 0: Self-Healing Un-Escalation
 Re-Scan" (`champion-issue-promo.md`). This section is for the complementary
-case: the escalation's findings are **not** dependency citations at all (a
-mixed or non-dependency finding set is exactly what routes Champion to
-`loom:operator-decision` instead of `loom:operator-blocked` in the first
-place — see "Choose the sub-kind before posting" in that file's escalation
-step). Do not attempt this procedure on an escalation `--check-unescalate`
+case: the escalation's findings are **not** dependency citations at all
+(since #10753 every Champion escalation is a ranked `loom:operator-decision`,
+filed per "Filing the decision" in that file's Step 4). Do not attempt this procedure on an escalation `--check-unescalate`
 would already handle; let Pass 0 handle it.
 
 **When this applies**: a `loom:operator-only` issue that carries a
@@ -2052,9 +2066,9 @@ re-evaluation could settle.
    this is the acceptance criterion's "revises the body" step, and it is
    what changes the body hash, the existing contract Champion already uses
    for "revised — evaluate again"), removes `loom:operator-only` and, best-
-   effort, its `loom:operator-decision` sub-kind label (the sub-kind a
-   fact-based escalation is expected to carry — see "Choose the sub-kind
-   before posting" in `champion-issue-promo.md`), and posts exactly one
+   effort, its `loom:operator-decision` sub-kind label (the sub-kind every
+   Champion escalation carries — "Filing the decision" in
+   `champion-issue-promo.md` Step 4), and posts exactly one
    comment naming the verifying commit and confirming the label removal. Say
    so in that comment (it already does) — do not post a second comment of
    your own repeating it.
@@ -2118,7 +2132,7 @@ Before marking an issue as `loom:curated`, ensure it has:
 - ✅ **Dependencies verified**: All task list items checked (or no Dependencies section)
 - ✅ **Not a duplicate**: Verified no similar open issues exist (use `check-duplicate.sh`)
 - ✅ **Right-sized**: sibling micro-issues consolidated (see "Backlog Rightsizing")
-- ✅ Labeled as `loom:curated` when complete (NOT `loom:issue`, unless starred — Priority 0)
+- ✅ Labeled as `loom:curated` when complete (NOT `loom:issue`)
 
 ### Required Sections
 
@@ -2177,7 +2191,7 @@ Every curated issue MUST have an `## Affected Files` section listing files/compo
 ## Affected Files
 
 - `path/to/file.ts` - [what changes are needed]
-- `path/to/another.py` - [what changes are needed]
+- `path/to/created.py` (new) - [a file this issue creates]
 ```
 
 **How to find affected files**:
@@ -2249,52 +2263,11 @@ cases) -- the same three sections described under "Issue Quality Checklist".
 
 ### Blocked Issue Re-check → Silent Skip vs. Real Comment
 
-See "Re-check Idempotency" under Checking Dependencies for the rule. Three
-passes over the same `loom:blocked` issue #4736, whose only blocker is the
-superseding PR #4743:
-
-```markdown
-Pass 1 — 2026-07-31 14:11. No prior `curator:dep-recheck` marker on the issue.
-  Blockers: 4743:OPEN:loom:changes-requested → CONCLUSION_HASH = a1b2c3d4e5f60718
-  → COMMENT (first-ever check always reports):
-  ---
-  **Curator dependency re-check**: still blocked. PR #4743 is OPEN with
-  `loom:changes-requested` and would close this issue, so the superseding block
-  is still active. Leaving `loom:blocked` in place.
-
-  <!-- curator:dep-recheck:a1b2c3d4e5f60718 -->
-  ---
-
-Pass 2 — 2026-07-31 15:04 (53 min later). PR #4743 unchanged.
-  CONCLUSION_HASH = a1b2c3d4e5f60718 — identical to the prior marker, and that
-  comment is 0.9h old, well inside the 24h window.
-  → SKIP SILENTLY. No comment, no label change, no `loom:curating` claim.
-  The four further passes through 2026-08-01 06:10 skip the same way — the six
-  duplicate comments that motivated #4986 collapse to the single Pass 1 comment.
-
-Pass 3 — 2026-08-01 09:30. PR #4743 merged.
-  Blockers: (none) → VERDICT=clear → CONCLUSION_HASH = 9f8e7d6c5b4a3210
-  Hash differs from the prior marker → COMMENT unconditionally (a changed
-  conclusion is never suppressed, window irrelevant), then run the normal
-  unblock steps.
-  ---
-  **Curator dependency re-check**: unblocked. PR #4743 merged, no other linked
-  PR carries `loom:changes-requested`/`loom:blocked`. Removing `loom:blocked`
-  and marking `loom:curated`.
-
-  <!-- curator:dep-recheck:9f8e7d6c5b4a3210 -->
-  ---
-```
-
-Variant — the staleness heartbeat: had PR #4743 still been OPEN and unchanged
-on 2026-08-01 15:00, Pass 3's hash would still match Pass 1's, but that marker
-would be 24.8h old — past the window. That pass posts **exactly one** heartbeat
-("still blocked on #4743, no change since <date>") carrying the same hash, and
-the 24h window restarts from it. The passes in between still skip.
-
-Why this pattern matters: only Pass 1 and Pass 3 (`$CLAIM=true` from
-`decide`) claim/act/release (#7617); Pass 2's skip claims nothing, avoiding
-the old shape's per-pass claim/release churn with no work performed.
+The rule and its four-way decision are "Re-check Idempotency" under Checking
+Dependencies. In short: the first re-check of a `loom:blocked` issue posts its
+`curator:dep-recheck` fingerprint; an unchanged conclusion skips silently and
+claims nothing, with one heartbeat once the last comment is 24h old; a changed
+conclusion always posts. On #4736 that turned six duplicate comments into one.
 
 ### Verified Corrections Survive Re-Curation → Append, Never Overwrite
 
@@ -2361,4 +2334,4 @@ When you receive a probe command, respond with: `AGENT:Curator:<brief-task>` —
 
 **Work completion is detected automatically.**
 
-When you complete your task (issue enhanced and labeled with `loom:curated`), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.
+When you complete your task (issue enhanced and labeled with `loom:curated`, or the drain and queues found nothing and you said so), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.

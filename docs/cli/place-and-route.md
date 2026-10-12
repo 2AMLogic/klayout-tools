@@ -1000,6 +1000,16 @@ many-corner library should use `sweep_corners` to scope the sweep down to
 the corners the design actually operates at, which also caps this added
 cost at the scoped subset's own size.
 
+**Iterating on timing after a route (recipe).** Run `place-and-route` once
+with `pdk.sweep_corners` naming only the corners the design operates at,
+keep the routed `.def` (and SPEF if `post_route_spef` is set), then re-time
+other corners with `klt sta` and `pdk.corners` on that DEF — no
+floorplan/place/CTS/route is repeated (see `docs/cli/sta.md`). Any change
+that feeds implementation still needs a full run; there is deliberately no
+cross-request checkpoint cache today. Design analysis and the proposed
+(unimplemented) routed-bundle replay: `docs/design/place-and-route-improvements-survey.md`
+section 6 (issue #2783).
+
 ### Design-rule-check verdict (`max_transition_violation_count`, `max_capacitance_violation_count`, issue #1709; library-only counterpart issue #2357)
 
 The sweep re-times the routed design at the `sweep_corners` decks, but until
@@ -1153,7 +1163,10 @@ a replacement of it:
    uses — so `spef_sta`'s own `worst_slack_ns`/`total_negative_slack_ns`/
    `setup_violation_count`/`hold_violation_count` are directly comparable to
    the top-level fields on the identical routed design, differing only in
-   parasitics source.
+   parasitics source. Both sessions emit the violator reports from the same
+   shared helper, so `spef_sta`'s counts cover the same check families
+   (data + recovery/removal + clock-gating, issue #2741) as the top-level
+   ones.
 3. **Net-name correlation is explicitly checked, not assumed** (the survey's
    own flagged open risk: does `klt extract`'s net naming correlate with
    OpenSTA's own flat linked-design net list?) — before `read_spef` runs,
@@ -1273,6 +1286,28 @@ layer name through, a macro or pin the LEF never declares, a pin centre not
 covered by drawn conductor — is named in
 `def_net_names.unresolved_single_pin_nets` and simply keeps the pre-#1488
 `$<id>` fallback downstream; the merge itself never fails over it.
+
+### Metal density coverage declaration (`coverage`, issue #2781)
+
+Every successful response, at every `target_stage` (`floorplan`, `place`,
+`cts`, `route`), carries an additive top-level `coverage` object stating what
+this command does **not** do:
+
+```json
+"coverage": {
+  "metal_density_fill": {"status": "unsupported", "inserted": false, "reason": "..."},
+  "density_compliance": {"status": "unsupported", "evaluated": false, "reason": "..."}
+}
+```
+
+No metal density fill is inserted and density compliance is never evaluated.
+The standard-cell gap fillers placed by `filler_placement` at `route` are not
+metal fill, and a zero `route_drc_violation_count` (routing DRC only) must not
+be read as density compliance. Whether density rules are covered for a layout
+must be determined separately: `klt drc --deck sky130` density coverage comes
+from that deck's own rule inventory, not from this field. Failures use the
+standard error envelope and do not carry `coverage`. The field is additive;
+`schema_version` is unchanged.
 
 ### Minimum-area repair (issue #2139)
 
@@ -1826,7 +1861,7 @@ live re-measurement above.
 | `netlist` | string | The gate-level netlist path — typically `klt synthesize`'s own `netlist_path` output. Required. Resolved relative to the request file's own directory. |
 | `hdl_toplevel` | string | The design's top module name. Required. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
-| `pdk.corner` | string \| omitted | Liberty (device) corner selector; defaults to the nominal corner when omitted. |
+| `pdk.corner` | string \| omitted | Liberty (device) corner selector; defaults to the nominal corner when omitted. This single deck is the **only** liberty the `place`/`cts`/`route` stages' `repair_design`/`repair_timing`/`repair_timing -hold`/`repair_antennas` passes see; the other corners in the post-route sweep (`pdk.sweep_corners`) are analysed afterwards and never feed back into repair. To aim repair at a low-voltage deck, name it here. A tight `constraints.max_transition_ns`/`.max_capacitance_pf` is one absolute value for every corner and, at a slow corner, can grow the design sharply without meeting it (see `docs/design/place-and-route-improvements-survey.md` section 3.7); check `corners[]` and the `..._vs_library` counts afterwards. |
 | `pdk.interconnect_corner` | string \| omitted | `"min"` \| `"nom"` \| `"max"` — tech-LEF *parasitic-extraction* corner selector, independent of `pdk.corner` (issue #1100). Default `"nom"`, byte-identical to this command's behavior before this field existed. An install that doesn't stage the requested corner's tech LEF is a clear application error (exit 1), never a silent fallback. Echoed back as the response's own `interconnect_corner` field — see "PDK / LEF / liberty resolution" above. |
 | `pdk.sweep_corners` | array\<string\> \| omitted | Additive field (issue #1092). Scopes the "Multi-corner setup/hold sweep" below to the named subset of `cell_library`'s shipped `.lib` corners. Omitted (the default) sweeps every shipped corner, reproducing today's behaviour exactly. An explicit `[]` sweeps zero corners (`worst_setup_slack_ns`/`worst_hold_slack_ns`/`corners` all degrade to `null`/`[]`). Every named corner must actually be one of `cell_library`'s own shipped corners (`corners[].name` in the unfiltered sweep) — an unresolvable name raises a `PlaceAndRouteError` naming the corner(s) it could not find and every corner that *is* valid. |
 | `floorplan.method` | string | `"utilization"` \| `"explicit"` \| `"def"` — see "Floorplan methods" above. Required. |
@@ -2105,7 +2140,7 @@ plain string" for the full enumeration and rationale.
 | `worst_slack_ns` / `total_negative_slack_ns` | number | WNS/TNS at `stage_reached`. Negative values are expected, not an error — a caller wanting a pass/fail gate on timing composes this contract into `klt eval`. A `target_stage: "floorplan"` request with no `constraints` (a clock is not required until `"place"`, see below) reports OpenROAD's own unconstrained-design sentinel (`1e+39`/`0`) rather than a real number — a `constraints`-less floorplan-only run has no clock to measure slack against, and this field is never fabricated to hide that. **That sentinel is not the only way to reach it** — a fully-constrained, fully-routed run of a design with no register-to-register path reports the identical `1e+39`/`0`. Check `timing_status` below before treating this number as a measurement. |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the slack fields in this response are *measurements* at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever **any** slack field in scope carries the sentinel; `null` when the stage reported no slack metric at all (nothing to classify — not a claim either way). **A pass/fail gate on timing must require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so `worst_slack_ns >= 0` on its own reports "timing closed with maximum confidence" on a design that was never timed. The sentinel values themselves are reported verbatim and unchanged — this field is additive and retypes nothing. Restated per stage in `stages[]` and per corner in `corners[]` (and inside `spef_sta`), each computed from that entry's own slack values. See "I/O timing constraints" below for the most common way to *fix* an `"unconstrained"` result rather than merely detect it. |
 | `fmax_mhz` | number \| null | `null` before placement (floorplan-stage ideal-clock STA reports no `fmax`). |
-| `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). |
+| `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). Nominal-corner count of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group, not every enumerated path) over the same timing-check families as the nominal setup/hold WNS/TNS: setup = data setup + asynchronous **recovery** + clock-gating setup (`-max_delay -recovery -clock_gating_setup`); hold = data hold + asynchronous **removal** + clock-gating hold (`-min_delay -removal -clock_gating_hold`) (issue #2741). Not swept: the corner-swept `worst_setup_slack_ns`/`worst_hold_slack_ns` below have no count counterpart. See [`docs/cli/sta.md`](sta.md)'s "Violation counts: check families" for the engine evidence and the gating caveats. |
 | `nominal_hold_slack_ns` | number \| null | Additive field (issue #1826). The single, nominal-corner hold WNS (`report_worst_slack_metric -hold`), mirroring `worst_slack_ns` above's setup-side value — a real slack-in-ns margin, not just the pass/fail count `hold_violation_count` already provides. `null` at the floorplan stage, matching `hold_violation_count`'s own gating. Named `nominal_hold_slack_ns` (not `worst_hold_slack_ns`) specifically to avoid colliding with the corner-swept `worst_hold_slack_ns` aggregate below — the two are independent fields that never replace one another, the same way `worst_slack_ns` and `worst_setup_slack_ns` already coexist (issue #949). |
 | `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
 | `route_drc_violation_count` | integer \| null | The violation count from `detailed_route -output_drc <rpt>`'s own report (TritonRoute's routing-legality check — short/spacing/via/etc. violations, distinct from the antenna check above), counting distinct complete `(type, sources, bbox, layer)` records from the **final** routing pass. Identical repeated records count once; incomplete records count individually. `0` for a DRC-clean route (a real `-output_drc` report is a 0-byte file in that case, not absent). `null` before the `"route"` stage — no `detailed_route` call has run yet (issue #938). |
@@ -2883,6 +2918,22 @@ which is why it is the default.
 `0` when `status` is `"match"`, `3` when `"drifted"`, `1` for a missing or
 unparseable report or an unresolvable request. `--rerun` without `--check` is
 a clean exit `1`, not a usage error.
+
+## Output-directory ownership
+
+**Output-directory ownership (issue #2770).** `klt place-and-route` owns its
+fixed `.klt/place-and-route/` directory next to the request (it has no
+`--outdir` flag) for the whole run, including `--check <report> --rerun`. A
+second cooperating run on the same directory (any relative or symlink alias
+of it) -- or on an ancestor or descendant of it -- fails immediately with
+error code `outdir_locked`: exit `1`, empty stdout, the standard error
+envelope on stderr, and nothing under the directory modified. Two requests
+in the same directory therefore cannot run at once; copy one elsewhere or
+run them sequentially. A killed or crashed run releases ownership
+automatically; a leftover owner record never blocks the next run.
+`outdir_lock_unavailable` (same exit/streams) means locking itself is not
+possible here. Full policy, library exceptions and platform scope:
+[json-contract.md](../json-contract.md) "Output-directory ownership".
 
 ## Exit codes
 

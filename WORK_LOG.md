@@ -2,8 +2,83 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-09
+
+- **Issue #2913** (closed): Champion: Merge-Risk Hold Digest
+
+### 2026-10-08
+
+- **PR #2859**: release: klayout-tools 0.7.0
+- **PR #2857**: feat(drc): exact rule-category set assertion for --engine klayout (#2806)
+- **PR #2856**: ci: stop cancelling started main runs in ci.yml
+- **PR #2855**: feat(sim): report resolved .include closure with per-file digests
+- **PR #2843**: feat(signoff): artifact-anchored generic evidence for T1 items 1/2/9/10
+- **PR #2841**: feat(report): path-only key registry for drc/extract reports
+- **PR #2836**: feat(sim): reject batch jobs on runner/client klt version skew
+- **PR #2797**: fix(lvs): parse netgen property blocks with colonless device identifiers
+- **PR #2832**: feat(mom): series-path PEEC inductance and resistance for a single winding
+- **PR #2828**: klt sim: add options.save_mode ("all"|"netlist") saved-vector opt-out
+- **PR #2827**: feat(sim): recover runner error envelope from failed batch jobs (#2733)
+- **PR #2825**: docs+example: adaptive single-probe campaigns on the batch backend
+- **PR #2824**: ring-check: opt-in --cells cell-inclusion scope (#2690)
+- **Issue #2838** (closed): Release: cut klayout-tools 0.7.0 to PyPI (downstream pins wait on #2431, #2480, --measure-command)
+- **Issue #2806** (closed): drc --engine klayout: no independent way to derive or check the --expect-rule-categories set (count-only, input-dependent)
+- **Issue #2786** (closed): CI: stop cancelling started main runs in ci.yml, and consider batching main CI on the newest main (~685 job-min/day on main)
+- **Issue #2799** (closed): klt sim: report hashes only the top-level netlist, not the .include closure it already resolves
+- **Issue #2718** (closed): klt signoff: T1 items 1/2/9/10 accept any passing envelope and reject generic, so a cited 'met' carries no information about the item
+- **Issue #2723** (closed): Friction: klt JSON reports (drc, extract) embed the caller's absolute invocation path, so identical analyses are never byte-identical
+- **Issue #2489** (closed): sim: a corner whose solve emitted singular-matrix/gmin warnings, or returned physically implausible node voltages, is still graded as a normal measurement
+- **Issue #2719** (closed): klt sim --backend batch: an older klt on the fleet image silently ignores request options the submitting klt accepted (e.g. options.ngspice_init)
+- **Issue #2674** (closed): netgen engine: property-error block header without a `class:index` colon is not parsed, so every per-parameter detail degrades to one opaque details.raw blob
+- **Issue #2388** (closed): Backfill threshold_max_dbu on sky130/sg13g2/sg13cmos5l fixed-size cut/via rules
+- **Issue #2729** (closed): Compute series-path PEEC inductance and resistance for a single winding
+- **Issue #2732** (closed): klt sim: no request-level control over the saved vector set; generated 'save all' defeats a netlist-body resident-vector save on large transient decks
+- **Issue #2733** (closed): klt sim batch: fleet klt version skew and gf180mcu model-bin failure only visible via S3
+- **Issue #2716** (closed): sim batch: document and regression-test adaptive single-probe campaigns
+- **Issue #2690** (closed): ring-check: no way to scope the layer set to the ring, so a shared layer can report continuous from unrelated geometry
+
+### 2026-10-07
+
+- **PR #2820**: feat(drc): opt-in --min-klayout-version preflight for --engine klayout (#2689)
+- **PR #2819**: feat(lvs,pex): accept the --label-layer label-purpose override
+- **Issue #2689** (closed): drc --engine klayout: cannot use the bundled KLayout, and does not preflight the PATH one's DSL feature level
+- **Issue #2686** (closed): klt lvs / klt pex cannot override a deck's label purpose: --label-layer is klt extract-only
+- **Issue #2453** (closed): synthesize under a WASI-sandboxed engine build fails when the run dir is under the host temp dir, and the error's remedy advises unpinning the engine
+- **Issue #2445** (closed): extract: decide whether cap_cmomi's feed variant (none/same/double) is recoverable from drawn geometry
+- **Issue #2668** (closed): klt sim: stage explicit model libraries and OSDI assets for batch/remote jobs
+- **Issue #2738** (closed): Friction: gen-compose sky130 routing roles stop at met2, so a P&R macro's met3 pins and met4/met5 PDN are unreachable by connectivity[]/routing
+- **Issue #2706** (closed): klt sim: per-corner supply_v override (alter) has no effect on PWL/PULSE/SIN sources
+- **Issue #2741** (closed): klt sta: hold_violation_count is 0 while worst_hold_slack_ns is negative (removal checks counted in WNS/TNS but not in the violator count)
+- **Issue #2697** (closed): drc --engine klayout: zero-finding external-deck runs can never be labelled clean - add an opt-in coverage assertion
+- **Issue #2681** (closed): klt sim: document and regression-test configurable measurement output precision
+- **Issue #2673** (closed): Friction: device.placeholder_value exclusion is klayout-engine-only, so the same request verdicts differently on engine: "netgen"
+- **Issue #2759** (closed): Shared PDK root (~/pdks) and per-technology PDK version check
+- **Issue #2682** (closed): lvs: options.combine_devices_max_attempts (#1413) is never echoed in the report, so a committed report cannot state its retry budget and --check --rerun replays at the default
+- **Issue #2758** (closed): Validate and document the pinned ASAP7 KLayout technology package
+- **PR #2793**: fix(synthesize,equiv): narrow WASI hint for scripts under the host temp dir
+- **PR #2794**: feat(extract): recover cap_cmomi feed variant from drawn port placement
+- **PR #2796**: feat(sim): opt-in staging of model inputs for remote/batch jobs (#2668)
+- **PR #2798**: feat(gen-compose): sky130 metal4/5/6 and via3/4/5 routing roles
+- **PR #2800**: feat(sim): reject supply_v override of PWL/PULSE/SIN sources (#2706)
+- **PR #2802**: fix(sta): count recovery/removal and clock-gating violators with setup/hold
+- **PR #2803**: feat(drc): opt-in --expect-rule-categories coverage assertion for klayout engine
+- **PR #2805**: docs+test(sim): document and regression-test measurement output precision
+- **PR #2791**: feat(lvs): placeholder-value exclusion on the netgen engine (#2673)
+- **PR #2808**: feat(pdk): shared ~/pdks root, ASAP7 probe, PDK version compatibility
+- **PR #2807**: lvs: echo options.combine_devices_max_attempts and replay it on --check --rerun
+- **PR #2809**: Validate and document pinned ASAP7 KLayout technology package
+- **PR #2815**: feat(drc): add ASAP7 FEOL/MOL KLayout DRC deck with per-rule fixtures
+- **PR #2817**: feat(extract): ASAP7 FinFET extraction with geometry-counted nfin
+
+- **PR #2790**: fix(decks): release build resolves its own deck hash
+- **PR #2789**: feat(drc): backfill threshold_max_dbu on sky130 via2/via3/via4 width rules (#2443)
+- **Issue #2451** (closed): klt deck resolve: a release's own deck hash is never in its own history table, so the newest release always self-reports released: false
+- **Issue #2443** (closed): Backfill threshold_max_dbu on the four fixed-size cut rules #2388's scope left min-only
+
 ### 2026-10-06
 
+- **PR #2788**: feat(erc): report label-layer text counts in provenance.label_layers
+- **Issue #2415** (closed): klt erc: the empty-label_layer condition is stderr-only, so a signoff consumer still cannot detect a report resting on an empty label layer
 - **PR #2785**: feat(extract): warn when a MOS flavour marker layer has no shapes (#2417)
 - **PR #2784**: feat(erc): disclose how much drawn tap geometry a well_boxes assertion covers
 - **PR #2779**: fix(place-and-route): use IHP sg13g2.map in DEF->GDS merge; routed sg13g2 GDS now klt-drc clean (#2444)

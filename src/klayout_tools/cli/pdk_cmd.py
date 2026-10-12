@@ -43,6 +43,7 @@ machinery, not in :mod:`klayout_tools.pdk`.
 import argparse
 import math
 import shlex
+import sys
 
 from ..pdk import (
     PdkNotFoundError,
@@ -53,6 +54,7 @@ from ..pdk import (
     list_pdks,
 )
 from ..pdk_cells import list_cell_libraries
+from ..pdk_compat import compatibility_warning
 from ..pdk_pcell import PdkPCellError, list_pdk_pcells
 from ..pdk_stackup import PdkStackupError, stackup
 from .output import emit_error, emit_success, render_table
@@ -211,6 +213,7 @@ def _print_find_text(report: dict) -> None:
     broken = report.get("broken_symlinks", [])
     if broken:
         print(f"broken_symlinks: {len(broken)} (see `klt pdk check` for detail)")
+    _print_compatibility_text(report)
 
 
 def _print_check_text(report: dict) -> None:
@@ -219,10 +222,23 @@ def _print_check_text(report: dict) -> None:
     broken = report["broken_symlinks"]
     if not broken:
         print("broken_symlinks: none")
+    else:
+        print(f"broken_symlinks: {len(broken)}")
+        for entry in broken:
+            print(f"  [{entry['asset']}] {entry['path']}")
+    _print_compatibility_text(report)
+
+
+def _print_compatibility_text(report: dict) -> None:
+    """Render the ``compatibility`` status; warn on stderr for mismatch or
+    unknown (warning-only, issue #2759 -- never changes the exit code)."""
+    compat = report.get("compatibility")
+    if not compat:
         return
-    print(f"broken_symlinks: {len(broken)}")
-    for entry in broken:
-        print(f"  [{entry['asset']}] {entry['path']}")
+    print(f"compatibility: {compat['status']}")
+    warning = compatibility_warning(compat)
+    if warning:
+        print(warning, file=sys.stderr)
 
 
 def _print_list_text(report: dict) -> None:

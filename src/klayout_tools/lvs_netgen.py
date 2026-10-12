@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._paths import _resolve_relative
@@ -129,9 +130,30 @@ _NETGEN_ENGINE_VERSION_RE = re.compile(r"Netgen\s+([\w.]+)")
 #:
 #: so the index group must accept any non-whitespace token, not just
 #: digits (issue #363).
+#:
+#: netgen does not always use the ``class:index`` shape at all: when it
+#: names a device after its connected net, neither side carries a class
+#: separator and the reference side may be a hierarchical path, e.g.
+#: (observed from netgen 1.5.133, issue #2674)::
+#:
+#:     VSS$29 vs. CELL_NAME/VSSP:
+#:      value circuit1: 120000   circuit2: 0
+#:
+#: Each side's identifier is therefore captured whole, as a free-form
+#: non-whitespace token (``$``, ``/`` and internal colons all allowed); only
+#: the header's single terminating ``:`` is stripped from the reference
+#: side. The optional ``class`` is derived afterwards by
+#: :func:`_netgen_device_class` rather than being required by this regex.
 _NETGEN_PROPERTY_BLOCK_RE = re.compile(
-    r"^(\S+):(\S+) vs\. (\S+):(\S+):\n((?: .+\n)+)", re.MULTILINE
+    r"^(\S+) vs\. (\S+):\n((?: .+\n)+)", re.MULTILINE
 )
+
+#: The ``class:index`` split of one netgen device identifier, when it has
+#: one. Greedy on the class side, so the split falls on the *last* colon --
+#: the same split the pre-#2674 block regex (``(\S+):(\S+)`` per side)
+#: produced, so existing ``pmos:1`` / ``sub:i1`` headers keep the same
+#: ``class`` they always had.
+_NETGEN_DEVICE_CLASS_INDEX_RE = re.compile(r"^(\S+):(\S+)$")
 
 #: One parameter-difference line inside a :data:`_NETGEN_PROPERTY_BLOCK_RE`
 #: body. netgen emits (at least) two trailing-qualifier shapes, both verified
@@ -323,6 +345,65 @@ def _resolve_netgen_setup(options: dict[str, Any], request_dir: str) -> str | No
     return resolved
 
 
+#: Issue #2673: the netgen property key each excludable klt parameter maps to.
+#: A SPICE `R`/`C` card carrying a model name is read by netgen as a device
+#: whose single compared property is `value` (verified against netgen
+#: 1.5.133).
+_NETGEN_PROPERTY_FOR_PARAMETER = {"R": "value", "C": "value"}
+
+_TCL_SPECIAL = frozenset(' \t\r\n\\"$[]{};#')
+
+
+def _tcl_word(text: str) -> str:
+    """Backslash-quote ``text`` into a single literal Tcl word."""
+    out = []
+    for ch in text:
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch in _TCL_SPECIAL:
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out) or '""'
+
+
+def _write_exclusion_setup(
+    work_dir: str,
+    caller_setup: str | None,
+    exclusions: Sequence[tuple[str, str, str]],
+) -> str:
+    """Write a netgen setup file under ``work_dir`` that first sources the
+    caller's ``options.netgen_setup`` (when given, so it stays effective) and
+    then deletes each proven placeholder property from *both* circuits' device
+    class -- netgen reports a property present on only one side as an error,
+    so a one-sided delete would not suppress anything. Returns its path."""
+    from .lvs import LvsError
+
+    lines = ["# klt lvs -- generated placeholder-value exclusions (issue #2673)"]
+    if caller_setup:
+        lines.append(f"source {_tcl_word(os.path.abspath(caller_setup))}")
+    for layout_class, reference_class, parameter in exclusions:
+        key = _NETGEN_PROPERTY_FOR_PARAMETER.get(parameter)
+        if key is None:
+            raise LvsError(
+                f"no netgen property known for excluded parameter '{parameter}'"
+            )
+        lines.append(
+            f"property [list -circuit1 {_tcl_word(layout_class)}] delete {key}"
+        )
+        lines.append(
+            f"property [list -circuit2 {_tcl_word(reference_class)}] delete {key}"
+        )
+    path = os.path.join(work_dir, "klt_setup.tcl")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    return path
+
+
 def _run_netgen_lvs(
     *,
     layout_netlist: kdb.Netlist,
@@ -332,6 +413,7 @@ def _run_netgen_lvs(
     setup_file: str | None,
     timeout_s: float,
     binary: str,
+    excluded_properties: Sequence[tuple[str, str, str]] = (),
 ) -> tuple[str, list[dict[str, Any]], str | None]:
     """Invoke ``netgen -batch lvs`` headlessly in netlist-vs-netlist mode and
     return ``(status, mismatches, engine_version)``.
@@ -378,6 +460,10 @@ def _run_netgen_lvs(
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-netgen-")
     try:
+        if excluded_properties:
+            setup_file = _write_exclusion_setup(
+                work_dir, setup_file, excluded_properties
+            )
         layout_path = os.path.join(work_dir, "layout.spice")
         reference_path = os.path.join(work_dir, "reference.spice")
         log_path = os.path.join(work_dir, "comp.out")
@@ -705,6 +791,15 @@ def _describe_netgen_property_delta(qualifier: str | None) -> str:
     return qualifier.strip()
 
 
+def _netgen_device_class(identifier: str) -> str | None:
+    """The device class of one netgen property-block identifier, or ``None``
+    when it has no ``class:index`` shape (e.g. a net-derived name such as
+    ``VSS$29`` or a hierarchical path such as ``CELL_NAME/VSSP``, issue
+    #2674) -- see :data:`_NETGEN_DEVICE_CLASS_INDEX_RE`."""
+    match = _NETGEN_DEVICE_CLASS_INDEX_RE.match(identifier)
+    return match.group(1) if match is not None else None
+
+
 def _parse_netgen_property_errors(log_text: str) -> list[dict[str, Any]]:
     """Parse netgen's parameter-difference block(s) into ``device.property``
     ``mismatches[]`` entries -- see :data:`_NETGEN_PROPERTY_BLOCK_RE` for the
@@ -721,14 +816,13 @@ def _parse_netgen_property_errors(log_text: str) -> list[dict[str, Any]]:
 
     entries: list[dict[str, Any]] = []
     for block_match in _NETGEN_PROPERTY_BLOCK_RE.finditer(log_text):
-        class1, index1, class2, index2, body = block_match.groups()
-        device_layout = f"{class1}:{index1}"
-        device_reference = f"{class2}:{index2}"
+        device_layout, device_reference, body = block_match.groups()
+        layout_class = _netgen_device_class(device_layout)
 
         def _device(
             layout: str = device_layout,
             reference: str = device_reference,
-            device_class: str = class1,
+            device_class: str | None = layout_class,
         ) -> dict[str, Any]:
             # A fresh dict per entry: `mismatches[]` entries must not share
             # mutable sub-objects across the list.

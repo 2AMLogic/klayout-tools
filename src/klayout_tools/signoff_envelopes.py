@@ -55,6 +55,9 @@ class _DrcEnvelope(_DrcRequired, total=False):
     deck: Any
     violation_count: Any
     coverage: dict[str, Any]
+    # Issue #2768: present only on a `klt drc --rules` run; read by
+    # `signoff._drc_rule_subset` to refuse full-deck credit for a subset.
+    rule_selection: dict[str, Any]
     metrics: dict[str, Any]
     provenance: dict[str, Any] | None
 
@@ -252,6 +255,49 @@ class _PlaceAndRouteEnvelope(_PlaceAndRouteRequired, total=False):
     provenance: dict[str, Any] | None
 
 
+class _SocketCheckRequired(_EnvelopeCommon):
+    # Issue #2839: `klt socket-check` (docs/cli/socket-check.md). `socket`
+    # plus the `checks`/`budgets` lists are the fields `_classify`
+    # recognises this shape by; `status` is what `_check_passed` grades.
+    # T1 item 11 reads the additive `power_ports` fact block, defensively,
+    # so an envelope predating it still classifies (and is then refused by
+    # the item's own rule, not here).
+    status: str
+    socket: Any
+    checks: list[Any]
+    budgets: list[Any]
+
+
+class _SocketCheckEnvelope(_SocketCheckRequired, total=False):
+    file: Any
+    socket_name: Any
+    dbu_um: Any
+    check_count: Any
+    power_ports: dict[str, Any]
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _LefAbstractRequired(_EnvelopeCommon):
+    # Issue #2839: `klt lef-abstract` (docs/cli/lef-abstract.md).
+    # `macro_name` plus the `pins` list and the `self_check` block are the
+    # fields `_classify` recognises this shape by; `self_check.status` is
+    # what `_check_passed` grades (the verb has no top-level `status`).
+    macro_name: str
+    pins: list[Any]
+    self_check: dict[str, Any]
+
+
+class _LefAbstractEnvelope(_LefAbstractRequired, total=False):
+    file: Any
+    socket: Any
+    output: Any
+    size_um: dict[str, Any]
+    power_pins: dict[str, Any]
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
 class _GenericRequired(_EnvelopeCommon):
     # `kind` and `status` are the two fields docs/cli/signoff.md's "Generic
     # evidence" section declares required; `summary`/`source` are explicitly
@@ -263,6 +309,11 @@ class _GenericRequired(_EnvelopeCommon):
 class _GenericEnvelope(_GenericRequired, total=False):
     summary: Any
     source: Any
+    # Issue #2718: the T1 item this attestation is for -- required (and must
+    # match) when the citation is graded for an artifact-anchored item (1, 2,
+    # 9, 10); optional otherwise. Optional here, so not type-checked at the
+    # envelope boundary -- the grader refuses a malformed value itself.
+    t1_item: Any
     metrics: dict[str, Any]
     provenance: dict[str, Any] | None
 
@@ -292,6 +343,8 @@ _EvidenceEnvelope = (
     | _FunctionalVerificationEnvelope
     | _ErcEnvelope
     | _PlaceAndRouteEnvelope
+    | _SocketCheckEnvelope
+    | _LefAbstractEnvelope
     | _GenericEnvelope
     | _ErrorEnvelope
 )
@@ -314,6 +367,8 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
     "functional-verification": _FunctionalVerificationEnvelope,
     "erc": _ErcEnvelope,
     "place-and-route": _PlaceAndRouteEnvelope,
+    "socket-check": _SocketCheckEnvelope,
+    "lef-abstract": _LefAbstractEnvelope,
     "generic": _GenericEnvelope,
     "error": _ErrorEnvelope,
 }

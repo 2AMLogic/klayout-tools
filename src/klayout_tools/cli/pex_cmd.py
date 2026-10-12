@@ -28,8 +28,13 @@ import argparse
 import shlex
 
 from ..env_provenance import render_path_field
+from ..output_lock import OutputLockError
 from ..pex import PexError, run_pex
-from ._parsing import parse_deck_options, parse_declared_pins
+from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
+
+# Issue #2686: the same one-line `label_layers:` text rendering `klt extract`
+# prints for its own echo, reused rather than copied.
+from .extract_cmd import _print_label_layers
 from .output import emit_error, emit_success
 
 EXIT_PASS = 0
@@ -45,6 +50,10 @@ def run(args: argparse.Namespace) -> int:
         # clean exit-1 error envelope rather than a traceback.
         deck_options = parse_deck_options(args.deck_options, PexError)
         declared_pins = parse_declared_pins(args.pins, PexError)
+        # `--label-layer` (issue #2686): the same shared parser `klt extract
+        # --label-layer` uses (issue #2656), bound to `PexError`. Role names
+        # are validated by the deck during extraction, not here.
+        label_layers = parse_label_layers(args.label_layers, PexError)
         # `--measure-command` (issue #2478): one shell-quoted string on the
         # command line, an argv *list* everywhere below -- `shlex.split`
         # here is the only place the string form exists. The command is
@@ -72,6 +81,12 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that predates
             # it.
             declared_pins=declared_pins,
+            # `--label-layer` (issue #2686): which GDS purpose extraction
+            # reads net/pin name text from, per label role, passed straight
+            # through to `klt extract --label-layer`. `None` when the flag
+            # was never given, unchanged from every call site that predates
+            # it.
+            label_layers=label_layers,
             # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the
             # lateral coupling pass onto these net names. `None` when the
             # flag was never given, unchanged from every call site that
@@ -103,6 +118,8 @@ def run(args: argparse.Namespace) -> int:
         )
     except PexError as exc:
         return emit_error("pex", str(exc), args.format)
+    except OutputLockError as exc:
+        return emit_error("pex", str(exc), args.format, code=exc.code)
 
     emit_success(report, args.format, _print_text)
 
@@ -179,6 +196,8 @@ def _print_text(report: dict) -> None:
         f"extraction: deck={extraction['deck']}  "
         f"devices={extraction['device_count']}  nets={extraction['net_count']}"
     )
+    # Additive (issue #2686): only printed when --label-layer was given.
+    _print_label_layers(extraction.get("label_layers"))
     # Additive (issue #976): only printed when --critical-net was given.
     critical_nets = extraction.get("critical_nets")
     if critical_nets:

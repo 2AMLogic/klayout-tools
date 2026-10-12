@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -83,6 +83,30 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   promoting more top-level pins — a body/substrate tap, say — than the
   schematic DUT declares. Off by default — every named net still promotes
   to a pin, byte-identical to before this flag existed.
+- `--label-layer` — repeatable `<role>=<layer>/<datatype>`, passed through
+  to `klt extract --label-layer` (issue #2686); see
+  [`extract.md`](extract.md)'s "Overriding a deck's label layers" section.
+  Re-points one label role (`well`, `poly`, `metal<i>` — 0-based,
+  index-aligned with the deck's metal stack) at the GDS purpose this layout
+  actually wrote its net/pin names on, *replacing* the deck's own pair for
+  that role; `<role>=none` reads no label layer for that role at all, and a
+  later entry for the same role wins. **Without it, a layout whose names sit
+  on a text purpose the deck does not read extracts with no promoted
+  top-level pins**, so the extracted-side DUT cannot bind to the
+  testbench's `X` line. For example, an IHP stream labelled on `Metal1.text`
+  (8/25) under `sg13cmos5l` (whose default is `Metal1.pin`, 8/2):
+
+  ```bash
+  klt pex routed.gds tb.json --deck sg13cmos5l \
+    --label-layer metal0=8/25 --label-layer metal1=10/25
+  ```
+
+  A malformed entry (no `=`, a blank role, a value that is neither `none`
+  nor `LAYER/DATATYPE`) or a role the deck has no slot for is a clean error
+  (exit 1). Only name text moves — connectivity and device recognition are
+  untouched. Off by default — byte-identical to before this flag existed.
+  The applied mapping is echoed as `extraction.label_layers` (`null` when
+  the flag was never given; a cleared role is `null` inside the object).
 - `--critical-net` — repeatable, passed through to `klt extract
   --critical-net` (issue #976, Epic #709 Phase 2a). Scopes the lateral
   (same-layer, sidewall) coupling-capacitance pass onto these net names, on
@@ -572,6 +596,38 @@ whenever the reference netlist is hierarchical; treat a hierarchical-shaped
 `detail` as inconclusive on its own and verify against a flattened
 reference before discarding the run's `delta[]` evidence.
 
+## The extracted network's own integrity report (issue #2764)
+
+`klt pex` re-simulates the netlist the extraction wrote, so a defect in the
+*emitted* RC network — a distributed ladder split into islands, a near-zero
+resistor bridging two nets, a NaN-valued R, a ground capacitor that no
+longer sums back to its net's declared total — would otherwise surface only
+as a confusing `delta[]` row. `klt extract --parasitics` already validates
+the network it emits; this command carries those diagnostics through as
+`extraction.parasitic_integrity`, so a committed pex record is
+self-describing about the health of the network its numbers were measured
+on.
+
+The block is `null` only for an extraction report predating issue #2764.
+Otherwise it is `klt extract`'s own integrity summary verbatim (check
+settings and aggregate counts — see [`extract.md`](extract.md)'s "Parasitic
+network integrity" for the field list and the model limits), plus a `nets`
+array re-attached from the extraction's `parasitics.nets[]` entries in that
+same order: one `{"net", "net_id", "rc_model", "integrity"}` entry per net,
+each `integrity` payload byte-identical to what `klt extract` inlines on
+the corresponding `parasitics.nets[]` entry. The same `open` /
+`islands` / `orphan_nodes` / `suspicious_resistors` / `short_candidates` /
+`capacitance` statuses, the same threshold and tolerances — extract and
+pex show the same diagnostics.
+
+**These checks validate the generated RC model and cannot certify geometric
+opens or shorts.** A `pass` says the emitted network is well-formed, not
+that the layout is; see `extract.md`'s model-limits note. And like
+`body_bias`/`model_mismatch`, the block is **reported, never folded into
+`status`** — whether a finding should invalidate a comparison is a policy
+decision for the evidence consumer, not one this command makes on the
+caller's behalf.
+
 ## Measuring with a caller-supplied command (`--measure-command`)
 
 Everything above describes this command's original (and still default) input
@@ -822,7 +878,49 @@ full `repo`/`external`/`absent` scope meanings.
     },
     "critical_nets": [],
     "distributed_rc": false,
-    "mom_rlc_override": null
+    "mom_rlc_override": null,
+    "label_layers": null,
+    "parasitic_integrity": {
+      "short_threshold_ohm": 1.0,
+      "cap_tolerance": { "absolute_ff": 1e-06, "relative": 1e-09 },
+      "max_detail_items": 20,
+      "nets_checked": 2,
+      "nets_with_findings": 0,
+      "open_nets": 0,
+      "island_components": 0,
+      "orphan_nodes": 0,
+      "suspicious_resistors": 0,
+      "short_candidates": 0,
+      "capacitance_mismatches": 0,
+      "nets": [
+        {
+          "net": "RB",
+          "net_id": 3,
+          "rc_model": "lumped",
+          "integrity": {
+            "open": {
+              "status": "not_applicable",
+              "reason": "lumped model: terminal legs attach to the hub by construction; no distributed segments to check connectivity over",
+              "disconnected_count": 0,
+              "disconnected_terminals": [],
+              "details_truncated": false
+            },
+            "islands": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+            "orphan_nodes": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+            "suspicious_resistors": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+            "short_candidates": { "count": 0, "details": [], "details_truncated": false, "reason": null },
+            "capacitance": {
+              "status": "pass",
+              "declared_ff": 2.45871,
+              "computed_ff": 2.45871,
+              "delta_ff": 0.0,
+              "reason": null,
+              "tolerance": { "absolute_ff": 1e-06, "relative": 1e-09 }
+            }
+          }
+        }
+      ]
+    }
   },
   "measurement": {
     "mode": "testbench",
@@ -881,7 +979,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `layout`             | object            | `{path, scope}` — `<layout>` normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when `<layout>` sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
 | `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. |
-| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), and `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
 | `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
 | `measurement`        | object            | Issue #2478 (additive field, always present). How this run's two legs were measured, so a reader of a committed record never has to infer it from the presence/absence of `testbenches[]`. `mode` is `"testbench"` (the default path — `command`/`timeout_s`/`sides` are then all `null`) or `"command"` (a caller-supplied `--measure-command` produced both legs). For `"command"`: `command` is the argv **list** verbatim (never a shell string — it is never run through a shell), `timeout_s` the per-invocation cap in force, and `sides` an object keyed `schematic`/`extracted`, each carrying `netlist` (`{path, scope}`, the exact netlist that side was measured on), `exit_status`, `corner_count` and `measurement_names`. See "Measuring with a caller-supplied command" above. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. **Empty (`[]`) for a `--measure-command` run**, which has no testbenches at all; `measurement.sides` carries the equivalent per-leg detail there. |
@@ -922,6 +1020,23 @@ count alone must not be treated as proof of comparison.
 
 `klt signoff` refuses zero, unknown or malformed common coverage. Partial
 comparisons remain disclosed for the Phase 2 success policy.
+
+## Output-directory ownership
+
+**Output-directory ownership (issue #2770).** `klt pex` owns its artifact
+root (`--outdir`, default `.klt/pex/` next to the layout) for the whole run.
+A second cooperating run on the same directory (any relative or symlink
+alias of it) -- or on an ancestor or descendant of it -- fails immediately
+with error code `outdir_locked`: exit `1`, empty stdout, the standard error
+envelope on stderr, and nothing under the directory modified. The
+per-testbench `klt sim` runs on `<outdir>/<testbench>/schematic|extracted`
+inherit that ownership, and an independent `klt sim`/`klt pex` aimed at one
+of those child directories is refused while the run is active. A killed or
+crashed run releases ownership automatically; a leftover owner record never
+blocks the next run. `outdir_lock_unavailable` (same exit/streams) means
+locking itself is not possible here. Full policy, library exceptions and
+platform scope: [json-contract.md](../json-contract.md) "Output-directory
+ownership".
 
 ## Exit codes
 

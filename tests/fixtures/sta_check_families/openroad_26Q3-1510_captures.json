@@ -1,0 +1,200 @@
+{
+  "engine_version": "26Q3-1510-g6cb3f2b704",
+  "netlist": "module top (clk, rst_n, d, en, q, q2, gq);\n  input clk, rst_n, d, en;\n  output q, q2, gq;\n  wire gclk;\n  sky130_fd_sc_hd__dfrtp_1 ff (.CLK(clk), .D(d), .RESET_B(rst_n), .Q(q));\n  sky130_fd_sc_hd__dfrtp_1 ff2 (.CLK(clk), .D(d), .RESET_B(rst_n), .Q(q2));\n  sky130_fd_sc_hd__and2_1 cg (.A(clk), .B(en), .X(gclk));\n  sky130_fd_sc_hd__dfxtp_1 ff3 (.CLK(gclk), .D(d), .Q(gq));\nendmodule\n",
+  "liberty": "sky130_fd_sc_hd__tt_025C_1v80.lib (volare open_pdks c6d73a35)",
+  "session_prefix_tcl": [
+    "read_lef <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef",
+    "read_lef <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef",
+    "read_liberty <sky130A>/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib",
+    "read_verilog /tmp/klt2741/top2.v",
+    "link_design top"
+  ],
+  "metric_tcl": [
+    "report_worst_slack_metric -setup",
+    "report_worst_slack_metric -hold",
+    "report_tns_metric -setup",
+    "report_tns_metric -hold"
+  ],
+  "report_tcl": [
+    "puts \"===KLT_STA_SETUP_VIOLATIONS_BEGIN===\"",
+    "report_check_types -max_delay -recovery -clock_gating_setup -violators -format end",
+    "puts \"===KLT_STA_SETUP_VIOLATIONS_END===\"",
+    "puts \"===KLT_STA_HOLD_VIOLATIONS_BEGIN===\"",
+    "report_check_types -min_delay -removal -clock_gating_hold -violators -format end",
+    "puts \"===KLT_STA_HOLD_VIOLATIONS_END===\""
+  ],
+  "scenarios": {
+    "clean": {
+      "constraints": [
+        "create_clock -name clk -period 2 [get_ports clk]",
+        "set_input_delay -clock clk 0.5 [get_ports d]",
+        "set_input_delay -clock clk 0.5 [get_ports rst_n]",
+        "set_input_delay -clock clk 1.5 [get_ports en]",
+        "set_output_delay -clock clk 0.0 [get_ports {q q2 gq}]"
+      ],
+      "metrics": {
+        "timing__setup__ws": 0.5,
+        "timing__hold__ws": 0.204409,
+        "timing__setup__tns": 0,
+        "timing__hold__tns": 0
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nNo paths found.\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nNo paths found.\n\n===LEGACY_HOLD_END===\n"
+    },
+    "removal_only": {
+      "constraints": [
+        "create_clock -name clk -period 2 [get_ports clk]",
+        "set_input_delay -clock clk 0.5 [get_ports d]",
+        "set_input_delay -clock clk 0.0 [get_ports rst_n]",
+        "set_input_delay -clock clk 1.5 [get_ports en]",
+        "set_output_delay -clock clk 0.0 [get_ports {q q2 gq}]"
+      ],
+      "metrics": {
+        "timing__setup__ws": 0.5,
+        "timing__hold__ws": -0.295591,
+        "timing__setup__tns": 0,
+        "timing__hold__tns": -0.591182
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nmin_delay/hold group asynchronous\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff/RESET_B (sky130_fd_sc_hd__dfrtp_1)    0.30    0.00   -0.30 (VIOLATED)\nff2/RESET_B (sky130_fd_sc_hd__dfrtp_1)    0.30    0.00   -0.30 (VIOLATED)\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nNo paths found.\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nNo paths found.\n\n===LEGACY_HOLD_END===\n"
+    },
+    "recovery_only": {
+      "constraints": [
+        "create_clock -name clk -period 2 [get_ports clk]",
+        "set_input_delay -clock clk 0.5 [get_ports d]",
+        "set_input_delay -clock clk 2.5 [get_ports rst_n]",
+        "set_input_delay -clock clk 1.5 [get_ports en]",
+        "set_output_delay -clock clk 0.0 [get_ports {q q2 gq}]"
+      ],
+      "metrics": {
+        "timing__setup__ws": -0.271732,
+        "timing__hold__ws": 0.258459,
+        "timing__setup__tns": -0.543463,
+        "timing__hold__tns": 0
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nmax_delay/setup group asynchronous\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff/RESET_B (sky130_fd_sc_hd__dfrtp_1)    2.23    2.50   -0.27 (VIOLATED)\nff2/RESET_B (sky130_fd_sc_hd__dfrtp_1)    2.23    2.50   -0.27 (VIOLATED)\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nNo paths found.\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nNo paths found.\n\n===LEGACY_HOLD_END===\n"
+    },
+    "data_hold_only": {
+      "constraints": [
+        "create_clock -name clk -period 2 [get_ports clk]",
+        "set_input_delay -clock clk -0.5 [get_ports d]",
+        "set_input_delay -clock clk 0.5 [get_ports rst_n]",
+        "set_input_delay -clock clk 1.5 [get_ports en]",
+        "set_output_delay -clock clk 0.0 [get_ports {q q2 gq}]"
+      ],
+      "metrics": {
+        "timing__setup__ws": 0.5,
+        "timing__hold__ws": -0.472283,
+        "timing__setup__tns": 0,
+        "timing__hold__tns": -1.40942
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nmin_delay/hold group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff3/D (sky130_fd_sc_hd__dfxtp_1)       -0.03   -0.50   -0.47 (VIOLATED)\nff/D (sky130_fd_sc_hd__dfrtp_1)        -0.03   -0.50   -0.47 (VIOLATED)\nff2/D (sky130_fd_sc_hd__dfrtp_1)       -0.03   -0.50   -0.47 (VIOLATED)\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nNo paths found.\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nmin_delay/hold group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff3/D (sky130_fd_sc_hd__dfxtp_1)       -0.03   -0.50   -0.47 (VIOLATED)\nff/D (sky130_fd_sc_hd__dfrtp_1)        -0.03   -0.50   -0.47 (VIOLATED)\nff2/D (sky130_fd_sc_hd__dfrtp_1)       -0.03   -0.50   -0.47 (VIOLATED)\n\n===LEGACY_HOLD_END===\n"
+    },
+    "data_setup_only": {
+      "constraints": [
+        "create_clock -name clk -period 2 [get_ports clk]",
+        "set_input_delay -clock clk 2.5 [get_ports d]",
+        "set_input_delay -clock clk 0.5 [get_ports rst_n]",
+        "set_input_delay -clock clk 1.5 [get_ports en]",
+        "set_output_delay -clock clk 0.0 [get_ports {q q2 gq}]"
+      ],
+      "metrics": {
+        "timing__setup__ws": -0.604885,
+        "timing__hold__ws": 0.204409,
+        "timing__setup__tns": -1.81102,
+        "timing__hold__tns": 0
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nmax_delay/setup group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff/D (sky130_fd_sc_hd__dfrtp_1)         1.90    2.50   -0.60 (VIOLATED)\nff2/D (sky130_fd_sc_hd__dfrtp_1)        1.90    2.50   -0.60 (VIOLATED)\nff3/D (sky130_fd_sc_hd__dfxtp_1)        1.90    2.50   -0.60 (VIOLATED)\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nmax_delay/setup group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff/D (sky130_fd_sc_hd__dfrtp_1)         1.90    2.50   -0.60 (VIOLATED)\nff2/D (sky130_fd_sc_hd__dfrtp_1)        1.90    2.50   -0.60 (VIOLATED)\nff3/D (sky130_fd_sc_hd__dfxtp_1)        1.90    2.50   -0.60 (VIOLATED)\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nNo paths found.\n\n===LEGACY_HOLD_END===\n"
+    },
+    "mixed_hold": {
+      "constraints": [
+        "create_clock -name clk -period 2 [get_ports clk]",
+        "set_input_delay -clock clk -0.5 [get_ports d]",
+        "set_input_delay -clock clk 0.0 [get_ports rst_n]",
+        "set_input_delay -clock clk 1.5 [get_ports en]",
+        "set_output_delay -clock clk 0.0 [get_ports {q q2 gq}]"
+      ],
+      "metrics": {
+        "timing__setup__ws": 0.5,
+        "timing__hold__ws": -0.472283,
+        "timing__setup__tns": 0,
+        "timing__hold__tns": -2.00061
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nmin_delay/hold group asynchronous\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff/RESET_B (sky130_fd_sc_hd__dfrtp_1)    0.30    0.00   -0.30 (VIOLATED)\nff2/RESET_B (sky130_fd_sc_hd__dfrtp_1)    0.30    0.00   -0.30 (VIOLATED)\n\nmin_delay/hold group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff3/D (sky130_fd_sc_hd__dfxtp_1)       -0.03   -0.50   -0.47 (VIOLATED)\nff/D (sky130_fd_sc_hd__dfrtp_1)        -0.03   -0.50   -0.47 (VIOLATED)\nff2/D (sky130_fd_sc_hd__dfrtp_1)       -0.03   -0.50   -0.47 (VIOLATED)\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nNo paths found.\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nmin_delay/hold group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff3/D (sky130_fd_sc_hd__dfxtp_1)       -0.03   -0.50   -0.47 (VIOLATED)\nff/D (sky130_fd_sc_hd__dfrtp_1)        -0.03   -0.50   -0.47 (VIOLATED)\nff2/D (sky130_fd_sc_hd__dfrtp_1)       -0.03   -0.50   -0.47 (VIOLATED)\n\n===LEGACY_HOLD_END===\n"
+    },
+    "mixed_setup": {
+      "constraints": [
+        "create_clock -name clk -period 2 [get_ports clk]",
+        "set_input_delay -clock clk 2.5 [get_ports d]",
+        "set_input_delay -clock clk 2.5 [get_ports rst_n]",
+        "set_input_delay -clock clk 1.5 [get_ports en]",
+        "set_output_delay -clock clk 0.0 [get_ports {q q2 gq}]"
+      ],
+      "metrics": {
+        "timing__setup__ws": -0.604885,
+        "timing__hold__ws": 0.258459,
+        "timing__setup__tns": -2.35448,
+        "timing__hold__tns": 0
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nmax_delay/setup group asynchronous\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff/RESET_B (sky130_fd_sc_hd__dfrtp_1)    2.23    2.50   -0.27 (VIOLATED)\nff2/RESET_B (sky130_fd_sc_hd__dfrtp_1)    2.23    2.50   -0.27 (VIOLATED)\n\nmax_delay/setup group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff/D (sky130_fd_sc_hd__dfrtp_1)         1.90    2.50   -0.60 (VIOLATED)\nff2/D (sky130_fd_sc_hd__dfrtp_1)        1.90    2.50   -0.60 (VIOLATED)\nff3/D (sky130_fd_sc_hd__dfxtp_1)        1.90    2.50   -0.60 (VIOLATED)\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nmax_delay/setup group clk\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\nff/D (sky130_fd_sc_hd__dfrtp_1)         1.90    2.50   -0.60 (VIOLATED)\nff2/D (sky130_fd_sc_hd__dfrtp_1)        1.90    2.50   -0.60 (VIOLATED)\nff3/D (sky130_fd_sc_hd__dfxtp_1)        1.90    2.50   -0.60 (VIOLATED)\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nNo paths found.\n\n===LEGACY_HOLD_END===\n"
+    },
+    "clock_gating_setup_only": {
+      "constraints": [
+        "create_clock -name clk -period 2 [get_ports clk]",
+        "set_input_delay -clock clk 0.5 [get_ports d]",
+        "set_input_delay -clock clk 0.5 [get_ports rst_n]",
+        "set_input_delay -clock clk 2.5 [get_ports en]",
+        "set_output_delay -clock clk 0.0 [get_ports {q q2 gq}]"
+      ],
+      "metrics": {
+        "timing__setup__ws": -0.5,
+        "timing__hold__ws": 0.204409,
+        "timing__setup__tns": -0.5,
+        "timing__hold__tns": 0
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nmax_delay/setup group gated clock\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\ncg/B (sky130_fd_sc_hd__and2_1)          2.00    2.50   -0.50 (VIOLATED)\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nNo paths found.\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nNo paths found.\n\n===LEGACY_HOLD_END===\n"
+    },
+    "clock_gating_hold_only": {
+      "constraints": [
+        "create_clock -name clk -period 2 [get_ports clk]",
+        "set_input_delay -clock clk 0.5 [get_ports d]",
+        "set_input_delay -clock clk 0.5 [get_ports rst_n]",
+        "set_input_delay -clock clk 0.0 [get_ports en]",
+        "set_output_delay -clock clk 0.0 [get_ports {q q2 gq}]"
+      ],
+      "metrics": {
+        "timing__setup__ws": 1.39511,
+        "timing__hold__ws": -1,
+        "timing__setup__tns": 0,
+        "timing__hold__tns": -1
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nmin_delay/hold group gated clock\n\n                                     Required  Actual\nEndpoint                               Delay   Delay   Slack\n------------------------------------------------------------\ncg/B (sky130_fd_sc_hd__and2_1)          1.00    0.00   -1.00 (VIOLATED)\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nNo paths found.\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nNo paths found.\n\n===LEGACY_HOLD_END===\n"
+    },
+    "unconstrained": {
+      "constraints": [],
+      "metrics": {
+        "timing__setup__ws": 1e+39,
+        "timing__hold__ws": 1e+39,
+        "timing__setup__tns": 0,
+        "timing__hold__tns": 0
+      },
+      "stdout": "===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n",
+      "legacy_stdout": "===LEGACY_SETUP_BEGIN===\nNo paths found.\n\n===LEGACY_SETUP_END===\n===LEGACY_HOLD_BEGIN===\nNo paths found.\n\n===LEGACY_HOLD_END===\n"
+    }
+  },
+  "legacy_report_tcl": [
+    "puts \"===LEGACY_SETUP_BEGIN===\"",
+    "report_check_types -max_delay -violators -format end",
+    "puts \"===LEGACY_SETUP_END===\"",
+    "puts \"===LEGACY_HOLD_BEGIN===\"",
+    "report_check_types -min_delay -violators -format end",
+    "puts \"===LEGACY_HOLD_END===\""
+  ]
+}

@@ -238,7 +238,10 @@ independently of the existing :data:`_ITEM_ALLOWED_KINDS` mechanism (item
 ``"met"`` grading on a ``"generic"``-kind citation to ``"unmet"``/
 ``"wrong_kind"`` for every item *not* in that set, regardless of whether
 ``allowed_kinds`` would otherwise have accepted it. Today the set is
-``{8}`` -- the one T1 item whose own checklist text names no `klt` verb.
+``{8}`` -- the one T1 item whose own checklist text names no `klt` verb
+(issue #2718 later added items 1, 2, 9 and 10, but only for an
+artifact-anchored generic citation -- see "Artifact-anchored generic
+evidence" below).
 Items 3-7 (DRC, LVS, corner verification, Monte Carlo, post-layout) reject a
 ``"generic"`` citation unconditionally, the same ``"wrong_kind"`` outcome
 item 7 already renders for any non-``pex`` citation; this phase did not
@@ -415,16 +418,34 @@ changes is only whether an `extract` citation (or any other wrong-kind one)
 can satisfy a *numbered tier item*.
 
 **Items 1, 2, 9 and 10 are deliberately left unrestricted.** Unlike items
-3-8 they name no evidence at all -- ``docs/design-evidence-tiers.md`` says
-so outright ("items **1**, **2**, **9**, and **10** have none ... Citing
-them honestly is the claimant's responsibility, not something the tool
-verifies"), and ``docs/cli/signoff.md``'s "Items 1, 2, 9, and 10" section
-states the grading consequence plainly: any recognised, passing native kind
-satisfies them, topical relevance included. Excluding ``extract`` there
-specifically would be arbitrary -- a `klt drc` citation for item 9
-("Testbenches shipped") is exactly as irrelevant and still counts by
-design. Binding those four to real evidence needs an artifact for them to
-bind *to*, which is a separate question from this one.
+3-8 they name no `klt` verb at all, and ``docs/cli/signoff.md``'s "Items
+1, 2, 9, and 10" section states the grading consequence plainly: any
+recognised, passing native kind satisfies them, topical relevance
+included. Excluding ``extract`` there specifically would be arbitrary -- a
+`klt drc` citation for item 9 ("Testbenches shipped") is exactly as
+irrelevant and still counts by design. Binding those four to real evidence
+needs an artifact for them to bind *to* -- see the next section.
+
+## Artifact-anchored generic evidence for items 1, 2, 9 and 10 (issue #2718)
+
+A passing native envelope cited for one of these four carries no
+information about the item, so this phase gives them a way to be evidenced
+that the grader *can* read: an opt-in ``"generic"`` envelope that declares
+which item it attests (``"t1_item": <id>``) and pins the audited artifact
+(``provenance.input.path`` + ``provenance.input.content_hash``, issue
+#2403's opt-in fields), cited by a manifest entry that pins the same
+``content_hash``. :data:`_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE`
+documents the four conditions; :func:`_generic_item_binding_refusal` and
+:func:`_grade_evidence` enforce them, and the ``"met"`` citation carries an
+``artifact_binding`` block disclosing the bound artifact.
+
+Strictly additive: a native citation for these items grades exactly as it
+did before (and carries no ``artifact_binding``, which is how a reader tells
+"a passing envelope was cited" apart from "the item is bound to an audited
+artifact"); items 3-7 and 11 still reject ``"generic"``; item 8 accepts a
+generic envelope with no ``t1_item`` exactly as before, and refuses one that
+declares a different item (:data:`_REASON_WRONG_ITEM`), so an anchored
+attestation for item 9 cannot be replayed onto item 8 either.
 
 ## Power delivery (structural): item 11 <- `klt erc` + `klt lvs` (+ P&R) (issue #2025)
 
@@ -822,7 +843,7 @@ import os
 import shlex
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import cache
 from pathlib import Path
 from typing import (
@@ -914,7 +935,11 @@ from .signoff_envelopes import _YieldRequired as _YieldRequired
 # everything else that subsystem needs back from here it imports itself,
 # deferred into its own function bodies -- see that module's own docstring
 # for why.
-from .signoff_power_delivery import _build_power_delivery_item, _strap_layers
+from .signoff_power_delivery import (
+    _build_power_delivery_item,
+    _read_power_port_policy,
+    _strap_layers,
+)
 
 __all__ = [
     "SignoffError",
@@ -1111,12 +1136,49 @@ _ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE: frozenset[int] = frozenset({7})
 #: ``"generic"`` citation for any item *not* in this set is always
 #: downgraded to ``"unmet"``/``"wrong_kind"``, even for an item that would
 #: otherwise accept any recognised native kind (``allowed_kinds is None``).
-#: Today this is only item 8 ("Characterization report") -- every other
-#: item's checklist text names a concrete `klt` verb (`klt
-#: drc`/`lvs`/sim/yield/pex) or a repo-state artifact no envelope, native or
-#: generic, could ever stand in for (items 1, 2, 9, 10), so none of them
-#: opt in.
-_ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({8})
+#: Item 8 ("Characterization report") was the only member until issue
+#: #2718; items 3-7 name a concrete `klt` verb (`klt
+#: drc`/`lvs`/sim/yield/pex) and still never accept ``"generic"``.
+#:
+#: Issue #2718 adds items 1, 2, 9 and 10 -- the repo-state items no `klt`
+#: verb can check -- but **only** through the stricter, artifact-anchored
+#: form :data:`_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE` defines: a bare
+#: "yep, it's fine" generic record still cannot satisfy them.
+_ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 8, 9, 10})
+
+#: T1 item ids that accept a ``"generic"`` citation **only when it is
+#: artifact-anchored** (issue #2718) -- items 1 (Design sources), 2 (Layout),
+#: 9 (Testbenches shipped) and 10 (Repo hygiene). For these four a generic
+#: citation renders ``"met"`` only when all of the following hold, checked
+#: in :func:`_generic_item_binding_refusal` and :func:`_grade_evidence`:
+#:
+#: 1. the envelope declares ``"t1_item": <this item's id>`` -- so one
+#:    attestation can never be replayed across items
+#:    (:data:`_REASON_WRONG_ITEM` on a mismatch);
+#: 2. the envelope names the audited artifact in
+#:    ``provenance.input.path`` and records its
+#:    ``provenance.input.content_hash`` (issue #2403's opt-in fields);
+#: 3. the manifest entry pins that same ``content_hash`` (the existing
+#:    staleness gate -- :data:`_REASON_STALE_EVIDENCE` /
+#:    :data:`_REASON_UNVERIFIABLE_PROVENANCE`);
+#: 4. the named artifact actually re-hashes to it from the grading context
+#:    (``input_verified is True``, issue #2196) -- ``False`` renders
+#:    :data:`_REASON_STALE_EVIDENCE`, ``None`` (not found/readable here)
+#:    renders :data:`_REASON_UNVERIFIABLE_PROVENANCE`.
+#:
+#: A missing or malformed piece of 1-3 renders
+#: :data:`_REASON_UNANCHORED_EVIDENCE`. The met citation then carries an
+#: ``artifact_binding`` block disclosing what was bound.
+#:
+#: Deliberately **not** in :data:`_ITEM_ALLOWED_KINDS`: these four still
+#: accept any passing native envelope exactly as before (no verdict any
+#: existing manifest renders changes), and so stay "structurally
+#: ungradeable" for the fleet roll-up's blocker reduction
+#: (:func:`_is_structurally_ungradeable_item`). The absence of
+#: ``artifact_binding`` on such a citation is what tells a reader the row
+#: was satisfied by a passing envelope the grader could not judge for
+#: relevance, rather than by an item-bound artifact.
+_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE: frozenset[int] = frozenset({1, 2, 9, 10})
 
 #: T1 item ids a ``"power"``-kind citation (issue #1321, see this module's
 #: "`klt power` (IR-drop/EM) evidence ingestion" docstring section) may
@@ -1148,6 +1210,16 @@ _ITEMS_ACCEPTING_ERC_EVIDENCE: frozenset[int] = frozenset({11})
 #: extract` on items 3 and 4.
 _ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE: frozenset[int] = frozenset({11})
 
+#: T1 item ids a ``"socket-check"``-kind citation (issue #2839) may satisfy:
+#: item 11 alone, as its port-accessibility half's GDS-side evidence (the
+#: ``power_ports`` facts). A socket fit says nothing about any other item.
+_ITEMS_ACCEPTING_SOCKET_CHECK_EVIDENCE: frozenset[int] = frozenset({11})
+
+#: T1 item ids a ``"lef-abstract"``-kind citation (issue #2839) may satisfy:
+#: item 11 alone, as its port-accessibility half's abstract evidence. Its
+#: own pass (a structurally sound LEF) proves nothing about any other item.
+_ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE: frozenset[int] = frozenset({11})
+
 #: Every **opt-in** kind, mapped to the T1 item ids that accept it -- the
 #: single table :func:`_build_tier_item` consults, so a new opt-in kind is
 #: one entry here rather than a fourth near-identical branch there. A kind
@@ -1163,6 +1235,8 @@ _OPT_IN_KIND_ITEMS: dict[str, frozenset[int]] = {
     "power": _ITEMS_ACCEPTING_POWER_EVIDENCE,
     "erc": _ITEMS_ACCEPTING_ERC_EVIDENCE,
     "place-and-route": _ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE,
+    "socket-check": _ITEMS_ACCEPTING_SOCKET_CHECK_EVIDENCE,
+    "lef-abstract": _ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE,
 }
 
 #: T1 item ids graded by the dedicated **compound** evidence path
@@ -1631,6 +1705,25 @@ _REASON_ENVELOPE_VERSION_SKEW = "envelope_version_skew"
 #: ``content_hash``.
 _REASON_UNVERIFIABLE_PROVENANCE = "unverifiable_provenance"
 
+#: Issue #2718: a passing ``"generic"`` citation for one of the
+#: artifact-anchored items (:data:`_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE`
+#: -- 1, 2, 9, 10) that does not carry the binding those items require: the
+#: envelope declares no ``t1_item`` (or a non-integer one), names no
+#: ``provenance.input.path``, or the manifest entry pins no
+#: ``content_hash``. Nothing ties the attestation to an audited artifact,
+#: so its ``status: "pass"`` is the caller's word alone. Grouped with the
+#: "no runnable check" reasons: the remedy is to anchor the citation, not
+#: to re-run anything.
+_REASON_UNANCHORED_EVIDENCE = "unanchored_evidence"
+
+#: Issue #2718: a passing ``"generic"`` citation whose envelope declares a
+#: ``t1_item`` other than the item it is cited for -- an attestation
+#: replayed across items. Checked for every item that accepts
+#: ``"generic"`` at all (:data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE`,
+#: including item 8); an item-8 envelope that declares no ``t1_item`` is
+#: unaffected, exactly as before.
+_REASON_WRONG_ITEM = "wrong_item"
+
 #: Issue #2342: the evidence entry carried a ``"pointer"`` (an RFC 6901 JSON
 #: Pointer naming where inside the cited document the envelope lives -- see
 #: :func:`_resolve_json_pointer`), and that pointer did not resolve to a JSON
@@ -1920,7 +2013,8 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                     "source": <str, the entry from `sources`>,
                     "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "pex"
                             | "power" | "sta" | "functional-verification"
-                            | "erc" | "place-and-route" | "generic" | "error",
+                            | "erc" | "place-and-route" | "socket-check"
+                            | "lef-abstract" | "generic" | "error",
                     "status": <str> | None,
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
@@ -2216,9 +2310,10 @@ def _raise_unclassified(envelope: Mapping[str, Any], source: str) -> NoReturn:
     raise SignoffError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
-        "yield/pex/power/sta/functional-verification/erc/place-and-route "
-        "success or error envelope, and not a generic evidence envelope "
-        '("kind": "generic") either -- klt signoff aggregates those eleven '
+        "yield/pex/power/sta/functional-verification/erc/place-and-route/"
+        "socket-check/lef-abstract success or error envelope, and not a "
+        'generic evidence envelope ("kind": "generic") either -- klt '
+        "signoff aggregates those thirteen "
         "verbs' output plus opt-in generic evidence today (see "
         "docs/cli/signoff.md)"
     )
@@ -2232,6 +2327,76 @@ def _classify_failure_reason(error: SignoffError) -> str:
     if isinstance(error, EnvelopeVersionSkewError):
         return _REASON_ENVELOPE_VERSION_SKEW
     return _REASON_UNRECOGNIZED_ENVELOPE
+
+
+def _is_erc_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt erc` (issue #2025; docs/cli/erc.md): a top-level `gates` list plus
+    # `gate_role` (the `stackup[0].name` echo) is unique to this shape -- no
+    # other verb emits either field. Recognised since `klt erc` grew a
+    # top-level `status` (`"clean"`/`"violations"`) and the shared
+    # `provenance` block in issue #1968, which is what made its output
+    # gradeable at all. See this module's "Power delivery (structural)"
+    # docstring section.
+    return isinstance(envelope.get("gates"), list) and "gate_role" in envelope
+
+
+def _is_place_and_route_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt place-and-route` (issue #2025; docs/cli/place-and-route.md): a
+    # top-level `stage_reached` string plus the always-present `power`
+    # object is unique to this response -- no other verb emits either. The
+    # `power` block is the whole reason this kind is recognised (T1 item
+    # 11's digital branch asks whether the routed artifact was produced with
+    # a PDN at all); this module still deliberately ignores the response's
+    # own `worst_setup_slack_ns`/`corners` timing, whose corner set is the
+    # PDK's full shipped list rather than a declared one -- see "Digital-flow
+    # evidence" above on why `klt sta`, not this, is item 5's timing
+    # evidence.
+    return isinstance(envelope.get("stage_reached"), str) and isinstance(
+        envelope.get("power"), dict
+    )
+
+
+def _is_socket_check_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt socket-check` (issue #2839; docs/cli/socket-check.md): a
+    # top-level `socket` (the descriptor path) plus the `checks` and
+    # `budgets` lists is unique to this response. Recognised only so T1
+    # item 11 can cite its additive `power_ports` facts -- see
+    # `_ITEMS_ACCEPTING_SOCKET_CHECK_EVIDENCE`.
+    return (
+        "socket" in envelope
+        and isinstance(envelope.get("checks"), list)
+        and isinstance(envelope.get("budgets"), list)
+    )
+
+
+def _is_lef_abstract_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt lef-abstract` (issue #2839; docs/cli/lef-abstract.md): a
+    # top-level `macro_name` plus a `pins` list and the `self_check` block
+    # (issue #2769) is unique to this response. Recognised for T1 item 11's
+    # LEF-abstract half -- see `_ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE`.
+    return (
+        isinstance(envelope.get("macro_name"), str)
+        and isinstance(envelope.get("pins"), list)
+        and isinstance(envelope.get("self_check"), dict)
+    )
+
+
+#: The kinds :func:`_classify` matches last, in order, each by a pair of
+#: fields unique to its verb's response (none can collide with an earlier
+#: kind's markers). One table rather than one branch each (issue #2839).
+_STRUCTURAL_KINDS: tuple[tuple[str, Callable[[Mapping[str, Any]], bool]], ...] = (
+    ("erc", _is_erc_shape),
+    ("place-and-route", _is_place_and_route_shape),
+    ("socket-check", _is_socket_check_shape),
+    ("lef-abstract", _is_lef_abstract_shape),
+)
+
+
+def _structural_kind(envelope: Mapping[str, Any]) -> str | None:
+    """The first :data:`_STRUCTURAL_KINDS` kind ``envelope`` matches."""
+    return next(
+        (kind for kind, matches in _STRUCTURAL_KINDS if matches(envelope)), None
+    )
 
 
 def _classify(envelope: Mapping[str, Any], source: str) -> str:
@@ -2365,30 +2530,12 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     elif isinstance(envelope.get("tests"), list) and "test_count" in envelope:
         kind = "functional-verification"
 
-    # `klt erc` (issue #2025; docs/cli/erc.md): a top-level `gates` list plus
-    # `gate_role` (the `stackup[0].name` echo) is unique to this shape -- no
-    # other verb emits either field. Recognised since `klt erc` grew a
-    # top-level `status` (`"clean"`/`"violations"`) and the shared
-    # `provenance` block in issue #1968, which is what made its output
-    # gradeable at all. See this module's "Power delivery (structural)"
-    # docstring section.
-    elif isinstance(envelope.get("gates"), list) and "gate_role" in envelope:
-        kind = "erc"
-
-    # `klt place-and-route` (issue #2025; docs/cli/place-and-route.md): a
-    # top-level `stage_reached` string plus the always-present `power`
-    # object is unique to this response -- no other verb emits either. The
-    # `power` block is the whole reason this kind is recognised (T1 item
-    # 11's digital branch asks whether the routed artifact was produced with
-    # a PDN at all); this module still deliberately ignores the response's
-    # own `worst_setup_slack_ns`/`corners` timing, whose corner set is the
-    # PDK's full shipped list rather than a declared one -- see "Digital-flow
-    # evidence" above on why `klt sta`, not this, is item 5's timing
-    # evidence.
-    elif isinstance(envelope.get("stage_reached"), str) and isinstance(
-        envelope.get("power"), dict
-    ):
-        kind = "place-and-route"
+    # `klt erc`, `klt place-and-route`, `klt socket-check` and `klt
+    # lef-abstract`: matched through one table (`_STRUCTURAL_KINDS`, which
+    # carries each shape's own recognition rationale) so a new kind is one
+    # table entry rather than another branch here (issue #2839).
+    elif (structural_kind := _structural_kind(envelope)) is not None:
+        kind = structural_kind
 
     else:
         # Issue #2198: refused either as version skew (a kind's primary
@@ -2780,6 +2927,55 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     return None if _erc_connectivity_state(envelope) is not None else refusal
 
 
+def _drc_rule_subset(envelope: Mapping[str, Any]) -> bool:
+    """Whether a `klt drc` envelope declares a deliberate ``--rules`` subset
+    (issue #2768) -- a run that executed only some of its deck's registered
+    rules.
+
+    The producer already rolls such a run up as ``"clean_partial"`` (each
+    omitted rule is a ``coverage.skipped`` record with reason
+    ``not_selected``), so :func:`_check_passed`'s ``status == "clean"`` test
+    declines it on its own. This is the belt to that braces, read off the
+    envelope's own ``rule_selection`` block so a hand-edited or
+    inconsistent envelope cannot claim full-deck credit either: ``True`` for
+    a non-empty ``omitted`` list, a ``subset: true`` flag, or a present but
+    malformed block (which proves nothing about the deck it skipped).
+    ``False`` when the key is absent -- every report written before the flag
+    existed, and every full-deck run, keeps grading exactly as before.
+    Applied inside :func:`_check_passed`, so envelope aggregation and
+    numbered-citation grading share it.
+    """
+    if "rule_selection" not in envelope:
+        return False
+    selection = envelope.get("rule_selection")
+    if not isinstance(selection, dict):
+        return True
+    omitted = selection.get("omitted")
+    if not isinstance(omitted, list):
+        return True
+    return bool(omitted) or selection.get("subset") is not False
+
+
+def _drc_rule_selection_detail(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """``{"rule_selection": <block>}`` quoted verbatim off a `klt drc --rules`
+    envelope (issue #2768), or ``{}`` when it carries none."""
+    if "rule_selection" not in envelope:
+        return {}
+    return {"rule_selection": envelope.get("rule_selection")}
+
+
+#: The kinds whose verdict is exactly one passing ``status`` token, read by
+#: :func:`_check_passed` through one table rather than one branch each
+#: (issue #2839 added ``socket-check`` here without growing that function).
+_PASSING_STATUS_BY_KIND: dict[str, str] = {
+    "sim": "pass",
+    "pex": "pass",
+    "place-and-route": "ok",
+    "socket-check": "pass",
+    "generic": "pass",
+}
+
+
 def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     """Whether this one check counts as passing.
 
@@ -2912,6 +3108,12 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       see "Digital-flow evidence" above). Because it cannot fail on
       quality, this kind is opt-in per item exactly like ``generic`` --
       only T1 item 11 accepts it, and only for its ``power`` block.
+    - ``socket-check`` (issue #2839) passes on ``status == "pass"`` and
+      ``lef-abstract`` on ``self_check.status == "pass"`` (it has no
+      top-level ``status``). Both are opt-in kinds scoped to T1 item 11,
+      whose port-accessibility grading reads their additive
+      ``power_ports``/``power_pins`` blocks rather than these verdicts
+      alone.
     - ``generic`` (issue #1152) passes on ``status == "pass"`` -- the
       envelope's own, caller-asserted verdict; unlike every native kind
       above, nothing here re-derives that verdict from any other field,
@@ -2919,21 +3121,22 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     - ``error`` never passes.
     """
     if kind == "drc":
-        passed = envelope.get("status") == "clean"
+        # Issue #2768: a `--rules` subset never earns full DRC credit, even
+        # if its status somehow reads "clean" -- see `_drc_rule_subset`.
+        passed = envelope.get("status") == "clean" and not _drc_rule_subset(envelope)
     elif kind == "lvs":
         power_connectivity = envelope.get("power_connectivity") or {}
         passed = (
             envelope.get("status") == "match"
             and power_connectivity.get("status") != "mismatch"
         )
-    elif kind == "sim":
-        passed = envelope.get("status") == "pass"
+    elif kind in _PASSING_STATUS_BY_KIND:
+        # sim/pex/place-and-route/socket-check/generic: one passing token.
+        passed = envelope.get("status") == _PASSING_STATUS_BY_KIND[kind]
     elif kind == "yield":
         passed = envelope.get("status") in ("pass", "reported")
     elif kind == "extract":
         passed = True
-    elif kind == "pex":
-        passed = envelope.get("status") == "pass"
     elif kind == "power":
         em_verdict = envelope.get("em_verdict")
         passed = isinstance(em_verdict, dict) and em_verdict.get("status") == "pass"
@@ -2943,10 +3146,10 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
         passed = _functional_verification_passed(envelope)
     elif kind == "erc":
         passed = _erc_passed(envelope)
-    elif kind == "place-and-route":
-        passed = envelope.get("status") == "ok"
-    elif kind == "generic":
-        passed = envelope.get("status") == "pass"
+    elif kind == "lef-abstract":
+        # Issue #2839: no top-level `status`; the structural self-check of
+        # the LEF read back from disk is the verb's verdict of record.
+        passed = (envelope.get("self_check") or {}).get("status") == "pass"
     else:
         passed = False  # kind == "error"
 
@@ -3118,6 +3321,14 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
     if _critical_metric_blockers(envelope):
         return _REASON_CHECK_FAILED
     if _reports_partial_status(kind, envelope):
+        return _REASON_PARTIAL_COVERAGE
+    # Issue #2768: a `klt drc --rules` subset whose only shortfall is the
+    # rules it deliberately omitted is a coverage gap, not a defect.
+    if (
+        kind == "drc"
+        and envelope.get("status") == "clean"
+        and _drc_rule_subset(envelope)
+    ):
         return _REASON_PARTIAL_COVERAGE
     return _REASON_CHECK_FAILED
 
@@ -3427,6 +3638,9 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
         coverage = _drc_coverage_disclosure(kind, envelope)
         if coverage is not None:
             detail["coverage"] = coverage
+        # Issue #2768: a `--rules` subset says so in the check itself, quoted
+        # verbatim; absent for a full-deck run, so old detail is unchanged.
+        detail.update(_drc_rule_selection_detail(envelope))
     elif kind == "lvs":
         detail = {
             "layout": envelope.get("layout"),
@@ -3556,10 +3770,10 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "sdf_annotated": _is_sdf_annotated(envelope),
             "sdf_corner": sdf.get("corner"),
         }
-    elif kind == "erc":
-        detail = _erc_detail(envelope)
-    elif kind == "place-and-route":
-        detail = _place_and_route_detail(envelope)
+    elif kind in _DETAIL_BUILDERS:
+        # erc/place-and-route/socket-check/lef-abstract: one builder each,
+        # looked up rather than branched on (issue #2839).
+        detail = _DETAIL_BUILDERS[kind](envelope)
     elif kind == "generic":
         detail = {
             "summary": envelope.get("summary"),
@@ -3640,6 +3854,39 @@ def _place_and_route_detail(envelope: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Provenance consistency (issue #251's provenance block; #309 AC #2)
 # --------------------------------------------------------------------------- #
+
+
+def _socket_check_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"socket-check"`` excerpt (issue #2839)."""
+    return {
+        "socket": envelope.get("socket"),
+        "socket_name": envelope.get("socket_name"),
+        "failed_checks": [
+            check.get("name")
+            for check in envelope.get("checks") or []
+            if isinstance(check, dict) and check.get("status") == "fail"
+        ],
+    }
+
+
+def _lef_abstract_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"lef-abstract"`` excerpt (issue #2839)."""
+    return {
+        "macro_name": envelope.get("macro_name"),
+        "output": envelope.get("output"),
+        "self_check_status": (envelope.get("self_check") or {}).get("status"),
+        "power_pins_status": (envelope.get("power_pins") or {}).get("status"),
+    }
+
+
+#: :func:`_detail`'s per-kind excerpt builders for the kinds that have one
+#: of their own (issue #2839 moved ``erc``/``place-and-route`` here).
+_DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "erc": _erc_detail,
+    "place-and-route": _place_and_route_detail,
+    "socket-check": _socket_check_detail,
+    "lef-abstract": _lef_abstract_detail,
+}
 
 
 def _provenance_consistency(checks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4382,6 +4629,8 @@ def build_tier_report(
         )
 
     partition_boundary = _read_partition_boundary(manifest, kind)
+    # Issue #2839: T1 item 11's port-accessibility policy (provisional).
+    power_port_policy = _read_power_port_policy(manifest.get("power_ports"))
 
     doc = parse_tier_doc(tiers_doc)
     partitions: tuple[str, ...] = (
@@ -4414,6 +4663,7 @@ def build_tier_report(
                     partition_boundary=partition_boundary.get(partition),
                     evidence=evidence,
                     graded_by_build=graded_by_build,
+                    power_port_policy=power_port_policy,
                 )
             else:
                 entry = _build_tier_item(
@@ -5042,6 +5292,7 @@ _INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
     "sim": ("netlist",),
     "pex": ("layout",),
     "sta": ("def_path", "verilog_path"),
+    "lef-abstract": ("file",),
 }
 
 
@@ -5187,6 +5438,7 @@ def _grade_evidence(
     *,
     require_post_layout: bool = False,
     allowed_kinds: set[str] | None = None,
+    item_id: int | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
     and return ``(status, reason, citation, failure_detail)``.
@@ -5271,6 +5523,14 @@ def _grade_evidence(
     above, and skipped entirely for any envelope that makes no such
     statement (including every envelope predating the convention). See this
     module's "Vacuous-verdict refusal" docstring section.
+
+    **Generic item binding** (issue #2718): ``item_id`` is the T1 item being
+    graded (``None`` outside :func:`_build_tier_item`). A passing
+    ``"generic"`` citation for an item that accepts that kind must not
+    declare a different ``t1_item`` (:data:`_REASON_WRONG_ITEM`), and for an
+    item in :data:`_ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE` must be
+    artifact-anchored (:data:`_REASON_UNANCHORED_EVIDENCE` otherwise) and its
+    named artifact must re-hash to the pinned hash -- see that constant.
     """
     resolution, reason = _resolve_evidence(spec)
     if resolution is None:
@@ -5318,13 +5578,147 @@ def _grade_evidence(
         )
         return "unmet", kind_gated, None, failure_detail
 
+    # Issue #2718: a generic citation's declared item identity and, for the
+    # artifact-anchored items, its artifact binding -- checked only for an
+    # item that accepts "generic" at all, so items 3-7/11 keep rendering
+    # `wrong_kind` from `_build_tier_item`'s opt-in gate exactly as before.
+    binding_refusal = _generic_item_binding_refusal(check_kind, item_id, envelope, spec)
+    if binding_refusal is not None:
+        return "unmet", binding_refusal, None, {}
+
     expected_hash = spec.get("content_hash")
     if expected_hash is not None and resolution["content_hash"] != expected_hash:
         if resolution["content_hash"] is None:
             return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
-    return "met", None, _citation(resolution), {}
+    citation = _citation(resolution)
+    anchored_refusal = _bind_anchored_citation(
+        check_kind, item_id, resolution, citation
+    )
+    if anchored_refusal is not None:
+        return "unmet", anchored_refusal, None, {}
+    return "met", None, citation, {}
+
+
+def _bind_anchored_citation(
+    check_kind: str,
+    item_id: int | None,
+    resolution: Mapping[str, Any],
+    citation: dict[str, Any],
+) -> str | None:
+    """For a ``"generic"`` citation of an artifact-anchored item (issue
+    #2718), require the bound artifact to re-hash to the recorded hash and
+    attach ``citation["artifact_binding"]`` -- or return the refusing
+    reason. A no-op (``None``) for every other kind/item.
+
+    By the time this runs the manifest pin has matched the envelope's own
+    claim; for an anchored item that claim must also hold against the
+    artifact itself (issue #2196's re-hash), or the binding is only one
+    self-report deep. ``False`` (re-hashed, differs) is
+    :data:`_REASON_STALE_EVIDENCE`; ``None`` (nothing could be re-hashed
+    from here) is :data:`_REASON_UNVERIFIABLE_PROVENANCE`.
+    """
+    if check_kind != "generic" or item_id not in (
+        _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
+    ):
+        return None
+    input_verified = resolution.get("input_verified")
+    if input_verified is False:
+        return _REASON_STALE_EVIDENCE
+    if input_verified is not True:
+        return _REASON_UNVERIFIABLE_PROVENANCE
+    citation["artifact_binding"] = _generic_artifact_binding(
+        resolution["envelope"], resolution
+    )
+    return None
+
+
+def _generic_binding_path(envelope: Mapping[str, Any]) -> Any:
+    """The ``provenance.input.path`` a generic envelope names, or ``None``
+    when it names no usable one -- a non-empty string, or a ``{path,
+    scope: "repo"}`` object (``scope: "external"`` carries no resolvable
+    path by design)."""
+    provenance = envelope.get("provenance")
+    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    path = input_block.get("path") if isinstance(input_block, Mapping) else None
+    if isinstance(path, str) and path:
+        return path
+    if isinstance(path, Mapping) and path.get("scope") == "repo":
+        return path
+    return None
+
+
+def _generic_item_binding_refusal(
+    check_kind: str,
+    item_id: int | None,
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+) -> str | None:
+    """Why a passing ``"generic"`` citation cannot be bound to T1 item
+    ``item_id`` (issue #2718), or ``None`` when its item identity and -- for
+    an artifact-anchored item -- its binding are present and consistent.
+    Always ``None`` for a non-generic kind, and for an item that does not
+    accept ``"generic"`` at all -- items 3-7/11 keep rendering
+    ``"wrong_kind"`` from :func:`_build_tier_item`'s opt-in gate, exactly as
+    before.
+
+    Only the *shape* of the binding is checked here; whether the pinned hash
+    matches the envelope, and the envelope the artifact, is
+    :func:`_grade_evidence`'s existing staleness gate plus its
+    ``input_verified`` requirement, so a stale binding reports the same
+    reasons a stale native citation does.
+
+    - A declared ``t1_item`` that is not an integer -- or is absent on an
+      anchored item -- renders :data:`_REASON_UNANCHORED_EVIDENCE`; one
+      naming a different item renders :data:`_REASON_WRONG_ITEM`. An item-8
+      envelope that declares no ``t1_item`` is accepted as before.
+    - An anchored item additionally needs ``provenance.input.path`` and a
+      manifest-pinned ``content_hash``.
+    """
+    if check_kind != "generic" or item_id not in _ITEMS_ACCEPTING_GENERIC_EVIDENCE:
+        return None
+    anchored = item_id in _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
+    declared = envelope.get("t1_item")
+    if declared is None:
+        if anchored:
+            return _REASON_UNANCHORED_EVIDENCE
+    elif isinstance(declared, bool) or not isinstance(declared, int):
+        return _REASON_UNANCHORED_EVIDENCE
+    elif declared != item_id:
+        return _REASON_WRONG_ITEM
+    if anchored and (
+        _generic_binding_path(envelope) is None
+        or not isinstance(spec.get("content_hash"), str)
+    ):
+        return _REASON_UNANCHORED_EVIDENCE
+    return None
+
+
+def _generic_artifact_binding(
+    envelope: Mapping[str, Any], resolution: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The ``citation.artifact_binding`` disclosure for a ``"met"``
+    artifact-anchored generic citation (issue #2718): which item the
+    attestation declared, which artifact it is bound to (``path`` exactly as
+    the envelope names it -- a string or a ``{path, scope}`` object), and the
+    hash that artifact re-hashed to. ``summary``/``source`` are echoed when
+    the envelope carries them, so a reader sees what was audited without
+    opening the envelope; they are never graded.
+    """
+    provenance = envelope.get("provenance") or {}
+    input_block = provenance.get("input") or {}
+    binding: dict[str, Any] = {
+        "t1_item": envelope.get("t1_item"),
+        "path": input_block.get("path"),
+        "content_hash": resolution["content_hash"],
+        "input_verified": resolution.get("input_verified"),
+    }
+    for field in ("summary", "source"):
+        value = envelope.get(field)
+        if isinstance(value, str):
+            binding[field] = value
+    return binding
 
 
 def _resolve_evidence(
@@ -5636,7 +6030,9 @@ def _build_tier_item(
 
     A ``"generic"``-kind citation (issue #1152) is gated independently of
     ``allowed_kinds``: it only satisfies an item whose id is a member of
-    :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` (today, item 8 only) -- checked
+    :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` (item 8, plus items 1, 2, 9
+    and 10 for an artifact-anchored citation only -- issue #2718, enforced
+    inside :func:`_grade_evidence`, which receives ``item_id``) -- checked
     first, so ``"generic"`` never borrows a pass from an item's otherwise
     unrestricted ``allowed_kinds=None`` (which was written for the six
     `klt`-verb-native kinds, before ``"generic"`` existed, and would
@@ -5682,6 +6078,7 @@ def _build_tier_item(
                 spec,
                 require_post_layout=require_post_layout,
                 allowed_kinds=allowed_kinds,
+                item_id=item_id,
             )
             opt_in_items = (
                 _OPT_IN_KIND_ITEMS.get(citation["kind"]) if status == "met" else None

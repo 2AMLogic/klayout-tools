@@ -230,6 +230,15 @@ cleanly.
   Metal2↔Metal3 via) — both families resolve to the identical four values,
   since `sg13cmos5l`'s own Metal1-TopMetal1 stack is a documented prefix of
   `sg13g2`'s deeper Metal1-TopMetal2 stack.
+- **sky130 upper routing planes (#2738)** — the role numbering counts li1 as
+  `"metal"`, so the roles are offset from the physical metal names —
+  `"metal4"` = met3 `70/20`, `"metal5"` = met4 `71/20`, `"metal6"` = met5
+  `72/20`, with `"via3"` = via2 `69/44` (met2↔met3), `"via4"` = via3 `70/44`
+  (met3↔met4), `"via5"` = via4 `71/44` (met4↔met5). The via-drop ladder walks
+  met2 → met5 through the extraction deck's stack. `"top_metal"` remains an
+  unchanged alias of `"metal6"` (met5); both get the same met5
+  width/spacing and via4 enclosure/landing-pad handling. Existing role names
+  are not renamed.
 - **Net labels (#200, fixed)** — every routed 2-pin net also gets one
   `kdb.Text` label, named after its own `connectivity[].net` field, on the
   PDK-family label layer that pairs with the resolved routing layer (e.g.

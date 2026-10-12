@@ -493,6 +493,17 @@ This is a first milestone, not the full issue #1719 scope.
    follow-on). It is not selected by the harness and adds no PDK dependency
    or runtime to the scored reference gate.
 
+   `charge-pump-pll` follows it (issue #2744, part of #2736): the scored
+   reference stays the PDK-free behavioral `reference/charge-pump-pll/pll.spice`,
+   and an **unscored** sky130A closed-loop variant lives in
+   [`reference/charge-pump-pll/device-pll/`](reference/charge-pump-pll/device-pll/README.md)
+   (own `sim_request.json`). It drives the delivered device VCO (`vco_dev`)
+   from the characterized switched device charge pump
+   ([`cp_dev`](reference/charge-pump-pll/device-pll/README-pump.md), #2743)
+   through a passive loop filter; only the PFD, the /4 divider and their
+   drivers are behavioral XSPICE logic. Not selected by the harness, not
+   in scoring CI, and the behavioral eval descriptor is unchanged.
+
    `telescopic-cascode-amp` is the task where the swap mattered most: a
    generic LEVEL=1 device has no short-channel output-conductance
    degradation, so the old generic-model reference measured ~94-103 dB, well

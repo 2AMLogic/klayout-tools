@@ -67,7 +67,9 @@ Resolution order (first hit wins; the winning step is reported as
    when set (the OpenLane-ecosystem convention). A ``$PDK_ROOT`` that does not
    resolve to an install is skipped, falling through to the steps below.
 3. The ciel/volare stores: ``~/.ciel``, then ``~/.volare``.
-4. Conventional install prefixes: ``/usr/local/share/pdk``,
+4. The shared PDK root ``~/pdks`` (the public pdks repo bootstrap location,
+   issue #2759); ``$PDK_ROOT`` and the ciel/volare stores both outrank it.
+5. Conventional install prefixes: ``/usr/local/share/pdk``,
    ``/usr/share/pdk``, ``~/share/pdk``.
 
 First-match-wins is deliberate, but it is **not** silent (issue #2564): when
@@ -90,6 +92,7 @@ import re
 from typing import Any
 
 from .lef_header import parse_lef_header
+from .pdk_compat import check_compatibility
 from .pdk_families import family_subset, pdk_variant_family
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
@@ -97,7 +100,12 @@ from .pdk_families import family_subset, pdk_variant_family
 #: the search space hermetically.
 STORE_DIRS: list[str] = ["~/.ciel", "~/.volare"]
 
-#: Conventional open_pdks install prefixes, in resolution order (step 4).
+#: Shared PDK roots (issue #2759), searched after the ciel/volare stores and
+#: before the conventional prefixes (step 4). ``~/pdks`` is the location the
+#: public pdks repo bootstraps into (``~/pdks/<pdk>``).
+SHARED_ROOTS: list[str] = ["~/pdks"]
+
+#: Conventional open_pdks install prefixes, in resolution order (step 5).
 CONVENTIONAL_PREFIXES: list[str] = [
     "/usr/local/share/pdk",
     "/usr/share/pdk",
@@ -162,6 +170,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             "broken_symlinks": [{"asset": <asset key>, "path": <abs path>}, ...],
             "has_pcell_library": <bool>,
             "ambiguous_roots": [{"root": <abs root>, "resolved_via": <str>}, ...],
+            "compatibility": {"status": <match|mismatch|unknown|not_declared>, ...},
         }
 
     Every ``assets`` key is always present; a value is the absolute directory
@@ -204,6 +213,11 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
     explicit ``root=`` disables the search entirely, so it is always ``[]``.
     Additive field; see ``docs/json-contract.md``.
 
+    ``compatibility`` (issue #2759) compares the install's version identity
+    with the one a klt technology package declares it was built for
+    (:mod:`klayout_tools.pdk_compat`). Warning-only: ``mismatch``/``unknown``
+    never change resolution or exit codes. Additive field.
+
     Raises :class:`PdkNotFoundError` when nothing resolves.
     """
     effective_variant = variant if variant is not None else os.environ.get("PDK")
@@ -234,6 +248,7 @@ def find_pdk(variant: str | None = None, root: str | None = None) -> dict[str, A
             "ambiguous_roots": _ambiguous_roots(
                 candidates[index + 1 :], chosen["name"], root_path
             ),
+            "compatibility": _compatibility_for(chosen),
         }
 
     raise PdkNotFoundError(_not_found_message(candidates, effective_variant))
@@ -366,8 +381,8 @@ def _candidate_roots(root: str | None) -> list[tuple[str, str]]:
 
     When ``root`` is given it is the sole candidate (search disabled).
     Otherwise the order is: ``$PDK_ROOT`` (if set), the ciel/volare stores,
-    then the conventional prefixes. ``resolved_via`` uses the unexpanded
-    ``~``-form for stable, human-readable labels.
+    the shared roots (``~/pdks``), then the conventional prefixes.
+    ``resolved_via`` uses the unexpanded ``~``-form for stable, human-readable labels.
     """
     if root is not None:
         return [(_abspath(root), "--pdk-root flag")]
@@ -378,6 +393,8 @@ def _candidate_roots(root: str | None) -> list[tuple[str, str]]:
         candidates.append((_abspath(pdk_root), "PDK_ROOT environment variable"))
     for store in STORE_DIRS:
         candidates.append((_abspath(store), f"search root: {store}"))
+    for shared in SHARED_ROOTS:
+        candidates.append((_abspath(shared), f"search root: {shared}"))
     for prefix in CONVENTIONAL_PREFIXES:
         candidates.append((_abspath(prefix), f"search root: {prefix}"))
     return candidates
@@ -408,10 +425,19 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
     variants: list[dict[str, Any]] = []
     for name in sorted(os.listdir(root_path)):
         variant_dir = os.path.join(root_path, name)
-        if not os.path.isdir(os.path.join(variant_dir, "libs.tech")):
+        if os.path.isdir(os.path.join(variant_dir, "libs.tech")):
+            layout = "open_pdks"
+        elif _is_asap7_tree(variant_dir):
+            layout = "asap7"
+        else:
             continue
         variants.append(
-            {"name": name, "version": _read_version(variant_dir), "_dir": variant_dir}
+            {
+                "name": name,
+                "version": _read_version(variant_dir),
+                "_dir": variant_dir,
+                "_layout": layout,
+            }
         )
     if variants:
         return variants
@@ -437,10 +463,56 @@ def _probe_flat_variant(root_path: str) -> list[dict[str, Any]]:
     read directly off its directory name) -- when ``root_path`` itself ships
     a ``libs.tech/`` directory, or ``[]`` otherwise.
     """
-    if not os.path.isdir(os.path.join(root_path, "libs.tech")):
+    if os.path.isdir(os.path.join(root_path, "libs.tech")):
+        layout = "open_pdks"
+    elif _is_asap7_tree(root_path):
+        layout = "asap7"
+    else:
         return []
     name = os.path.basename(root_path.rstrip(os.sep)) or root_path
-    return [{"name": name, "version": _read_version(root_path), "_dir": root_path}]
+    return [
+        {
+            "name": name,
+            "version": _read_version(root_path),
+            "_dir": root_path,
+            "_layout": layout,
+        }
+    ]
+
+
+#: Structural markers of the supported ASAP7 process tree (issue #2759): the
+#: lambdapdk ASAP7 shape (``<process>/base/setup/klayout``, ``<process>/base/apr``,
+#: ``<process>/libs``). All three must be directories; the directory *name*
+#: alone never qualifies a tree.
+_ASAP7_MARKERS: tuple[tuple[str, ...], ...] = (
+    ("base", "setup", "klayout"),
+    ("base", "apr"),
+    ("libs",),
+)
+
+#: Asset locations for the ASAP7 layout. Only assets that exist in that tree
+#: are mapped; every other key stays ``None`` (discovery implies no DRC/LVS/
+#: PCell support).
+_ASAP7_ASSET_LAYOUT: dict[str, tuple[str, ...]] = {
+    "klayout": ("base", "setup", "klayout"),
+    "libs_ref": ("libs",),
+}
+
+
+def _is_asap7_tree(directory: str) -> bool:
+    """True when ``directory`` has every :data:`_ASAP7_MARKERS` directory and
+    is not an open_pdks-shaped tree (no ``libs.tech``)."""
+    if os.path.isdir(os.path.join(directory, "libs.tech")):
+        return False
+    return all(os.path.isdir(os.path.join(directory, *m)) for m in _ASAP7_MARKERS)
+
+
+def _compatibility_for(entry: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility result (:mod:`klayout_tools.pdk_compat`) for a probed
+    variant entry."""
+    return check_compatibility(
+        entry["name"], entry["_dir"], entry["_layout"], entry["version"]
+    )
 
 
 def _read_version(variant_dir: str) -> str | None:
@@ -465,7 +537,11 @@ def _read_version(variant_dir: str) -> str | None:
 def _asset_dirs(variant_dir: str) -> dict[str, str | None]:
     """Map each tool area to its absolute directory, or ``None`` if absent."""
     assets: dict[str, str | None] = {}
-    for key, parts in _ASSET_LAYOUT.items():
+    layout = _ASSET_LAYOUT
+    if _is_asap7_tree(variant_dir):
+        layout = _ASAP7_ASSET_LAYOUT
+        assets = {key: None for key in _ASSET_LAYOUT}
+    for key, parts in layout.items():
         path = os.path.join(variant_dir, *parts)
         assets[key] = path if os.path.isdir(path) else None
     return assets
