@@ -4,7 +4,8 @@ Run a headless DRC rule deck against a GDSII or OASIS layout stream and
 report violations as structured data.
 
 ```
-klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
+klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
+klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
@@ -80,6 +81,14 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   `--rerun`" below.
 - `--rerun` — full mode for `--check`: actually re-run the DRC deck the
   report names, instead of only re-hashing its inputs. Requires `--check`.
+- `--list-rules` — list the curated `--deck`'s registered rules instead of
+  running DRC (issue #2768). Reads no layout; mutually exclusive with
+  `<file>` and `--check`. See "Rule listing and selection" below.
+- `--rules '<id|glob>,...'` — run only the selected curated deck rules
+  (issue #2768): exact rule ids and/or case-sensitive shell-style globs,
+  comma-separated. **Quote globs** so the shell does not expand them. A
+  proper subset is reported as partial and never counts as full DRC
+  signoff. See "Rule listing and selection" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Request document
@@ -133,6 +142,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `expect_rule_categories_file` | string | `--expect-rule-categories-file` (a path, resolved relative to the request document's own directory like `deck_file`; mutually exclusive with `expect_rule_categories`. The *names* are not inlined in the request — point at the reviewed manifest.) |
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
+| `rules` | string \| array\<string\> | `--rules` — one comma-separated string (the argv spelling) or a list of selector strings, each comma-split the same way. Any other type (a number, an object, a list holding a non-string) is rejected; empty and unmatched tokens are rejected exactly as for the flag. Curated engine only. |
 
 An unknown top-level field is an application error (exit `1`), not a silently
 ignored one — a typo'd field would otherwise drop an input the caller
@@ -162,7 +172,7 @@ than a JSON parse error.
 **A request document may not be combined with any of this command's own input
 flags** (`--deck`, `--top`, `--engine`, `--deck-file`, `--deck-var`, `--pdk`,
 `--pdk-root`, `--timeout-s`, `--allow-deck-errors`,
-`--allow-missing-host-tools`). Passing both is a clean
+`--allow-missing-host-tools`, `--rules`, ...). Passing both is a clean
 application error
 (exit `1`):
 
@@ -189,6 +199,176 @@ against **the document's own directory** for the file form, and against the
 current working directory for the `-` (stdin) and inline-JSON forms — there is
 no request file to anchor them to in those cases. `~` and `$VAR` are expanded.
 This is `klt lvs`'s convention verbatim (both use the same shared helper).
+
+## Rule listing and selection
+
+An agent iterating on one violation class (say, `met1` spacing) does not need
+to pay for the whole deck on every edit. Two curated-engine options (issue
+#2768) support that loop: list what a deck registers, then run a selected
+subset of it.
+
+### `--list-rules`
+
+```
+klt drc --deck sky130 --list-rules
+klt drc --deck sky130 --list-rules --format json
+```
+
+Lists the deck's registered rules **without reading a layout or running any
+check**: no `<file>` is taken (argparse rejects combining `--list-rules` with
+`<file>` or `--check`, exit `2`), and the only other input flag accepted is
+`--deck` (required). Any other input flag — `--rules`, `--top`, `--pdk`, ... —
+is a clean error (exit `1`) rather than silently ignored, and so is an unknown
+deck. Output is deterministic: rules in deck (registration) order, which is
+also the order a `--rules` subset executes in.
+
+```json
+{
+  "schema_version": 2,
+  "mode": "list_rules",
+  "deck": "sky130",
+  "engine": "curated",
+  "rule_count": 136,
+  "groups": {
+    "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
+    "scope": { "m1": 5, "poly": 1, "...": 0 }
+  },
+  "rules": [
+    {
+      "id": "poly.width.1",
+      "description": "minimum poly width",
+      "check": "width",
+      "layer": "66/20",
+      "layer_name": "poly.drawing",
+      "other_layer": null,
+      "other_layer_name": null,
+      "derived_layer": null,
+      "scope": "poly"
+    }
+  ],
+  "provenance": { "deck": { "name": "sky130", "content_hash": "sha256:..." } }
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `mode` | Always `"list_rules"` — this payload is a listing, not a report. |
+| `rule_count` | Total registered rules in the deck. |
+| `groups.check` / `groups.scope` | Rule counts per check kind and per non-empty `scope` (the existing `DrcRule.scope` metadata `coverage.deck_scope` is built from), sorted by key. |
+| `rules[]` | One entry per registered rule: `id`, `description`, `check`, `layer` (`"<layer>/<datatype>"`), `layer_name`, `other_layer`/`other_layer_name` (two-layer checks), `derived_layer` (`{mode, base, intersect_with, sized_by_um}` or `null`), `scope` (`null` when unset). |
+| `provenance` | The shared block, pinning the deck's content hash; no `input`, since no layout was read. |
+
+A listing **is not a DRC verdict**: it carries no `status`, `violations` or
+`coverage`, exits `0` whenever the deck exists, and [`klt signoff`](signoff.md)
+refuses it as an unrecognised envelope.
+
+### `--rules`
+
+```
+klt drc design.gds --deck sky130 --rules 'met1.*'
+klt drc design.gds --deck sky130 --rules 'met1.space.1, via.*' --format json
+```
+
+- Tokens are comma-separated. Surrounding whitespace is trimmed.
+- A token that is an exact registered id selects that rule; otherwise it is a
+  **case-sensitive shell-style glob** (`*`, `?`, `[...]`, Python
+  `fnmatch.fnmatchcase`) over ids. Always **quote** a glob — unquoted, the
+  shell may expand `met1.*` against file names before `klt` sees it.
+- Overlapping tokens are deduplicated, and the selected rules execute in deck
+  order, never selector order.
+- **Validated before any geometry is read.** An empty token (`'met1.*,'`,
+  `' , '`) or a token matching no rule is a clean error (exit `1`) naming the
+  offending token — a typo never silently shrinks the run:
+
+  ```
+  klt drc: --rules has an empty rule selector in 'met1.*,' -- pass comma-separated rule ids or quoted globs, e.g. --rules 'met1.*,via.width.1'
+  klt drc: --rules selector(s) matched no rule in this deck: glob 'mett1.*' -- ids and globs are case-sensitive; see `klt drc --deck <name> --list-rules` for the registered ids
+  ```
+
+- **Unselected rules are not executed** — they are never dispatched, not run
+  and filtered afterwards, which is the whole point of the flag.
+- Omitting `--rules` keeps today's full-deck behaviour exactly (and the report
+  carries no `rule_selection` key). Selecting every id is equivalent to a full
+  run: `omitted` is empty and the status is whatever the full run's would be.
+
+Unsupported combinations, each a clean error (exit `1`):
+
+| Combination | Why |
+| ----------- | --- |
+| `--rules` or `--list-rules` with `--engine klayout` | A PDK-native runset does not share the curated rule registry; native rule-category discovery and assertions are separate work (#2806). |
+| `--rules` with `--check` | `--check --rerun` replays the committed report's own recorded selection (below); a second argv selection would be ambiguous. |
+| `--rules` with `--list-rules` | A listing always enumerates the whole deck. |
+| `--rules` with a request document | Same mutual-exclusion rule as every other input flag — put `rules` in the document instead. |
+
+#### What a subset reports
+
+A `--rules` run adds one top-level block, `rule_selection`, relative to the
+**full registered deck**:
+
+```json
+"rule_selection": {
+  "selectors": ["met1.*"],
+  "selected": ["met1.width.1", "met1.space.1", "met1.enclosing.mcon.1", "..."],
+  "omitted": ["poly.width.1", "diff.width.1", "..."],
+  "deck_rule_count": 136,
+  "subset": true
+}
+```
+
+`selectors` are the trimmed tokens as given; `selected`/`omitted` partition
+the deck, both in deck order; `subset` is `true` exactly when `omitted` is
+non-empty.
+
+Every omitted rule is also a common-coverage `coverage.skipped` record with
+reason **`not_selected`** — a skipped *request*, never `inapplicable`, even
+when the omitted rule's layers are absent from the stream (the full deck is
+what a DRC verdict is about). That reason code is what keeps a deliberate
+omission distinguishable from a naturally inapplicable rule
+(`no_applicable_geometry`) or an absent-layer skip (`absent_input_layer`).
+Omitted rules are **not** added to the legacy `coverage.rules_skipped` /
+`rules_checked` lists, which keep their meaning for the rules that were
+dispatched. Deck-static fields (`coverage.deck_layers`, `layers_checked`,
+`layers_in_stream_without_rules`, `deck_scope`) and `provenance.deck` still
+describe the full deck. Inapplicable-rule semantics among the *selected*
+rules are unchanged.
+
+`status` and the exit code come from the common rollup table (see
+"Coverage" and [`../coverage-contract.md`](../coverage-contract.md)), so a
+proper subset is partial:
+
+| Subset outcome | `status` | Exit |
+| -------------- | -------- | ---- |
+| a selected rule found violations | `violations` | `3` |
+| every selected rule was skipped/inapplicable (zero checked work) | `not_checked` | `4` |
+| selected rules ran clean, some rules omitted | `clean_partial` | `0` |
+| every rule selected and clean | `clean` | `0` |
+
+`clean_partial` is a real exit-`0` result, but **never** the verb's
+unconditional `clean`: `klt signoff` does not count it as full DRC credit,
+in either envelope aggregation or numbered-citation grading — see
+[`signoff.md`](signoff.md), "A `--rules` subset is never full DRC credit".
+Before signoff, re-run without `--rules`.
+
+The text form adds one line, e.g.
+`rule selection: 5 of 136 rules (131 omitted; partial run) -- selectors: met1.*`,
+and does not list `not_selected` rules one per line under "skipped requested
+rules".
+
+#### Request documents and `--check`
+
+The request-document field `rules` takes either spelling:
+
+```json
+{ "file": "design.gds", "deck": "sky130", "rules": ["met1.*", "via.width.1"] }
+```
+
+`--check <report>` (cheap mode) is unchanged — it re-hashes the input and
+deck. `--check <report> --rerun` replays a subset report's recorded
+`rule_selection.selectors` against the current deck, so a deck change that
+alters what a glob matches surfaces as drift; a report with no
+`rule_selection` (every report written before this flag) keeps its full-deck
+interpretation. A present but malformed `rule_selection` is a clean error
+rather than a silent full-deck rerun.
 
 ## Engine
 
@@ -2088,6 +2268,7 @@ On a run with findings:
 | `metrics`         | object                   | Declared-namespace re-keying of `violation_count` (issue #1847). See below. |
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
+| `rule_selection`  | object                   | Present only on a `--rules` run (issue #2768): `{"selectors", "selected", "omitted", "deck_rule_count", "subset"}`, relative to the full registered deck — see "Rule listing and selection" above. Absent otherwise, so a default run's report is unchanged. |
 | `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
 
 ### `metrics` object
@@ -2175,6 +2356,11 @@ concerned. The common block splits them by a single, auditable question:
 | --- | --- | --- | --- |
 | No — the check is a provable no-op | `inapplicable` | `no_applicable_geometry` | None. Inapplicable work never makes an otherwise complete run partial, so a small block that draws four of a PDK deck's seventeen layers still earns an unconditional `clean`. |
 | Yes — the skip hides a possible finding | `skipped` | `absent_input_layer` | The run is `clean_partial` (exit 0) and is **not** an unconditional success; `klt signoff` refuses to count it as a passing check and reports `partial_coverage`. |
+
+A rule the caller deliberately left out of a `--rules` subset (issue #2768)
+never reaches this question: it is always `skipped` with reason
+`not_selected`, whatever its layers — see "Rule listing and selection"
+above.
 
 One skipped rule is not an absent-layer skip at all (issue #2642), so it is
 classified directly rather than through that question: an `"ongrid"` rule
@@ -2555,8 +2741,8 @@ what a given report's outcome is.
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
 | `0`  | At least one curated rule ran, with no violations — `status: "clean"`, or `"clean_partial"` when a rule that could have found something did not run (issue #2110; a real result, but not an unconditional pass — see "`coverage.skipped` vs. `coverage.inapplicable`"). Under `--check`: the committed report still holds (`status: "match"`). |
-| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error (for `--engine klayout`, that includes a deck run `klayout` itself reported an error for: a non-zero exit status or an `ERROR` line in its output, even when a report file was written — issue #1941, opt out with `--allow-deck-errors`; and a deck script that shells out to a command missing from `PATH`, refused before the deck runs — issue #2333, opt out with `--allow-missing-host-tools`). Under `--check`: a missing/unparseable committed report. |
-| `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
+| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, an empty or unmatched `--rules` token or an unsupported `--rules`/`--list-rules` combination (issue #2768), or engine error (for `--engine klayout`, that includes a deck run `klayout` itself reported an error for: a non-zero exit status or an `ERROR` line in its output, even when a report file was written — issue #1941, opt out with `--allow-deck-errors`; and a deck script that shells out to a command missing from `PATH`, refused before the deck runs — issue #2333, opt out with `--allow-missing-host-tools`). Under `--check`: a missing/unparseable committed report. |
+| `2`  | Usage error (missing argument, bad `--format` value, or combining any two of `<file>`, `--check` and `--list-rules`) — from argparse. |
 | `3`  | Ran successfully, violations found. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
 
 `2` is deliberately **not** reused for "violations found" even though some

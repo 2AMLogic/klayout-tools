@@ -55,6 +55,9 @@ class _DrcEnvelope(_DrcRequired, total=False):
     deck: Any
     violation_count: Any
     coverage: dict[str, Any]
+    # Issue #2768: present only on a `klt drc --rules` run; read by
+    # `signoff._drc_rule_subset` to refuse full-deck credit for a subset.
+    rule_selection: dict[str, Any]
     metrics: dict[str, Any]
     provenance: dict[str, Any] | None
 
