@@ -62,15 +62,18 @@ foundry rule manual. A "DRC-clean" verdict from `klt drc` is clean *against
 the curated subset*, not a full-deck signoff — do not conflate the two when
 reporting S8's exit criteria met, especially at S11 (signoff).
 
-**Attribution on a mixed/hierarchical macro (issue #451, open):**
+**Attribution on a mixed/hierarchical macro (issue #451, fixed):**
 `klt drc` flattens the whole layout into one `Region` per top cell before
-checking, so a violation's `"cell"` field always names the *top* cell, never
-the placed instance a shape actually came from — including on a mixed
-sky130_fd_sc_hd + analog-macro layout produced via `klt place-and-route`'s
-`request.macros` field (Epic #393 phase 3, issue #456). This does not affect
-whether geometry in either region is checked (the flattened `Region` already
-spans both — see #456's findings), only which instance a hit is attributed
-to in the report.
+checking, so a violation's `"cell"` field still names the *top* cell —
+including on a mixed sky130_fd_sc_hd + analog-macro layout produced via `klt
+place-and-route`'s `request.macros` field (Epic #393 phase 3, issue #456).
+Each violation additionally carries `source_cell`/`source_path`, naming the
+innermost placed instance whose bounding box fully contains it; both are
+`null` for top-level geometry or a violation straddling an instance boundary
+(and always `null` under `--engine klayout`, which reports through an
+RDB). Use those fields, not `"cell"`, to find the originating instance —
+see `docs/cli/drc.md` →
+"Per-instance attribution (`source_cell` / `source_path`)".
 
 ## LVS half — fully specified, shipped
 
@@ -139,7 +142,8 @@ tradeoff (the stuck criteria above).
 
 - DRC-clean but LVS-dirty (or the reverse) — Loop B's tradeoff case.
 - A curated DRC deck subset passing while the full foundry deck would not.
-- A `klt drc` violation's `"cell"` field naming the top cell instead of the
-  originating instance on a hierarchical/mixed layout (#451, open) — a
-  reporting-attribution gap, not a coverage gap; always re-check geometry
-  against the actual placed instance positions, not just the reported name.
+- Reading a `klt drc` violation's `"cell"` field (always the top cell) as
+  the originating instance on a hierarchical/mixed layout — use
+  `source_cell`/`source_path` (#451, fixed) instead, and when those are
+  `null` (top-level or boundary-straddling geometry) re-check geometry
+  against the actual placed instance positions.

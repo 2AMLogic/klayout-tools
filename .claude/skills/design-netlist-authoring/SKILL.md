@@ -72,11 +72,15 @@ downstream at S10 as a netlist-parse error, so check it here.
 
 ## Applicable `klt` verbs
 
-None currently. Schematic capture (xschem) is out-of-repo per current scope,
-and there is no `klt netlist`/export verb — the staleness-check and
-testbench-vs-block gaps this stage would otherwise close are tracked in #55
-(design doc §4, S6 gap-map row). This stage's output is authored directly
-(by the agent, mechanically) rather than produced by a `klt` command.
+`klt netlist` ([`docs/cli/netlist.md`](../../../docs/cli/netlist.md),
+shipped — #55, closed) exports an xschem schematic to a SPICE netlist
+headlessly. `--block` emits an includable `.subckt` body rather than a
+testbench deck, and `--check` is the staleness gate: it regenerates the
+netlist and diffs it against the committed file (`"drifted"`, exit 3).
+Schematic *capture* itself (drawing the xschem schematic) remains
+out-of-repo. When a block has no xschem schematic, this stage's output is
+authored directly (by the agent, mechanically) rather than produced by a
+`klt` command.
 
 **Practical verification, not a dedicated verb:** once the netlist file
 exists, the cheapest way to check "does it elaborate cleanly" without
@@ -98,14 +102,16 @@ real corner-matrix run.
 - **Silent divergence from the sized schematic.** The netlist claims to
   represent S5's sized device set but has drifted from it (a stale W/L, a
   device dropped or duplicated during transcription) — the staleness problem
-  #55 names directly. Because this stage is mechanical, drift here is a
+  #55 named (for an xschem-sourced netlist, `klt netlist --check` detects
+  it). Because this stage is mechanical, drift here is a
   transcription bug, not a design decision; treat any mismatch between the
   netlist and S5's device parameter set as a hard failure, not a rounding
   difference.
 - **Testbench, not includable subcircuit.** A block netlisted as a
   self-contained testbench (with its own sources/analysis baked in) rather
   than an includable subcircuit body that `klt sim`'s wrapper deck can
-  `.include` and drive — also #55. Combined with the "circuit body, not a
+  `.include` and drive — also #55 (`klt netlist --block` emits the
+  includable form). Combined with the "circuit body, not a
   full deck" constraint above, this is the single most common way S6's
   output fails S10 downstream.
 - **Floating-output open-loop testbench (spurious corner-dependent gain

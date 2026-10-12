@@ -38,13 +38,13 @@ instruct this stage to run on model knowledge alone until it lands. **That
 has changed since**: `klt kb` shipped in
 [#119](https://github.com/2AMLogic/klayout-tools/pull/119), closing #110,
 concurrently with this skill's own authoring. The design doc's §2/§4 rows for
-S4 are accordingly stale on this one point as of this writing — this skill
-documents the **current, shipped** state rather than repeat the now-outdated
-"not yet shipped" framing, per CLAUDE.md's contract-first rule (the shipped
-CLI and its doc are the source of truth, not a design doc that predates it).
+S4 have since been reconciled and now describe `klt kb` as shipped; the shipped
+CLI and its doc ([`docs/cli/kb.md`](../../../docs/cli/kb.md)) remain the source
+of truth per CLAUDE.md's contract-first rule.
 
-The corpus itself (`kb/entries/`) is still shallow and actively growing
-(design doc §4: #106 sourcing playbook, #107/#108/#109 entry batches) — a
+The corpus itself (`kb/entries/`) is still shallow and grows incrementally
+(the original sourcing playbook and entry batches, #106–#109, are closed;
+what remains is corpus breadth, not the query surface) — a
 `klt kb search` miss is much more likely to mean "not yet catalogued" than
 "no such topology exists." Treat an empty result as **inconclusive**, not as
 evidence the KB has nothing to offer; the failure mode below exists precisely
