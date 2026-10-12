@@ -2528,7 +2528,12 @@ def test_malformed_provenance_is_a_yield_error(tmp_path, bad):
 def test_malformed_provenance_exits_1_with_json_envelope(tmp_path, capsys):
     path = _prov_doc(tmp_path, {"seed": "abc"})
     assert main(["yield", path, "--format", "json"]) == 1
-    assert capsys.readouterr().out == ""
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "yield"
+    assert "provenance.seed must be an integer" in error["error"]["message"]
 
 
 def test_non_string_spec_row_is_a_yield_error(tmp_path):
