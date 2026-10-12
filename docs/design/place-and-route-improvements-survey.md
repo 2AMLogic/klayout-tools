@@ -699,9 +699,11 @@ production legalizer merged on faith.
 ## 6. Design spike: P&R iteration cost and safe checkpoint reuse (issue #2783)
 
 Part of #2734 (original item 4). **Status: design spike, docs only. No
-persistent cache is implemented or proposed for immediate build without the
-gates below.** The reporter's "~30 minutes for a 16-corner run" figure came
-from an older build and **was not remeasured here**.
+persistent cache is implemented.** The reporter's "~30 minutes for a
+16-corner run" came from an older build on an unknown design. On current
+main, a full 16-corner run of the `mult8` fixture takes 58.6 s on the host
+described in 6.2. Measurements: 6.2. Recommendation: stop, with no caching
+follow-up (6.4).
 
 ### 6.1 What already exists on `main` (verified by source inspection, 0e952ded)
 
@@ -716,10 +718,13 @@ Selected-corner recipe (already sufficient for timing iteration):
 
 1. Run `klt place-and-route` once, with `pdk.sweep_corners` naming only the
    corner(s) the design operates at (or a single sign-off corner).
-2. Keep the routed `.def` (and `post_route_spef` output if wanted).
+2. Keep the routed `.def`. Set `post_route_spef: true` in step 1 when the
+   numbers must include real wire parasitics.
 3. For every further corner or constraint-only tweak that does not move
-   geometry, call `klt sta` with `pdk.corners: [...]` on that DEF. This
-   never re-runs floorplan/place/CTS/route.
+   geometry, call `klt sta` with `pdk.corners: [...]` on that DEF. Pass
+   `spef` (without it `klt sta` attaches no wire RC and is optimistic,
+   see 6.2.4), and set `constraints.propagated_clock` for a sequential
+   design. This never re-runs floorplan/place/CTS/route.
 
 When this already meets the need: the question is "what does this *routed*
 design do at other corners / other SDC-style constraints". It does **not**
@@ -729,50 +734,108 @@ options, timing-driven constraints, engine build): those require a real
 re-implementation, and a cache can only help if it can prove that the
 unchanged *prefix* of stages is still valid.
 
-Differences between the two paths that must be explained, not assumed
-equal: (a) `klt sta` on a DEF times the DEF's wires with ideal clocks unless
-`constraints.propagated_clock` is set and a SPEF is supplied, whereas the
-in-flow sweep reads the ODB checkpoint with the engine's own estimated
-parasitics and the flow's own clock/constraint setup; (b) `klt sta` does not
-carry detailed-route-time state (for example post-`repair_antennas` diode
-insertion is in the DEF, but engine-side estimated-parasitic settings are
-not); (c) a *full repeated route* is re-seeded and not corner-invariant (the
-STA doc states this), so route-to-route slack differences are expected and
-are not an equivalence defect in either path. Numerical comparison of the
-two paths on a real routed design was **not** performed (see 6.2).
+How the two paths differ, measured in 6.2.4 rather than assumed:
+(a) parasitics: the in-flow sweep re-reads the route ODB in a fresh session
+and runs `set_wire_rc -layer met2` + `estimate_parasitics -global_routing`.
+The route stage's own top-level numbers come from `estimate_parasitics
+-global_routing` in the session that just ran `global_route`, with no
+`set_wire_rc`. `klt sta` attaches no wire parasitics unless a `spef` is
+supplied. (b) clock: every in-flow timing session uses an ideal clock (no
+`set_propagated_clock` in any flow script), while `klt sta` propagates the
+clock only when `constraints.propagated_clock` is set. (c) SDC: the clock,
+input delays and output delays are the same in both when the caller passes
+the same `constraints`. The flow's `set_dont_use` lines do not affect
+timing. (d) a repeated route at the same request reproduced the routed ODB
+byte for byte here (6.2.4). The `docs/cli/sta.md` warning that "re-running
+`place-and-route` per corner produces N different placements" applies to
+changing the *implementation* corner (`pdk.corner`, which drives repair and
+timing-driven stages, see 3.7.2 runs A vs C). It does not apply to repeating
+an identical request.
 
-### 6.2 Measurement: what was and was not measured
+### 6.2 Measurement
 
-Environment: Apple M3 Ultra (arm64), macOS (Darwin 27.0.0), `klt
-0.7.0+g0e952ded20c1`, OpenROAD native build reporting version `unknown`
-(`openroad -version`; `Features: -GPU +GUI -Python`), Yosys 0.69+post
-(143eb14f), date 2026-10-12.
+#### 6.2.1 Environment and identity
 
-**Not measured (blocked by the environment, stated rather than estimated):**
+- Host: Apple M3 Ultra (arm64), macOS (Darwin 27.0.0), 2026-10-12. Docker
+  Engine 29.8.2.
+- `klt 0.7.0+g6397bb220748`: this PR's tree, which is `origin/main`
+  `ede0fdad` plus docs. Run as `<worktree>/.venv/bin/klt`. Every response's
+  `provenance.klt_version` reports this sha. The globally installed
+  `~/.local/bin/klt` on this host is a stale, non-editable 0.7.0 build
+  (no `clock_mode` in `klt sta` responses), so it was not used for any
+  number below.
+- OpenROAD: `openroad` on `PATH` is `~/.local/bin/openroad`. It is not a
+  native build. It is a bash wrapper (the local variant of
+  `scripts/install-openroad-docker.sh`'s generated wrapper) that runs
+  `docker run --rm -i --platform linux/amd64 ... openroad/orfs:latest
+  .../OpenROAD/bin/openroad`, which emulates amd64 on this arm64 host. Image
+  `openroad/orfs:latest` is `sha256:0f1f4f03792e4825a917f1802cb415da6c4a372f6b24bee0b403f7efe62f6d30`
+  (created 2026-10-08). `openroad -version` prints `unknown`, so the image
+  digest is the engine identity. The wrapper mounts `$PWD`, the resolved
+  `TMPDIR`, and `$PDK_ROOT` (read-only) *only when `PDK_ROOT` is set*. Two
+  consequences: every `klt` run must be started from a directory that
+  contains its inputs, and `PDK_ROOT` must be exported.
+- Yosys 0.69+post (`143eb14f`), host-native.
+- PDK: sky130A at `~/.volare/sky130A` (`open_pdks
+  c6d73a35f524070e85faff4a6a9eef49553ebc2b`), selected with
+  `PDK_ROOT=~/.volare PDK=sky130A`. `klt pdk find` reports `resolved_via:
+  "PDK_ROOT environment variable"`. Without these variables `find_pdk()`
+  picks gf180mcuA from `~/.ciel` first, which is the documented resolution
+  order and not a missing PDK. Library `sky130_fd_sc_hd`, 16 non-ccsnoise
+  liberty corners.
+- Fixtures: `tests/corpus/statime/mult8.v` (combinational 8x8 multiplier,
+  261 cells excluding fillers after route) and
+  `examples/functional-verification/gcd.v` (sequential, 504 cells excluding
+  fillers). Each was synthesized with `klt synthesize` using the
+  `scripts/place-and-route-smoke.sh` synth request (5.3 s and 5.5 s wall).
+- Request: exactly the smoke script's `par_request.json` (utilization 38,
+  aspect 1.0, margin 2.0 um, `unithd`, met3/met2 IO, seed 1, `target_stage:
+  route`, `pdk.corner: tt_025C_1v80`), plus the #2782 timing fields
+  `constraints.input_delay_ns: 1.0` and `output_delay_ns: 1.0` so that slacks
+  are finite. Clocks: mult8 `p[15]` at 6.0 ns, gcd `clk` at 1.1 ns. Only
+  `pdk.sweep_corners` and `post_route_spef` vary between runs, as named in
+  the tables.
+- Commands: `PDK_ROOT=~/.volare PDK=sky130A klt place-and-route par.json
+  --format json`, run from the run directory, and `klt sta sta.json --format
+  json` with `def: ../.klt/place-and-route/<top>.def` and the same
+  `constraints`, run from the P&R run directory so that the wrapper mounts
+  the DEF.
+- Timing method: a pass-through shim earlier on `PATH` logged the wall-clock
+  of every `openroad` invocation (script name, start, end, exit code) and
+  then delegated to the wrapper. "klt wall" is the wall-clock of the whole
+  `klt` process. One run per configuration unless noted, run one at a time
+  on an otherwise idle host. Repeats of the same configuration varied by
+  about 10% in wall-clock (the two 3-corner rows), so read differences under
+  about 2 s as noise.
 
-- No end-to-end `klt place-and-route` or `klt sta` run. `find_pdk()` found
-  no usable sky130 install under `~/.ciel`, `~/.volare`, `~/pdks`,
-  `/usr/local/share/pdk`, `/usr/share/pdk`, `~/share/pdk`, and no
-  `$PDK_ROOT` was set; only gf180mcu (A/B/C/D) is installed, and
-  `find_pdk("gf180mcu")` also fails with "no supported-layout PDK install".
-  The KLayout Python module (`pya`) is also not installed here. Therefore
-  **no stage timings, no per-corner `klt` sweep timings, no
-  existing-STA-versus-full-route comparison, and no 16-corner figure exist
-  in this spike.** The acceptance item "run the documented small
-  selected-corner recipe" is therefore **deferred**; it is item 0 of the
-  plan in 6.6 and must be executed on a host with sky130 before the
-  recommendation is built.
-- Docker was available but no OpenROAD image/PDK mount was set up; this
-  spike did not pursue a container run.
+#### 6.2.2 Cold setup: engine launch and liberty parse (sky130, this host)
 
-**Measured (raw engine, not through `klt`; open gf180mcu 7-track library
-only, as the single available open PDK):** wall-clock of `openroad -no_init
--exit` with a Tcl script, library files copied to a scratch directory
-(OpenROAD under the agent sandbox could not read the originals in
-`~/.volare`, "cannot read file", but read byte-identical copies). Each row
-is 3 runs unless noted.
+| Probe | Through the wrapper, host wall (s) | Inside the container (s) |
+|---|---|---|
+| `docker run ... openroad/orfs:latest true` (no OpenROAD) | 0.24, 0.25, 0.26 | -- |
+| `openroad -no_init -exit` on an empty script | 0.59, 0.64, 0.72 | 0.25, 0.25, 0.26 |
+| `read_liberty` of `tt_025C_1v80` (one deck) | 1.12, 1.21, 1.44 | 0.56, 0.56, 0.56 |
+| `read_liberty` of all 16 `sky130_fd_sc_hd` decks in one process | -- | 4.73, 4.74, 4.79 |
 
-| Probe | Wall-clock (s) |
+Reading: each `openroad` launch through the wrapper costs about 0.6 s before
+any work. Of that, about 0.35 to 0.45 s is container and Docker CLI
+overhead, and about 0.25 s is the emulated OpenROAD start. Parsing a sky130
+hd liberty deck adds about 0.3 s per deck in-container. Each `klt` process
+also pays about 1.6 s of Python start-up (`klt --version`: 1.55, 1.64,
+1.73 s) and one `openroad -version` probe of 0.5 to 1.1 s per request.
+
+The gf180mcu probe in the first revision of this spike is kept below for the
+record. **It ran through the same Docker wrapper (emulated amd64), so it
+measures Docker launch plus emulated start-up as much as OpenROAD.** The
+"engine start" rows are entirely launch overhead. The extra 10 s of the
+15-process row over the one-process row is 14 extra launches (about 0.7 s
+each), not OpenROAD work. Its "cannot read file" errors on `~/.volare` were
+not a sandbox restriction. `PDK_ROOT` was unset, so the wrapper never
+mounted the PDK, and the probe worked only after the files were copied
+under the mounted working directory. Do not use this table for stage or
+analysis cost.
+
+| gf180mcu probe (Docker-wrapper-inclusive, 3 runs unless noted) | Wall-clock (s) |
 |---|---|
 | Engine start, empty script | 0.61, 0.64, 0.63 |
 | Engine start, `-exit` with no script | 0.73, 0.68, 0.63 |
@@ -780,60 +843,194 @@ is 3 runs unless noted.
 | `read_liberty` of all 15 shipped corners in **one** process | 9.83, 9.79, 10.64 |
 | 15 separate processes, one corner each (1 run) | 19.8 total |
 
-Reading, with the limits of the evidence: engine start-up is ~0.6 s;
-parsing one ~20 MB liberty deck adds ~0.6 s; so a per-corner subprocess
-(the design `pdk.sweep_corners` documents for `corners[]`) costs roughly
-twice the in-process load for the same corners (~1.3 s versus ~0.65 s per
-corner here) *before* any design is read or timed. This characterizes
-cold setup (process + liberty parse) only. It says nothing about stage
-times (floorplan/place/CTS/route), which on a real design are expected to
-dominate and are unmeasured. It does support one qualitative conclusion:
-corner analysis cost scales linearly with corner count even with no
-design, so scoping corners (`sweep_corners`, `klt sta pdk.corners`) is the
-first lever, and "repeated work" in a corner sweep is mostly repeated
-liberty parsing and process launches, not repeated placement. Caveats:
-different PDK than the project's primary (sky130); different library
-sizes; one machine; the 15-corner single process and the per-process run
-are not an identical STA workload (no design, no `define_corners`).
+#### 6.2.3 Stage and corner-sweep cost through `klt place-and-route`
+
+Per-invocation wall-clock (s), wrapper launch included in every cell.
+"Sweep" is the combined all-swept-corner session (`pnr_<top>_route_corners.tcl`)
+plus the per-corner sessions (`pnr_<top>_route_corner_<c>.tcl`, one per
+swept corner when more than one is swept). "Engine sum" also includes the
+`openroad -version` probe.
+
+| Run | `sweep_corners` | floorplan | place | cts | route | `post_route_spef` engine | Sweep: combined + per-corner | Engine sum | klt wall |
+|---|---|---|---|---|---|---|---|---|---|
+| mult8 s0 | `[]` | 1.26 | 3.55 | 1.55 | 12.25 | -- | -- | 19.53 | 27.70 |
+| mult8 s1 | tt | 1.45 | 3.56 | 1.81 | 11.86 | -- | 1.73 + 0 | 21.48 | 29.48 |
+| mult8 s3 | tt, ss_n40C_1v28, ff_n40C_1v95 | 1.88 | 4.10 | 1.81 | 11.97 | -- | 3.27 + 5.61 (3) | 29.50 | 39.26 |
+| mult8 s3, repeat | same | 1.50 | 3.52 | 1.62 | 11.54 | -- | 2.21 + 4.95 (3) | 26.38 | 36.70 |
+| mult8 all | omitted (all 16) | 1.47 | 3.44 | 1.85 | 11.84 | -- | 6.11 + 23.05 (16) | 48.50 | 58.63 |
+| mult8 s3 + SPEF | 3, `post_route_spef: true` | 1.26 | 3.53 | 1.44 | 11.62 | 1.23 | 1.86 + 3.95 (3) | 25.54 | 49.67 |
+| gcd s3 + SPEF | 3, `post_route_spef: true` | 1.12 | 4.80 | 1.47 | 44.91 | 1.52 | 1.93 + 4.27 (3) | 60.73 | 124.31 |
+
+Findings:
+
+1. **Cold setup versus repeated work.** Every stage is a separate engine
+   launch, so a request pays about 0.6 s of wrapper launch per stage, a
+   liberty parse per stage, about 1.6 s of `klt` start-up and one version
+   probe. That is roughly 6 s of the 27.7 s mult8 `[]` run. The
+   implementation work itself is about 18 s for mult8 and about 52 s for
+   gcd. Detailed routing dominates both (about 12 s and 45 s). `klt`'s
+   non-engine time (klt wall minus engine sum) is 8 to 10 s without SPEF.
+   `post_route_spef` adds about 14 s of host-side time for mult8
+   (24.1 s versus 9.8 to 10.3 s), which is consistent with KLayout parasitic
+   extraction (not separately attributed). gcd's 63.6 s host-side time with
+   SPEF was not broken down.
+2. **Per-corner sweep cost** is about 1.4 to 1.9 s of engine time per swept
+   corner. One swept corner adds 1.7 s (one combined session). Three add 5.8
+   to 8.9 s. All 16 add 29.2 s (6.1 s combined, 23.1 s in the 16 per-corner
+   sessions, about 1.44 s each). Klt wall rises 27.7, 29.5, 36.7 to 39.3, and
+   58.6 s for 0, 1, 3 and 16 corners. With more than one swept corner, each
+   corner's liberty is parsed twice (once in the combined session, once in
+   its own session), so 23 of the 29 s of a 16-corner sweep is per-corner
+   re-launch and re-parse, not new analysis. That is the only repeated work
+   inside a request that the data shows to be material.
+3. **The 30-minute, 16-corner figure does not reproduce on mult8.** A full
+   16-corner mult8 run takes 58.6 s wall, including about 31 s of sweep.
+   The original design and build are unknown, so this neither confirms nor
+   refutes the report for a larger design. It does show that on current
+   main the per-corner cost is seconds, not minutes, for a small block.
+
+#### 6.2.4 Routed-artifact `klt sta` versus the in-flow sweep (Test Plan item 2)
+
+`klt sta` was run on the routed DEF of the "s3 + SPEF" runs above, with the
+same `constraints` and with `pdk.corners` set to the corners named. Wall (s)
+is the whole `klt sta` process. Engine (s) is the sum of the per-corner
+OpenSTA sessions (one launch each), excluding the version probe.
+
+| `klt sta` request | mult8 wall | mult8 engine | gcd wall | gcd engine |
+|---|---|---|---|---|
+| 1 corner (tt), no SPEF | 3.77 | 1.16 | 6.53 | 1.50 |
+| 3 corners, no SPEF | 8.14 | 3.64 | 12.70 | 4.92 |
+| 3 corners, `propagated_clock` | 8.77 | 3.79 | 14.70 | 4.94 |
+| 3 corners, `spef` | 11.47 | 4.77 | 16.07 | 5.78 |
+| 3 corners, `spef` + `propagated_clock` | 13.02 | 4.88 | 15.90 | 6.15 |
+| all 16 corners, no SPEF | 41.50 | 22.30 | -- | -- |
+
+Worst slack (ns), setup / hold, on the same routed geometry. The routed
+ODB from which the sweep ran and the DEF that `klt sta` read come from the
+same run.
+
+| Source | Parasitics | Clock | tt | ss_n40C_1v28 | ff_n40C_1v95 |
+|---|---|---|---|---|---|
+| **mult8** route stage, top level (tt only) | GR estimate, route session | ideal | 0.491 / 2.178 | -- | -- |
+| mult8 in-flow sweep (`corners[]`) | `set_wire_rc met2` + GR estimate, fresh session | ideal | 0.408 / 2.178 | -24.872 / 2.943 | 1.853 / 2.116 |
+| mult8 in-flow `spef_sta` (tt only) | KLayout SPEF | ideal | 0.359 / -- | -- | -- |
+| mult8 `klt sta` | none | ideal | 0.641 / 2.146 | -23.605 / 2.742 | 1.983 / 2.095 |
+| mult8 `klt sta` | SPEF | ideal | 0.359 / 2.176 | -25.263 / 2.953 | 1.808 / 2.114 |
+| mult8 `klt sta` | none or SPEF | propagated | identical to the ideal row with the same parasitics | | |
+| **gcd** route stage, top level (tt only) | GR estimate, route session | ideal | -1.888 / 0.448 | -- | -- |
+| gcd in-flow sweep (`corners[]`) | `set_wire_rc met2` + GR estimate, fresh session | ideal | -1.901 / 0.460 | -21.366 / -1.284 | -0.781 / 0.282 |
+| gcd in-flow `spef_sta` (tt only) | KLayout SPEF | ideal | -1.995 / -- | -- | -- |
+| gcd `klt sta` | none | ideal | -1.687 / 0.431 | -19.159 / -1.284 | -0.616 / 0.263 |
+| gcd `klt sta` | none | propagated | -1.699 / 0.438 | -19.143 / -2.689 | -0.629 / 0.282 |
+| gcd `klt sta` | SPEF | ideal | -1.995 / 0.469 | -22.516 / -1.284 | -0.831 / 0.287 |
+| gcd `klt sta` | SPEF | propagated | -2.017 / 0.362 | -22.528 / -3.333 | -0.861 / 0.315 |
+
+What explains the differences:
+
+- **Parasitics set the setup order.** Within each design, setup slack
+  orders by how much wire RC each path attaches. `klt sta` without SPEF
+  attaches no wire parasitics and is the most optimistic (mult8 tt 0.641).
+  The route session's global-route estimate gives 0.491. The sweep's fresh
+  `set_wire_rc met2` estimate gives 0.408. Extracted SPEF is the most
+  pessimistic (0.359). The sweep and the route stage disagree at the *same*
+  corner (0.408 versus 0.491 for mult8) because their parasitic setup
+  differs (6.1 (a)), not because the geometry does. Without a SPEF, `klt
+  sta` is therefore not a substitute for the sweep's numbers. It is
+  optimistic relative to the sweep by 0.13 to 2.2 ns of setup slack on
+  these designs, and the gap is largest at the slow corner.
+- **With the same SPEF, the two paths agree exactly.** `klt sta` + SPEF
+  at tt reproduces the in-flow `spef_sta` value to the reported precision
+  (mult8 0.35865, gcd -1.99475). This is the replay-equivalence check the
+  spec in 6.5 and 6.6 asks for, and on these two designs it holds today
+  without any new code.
+- **The annotation verdicts disagree, though the numbers match.** For the
+  same SPEF, the in-flow `spef_sta.annotation_complete` is `true`, while
+  `klt sta`'s `spef_annotation.annotation_complete` is `false`. The reason
+  is that `klt sta` also counts `read_spef` "net not found" warnings for the
+  extractor's internal `$NNNN` nets (378 for mult8, 815 for gcd), and for
+  gcd it found 3 unannotated drivers. A caller comparing the two paths
+  should read the evidence fields, not the boolean. This is a gap between
+  the two checks, and it is noted here only, not addressed.
+- **Clock mode matters for hold on a sequential design.** Every in-flow
+  session uses an ideal clock. For gcd, `propagated_clock` moves the slow
+  corner's worst hold from -1.284 to -2.689 ns without SPEF (-3.333 with
+  SPEF), as clock network latency reaches 1.66 to 1.79 ns at ss_n40C_1v28.
+  The in-flow sweep's hold numbers therefore understate this design's
+  slow-corner hold problem. mult8 has no clock sinks (`p[15]` is a
+  virtual-clock output reference, and `clock_propagation.clock_sinks` is 0),
+  so propagation changes nothing there, as expected.
+- **A repeated route did not differ.** The routed `mult8_route.odb` was
+  byte-identical (same SHA-256) across all six mult8 runs above, in six
+  different directories. The DEF was identical apart from its date line.
+  Slacks and wirelength (5032 um) were identical too. With an unchanged
+  request, seed and image on this host, a second full route reproduced the
+  first exactly. This is one design, one thread setting and one engine
+  build. It is evidence toward, not proof of, the determinism that 6.6
+  item 5 asks for.
+- **Cost.** Re-timing 3 corners with `klt sta` took 8 to 16 s wall, versus
+  37 to 50 s for re-running the whole mult8 request and 124 s for gcd with
+  SPEF. For 16 corners the saving is small for mult8 (41.5 s versus 58.6 s),
+  because `klt sta` pays a full launch, liberty parse and about 1.1 s of
+  host-side `klt` work per corner (about 2.6 s per corner wall for mult8,
+  4 to 5 s for gcd at 3 corners).
 
 ### 6.3 Which work repeats on main
 
-Established by source/docs, not by timing:
-
 - **Across requests: all of it.** A new `klt place-and-route` request
-  re-runs every requested stage from RTL; the previous request's ODB files
-  are overwritten in the fixed `<request dir>/.klt/place-and-route/`
-  directory and are never consumed.
-- **Within a request:** each stage process re-issues `read_liberty` and
-  `create_clock`; the sweep spawns one extra engine launch per swept corner
-  beyond the first (documented in `docs/cli/place-and-route.md`).
-- **Via `klt sta`:** only the corner analysis repeats, by design.
+  re-runs every requested stage from the synthesized netlist. The previous
+  request's ODB files are overwritten in the fixed `<request
+  dir>/.klt/place-and-route/` directory and are never consumed. Measured
+  cost on this host: about 18 s of implementation engine time for mult8 and
+  about 52 s for gcd, dominated by detailed routing (6.2.3).
+- **Within a request:** each stage is a separate engine launch that
+  re-issues `read_liberty` and `create_clock` (about 0.6 s wrapper launch
+  plus about 0.3 s parse per stage here). With more than one swept corner,
+  the sweep runs one combined session plus one session per corner,
+  re-parsing every swept deck twice (23 of 29 s of a 16-corner mult8 sweep).
+- **Via `klt sta`:** only the corner analysis repeats, by design. It costs
+  about 1.2 to 2.2 s of engine time and 2.6 to 5.4 s of wall per corner
+  here (`klt` start-up included).
 
-### 6.4 Recommendation (one bounded follow-up)
+### 6.4 Recommendation
 
-**Recommend analysis-only replay, not validated checkpoint resume.** Make
-the existing selected-corner path first-class: a way for a completed
-`place-and-route` run to emit a content-addressed *routed bundle* (routed
-ODB or DEF, SPEF if produced, the exact SDC/constraints used, and a
-manifest), and an analysis verb or mode that re-times that bundle at a
-requested corner list after verifying the manifest. Rationale:
+**Stop: no caching or resume follow-up is warranted on the measured
+data.** The 6.6 item-0 gate was "if cold setup plus corner analysis is under
+a few seconds per corner, stop: the existing recipe suffices". Measured: in
+the flow, 1.4 to 1.9 s of engine time per swept corner. Through `klt sta`,
+1.2 to 2.2 s of engine time and 2.6 to 5.4 s of wall per corner (`klt`
+start-up included), of which about 0.6 s per launch is this host's Docker
+wrapper. Both are within that bar. The selected-corner recipe in 6.1 already gives the reuse the issue
+asks for. Run `place-and-route` once with a narrow `sweep_corners` (and
+`post_route_spef: true` when real parasitics matter), then re-time other
+corners with `klt sta` on the routed DEF, passing the SPEF and, for
+sequential designs, `constraints.propagated_clock`. With the same SPEF this
+reproduces the in-flow `spef_sta` number exactly (6.2.4).
 
-1. It reuses the already-shipped, already-tested single-corner session
-   mechanics and the `klt sta` envelope; it adds no new engine-stage
-   semantics.
-2. Its validity condition is simple (the bundle is the input; corners and
-   analysis-only constraints are the free variables), whereas stage resume
-   must prove that placement/CTS/route are deterministic functions of the
-   digested inputs across engine builds and thread counts, which has not
-   been demonstrated and which the docs already flag for detailed routing
-   ("seeded but not corner-invariant").
-3. It addresses the reported pain (many-corner timing iteration) without
-   claiming speed-ups for implementation changes.
+Reasons not to build more now:
 
-Checkpoint resume (skip floorplan/place/CTS when only later-stage options
-changed) is **deferred** and gated on first measuring real stage times
-(6.6 item 0). If stage times show floorplan+place dominate and callers
-iterate on CTS/route options, file it as a separate issue then.
+1. Analysis-only replay (the routed bundle with a manifest in 6.5) would
+   add validation and provenance, not speed. The analysis it replays is
+   already the cheap part, and `klt sta` already re-times a fixed routed
+   artifact.
+2. Validated checkpoint resume could at most skip floorplan, place and CTS
+   (6.4 s for mult8, 7.4 s for gcd). Detailed routing, the dominant cost,
+   would still re-run for any route-affecting change. That is too little
+   gain to justify the invalidation surface in 6.5.
+3. The 30-minute report did not reproduce at fixture scale (58.6 s for a
+   full 16-corner mult8 run).
+
+If this is reopened, analysis-only replay remains the preferred shape over
+stage resume, for the reasons in 6.5. Reopen it when a measured design shows
+corner analysis well above a few seconds per corner, or implementation
+prefixes (floorplan to CTS) costing minutes. Cheaper levers come first,
+without any cache:
+
+- (a) avoid the doubled liberty parse in multi-corner sweeps (the combined
+  session plus per-corner sessions, 6.2.3 finding 2);
+- (b) document that `klt sta` without SPEF is optimistic and that the
+  in-flow sweep is ideal-clock (6.2.4).
+
+Neither is filed by this spike.
 
 ### 6.5 Specification (applies to the analysis-replay bundle; a future stage resume must meet a strict superset)
 
@@ -891,18 +1088,19 @@ bundle publish protocol above is self-contained. If #2770 lands first, the
 producer step should take its lock around reading the run directory into
 the bundle, so a concurrent run cannot interleave members.
 
-### 6.6 Implementation and test plan (not implemented here)
+### 6.6 Implementation and test plan (not implemented here; parked by 6.4)
 
-0. **Gate: measure.** On a host with sky130 and OpenROAD (container or
-   native), run the documented selected-corner recipe on a small design
-   (for example the repo's smallest sky130 example) and record: command,
-   `klt` sha, `openroad -version` plus binary digest, PDK digest, per-stage
-   wall-clock from the response, per-corner sweep time, `klt sta` time on
-   the routed DEF at the same corners, and the slack difference between
-   `klt sta` and the in-flow sweep with the parasitic/clock differences
-   explained (6.1). Append the table to this section. If cold setup plus
-   corner analysis is under a few seconds per corner, stop: the existing
-   recipe suffices and only a docs change is warranted.
+This plan is **not** scheduled. Item 0 has been run (6.2), and its stop
+rule fired (6.4). Items 1 to 5 are kept as the ready-made plan for the case
+where a measured design reopens the question.
+
+0. **Gate: measure. Done (6.2).** Commands, `klt` sha, engine image digest,
+   PDK version, per-stage and per-corner wall-clock, `klt sta` time on the
+   routed DEF, and the `klt sta` versus in-flow slack comparison, with the
+   parasitic and clock differences explained, are in 6.2.1 to 6.2.4. Result:
+   corner analysis costs seconds per corner, so the existing recipe
+   suffices. To reopen, rerun the same measurement on the larger design and
+   compare it against the reopen criteria in 6.4.
 1. Add manifest + digest utilities (pure Python, no engine), with unit
    tests for canonicalisation (key order, path-independence).
 2. Bundle writer (atomic publish) and reader/verifier; wire the producer
@@ -931,9 +1129,11 @@ the bundle, so a concurrent run cannot interleave members.
    - engine-gated equivalence: replayed slack at a corner versus a fresh
      `klt sta` on the same DEF is equal within the documented tolerance,
      and both are compared (not asserted equal) to the in-flow sweep.
-5. Only after step 0 data: decide whether to file the deferred stage-resume
-   issue; if so it needs a determinism study (same inputs, same engine,
-   repeated runs, byte-compare of checkpoints) before any resume logic.
+5. Stage resume: not filed. It would need a determinism study first (same
+   inputs, same engine, repeated runs, byte-compare of checkpoints). 6.2.4
+   has a first data point: six identical mult8 requests produced
+   byte-identical route ODBs on one engine build. A real study would also
+   vary thread count, host and image.
 
 ## References
 
