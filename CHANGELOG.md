@@ -30,7 +30,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   instead of the static base. Field names and types are unchanged, so no
   `schema_version` bump; see `docs/cli/version.md`. Release managers now bump
   `base-version` instead of `[project] version` (`RELEASING.md`).
-
+- **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
+  unequal top-circuit pin counts yield `status: mismatch` with a new
+  `pin.count` error finding (both counts in `details`). Default unchanged;
+  additive `options` echo key, no `schema_version` bump. A `pin.count` error
+  is never downgraded to `inconclusive` by an exhausted `combine_devices`.
 - **T1 item 11 port accessibility: edge power ports + LEF abstract
   (provisional)** (issue #2839, operator ruling 2AMLogic/product#134, not yet
   ratified). `klt signoff --manifest` grades a new item-11 sub-check for a
