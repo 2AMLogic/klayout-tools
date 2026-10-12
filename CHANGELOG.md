@@ -25,7 +25,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   `islands`; `orphan_nodes`; `suspicious_resistors` — negative, zero,
   non-finite, self-loop; `short_candidates` — cross-net resistors at or
   below the inclusive `1.0` Ω threshold; `capacitance` — declared total
-  vs. the sum of emitted ground capacitors, pass/mismatch/not_applicable
+  vs. the sum of emitted ground capacitors (each read back from the
+  created device), pass/mismatch/not_applicable
   at `1e-6` fF absolute + `1e-9` relative tolerance), and the `parasitics`
   block gains a net-name-free `integrity` summary (check settings and
   aggregate counts). Connectivity is judged over the emitted DC-conducting
@@ -36,8 +37,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   `extraction.parasitic_integrity` (summary + one entry per net,
   `parasitics.nets[]` order). Non-finite input values are diagnosed and
   serialize as `null` — the blocks are strict finite JSON; detail lists cap
-  at 20 entries with complete counts. No existing field changes;
-  `schema_version` stays 3 (extract) / 2 (pex).
+  at 20 entries with complete counts. The checker indexes the network by
+  owning net once, so it runs in time linear in the network size. No
+  existing field changes; `schema_version` stays 3 (extract) / 2 (pex).
 
 - **`klt synthesize` memory-mapping evidence** (issue #2745, part of #2281):
   the response gains two additive, always-present fields. `memory_mapping`

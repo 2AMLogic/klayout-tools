@@ -15938,6 +15938,50 @@ def test_parasitic_integrity_corrupted_record_trips_every_status(tmp_path, monke
     assert "Infinity" not in json.dumps(report, allow_nan=False)
 
 
+def test_parasitic_integrity_corrupted_lumped_capacitor_trips_mismatch(
+    tmp_path, monkeypatch
+):
+    """The lumped reconciliation checks the value the device actually
+    carries (PR #3127 review): corrupting one emitted lumped ground
+    capacitor's `C` parameter after it is set -- the declared total
+    untouched -- trips `capacitance.status == "mismatch"` on exactly that
+    net, with `computed_ff` reflecting the corrupted device value."""
+    from klayout_tools import extract_parasitics
+
+    real_readback = extract_parasitics._emitted_capacitance_ff
+    corrupted: list[str] = []
+
+    def corrupt_first_lumped_cap(cap_device):
+        # Every net of this layout is lumped (no `--distributed-rc`), so
+        # the first capacitor seen is a lumped hub cap; corrupt only it.
+        if not corrupted:
+            cap_device.set_parameter("C", cap_device.parameter("C") * 2.0)
+            corrupted.append(cap_device.name)
+        return real_readback(cap_device)
+
+    monkeypatch.setattr(
+        extract_parasitics, "_emitted_capacitance_ff", corrupt_first_lumped_cap
+    )
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    assert len(corrupted) == 1
+    summary = _integrity_summary(report)
+    assert summary["capacitance_mismatches"] == 1
+    assert summary["nets_with_findings"] == 1
+    (bad,) = [
+        n
+        for n in report["parasitics"]["nets"]
+        if n["integrity"]["capacitance"]["status"] == "mismatch"
+    ]
+    assert bad["rc_model"] == "lumped"
+    cap = bad["integrity"]["capacitance"]
+    assert cap["declared_ff"] > 0
+    assert cap["computed_ff"] == pytest.approx(2.0 * cap["declared_ff"], rel=1e-6)
+    assert cap["delta_ff"] == pytest.approx(cap["declared_ff"], rel=1e-6)
+
+
 def test_parasitic_integrity_healthy_report_is_strict_finite_json(tmp_path):
     """A healthy extraction's whole report -- integrity blocks included --
     serializes under `allow_nan=False` with no NaN/Infinity literals."""

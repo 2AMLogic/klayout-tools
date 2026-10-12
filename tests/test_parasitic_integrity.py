@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 
 import pytest
 
@@ -680,6 +681,93 @@ class TestBoundedAndDeterministic:
             "relative": CAP_TOLERANCE_REL,
         }
         assert result["max_detail_items"] == MAX_DETAIL_ITEMS
+
+
+# ---------------------------------------------------------------------------
+# scaling: the checker is linear in the record, not O(nets x elements)
+# ---------------------------------------------------------------------------
+
+
+class _CountingList(list):
+    """A ``list`` that counts full iterations -- how many times the checker
+    scans a record element list end to end."""
+
+    def __init__(self, items: list) -> None:
+        super().__init__(items)
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+
+def _ladder_record(n_nets: int) -> ParasiticNetworkRecord:
+    """``n_nets`` healthy 5-node distributed ladders (4 R + 5 C each) --
+    the shape the Judge's PR #3127 timing used."""
+    b = IntegrityRecordBuilder()
+    ground = b.add_node("0", GROUND_OWNER)
+    for k in range(n_nets):
+        uids = [b.add_node(f"n{k}_{i}", k) for i in range(5)]
+        for i in range(4):
+            b.add_resistor(f"R{k}_{i}", uids[i], uids[i + 1], 1.0, k)
+        for i, uid in enumerate(uids):
+            b.add_ground_capacitor(f"C{k}_{i}", uid, ground, 0.2, k)
+        b.add_net(k, f"n{k}", "distributed", tuple(uids), 1.0)
+    return _build(b)
+
+
+class TestScaling:
+    def _scan_counts(self, n_nets: int) -> dict[str, int]:
+        record = _ladder_record(n_nets)
+        for name in ("nodes", "resistors", "inductors", "capacitors"):
+            setattr(record, name, _CountingList(getattr(record, name)))
+        result = check_parasitic_network(record)
+        assert result["nets_checked"] == n_nets
+        assert result["nets_with_findings"] == 0
+        return {
+            name: getattr(record, name).iterations
+            for name in ("nodes", "resistors", "inductors", "capacitors")
+        }
+
+    def test_element_lists_are_scanned_a_fixed_number_of_times(self):
+        """Deterministic scaling guard: the number of full passes over each
+        record element list is independent of the net count (the
+        pre-index checker rescanned every list once or more *per net*)."""
+        small = self._scan_counts(3)
+        large = self._scan_counts(300)
+        assert small == large
+        assert all(passes <= 1 for passes in large.values()), large
+
+    def test_thousands_of_nets_check_fast(self):
+        """Wall-clock backstop with a deliberately generous bound: 5,000
+        ladders (45,000 elements) check in well under a second on the
+        indexed checker, versus about a minute for the old per-net rescan
+        (11.7 s at 2,000 nets, growing quadratically)."""
+        record = _ladder_record(5000)
+        start = time.perf_counter()
+        result = check_parasitic_network(record)
+        elapsed = time.perf_counter() - start
+        assert result["nets_checked"] == 5000
+        assert result["nets_with_findings"] == 0
+        assert elapsed < 10.0, f"integrity check took {elapsed:.2f}s"
+
+    def test_foreign_owned_edge_joins_the_endpoint_owners_graph(self):
+        """Indexing keeps the connectivity semantics: a DC element whose
+        *both* endpoints net 2 owns joins net 2's graph even when net 1
+        emitted it (edges bucket by endpoint ownership, not by emitter)."""
+        b = IntegrityRecordBuilder()
+        ground = b.add_node("vsubs", GROUND_OWNER)
+        a0 = b.add_node("b__t0", 2)
+        a1 = b.add_node("b__t1", 2)
+        b.add_resistor("stray", a0, a1, 5.0, 1)
+        b.add_ground_capacitor("b_n0", a0, ground, 1.0, 2)
+        b.add_ground_capacitor("b_n1", a1, ground, 1.0, 2)
+        b.add_net(2, "b", "distributed", (a0, a1), 2.0)
+        (net,) = check_parasitic_network(_build(b))["nets"]
+        assert net["open"]["status"] == "pass"
+        assert net["islands"]["count"] == 0
+        # ...but it is still attributed to its emitter for resistor checks.
+        assert net["suspicious_resistors"]["count"] == 0
 
 
 # ---------------------------------------------------------------------------

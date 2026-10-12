@@ -387,8 +387,97 @@ def _union_find_connectivity(
     return {uid: find(uid) for uid in uids}
 
 
+@dataclass
+class _RecordIndex:
+    """One-pass index over a :class:`ParasiticNetworkRecord`, so every
+    per-net check reads only its own net's slice of the record.
+
+    Built once per :func:`check_parasitic_network` call: without it every
+    net rescanned every node and element (``O(nets x elements)`` -- seconds
+    at a few thousand nets, on every ``--parasitics`` run). Each bucket
+    preserves record order, so the per-net results are identical to the
+    full-scan formulation they replace.
+    """
+
+    #: ``owner_net_id -> [uid, ...]`` in node-registration order.
+    nodes_by_owner: dict[int | None, list[int]]
+    #: ``owner_net_id -> [(node_a, node_b), ...]``: the DC-conducting
+    #: elements (resistors minus substrate DC ties, then inductors) whose
+    #: *both* endpoints that owner's node universe contains -- regardless
+    #: of which net emitted the element.
+    dc_edges_by_owner: dict[int | None, list[tuple[int, int]]]
+    #: ``owner_net_id -> [resistor, ...]``: resistors by *emitting* net.
+    resistors_by_owner: dict[int | None, list[IntegrityResistor]]
+    #: ``owner_net_id -> [capacitance_ff, ...]``: ground caps by emitting net.
+    ground_caps_by_owner: dict[int | None, list[float]]
+    #: Every uid any R/L/C with two registered endpoints touches.
+    attached: set[int]
+
+
+def _bucket_dc_edge(
+    edges_by_owner: dict[int | None, list[tuple[int, int]]],
+    owners_by_uid: dict[int, list[int | None]],
+    node_a: int,
+    node_b: int,
+) -> None:
+    """File the DC edge ``(node_a, node_b)`` under every owner whose node
+    universe contains *both* endpoints (exactly the nets whose
+    connectivity it joins); an edge touching an unregistered uid, or
+    spanning two owners, joins no net's graph."""
+    owners_b = owners_by_uid.get(node_b, ())
+    for owner in owners_by_uid.get(node_a, ()):
+        if owner in owners_b:
+            edges_by_owner.setdefault(owner, []).append((node_a, node_b))
+
+
+def _mark_attached(
+    attached: set[int], record: ParasiticNetworkRecord, node_a: int, node_b: int
+) -> None:
+    """Add both endpoints of one R/L/C to ``attached`` when both resolve to
+    registered nodes (a malformed endpoint attaches nothing)."""
+    if _endpoints_known(record, node_a, node_b):
+        attached.add(node_a)
+        attached.add(node_b)
+
+
+def _index_record(record: ParasiticNetworkRecord) -> _RecordIndex:
+    """Bucket ``record`` by owner in a single pass over each element list
+    (see :class:`_RecordIndex`)."""
+    nodes_by_owner: dict[int | None, list[int]] = {}
+    # A malformed record may register one uid under several owners; keeping
+    # every owner per uid keeps the per-owner set semantics exact.
+    owners_by_uid: dict[int, list[int | None]] = {}
+    for n in record.nodes:
+        nodes_by_owner.setdefault(n.owner_net_id, []).append(n.uid)
+        owners_by_uid.setdefault(n.uid, []).append(n.owner_net_id)
+
+    dc_edges_by_owner: dict[int | None, list[tuple[int, int]]] = {}
+    attached: set[int] = set()
+    resistors_by_owner: dict[int | None, list[IntegrityResistor]] = {}
+    for r in record.resistors:
+        resistors_by_owner.setdefault(r.owner_net_id, []).append(r)
+        if not r.intentional_dc_tie:
+            _bucket_dc_edge(dc_edges_by_owner, owners_by_uid, r.node_a, r.node_b)
+        _mark_attached(attached, record, r.node_a, r.node_b)
+    for i in record.inductors:
+        _bucket_dc_edge(dc_edges_by_owner, owners_by_uid, i.node_a, i.node_b)
+        _mark_attached(attached, record, i.node_a, i.node_b)
+    ground_caps_by_owner: dict[int | None, list[float]] = {}
+    for c in record.capacitors:
+        if c.kind == "ground":
+            ground_caps_by_owner.setdefault(c.owner_net_id, []).append(c.capacitance_ff)
+        _mark_attached(attached, record, c.node_a, c.node_b)
+    return _RecordIndex(
+        nodes_by_owner=nodes_by_owner,
+        dc_edges_by_owner=dc_edges_by_owner,
+        resistors_by_owner=resistors_by_owner,
+        ground_caps_by_owner=ground_caps_by_owner,
+        attached=attached,
+    )
+
+
 def _net_connectivity(
-    record: ParasiticNetworkRecord, net_id: int
+    index: _RecordIndex, net_id: int
 ) -> tuple[set[int], dict[int, int]]:
     """The node universe of original net ``net_id`` and its DC connectivity
     (union-find representatives) over the DC-conducting elements -- the
@@ -396,25 +485,20 @@ def _net_connectivity(
     *both* endpoints the net owns. Capacitors establish no DC connectivity
     and join no edge here. Cross-net and net-to-ground elements correctly
     join no within-net edge: their other endpoint is not in the universe.
+    Reads only ``net_id``'s buckets of the pre-built ``index``.
     """
-    uids = [n.uid for n in record.nodes if n.owner_net_id == net_id]
-    uid_set = set(uids)
-    edges: list[tuple[int, int]] = [
-        (r.node_a, r.node_b)
-        for r in record.resistors
-        if not r.intentional_dc_tie and r.node_a in uid_set and r.node_b in uid_set
-    ]
-    edges.extend(
-        (i.node_a, i.node_b)
-        for i in record.inductors
-        if i.node_a in uid_set and i.node_b in uid_set
+    uids = index.nodes_by_owner.get(net_id, [])
+    return set(uids), _union_find_connectivity(
+        uids, index.dc_edges_by_owner.get(net_id, [])
     )
-    return uid_set, _union_find_connectivity(uids, edges)
 
 
-def _check_open(record: ParasiticNetworkRecord, net: IntegrityNet) -> dict[str, Any]:
+def _check_open(
+    record: ParasiticNetworkRecord, net: IntegrityNet, reps: dict[int, int]
+) -> dict[str, Any]:
     """The per-net ``open`` block: union-find over the net's required
-    terminals through its emitted segment resistors.
+    terminals through its emitted segment resistors (``reps`` -- the net's
+    connectivity from :func:`_net_connectivity`, computed once per net).
 
     ``distributed`` nets get the real check. ``lumped`` nets report
     ``not_applicable``: the star/Gamma-shunt topology hangs every terminal
@@ -445,7 +529,6 @@ def _check_open(record: ParasiticNetworkRecord, net: IntegrityNet) -> dict[str, 
             "disconnected_terminals": [],
             "details_truncated": False,
         }
-    _, reps = _net_connectivity(record, net.net_id)
     # `reps.get` (not `[...]`): a required terminal uid the connectivity
     # pass never resolved -- out of range, or not owned by this net, i.e. a
     # malformed record -- counts as disconnected rather than crashing.
@@ -519,26 +602,14 @@ def _check_islands(
 
 
 def _check_orphans(
-    record: ParasiticNetworkRecord, net: IntegrityNet, uid_set: set[int]
+    record: ParasiticNetworkRecord, uid_set: set[int], attached: set[int]
 ) -> dict[str, Any]:
     """Orphan nodes: nodes of the net's universe with no element attached
     at all. A node attached even only by a capacitor is a legitimate
     capacitor endpoint, not an orphan -- capacitors count as attachment
-    here even though they establish no DC connectivity.
+    here even though they establish no DC connectivity. ``attached`` is
+    the record-wide set :func:`_index_record` builds once.
     """
-    attached: set[int] = set()
-    for r in record.resistors:
-        if _endpoints_known(record, r.node_a, r.node_b):
-            attached.add(r.node_a)
-            attached.add(r.node_b)
-    for i in record.inductors:
-        if _endpoints_known(record, i.node_a, i.node_b):
-            attached.add(i.node_a)
-            attached.add(i.node_b)
-    for c in record.capacitors:
-        if _endpoints_known(record, c.node_a, c.node_b):
-            attached.add(c.node_a)
-            attached.add(c.node_b)
     orphans = sorted(record.nodes[uid].name for uid in uid_set if uid not in attached)
     capped, truncated = _cap_details(
         [{"node": name} for name in orphans], record.max_detail_items
@@ -571,16 +642,17 @@ def _resistor_issues(resistor: IntegrityResistor) -> list[str]:
 
 
 def _check_suspicious_resistors(
-    record: ParasiticNetworkRecord, net: IntegrityNet
+    record: ParasiticNetworkRecord, own_resistors: list[IntegrityResistor]
 ) -> dict[str, Any]:
     """Malformed resistors this net emitted: negative, zero, non-finite and
     self-loop values, diagnosed before graph arithmetic. Intentional
     substrate DC ties are excluded (a fixed ``1e12`` positive shunt is
-    none of these anyway, but the exclusion is explicit).
+    none of these anyway, but the exclusion is explicit). ``own_resistors``
+    is the net's emitted resistors, in record order.
     """
     findings: list[dict[str, Any]] = []
-    for r in record.resistors:
-        if r.owner_net_id != net.net_id or r.intentional_dc_tie:
+    for r in own_resistors:
+        if r.intentional_dc_tie:
             continue
         if not _endpoints_known(record, r.node_a, r.node_b):
             continue
@@ -607,7 +679,7 @@ def _check_suspicious_resistors(
 
 
 def _check_short_candidates(
-    record: ParasiticNetworkRecord, net: IntegrityNet
+    record: ParasiticNetworkRecord, own_resistors: list[IntegrityResistor]
 ) -> dict[str, Any]:
     """Cross-net short candidates: injected parasitic resistors (substrate
     DC ties excluded) whose endpoints resolve to different owners -- a
@@ -626,8 +698,8 @@ def _check_short_candidates(
         owner = record.nodes[uid].owner_net_id
         return "ground" if owner is GROUND_OWNER else owner
 
-    for r in record.resistors:
-        if r.intentional_dc_tie or r.owner_net_id != net.net_id:
+    for r in own_resistors:
+        if r.intentional_dc_tie:
             continue
         if not _endpoints_known(record, r.node_a, r.node_b):
             continue
@@ -661,7 +733,7 @@ def _check_short_candidates(
 
 
 def _check_capacitance(
-    record: ParasiticNetworkRecord, net: IntegrityNet
+    record: ParasiticNetworkRecord, net: IntegrityNet, ground_caps_ff: list[float]
 ) -> dict[str, Any]:
     """Ground-capacitance reconciliation: the net's declared total ground
     capacitance against the sum of its emitted ground-capacitor values,
@@ -674,13 +746,10 @@ def _check_capacitance(
     side is non-finite (a NaN total can never satisfy the tolerance
     comparison, and its value serializes as ``null``). A replacement model
     that cannot be compared fairly reports ``not_applicable`` with its
-    reason instead of a verdict.
+    reason instead of a verdict. ``ground_caps_ff`` is the net's emitted
+    ground-capacitor values, in record order.
     """
-    computed_ff = math.fsum(
-        c.capacitance_ff
-        for c in record.capacitors
-        if c.kind == "ground" and c.owner_net_id == net.net_id
-    )
+    computed_ff = math.fsum(ground_caps_ff)
     tolerance = {
         "absolute_ff": _finite_or_none(record.cap_tolerance_abs_ff, 12),
         "relative": _finite_or_none(record.cap_tolerance_rel, 12),
@@ -725,7 +794,12 @@ def check_parasitic_network(record: ParasiticNetworkRecord) -> dict[str, Any]:
     moves on, and every emitted number passes through
     :func:`_finite_or_none`, so the block serializes as strict finite
     JSON even for non-finite input.
+
+    Runs in ``O(nodes + elements)`` overall: the record is indexed by owner
+    once (:func:`_index_record`) and each net's checks read only their own
+    buckets.
     """
+    index = _index_record(record)
     nets_report: list[dict[str, Any]] = []
     open_nets = 0
     island_components = 0
@@ -735,13 +809,16 @@ def check_parasitic_network(record: ParasiticNetworkRecord) -> dict[str, Any]:
     capacitance_mismatches = 0
     nets_with_findings = 0
     for net in record.nets:
-        uid_set, reps = _net_connectivity(record, net.net_id)
-        open_block = _check_open(record, net)
+        uid_set, reps = _net_connectivity(index, net.net_id)
+        own_resistors = index.resistors_by_owner.get(net.net_id, [])
+        open_block = _check_open(record, net, reps)
         islands_block = _check_islands(record, net, uid_set, reps)
-        orphans_block = _check_orphans(record, net, uid_set)
-        suspicious_block = _check_suspicious_resistors(record, net)
-        shorts_block = _check_short_candidates(record, net)
-        capacitance_block = _check_capacitance(record, net)
+        orphans_block = _check_orphans(record, uid_set, index.attached)
+        suspicious_block = _check_suspicious_resistors(record, own_resistors)
+        shorts_block = _check_short_candidates(record, own_resistors)
+        capacitance_block = _check_capacitance(
+            record, net, index.ground_caps_by_owner.get(net.net_id, [])
+        )
         findings = (
             open_block["status"] == "open"
             or islands_block["count"] > 0

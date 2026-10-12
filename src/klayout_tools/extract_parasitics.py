@@ -1833,6 +1833,20 @@ def _tag_slice_hub(hub: kdb.Net, origin_id: int, enabled: bool) -> None:
         hub.set_property(PARASITIC_HUB_PROPERTY, origin_id)
 
 
+def _emitted_capacitance_ff(cap_device: kdb.Device) -> float:
+    """The capacitance (fF) ``cap_device`` actually carries, read back from
+    the created device's own ``C`` parameter (Farads).
+
+    The integrity record (issue #2764) records this read-back value -- not
+    the Farad value injection *intended* to set -- so the declared-vs-
+    emitted reconciliation covers what the netlist writer will emit: a
+    capacitor whose device value went wrong (a mis-scaled or overwritten
+    ``C``) shows up as a ``mismatch`` instead of the declared total being
+    compared to a copy of itself.
+    """
+    return cap_device.parameter("C") * 1e15
+
+
 def _record_substrate_ties(
     integ: IntegrityRecordBuilder, substrate_dc_tie: dict[str, Any]
 ) -> None:
@@ -2111,6 +2125,11 @@ def _inject_parasitics(
 
     report_nets: list[dict[str, Any]] = []
     hub_by_net: dict[str, kdb.Net] = {}
+    # Keyed by display name to mirror `hub_by_net` exactly: with two
+    # same-named nets (issue #765) a coupling cap's record endpoint resolves
+    # to the last hub, just as its netlist endpoint does. That only affects
+    # orphan attachment in the integrity record (coupling caps never join
+    # DC connectivity or the ground-capacitance sum).
     hub_uid_by_net: dict[str, int] = {}
     total_r = 0.0
     total_c_ff = 0.0
@@ -2248,7 +2267,7 @@ def _inject_parasitics(
                     f"{instance_name}_n{position_in_order}",
                     leg_uids[position_in_order],
                     ground_uid,
-                    node_c_farad * 1e15,
+                    _emitted_capacitance_ff(node_cap),
                     origin_id,
                 )
 
@@ -2405,7 +2424,11 @@ def _inject_parasitics(
             c_dev.set_parameter("C", c_farad)
             net_c_count = 1
             integ.add_ground_capacitor(
-                instance_name, c_ground_uid, ground_uid, c_farad * 1e15, origin_id
+                instance_name,
+                c_ground_uid,
+                ground_uid,
+                _emitted_capacitance_ff(c_dev),
+                origin_id,
             )
 
         # Marks this net's coupling/ground-capacitor attachment point (issue
