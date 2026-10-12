@@ -9102,3 +9102,464 @@ def test_drc_text_output_renders_the_file_envelope_not_a_dict_repr(
 
     assert inside.splitlines()[0] == "file: violation.gds"
     assert outside_text.splitlines()[0] == "file: <outside repo>"
+
+
+# Rule listing and selection (issue #2768): `--list-rules` and `--rules`.
+#
+# A three-rule synthetic deck: `a.width.1`/`b.width.1` each fail on a seeded
+# narrow bar, `c.width.1` reads a layer the stream never draws (naturally
+# inapplicable on a full run).
+# --------------------------------------------------------------------------- #
+
+
+def _selection_deck(monkeypatch) -> list:
+    from klayout_tools.decks import DrcRule
+
+    deck = [
+        DrcRule(
+            id=f"{name}.width.1",
+            description=f"synthetic: {name} width >= 500 dbu",
+            layer=(layer, 0),
+            check="width",
+            threshold_dbu=500,
+            scope=name,
+        )
+        for name, layer in (("a", 10), ("b", 20), ("c", 30))
+    ]
+    monkeypatch.setattr("klayout_tools.drc.get_deck", lambda name: deck)
+    monkeypatch.setattr("klayout_tools.drc.get_nominal_dbu", lambda name: 0.001)
+    monkeypatch.setattr("klayout_tools.drc.get_layer_names", lambda name: {})
+    return deck
+
+
+def _selection_layout(tmp_path, *, narrow_a: bool = True, narrow_b: bool = True) -> str:
+    """Layers 10/0 and 20/0 drawn (narrow = violating), 30/0 never drawn."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for layer, narrow in ((10, narrow_a), (20, narrow_b)):
+        width = 100 if narrow else 1000
+        top.shapes(layout.layer(layer, 0)).insert(
+            kdb.Box(layer * 1000, 0, layer * 1000 + width, 5000)
+        )
+    path = tmp_path / f"selection_{int(narrow_a)}{int(narrow_b)}.gds"
+    layout.write(str(path))
+    return str(path)
+
+
+@pytest.fixture
+def dispatched_rules(monkeypatch) -> list[str]:
+    """Record every rule id handed to the edge-pair check primitive, so a
+    test can prove an unselected rule was never *executed* -- filtering its
+    findings out afterwards would not satisfy this."""
+    import klayout_tools.drc as drc_module
+
+    calls: list[str] = []
+    real_run_check = drc_module._run_check
+
+    def _spy(region, other_region, rule, dbu_scale):
+        calls.append(rule.id)
+        return real_run_check(region, other_region, rule, dbu_scale)
+
+    monkeypatch.setattr(drc_module, "_run_check", _spy)
+    return calls
+
+
+def test_rules_subset_never_dispatches_unselected_rules(
+    tmp_path, monkeypatch, dispatched_rules
+):
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path)
+
+    report = run_drc(path, "synthetic", rules=["a.width.1"])
+
+    assert set(dispatched_rules) == {"a.width.1"}
+    assert report["status"] == "violations"
+    assert set(report["rule_counts"]) == {"a.width.1"}
+    assert report["coverage"]["rules_checked"] == ["a.width.1"]
+    # Legacy field keeps its absent-layer meaning: omitted rules never ran.
+    assert report["coverage"]["rules_skipped"] == []
+    assert report["rule_selection"] == {
+        "selectors": ["a.width.1"],
+        "selected": ["a.width.1"],
+        "omitted": ["b.width.1", "c.width.1"],
+        "deck_rule_count": 3,
+        "subset": True,
+    }
+
+
+def test_full_run_dispatches_every_rule_and_has_no_selection_block(
+    tmp_path, monkeypatch, dispatched_rules
+):
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path)
+
+    report = run_drc(path, "synthetic")
+
+    assert set(dispatched_rules) == {"a.width.1", "b.width.1"}
+    assert "rule_selection" not in report
+    assert report["coverage"]["inapplicable"] == [
+        {"id": "c.width.1", "reason": "no_applicable_geometry"}
+    ]
+
+
+def test_selecting_every_rule_is_equivalent_to_a_full_run(tmp_path, monkeypatch):
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path, narrow_a=False, narrow_b=False)
+
+    full = run_drc(path, "synthetic")
+    selected = run_drc(path, "synthetic", rules=["*"])
+
+    selection = selected.pop("rule_selection")
+    assert selection["omitted"] == []
+    assert selection["subset"] is False
+    assert selection["selected"] == ["a.width.1", "b.width.1", "c.width.1"]
+    full["provenance"].pop("klt_version", None)
+    selected["provenance"].pop("klt_version", None)
+    assert selected == full
+    assert full["status"] == "clean"
+    assert drc_exit_code(selected) == 0
+
+
+def test_omitted_absent_layer_rule_is_a_skip_not_inapplicable(tmp_path, monkeypatch):
+    """`c.width.1`'s layer is absent, so a full run calls it inapplicable --
+    but deliberately omitting it is still a requested-work gap, so a clean
+    subset is partial, never an unconditional `clean`."""
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path, narrow_a=False, narrow_b=False)
+
+    report = run_drc(path, "synthetic", rules=["a.width.1", "b.width.1"])
+
+    coverage = report["coverage"]
+    assert coverage["skipped"] == [{"id": "c.width.1", "reason": "not_selected"}]
+    assert coverage["inapplicable"] == []
+    assert report["status"] == "clean_partial"
+    assert drc_exit_code(report) == 0
+
+
+def test_clean_subset_is_clean_partial_with_exit_0(tmp_path, monkeypatch, capsys):
+    """Only `b` is seeded with a violation; selecting `a` alone runs clean
+    but is a partial result, and the text form says so."""
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path, narrow_a=False, narrow_b=True)
+
+    code, report = _run_drc_json(
+        capsys, [path, "--deck", "synthetic", "--rules", "a.width.1"]
+    )
+
+    assert code == 0
+    assert report["status"] == "clean_partial"
+    assert report["violation_count"] == 0
+    assert {r["id"] for r in report["coverage"]["skipped"]} == {
+        "b.width.1",
+        "c.width.1",
+    }
+
+    capsys.readouterr()
+    assert main(["drc", path, "--deck", "synthetic", "--rules", "a.width.1"]) == 0
+    out = capsys.readouterr().out
+    assert "status: clean_partial" in out
+    assert "rule selection: 1 of 3 rules (2 omitted; partial run)" in out
+    assert "skipped requested rules" not in out
+
+
+def test_selected_violation_exits_3(tmp_path, monkeypatch, capsys):
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path)
+
+    code, report = _run_drc_json(
+        capsys, [path, "--deck", "synthetic", "--rules", "b.*"]
+    )
+
+    assert code == 3
+    assert report["status"] == "violations"
+    assert set(report["rule_counts"]) == {"b.width.1"}
+
+
+def test_subset_with_zero_checked_work_reaches_no_verdict(
+    tmp_path, monkeypatch, capsys
+):
+    """Selecting only the rule whose layer is absent checks nothing at all:
+    the existing no-verdict behaviour (exit 4), not a vacuous clean."""
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path)
+
+    code, report = _run_drc_json(
+        capsys, [path, "--deck", "synthetic", "--rules", "c.width.1"]
+    )
+
+    assert code == 4
+    assert report["status"] == "not_checked"
+    assert report["coverage"]["nothing_checked"] is True
+    assert report["coverage"]["checked"] == []
+    assert report["rule_selection"]["omitted"] == ["a.width.1", "b.width.1"]
+
+
+def test_rule_selectors_glob_dedupe_trim_and_deck_order(tmp_path, monkeypatch):
+    from klayout_tools.drc import parse_rule_selectors, resolve_rule_selection
+
+    deck = _selection_deck(monkeypatch)
+
+    selectors = parse_rule_selectors(" c.* , a.width.1,*.width.1 ")
+    selection = resolve_rule_selection(deck, selectors)
+
+    assert selectors == ["c.*", "a.width.1", "*.width.1"]
+    assert selection["selected"] == ["a.width.1", "b.width.1", "c.width.1"]
+    assert selection["omitted"] == []
+    assert resolve_rule_selection(deck, ["[ab].width.?"])["selected"] == [
+        "a.width.1",
+        "b.width.1",
+    ]
+    # Request form: a list whose elements are comma-split the same way.
+    assert parse_rule_selectors(["a.width.1, b.*"]) == ["a.width.1", "b.*"]
+    assert parse_rule_selectors(None) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("a.width.1,", "empty rule selector"),
+        (" , ", "empty rule selector"),
+        ("", "empty rule selector"),
+        ("A.width.1", "rule id 'A.width.1'"),  # case-sensitive
+        ("a.width.1,zz.*", "glob 'zz.*'"),
+    ],
+)
+def test_bad_rule_selectors_are_clean_errors_before_any_layout_read(
+    value, expected, tmp_path, monkeypatch, capsys
+):
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path)
+
+    def _no_layout(*args, **kwargs):
+        raise AssertionError("layout must not be read for an invalid selection")
+
+    monkeypatch.setattr("klayout_tools.drc.load_layout", _no_layout)
+
+    message = _drc_error_message(
+        capsys, [path, "--deck", "synthetic", "--rules", value]
+    )
+
+    assert expected in message
+
+
+def test_rules_reject_unsupported_combinations(tmp_path, capsys):
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+
+    klayout_message = _drc_error_message(
+        capsys,
+        [
+            str(path),
+            "--engine",
+            "klayout",
+            "--deck-file",
+            "x.lydrc",
+            "--rules",
+            "poly.*",
+        ],
+    )
+    check_message = _drc_error_message(
+        capsys, ["--check", str(report_path), "--rules", "poly.*"]
+    )
+    request_message = _drc_error_message(
+        capsys,
+        [json.dumps(_drc_request_document(path)), "--rules", "poly.*"],
+    )
+
+    assert "not supported with --engine klayout" in klayout_message
+    assert "cannot be combined with --check" in check_message
+    assert "mutually exclusive" in request_message
+    assert "--rules" in request_message
+
+
+# -- listing ---------------------------------------------------------------- #
+
+
+def test_list_rules_reads_no_layout_and_lists_the_whole_deck(monkeypatch, capsys):
+    def _no_layout(*args, **kwargs):
+        raise AssertionError("--list-rules must not read a layout")
+
+    monkeypatch.setattr("klayout_tools.drc.load_layout", _no_layout)
+
+    code, listing = _run_drc_json(capsys, ["--deck", "sky130", "--list-rules"])
+
+    deck = get_deck("sky130")
+    assert code == 0
+    assert listing["mode"] == "list_rules"
+    assert listing["rule_count"] == len(deck)
+    assert [rule["id"] for rule in listing["rules"]] == [rule.id for rule in deck]
+    assert sum(listing["groups"]["check"].values()) == len(deck)
+    first = listing["rules"][0]
+    assert first["check"] == deck[0].check
+    assert first["layer"] == f"{deck[0].layer[0]}/{deck[0].layer[1]}"
+    assert first["scope"] == (deck[0].scope or None)
+    # Not a verdict: nothing a DRC consumer grades on.
+    assert not {"status", "violations", "coverage"} & set(listing)
+    # Deterministic.
+    assert _run_drc_json(capsys, ["--deck", "sky130", "--list-rules"])[1] == listing
+
+
+def test_list_rules_text_and_json_agree(monkeypatch, capsys):
+    _selection_deck(monkeypatch)
+
+    capsys.readouterr()
+    assert main(["drc", "--deck", "synthetic", "--list-rules"]) == 0
+    text = capsys.readouterr().out
+    _, listing = _run_drc_json(capsys, ["--deck", "synthetic", "--list-rules"])
+
+    assert "rules: 3" in text
+    for rule in listing["rules"]:
+        assert rule["id"] in text
+    assert listing["groups"] == {
+        "check": {"width": 3},
+        "scope": {"a": 1, "b": 1, "c": 1},
+    }
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--deck", "nope", "--list-rules"], "unknown deck 'nope'"),
+        (["--list-rules"], "--list-rules requires --deck"),
+        (["--deck", "sky130", "--list-rules", "--rules", "poly.*"], "--rules"),
+        (["--deck", "sky130", "--list-rules", "--top", "TOP"], "--top"),
+        (
+            ["--deck", "sky130", "--list-rules", "--engine", "klayout"],
+            "not supported with --engine klayout",
+        ),
+    ],
+)
+def test_list_rules_errors_are_clean(argv, expected, capsys):
+    assert expected in _drc_error_message(capsys, argv)
+
+
+def test_list_rules_is_an_input_mode_exclusive_with_file_and_check(tmp_path):
+    """Argparse usage errors (exit 2): listing reads no layout or report."""
+    for argv in (
+        ["drc", "x.gds", "--deck", "sky130", "--list-rules"],
+        ["drc", "--check", "r.json", "--deck", "sky130", "--list-rules"],
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            main(argv)
+        assert excinfo.value.code == 2
+
+
+# -- request documents ------------------------------------------------------ #
+
+
+@pytest.mark.parametrize("rules", ["a.width.1, b.*", ["a.width.1", "b.*"]])
+def test_request_document_rules_match_argv(rules, tmp_path, monkeypatch, capsys):
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path, narrow_a=False, narrow_b=False)
+    document = {"file": path, "deck": "synthetic", "rules": rules}
+
+    argv_code, argv_report = _run_drc_json(
+        capsys, [path, "--deck", "synthetic", "--rules", "a.width.1,b.*"]
+    )
+    request_code, request_report = _run_drc_json(capsys, [json.dumps(document)])
+
+    assert argv_code == request_code == 0
+    assert request_report["rule_selection"]["selected"] == ["a.width.1", "b.width.1"]
+    assert request_report == argv_report
+
+
+@pytest.mark.parametrize("rules", [3, {"a": 1}, ["a.width.1", 3], True])
+def test_request_document_rules_type_is_validated(rules, tmp_path, capsys):
+    document = {"file": "x.gds", "deck": "sky130", "rules": rules}
+
+    message = _drc_error_message(capsys, [json.dumps(document)])
+
+    assert "request field 'rules'" in message
+
+
+def test_request_document_rules_with_klayout_engine_is_refused(tmp_path, capsys):
+    document = {
+        "file": "x.gds",
+        "engine": "klayout",
+        "deck_file": "x.lydrc",
+        "rules": "poly.*",
+    }
+
+    message = _drc_error_message(capsys, [json.dumps(document)])
+
+    assert "not supported with --engine klayout" in message
+
+
+# -- --check / --rerun ------------------------------------------------------ #
+
+
+def test_rerun_replays_the_recorded_rule_selection(
+    tmp_path, monkeypatch, capsys, dispatched_rules
+):
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path)
+    report_path = tmp_path / "subset.drc.json"
+    _write_report(report_path, run_drc(path, "synthetic", rules=["b.*"]))
+    dispatched_rules.clear()
+
+    result = rerun_drc_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert set(dispatched_rules) == {"b.width.1"}
+
+
+def test_cheap_check_of_a_subset_report_still_rehashes_inputs(tmp_path, capsys):
+    """Cheap `--check` is unchanged by a selection: it re-hashes the input
+    and deck, and drifts when the layout moves."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "subset.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130", rules=["poly.*"]))
+
+    assert check_drc_report(str(report_path))["status"] == "match"
+    _make_violation_layout().write(str(path))
+    assert check_drc_report(str(report_path))["status"] == "drifted"
+
+
+def test_rerun_of_a_legacy_report_keeps_full_deck_meaning(
+    tmp_path, monkeypatch, dispatched_rules
+):
+    """A report with no `rule_selection` (everything written before #2768)
+    reruns the whole deck."""
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path)
+    report_path = tmp_path / "full.drc.json"
+    _write_report(report_path, run_drc(path, "synthetic"))
+    dispatched_rules.clear()
+
+    result = rerun_drc_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert set(dispatched_rules) == {"a.width.1", "b.width.1"}
+
+
+def test_rerun_detects_a_subset_report_doctored_into_a_full_one(tmp_path, monkeypatch):
+    """Dropping `rule_selection` from a subset report makes the rerun run the
+    full deck, whose different verdict surfaces as drift -- the selection
+    cannot be silently shed."""
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path)
+    report = run_drc(path, "synthetic", rules=["b.*"])
+    del report["rule_selection"]
+    report_path = tmp_path / "doctored.drc.json"
+    _write_report(report_path, report)
+
+    assert rerun_drc_report(str(report_path))["status"] == "drifted"
+
+
+@pytest.mark.parametrize(
+    "selection", [{"selectors": []}, {"selectors": "b.*"}, ["b.*"], {"x": 1}]
+)
+def test_rerun_rejects_a_malformed_recorded_selection(selection, tmp_path, monkeypatch):
+    _selection_deck(monkeypatch)
+    path = _selection_layout(tmp_path)
+    report = run_drc(path, "synthetic", rules=["b.*"])
+    report["rule_selection"] = selection
+    report_path = tmp_path / "malformed.drc.json"
+    _write_report(report_path, report)
+
+    with pytest.raises(DrcError, match="rule_selection.selectors"):
+        rerun_drc_report(str(report_path))

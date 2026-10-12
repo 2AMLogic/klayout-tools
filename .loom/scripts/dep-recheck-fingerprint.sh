@@ -84,6 +84,15 @@
 #                       CLOSED-without-merging both count as resolved, and an
 #                       issue body with no `## Dependencies` section (or an
 #                       empty one) is VERDICT=clear.
+#                       Repo routing (#2437, ported from upstream
+#                       rjwalters/loom#8510 @ 418d1bad): a CROSS-REPO
+#                       `owner/repo#N` item has its state read in THAT repo
+#                       and renders in DEPS as `owner/repo#N:<state>`; a bare
+#                       `#N` is read in the invoking repo (`--repo`, else the
+#                       cwd's remote) and still renders as `N:<state>`, so no
+#                       same-repo CONCLUSION_HASH moves. A cross-repo lookup
+#                       that fails is fatal (exit 1) — it is never retried
+#                       against the invoking repo.
 #
 # FORMULA_VERSION: a literal constant (see "FORMULA_VERSION" in the footer
 # comment below) bumped only when CONCLUSION_HASH's inputs or their canonical
@@ -125,7 +134,10 @@
 #                                         "checked":false,"state":"OPEN"}, ...]}
 #                                         (a checked entry may omit "state"
 #                                         entirely, or set it to null — it is
-#                                         never consulted).
+#                                         never consulted; an optional
+#                                         "repo":"owner/name" marks a
+#                                         cross-repo entry, omitted or null
+#                                         for a same-repo one).
 #
 # Options:
 #   --verdict blocked|clear   `dep-recheck` only: override the mechanically
@@ -145,7 +157,10 @@
 #                             ordinary case — every existing fingerprint is
 #                             unaffected when this is empty).
 #   --repo OWNER/NAME         Target repo for live mode (default: the cwd's
-#                             git remote).
+#                             git remote). For `named-dependency` this is the
+#                             invoking repo: it is where the issue body and
+#                             every bare `#N` are read, never an explicit
+#                             `owner/repo#N` (read in its own repo, #2437).
 #   --json                    Emit a JSON object instead of KEY=VALUE lines.
 #
 # Exit codes:
@@ -484,30 +499,54 @@ _extract_dependencies_section() {
     ' <<<"$1"
 }
 
-# One "<ref#> <true|false>" line per checklist item found in the section,
-# mirroring `operator-premise`'s regex-extraction approach (a fixed,
-# machine-readable pattern rather than free-form prose matching) but scoped
-# to this file's own `## Dependencies` checklist syntax. The `#N` reference
+# `owner/name`, as GitHub (and Gitea) spell it — ported verbatim from upstream
+# Loom's `OWNER_REPO` (rjwalters/loom#8510, loom-daemon/src/dep_recheck/
+# named.rs @ 418d1bad). Narrow on purpose: the captured value is passed to
+# `gh --repo` verbatim and every issue body is untrusted input, so it must
+# not be able to carry whitespace, a quote, or a leading `-` (which could
+# otherwise be smuggled through as a flag).
+_OWNER_REPO_RE='[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+'
+
+# One "<ref#> <true|false> [<owner/repo>]" line per checklist item found in
+# the section, mirroring `operator-premise`'s regex-extraction approach (a
+# fixed, machine-readable pattern rather than free-form prose matching) but
+# scoped to this file's own `## Dependencies` checklist syntax. The reference
 # does not need to sit immediately after the checkbox — any prose may come
-# first, and the FIRST `#[0-9]+` token on the line is taken as the ref (a
+# first, and the FIRST reference token on the line is taken as the ref (a
 # later `#N` mentioned in the same line, e.g. a `Closes #N` aside, is not the
 # dependency and must not be picked up instead):
 #   - [ ] #123: Prerequisite feature
 #   - [x] #456: Required infrastructure
 #   - [ ] PR #1607 (Closes #1600) merged -- lands something. (#1669: takes
 #         1607, the first `#N`, not 1600)
+#   - [ ] 2AMLogic/2am#1015: upstream prerequisite (#2437: a CROSS-REPO ref;
+#         emits "1015 false 2AMLogic/2am" so the state is read in THAT repo,
+#         never the invoking one)
+#
+# A reference token is `#N` with an optional `owner/repo` prefix glued to it
+# (upstream rjwalters/loom#8510's contract). The third field is present only
+# for a cross-repo reference; a bare `#N` emits two fields, meaning "the
+# invoking repo" (`--repo`, or the cwd's remote when `--repo` is omitted).
 _extract_named_deps() {
-    local line num checked
+    local line ref num repo checked
     grep -E '^[[:space:]]*-[[:space:]]*\[[ xX]\].*#[0-9]+' <<<"$1" | while IFS= read -r line; do
         checked="false"
         [[ "$line" =~ \[[xX]\] ]] && checked="true"
-        num="$(grep -oE '#[0-9]+' <<<"$line" | head -n1 | tr -d '#')"
-        printf '%s %s\n' "$num" "$checked"
+        ref="$(grep -oE "(${_OWNER_REPO_RE})?#[0-9]+" <<<"$line" | head -n1)"
+        num="${ref##*#}"
+        repo=""
+        [[ "$ref" == *"/"*"#"* ]] && repo="${ref%#*}"
+        if [[ -n "$repo" ]]; then
+            printf '%s %s %s\n' "$num" "$checked" "$repo"
+        else
+            printf '%s %s\n' "$num" "$checked"
+        fi
     done
 }
 
 _fetch_named_dependency_json() {
-    local body section entries num checked state one deps_json first
+    local body section entries num checked repo ref state one deps_json first
+    local -a target_flag
     body="$(gh issue view "$NUMBER" "${REPO_FLAG[@]}" --json body --jq '.body')" ||
         _die "gh issue view $NUMBER failed — cannot compute a fingerprint from a failed read (fail safe: never guess 'clear' on missing data)" 1
     section="$(_extract_dependencies_section "$body")"
@@ -516,25 +555,42 @@ _fetch_named_dependency_json() {
     if [[ -n "$entries" ]]; then
         deps_json="["
         first=true
-        while read -r num checked; do
+        while read -r num checked repo; do
             [[ -z "$num" ]] && continue
             if [[ "$checked" == "true" ]]; then
                 # Already resolved by whoever edited the checklist — no live
                 # lookup needed, and no state is ever consulted for it.
-                one="$(jq -n --argjson n "$num" '{number: $n, checked: true, state: null}')"
+                one="$(jq -n --argjson n "$num" --arg r "$repo" \
+                    '{number: $n, repo: (if $r == "" then null else $r end), checked: true, state: null}')"
             else
+                # Resolve in the repo the entry itself names (#2437, upstream
+                # rjwalters/loom#8510); a bare `#N` falls back to the invoking
+                # repo (explicit `--repo`, else gh's own cwd default). Before
+                # this, every lookup went to the invoking repo, so
+                # `2AMLogic/2am#1015` was answered by this repo's unrelated
+                # `#1015` — a silently wrong state, not an error.
+                if [[ -n "$repo" ]]; then
+                    target_flag=(--repo "$repo")
+                    ref="$repo#$num"
+                else
+                    target_flag=("${REPO_FLAG[@]}")
+                    ref="#$num"
+                fi
                 # A named dependency is either an issue or a PR — try issue
                 # first, and only fall back to `pr view` when that lookup
                 # itself fails (mirrors _fetch_operator_premise_json above).
                 # If BOTH fail, that is a real read failure — die rather than
                 # silently defaulting to a status that would misreport as
-                # "clear" (fail safe: never guess "clear" on missing data).
-                state="$(gh issue view "$num" "${REPO_FLAG[@]}" --json state --jq '.state' 2>/dev/null || true)"
+                # "clear" (fail safe: never guess "clear" on missing data). For
+                # a cross-repo ref this is never retried against the invoking
+                # repo: an unreadable upstream reference fails closed.
+                state="$(gh issue view "$num" "${target_flag[@]}" --json state --jq '.state' 2>/dev/null || true)"
                 if [[ -z "$state" ]]; then
-                    state="$(gh pr view "$num" "${REPO_FLAG[@]}" --json state --jq '.state' 2>/dev/null || true)"
+                    state="$(gh pr view "$num" "${target_flag[@]}" --json state --jq '.state' 2>/dev/null || true)"
                 fi
-                [[ -n "$state" ]] || _die "could not read state for named dependency #$num (neither gh issue view nor gh pr view succeeded)" 1
-                one="$(jq -n --argjson n "$num" --arg s "$state" '{number: $n, checked: false, state: $s}')"
+                [[ -n "$state" ]] || _die "could not read state for named dependency $ref (neither gh issue view nor gh pr view succeeded)" 1
+                one="$(jq -n --argjson n "$num" --arg r "$repo" --arg s "$state" \
+                    '{number: $n, repo: (if $r == "" then null else $r end), checked: false, state: $s}')"
             fi
             [[ "$first" == true ]] && first=false || deps_json+=","
             deps_json+="$one"
@@ -544,12 +600,19 @@ _fetch_named_dependency_json() {
     jq -n --argjson deps "$deps_json" '{deps: $deps}'
 }
 
-# One "<ref#>:<state>" line per named dependency, sorted — a checked item
-# always renders as "<ref#>:checked" regardless of any "state" it carries
+# One "<ref>:<state>" line per named dependency, sorted — a checked item
+# always renders as "<ref>:checked" regardless of any "state" it carries
 # (never consulted, matching the header doc).
+#
+# `<ref>` is the bare number for a same-repo dependency (no `repo`, or a null
+# one) — byte-identical to the pre-#2437 encoding, so no existing same-repo
+# CONCLUSION_HASH moves — and `owner/repo#N` for a cross-repo one, so
+# `owner/a#5`, `owner/b#5` and a local `#5` are three distinct entries
+# (upstream rjwalters/loom#8510's `Dep::line_key`).
 _named_dependency_deps() {
     jq -r '.deps | sort_by(.number) | .[]
-        | if .checked == true then "\(.number):checked" else "\(.number):\(.state)" end' <<<"$1" | sort
+        | (if (.repo // "") == "" then "\(.number)" else "\(.repo)#\(.number)" end) as $key
+        | if .checked == true then "\($key):checked" else "\($key):\(.state)" end' <<<"$1" | sort
 }
 
 # A named dependency blocks iff it is unchecked AND its live state is OPEN.

@@ -2399,6 +2399,140 @@ def test_run_pex_distributed_rc_threaded_through_to_extraction(
     assert report["status"] == "pass"
 
 
+@_SKIP_NO_NGSPICE
+def test_run_pex_parasitic_integrity_propagates_matching_payloads(
+    tmp_path, resistor_layout
+):
+    """Issue #2764: `extraction.parasitic_integrity` carries the
+    extraction's own integrity diagnostics -- summary fields verbatim, and
+    per-net entries whose `integrity` payloads are byte-identical to what
+    `klt extract --parasitics` inlines on the same layout's
+    `parasitics.nets[]` entries (same order, same content)."""
+    from klayout_tools.extract import run_extract
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    propagated = report["extraction"]["parasitic_integrity"]
+    assert propagated is not None
+    summary_keys = {
+        "short_threshold_ohm",
+        "cap_tolerance",
+        "max_detail_items",
+        "nets_checked",
+        "nets_with_findings",
+        "open_nets",
+        "island_components",
+        "orphan_nodes",
+        "suspicious_resistors",
+        "short_candidates",
+        "capacitance_mismatches",
+    }
+    assert summary_keys <= set(propagated)
+    direct = run_extract(
+        resistor_layout,
+        "sky130",
+        output=str(tmp_path / "direct.spice"),
+        parasitics=True,
+    )
+    direct_summary = direct["parasitics"]["integrity"]
+    for key in summary_keys:
+        assert propagated[key] == direct_summary[key]
+    assert len(propagated["nets"]) == len(direct["parasitics"]["nets"])
+    for pex_net, direct_net in zip(
+        propagated["nets"], direct["parasitics"]["nets"], strict=True
+    ):
+        assert pex_net["net"] == direct_net["net"]
+        assert pex_net["net_id"] == direct_net["net_id"]
+        assert pex_net["rc_model"] == direct_net["rc_model"]
+        assert pex_net["integrity"] == direct_net["integrity"]
+    # A healthy extraction trips nothing, and the pex verdict is untouched.
+    assert propagated["nets_with_findings"] == 0
+    assert report["status"] == "pass"
+
+
+def test_run_pex_parasitic_integrity_none_without_the_field(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """An extraction report predating issue #2764 (no `integrity` summary)
+    propagates `parasitic_integrity: null` instead of crashing -- the same
+    tolerance `_body_bias_report`'s callers already extend to older
+    extractions."""
+    calls = _install_two_call_fake_run_sim(monkeypatch)
+    assert calls is not None  # the fake answers both legs without ngspice
+
+    import klayout_tools.pex as pex_module
+
+    real_run_extract = pex_module.run_extract
+
+    def strip_integrity(*args, **kwargs):
+        report = real_run_extract(*args, **kwargs)
+        if report.get("parasitics"):
+            report["parasitics"].pop("integrity", None)
+            for entry in report["parasitics"]["nets"]:
+                entry.pop("integrity", None)
+        return report
+
+    monkeypatch.setattr(pex_module, "run_extract", strip_integrity)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["extraction"]["parasitic_integrity"] is None
+    assert report["status"] == "pass"
+
+
+def test_parasitic_integrity_report_unit_shapes():
+    """`_parasitic_integrity_report` itself: the summary-plus-nets assembly
+    for a well-formed `parasitics` block, and `None` for anything without
+    the summary field."""
+    from klayout_tools.pex import _parasitic_integrity_report
+
+    parasitics = {
+        "integrity": {
+            "short_threshold_ohm": 1.0,
+            "cap_tolerance": {"absolute_ff": 1e-06, "relative": 1e-09},
+            "max_detail_items": 20,
+            "nets_checked": 1,
+            "nets_with_findings": 1,
+            "open_nets": 1,
+            "island_components": 0,
+            "orphan_nodes": 0,
+            "suspicious_resistors": 0,
+            "short_candidates": 0,
+            "capacitance_mismatches": 0,
+        },
+        "nets": [
+            {
+                "net": "clk",
+                "net_id": 2,
+                "rc_model": "distributed",
+                "integrity": {"open": {"status": "open"}},
+            },
+            {"net": "old", "net_id": 3, "rc_model": "lumped"},  # pre-#2764 entry
+        ],
+    }
+    block = _parasitic_integrity_report(parasitics)
+    assert block is not None
+    assert block["short_threshold_ohm"] == 1.0
+    assert block["nets"] == [
+        {
+            "net": "clk",
+            "net_id": 2,
+            "rc_model": "distributed",
+            "integrity": {"open": {"status": "open"}},
+        }
+    ]
+    assert _parasitic_integrity_report({"nets": []}) is None
+    assert _parasitic_integrity_report({}) is None
+
+
 def test_run_pex_distributed_rc_requires_critical_net(tmp_path, resistor_layout):
     dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
     tb = _write_testbench(tmp_path / "testbench.spice", dut)

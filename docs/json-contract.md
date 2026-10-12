@@ -396,6 +396,17 @@ no divergence it cannot prove. A new key on an unchanged shape: no
 `schema_version` bump on either mode. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "A doc the build has outrun".
 
+Issue #2718 lets T1 items 1, 2, 9 and 10 accept an artifact-anchored
+`generic` envelope. The additions are: an optional `t1_item` key on the
+generic envelope; a conditional `citation.artifact_binding` object, present
+only on such a citation; and two new values in the existing `reason` enum,
+`unanchored_evidence` and `wrong_item`. A native citation for those items
+grades and renders exactly as before. A bare generic envelope cited for
+them was already `unmet`, and its `reason` changes from `wrong_kind` to the
+more specific `unanchored_evidence`. No `schema_version` bump. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10: bind them
+to an audited artifact".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A
@@ -1099,6 +1110,38 @@ operator lists, and the negative controls:
 [`guides/golden-artifact-determinism.md`](guides/golden-artifact-determinism.md)
 → "Float provenance rules for committed evidence".
 
+## Path-only (non-result) keys (issue #2723)
+
+`klt drc` and `klt extract` echo caller-supplied filesystem paths. Two analyses
+of identical inputs run from different directories therefore never produce
+byte-identical reports, even when every result is identical. A consumer that
+hashes, diffs, or dedupes reports should drop the keys below rather than
+hard-code names from observation. The lists are also importable constants in
+`src/klayout_tools/_report_verify.py` (`DRC_PATH_ONLY_PATHS`,
+`EXTRACT_PATH_ONLY_PATHS`, `PATH_ONLY_KEYS_BY_VERB`) with a helper
+`strip_path_only_keys(report, verb)`; a test fails if a path-bearing key is
+added without being registered. Paths use dotted notation, `*` standing for
+any list index.
+
+| Verb | Key | Meaning |
+|---|---|---|
+| `drc` | `file` | input layout, as provided by the caller |
+| `extract` | `file` | input layout, as provided by the caller |
+| `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`) |
+| `extract` | `spef_path` | written SPEF (`--spef`), else `null` |
+| `extract` | `subcircuit.path` | written sub-circuit netlist (`--subcircuit`) |
+| `extract` | `abstracted_cells.*.lef_path` | LEF file an abstracted cell's pins came from |
+| `extract` | `pdk.root` | `{path, scope}` of the PDK install (never absolute, but host-dependent) |
+
+Separately, `provenance.klt_version`, `provenance.klayout_version`, and
+`provenance.pdk.version` (`VOLATILE_PROVENANCE_PATHS`) differ across tool
+builds even when every path matches, so reports are comparable across
+checkouts only for the same tool build; `strip_path_only_keys(...,
+include_volatile_provenance=True)` drops those too. The default report shape
+is unchanged: these fields are still emitted as before (no `schema_version`
+change). A `--path-root` option that records them relative to a caller-given
+root is tracked separately.
+
 ## Verifying committed evidence: `--check` / `--rerun`
 
 Seven verbs let a consumer verify that a previously committed `--format json`
@@ -1287,6 +1330,25 @@ of whether RDB categories exist: absent findings their status is
 correction to `coverage.rules_checked`; category declarations move to
 `coverage.rule_categories`.
 
+**Caller-vouched rule-category assertions** (issues #2697, #2806) are the one
+opt-in exception: the additive top-level `coverage_assertion` field, present
+only when the caller supplied an assertion, records which one was used and
+whether it held. Two variants, distinguished by `kind`:
+
+- `{"kind": "expected_rule_categories", "expected": <int>, "observed":
+  <int>, "satisfied": <bool>}` — `--expect-rule-categories N` (unchanged).
+- `{"kind": "expected_rule_category_names", "expected_names": [<str>],
+  "observed_names": [<str>], "missing_names": [<str>], "unexpected_names":
+  [<str>], "satisfied": <bool>}` — `--expect-rule-categories-file PATH`. All
+  name lists are sorted and deduplicated. This variant never carries the
+  integer `expected`/`observed` keys, so a consumer must dispatch on `kind`
+  rather than read `expected` blindly.
+
+A satisfied assertion of either kind marks the declared categories checked
+and clears the `unmeasured_rule_execution` sentinel; it is caller-supplied
+evidence, not proof of execution (see `docs/cli/drc.md`, "Engine" →
+`"klayout"`).
+
 `nothing_checked` and `nothing_checked_reasons` remain available. In a v1
 coverage block, zero means **known** zero actual checked work. It is not a
 synonym for partial, unknown, attempted, or inapplicable work. Real errored
@@ -1334,6 +1396,41 @@ completeness. Optional Verilator code-coverage percentages are `legacy` and
 are never a requested-check claim. The
 [full table, field names and adapter migration contract](coverage-contract.md)
 are normative.
+
+## A success payload that is itself an input document (`klt yield-samples`, issue #2563)
+
+Most payloads are reports a person or tool reads. `klt yield-samples`'
+payload is also a **document another verb consumes**: its `--format json`
+output is a `klt yield` sample-set document, redirected to a file and passed
+to `klt yield` unchanged. It needs no exception to this contract, because
+the envelope is additive and flat:
+
+```json
+{
+  "schema_version": 1,
+  "measurements": [ "... sample-set entries, see docs/cli/yield.md ..." ],
+  "derivation": { "nominal": {"path": "...", "content_hash": "sha256:..."},
+                  "negative_control": {"path": "...", "content_hash": "sha256:...", "description": null},
+                  "measurements": [ "... per-measurement control disclosures ..." ] }
+}
+```
+
+- The success payload is emitted through `emit_success()` like every other
+  verb; `schema_version` (this command's own, `1`) sits beside the
+  sample-set's `measurements`, and `derivation` is an additive audit block.
+  `klt yield`'s sample-set reader reads `measurements` and ignores both
+  extra top-level keys, so **no result wrapper and no extraction step** sits
+  between the two commands.
+- Errors use the shared error shape below (`error.command:
+  "yield-samples"`) on stderr with stdout empty, exit `1`; a missing
+  `--negative-control` is an argparse usage error, exit `2`. Because stdout
+  is empty on failure, `klt yield-samples ... --format json > samples.json`
+  leaves an empty file rather than a partial sample set — still, check the
+  exit code before using the file.
+- The output is deterministic (no timestamps), so a CI job can re-derive and
+  byte-compare a committed copy. Field-level documentation, the matching
+  rules, and the signoff freshness consequence are in
+  [`cli/yield.md`](cli/yield.md#deriving-a-sample-set-from-two-klt-sim-reports-klt-yield-samples).
 
 ## Error shape
 

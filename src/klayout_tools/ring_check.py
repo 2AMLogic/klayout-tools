@@ -85,6 +85,7 @@ def run_ring_check(
     region_um: tuple[float, float, float, float] | None = None,
     top: str | None = None,
     ignore_enclosed: bool = False,
+    cells: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assert that ``layers``' shapes form one closed annulus per top cell.
 
@@ -102,7 +103,18 @@ def run_ring_check(
     ring is not reported ``"broken"`` merely because it protects a circuit
     drawn on the same layer set (issue #550). A genuine break in the ring's
     own perimeter (a fragment that is not inside a hole) still fails either
-    way.
+    way. ``cells``, when given (default ``None``: no scope, every shape under
+    the checked root participates), is a non-empty list of **exact** cell names
+    restricting the geometry to those cells' subtrees (issue #2690). Every
+    occurrence of each selected cell reachable from the checked root
+    participates, placed with its full transform (nesting, rotation,
+    reflection, arrays) in the root's coordinates, and every descendant of a
+    selected cell participates. Shapes owned by unselected ancestors and
+    sibling subtrees are excluded. The selected geometry is combined *before*
+    the clip window and the annulus assertion. Selecting both an ancestor and a
+    descendant never duplicates geometry. Unknown or malformed names raise
+    :class:`RingCheckError`; a selected cell with no reachable geometry in a
+    root yields an ``"empty"`` violation for that root.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/ring-check.md``)::
@@ -112,6 +124,7 @@ def run_ring_check(
             "file": <path as provided>,
             "layers": [[layer, datatype], ...],
             "region_um": [left, bottom, right, top] | None,
+            "cells": ["<name>", ...] | None,  # the effective --cells scope
             "dbu_um": <database unit in micrometres, float>,
             "status": "continuous" | "broken",
             "violation_count": <int>,
@@ -158,7 +171,16 @@ def run_ring_check(
     if not layers:
         raise RingCheckError("layer set is empty: at least one layer required")
 
+    selected_cells = _validate_cells(cells)
+
     layout = load_layout(layout_path, RingCheckError)
+
+    if selected_cells is not None:
+        unknown = [name for name in selected_cells if layout.cell(name) is None]
+        if unknown:
+            raise RingCheckError(
+                "unknown cell(s) in --cells: " + ", ".join(repr(n) for n in unknown)
+            )
 
     # Imported lazily (after load_layout, which already paid this cost) for
     # kdb.Region() below -- matching drc.py's ordering.
@@ -172,6 +194,7 @@ def run_ring_check(
     clip_box = _clip_box(kdb, region_um, dbu) if region_um is not None else None
 
     violations: list[dict[str, Any]] = []
+    cache: dict[tuple[int, int], Any] = {}
     for cell in top_cells:
         region = kdb.Region()
         for layer, datatype in layers:
@@ -181,7 +204,12 @@ def run_ring_check(
                 # itself; the merged-region assertion below decides the
                 # verdict (an all-absent layer set yields an "empty" ring).
                 continue
-            region += kdb.Region(cell.begin_shapes_rec(layer_index))
+            if selected_cells is None:
+                region += kdb.Region(cell.begin_shapes_rec(layer_index))
+            else:
+                region += _scoped_region(
+                    kdb, layout, cell, layer_index, frozenset(selected_cells), cache
+                )
 
         if clip_box is not None:
             region &= kdb.Region(clip_box)
@@ -212,11 +240,75 @@ def run_ring_check(
         "file": layout_path,
         "layers": [[layer, datatype] for layer, datatype in layers],
         "region_um": list(region_um) if region_um is not None else None,
+        "cells": list(selected_cells) if selected_cells is not None else None,
         "dbu_um": dbu,
         "status": "broken" if violations else "continuous",
         "violation_count": len(violations),
         "violations": violations,
     }
+
+
+def _validate_cells(cells: list[str] | None) -> list[str] | None:
+    """Validate an explicit ``cells`` scope; return it de-duplicated (order
+    preserved) or ``None`` when no scope was requested."""
+    if cells is None:
+        return None
+    if isinstance(cells, str) or not isinstance(cells, (list, tuple)):
+        raise RingCheckError("--cells must be a list of cell names")
+    if not cells:
+        raise RingCheckError("--cells is empty: at least one cell name required")
+    seen: list[str] = []
+    for name in cells:
+        if not isinstance(name, str) or not name.strip():
+            raise RingCheckError(
+                f"malformed cell name in --cells: {name!r} (must be a non-empty string)"
+            )
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _scoped_region(
+    kdb: Any,
+    layout: Any,
+    root: Any,
+    layer_index: int,
+    selected: frozenset[str],
+    cache: dict[tuple[int, int], Any],
+) -> Any:
+    """Union of ``layer_index`` shapes inside selected-cell subtrees of ``root``.
+
+    Walks the instance tree from ``root``. Unselected cells contribute nothing
+    of their own and are only descended through; the first selected cell on a
+    path contributes its whole subtree (its own shapes plus all descendants),
+    transformed into ``root``'s coordinates, and the walk does not descend
+    further on that path -- so a selected descendant of a selected ancestor is
+    never counted twice. A selected ``root`` contributes everything.
+    """
+
+    def subtree(cell: Any) -> Any:
+        key = (cell.cell_index(), layer_index)
+        if key not in cache:
+            cache[key] = kdb.Region(cell.begin_shapes_rec(layer_index))
+        return cache[key]
+
+    result = kdb.Region()
+    if root.name in selected:
+        result += subtree(root)
+        return result
+
+    def walk(cell: Any, trans: Any) -> None:
+        for inst in cell.each_inst():
+            child = layout.cell(inst.cell_index)
+            for t in inst.cell_inst.each_cplx_trans():
+                combined = trans * t
+                if child.name in selected:
+                    result.insert(subtree(child).transformed(combined))
+                else:
+                    walk(child, combined)
+
+    walk(root, kdb.ICplxTrans())
+    return result
 
 
 def _select_top_cells(layout: Any, top: str | None) -> list[Any]:

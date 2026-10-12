@@ -5144,6 +5144,116 @@ def test_command_evidence_yield_hashes_samples_relative_to_command_cwd(
     assert item_6["citation"]["content_hash"] == expected_hash
 
 
+# --------------------------------------------------------------------------- #
+# `klt yield-samples` derived documents (issue #2563): signoff hashing is
+# unchanged -- it hashes the single document `samples` names, which for a
+# negative-control workflow is the derived sample set, not either campaign.
+# --------------------------------------------------------------------------- #
+
+
+def _mc_sim_report(path: Path, values: list) -> str:
+    """A minimal `klt sim` Monte Carlo report over one measurement."""
+    report = {
+        "schema_version": 3,
+        "status": "pass",
+        "measurements": [{"name": "vref", "unit": "V", "limits": {"max": 1.25}}],
+        "corners": [
+            {
+                "corner_id": f"tt/mc{i}",
+                "status": "pass",
+                "measurements": [{"name": "vref", "value": v, "status": "pass"}],
+                "monte_carlo": {"sample_index": i, "seed": i},
+            }
+            for i, v in enumerate(values)
+        ],
+    }
+    path.write_text(json.dumps(report))
+    return str(path)
+
+
+def _derive_samples(tmp_path: Path, capsys) -> Path:
+    """Run the documented first command of the two-command workflow and
+    commit its `--format json` output beside the yield report."""
+    argv = [
+        "yield-samples",
+        str(tmp_path / "nominal.json"),
+        "--negative-control",
+        str(tmp_path / "control.json"),
+        "--format",
+        "json",
+    ]
+    assert main(argv) == 0
+    derived = tmp_path / "mc-samples.json"
+    derived.write_text(capsys.readouterr().out)
+    return derived
+
+
+def _yield_item_6(tmp_path: Path, pin: str | None = None) -> dict:
+    yield_path = _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE)
+    evidence: dict | str = (
+        yield_path if pin is None else {"file": yield_path, "content_hash": pin}
+    )
+    result = build_tier_report(_manifest(evidence={"6": evidence}))
+    return next(item for item in result["items"] if item["id"] == 6)
+
+
+def test_yield_samples_derived_document_is_what_signoff_hashes(tmp_path, capsys):
+    _mc_sim_report(tmp_path / "nominal.json", [1.20, 1.21, 1.19])
+    _mc_sim_report(tmp_path / "control.json", [1.30, 1.31, 1.29])
+    derived = _derive_samples(tmp_path, capsys)
+
+    item_6 = _yield_item_6(tmp_path)
+
+    assert item_6["status"] == "met"
+    derived_hash = "sha256:" + hashlib.sha256(derived.read_bytes()).hexdigest()
+    assert item_6["citation"]["content_hash"] == derived_hash
+    # The pin moved from either campaign to the derived document; both
+    # campaigns' own hashes live *inside* it as audit metadata.
+    for name in ("nominal.json", "control.json"):
+        source_hash = (
+            "sha256:" + hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
+        )
+        assert item_6["citation"]["content_hash"] != source_hash
+        assert source_hash in derived.read_text()
+
+
+@pytest.mark.parametrize("changed", ["nominal.json", "control.json"])
+def test_yield_samples_regenerated_from_a_changed_campaign_rejects_the_old_pin(
+    tmp_path, capsys, changed
+):
+    _mc_sim_report(tmp_path / "nominal.json", [1.20, 1.21, 1.19])
+    _mc_sim_report(tmp_path / "control.json", [1.30, 1.31, 1.29])
+    derived = _derive_samples(tmp_path, capsys)
+    old_pin = "sha256:" + hashlib.sha256(derived.read_bytes()).hexdigest()
+    assert _yield_item_6(tmp_path, pin=old_pin)["status"] == "met"
+
+    _mc_sim_report(tmp_path / changed, [1.40, 1.41, 1.39])
+    _derive_samples(tmp_path, capsys)
+
+    item_6 = _yield_item_6(tmp_path, pin=old_pin)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "stale_evidence"
+
+
+def test_yield_samples_source_edit_without_regeneration_is_not_rechecked(
+    tmp_path, capsys
+):
+    """The documented freshness limitation: signoff does not recursively
+    re-hash the campaigns a derived document records. Editing a source
+    report without re-running `klt yield-samples` leaves the pin satisfied
+    -- regeneration is what folds a changed campaign into the evidence."""
+    _mc_sim_report(tmp_path / "nominal.json", [1.20, 1.21, 1.19])
+    _mc_sim_report(tmp_path / "control.json", [1.30, 1.31, 1.29])
+    derived = _derive_samples(tmp_path, capsys)
+    pin = "sha256:" + hashlib.sha256(derived.read_bytes()).hexdigest()
+
+    _mc_sim_report(tmp_path / "nominal.json", [9.0, 9.0, 9.0])
+
+    item_6 = _yield_item_6(tmp_path, pin=pin)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["content_hash"] == pin
+
+
 def test_mixed_signal_manifest_shares_bare_item_6_yield_evidence_across_partitions(
     tmp_path,
 ):
@@ -5564,13 +5674,13 @@ def test_mixed_signal_partitions_apply_their_own_item_5_rule(tmp_path):
 def test_extract_still_satisfies_the_four_items_with_no_evidence_behind_them(
     tmp_path, item_id
 ):
-    """Deliberately out of scope for issue #2044: items 1, 2, 9 and 10 name
-    no evidence at all ("items 1, 2, 9, and 10 have none ... Citing them
-    honestly is the claimant's responsibility, not something the tool
-    verifies"), so they are graded on whether *some* passing envelope was
-    cited, topical relevance included -- and `extract` is no more irrelevant
-    there than the `drc` report that also satisfies them. Restricting them
-    needs an artifact to bind them to, which is a separate question."""
+    """Deliberately out of scope for issue #2044, and kept for compatibility
+    by issue #2718: items 1, 2, 9 and 10 name no `klt` verb, so any passing
+    native envelope still satisfies them -- `extract` no more irrelevantly
+    than the `drc` report that also does. Issue #2718 adds an
+    artifact-anchored generic form for them instead of restricting native
+    kinds; a native citation is told apart by carrying no
+    `artifact_binding`."""
     extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
 
     result = build_tier_report(_manifest(evidence={str(item_id): extract_path}))
@@ -5675,20 +5785,341 @@ def test_generic_evidence_for_items_3_through_7_renders_unmet_wrong_kind(
 
 
 @pytest.mark.parametrize("item_id", [1, 2, 9, 10])
-def test_generic_evidence_for_unrestricted_non_item_8_items_still_rejected(
+def test_bare_generic_evidence_for_items_1_2_9_10_is_refused_as_unanchored(
     tmp_path, item_id
 ):
-    """Items 1, 2, 9, and 10 are otherwise unrestricted (any native kind
-    satisfies them, like items 3-6) but do not opt in to "generic" either --
-    only item 8 does."""
+    """Items 1, 2, 9, and 10 accept "generic" only when it is
+    artifact-anchored (issue #2718). A bare "yep, it's fine" generic record
+    -- no `t1_item`, no bound artifact, no pinned hash -- still never
+    renders `met`; the reason now names what is missing (it was
+    `wrong_kind` before these items accepted any generic citation)."""
     generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
 
     result = build_tier_report(_manifest(evidence={str(item_id): generic_path}))
 
     item = next(item for item in result["items"] if item["id"] == item_id)
     assert item["status"] == "unmet"
-    assert item["reason"] == "wrong_kind"
+    assert item["reason"] == "unanchored_evidence"
     assert item["citation"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Artifact-anchored generic evidence for items 1, 2, 9, 10 (issue #2718)
+# --------------------------------------------------------------------------- #
+
+#: One audited artifact per anchored item -- the subject matter each item's
+#: checklist text names.
+_ANCHORED_ARTIFACTS = {
+    1: ("design-sources.txt", "schematic/ota.sch\nnetlist/ota.spice\n"),
+    2: ("ota.gds", "GDS-BYTES"),
+    9: ("testbenches.txt", "tb/ota_ac.spice\ntb/ota_tran.spice\n"),
+    10: ("ci.yml", "jobs: {validate: {}}\n"),
+}
+
+
+def _anchored_generic(
+    tmp_path,
+    item_id: int,
+    *,
+    declared_item: object = "same",
+    path: object = "same",
+    recorded_hash: str | None = None,
+    status: str = "pass",
+    name: str | None = None,
+) -> tuple[str, str]:
+    """Write an artifact for ``item_id`` and an artifact-anchored generic
+    envelope beside it. Returns ``(envelope path, artifact hash)``.
+
+    ``declared_item``/``path`` default to the honest values; pass ``None``
+    to omit the field, or any other value to override it."""
+    artifact_name, content = _ANCHORED_ARTIFACTS[item_id]
+    artifact = tmp_path / artifact_name
+    artifact.write_text(content)
+    digest = _hash_of(artifact)
+    input_block: dict = {"content_hash": recorded_hash or digest}
+    if path == "same":
+        input_block["path"] = artifact_name
+    elif path is not None:
+        input_block["path"] = path
+    envelope: dict = {
+        "schema_version": 1,
+        "kind": "generic",
+        "status": status,
+        "summary": f"audited artifact for T1 item {item_id}",
+        "source": artifact_name,
+        "provenance": {
+            "klt_version": "0.5.0",
+            "klayout_version": "0.30.10",
+            "pdk": None,
+            "deck": None,
+            "input": input_block,
+        },
+    }
+    if declared_item == "same":
+        envelope["t1_item"] = item_id
+    elif declared_item is not None:
+        envelope["t1_item"] = declared_item
+    return _write(tmp_path, name or f"item{item_id}.json", envelope), digest
+
+
+@pytest.mark.parametrize("item_id", [1, 2, 9, 10])
+def test_anchored_generic_evidence_satisfies_its_item_and_discloses_binding(
+    tmp_path, item_id
+):
+    envelope_path, digest = _anchored_generic(tmp_path, item_id)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={str(item_id): {"file": envelope_path, "content_hash": digest}}
+        )
+    )
+
+    item = _item(result, item_id)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    citation = item["citation"]
+    assert citation["kind"] == "generic"
+    assert citation["content_hash"] == digest
+    assert citation["input_verified"] is True
+    assert citation["artifact_binding"] == {
+        "t1_item": item_id,
+        "path": _ANCHORED_ARTIFACTS[item_id][0],
+        "content_hash": digest,
+        "input_verified": True,
+        "summary": f"audited artifact for T1 item {item_id}",
+        "source": _ANCHORED_ARTIFACTS[item_id][0],
+    }
+
+
+@pytest.mark.parametrize(
+    ("cited_for", "declared"), [(1, 2), (2, 9), (9, 10), (10, 1), (8, 9)]
+)
+def test_anchored_generic_evidence_cannot_be_replayed_onto_another_item(
+    tmp_path, cited_for, declared
+):
+    """An attestation declares the one item it is for; citing it for any
+    other item -- including item 8 -- renders `wrong_item`."""
+    envelope_path, digest = _anchored_generic(tmp_path, declared)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={str(cited_for): {"file": envelope_path, "content_hash": digest}}
+        )
+    )
+
+    item = _item(result, cited_for)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_item"
+    assert item["citation"] is None
+
+
+@pytest.mark.parametrize("item_id", [3, 4, 5, 6, 7])
+def test_anchored_generic_evidence_still_wrong_kind_for_items_3_to_7(tmp_path, item_id):
+    """Declaring the item does not unlock a verb-backed item: those still
+    reject "generic" as `wrong_kind`, exactly as before."""
+    envelope_path, digest = _anchored_generic(tmp_path, 9)
+    envelope = json.loads(Path(envelope_path).read_text())
+    envelope["t1_item"] = item_id
+    Path(envelope_path).write_text(json.dumps(envelope))
+
+    result = build_tier_report(
+        _manifest(
+            evidence={str(item_id): {"file": envelope_path, "content_hash": digest}}
+        )
+    )
+
+    item = _item(result, item_id)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"declared_item": None},
+        {"declared_item": "9"},
+        {"declared_item": True},
+        {"path": None},
+        {"path": ""},
+        {"path": {"path": "testbenches.txt", "scope": "external"}},
+    ],
+    ids=[
+        "no-t1_item",
+        "string-t1_item",
+        "bool-t1_item",
+        "no-path",
+        "empty-path",
+        "external-scope",
+    ],
+)
+def test_missing_or_malformed_binding_renders_unanchored(tmp_path, overrides):
+    envelope_path, digest = _anchored_generic(tmp_path, 9, **overrides)
+
+    result = build_tier_report(
+        _manifest(evidence={"9": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 9)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+    assert item["citation"] is None
+
+
+def test_unpinned_manifest_entry_renders_unanchored(tmp_path):
+    """The manifest must pin the artifact hash -- an unpinned citation makes
+    no freshness claim, so nothing anchors it."""
+    envelope_path, _ = _anchored_generic(tmp_path, 10)
+
+    result = build_tier_report(_manifest(evidence={"10": envelope_path}))
+
+    item = _item(result, 10)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unanchored_evidence"
+
+
+def test_pin_mismatch_renders_stale(tmp_path):
+    envelope_path, _ = _anchored_generic(tmp_path, 2)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={"2": {"file": envelope_path, "content_hash": "sha256:other"}}
+        )
+    )
+
+    item = _item(result, 2)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+
+
+def test_changed_artifact_renders_stale_even_when_pin_matches_envelope(tmp_path):
+    """The manifest and envelope agree, but the audited artifact (here the
+    testbench inventory) changed underneath them. For a native citation this
+    is only disclosed (`input_verified: false`); for an anchored item it is
+    the whole claim, so it refuses."""
+    envelope_path, digest = _anchored_generic(tmp_path, 9)
+    (tmp_path / "testbenches.txt").write_text("tb/ota_ac.spice\n")
+
+    result = build_tier_report(
+        _manifest(evidence={"9": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 9)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+    assert item["citation"] is None
+
+
+def test_unresolvable_artifact_renders_unverifiable(tmp_path):
+    """The bound artifact cannot be found from the grading context, so the
+    hash is only the envelope's own claim."""
+    envelope_path, digest = _anchored_generic(tmp_path, 1)
+    (tmp_path / "design-sources.txt").unlink()
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unverifiable_provenance"
+
+
+def test_failing_anchored_generic_renders_check_failed(tmp_path):
+    envelope_path, digest = _anchored_generic(tmp_path, 10, status="fail")
+
+    result = build_tier_report(
+        _manifest(evidence={"10": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 10)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_command_backed_anchored_generic_follows_the_same_rules(tmp_path):
+    """File- and command-backed evidence bind identically: the command runs
+    in `cwd`, where the artifact lives."""
+    envelope_path, digest = _anchored_generic(tmp_path, 9)
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.write(open(sys.argv[1]).read())",
+        envelope_path,
+    ]
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "9": {"command": command, "cwd": str(tmp_path), "content_hash": digest},
+                "10": {
+                    "command": command,
+                    "cwd": str(tmp_path),
+                    "content_hash": digest,
+                },
+            }
+        )
+    )
+
+    item_9 = _item(result, 9)
+    assert item_9["status"] == "met"
+    assert item_9["citation"]["command"] is not None
+    assert item_9["citation"]["artifact_binding"]["t1_item"] == 9
+    item_10 = _item(result, 10)
+    assert item_10["status"] == "unmet"
+    assert item_10["reason"] == "wrong_item"
+
+
+@pytest.mark.parametrize("item_id", [1, 2, 9, 10])
+def test_native_citation_for_items_1_2_9_10_carries_no_artifact_binding(
+    tmp_path, item_id
+):
+    """Compatibility: a passing native envelope still satisfies these four
+    exactly as before -- and its citation carries no `artifact_binding`,
+    which is what distinguishes "a passing envelope was cited" from "the
+    item is bound to an audited artifact"."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={str(item_id): drc_path}))
+
+    item = _item(result, item_id)
+    assert item["status"] == "met"
+    assert "artifact_binding" not in item["citation"]
+
+
+def test_item_8_generic_without_t1_item_is_unchanged(tmp_path):
+    """Item 8 does not require the anchored form; declaring itself is
+    accepted, and no `artifact_binding` is attached."""
+    plain = _write(tmp_path, "plain.json", GENERIC_PASS_ENVELOPE)
+    declared = _write(
+        tmp_path, "declared.json", {**GENERIC_PASS_ENVELOPE, "t1_item": 8}
+    )
+
+    for path in (plain, declared):
+        item_8 = _item(build_tier_report(_manifest(evidence={"8": path})), 8)
+        assert item_8["status"] == "met"
+        assert "artifact_binding" not in item_8["citation"]
+
+
+def test_anchored_binding_is_shown_in_text_output(tmp_path, capsys):
+    envelope_path, digest = _anchored_generic(tmp_path, 9)
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            evidence={
+                "9": {"file": envelope_path, "content_hash": digest},
+                "10": drc_path,
+            }
+        ),
+    )
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert exit_code in (0, 3)
+    assert "bound: T1 item #9 -> testbenches.txt" in out
+    assert "topic: not bound" in out
 
 
 def test_command_evidence_generic_wrong_kind_renders_unmet(monkeypatch):
@@ -13184,3 +13615,127 @@ def test_resolver_still_handles_a_pre_2659_bare_string_citation(tmp_path):
 
     item_3 = next(item for item in result["items"] if item["id"] == 3)
     assert item_3["citation"]["input_verified"] is True
+
+
+# --------------------------------------------------------------------------- #
+# `klt drc --rules` subsets (issue #2768): a report that executed only part of
+# its deck never earns full DRC credit, in either entry point.
+# --------------------------------------------------------------------------- #
+
+
+def _sky130_clean_drc_report(tmp_path, *, rules=None) -> dict:
+    """A real curated `klt drc` report over a clean one-poly-shape layout."""
+    import klayout.db as kdb
+
+    from klayout_tools.drc import run_drc
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    poly = layout.layer(66, 20)
+    top.shapes(poly).insert(kdb.Box(0, 0, 1000, 1000))
+    gds = tmp_path / "clean.gds"
+    layout.write(str(gds))
+    return run_drc(str(gds), "sky130", rules=rules)
+
+
+def _item_3(path: str) -> dict:
+    result = build_tier_report(_manifest(evidence={"3": path}))
+    return next(item for item in result["items"] if item["id"] == 3)
+
+
+def test_drc_rule_subset_is_refused_full_credit_in_both_entry_points(tmp_path):
+    report = _sky130_clean_drc_report(tmp_path, rules=["poly.*"])
+    assert report["status"] == "clean_partial"
+    path = _write(tmp_path, "subset.drc.json", report)
+
+    check = build_signoff([path])["checks"][0]
+    item_3 = _item_3(path)
+
+    assert check["passed"] is False
+    assert check["detail"]["rule_selection"] == report["rule_selection"]
+    skipped = check["detail"]["coverage_qualification"]["skipped"]
+    assert skipped and {r["reason"] for r in skipped} == {"not_selected"}
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "partial_coverage"
+    assert item_3["citation"] is None
+
+
+def test_drc_subset_doctored_to_clean_is_still_refused(tmp_path):
+    """Belt and braces: a hand-edited subset report whose status reads
+    `"clean"` still declares its omissions in `rule_selection`, and that
+    alone keeps it from counting as full DRC credit."""
+    report = _sky130_clean_drc_report(tmp_path, rules=["poly.*"])
+    report["status"] = "clean"
+    report["coverage"] = build_check_coverage(checked=["poly.width.1"])
+    path = _write(tmp_path, "doctored.drc.json", report)
+
+    check = build_signoff([path])["checks"][0]
+    item_3 = _item_3(path)
+
+    assert check["passed"] is False
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "partial_coverage"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "poly.*",
+        {"omitted": "poly.width.1"},
+        {"omitted": [], "subset": True},
+        {"omitted": []},
+    ],
+)
+def test_drc_malformed_or_inconsistent_rule_selection_never_passes(selection, tmp_path):
+    report = _sky130_clean_drc_report(tmp_path)
+    assert report["status"] == "clean"
+    report["rule_selection"] = selection
+    path = _write(tmp_path, "odd.drc.json", report)
+
+    try:
+        checks = build_signoff([path])["checks"]
+    except SignoffError:
+        return  # refused as an unrecognised envelope: also not credit
+    assert checks[0]["passed"] is False
+
+
+def test_drc_selection_of_every_rule_grades_like_a_full_run(tmp_path):
+    from klayout_tools.decks import get_deck
+
+    every = [rule.id for rule in get_deck("sky130")]
+    full_dir = tmp_path / "full"
+    all_dir = tmp_path / "all"
+    full_dir.mkdir()
+    all_dir.mkdir()
+    full = _sky130_clean_drc_report(full_dir)
+    selected = _sky130_clean_drc_report(all_dir, rules=every)
+    assert selected["rule_selection"]["subset"] is False
+    full_path = _write(full_dir, "full.drc.json", full)
+    selected_path = _write(all_dir, "all.drc.json", selected)
+
+    full_check = build_signoff([full_path])["checks"][0]
+    selected_check = build_signoff([selected_path])["checks"][0]
+
+    assert full_check["passed"] is selected_check["passed"] is True
+    assert "rule_selection" not in full_check["detail"]
+    full_item, selected_item = _item_3(full_path), _item_3(selected_path)
+    assert full_item["status"] == selected_item["status"] == "met"
+
+
+def test_drc_subset_that_found_violations_is_check_failed(tmp_path):
+    report = _sky130_clean_drc_report(tmp_path, rules=["poly.*"])
+    report["status"] = "violations"
+    report["violation_count"] = 1
+    path = _write(tmp_path, "failing.drc.json", report)
+
+    assert _item_3(path)["reason"] == "check_failed"
+
+
+def test_drc_list_rules_output_is_not_signoff_evidence(tmp_path):
+    from klayout_tools.drc import list_deck_rules
+
+    path = _write(tmp_path, "rules.json", list_deck_rules("sky130"))
+
+    with pytest.raises(SignoffError):
+        build_signoff([path])
+    assert _item_3(path)["status"] == "unmet"

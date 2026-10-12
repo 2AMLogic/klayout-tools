@@ -283,8 +283,16 @@ both sides, so it constrains exactly the nets that are top-level pins. An
 **interior** node stays topology-only — including a bit tied to a Verilog
 constant (`1'b0`/`1'b1`, converted as the `__CONST0__`/`__CONST1__` nets):
 two such tie bits on one black-box macro remain interchangeable and swapping
-them still compares clean. Reaching that case needs the *macro's own* pin
-names anchored, which is a separate mechanism. Likewise, a pin name present
+them still compares clean. Anchoring through the *macro's own* pins would not
+reach it either. Issue #2704's spike
+([design note](../design/lvs-paired-instance-anchoring-spike.md)) measured
+that the comparer already pairs a black-box master's pins by name and already
+pairs the parent nets reached through each paired instance, so such an anchor
+only restates the comparer's own pairing. The swap is visible only through
+what each layout tie node *means*. Today the caller can declare that with
+`hints.same_nets` (for example `[["LO", "__CONST0__"], ["HI", "__CONST1__"]]`,
+using the layout's own tie-node names), and a swap then reports `mismatch`.
+#3014 tracks a first-class form of that declaration. Likewise, a pin name present
 on only one side is never an error and is simply not anchored (the layout's
 `VPWR`/`VGND` rails against a signal-only `gate-level-verilog` reference are
 the routine example), and a name declared by more than one pin on the same

@@ -1,0 +1,264 @@
+{
+  "clock": {
+    "clock_period_ns": 2.0,
+    "clock_port": "clk"
+  },
+  "completeness_tcl": [
+    "puts \"===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\"",
+    "foreach {klt_cc_check klt_cc_flags} {unconstrained_endpoints {0 0 0 0 1 0 0} unclocked_registers {0 0 0 1 0 0 0}} {",
+    "    if {[catch {",
+    "        set klt_cc_pins {}",
+    "        foreach klt_cc_record [sta::check_timing_cmd {*}$klt_cc_flags] {",
+    "            lappend klt_cc_pins {*}[lrange $klt_cc_record 1 end]",
+    "        }",
+    "        puts \"CHECK\\t$klt_cc_check\\t[llength $klt_cc_pins]\"",
+    "        foreach klt_cc_pin [lrange $klt_cc_pins 0 19] {",
+    "            puts \"ITEM\\t$klt_cc_check\\t[string map [list \\n { } \\t { }] $klt_cc_pin]\"",
+    "        }",
+    "    } klt_cc_error]} {",
+    "        puts \"ERROR\\t$klt_cc_check\\t[string map [list \\n { } \\t { }] $klt_cc_error]\"",
+    "    }",
+    "}",
+    "puts \"===KLT_STA_CONSTRAINT_COMPLETENESS_END===\""
+  ],
+  "engine_version": "26Q3-1510-g6cb3f2b704",
+  "netlists": {
+    "combinational": "module top (clk, a, b, y);\n  input clk, a, b;\n  output y;\n  sky130_fd_sc_hd__and2_1 g (.A(a), .B(b), .X(y));\nendmodule\n",
+    "many_unclocked": "module top (clk, other_clk, d, q);\n  input clk, other_clk, d;\n  output [24:0] q;\n  sky130_fd_sc_hd__dfxtp_1 u00 (.CLK(other_clk), .D(d), .Q(q[0]));\n  sky130_fd_sc_hd__dfxtp_1 u01 (.CLK(other_clk), .D(d), .Q(q[1]));\n  sky130_fd_sc_hd__dfxtp_1 u02 (.CLK(other_clk), .D(d), .Q(q[2]));\n  sky130_fd_sc_hd__dfxtp_1 u03 (.CLK(other_clk), .D(d), .Q(q[3]));\n  sky130_fd_sc_hd__dfxtp_1 u04 (.CLK(other_clk), .D(d), .Q(q[4]));\n  sky130_fd_sc_hd__dfxtp_1 u05 (.CLK(other_clk), .D(d), .Q(q[5]));\n  sky130_fd_sc_hd__dfxtp_1 u06 (.CLK(other_clk), .D(d), .Q(q[6]));\n  sky130_fd_sc_hd__dfxtp_1 u07 (.CLK(other_clk), .D(d), .Q(q[7]));\n  sky130_fd_sc_hd__dfxtp_1 u08 (.CLK(other_clk), .D(d), .Q(q[8]));\n  sky130_fd_sc_hd__dfxtp_1 u09 (.CLK(other_clk), .D(d), .Q(q[9]));\n  sky130_fd_sc_hd__dfxtp_1 u10 (.CLK(other_clk), .D(d), .Q(q[10]));\n  sky130_fd_sc_hd__dfxtp_1 u11 (.CLK(other_clk), .D(d), .Q(q[11]));\n  sky130_fd_sc_hd__dfxtp_1 u12 (.CLK(other_clk), .D(d), .Q(q[12]));\n  sky130_fd_sc_hd__dfxtp_1 u13 (.CLK(other_clk), .D(d), .Q(q[13]));\n  sky130_fd_sc_hd__dfxtp_1 u14 (.CLK(other_clk), .D(d), .Q(q[14]));\n  sky130_fd_sc_hd__dfxtp_1 u15 (.CLK(other_clk), .D(d), .Q(q[15]));\n  sky130_fd_sc_hd__dfxtp_1 u16 (.CLK(other_clk), .D(d), .Q(q[16]));\n  sky130_fd_sc_hd__dfxtp_1 u17 (.CLK(other_clk), .D(d), .Q(q[17]));\n  sky130_fd_sc_hd__dfxtp_1 u18 (.CLK(other_clk), .D(d), .Q(q[18]));\n  sky130_fd_sc_hd__dfxtp_1 u19 (.CLK(other_clk), .D(d), .Q(q[19]));\n  sky130_fd_sc_hd__dfxtp_1 u20 (.CLK(other_clk), .D(d), .Q(q[20]));\n  sky130_fd_sc_hd__dfxtp_1 u21 (.CLK(other_clk), .D(d), .Q(q[21]));\n  sky130_fd_sc_hd__dfxtp_1 u22 (.CLK(other_clk), .D(d), .Q(q[22]));\n  sky130_fd_sc_hd__dfxtp_1 u23 (.CLK(other_clk), .D(d), .Q(q[23]));\n  sky130_fd_sc_hd__dfxtp_1 u24 (.CLK(other_clk), .D(d), .Q(q[24]));\nendmodule\n",
+    "mixed": "module top (clk, other_clk, d, a, b, q, q2, y);\n  input clk, other_clk, d, a, b;\n  output q, q2, y;\n  sky130_fd_sc_hd__dfxtp_1 ff (.CLK(clk), .D(d), .Q(q));\n  sky130_fd_sc_hd__dfxtp_1 ff_unclk (.CLK(other_clk), .D(d), .Q(q2));\n  sky130_fd_sc_hd__and2_1 g (.A(a), .B(b), .X(y));\nendmodule\n",
+    "single_ff": "module top (clk, d, q);\n  input clk, d;\n  output q;\n  sky130_fd_sc_hd__dfxtp_1 ff (.CLK(clk), .D(d), .Q(q));\nendmodule\n"
+  },
+  "pdk": "sky130A (volare), sky130_fd_sc_hd__tt_025C_1v80.lib",
+  "scenarios": {
+    "combinational_constrained": {
+      "constraints": {
+        "input_delay_ns": 0.1,
+        "output_delay_ns": 0.1
+      },
+      "extra_sdc": [],
+      "metrics": {
+        "clock__skew__setup": 0,
+        "flow__errors__count": 0,
+        "flow__warnings__count": 1,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1,
+        "power__internal__total": 4.90617e-07,
+        "power__leakage__total": 2.665e-12,
+        "power__switching__total": 0,
+        "power__total": 4.9062e-07,
+        "timing__fmax": 3188380000.0,
+        "timing__fmax__clock:clk": 3188380000.0,
+        "timing__hold__tns": 0,
+        "timing__hold__ws": 0.271884,
+        "timing__setup__tns": 0,
+        "timing__setup__ws": 1.68636
+      },
+      "netlist": "combinational",
+      "stdout": "OpenROAD 26Q3-1510-g6cb3f2b704 \nFeatures included (+) or not (-): +GPU +GUI +Python\nThis program is licensed under the BSD-3 license. See the LICENSE file for details.\nComponents of this program may be licensed under more restrictive licenses which must be honored.\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef, created 14 layers, 25 vias\n[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.\nThe NOWIREEXTENSIONATPIN statement will be ignored. See file <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef at line 2.\n\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef, created 437 library cells\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\nPATH\tmax\toutput setup\t1.6863614948903205e-9\tb\ty\nPATH\tmin\toutput hold\t2.7188384876808414e-10\ta\ty\n===KLT_STA_WORST_PATHS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n"
+    },
+    "combinational_no_io_delays": {
+      "constraints": {},
+      "extra_sdc": [],
+      "metrics": {
+        "clock__skew__setup": 0,
+        "flow__errors__count": 0,
+        "flow__warnings__count": 1,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1,
+        "power__internal__total": 4.90617e-07,
+        "power__leakage__total": 2.665e-12,
+        "power__switching__total": 0,
+        "power__total": 4.9062e-07,
+        "timing__fmax": 8799830000.0,
+        "timing__hold__tns": 0,
+        "timing__hold__ws": 1e+39,
+        "timing__setup__tns": 0,
+        "timing__setup__ws": 1e+39
+      },
+      "netlist": "combinational",
+      "stdout": "OpenROAD 26Q3-1510-g6cb3f2b704 \nFeatures included (+) or not (-): +GPU +GUI +Python\nThis program is licensed under the BSD-3 license. See the LICENSE file for details.\nComponents of this program may be licensed under more restrictive licenses which must be honored.\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef, created 14 layers, 25 vias\n[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.\nThe NOWIREEXTENSIONATPIN statement will be ignored. See file <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef at line 2.\n\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef, created 437 library cells\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\n===KLT_STA_WORST_PATHS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t1\nITEM\tunconstrained_endpoints\ty\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n"
+    },
+    "fully_constrained": {
+      "constraints": {
+        "input_delay_ns": 0.1,
+        "output_delay_ns": 0.1
+      },
+      "extra_sdc": [],
+      "metrics": {
+        "clock__skew__setup": 0,
+        "flow__errors__count": 0,
+        "flow__warnings__count": 1,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1,
+        "power__internal__total": 2.13987e-05,
+        "power__leakage__total": 8.43862e-12,
+        "power__switching__total": 0,
+        "power__total": 2.13987e-05,
+        "timing__fmax": 2766140000.0,
+        "timing__fmax__clock:clk": 2766140000.0,
+        "timing__hold__tns": 0,
+        "timing__hold__ws": 0.127717,
+        "timing__setup__tns": 0,
+        "timing__setup__ws": 1.63849
+      },
+      "netlist": "single_ff",
+      "stdout": "OpenROAD 26Q3-1510-g6cb3f2b704 \nFeatures included (+) or not (-): +GPU +GUI +Python\nThis program is licensed under the BSD-3 license. See the LICENSE file for details.\nComponents of this program may be licensed under more restrictive licenses which must be honored.\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef, created 14 layers, 25 vias\n[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.\nThe NOWIREEXTENSIONATPIN statement will be ignored. See file <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef at line 2.\n\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef, created 437 library cells\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\nPATH\tmax\toutput setup\t1.6384850143325025e-9\tff/Q\tq\nPATH\tmin\thold\t1.2771735058425548e-10\td\tff/D\n===KLT_STA_WORST_PATHS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t0\nCHECK\tunclocked_registers\t0\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n"
+    },
+    "many_unclocked": {
+      "constraints": {
+        "input_delay_ns": 0.1,
+        "output_delay_ns": 0.1
+      },
+      "extra_sdc": [],
+      "metrics": {
+        "clock__skew__setup": 0,
+        "flow__errors__count": 0,
+        "flow__warnings__count": 1,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1,
+        "power__internal__total": 4.00632e-05,
+        "power__leakage__total": 2.10966e-10,
+        "power__switching__total": 0,
+        "power__total": 4.00634e-05,
+        "timing__fmax": 3823870000.0,
+        "timing__hold__tns": 0,
+        "timing__hold__ws": 1e+39,
+        "timing__setup__tns": 0,
+        "timing__setup__ws": 1e+39
+      },
+      "netlist": "many_unclocked",
+      "stdout": "OpenROAD 26Q3-1510-g6cb3f2b704 \nFeatures included (+) or not (-): +GPU +GUI +Python\nThis program is licensed under the BSD-3 license. See the LICENSE file for details.\nComponents of this program may be licensed under more restrictive licenses which must be honored.\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef, created 14 layers, 25 vias\n[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.\nThe NOWIREEXTENSIONATPIN statement will be ignored. See file <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef at line 2.\n\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef, created 437 library cells\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\n===KLT_STA_WORST_PATHS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t50\nITEM\tunconstrained_endpoints\tq[0]\nITEM\tunconstrained_endpoints\tq[10]\nITEM\tunconstrained_endpoints\tq[11]\nITEM\tunconstrained_endpoints\tq[12]\nITEM\tunconstrained_endpoints\tq[13]\nITEM\tunconstrained_endpoints\tq[14]\nITEM\tunconstrained_endpoints\tq[15]\nITEM\tunconstrained_endpoints\tq[16]\nITEM\tunconstrained_endpoints\tq[17]\nITEM\tunconstrained_endpoints\tq[18]\nITEM\tunconstrained_endpoints\tq[19]\nITEM\tunconstrained_endpoints\tq[1]\nITEM\tunconstrained_endpoints\tq[20]\nITEM\tunconstrained_endpoints\tq[21]\nITEM\tunconstrained_endpoints\tq[22]\nITEM\tunconstrained_endpoints\tq[23]\nITEM\tunconstrained_endpoints\tq[24]\nITEM\tunconstrained_endpoints\tq[2]\nITEM\tunconstrained_endpoints\tq[3]\nITEM\tunconstrained_endpoints\tq[4]\nCHECK\tunclocked_registers\t25\nITEM\tunclocked_registers\tu00/CLK\nITEM\tunclocked_registers\tu01/CLK\nITEM\tunclocked_registers\tu02/CLK\nITEM\tunclocked_registers\tu03/CLK\nITEM\tunclocked_registers\tu04/CLK\nITEM\tunclocked_registers\tu05/CLK\nITEM\tunclocked_registers\tu06/CLK\nITEM\tunclocked_registers\tu07/CLK\nITEM\tunclocked_registers\tu08/CLK\nITEM\tunclocked_registers\tu09/CLK\nITEM\tunclocked_registers\tu10/CLK\nITEM\tunclocked_registers\tu11/CLK\nITEM\tunclocked_registers\tu12/CLK\nITEM\tunclocked_registers\tu13/CLK\nITEM\tunclocked_registers\tu14/CLK\nITEM\tunclocked_registers\tu15/CLK\nITEM\tunclocked_registers\tu16/CLK\nITEM\tunclocked_registers\tu17/CLK\nITEM\tunclocked_registers\tu18/CLK\nITEM\tunclocked_registers\tu19/CLK\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n"
+    },
+    "mixed": {
+      "constraints": {
+        "input_delay_ns": 0.1,
+        "output_delay_ns": 0.1
+      },
+      "extra_sdc": [],
+      "metrics": {
+        "clock__skew__setup": 0,
+        "flow__errors__count": 0,
+        "flow__warnings__count": 1,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1,
+        "power__internal__total": 2.34919e-05,
+        "power__leakage__total": 1.95422e-11,
+        "power__switching__total": 0,
+        "power__total": 2.34919e-05,
+        "timing__fmax": 2766140000.0,
+        "timing__fmax__clock:clk": 2766140000.0,
+        "timing__hold__tns": 0,
+        "timing__hold__ws": 0.127717,
+        "timing__setup__tns": 0,
+        "timing__setup__ws": 1.63849
+      },
+      "netlist": "mixed",
+      "stdout": "OpenROAD 26Q3-1510-g6cb3f2b704 \nFeatures included (+) or not (-): +GPU +GUI +Python\nThis program is licensed under the BSD-3 license. See the LICENSE file for details.\nComponents of this program may be licensed under more restrictive licenses which must be honored.\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef, created 14 layers, 25 vias\n[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.\nThe NOWIREEXTENSIONATPIN statement will be ignored. See file <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef at line 2.\n\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef, created 437 library cells\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\nPATH\tmax\toutput setup\t1.6384850143325025e-9\tff/Q\tq\nPATH\tmin\thold\t1.2771735058425548e-10\td\tff/D\n===KLT_STA_WORST_PATHS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t2\nITEM\tunconstrained_endpoints\tq2\nITEM\tunconstrained_endpoints\tff_unclk/D\nCHECK\tunclocked_registers\t1\nITEM\tunclocked_registers\tff_unclk/CLK\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n"
+    },
+    "mixed_exception_probe_control": {
+      "constraints": {
+        "input_delay_ns": 0.1,
+        "output_delay_ns": 0.1
+      },
+      "extra_sdc": [
+        "puts \"KLT_PROBE_PATHS_TO_Y [llength [find_timing_paths -to [get_ports y]]]\""
+      ],
+      "metrics": {
+        "clock__skew__setup": 0,
+        "flow__errors__count": 0,
+        "flow__warnings__count": 1,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1,
+        "power__internal__total": 2.34919e-05,
+        "power__leakage__total": 1.95422e-11,
+        "power__switching__total": 0,
+        "power__total": 2.34919e-05,
+        "timing__fmax": 2766140000.0,
+        "timing__fmax__clock:clk": 2766140000.0,
+        "timing__hold__tns": 0,
+        "timing__hold__ws": 0.127717,
+        "timing__setup__tns": 0,
+        "timing__setup__ws": 1.63849
+      },
+      "netlist": "mixed",
+      "stdout": "OpenROAD 26Q3-1510-g6cb3f2b704 \nFeatures included (+) or not (-): +GPU +GUI +Python\nThis program is licensed under the BSD-3 license. See the LICENSE file for details.\nComponents of this program may be licensed under more restrictive licenses which must be honored.\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef, created 14 layers, 25 vias\n[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.\nThe NOWIREEXTENSIONATPIN statement will be ignored. See file <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef at line 2.\n\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef, created 437 library cells\nKLT_PROBE_PATHS_TO_Y 1\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\nPATH\tmax\toutput setup\t1.6384850143325025e-9\tff/Q\tq\nPATH\tmin\thold\t1.2771735058425548e-10\td\tff/D\n===KLT_STA_WORST_PATHS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t2\nITEM\tunconstrained_endpoints\tq2\nITEM\tunconstrained_endpoints\tff_unclk/D\nCHECK\tunclocked_registers\t1\nITEM\tunclocked_registers\tff_unclk/CLK\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n"
+    },
+    "mixed_false_path_on_constrained_endpoint": {
+      "constraints": {
+        "input_delay_ns": 0.1,
+        "output_delay_ns": 0.1
+      },
+      "extra_sdc": [
+        "set_false_path -to [get_ports y]",
+        "puts \"KLT_PROBE_PATHS_TO_Y [llength [find_timing_paths -to [get_ports y]]]\""
+      ],
+      "metrics": {
+        "clock__skew__setup": 0,
+        "flow__errors__count": 0,
+        "flow__warnings__count": 1,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1,
+        "power__internal__total": 2.34919e-05,
+        "power__leakage__total": 1.95422e-11,
+        "power__switching__total": 0,
+        "power__total": 2.34919e-05,
+        "timing__fmax": 2766140000.0,
+        "timing__fmax__clock:clk": 2766140000.0,
+        "timing__hold__tns": 0,
+        "timing__hold__ws": 0.127717,
+        "timing__setup__tns": 0,
+        "timing__setup__ws": 1.63849
+      },
+      "netlist": "mixed",
+      "stdout": "OpenROAD 26Q3-1510-g6cb3f2b704 \nFeatures included (+) or not (-): +GPU +GUI +Python\nThis program is licensed under the BSD-3 license. See the LICENSE file for details.\nComponents of this program may be licensed under more restrictive licenses which must be honored.\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef, created 14 layers, 25 vias\n[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.\nThe NOWIREEXTENSIONATPIN statement will be ignored. See file <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef at line 2.\n\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef, created 437 library cells\nKLT_PROBE_PATHS_TO_Y 0\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\nPATH\tmax\toutput setup\t1.6384850143325025e-9\tff/Q\tq\nPATH\tmin\thold\t1.2771735058425548e-10\td\tff/D\n===KLT_STA_WORST_PATHS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t2\nITEM\tunconstrained_endpoints\tq2\nITEM\tunconstrained_endpoints\tff_unclk/D\nCHECK\tunclocked_registers\t1\nITEM\tunclocked_registers\tff_unclk/CLK\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n"
+    },
+    "mixed_no_io_delays": {
+      "constraints": {},
+      "extra_sdc": [],
+      "metrics": {
+        "clock__skew__setup": 0,
+        "flow__errors__count": 0,
+        "flow__warnings__count": 1,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1,
+        "power__internal__total": 2.34919e-05,
+        "power__leakage__total": 1.95422e-11,
+        "power__switching__total": 0,
+        "power__total": 2.34919e-05,
+        "timing__fmax": 3823870000.0,
+        "timing__hold__tns": 0,
+        "timing__hold__ws": 1e+39,
+        "timing__setup__tns": 0,
+        "timing__setup__ws": 1e+39
+      },
+      "netlist": "mixed",
+      "stdout": "OpenROAD 26Q3-1510-g6cb3f2b704 \nFeatures included (+) or not (-): +GPU +GUI +Python\nThis program is licensed under the BSD-3 license. See the LICENSE file for details.\nComponents of this program may be licensed under more restrictive licenses which must be honored.\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef, created 14 layers, 25 vias\n[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.\nThe NOWIREEXTENSIONATPIN statement will be ignored. See file <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef at line 2.\n\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef, created 437 library cells\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\n===KLT_STA_WORST_PATHS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t5\nITEM\tunconstrained_endpoints\tq\nITEM\tunconstrained_endpoints\tq2\nITEM\tunconstrained_endpoints\ty\nITEM\tunconstrained_endpoints\tff/D\nITEM\tunconstrained_endpoints\tff_unclk/D\nCHECK\tunclocked_registers\t1\nITEM\tunclocked_registers\tff_unclk/CLK\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n"
+    },
+    "mixed_no_io_false_path_on_unconstrained_endpoints": {
+      "constraints": {},
+      "extra_sdc": [
+        "set_false_path -to [get_ports y]",
+        "set_false_path -to [get_pins ff_unclk/D]",
+        "puts \"KLT_PROBE_PATHS_TO_Y [llength [find_timing_paths -to [get_ports y]]]\""
+      ],
+      "metrics": {
+        "clock__skew__setup": 0,
+        "flow__errors__count": 0,
+        "flow__warnings__count": 1,
+        "flow__warnings__count:ODB-0220": 1,
+        "flow__warnings__type_count": 1,
+        "power__internal__total": 2.34919e-05,
+        "power__leakage__total": 1.95422e-11,
+        "power__switching__total": 0,
+        "power__total": 2.34919e-05,
+        "timing__fmax": 3823870000.0,
+        "timing__hold__tns": 0,
+        "timing__hold__ws": 1e+39,
+        "timing__setup__tns": 0,
+        "timing__setup__ws": 1e+39
+      },
+      "netlist": "mixed",
+      "stdout": "OpenROAD 26Q3-1510-g6cb3f2b704 \nFeatures included (+) or not (-): +GPU +GUI +Python\nThis program is licensed under the BSD-3 license. See the LICENSE file for details.\nComponents of this program may be licensed under more restrictive licenses which must be honored.\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef, created 14 layers, 25 vias\n[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.\nThe NOWIREEXTENSIONATPIN statement will be ignored. See file <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef at line 2.\n\n[INFO ODB-0227] LEF file: <sky130A>/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef, created 437 library cells\nKLT_PROBE_PATHS_TO_Y 0\n===KLT_STA_SETUP_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_SETUP_VIOLATIONS_END===\n===KLT_STA_HOLD_VIOLATIONS_BEGIN===\nNo paths found.\n\n===KLT_STA_HOLD_VIOLATIONS_END===\n===KLT_STA_WORST_PATHS_BEGIN===\n===KLT_STA_WORST_PATHS_END===\n===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN===\nCHECK\tunconstrained_endpoints\t5\nITEM\tunconstrained_endpoints\tq\nITEM\tunconstrained_endpoints\tq2\nITEM\tunconstrained_endpoints\ty\nITEM\tunconstrained_endpoints\tff/D\nITEM\tunconstrained_endpoints\tff_unclk/D\nCHECK\tunclocked_registers\t1\nITEM\tunclocked_registers\tff_unclk/CLK\n===KLT_STA_CONSTRAINT_COMPLETENESS_END===\n"
+    }
+  }
+}

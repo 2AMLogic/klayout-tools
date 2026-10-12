@@ -278,8 +278,13 @@ degrades to that real `gh`.
 - **Reader App**: reads route to a configured reader App through
   `forge_etag_store::fetch_conditional` (#9537); with none configured nothing
   changes. Passthrough reads are tracked as follow-up work.
-- **Telemetry**: served reads are recorded under caller `agent_gh_front` in
-  `forge_call_stats`; set `GH_CACHE_OUTCOME_LOG` for `x-loom-cache`
+- **Telemetry**: served reads (caller `agent_gh_front`) and passthroughs (one
+  W5 row, `agent.gh.<cmd>`) land in `forge_call_stats` with `ag`=role,
+  `vi`=served|passthrough (#10607). Every spawn path exports the host sink as
+  `LOOM_FORGE_CALL_STATS_DIR`; containers get only its `contained/` subdirectory,
+  mounted rw at that path, and only if it is a sink (rows drop silently unless
+  the container uid owns it). The daemon ingests these rows into
+  `loom.forge.calls{agent=<role>}` on its export tick, as untrusted input. `GH_CACHE_OUTCOME_LOG` adds `x-loom-cache`
   `revalidated`/`bypass` records. Measure the 304 share, not process counts.
 
 ## Per-skill call-site inventory

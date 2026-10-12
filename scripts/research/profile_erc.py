@@ -36,6 +36,16 @@ and ``erc_status`` are equal between the two runs.
 overhead inflates that run, so its times are for attribution only; the
 phase table above comes from an un-profiled run.
 
+**Sampled attribution without a full profiling run** (issue #2753):
+``--repeat 0 --attribute-walk`` skips every ``run_erc`` call and emits
+only ``walk_attribution`` (``runs: []``). ``--attribute-walk-limit N``
+bounds the timed per-candidate loop (cluster-id order) only -- layout
+loading, primary extraction, and the active-region build still run once,
+at full size. ``--check-identical`` and ``--cprofile`` each perform an
+extra full ERC run (``--check-identical`` also needs ``--repeat >= 1``
+for its baseline), so neither belongs in this recipe; specs declaring
+``devices[]`` or a ``--deck`` are rejected.
+
 Deliberate, manual, **never a CI step** -- the measurement depends on the
 host. See ``docs/design/erc-runtime-profile.md`` for the recorded result.
 
@@ -44,6 +54,10 @@ Usage::
     python scripts/research/profile_erc.py LAYOUT SPEC [--top CELL] [--pdk sky130]
         [--findings-only] [--deck NAME] [--repeat N] [--check-identical]
         [--cprofile OUT.pstats] [--attribute-walk [--attribute-walk-limit N]]
+
+    # sampled candidate-walk attribution, no full ERC run (issue #2753):
+    python scripts/research/profile_erc.py LAYOUT SPEC --repeat 0
+        --attribute-walk [--attribute-walk-limit N]
 """
 
 from __future__ import annotations
@@ -297,6 +311,9 @@ def _attribute_walk(args: argparse.Namespace) -> dict[str, Any]:
         if active_layer is not None
         else None
     )
+    active_index = (
+        erc._ActiveIndex(active_region) if active_region is not None else None
+    )
     candidates = sorted(
         (n for n in circuit.each_net() if n.cluster_id != 0), key=lambda n: n.cluster_id
     )
@@ -309,9 +326,7 @@ def _attribute_walk(args: argparse.Namespace) -> dict[str, Any]:
         gate_poly = l2n.polygons_of_net(net, gate_index).merged()
         t1 = time.perf_counter()
         gate_area_region = (
-            (gate_poly & active_region).merged()
-            if active_region is not None
-            else gate_poly
+            active_index.intersect(gate_poly) if active_index is not None else gate_poly
         )
         t2 = time.perf_counter()
         area = gate_area_region.area()
@@ -356,7 +371,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pdk")
     parser.add_argument("--deck")
     parser.add_argument("--findings-only", action="store_true")
-    parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="profile run_erc N times; 0 skips profiling (attribution-only "
+        "with --attribute-walk)",
+    )
     parser.add_argument("--check-identical", action="store_true")
     parser.add_argument("--cprofile")
     parser.add_argument("--attribute-walk", action="store_true")
