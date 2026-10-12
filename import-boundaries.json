@@ -382,6 +382,7 @@
         "klayout_tools._text",
         "klayout_tools._vendor",
         "klayout_tools._vendor.mutation_variants",
+        "klayout_tools._version_scheme",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.design_evidence_tiers",

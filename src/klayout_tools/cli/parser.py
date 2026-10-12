@@ -197,8 +197,9 @@ def create_parser() -> argparse.ArgumentParser:
         action=_BuildVersionAction,
         help=(
             "print the running build's identity and exit -- bare `klt X.Y.Z` "
-            "for a tagged release, `klt X.Y.Z+g<sha>` otherwise (see `klt "
-            "version --format json`)"
+            "for a tagged release, a dev version such as "
+            "`klt X.Y.(Z+1).devN+g<sha>` otherwise (see `klt version "
+            "--format json`)"
         ),
     )
     # No default handler: absence of a subcommand is handled by main().
@@ -4292,13 +4293,13 @@ def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Report which klayout-tools build is running: its version, the "
             "git commit it was built from, and whether that commit is this "
-            "version's release tag. The package version alone cannot answer "
-            "the last question -- a source build made after a release tag "
-            "declares the same version the release does -- so `version` "
-            "reports a PEP 440 local-version form (`X.Y.Z+g<sha>`) for any "
-            "build that is not a confirmed release, and a bare `X.Y.Z` for "
-            "one that is. Identifying the build never fails: an "
-            "unrecoverable identity is reported as `X.Y.Z+unknown` with "
+            "version's release tag. Only a clean build made exactly at the "
+            "release tag carries the bare `X.Y.Z`; any other build's "
+            "distribution version is a distinct PEP 440 dev version "
+            "(`X.Y.(Z+1).devN+g<sha>`, plus `.dirty` for uncommitted "
+            "changes), so it can never satisfy a `klayout-tools==X.Y.Z` "
+            "pin. Identifying the build never fails: an unrecoverable "
+            "identity is reported as `X.Y.Z.dev0+unknown` with "
             "`is_release: null`, not as an error."
         ),
     )

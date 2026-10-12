@@ -196,3 +196,18 @@ def test_main_no_tags_fails_loudly(tmp_path, monkeypatch, capsys):
     assert exit_code == 1
     assert "no v* git tags" in capsys.readouterr().err
     assert not (tmp_path / "_history.json").exists()
+
+
+def test_version_regex_reads_both_pyproject_version_styles():
+    """Tags before issue #2823 carry a static `[project]` `version`; tags
+    after it carry `[tool.hatch.version]`'s `base-version` instead."""
+    module = _load_generate_deck_history()
+    legacy = '[project]\nname = "klayout-tools"\nversion = "0.6.0"\n'
+    dynamic = (
+        '[project]\nname = "klayout-tools"\ndynamic = ["version"]\n\n'
+        '[tool.hatch.version]\nsource = "code"\nbase-version = "0.8.0"\n'
+    )
+    assert module._VERSION_RE.search(legacy).group(1) == "0.6.0"
+    assert module._VERSION_RE.search(dynamic).group(1) == "0.8.0"
+    real = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text("utf-8")
+    assert module._VERSION_RE.search(real) is not None

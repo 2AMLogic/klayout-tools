@@ -522,14 +522,21 @@ stability statement, concrete precedents, and drift-detection guidance, and
 - `klt_version` — the running `klt` build identity (issue #2090), resolved by
   `build_identity.build_version()` exactly like `klt --version` and
   `klt version --format json`'s `version`: `X.Y.Z` for a confirmed clean
-  release, `X.Y.Z+g<12-char sha>` for a post-tag build, an additional
-  `.dirty` for uncommitted changes, or `X.Y.Z+unknown` when no git provenance
-  can be recovered. Packaged builds use their build-time record; source
-  installs probe their checkout. Reports now carry the build identity
-  themselves. Reports from before this fix carry only the static package
-  version and cannot distinguish releases from post-tag builds.
-  `klayout_tools.__version__` and the version command's `package_version`
-  remain the plain package version. See `docs/cli/version.md`.
+  release, `X.Y.(Z+1).devN+g<12-char sha>` for a post-tag build (or
+  `X.Y.Z.devN+g<sha>` before the base version is tagged), an additional
+  `.dirty` for uncommitted changes, or `X.Y.Z.dev0+unknown` when no git
+  provenance can be recovered. Since issue #2823 this is the built
+  distribution's own metadata version, so it equals
+  `klayout_tools.__version__` and `klt version`'s `package_version` for every
+  built distribution; editable installs recompute it live from their
+  checkout. Reports from before #2090 carry only the static package version
+  and cannot distinguish releases from post-tag builds; reports from builds
+  between #2090 and #2823 carry the older `X.Y.Z+g<sha>` / `X.Y.Z+unknown`
+  forms. **Contract change (issue #2823):** `package_version` (in `klt
+  version` and `klt signoff`'s `build` block) is no longer the static base
+  version on non-release builds — it carries the same dev form as `version`.
+  Field names, types, and the definition (`klayout_tools.__version__`) are
+  unchanged, so no `schema_version` bump; see `docs/cli/version.md`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
   or `null` if unresolvable.
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
@@ -1175,10 +1182,10 @@ block (and `provenance.klt_version` elsewhere) records the state of the tree
 the running install was *built from*, at build time — not a property of the
 commit. Two byte-legitimate installs of the **same pinned commit** can
 therefore emit different bytes for identical evidence: a
-`git+https://…@<sha>` install records real git facts (`+g<sha>`), while a
+`git+https://…@<sha>` install records real git facts (`.devN+g<sha>`), while a
 `pip install` of a source tarball of that same `<sha>` has no `.git` at build
-time and honestly records none (`+unknown`, `git_commit: null`, `is_release:
-null`). The second case cannot be fixed by tightening `dirty` (issue #2248) —
+time and honestly records none (`.dev0+unknown`, `git_commit: null`,
+`is_release: null`). The second case cannot be fixed by tightening `dirty` (issue #2248) —
 the facts were never present to record. So "does this committed evidence
 still hold" is answered by `--check`, which excludes exactly the identity
 surface, **not** by `diff`-ing a committed report against a fresh render. See

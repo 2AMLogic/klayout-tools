@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
+  absorbing #2888): the distribution version is now computed at build time
+  from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the
+  checkout's git facts. A clean build exactly at tag `vX.Y.Z` still declares
+  bare `X.Y.Z`. A post-tag build now declares `X.Y.(Z+1).devN+g<sha>` in its
+  wheel/sdist metadata (a commit before the base is tagged declares
+  `X.Y.Z.devN+g<sha>`, uncommitted changes add `.dirty`, no git facts gives
+  `X.Y.Z.dev0+unknown`). Previously only `klt`'s output carried `+g<sha>`, so
+  a cached or tool-installed dev build silently satisfied an exact pin. A
+  wheel rebuilt from the sdist keeps the originating version. **Contract
+  change:** `klt version --format json`'s `package_version` (and `klt
+  signoff`'s `build.package_version`) is the distribution's own version, so
+  on non-release builds it now carries the same dev form as `version`
+  instead of the static base. Field names and types are unchanged, so no
+  `schema_version` bump; see `docs/cli/version.md`. Release managers now bump
+  `base-version` instead of `[project] version` (`RELEASING.md`).
 - **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
   unequal top-circuit pin counts yield `status: mismatch` with a new
   `pin.count` error finding (both counts in `details`). Default unchanged;
@@ -38,6 +54,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   descriptor `pins[].metal_layer`; `klt lef-abstract` gains `pins[].gds_layer`,
   a read-back `power_pins` verdict and `--require-power-pins`; `klt signoff`
   recognises both envelopes as opt-in kinds scoped to item 11.
+
 - **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
   (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
   persistent artifact root; a competing cooperating run fails fast with the
@@ -45,6 +62,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   error envelope) instead of interleaving artifacts. Ancestor/descendant
   roots exclude each other, aliases contend, dead owners release
   automatically. See `docs/json-contract.md` "Output-directory ownership".
+
 - **ASAP7 KLayout DRC deck: BEOL M1-M9 / V0-V9** (issue #2810): the in-repo
   deck (`src/klayout_tools/decks/asap7.drc`) grows from 106 to 232 rule
   categories, adding `V0.LIG.A.1` and the M1-M9 / V1-V9 width, spacing,

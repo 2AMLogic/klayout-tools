@@ -6406,13 +6406,14 @@ def build_fleet_report(
 #:
 #: - ``uv tool install "klayout-tools @ git+URL@<sha>"`` builds in a
 #:   package-manager-owned scratch checkout, so ``hatch_build.py`` records
-#:   real git facts: ``git_commit: "<sha>"``, ``version: "X.Y.Z+g<sha>"``
+#:   real git facts: ``git_commit: "<sha>"``, a version such as
+#:   ``"X.Y.(Z+1).devN+g<sha>"`` (``"X.Y.Z+g<sha>"`` before issue #2823)
 #:   (and, before issue #2248, ``dirty: true`` from that checkout's own
 #:   build-tool residue).
 #: - ``pip install`` of a source *tarball* of the same ``<sha>`` (a GitHub
 #:   ``/archive/<sha>.tar.gz``, a vendored copy) builds in a tree with no
 #:   ``.git`` at all, so the hook records nothing and the same commit
-#:   reports ``git_commit: null``, ``version: "X.Y.Z+unknown"``,
+#:   reports ``git_commit: null``, ``version: "X.Y.Z.dev0+unknown"``,
 #:   ``is_release: null``.
 #:
 #: Neither is wrong -- each honestly describes the build it identifies, which
