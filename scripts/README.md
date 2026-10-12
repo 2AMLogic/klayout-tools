@@ -23,6 +23,7 @@ scripts/
   fetch-magic-tech.sh            # generate the open_pdks magic decks (sky130A, gf180mcuC) that oracle runs against, from pinned open_pdks source (#2014)
   _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
+  bootstrap-auditor-python.sh    # pinned, checksum-verified uv + managed CPython + host-local .venv + `klt` startup smoke for a Python-less Linux audit host (#2829)
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
   native_source_fingerprint.py   # content fingerprint of a native crate's Rust sources; CI gates native-engine legs on it (#1889)
   install-openroad-docker.sh     # install an `openroad` Docker-wrapper onto $PATH (CI provisioning, #1328)
@@ -248,6 +249,86 @@ See the script's header comment for the full knob list and the incident log
 evidence; [`tests/test_ci_apt_install.py`](../tests/test_ci_apt_install.py)
 exercises every retry/timeout/fatal path against a fake `apt-get` and pins
 the workflow wiring.
+
+## `bootstrap-auditor-python.sh`
+
+Gives a Linux audit host that has a POSIX shell, `curl`, `tar` and
+`sha256sum`/`shasum` -- but **no Python and no `uv`** -- a working, host-local
+`klt` for the current checkout, then runs the startup smoke an Auditor needs
+(issue #2829). One command, no `sudo`:
+
+```
+scripts/bootstrap-auditor-python.sh
+```
+
+What it does, in order:
+
+1. Refuses a foreign `.venv` (see below) before downloading anything.
+2. Downloads the pinned `uv` release artifact for this CPU (`x86_64` or
+   `aarch64`, glibc Linux) from `github.com/astral-sh/uv/releases` and checks
+   it against the SHA-256 pinned in the script; a mismatch installs nothing.
+3. Installs a uv-managed CPython (default `3.12`; `--python X.Y` to choose,
+   refused if below `pyproject.toml`'s `requires-python` floor) into the
+   prefix. uv runs with `UV_PYTHON_PREFERENCE=only-managed`, so no system
+   interpreter is ever picked up, and with `--no-bin`, so nothing is written
+   to `~/.local/bin`.
+4. Runs `uv sync --locked --extra dev` into the checkout's `.venv`. `uv.lock`
+   is consumed, never rewritten -- a stale lock fails the run.
+5. Runs `klt --help`, `klt version --format json` and
+   `klt kb validate --format json` from that `.venv` (`--no-smoke` to skip).
+6. Prints a `KEY=value` summary on stdout -- `uv_version`, `uv_sha256`,
+   `python_version`, `python_path`, `environment`, `source_revision` (the
+   checkout's `HEAD`, `-dirty` if tracked files are modified), `smoke` -- for
+   the Auditor to record. Progress and command output go to stderr.
+
+**Ownership.** Everything except the `.venv` lives under one prefix, default
+`${XDG_CACHE_HOME:-$HOME/.cache}/klayout-tools-auditor` (`--prefix DIR` or
+`$KLT_AUDITOR_PREFIX` to choose; paths with spaces are fine):
+`uv-<version>-<target>/` (the verified `uv`), `python/` (managed CPython),
+`cache/` (uv's download/wheel cache). Delete the prefix to start over. Any
+`uv`/Python already on `PATH` is left alone and never used.
+
+**Idempotent.** Re-running with the same prefix reuses the verified `uv` (no
+download), lets `uv python install`/`uv sync --locked` no-op, and prints the
+same summary (`uv_action=reused`, `environment_action=synced`).
+
+**Foreign `.venv`.** An existing `.venv` is reused only if its `bin/python`
+resolves inside the prefix's `python/` directory. A dangling symlink (e.g. a
+`.venv` created on macOS pointing at `/Users/.../cpython-3.12.11-macos-aarch64-none/...`),
+an interpreter anywhere else on the host, a Windows-layout or non-venv
+directory is refused **without being executed** (exit 16). To recover,
+re-run with `--replace-venv`: the old directory is moved aside to
+`.venv.foreign-<UTC timestamp>` (gitignored, never deleted) and a fresh
+host-local `.venv` is built. Note this also applies to a `.venv` a developer
+made with their own `uv`; that is deliberate -- the bootstrap only vouches
+for environments it built.
+
+**Failures** exit non-zero with a distinct code and an actionable message:
+
+| Exit | Cause | Recovery |
+|------|-------|----------|
+| 2  | bad arguments | see `--help` |
+| 10 | not Linux, or CPU not `x86_64`/`aarch64` | run on a supported host |
+| 11 | `curl`, `tar` or a SHA-256 tool missing | provide the tool |
+| 12 | prefix cannot be created or written | pass a user-writable `--prefix` |
+| 13 | `uv` download failed / interrupted | check connectivity, re-run (nothing was installed) |
+| 14 | checksum mismatch, or unpacked `uv` is not the pinned version | do not override; investigate the mirror/proxy |
+| 15 | managed CPython install failed, or below the `requires-python` floor | check connectivity / `--python` |
+| 16 | `.venv` provenance mismatch | `--replace-venv` |
+| 17 | `uv sync --locked` failed (e.g. stale `uv.lock`) | fix the lock in the repo |
+| 18 | a `klt` smoke command failed | the message names the command and source revision |
+| 19 | no `pyproject.toml`/`uv.lock`, or uninterpretable `requires-python` | run from a full checkout |
+
+**Scope.** Repository-scoped only: no fleet image changes, no system
+packages, no credentials, no Rust toolchain (the default sync builds none of
+the `native/` crates), no change to the Python floor. A passing exact-commit
+CI run is not a substitute for this local startup check.
+
+**Re-pinning `uv`.** Update `UV_VERSION` and both `UV_SHA256_*` constants
+together from the release's own `uv-<target>.tar.gz.sha256` files (the
+script's header has the commands), and the matching constants in
+[`tests/test_bootstrap_auditor_python.py`](../tests/test_bootstrap_auditor_python.py),
+which exercises every path above offline against fake `curl`/`sha256sum`/`uv`.
 
 ## `install-openroad-docker.sh` / `place-and-route-smoke.sh`
 
