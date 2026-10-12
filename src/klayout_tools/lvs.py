@@ -2276,7 +2276,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     mismatches.extend(supply_findings)
     mismatches.sort(key=_sort_key)
 
-    if combine_incomplete and status == "mismatch":
+    # Issue #2845: a strict `pin.count` error is exempt from the downgrade
+    # below -- `combine_devices` only folds devices and never changes a
+    # circuit's declared pins, so the pin-count difference is a real
+    # mismatch whether or not combining applied, and downgrading would hide
+    # it behind `"inconclusive"`.
+    if combine_incomplete and status == "mismatch" and not strict_pin_findings:
         # Issue #1370: `options.combine_devices` was requested, at least one
         # side exhausted its retry budget, and both sides were rolled back to
         # their pre-combine state (the symmetric degrade above). The compare
@@ -5652,7 +5657,10 @@ def _strict_pin_count_check(
         f"'{reference_circuit.name}' declares {reference_pins} "
         "(options.strict_top_level_pin_count)",
         "both",
-        details={"layout_pin_count": layout_pins, "reference_pin_count": reference_pins},
+        details={
+            "layout_pin_count": layout_pins,
+            "reference_pin_count": reference_pins,
+        },
     )
     return "mismatch", [finding]
 
