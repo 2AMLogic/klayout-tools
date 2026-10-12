@@ -716,12 +716,24 @@ class _FakeRemoteLauncher:
         return "203.0.113.9"
 
 
-def install_fake_remote(monkeypatch, *, report_override=None):
+def install_fake_remote(monkeypatch, tmp_path, *, report_override=None):
     """Patch the remote transport with fakes that *execute* the worker
     request locally: push materializes the inputs into a job directory,
     run calls the real :func:`sim_decks.run_deck_request` on it (exactly
-    what the provisioned box would run), pull copies the unit trees back."""
+    what the provisioned box would run), pull copies the unit trees back.
+
+    ``remote_transport.job_dir`` is redirected under ``tmp_path``: the real
+    one returns ``/home/<user>/<job_id>``, which is unwritable on CI
+    runners (user ``runner``) and litters dev hosts with stray job
+    directories.
+    """
     state: dict = {}
+    fake_remote_home = tmp_path / "fake-remote-home"
+    monkeypatch.setattr(
+        sd.remote_transport,
+        "job_dir",
+        lambda user, job_id: str(fake_remote_home / user / job_id),
+    )
 
     def fake_push_job(*, host, remote_job_dir, job, **kwargs):
         state["host"] = host
@@ -793,7 +805,7 @@ class TestRemoteDispatch:
         self, tmp_path, monkeypatch
     ):
         write_stub_engine(tmp_path)
-        state = install_fake_remote(monkeypatch)
+        state = install_fake_remote(monkeypatch, tmp_path)
         report = run_local(tmp_path, remote_deck_request(tmp_path), outdir="remote-out")
         assert report["status"] == "pass"
         assert state["pull_called"] is True
@@ -819,7 +831,7 @@ class TestRemoteDispatch:
 
     def test_worker_request_shape(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
-        state = install_fake_remote(monkeypatch)
+        state = install_fake_remote(monkeypatch, tmp_path)
         run_local(tmp_path, remote_deck_request(tmp_path), outdir="out")
         worker = json.loads(
             next(
@@ -851,7 +863,7 @@ class TestRemoteDispatch:
 
     def test_missing_pdk_refused_before_provisioning(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
-        install_fake_remote(monkeypatch)
+        install_fake_remote(monkeypatch, tmp_path)
         _FakeRemoteLauncher.last_instance = None
         request = remote_deck_request(tmp_path)
         request["models"] = {}
@@ -869,7 +881,7 @@ class TestRemoteDispatch:
         from klayout_tools import remote_transport
 
         write_stub_engine(tmp_path)
-        state = install_fake_remote(monkeypatch)
+        state = install_fake_remote(monkeypatch, tmp_path)
         real_run = sd.remote_transport.run_remote_job
 
         def failing_run(**kwargs):
@@ -904,7 +916,7 @@ class TestRemoteDispatch:
         from klayout_tools import remote_transport
 
         write_stub_engine(tmp_path)
-        install_fake_remote(monkeypatch)
+        install_fake_remote(monkeypatch, tmp_path)
 
         def failing(**kwargs):
             raise remote_transport.RemoteTransportError("ssh went away")
@@ -937,7 +949,7 @@ class TestRemoteDispatch:
         assert (outdir / "tt_27c" / "out" / "measure.raw").is_file()
         (outdir / "keep.txt").write_text("not a unit\n", encoding="utf-8")
 
-        install_fake_remote(monkeypatch)
+        install_fake_remote(monkeypatch, tmp_path)
 
         def failing(**kwargs):
             raise remote_transport.RemoteTransportError("ssh went away")
@@ -965,7 +977,7 @@ class TestRemoteDispatch:
         outdir = tmp_path / "out"
         assert (outdir / "ss_125c" / "stdout.bin").is_file()
 
-        install_fake_remote(monkeypatch)
+        install_fake_remote(monkeypatch, tmp_path)
 
         def failing_run(**kwargs):
             raise remote_transport.RemoteTransportError("ssh went away")
@@ -997,7 +1009,7 @@ class TestRemoteDispatch:
         (stale_unit / "out").mkdir(parents=True)
         (stale_unit / "stale.txt").write_text("old\n", encoding="utf-8")
         (stale_unit / "out" / "old.raw").write_bytes(b"old")
-        install_fake_remote(monkeypatch)
+        install_fake_remote(monkeypatch, tmp_path)
         report = run_local(tmp_path, remote_deck_request(tmp_path), outdir="out")
         assert report["status"] == "pass"
         assert not (stale_unit / "stale.txt").exists()
@@ -1009,7 +1021,7 @@ class TestRemoteDispatch:
         from klayout_tools import remote_transport
 
         write_stub_engine(tmp_path)
-        install_fake_remote(monkeypatch)
+        install_fake_remote(monkeypatch, tmp_path)
 
         def failing_push(**kwargs):
             raise remote_transport.RemoteTransportError("scp refused")
@@ -1020,7 +1032,7 @@ class TestRemoteDispatch:
 
     def test_non_deck_report_refused(self, tmp_path, monkeypatch):
         write_stub_engine(tmp_path)
-        install_fake_remote(monkeypatch, report_override={"corners": []})
+        install_fake_remote(monkeypatch, tmp_path, report_override={"corners": []})
         with pytest.raises(sim.SimError, match="did not return a deck-list report"):
             run_local(tmp_path, remote_deck_request(tmp_path), outdir="out")
 
