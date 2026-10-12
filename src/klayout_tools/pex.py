@@ -205,6 +205,7 @@ each row's comparison does and does not account for.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import math
@@ -215,7 +216,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import env_provenance
+from . import env_provenance, output_lock
 from ._paths import _fold_spice_continuations, _resolve_relative
 from .coverage import (
     REASON_NO_DELTA_ROWS,
@@ -1815,6 +1816,7 @@ def run_pex(
     measure_command: Sequence[str] | None = None,
     reference_netlist: str | None = None,
     measure_timeout_s: float | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
     testbench in ``testbench_paths`` against both the schematic DUT it
@@ -1970,7 +1972,53 @@ def run_pex(
     in testbench mode. See this module's "Measuring with a caller-supplied
     command" docstring section.
 
+
+    **Output-directory ownership (issue #2770).** The run owns its artifact
+    root (``artifacts_dir``, default ``.klt/pex/`` beside the layout) for its
+    whole lifetime through :func:`klayout_tools.output_lock.hold_output_dir`,
+    taken before anything is created: a competing cooperating run raises
+    :class:`~klayout_tools.output_lock.OutputDirLockedError`. The per-testbench
+    ``run_sim`` calls on ``<root>/<label>/schematic|extracted`` inherit that
+    ownership (they never re-acquire it), and a separate cooperating
+    ``run_sim``/``run_pex`` on one of those child directories is refused
+    while this run holds the root. ``_ownership`` is internal: the exit
+    stack that releases the lock when the run ends.
     """
+    if _ownership is None:
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                output_lock.hold_output_dir(
+                    artifacts_dir
+                    if artifacts_dir
+                    else os.path.join(
+                        os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex"
+                    )
+                )
+            )
+            return run_pex(
+                layout_path,
+                testbench_paths,
+                deck_name,
+                output=output,
+                top=top,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+                artifacts_dir=artifacts_dir,
+                backend=backend,
+                deck_options=deck_options,
+                declared_pins=declared_pins,
+                label_layers=label_layers,
+                critical_nets=critical_nets,
+                distributed_rc=distributed_rc,
+                mom_rlc_net=mom_rlc_net,
+                mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
+                mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
+                mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+                measure_command=measure_command,
+                reference_netlist=reference_netlist,
+                measure_timeout_s=measure_timeout_s,
+                _ownership=stack,
+            )
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
     # mode and `None` in the default testbench mode -- the single flag every

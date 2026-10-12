@@ -3525,6 +3525,18 @@ the full reasoning):
   sampled seed sequence itself reproducible from `monte_carlo.seed` alone
   (see "Monte Carlo sampling" above).
 
+## Output-directory ownership
+
+**Output-directory ownership (issue #2770).** A `klt sim` run that writes persistent artifacts -- `options.keep_artifacts`, `--resume` (the checkpoint), `--plot` (the plot directory, also owned), or the `remote`/`batch` backends that collect results locally -- owns `--outdir` (default `.klt/sim/` next to the request) for the whole run. A second cooperating
+run on the same directory (any relative or symlink alias of it) -- or on an
+ancestor or descendant of it -- fails immediately with error code
+`outdir_locked`: exit `1`, empty stdout, the standard error envelope on
+stderr, and nothing under the directory modified. A run that uses only temporary directories writes nothing there and takes no lock; sharded/parallel workers inside one run share the run's ownership. A killed or crashed
+run releases ownership automatically; a leftover owner record never blocks
+the next run. `outdir_lock_unavailable` (same exit/streams) means locking
+itself is not possible here. Full policy, library exceptions and platform
+scope: [json-contract.md](../json-contract.md) "Output-directory ownership".
+
 ## Exit codes
 
 | Code | Meaning                                                                    |

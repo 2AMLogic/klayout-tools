@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
+  (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
+  persistent artifact root; a competing cooperating run fails fast with the
+  additive `error.code` `outdir_locked` (exit `1`, empty stdout, existing
+  error envelope) instead of interleaving artifacts. Ancestor/descendant
+  roots exclude each other, aliases contend, dead owners release
+  automatically. See `docs/json-contract.md` "Output-directory ownership".
+
 - **`klt extract --resistance-path NET_ID FROM TO`: point-to-point shortest
   series path resistance over a `--distributed-rc` ladder** (issue #2765):
   a repeatable, opt-in query (requires `--parasitics --distributed-rc`)

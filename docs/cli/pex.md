@@ -1021,6 +1021,18 @@ count alone must not be treated as proof of comparison.
 `klt signoff` refuses zero, unknown or malformed common coverage. Partial
 comparisons remain disclosed for the Phase 2 success policy.
 
+## Output-directory ownership
+
+**Output-directory ownership (issue #2770).** `klt pex` owns its artifact root (`--outdir`, default `.klt/pex/` next to the layout) for the whole run. A second cooperating
+run on the same directory (any relative or symlink alias of it) -- or on an
+ancestor or descendant of it -- fails immediately with error code
+`outdir_locked`: exit `1`, empty stdout, the standard error envelope on
+stderr, and nothing under the directory modified. The per-testbench `klt sim` runs on `<outdir>/<testbench>/schematic|extracted` inherit that ownership, and an independent `klt sim`/`klt pex` aimed at one of those child directories is refused while the run is active. A killed or crashed
+run releases ownership automatically; a leftover owner record never blocks
+the next run. `outdir_lock_unavailable` (same exit/streams) means locking
+itself is not possible here. Full policy, library exceptions and platform
+scope: [json-contract.md](../json-contract.md) "Output-directory ownership".
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                     |

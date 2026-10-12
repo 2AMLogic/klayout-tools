@@ -590,12 +590,14 @@ the full request/response contract.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
 from typing import Any
 
+from . import output_lock
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -1893,6 +1895,7 @@ def run_place_and_route(
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
     ``request_path``, through the requested (or default, ``"route"``)
@@ -1918,7 +1921,32 @@ def run_place_and_route(
     ``.klt/place-and-route/`` next to the request file (the same
     "next to the input" convention ``klt synthesize``'s ``.klt/synthesize/``
     already uses) and kept as debuggable artifacts, never deleted.
+
+    **Output-directory ownership (issue #2770).** That fixed
+    ``.klt/place-and-route/`` directory is owned for the whole run through
+    :func:`klayout_tools.output_lock.hold_output_dir`: a competing cooperating
+    run on the same request directory (or any alias of it) raises
+    :class:`~klayout_tools.output_lock.OutputDirLockedError` instead of
+    interleaving stage artifacts. ``_ownership`` is internal: the exit stack
+    that releases the lock when the run ends.
     """
+    if _ownership is None:
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                output_lock.hold_output_dir(
+                    os.path.join(
+                        os.path.dirname(os.path.abspath(request_path)),
+                        ".klt",
+                        "place-and-route",
+                    )
+                )
+            )
+            return run_place_and_route(
+                request_path,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+                _ownership=stack,
+            )
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
 

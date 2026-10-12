@@ -43,6 +43,7 @@ import argparse
 
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
+from ..output_lock import OutputLockError
 from ..sim import SimError, run_sim
 from .output import emit_error, emit_success
 
@@ -69,6 +70,8 @@ def run(args: argparse.Namespace) -> int:
             fail_on_diagnostic=args.fail_on_diagnostic,
         )
     except SimError as exc:
+        return emit_error("sim", str(exc), args.format, code=exc.code)
+    except OutputLockError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
     emit_success(report, args.format, _print_text)

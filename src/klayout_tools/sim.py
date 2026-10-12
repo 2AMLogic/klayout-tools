@@ -74,6 +74,7 @@ real failure.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -87,7 +88,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any
 
-from . import env_provenance, sim_steps
+from . import env_provenance, output_lock, sim_steps
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -1203,6 +1204,7 @@ def run_sim(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the PVT corner matrix declared by the request at ``request_path``.
 
@@ -1392,7 +1394,33 @@ def run_sim(
     the sweep from starting at all (bad request, unresolvable netlist/model
     library, unsupported engine, unknown backend) -- once the sweep starts,
     every corner is reported in the response, including ones that error.
+
+    **Output-directory ownership (issue #2770).** A run that writes
+    persistent artifacts -- ``options.keep_artifacts``, ``resume``, a
+    ``plot_dir``, or an off-host (``remote``/``batch``) backend that collects
+    results locally -- owns ``artifacts_dir`` (and ``plot_dir``) for its
+    lifetime through :func:`klayout_tools.output_lock.hold_output_dir`; a
+    competing cooperating run raises
+    :class:`~klayout_tools.output_lock.OutputDirLockedError`. A run that
+    only uses temporary directories takes no lock. Ownership of an ancestor
+    (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
+    internal: the exit stack that releases the lock when the run ends.
     """
+    if _ownership is None:
+        with contextlib.ExitStack() as stack:
+            return run_sim(
+                request_path,
+                artifacts_dir=artifacts_dir,
+                backend=backend,
+                max_workers=max_workers,
+                hosts=hosts,
+                budget_s=budget_s,
+                resume=resume,
+                plot_dir=plot_dir,
+                fail_fast_probe=fail_fast_probe,
+                fail_on_diagnostic=fail_on_diagnostic,
+                _ownership=stack,
+            )
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
@@ -1738,6 +1766,13 @@ def run_sim(
     # incrementally -- if this run is itself interrupted, only the corners
     # actually completed here are lost from the next resume, not the whole
     # sweep.
+    # Issue #2770: own every persistent artifact root before the first write
+    # to it. Temporary-only runs (no keep_artifacts/resume/plots, local
+    # backends) never touch `artifacts_dir`, so they take no lock.
+    if keep_artifacts or resume or backend in _OFFHOST_BACKENDS:
+        _ownership.enter_context(output_lock.hold_output_dir(artifacts_dir))
+    if plot_dir is not None:
+        _ownership.enter_context(output_lock.hold_output_dir(plot_dir))
     checkpoint_path = _checkpoint_path(artifacts_dir)
     pre_completed: dict[str, dict[str, Any]] = {}
     loaded_engine_version: str | None = None
