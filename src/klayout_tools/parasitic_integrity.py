@@ -449,14 +449,10 @@ def _check_open(record: ParasiticNetworkRecord, net: IntegrityNet) -> dict[str, 
     # `reps.get` (not `[...]`): a required terminal uid the connectivity
     # pass never resolved -- out of range, or not owned by this net, i.e. a
     # malformed record -- counts as disconnected rather than crashing.
-    reps_by_uid = {
-        uid: reps.get(uid) for uid in net.required_terminal_uids
-    }
+    reps_by_uid = {uid: reps.get(uid) for uid in net.required_terminal_uids}
     reference = next(iter(reps_by_uid.values()))
     disconnected = [
-        _node_name(record, uid)
-        for uid, rep in reps_by_uid.items()
-        if rep != reference
+        _node_name(record, uid) for uid, rep in reps_by_uid.items() if rep != reference
     ]
     if not disconnected:
         return {
