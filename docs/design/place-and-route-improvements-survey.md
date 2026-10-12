@@ -907,7 +907,7 @@ OpenSTA sessions (one launch each), excluding the version probe.
 
 Worst slack (ns), setup / hold, on the same routed geometry. The routed
 ODB from which the sweep ran and the DEF that `klt sta` read come from the
-same run.
+same run. "GR estimate" means `estimate_parasitics -global_routing`.
 
 | Source | Parasitics | Clock | tt | ss_n40C_1v28 | ff_n40C_1v95 |
 |---|---|---|---|---|---|
