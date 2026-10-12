@@ -134,8 +134,22 @@ DEFAULT_MANIFEST_PATH: Path = (
 #: :func:`ami_pdk_key`'s family-reduction path -- the same shape as
 #: ``"gf180mcuC"`` -> ``"gf180mcu"``, not sky130's variant/key coincidence.
 #: ``scripts/aws/build-remote-sim-ami.sh --pdk sg13g2`` is the matching build
-#: invocation.
-SUPPORTED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu", "sg13g2")
+#: invocation. ``"sg13cmos5l"`` (#2727) is that same shape a third time --
+#: its one real local variant directory is ``"ihp-sg13cmos5l"`` (aliased in
+#: ``pdk_families.PDK_VARIANT_FAMILY_ALIASES``), its manifest key is the bare
+#: family, and ``--pdk sg13cmos5l`` is the matching build invocation; its
+#: recipe additionally fetches the SG13G2 sibling tree the ``ihp-sg13cmos5l``
+#: install's shared-model symlinks resolve into (see that script's
+#: sg13cmos5l branch). Registration is not publication: no SG13CMOS5L AMI
+#: exists in the manifest yet (the image-publication follow-up), so requests
+#: resolve to :func:`resolve_ami`'s region-aware "no published AMI" error
+#: until an operator builds one.
+SUPPORTED_PDKS: tuple[str, ...] = (
+    "sky130A",
+    "gf180mcu",
+    "sg13g2",
+    "sg13cmos5l",
+)
 
 #: The PDK **families** the remote backend's baked-AMI transport covers, used
 #: to map a request's ``models.pdk`` -- which is a local *variant* name -- onto
@@ -157,7 +171,9 @@ SUPPORTED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu", "sg13g2")
 #: dependency. Ordering is no longer load-bearing either: :func:`ami_pdk_key`
 #: classifies via :func:`~klayout_tools.pdk_families.pdk_variant_family` and
 #: then tests membership, so there is no longest-prefix-first requirement.
-_AMI_PDK_FAMILIES: frozenset[str] = family_subset("gf180mcu", "sky130", "sg13g2")
+_AMI_PDK_FAMILIES: frozenset[str] = family_subset(
+    "gf180mcu", "sky130", "sg13g2", "sg13cmos5l"
+)
 
 #: ``c7i`` instance-family sizing ladder: (name, vcpu count), ascending.
 #: Compute-optimized, per the design note's sizing recipe: "ngspice is
@@ -641,7 +657,8 @@ def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
     sky130's: its one real local variant directory is ``ihp-sg13g2`` (see
     ``pdk_families.PDK_VARIANT_FAMILY_ALIASES``), while the manifest key is
     the bare family ``sg13g2``, so ``ihp-sg13g2`` always goes through the
-    family-reduction path below.
+    family-reduction path below. SG13CMOS5L (#2727) is that shape a third
+    time: variant ``ihp-sg13cmos5l``, manifest key ``sg13cmos5l``.
 
     Exact matches win, so an explicit manifest key still works; otherwise the
     variant is reduced to its family by

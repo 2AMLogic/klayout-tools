@@ -25,12 +25,16 @@
 #      ngspice (`pre_osdi` + `devhelp`) to confirm the ABI floor claim
 #      instead of taking it on faith.
 #
-# Usage: scripts/fetch-sg13g2-sim-toolchain.sh [--force]
-#   Requires `scripts/fetch-ihp-sg13g2.sh` to have already been run (this
-#   script fails closed, not silently, if the PDK's `libs.tech/verilog-a/`
-#   isn't there). Idempotent: a prior successful compile with the same
-#   pinned openvaf-r tag is left in place unless --force is given (matches
-#   fetch-ihp-sg13g2.sh's own --force convention) -- but the ngspice
+# Usage: scripts/fetch-sg13g2-sim-toolchain.sh [--force] [--pdk-dir <dir>]
+#   Requires the target tree's fetch script to have already been run (this
+#   script fails closed, not silently, if the tree's `libs.tech/verilog-a/`
+#   isn't there). `--pdk-dir` retargets the compile at another IHP-Open-PDK
+#   tree that ships its own `openvaf-compile-va.sh` -- e.g. the sibling
+#   `pdks/ihp-open-pdk/ihp-sg13cmos5l` fetch (#2727) -- while reusing this
+#   script's single pinned openvaf-r build, ngspice ABI preflight, and
+#   per-model load verification. Idempotent: a prior successful compile with
+#   the same pinned openvaf-r tag is left in place unless --force is given
+#   (matches fetch-ihp-sg13g2.sh's own --force convention) -- but the ngspice
 #   ABI-floor preflight and the per-model load-verification in step 4 above
 #   always re-run, even when the compile itself is skipped, since the
 #   ngspice on PATH can change between runs independently of the PDK.
@@ -98,10 +102,18 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Which IHP-Open-PDK tree to provision -- overridable with --pdk-dir (parsed
+# below) so the SAME pinned openvaf-r fetch, ngspice ABI preflight, and
+# per-model load verification serve every IHP tree that ships its own
+# `libs.tech/verilog-a/openvaf-compile-va.sh`. Default remains the SG13G2
+# tree this script was written for (#1628); `scripts/aws/build-remote-sim-ami.sh`'s
+# sg13cmos5l branch (#2727) passes the sibling `ihp-sg13cmos5l` tree, whose
+# compile script produces all six of that PDK's OSDI objects (the four
+# shared psp103/r3_cmc/mosvar models via the tree's symlinks into the
+# default ihp-sg13g2 sibling, plus cmos5l's own cap_cmom{i,f} sources --
+# the prebuilt x86-64 copies IHP-Open-PDK#1239 removed are gone, so
+# everything must be compiled for the host's own architecture).
 PDK_DIR="$REPO_ROOT/pdks/ihp-open-pdk/ihp-sg13g2"
-VA_DIR="$PDK_DIR/libs.tech/verilog-a"
-OSDI_DIR="$PDK_DIR/libs.tech/ngspice/osdi"
-MODELS_MARKER="$OSDI_DIR/.compiled-version"
 
 # Pinned openvaf-r release -- bump the tag/URL/checksum together in the
 # same change if this is ever refreshed. Fails closed on checksum
@@ -137,7 +149,29 @@ COMPILER_BIN="$COMPILER_PREFIX/bin/openvaf-r"
 COMPILER_MARKER="$COMPILER_PREFIX/.installed-version"
 
 FORCE=0
-[[ "${1:-}" == "--force" ]] && FORCE=1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force)
+            FORCE=1
+            shift
+            ;;
+        --pdk-dir)
+            [[ -n "${2:-}" ]] || {
+                echo "error: --pdk-dir requires a directory argument" >&2
+                exit 1
+            }
+            PDK_DIR="$2"
+            shift 2
+            ;;
+        *)
+            echo "error: unknown argument: $1 (usage: $0 [--force] [--pdk-dir <dir>])" >&2
+            exit 1
+            ;;
+    esac
+done
+VA_DIR="$PDK_DIR/libs.tech/verilog-a"
+OSDI_DIR="$PDK_DIR/libs.tech/ngspice/osdi"
+MODELS_MARKER="$OSDI_DIR/.compiled-version"
 
 # preflight_ngspice_osdi_abi: fail closed, naming the version floor, if
 # ngspice is missing or too old to accept what openvaf-r emits -- rather
@@ -271,7 +305,7 @@ fetch_compiler() {
 }
 
 compile_models() {
-    echo "Compiling SG13G2 Verilog-A models with openvaf-r $OPENVAF_R_TAG ..."
+    echo "Compiling $PDK_DIR Verilog-A models with openvaf-r $OPENVAF_R_TAG ..."
     mkdir -p "$OSDI_DIR"
     (
         cd "$VA_DIR"
@@ -325,9 +359,10 @@ if [[ ! -d "$VA_DIR" ]]; then
     cat >&2 <<EOF
 error: $VA_DIR not found
 
-  Run scripts/fetch-ihp-sg13g2.sh first -- this script compiles that
-  fetch's Verilog-A sources into OSDI models, it does not fetch the PDK
-  itself.
+  Run the tree's fetch script first (scripts/fetch-ihp-sg13g2.sh for the
+  default ihp-sg13g2 tree; scripts/fetch-ihp-sg13cmos5l.sh, after it, for
+  an ihp-sg13cmos5l --pdk-dir) -- this script compiles that fetch's
+  Verilog-A sources into OSDI models, it does not fetch the PDK itself.
 EOF
     exit 1
 fi
@@ -336,7 +371,7 @@ preflight_ngspice_osdi_abi || exit 1
 
 NEED_COMPILE=1
 if [[ -f "$MODELS_MARKER" && $FORCE -eq 0 && "$(cat "$MODELS_MARKER" 2>/dev/null)" == "$OPENVAF_R_TAG" ]]; then
-    echo "SG13G2 OSDI models already compiled with openvaf-r $OPENVAF_R_TAG at $OSDI_DIR (use --force to rebuild)"
+    echo "OSDI models already compiled with openvaf-r $OPENVAF_R_TAG at $OSDI_DIR (use --force to rebuild)"
     NEED_COMPILE=0
 fi
 

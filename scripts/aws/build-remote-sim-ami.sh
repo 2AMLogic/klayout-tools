@@ -5,8 +5,9 @@
 # Resolves the "AMI build/refresh pipeline mechanics" open question the
 # design note explicitly leaves to Phase 2 (issue #264): bakes ngspice + one
 # PDK's curated ngspice model decks onto a fresh Ubuntu build instance --
-# for SG13G2 (issue #2573) also a compiled OSDI toolchain output, since a
-# PDK-only install cannot simulate a single SG13G2 device -- plus
+# for SG13G2 (issue #2573) and SG13CMOS5L (issue #2727) also compiled OSDI
+# toolchain outputs, since a PDK-only install cannot simulate a single
+# device of either family -- plus
 # the idle-shutdown guard src/klayout_tools/remote_launcher.py's
 # `idle_guard_install_script()` generates (single source of truth — this
 # script calls that Python function via `python3 -c ...` rather than
@@ -61,14 +62,28 @@
 #       [--copy-to-region us-west-2 ...] \
 #       [--klt-ref <git-ref>] [--manifest <path>] [--yes]
 #
-#   --pdk accepts sky130A, gf180mcu, or sg13g2 (remote_launcher.SUPPORTED_PDKS
-#   -- keep both lists in sync). sg13g2's recipe fetches via a `--klt-ref`
-#   pinned checkout of THIS repo rather than volare (see the PDK_FETCH_CMDS
-#   case below) -- IHP-Open-PDK is not on volare's feed, and the
-#   compiled-OSDI step has no volare equivalent at all.
+#   --pdk accepts sky130A, gf180mcu, sg13g2, or sg13cmos5l
+#   (remote_launcher.SUPPORTED_PDKS -- keep both lists in sync). sg13g2's and
+#   sg13cmos5l's recipes fetch via a `--klt-ref` pinned checkout of THIS repo
+#   rather than volare (see the PDK_FETCH_CMDS cases below) -- IHP-Open-PDK
+#   is not on volare's feed, and the compiled-OSDI step has no volare
+#   equivalent at all. sg13cmos5l (#2727) additionally fetches the SG13G2
+#   sibling tree first -- the `ihp-sg13cmos5l/` subtree of IHP-Open-PDK
+#   (post-#2720 pin: `scripts/fetch-ihp-sg13cmos5l.sh` pins an exact `dev`
+#   commit SHA + tarball sha256) holds *relative* symlinks up into that
+#   sibling (`../../../ihp-sg13g2/libs.tech/...`), so its shared
+#   psp103/r3_cmc/mosvar Verilog-A sources resolve only when
+#   `ihp-sg13g2/` lives immediately alongside it -- and then compiles ALL of
+#   sg13cmos5l's OSDI objects from source on the image's own architecture
+#   (the prebuilt x86-64 `cap_cmom{i,f}.osdi` upstream used to ship were
+#   removed at IHP-Open-PDK `e8fba183`; nothing ships prebuilt anymore), via
+#   the same pinned openvaf-r toolchain + ngspice load verification
+#   `scripts/fetch-sg13g2-sim-toolchain.sh` provides (its `--pdk-dir`
+#   retargets it at the cmos5l tree).
 #
 #   Without --yes: prints the resolved build plan (PDK, region, base AMI,
-#   instance type, estimated one-time build cost) and exits — nothing is
+#   instance type, estimated one-time build cost, plus the exact ngspice
+#   install + PDK fetch commands the build would run) and exits — nothing is
 #   created. Mirrors repo-remote.sh's own "plan shown before money is spent"
 #   discipline (see /repo:remote).
 #   With --yes: actually launches the build instance, installs, snapshots,
@@ -124,6 +139,23 @@ YES=false
 #: install with it, see PDK_FETCH_CMDS below) and revise this constant from
 #: a measured number if it turns out to be wrong, rather than trusting this
 #: estimate indefinitely.
+#:
+#: SG13CMOS5L provisional sizing decision (issue #2727, documented not
+#: measured -- same constraint as the sg13g2 branch above): 60 GB is kept
+#: for the sg13cmos5l branch as well. Reasoning: its recipe downloads a
+#: SECOND whole-repo IHP-Open-PDK tarball (~400 MB -- `fetch-ihp-sg13g2.sh`'s
+#: release tarball plus `fetch-ihp-sg13cmos5l.sh`'s dev-commit tarball, of
+#: which only the ~96 MB `ihp-sg13cmos5l/` subtree is extracted), keeps BOTH
+#: extracted trees (sg13g2's -- still required, the cmos5l subtree's shared
+#: models are relative symlinks into it -- and cmos5l's), one openvaf-r
+#: binary, and six per-model `.osdi` outputs (KB-MB each). Transient peak is
+#: the two live tarballs plus their extracted trees -- call it ~2-3 GB --
+#: plus the same low single-digit GB from-source ngspice/toolchain budget
+#: the sg13g2 branch already carries. All comfortably inside the 60 GB the
+#: measured gf180mcu need (#612) fits in with headroom to spare. Same
+#: instruction as above applies: the operator running the real
+#: sg13cmos5l build should confirm with `df -h` and revise from a measured
+#: number, not trust this estimate indefinitely.
 ROOT_GB="60"
 #: Pinned to the commit this script itself is run from by default --
 #: reproducible, matches whatever `remote_launcher`/`sim.py`/`remote_transport`
@@ -159,12 +191,25 @@ PDK_VERSION="c6d73a35f524070e85faff4a6a9eef49553ebc2b"
 #: manifest's `pdk_snapshot` field does via SG13G2_PDK_SNAPSHOT_PREFIX
 #: below.
 SG13G2_PDK_SNAPSHOT_PREFIX="sg13g2-klt"
+#: SG13CMOS5L snapshot-pinning decision (issue #2727) -- the same shape as
+#: SG13G2's above: no single upstream release tag to pin here either. The
+#: recipe (the sg13cmos5l PDK_FETCH_CMDS branch below) clones THIS repo at
+#: `--klt-ref` and runs `scripts/fetch-ihp-sg13g2.sh` (sibling prerequisite),
+#: `scripts/fetch-ihp-sg13cmos5l.sh` (pins `IHP_SG13CMOS5L_COMMIT`, an
+#: IHP-Open-PDK `dev` commit SHA, plus `IHP_SG13CMOS5L_SHA256`, the tarball
+#: checksum -- the post-#2720 pin; no release carries SG13CMOS5L yet), and
+#: `scripts/fetch-sg13g2-sim-toolchain.sh --pdk-dir <cmos5l tree>` (pins
+#: `OPENVAF_R_TAG`) -- so SG13CMOS5L's snapshot identity is likewise the
+#: *pair* (KLT_REF, whatever those scripts pin at that ref), recorded in the
+#: manifest's `pdk_snapshot` via this prefix, never restated as independent
+#: literals here.
+SG13CMOS5L_PDK_SNAPSHOT_PREFIX="sg13cmos5l-klt"
 
 log() { echo "[build-remote-sim-ami] $*" >&2; }
 die() { local code="$1"; shift; log "error: $*"; exit "$code"; }
 
 usage() {
-  sed -n '2,78p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,91p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -187,10 +232,10 @@ done
 # loudly on missing config, never a silent default (repo#52's discipline,
 # reused deliberately here per the design note's own instruction to reuse
 # repo-remote.sh's *patterns*, not its code). ─────────────────────────────
-[[ -n "$PDK" ]] || die 2 "--pdk is required (sky130A|gf180mcu|sg13g2)"
+[[ -n "$PDK" ]] || die 2 "--pdk is required (sky130A|gf180mcu|sg13g2|sg13cmos5l)"
 case "$PDK" in
-  sky130A|gf180mcu|sg13g2) : ;;
-  *) die 2 "unsupported --pdk '$PDK' (must match remote_launcher.SUPPORTED_PDKS: sky130A, gf180mcu, sg13g2)" ;;
+  sky130A|gf180mcu|sg13g2|sg13cmos5l) : ;;
+  *) die 2 "unsupported --pdk '$PDK' (must match remote_launcher.SUPPORTED_PDKS: sky130A, gf180mcu, sg13g2, sg13cmos5l)" ;;
 esac
 [[ -n "$REGION" ]] || die 2 "--region (or AWS_REGION/AWS_DEFAULT_REGION) is required"
 command -v aws >/dev/null 2>&1 || die 2 "the 'aws' CLI is required on PATH"
@@ -198,17 +243,116 @@ command -v jq  >/dev/null 2>&1 || die 2 "'jq' is required on PATH (manifest upda
 command -v uv  >/dev/null 2>&1 || die 2 "'uv' is required on PATH (idle-guard script generation via 'uv run python3')"
 
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-# sky130A/gf180mcu apt-install Ubuntu 22.04's packaged ngspice; sg13g2
-# instead builds ngspice from source (NGSPICE_INSTALL_CMDS below) because
-# apt's version is below the OSDI ABI floor
+# sky130A/gf180mcu apt-install Ubuntu 22.04's packaged ngspice; sg13g2 and
+# sg13cmos5l instead build ngspice from source (NGSPICE_INSTALL_CMDS below)
+# because apt's version is below the OSDI ABI floor
 # scripts/fetch-sg13g2-sim-toolchain.sh's own preflight enforces -- see that
 # script's header comment. Both hints are verified post-install below.
 case "$PDK" in
-  sg13g2) NGSPICE_VERSION_HINT="47" ;;  # matches docker/eda-sim/pdk-versions.json's tools.ngspice pin
+  sg13g2|sg13cmos5l) NGSPICE_VERSION_HINT="47" ;;  # matches docker/eda-sim/pdk-versions.json's tools.ngspice pin
   *) NGSPICE_VERSION_HINT="46" ;;  # the version this repo's own test matrix pins against
 esac
 
+# ── ngspice install recipe. sky130A/gf180mcu apt-install Ubuntu 22.04's
+# packaged ngspice (unchanged from before #2573); sg13g2 and sg13cmos5l
+# instead build ngspice from source, because that apt package is below the
+# OSDI ABI floor scripts/fetch-sg13g2-sim-toolchain.sh's own preflight
+# enforces (see that script's header comment for the ngspice-43-vs-44
+# osdiregistry.c citation). Reuses docker/eda-sim/pdk-versions.json's
+# already-pinned from-source ngspice recipe (version/sha256/configure-flags)
+# via `jq` rather than restating those as a second, independently-driftable
+# literal here -- that file is itself the single source of truth
+# `tests/test_eda_sim_image.py` enforces has no duplicate. ──────────────────
+case "$PDK" in
+  sg13g2|sg13cmos5l)
+    NGSPICE_PIN_FILE="${REPO_ROOT}/docker/eda-sim/pdk-versions.json"
+    [[ -f "$NGSPICE_PIN_FILE" ]] || die 2 "expected ngspice pin file missing: $NGSPICE_PIN_FILE"
+    NGSPICE_SRC_VERSION="$(jq -r '.tools.ngspice.version' "$NGSPICE_PIN_FILE")"
+    NGSPICE_SRC_SHA256="$(jq -r '.tools.ngspice.sha256' "$NGSPICE_PIN_FILE")"
+    NGSPICE_SRC_URL="$(jq -r '.tools.ngspice.url_template' "$NGSPICE_PIN_FILE" | sed "s/{version}/${NGSPICE_SRC_VERSION}/g")"
+    NGSPICE_SRC_FLAGS="$(jq -r '.tools.ngspice.configure_flags | join(" ")' "$NGSPICE_PIN_FILE")"
+    [[ "$NGSPICE_SRC_VERSION" == "$NGSPICE_VERSION_HINT" ]] \
+      || die 2 "docker/eda-sim/pdk-versions.json's tools.ngspice.version ($NGSPICE_SRC_VERSION) no longer matches this script's NGSPICE_VERSION_HINT ($NGSPICE_VERSION_HINT) -- update NGSPICE_VERSION_HINT's sg13g2/sg13cmos5l case above in the same change that bumps the pin file"
+    # shellcheck disable=SC2016  # intentional: $(...) expands later, inside
+    # the build instance's own user-data shell (BUILD_USERDATA below).
+    NGSPICE_INSTALL_CMDS='apt-get install -y build-essential bison flex autoconf automake libtool m4 && curl -fL --retry 3 -o /tmp/ngspice.tar.gz "'"${NGSPICE_SRC_URL}"'" && echo "'"${NGSPICE_SRC_SHA256}"'  /tmp/ngspice.tar.gz" | sha256sum -c - && mkdir -p /tmp/ngspice-src && tar -xzf /tmp/ngspice.tar.gz -C /tmp/ngspice-src --strip-components=1 && (cd /tmp/ngspice-src && ./configure '"${NGSPICE_SRC_FLAGS}"' && make -j"$(nproc)" && make install && ldconfig) && rm -rf /tmp/ngspice.tar.gz /tmp/ngspice-src'
+    ;;
+  *)
+    NGSPICE_INSTALL_CMDS='apt-get install -y ngspice'
+    ;;
+esac
+
+# ── per-PDK install recipe. Fetches the same curated open-PDK ngspice model
+# decks klt's own docs/design/remote-sim-backend-spike.md decision 4 scopes
+# this AMI to (sky130A, gf180mcu, sg13g2, sg13cmos5l) -- via the PDK's own
+# published release artifact, never an ad hoc mirror. Installed under the
+# fixed $PDK_ROOT this script bakes into /etc/environment below, so
+# `pdk.find_pdk` resolves it identically to a local install (see #265's
+# header comment). sg13g2 (#2573) is not on volare's feed at all --
+# IHP-Open-PDK is a different upstream project -- so that branch drives this
+# repo's own scripts/fetch-ihp-sg13g2.sh +
+# scripts/fetch-sg13g2-sim-toolchain.sh from a --klt-ref pinned checkout
+# instead (see SG13G2_PDK_SNAPSHOT_PREFIX above for why KLT_REF is that
+# recipe's snapshot-identity anchor), and additionally needs ngspice already
+# on PATH -- guaranteed by NGSPICE_INSTALL_CMDS running first in
+# BUILD_USERDATA below, since fetch-sg13g2-sim-toolchain.sh preflights and
+# load-verifies its compiled OSDI models against it. sg13cmos5l (#2727) is
+# the same not-on-volare shape, plus two family-specific requirements:
+#   1. The SG13G2 sibling tree must be fetched FIRST -- the post-#2720
+#      `ihp-sg13cmos5l/` subtree of IHP-Open-PDK holds *relative* symlinks
+#      up into it (shared psp103/r3_cmc/mosvar Verilog-A sources,
+#      `../../../ihp-sg13g2/libs.tech/...`), and
+#      scripts/fetch-ihp-sg13cmos5l.sh refuses to run without it (the #1406
+#      dangling-symlink regression guard).
+#   2. Every OSDI object must be COMPILED for the image's own architecture
+#      -- upstream removed the prebuilt x86-64 `cap_cmom{i,f}.osdi` at
+#      IHP-Open-PDK `e8fba183` (#1239/#1260), so nothing ships prebuilt
+#      anymore. The cmos5l tree's own `openvaf-compile-va.sh` produces all
+#      six objects into its `libs.tech/ngspice/osdi/`; we drive it through
+#      scripts/fetch-sg13g2-sim-toolchain.sh --pdk-dir (same pinned
+#      openvaf-r fetch + ngspice ABI preflight + per-model load verification
+#      as the sg13g2 branch -- one copy of those pins, not two), targeting
+#      the cmos5l tree only: the sibling sg13g2 tree is present to satisfy
+#      the symlinks, not to serve sg13g2 requests (that is its own AMI), so
+#      its osdi/ directory stays empty. ────────────────────────────────────
+# shellcheck disable=SC2016  # intentional: $(...) expands later, inside the
+# build instance's own user-data shell (BUILD_USERDATA below), not here.
+case "$PDK" in
+  sky130A)
+    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk sky130 '"${PDK_VERSION}"''
+    ;;
+  gf180mcu)
+    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk gf180mcu '"${PDK_VERSION}"''
+    ;;
+  sg13g2|sg13cmos5l)
+    # A second, independent `git clone` of this repo (distinct from the
+    # `pip install klayout-tools @ git+...` clone further down in
+    # BUILD_USERDATA) -- deliberately not shared: this one needs the repo's
+    # `scripts/`/`pdks/` tree on disk to run shell scripts from, the pip
+    # install needs only the installed Python package. Both are pinned to
+    # the same $KLT_REF, so they never disagree about which commit's fetch
+    # scripts (and therefore which IHP-Open-PDK/openvaf-r pins) get baked.
+    # sg13cmos5l additionally runs the compile/verify step against the
+    # cmos5l tree (--pdk-dir) after both fetches, per the two requirements
+    # commented above.
+    PDK_FETCH_CMDS='git clone https://github.com/2AMLogic/klayout-tools.git /tmp/klt-src && (cd /tmp/klt-src && git checkout '"${KLT_REF}"') && /tmp/klt-src/scripts/fetch-ihp-sg13g2.sh'
+    if [[ "$PDK" == "sg13cmos5l" ]]; then
+      PDK_FETCH_CMDS="${PDK_FETCH_CMDS}"' && /tmp/klt-src/scripts/fetch-ihp-sg13cmos5l.sh && /tmp/klt-src/scripts/fetch-sg13g2-sim-toolchain.sh --pdk-dir /tmp/klt-src/pdks/ihp-open-pdk/ihp-sg13cmos5l'
+    else
+      PDK_FETCH_CMDS="${PDK_FETCH_CMDS}"' && /tmp/klt-src/scripts/fetch-sg13g2-sim-toolchain.sh'
+    fi
+    PDK_FETCH_CMDS="${PDK_FETCH_CMDS}"' && mkdir -p "'"${PDK_ROOT}"'" && cp -a /tmp/klt-src/pdks/ihp-open-pdk/. "'"${PDK_ROOT}"'/" && rm -rf /tmp/klt-src'
+    ;;
+esac
+
+# Bracket the PDK install with `df -h` so a disk-space failure names itself in
+# the console trace instead of surfacing as a bare `[Errno 28]` mid-extract
+# (#612). Cheap, and it is the first thing anyone asks after a failed build.
+PDK_FETCH_CMDS="df -h / && ${PDK_FETCH_CMDS} && df -h /"
+
 log "plan: build a ${PDK} AMI in ${REGION} (build instance type ${INSTANCE_TYPE}, root ${ROOT_GB}GB gp3, klt-ref ${KLT_REF}); copy-to: ${COPY_TO_REGIONS[*]:-<none>}"
+log "plan: ngspice: ${NGSPICE_INSTALL_CMDS}"
+log "plan: PDK fetch: ${PDK_FETCH_CMDS}"
 
 if [[ "$YES" != true ]]; then
   log "dry-run (pass --yes to actually build). Nothing was created."
@@ -239,75 +383,6 @@ ROOT_DEVICE="$(aws ec2 describe-images --region "$REGION" --image-ids "$BASE_AMI
 # truth — see this script's header comment) ────────────────────────────────
 IDLE_GUARD_SCRIPT="$(cd "$REPO_ROOT" && uv run python3 -c \
   "from klayout_tools.remote_launcher import idle_guard_install_script as f; print(f())")"
-
-# ── ngspice install recipe. sky130A/gf180mcu apt-install Ubuntu 22.04's
-# packaged ngspice (unchanged from before #2573); sg13g2 instead builds
-# ngspice from source, because that apt package is below the OSDI ABI floor
-# scripts/fetch-sg13g2-sim-toolchain.sh's own preflight enforces (see that
-# script's header comment for the ngspice-43-vs-44 osdiregistry.c citation).
-# Reuses docker/eda-sim/pdk-versions.json's already-pinned from-source
-# ngspice recipe (version/sha256/configure-flags) via `jq` rather than
-# restating those as a second, independently-driftable literal here --
-# that file is itself the single source of truth `tests/test_eda_sim_image.py`
-# enforces has no duplicate. ────────────────────────────────────────────────
-case "$PDK" in
-  sg13g2)
-    NGSPICE_PIN_FILE="${REPO_ROOT}/docker/eda-sim/pdk-versions.json"
-    [[ -f "$NGSPICE_PIN_FILE" ]] || die 2 "expected ngspice pin file missing: $NGSPICE_PIN_FILE"
-    NGSPICE_SRC_VERSION="$(jq -r '.tools.ngspice.version' "$NGSPICE_PIN_FILE")"
-    NGSPICE_SRC_SHA256="$(jq -r '.tools.ngspice.sha256' "$NGSPICE_PIN_FILE")"
-    NGSPICE_SRC_URL="$(jq -r '.tools.ngspice.url_template' "$NGSPICE_PIN_FILE" | sed "s/{version}/${NGSPICE_SRC_VERSION}/g")"
-    NGSPICE_SRC_FLAGS="$(jq -r '.tools.ngspice.configure_flags | join(" ")' "$NGSPICE_PIN_FILE")"
-    [[ "$NGSPICE_SRC_VERSION" == "$NGSPICE_VERSION_HINT" ]] \
-      || die 2 "docker/eda-sim/pdk-versions.json's tools.ngspice.version ($NGSPICE_SRC_VERSION) no longer matches this script's NGSPICE_VERSION_HINT ($NGSPICE_VERSION_HINT) -- update NGSPICE_VERSION_HINT's sg13g2 case above in the same change that bumps the pin file"
-    # shellcheck disable=SC2016  # intentional: $(...) expands later, inside
-    # the build instance's own user-data shell (BUILD_USERDATA below).
-    NGSPICE_INSTALL_CMDS='apt-get install -y build-essential bison flex autoconf automake libtool m4 && curl -fL --retry 3 -o /tmp/ngspice.tar.gz "'"${NGSPICE_SRC_URL}"'" && echo "'"${NGSPICE_SRC_SHA256}"'  /tmp/ngspice.tar.gz" | sha256sum -c - && mkdir -p /tmp/ngspice-src && tar -xzf /tmp/ngspice.tar.gz -C /tmp/ngspice-src --strip-components=1 && (cd /tmp/ngspice-src && ./configure '"${NGSPICE_SRC_FLAGS}"' && make -j"$(nproc)" && make install && ldconfig) && rm -rf /tmp/ngspice.tar.gz /tmp/ngspice-src'
-    ;;
-  *)
-    NGSPICE_INSTALL_CMDS='apt-get install -y ngspice'
-    ;;
-esac
-
-# ── per-PDK install recipe. Fetches the same curated open-PDK ngspice model
-# decks klt's own docs/design/remote-sim-backend-spike.md decision 4 scopes
-# this AMI to (sky130A, gf180mcu, sg13g2) -- via the PDK's own published
-# release artifact, never an ad hoc mirror. Installed under the fixed
-# $PDK_ROOT this script bakes into /etc/environment below, so `pdk.find_pdk`
-# resolves it identically to a local install (see #265's header comment).
-# sg13g2 (#2573) is not on volare's feed at all -- IHP-Open-PDK is a
-# different upstream project -- so that branch drives this repo's own
-# scripts/fetch-ihp-sg13g2.sh + scripts/fetch-sg13g2-sim-toolchain.sh from a
-# --klt-ref pinned checkout instead (see SG13G2_PDK_SNAPSHOT_PREFIX above for
-# why KLT_REF is that recipe's snapshot-identity anchor), and additionally
-# needs ngspice already on PATH -- guaranteed by NGSPICE_INSTALL_CMDS running
-# first in BUILD_USERDATA below, since fetch-sg13g2-sim-toolchain.sh
-# preflights and load-verifies its compiled OSDI models against it. ────────
-# shellcheck disable=SC2016  # intentional: $(...) expands later, inside the
-# build instance's own user-data shell (BUILD_USERDATA below), not here.
-case "$PDK" in
-  sky130A)
-    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk sky130 '"${PDK_VERSION}"''
-    ;;
-  gf180mcu)
-    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk gf180mcu '"${PDK_VERSION}"''
-    ;;
-  sg13g2)
-    # A second, independent `git clone` of this repo (distinct from the
-    # `pip install klayout-tools @ git+...` clone further down in
-    # BUILD_USERDATA) -- deliberately not shared: this one needs the repo's
-    # `scripts/`/`pdks/` tree on disk to run shell scripts from, the pip
-    # install needs only the installed Python package. Both are pinned to
-    # the same $KLT_REF, so they never disagree about which commit's fetch
-    # scripts (and therefore which IHP-Open-PDK/openvaf-r pins) get baked.
-    PDK_FETCH_CMDS='git clone https://github.com/2AMLogic/klayout-tools.git /tmp/klt-src && (cd /tmp/klt-src && git checkout '"${KLT_REF}"') && /tmp/klt-src/scripts/fetch-ihp-sg13g2.sh && /tmp/klt-src/scripts/fetch-sg13g2-sim-toolchain.sh && mkdir -p "'"${PDK_ROOT}"'" && cp -a /tmp/klt-src/pdks/ihp-open-pdk/. "'"${PDK_ROOT}"'/" && rm -rf /tmp/klt-src'
-    ;;
-esac
-
-# Bracket the PDK install with `df -h` so a disk-space failure names itself in
-# the console trace instead of surfacing as a bare `[Errno 28]` mid-extract
-# (#612). Cheap, and it is the first thing anyone asks after a failed build.
-PDK_FETCH_CMDS="df -h / && ${PDK_FETCH_CMDS} && df -h /"
 
 BUILD_USERDATA="$(mktemp)"
 trap 'rm -f "$BUILD_USERDATA"' EXIT
@@ -411,6 +486,12 @@ if [[ "$PDK" == "sg13g2" ]]; then
   # actual IHP-Open-PDK/openvaf-r versions this build baked, so it belongs
   # in the manifest's own snapshot identity, not just this script's log.
   PDK_SNAPSHOT="${SG13G2_PDK_SNAPSHOT_PREFIX}-${KLT_REF:0:12}-$(date -u +%Y.%m.%d)"
+elif [[ "$PDK" == "sg13cmos5l" ]]; then
+  # Same (KLT_REF, date) identity as the sg13g2 branch, under
+  # SG13CMOS5L_PDK_SNAPSHOT_PREFIX's own prefix (#2727): KLT_REF is what
+  # resolves fetch-ihp-sg13cmos5l.sh's IHP-Open-PDK dev-commit pin and
+  # fetch-sg13g2-sim-toolchain.sh's openvaf-r pin for this build.
+  PDK_SNAPSHOT="${SG13CMOS5L_PDK_SNAPSHOT_PREFIX}-${KLT_REF:0:12}-$(date -u +%Y.%m.%d)"
 else
   PDK_SNAPSHOT="${PDK}-$(date -u +%Y.%m.%d)"
 fi

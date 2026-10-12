@@ -422,7 +422,7 @@ implements against.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. Validated up front by `remote_launcher.ami_pdk_key` — the *same* check the `batch` backend applies, see "Both off-host backends validate `models.pdk` up front" below. `sg13g2` is registered (#2573) but no AMI has been built/published for it yet (#2574) — a request will fail at `resolve_ami` with a "no published AMI" error until an operator runs `scripts/aws/build-remote-sim-ami.sh --pdk sg13g2` for the target region. |
+| `models.pdk` | string, required for `remote` | Selects which baked-AMI PDK to provision (`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`, `sg13cmos5l`). The remote host resolves its own baked model library from this field the same way a local run resolves one (`pdk.find_pdk`, via the AMI's own `$PDK_ROOT`) — do not pair it with an operator-local absolute `models.pdk_root`, which only exists on the caller's own machine. Validated up front by `remote_launcher.ami_pdk_key` — the *same* check the `batch` backend applies, see "Both off-host backends validate `models.pdk` up front" below. `sg13g2` (#2573) and `sg13cmos5l` (#2727) are registered but no AMI has been built/published for either yet (#2574 / the SG13CMOS5L publication follow-up) — a request will fail at `resolve_ami` with a "no published AMI" error until an operator runs `scripts/aws/build-remote-sim-ami.sh --pdk <family>` for the target region. |
 | `remote.region` | string, required | AWS region to provision in. No default — an unset region is a usage error, not an inferred one (`RemoteLaunchError` from `remote_launcher.require_cost_config`, mirroring `repo:remote`'s "no silent defaults for cost-relevant fields" discipline). |
 | `remote.key_name` | string, required | AWS EC2 keypair name attached to the provisioned instance, so `remote.ssh_key_path`'s private key can authenticate. |
 | `remote.ssh_key_path` | string, required | Local path to the private key matching `remote.key_name`, used for every SSH/SCP call the transport makes. |
@@ -508,8 +508,8 @@ longer wall-clock the extra waves take. `remote_launcher.resolve_ami()` resolves
 (`data/remote-sim-ami-manifest.json`, schema at
 `docs/schemas/remote-sim-ami-manifest.schema.json`) produced by
 `scripts/aws/build-remote-sim-ami.sh` — ngspice, the curated `sky130A`/
-`gf180mcu`/`sg13g2` model decks (`sg13g2`'s recipe additionally bakes
-compiled OSDI models — see that script's SG13G2 branch), and `klt` itself
+`gf180mcu`/`sg13g2`/`sg13cmos5l` model decks (`sg13g2`'s and `sg13cmos5l`'s
+recipes additionally bake compiled OSDI models — see those script branches), and `klt` itself
 are baked into the AMI, never fetched per job. Only the netlist (with its
 `.include` closure) and a generated request document
 (kilobytes to low megabytes) are pushed per job — plus, when the request opts
@@ -660,7 +660,8 @@ made. Things worth knowing:
 
 `remote` and `batch` (`sim._OFFHOST_BACKENDS`) both run on images the same
 AMI pipeline publishes, so both accept exactly the same PDK set
-(`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`) and both
+(`remote_launcher.SUPPORTED_PDKS`: `sky130A`, `gf180mcu`, `sg13g2`,
+`sg13cmos5l`) and both
 refuse an unsupported one **before spending anything** — `remote` before its
 `run-instances` call, `batch` before its first S3 write
 ([#2523](https://github.com/2AMLogic/klayout-tools/issues/2523)):
@@ -674,8 +675,10 @@ paths rather than restated per backend, so the two can never disagree about
 what is supported. Consequences worth knowing:
 
 - **A variant reducible to a published family is accepted** on both, on the
-  same terms: `models.pdk: "gf180mcuC"` → family `gf180mcu`, or
-  `models.pdk: "ihp-sg13g2"` → family `sg13g2`. The *variant* name is what
+  same terms: `models.pdk: "gf180mcuC"` → family `gf180mcu`,
+  `models.pdk: "ihp-sg13g2"` → family `sg13g2`, or
+  `models.pdk: "ihp-sg13cmos5l"` → family `sg13cmos5l` (#2727). The
+  *variant* name is what
   keeps flowing off-host (`job.json`'s `pdk_variant`), because the executing
   box resolves the PDK locally exactly as the `local` backend does.
 - **A variant whose family has no published image is refused even though it

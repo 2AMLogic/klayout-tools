@@ -178,6 +178,11 @@ def test_resolve_ami_rejects_unsupported_pdk(tmp_path):
         # match) -- mirrors "gf180mcuC" -> "gf180mcu" above.
         ("ihp-sg13g2", "sg13g2"),
         ("sg13g2", "sg13g2"),  # explicit manifest key still accepted
+        # #2727: ihp-sg13cmos5l is the same shape again -- its one real local
+        # variant name ("ihp-sg13cmos5l") never equals the manifest key
+        # ("sg13cmos5l"), so it always goes through family reduction too.
+        ("ihp-sg13cmos5l", "sg13cmos5l"),
+        ("sg13cmos5l", "sg13cmos5l"),  # explicit manifest key still accepted
     ],
 )
 def test_ami_pdk_key_maps_variant_to_manifest_key(requested, expected_key):
@@ -192,16 +197,18 @@ def test_ami_pdk_key_rejects_family_without_published_ami():
         rl.ami_pdk_key("sky130B")
 
 
-@pytest.mark.parametrize("requested", ["ihp-sg13cmos5l"])
+@pytest.mark.parametrize("requested", ["asap7"])
 def test_ami_pdk_key_rejects_a_family_the_remote_backend_does_not_cover(requested):
     """Issue #2026: classification is delegated to
-    `pdk_families.pdk_variant_family`, so `ihp-sg13cmos5l` now *classifies*
-    (to `sg13cmos5l`) where the old local prefix scan simply failed to match --
-    but `_AMI_PDK_FAMILIES` is a declared narrowing that does not include it,
-    so the answer is still a named refusal, never a guessed AMI. `ihp-sg13g2`
-    was in this same list before #2573 registered SG13G2 with the remote
-    backend -- see `test_ami_pdk_key_maps_variant_to_manifest_key` for its
-    (now-accepted) mapping."""
+    `pdk_families.pdk_variant_family`, so an unregistered variant still
+    *classifies* (to its family) where the old local prefix scan simply failed
+    to match -- but `_AMI_PDK_FAMILIES` is a declared narrowing that does not
+    include every family, so the answer is a named refusal, never a guessed
+    AMI. `asap7` (#2761) is the currently-uncovered shape: it classifies but
+    is not remote-AMI-maintained. `ihp-sg13g2` and `ihp-sg13cmos5l` were both
+    in this same list before #2573/#2727 registered them -- see
+    `test_ami_pdk_key_maps_variant_to_manifest_key` for their (now-accepted)
+    mappings."""
     with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
         rl.ami_pdk_key(requested)
 
@@ -298,6 +305,59 @@ def test_resolve_ami_sg13g2_names_region_when_no_published_ami(tmp_path):
     message = str(excinfo.value)
     assert "ihp-sg13g2" in message
     assert "sg13g2" in message
+    assert "eu-west-1" in message
+    assert "no published AMI" in message
+    assert "build-remote-sim-ami.sh" in message
+
+
+def test_resolve_ami_accepts_sg13cmos5l_variant(tmp_path):
+    """#2727, the sg13g2 shape (#2573, itself the gf180mcu case #615) applied
+    to SG13CMOS5L: `ihp-sg13cmos5l` is the only real local variant name, and
+    it must resolve to the `sg13cmos5l` manifest key end to end through
+    `resolve_ami`."""
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "pdk": "sg13cmos5l",
+                "region": "us-west-2",
+                "ami_id": "ami-0f1a2b3c4d5e60711",
+                "pdk_snapshot": "sg13cmos5l-klt-04396fb9a1c2-2026.10.12",
+                "ngspice_version": "47",
+                "built_at": "2026-10-12T00:00:00Z",
+            }
+        ],
+    )
+    resolved = rl.resolve_ami("ihp-sg13cmos5l", "us-west-2", manifest)
+    assert resolved["ami_id"] == "ami-0f1a2b3c4d5e60711"
+
+
+def test_resolve_ami_sg13cmos5l_names_region_when_no_published_ami(tmp_path):
+    """Acceptance criterion 3 (#2727): once SG13CMOS5L is registered in
+    `SUPPORTED_PDKS`/`_AMI_PDK_FAMILIES` but no image is published yet (the
+    publication follow-up), a request must land on the *existing*
+    region-aware "no published AMI for pdk=... region=..." error with no new
+    error-handling code -- registration leads into `resolve_ami`'s missing
+    image/region message until an operator builds one. Mirrors the sg13g2
+    regression test above."""
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            {
+                "pdk": "sg13g2",
+                "region": "us-west-2",
+                "ami_id": "ami-0e5c6b1f2a7d34901",
+                "pdk_snapshot": "sg13g2-2026.09.27",
+                "ngspice_version": "47",
+                "built_at": "2026-09-27T00:00:00Z",
+            }
+        ],
+    )
+    with pytest.raises(rl.RemoteLaunchError) as excinfo:
+        rl.resolve_ami("ihp-sg13cmos5l", "eu-west-1", manifest)
+    message = str(excinfo.value)
+    assert "ihp-sg13cmos5l" in message
+    assert "sg13cmos5l" in message
     assert "eu-west-1" in message
     assert "no published AMI" in message
     assert "build-remote-sim-ami.sh" in message

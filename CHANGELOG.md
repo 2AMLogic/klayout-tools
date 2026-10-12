@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2727, `klt sim`; additive — `schema_version` unchanged): the
+  `remote`/`batch` backends' AMI pipeline now recognizes `sg13cmos5l`
+  (`models.pdk: "ihp-sg13cmos5l"` or the bare `"sg13cmos5l"` manifest key) in
+  `remote_launcher.SUPPORTED_PDKS`/`_AMI_PDK_FAMILIES`, and
+  `scripts/aws/build-remote-sim-ami.sh --pdk sg13cmos5l` has a build recipe
+  that drives `scripts/fetch-ihp-sg13g2.sh` (sibling prerequisite — the
+  post-#2720 `ihp-sg13cmos5l/` subtree of IHP-Open-PDK holds *relative*
+  symlinks into it for the shared psp103/r3_cmc/mosvar Verilog-A sources) +
+  `scripts/fetch-ihp-sg13cmos5l.sh` (pins an exact IHP-Open-PDK `dev` commit
+  SHA + tarball sha256) + `scripts/fetch-sg13g2-sim-toolchain.sh --pdk-dir
+  <cmos5l tree>` (one pinned openvaf-r build, one ngspice OSDI-ABI preflight,
+  one per-model load verification now serve both IHP trees), compiling all
+  six of sg13cmos5l's OSDI objects from source for the image's own
+  architecture — upstream removed the prebuilt x86-64 `cap_cmom{i,f}.osdi`
+  at IHP-Open-PDK `e8fba183`, so nothing ships prebuilt anymore. From-source
+  ngspice and the dry-run plan print match the existing sg13g2 branch; the
+  no-`--yes` dry-run now also emits the exact ngspice-install and PDK-fetch
+  commands it resolved, so an operator can inspect the pinned plan without
+  AWS credentials. No AMI has actually been built/published for
+  `sg13cmos5l` yet — that is a separate, operator-only publication follow-up
+  that needs real AWS access; until it lands, an `sg13cmos5l` off-host
+  request fails with the region-aware "no published AMI" error rather than
+  the previous generic "unsupported PDK" one. Unrelated unsupported families
+  (e.g. `asap7`) are still refused before submission.
 - **`klt extract --resistance-path NET_ID FROM TO`: point-to-point shortest
   series path resistance over a `--distributed-rc` ladder** (issue #2765):
   a repeatable, opt-in query (requires `--parasitics --distributed-rc`)
