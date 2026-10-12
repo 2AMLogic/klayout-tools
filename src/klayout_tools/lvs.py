@@ -308,6 +308,10 @@ CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 #: See `_correct_combine_parameters`.
 CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED = "device.combine_parameter_corrected"
 CATEGORY_PIN_UNMATCHED = "pin.unmatched"
+#: Issue #2845: `options.strict_top_level_pin_count` found the two compared
+#: top circuits declaring a different number of pins. Always `severity:
+#: "error"`; `details` carries both counts.
+CATEGORY_PIN_COUNT = "pin.count"
 CATEGORY_TOPOLOGY = "topology"
 #: Issue #499: a `hints.same_nets` pairing the caller asserted with
 #: `must_match=True` that the comparer refused to confirm -- see
@@ -1055,6 +1059,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         anchor_top_level_pins_requested,
         anchor_top_level_pins_echo,
     ) = _parse_anchor_top_level_pins(options, engine)
+    strict_top_level_pin_count = _parse_strict_top_level_pin_count(options, engine)
     supply_nets = parse_supply_nets(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
@@ -2082,6 +2087,14 @@ def run_lvs(request: str) -> dict[str, Any]:
             },
         }
 
+    # Issue #2845: opt-in strict pin-count check, at the one point both
+    # engines converge, on the circuits actually compared (after any
+    # flatten/prune) -- the same counts reported as `counts.pins`.
+    status, strict_pin_findings = _strict_pin_count_check(
+        strict_top_level_pin_count, status, counts, layout_circuit, reference_circuit
+    )
+    mismatches.extend(strict_pin_findings)
+
     # `layout_deck_name`/`layout_deck` were already resolved above (before
     # the `combine_devices` block) -- reused here for `device_classes`
     # (issue #221), `null` when `layout.netlist` (pre-extracted) was given
@@ -2454,6 +2467,8 @@ def run_lvs(request: str) -> dict[str, Any]:
             # it came from; what this run actually *did* is reported as the
             # `topology.top_level_pins_anchored` disclosure in `mismatches[]`.
             "anchor_top_level_pins": anchor_top_level_pins_echo,
+            # Issue #2845: the effective boolean (`false` when omitted).
+            "strict_top_level_pin_count": strict_top_level_pin_count,
             "supply_nets": supply_nets,
         },
         # Issue #1998: every `hints.equivalent_pins` grouping actually passed
@@ -2869,6 +2884,8 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     # `_reconstruct_lvs_request` is complexity-baselined (see
     # `scripts/check_complexity_baseline.py`).
     options.update(_anchor_top_level_pins_replay_options(echoed))
+    if echoed.get("strict_top_level_pin_count") is True:
+        options["strict_top_level_pin_count"] = True
     # Issue #2682: replay the echoed retry budget verbatim (never through the
     # boolean flag loop); a malformed recorded value stays malformed so the
     # parser rejects it rather than it becoming an unrelated valid budget.
@@ -3107,6 +3124,7 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
         "power_connectivity",
         "supply_nets",
         "anchor_top_level_pins",
+        "strict_top_level_pin_count",  # Issue #2845
         "combine_devices_max_attempts",  # Issue #2682
     ):
         if not isinstance(committed_options, dict) or option not in committed_options:
@@ -5593,6 +5611,50 @@ def _parse_anchor_top_level_pins(
             '"Engine")'
         )
     return value, value
+
+
+def _parse_strict_top_level_pin_count(options: Mapping[str, Any], engine: str) -> bool:
+    """Resolve ``options.strict_top_level_pin_count`` (issue #2845); default
+    ``False``. A non-boolean is a clean request error. The check compares
+    ``Circuit.pin_count()`` of the two selected circuits, which both engines
+    expose, so it is supported on every engine."""
+    value = options.get("strict_top_level_pin_count", False)
+    if not isinstance(value, bool):
+        raise LvsError(
+            "options.strict_top_level_pin_count must be a boolean -- true to "
+            "report a mismatch when the two top circuits declare a different "
+            "number of pins, false (the default) to leave pin counts "
+            "informational"
+        )
+    return value
+
+
+def _strict_pin_count_check(
+    enabled: bool,
+    status: str,
+    counts: dict[str, Any],
+    layout_circuit: Any,
+    reference_circuit: Any,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Issue #2845: when ``enabled`` and the compared circuits' pin counts
+    differ, force ``status`` to ``"mismatch"`` and return one ``pin.count``
+    error finding carrying both counts. Names/order are not compared and
+    ``counts`` is never altered. Otherwise ``(status, [])``."""
+    layout_pins = counts["pins"]["layout"]
+    reference_pins = counts["pins"]["reference"]
+    if not enabled or layout_pins == reference_pins:
+        return status, []
+    finding = _mismatch(
+        CATEGORY_PIN_COUNT,
+        "error",
+        f"top-level pin count differs: layout circuit '{layout_circuit.name}' "
+        f"declares {layout_pins} pin(s), reference circuit "
+        f"'{reference_circuit.name}' declares {reference_pins} "
+        "(options.strict_top_level_pin_count)",
+        "both",
+        details={"layout_pin_count": layout_pins, "reference_pin_count": reference_pins},
+    )
+    return "mismatch", [finding]
 
 
 # --------------------------------------------------------------------------- #

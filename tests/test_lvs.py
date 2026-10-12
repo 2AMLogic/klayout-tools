@@ -15230,6 +15230,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         # form-dependent default applies (off for this `plain-element`
         # reference, on for `gate-level-verilog`).
         "anchor_top_level_pins": None,
+        "strict_top_level_pin_count": False,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
     }
     # The pre-#1205 fields are untouched -- this is an additive change, so no
@@ -21986,3 +21987,94 @@ def test_extract_flat_output_has_no_layout_circuits_for_per_circuit_options(
         if m["category"] == "combine_devices_per_circuit.unmatched"
     ]
     assert {m["side"] for m in unmatched} == {"layout"}
+
+
+# --------------------------------------------------------------------------- #
+# options.strict_top_level_pin_count (issue #2845)
+# --------------------------------------------------------------------------- #
+
+_PIN_REF = ".SUBCKT top a b\nR1 a b 1k\n.ENDS top\n"
+
+
+def _pin_count_run(tmp_path, lay_text, ref_text=_PIN_REF, **options):
+    request = {
+        "layout": {"netlist": _write(tmp_path / "lay.spice", lay_text), "top": "top"},
+        "reference": {"netlist": _write(tmp_path / "ref.spice", ref_text), "top": "top"},
+    }
+    if options:
+        request["options"] = options
+    return run_lvs(_write_request(tmp_path / "req.json", request))
+
+
+def _pin_count_findings(report):
+    return [m for m in report["mismatches"] if m["category"] == "pin.count"]
+
+
+_EXTRA_LAYOUT_PIN = ".SUBCKT top a b a$1\nR1 a b 1k\n.ENDS top\n"
+
+
+def test_strict_pin_count_default_unchanged(tmp_path):
+    for opts in ({}, {"strict_top_level_pin_count": False}):
+        report = _pin_count_run(tmp_path, _EXTRA_LAYOUT_PIN, **opts)
+        assert report["status"] == "match"
+        assert _pin_count_findings(report) == []
+        assert report["options"]["strict_top_level_pin_count"] is False
+        assert report["counts"]["pins"]["layout"] == 3
+        assert report["counts"]["pins"]["reference"] == 2
+
+
+def test_strict_pin_count_extra_layout_pin(tmp_path):
+    report = _pin_count_run(
+        tmp_path, _EXTRA_LAYOUT_PIN, strict_top_level_pin_count=True
+    )
+    assert report["status"] == "mismatch"
+    (finding,) = _pin_count_findings(report)
+    assert finding["severity"] == "error"
+    assert finding["details"] == {"layout_pin_count": 3, "reference_pin_count": 2}
+    assert report["category_error_counts"]["pin.count"] == 1
+    assert report["options"]["strict_top_level_pin_count"] is True
+    assert report["counts"]["pins"]["layout"] == 3
+
+
+def test_strict_pin_count_extra_reference_pin(tmp_path):
+    report = _pin_count_run(
+        tmp_path,
+        _PIN_REF,
+        ref_text=_EXTRA_LAYOUT_PIN,
+        strict_top_level_pin_count=True,
+    )
+    assert report["status"] == "mismatch"
+    (finding,) = _pin_count_findings(report)
+    assert finding["details"] == {"layout_pin_count": 2, "reference_pin_count": 3}
+
+
+def test_strict_pin_count_equal_counts_renamed_reordered(tmp_path):
+    report = _pin_count_run(
+        tmp_path,
+        ".SUBCKT top y x\nR1 x y 1k\n.ENDS top\n",
+        strict_top_level_pin_count=True,
+    )
+    assert report["status"] == "match"
+    assert _pin_count_findings(report) == []
+
+
+def test_strict_pin_count_coexists_with_topology_mismatch(tmp_path):
+    report = _pin_count_run(
+        tmp_path,
+        ".SUBCKT top a b c\nR1 a b 2k\n.ENDS top\n",
+        strict_top_level_pin_count=True,
+    )
+    assert report["status"] == "mismatch"
+    assert len(_pin_count_findings(report)) == 1
+    others = [
+        m
+        for m in report["mismatches"]
+        if m["severity"] == "error" and m["category"] != "pin.count"
+    ]
+    assert others
+
+
+@pytest.mark.parametrize("bad", ["true", 1, None, []])
+def test_strict_pin_count_rejects_non_boolean(tmp_path, bad):
+    with pytest.raises(LvsError, match="strict_top_level_pin_count must be a boolean"):
+        _pin_count_run(tmp_path, _PIN_REF, strict_top_level_pin_count=bad)

@@ -14,6 +14,10 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
+  unequal top-circuit pin counts yield `status: mismatch` with a new
+  `pin.count` error finding (both counts in `details`). Default unchanged;
+  additive `options` echo key, no `schema_version` bump.
 - **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
   (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
   persistent artifact root; a competing cooperating run fails fast with the
