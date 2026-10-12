@@ -23078,3 +23078,290 @@ def test_hierarchical_cells_preserves_model_binding_and_mos_flavour(tmp_path):
     flat_text = (tmp_path / "flat.spice").read_text()
     assert flat_text.count("sky130_fd_pr__nfet_g5v0d10v5") == 1
     assert flat_text.count("sky130_fd_pr__nfet_01v8") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Point-to-point shortest series path resistance (--resistance-path, issue
+# #2765)
+# --------------------------------------------------------------------------- #
+
+
+def _resistance_path_ladder_run(tmp_path, **kwargs) -> tuple[dict, dict]:
+    """`OUT` on :func:`_make_subcircuit_slice_layout`'s fan-out variant has
+    four device terminals, so `--distributed-rc` emits a 4-node, 3-segment
+    ladder -- returns ``(report, OUT's parasitics.nets[] entry)``."""
+    path = _write_gds(
+        _make_subcircuit_slice_layout(out_fanout=True), tmp_path / "block.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / f"block{len(kwargs)}.spice"),
+        parasitics=True,
+        critical_nets=["OUT"],
+        distributed_rc=True,
+        **kwargs,
+    )
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == "OUT")
+    assert entry["rc_model"] == "distributed"
+    return report, entry
+
+
+def test_resistance_path_queries_real_ladder_terminals(tmp_path):
+    """End to end over the actual emitted ladder: endpoints are real
+    `terminals[].leg_net` values, the returned path walks `segments[]`, and
+    the reported value equals the independent sum of those segments."""
+    _, baseline_entry = _resistance_path_ladder_run(tmp_path)
+    legs = [t["leg_net"] for t in baseline_entry["terminals"]]
+    net_id = baseline_entry["net_id"]
+
+    report, entry = _resistance_path_ladder_run(
+        tmp_path,
+        resistance_paths=[
+            (net_id, legs[0], legs[-1]),
+            (net_id, legs[-1], legs[1]),
+            (net_id, legs[2], legs[2]),
+        ],
+    )
+    end_to_end, partial, same = report["parasitics"]["resistance_paths"]
+
+    assert end_to_end["status"] == "ok"
+    assert end_to_end["quantity"] == "shortest_series_path_resistance"
+    assert (end_to_end["net_id"], end_to_end["net"]) == (net_id, "OUT")
+    assert end_to_end["rc_model"] == "distributed"
+    assert end_to_end["path_nodes"] == legs
+    assert end_to_end["path_resistors"] == ["seg0", "seg1", "seg2"]
+    segments = entry["segments"]
+    independent = sum(
+        segments[int(rid[3:])]["resistance_ohm"] for rid in end_to_end["path_resistors"]
+    )
+    assert end_to_end["resistance_ohm"] == pytest.approx(independent, abs=1e-9)
+    # Every segment's resistance is part of this net's own total -- the end
+    # to end series path of a ladder is the whole net's resistance.
+    assert end_to_end["resistance_ohm"] == pytest.approx(
+        entry["resistance_ohm"], rel=1e-5
+    )
+
+    assert partial["status"] == "ok"
+    assert partial["path_nodes"] == [legs[3], legs[2], legs[1]]
+    assert partial["path_resistors"] == ["seg2", "seg1"]
+    assert partial["resistance_ohm"] == pytest.approx(
+        segments[1]["resistance_ohm"] + segments[2]["resistance_ohm"]
+    )
+
+    assert (same["status"], same["resistance_ohm"], same["path_nodes"]) == (
+        "ok",
+        0.0,
+        [legs[2]],
+    )
+
+    # The written netlist's own segment cards carry the unrounded values the
+    # report rounds to 4 decimals -- the documented <= 5e-5 ohm/segment gap.
+    netlist = Path(report["netlist_path"]).read_text()
+    card_values = [
+        float(line.split()[3])
+        for line in netlist.splitlines()
+        if line.startswith("ROUT_seg")
+    ]
+    assert len(card_values) == 3
+    assert end_to_end["resistance_ohm"] == pytest.approx(
+        sum(card_values), abs=3 * 5e-5 + 1e-9
+    )
+    json.dumps(report["parasitics"]["resistance_paths"], allow_nan=False)
+
+
+def test_resistance_path_non_success_statuses_end_to_end(tmp_path):
+    _, baseline_entry = _resistance_path_ladder_run(tmp_path)
+    legs = [t["leg_net"] for t in baseline_entry["terminals"]]
+    net_id = baseline_entry["net_id"]
+    report, _ = _resistance_path_ladder_run(tmp_path)
+    lumped = next(n for n in report["parasitics"]["nets"] if n["rc_model"] == "lumped")
+    missing_id = max(n["net_id"] for n in report["parasitics"]["nets"]) + 1000
+
+    report, _ = _resistance_path_ladder_run(
+        tmp_path,
+        resistance_paths=[
+            (net_id, legs[0], "NOT_A_NODE"),
+            (missing_id, legs[0], legs[1]),
+            (lumped["net_id"], lumped["terminals"][0]["leg_net"], lumped["hub_net"]),
+            (net_id, legs[0], legs[-1]),
+        ],
+        resistance_path_max_nodes=4,
+        resistance_path_max_resistors=3,
+    )
+    absent, unknown_net, lumped_result, at_cap = report["parasitics"][
+        "resistance_paths"
+    ]
+    for result in (absent, unknown_net, lumped_result):
+        assert result["status"] == "node_not_found"
+        assert result["resistance_ohm"] is None
+        assert result["path_nodes"] == [] and result["path_resistors"] == []
+        assert result["reason"]
+    assert lumped_result["rc_model"] == "lumped"
+    assert unknown_net["net"] is None
+    # Exactly at both caps (4 nodes, 3 resistors) is still answered.
+    assert at_cap["status"] == "ok"
+    assert (at_cap["max_nodes"], at_cap["max_resistors"]) == (4, 3)
+
+    report, _ = _resistance_path_ladder_run(
+        tmp_path,
+        resistance_paths=[(net_id, legs[0], legs[-1])],
+        resistance_path_max_resistors=2,
+    )
+    (over,) = report["parasitics"]["resistance_paths"]
+    assert over["status"] == "limit_exceeded"
+    assert over["resistance_ohm"] is None
+    assert over["path_nodes"] == [] and over["path_resistors"] == []
+    assert (over["node_count"], over["resistor_count"]) == (4, 3)
+
+
+def test_resistance_path_is_additive_and_default_output_unchanged(tmp_path):
+    baseline, entry = _resistance_path_ladder_run(tmp_path)
+    assert "resistance_paths" not in baseline["parasitics"]
+    legs = [t["leg_net"] for t in entry["terminals"]]
+    queried, _ = _resistance_path_ladder_run(
+        tmp_path, resistance_paths=[(entry["net_id"], legs[0], legs[-1])]
+    )
+    queried_parasitics = dict(queried["parasitics"])
+    queried_parasitics.pop("resistance_paths")
+    assert queried_parasitics == baseline["parasitics"]
+    assert queried["warnings"] == baseline["warnings"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"resistance_paths": [(1, "a", "b")]}, "requires --parasitics"),
+        (
+            {"parasitics": True, "resistance_paths": [(1, "a", "b")]},
+            "requires --distributed-rc",
+        ),
+        (
+            {"parasitics": True, "resistance_path_max_nodes": 5},
+            "require --resistance-path",
+        ),
+        (
+            {
+                "parasitics": True,
+                "critical_nets": ["OUT"],
+                "distributed_rc": True,
+                "resistance_paths": [(1, "a", "b")],
+                "resistance_path_max_nodes": 0,
+            },
+            "max_nodes must be a positive integer",
+        ),
+        (
+            {
+                "parasitics": True,
+                "critical_nets": ["OUT"],
+                "distributed_rc": True,
+                "resistance_paths": [(1, "a", "b")],
+                "resistance_path_max_resistors": -3,
+            },
+            "max_resistors must be a positive integer",
+        ),
+        (
+            {
+                "parasitics": True,
+                "critical_nets": ["OUT"],
+                "distributed_rc": True,
+                "resistance_paths": [("1", "a", "b")],
+            },
+            "NET_ID must be an integer",
+        ),
+    ],
+)
+def test_resistance_path_argument_validation(tmp_path, kwargs, match):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    with pytest.raises(ExtractError, match=match):
+        run_extract(path, "sky130", output=str(tmp_path / "inv.spice"), **kwargs)
+
+
+def test_resistance_path_cli_json_and_text(tmp_path, capsys):
+    _, entry = _resistance_path_ladder_run(tmp_path)
+    legs = [t["leg_net"] for t in entry["terminals"]]
+    gds = str(tmp_path / "block.gds")
+    argv = [
+        "extract",
+        gds,
+        "--deck",
+        "sky130",
+        "--output",
+        str(tmp_path / "cli.spice"),
+        "--parasitics",
+        "--critical-net",
+        "OUT",
+        "--distributed-rc",
+        "--resistance-path",
+        str(entry["net_id"]),
+        legs[0],
+        legs[-1],
+        "--resistance-path",
+        str(entry["net_id"]),
+        legs[0],
+        "NOPE",
+    ]
+    capsys.readouterr()
+    assert main([*argv, "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    ok, missing = payload["parasitics"]["resistance_paths"]
+    assert ok["status"] == "ok" and ok["path_nodes"] == legs
+    assert missing["status"] == "node_not_found"
+    # Existing fields keep their place next to the additive one.
+    assert payload["parasitics"]["distributed_rc"] is True
+
+    assert main(argv) == 0
+    text = capsys.readouterr().out
+    assert (
+        f"resistance_path: net_id={entry['net_id']} {legs[0]} -> {legs[-1]}  status=ok"
+        in text
+    )
+    assert "status=node_not_found" in text
+
+    assert (
+        main([*argv[:6], "--resistance-path", "x", "a", "b", "--format", "json"]) == 1
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert "NET_ID must be an integer" in error["error"]["message"]
+
+
+def test_resistance_path_request_document_round_trip(tmp_path):
+    from klayout_tools.cli.extract_cmd import _apply_request, _parse_resistance_paths
+    from klayout_tools.cli.parser import create_parser
+
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": "design.gds",
+                "deck": "sky130",
+                "resistance_paths": [{"net_id": 3, "from": "OUT__t0", "to": "OUT"}],
+                "resistance_path_max_nodes": 50,
+                "resistance_path_max_resistors": 60,
+            }
+        )
+    )
+    resolved = _apply_request(
+        create_parser().parse_args(["extract", str(request_path)])
+    )
+    assert resolved.resistance_paths == [["3", "OUT__t0", "OUT"]]
+    assert _parse_resistance_paths(resolved.resistance_paths) == [(3, "OUT__t0", "OUT")]
+    assert resolved.resistance_path_max_nodes == 50
+    assert resolved.resistance_path_max_resistors == 60
+
+    argv_form = create_parser().parse_args(
+        ["extract", "x.gds", "--resistance-path", "3", "OUT__t0", "OUT"]
+    )
+    assert argv_form.resistance_paths == resolved.resistance_paths
+
+    for bad in (
+        {"resistance_paths": [{"net_id": "3", "from": "a", "to": "b"}]},
+        {"resistance_paths": [["3", "a", "b"]]},
+        {"resistance_path_max_nodes": 2.5},
+    ):
+        request_path.write_text(
+            json.dumps({"schema": "klt.extract.request/1", "file": "d.gds", **bad})
+        )
+        with pytest.raises(ExtractError):
+            _apply_request(create_parser().parse_args(["extract", str(request_path)]))

@@ -170,6 +170,93 @@ def _parse_matched_groups(raw: list[str] | None) -> dict[str, tuple[str, ...]] |
     return groups
 
 
+def _parse_resistance_paths(
+    raw: list[list[str]] | None,
+) -> list[tuple[int, str, str]] | None:
+    """Parse the repeatable ``--resistance-path NET_ID FROM TO`` triples
+    (issue #2765) into ``(net_id, from, to)`` tuples, or ``None`` when the
+    flag was never given. ``NET_ID`` must be an integer
+    ``parasitics.nets[].net_id``; ``FROM``/``TO`` are exact emitted node IDs
+    (``terminals[].leg_net``), passed through verbatim.
+    """
+    if raw is None:
+        return None
+    queries: list[tuple[int, str, str]] = []
+    for net_id_raw, source, target in raw:
+        try:
+            net_id = int(net_id_raw)
+        except ValueError:
+            raise ExtractError(
+                f"--resistance-path NET_ID must be an integer "
+                f"parasitics.nets[].net_id (got {net_id_raw!r})"
+            ) from None
+        queries.append((net_id, source, target))
+    return queries
+
+
+def _request_resistance_paths(request: dict) -> list[list[str]] | None:
+    """The request document's ``resistance_paths`` -- an array of
+    ``{"net_id": <int>, "from": <str>, "to": <str>}`` objects -- normalized
+    into the ``[[NET_ID, FROM, TO], ...]`` argv encoding the repeatable
+    ``--resistance-path`` flag accumulates (issue #2765), so both forms run
+    through :func:`_parse_resistance_paths` unchanged."""
+    value = request.get("resistance_paths")
+    if value is None:
+        return None
+    expected = 'an array of {"net_id": int, "from": str, "to": str} objects'
+    if not isinstance(value, list):
+        raise ExtractError(
+            f"`klt extract` request field 'resistance_paths' must be {expected}"
+        )
+    triples: list[list[str]] = []
+    for entry in value:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"net_id", "from", "to"}
+            or isinstance(entry["net_id"], bool)
+            or not isinstance(entry["net_id"], int)
+            or not isinstance(entry["from"], str)
+            or not isinstance(entry["to"], str)
+        ):
+            raise ExtractError(
+                f"`klt extract` request field 'resistance_paths' must be "
+                f"{expected} (got entry {entry!r})"
+            )
+        triples.append([str(entry["net_id"]), entry["from"], entry["to"]])
+    return triples
+
+
+def _request_int(request: dict, key: str) -> int | None:
+    """``request[key]`` as an integer, or ``None`` when absent/``null``
+    (``bool`` and non-integral numbers are rejected)."""
+    value = request.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ExtractError(
+            f"`klt extract` request field {key!r} must be an integer (got "
+            f"{type(value).__name__}: {value!r})"
+        )
+    return value
+
+
+def _print_resistance_paths(parasitics: dict) -> None:
+    """Text-mode lines for ``parasitics.resistance_paths[]`` (issue #2765);
+    prints nothing when no ``--resistance-path`` was given."""
+    for query in parasitics.get("resistance_paths") or ():
+        head = (
+            f"resistance_path: net_id={query['net_id']} "
+            f"{query['from']} -> {query['to']}  status={query['status']}"
+        )
+        if query["status"] == "ok":
+            print(
+                f"{head}  series_R={query['resistance_ohm']} ohm  "
+                f"via {' -> '.join(query['path_nodes'])}"
+            )
+        else:
+            print(f"{head}  ({query['reason']})")
+
+
 def _parse_def_net_connections(
     raw: str | None, *, spef_output: str | None
 ) -> dict[str, tuple[tuple[str, str], ...]] | None:
@@ -249,6 +336,9 @@ _REQUEST_FIELD_DESTS = {
         "parasitics_nets",
         "parasitics_top_cell_only",
         "distributed_rc",
+        "resistance_paths",
+        "resistance_path_max_nodes",
+        "resistance_path_max_resistors",
         "mom_rlc_net",
         "mom_rlc_resistance_ohm",
         "mom_rlc_capacitance_ff",
@@ -344,6 +434,13 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "parasitics_nets": _str_list("parasitics_nets"),
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "distributed_rc": _bool("distributed_rc"),
+            "resistance_paths": _request_resistance_paths(request),
+            "resistance_path_max_nodes": _request_int(
+                request, "resistance_path_max_nodes"
+            ),
+            "resistance_path_max_resistors": _request_int(
+                request, "resistance_path_max_resistors"
+            ),
             "mom_rlc_net": _str("mom_rlc_net"),
             "mom_rlc_resistance_ohm": _number("mom_rlc_resistance_ohm"),
             "mom_rlc_capacitance_ff": _number("mom_rlc_capacitance_ff"),
@@ -414,6 +511,7 @@ def run(args: argparse.Namespace) -> int:
             args.def_net_connections, spef_output=args.spef
         )
         matched_device_groups = _parse_matched_groups(args.matched_groups)
+        resistance_paths = _parse_resistance_paths(args.resistance_paths)
         report = run_extract(
             args.file,
             args.deck,
@@ -484,6 +582,13 @@ def run(args: argparse.Namespace) -> int:
             # every `--critical-net`-named net. `False` when the flag was
             # never given, unchanged from every call site that predates it.
             distributed_rc=args.distributed_rc,
+            # `--resistance-path` (issue #2765): shortest series path
+            # resistance queries over --distributed-rc ladders. `None` when
+            # the flags were never given, unchanged from every call site
+            # that predates them.
+            resistance_paths=resistance_paths,
+            resistance_path_max_nodes=args.resistance_path_max_nodes,
+            resistance_path_max_resistors=args.resistance_path_max_resistors,
             # `--def-net-connections` (issue #961): real cell-instance
             # `*CONN`/`*RES` correlation for --spef, parsed from a routed
             # DEF's own `NETS` section. `None` when the flag was never
@@ -678,6 +783,8 @@ def _print_text(report: dict) -> None:
                 1 for n in parasitics["nets"] if n.get("rc_model") == "distributed"
             )
             print(f"distributed_rc: {distributed_count} net(s)")
+        # Additive (issue #2765): only prints when --resistance-path was given.
+        _print_resistance_paths(parasitics)
         # Additive (issue #1704): only printed when --parasitics-top-cell-only
         # was given -- each `parasitics.nets[]` entry's
         # `resistance_ohm_top_cell`/`capacitance_ff_top_cell` otherwise stay

@@ -1932,6 +1932,51 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--resistance-path",
+        dest="resistance_paths",
+        action="append",
+        nargs=3,
+        default=None,
+        metavar=("NET_ID", "FROM", "TO"),
+        help=(
+            "report the shortest SERIES path resistance between two emitted "
+            "node IDs (`terminals[].leg_net` values) of one --distributed-rc "
+            "ladder, selected by its `parasitics.nets[].net_id` (issue "
+            "#2765). Repeatable; results land in `parasitics."
+            "resistance_paths[]` with status ok/limit_exceeded/"
+            "node_not_found/no_path. Not an effective two-port resistance "
+            "(parallel paths are not combined) and not a physical-route "
+            "resistance -- the ladder is the terminal-ordered approximation "
+            "--distributed-rc builds. Requires --parasitics and "
+            "--distributed-rc. See docs/cli/extract.md's "
+            "'--resistance-path' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--resistance-path-max-nodes",
+        dest="resistance_path_max_nodes",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "--resistance-path node cap (positive integer, default 10000): a "
+            "selected net with more ladder nodes is answered "
+            "`limit_exceeded` before any search. Requires --resistance-path."
+        ),
+    )
+    extract_parser.add_argument(
+        "--resistance-path-max-resistors",
+        dest="resistance_path_max_resistors",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "--resistance-path resistor cap (positive integer, default "
+            "10000): a selected net with more ladder segments is answered "
+            "`limit_exceeded` before any search. Requires --resistance-path."
+        ),
+    )
+    extract_parser.add_argument(
         "--mom-rlc-net",
         dest="mom_rlc_net",
         default=None,

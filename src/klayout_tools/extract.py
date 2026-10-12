@@ -943,6 +943,101 @@ def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
         raise ExtractError(f"{flag} requires --parasitics")
 
 
+def _validate_resistance_path_args(
+    resistance_paths: Sequence[tuple[int, str, str]] | None,
+    max_nodes: int | None,
+    max_resistors: int | None,
+    *,
+    parasitics: bool,
+    distributed_rc: bool,
+) -> None:
+    """Up-front validation of ``--resistance-path`` and its limits (issue
+    #2765) -- every violation is an :class:`ExtractError`, the same "a flag
+    naming something invalid is an error, not a silent no-op" convention
+    the other opt-in parasitics flags follow."""
+    from .resistance_path import validate_limits
+
+    if not resistance_paths:
+        if max_nodes is not None or max_resistors is not None:
+            raise ExtractError(
+                "--resistance-path-max-nodes/--resistance-path-max-resistors "
+                "require --resistance-path"
+            )
+        return
+    if not parasitics:
+        raise ExtractError("--resistance-path requires --parasitics")
+    if not distributed_rc:
+        raise ExtractError("--resistance-path requires --distributed-rc")
+    for query in resistance_paths:
+        net_id = query[0]
+        if isinstance(net_id, bool) or not isinstance(net_id, int):
+            raise ExtractError(
+                f"--resistance-path NET_ID must be an integer "
+                f"parasitics.nets[].net_id (got {net_id!r})"
+            )
+    try:
+        validate_limits(
+            _resistance_path_limit(max_nodes, "nodes"),
+            _resistance_path_limit(max_resistors, "resistors"),
+        )
+    except ValueError as exc:
+        raise ExtractError(
+            f"--resistance-path limits: {exc} "
+            "(--resistance-path-max-nodes/--resistance-path-max-resistors)"
+        ) from exc
+
+
+def _resistance_path_limit(value: int | None, kind: str) -> int:
+    """``value``, or the module default for ``kind`` (``"nodes"``/
+    ``"resistors"``) when ``None``."""
+    from .resistance_path import DEFAULT_MAX_NODES, DEFAULT_MAX_RESISTORS
+
+    if value is not None:
+        return value
+    return DEFAULT_MAX_NODES if kind == "nodes" else DEFAULT_MAX_RESISTORS
+
+
+def _attach_resistance_paths(
+    parasitics_report: dict[str, Any],
+    resistance_paths: Sequence[tuple[int, str, str]] | None,
+    max_nodes: int | None,
+    max_resistors: int | None,
+) -> None:
+    """Answer every ``--resistance-path`` query (issue #2765) over the
+    finished ``parasitics_report["nets"]`` and store the results, in request
+    order, as ``parasitics_report["resistance_paths"]``. A no-op (the key
+    stays absent) when no query was given, so default output is unchanged.
+
+    A malformed emitted ladder would be an internal inconsistency, not a
+    caller error -- surfaced as an :class:`ExtractError` rather than an
+    answer computed over silently dropped segments.
+    """
+    if not resistance_paths:
+        return
+    from .resistance_path import ResistanceGraphError, query_parasitic_net
+
+    nets = parasitics_report["nets"]
+    results = []
+    for net_id, source, target in resistance_paths:
+        try:
+            results.append(
+                query_parasitic_net(
+                    nets,
+                    net_id,
+                    source,
+                    target,
+                    max_nodes=_resistance_path_limit(max_nodes, "nodes"),
+                    max_resistors=_resistance_path_limit(max_resistors, "resistors"),
+                )
+            )
+        except ResistanceGraphError as exc:
+            raise ExtractError(
+                f"--resistance-path: net_id {net_id}'s emitted ladder is "
+                f"malformed: {exc}"
+            ) from exc
+    parasitics_report["resistance_paths"] = results
+
+
 def _describe_label_layers(
     label_layers: Mapping[str, tuple[int, int] | None] | None,
 ) -> dict[str, list[int] | None] | None:
@@ -1018,6 +1113,9 @@ def run_extract(
     parasitics_nets: Sequence[str] | None = None,
     parasitics_top_cell_only: bool = False,
     distributed_rc: bool = False,
+    resistance_paths: Sequence[tuple[int, str, str]] | None = None,
+    resistance_path_max_nodes: int | None = None,
+    resistance_path_max_resistors: int | None = None,
     def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None = None,
     mom_rlc_net: str | None = None,
     mom_rlc_resistance_ohm: float | None = None,
@@ -1427,6 +1525,22 @@ def run_extract(
     which end up with 2+ terminals in a given layout. ``False`` (the
     default) skips this entirely -- byte-identical to before this feature
     existed.
+
+    ``resistance_paths`` (``klt extract --resistance-path NET_ID FROM TO``,
+    repeatable, issue #2765) asks, per ``(net_id, from, to)`` triple, for the
+    **shortest series path resistance** between two emitted node IDs of one
+    ``distributed_rc`` ladder -- not an effective two-port resistance, not a
+    physical-route resistance. Answered by
+    :func:`klayout_tools.resistance_path.query_parasitic_net` over the
+    finished ``parasitics.nets[]`` report and returned, one result per
+    query in request order, as the additive ``parasitics.resistance_paths``
+    list (absent when no query was given). ``resistance_path_max_nodes``/
+    ``resistance_path_max_resistors`` cap the selected net's graph size
+    (``None`` -> :data:`~klayout_tools.resistance_path.DEFAULT_MAX_NODES`/
+    :data:`~klayout_tools.resistance_path.DEFAULT_MAX_RESISTORS`). Requires
+    ``parasitics=True`` and ``distributed_rc=True``; a limit given without a
+    query, a non-positive limit, or a non-integer ``net_id`` is an
+    :class:`ExtractError`. See :func:`_validate_resistance_path_args`.
 
     ``def_net_connections`` (issue #961, Epic #700 Phase 3) is
     :func:`def_net_instance_pins`'s own ``{net_name: ((inst, pin), ...)}``
@@ -2281,6 +2395,16 @@ def run_extract(
     if distributed_rc and not critical_nets_set:
         raise ExtractError("--distributed-rc requires --critical-net")
 
+    # `--resistance-path` (issue #2765): validated up front, in a helper so
+    # this function's own (baselined) complexity does not grow.
+    _validate_resistance_path_args(
+        resistance_paths,
+        resistance_path_max_nodes,
+        resistance_path_max_resistors,
+        parasitics=parasitics,
+        distributed_rc=distributed_rc,
+    )
+
     # `--mom-rlc-net` (issue #988, Epic #709 Phase 3a): substitutes a
     # caller-supplied R/L/C for one named net's Phase 1/2 lumped-RC model --
     # see `run_extract`'s own `mom_rlc_net` docstring paragraph. Validated up
@@ -2987,6 +3111,14 @@ def run_extract(
                     "distributed ladder (nothing to chain). See "
                     "docs/cli/extract.md's '--distributed-rc' section."
                 )
+        # Additive field (issue #2765): present only when --resistance-path
+        # was given; a no-op otherwise.
+        _attach_resistance_paths(
+            parasitics_report,
+            resistance_paths,
+            resistance_path_max_nodes,
+            resistance_path_max_resistors,
+        )
         # Additive field (issue #1704): `True` only when
         # `--parasitics-top-cell-only` was given -- distinguishes a run whose
         # `nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` are
