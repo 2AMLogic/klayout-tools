@@ -423,6 +423,11 @@ _WIDE_SPACING = (
     "80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; "
     "the intended width-class reading is not stated"
 )
+_WIDE_SPACING_S4 = (
+    "read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 "
+    "nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply "
+    "to it; the intended width-class reading is not stated"
+)
 _PAD = (
     "PAD (DRM mask 96) is not a layer of the pinned asap7.lyp, so the deck "
     "does not read it"
@@ -445,7 +450,7 @@ def _sadp_metal_gaps(layer: str, t1: str, t2: str) -> tuple[Asap7RuleGap, ...]:
 
 def _top_metal_gaps(layer: str) -> tuple[Asap7RuleGap, ...]:
     return (
-        Asap7RuleGap(f"{layer}.S.4", "Table 3.18.1", _WIDE_SPACING, "#3156"),
+        Asap7RuleGap(f"{layer}.S.4", "Table 3.18.1", _WIDE_SPACING_S4, "#3156"),
         *_gaps(
             tuple(f"{layer}.S.{n}" for n in range(5, 9)),
             "Table 3.18.2",

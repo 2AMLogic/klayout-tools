@@ -2083,9 +2083,11 @@ Related notes:
   trips `AUX.1`; the fixtures expect both ids for those cases.
 - **M8-M9 wide-metal spacing.** `M8.S.4`-`M8.S.8` (and M9) condition the
   spacing on "one of the edges" being 60-80, 80-120, ... 1000+ nm. Read as
-  edge lengths they would override `M8.S.1` (two edges >= 80 nm need 40
-  nm) for every edge it covers, so the intended reading is a width class
-  the DRM does not state; they are not checked (#3156).
+  edge lengths, `M8.S.5`-`M8.S.8` would override `M8.S.1` (two edges >= 80
+  nm need 40 nm) for every edge it covers, and `M8.S.4` (60 nm for a 60-80
+  nm edge) would override `M8.S.2` (43 nm) and `M8.S.3` (46 nm) for every
+  such edge. The intended reading is a width class the DRM does not state;
+  they are not checked (#3156).
 - **Via enclosure.** `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2` and the
   V4-V9 enclosure rules ("on (at least) two opposite sides") flag a via only
   when its enclosure is short on the left/right pair *and* on the top/bottom
@@ -2151,9 +2153,9 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `V4.S.2`, `V5.S.2` | Table 3.15.1 | needs net connectivity to tell different-net pairs from same-net ones; the threshold equals S.1's, and the deck's net-independent S.1 check reports these pairs | #3155 |
 | `V6.S.2`, `V7.S.2` | Table 3.17.1 | needs net connectivity to tell different-net pairs from same-net ones; the threshold equals S.1's, and the deck's net-independent S.1 check reports these pairs | #3155 |
 | `V7.W.1`, `V7.M8.AUX.2` | Table 3.17.1 | stated along / across the M8 length, but the DRM gives no M8 routing direction (Table 3.18.1 is direction-free) | #3155 |
-| `M8.S.4` | Table 3.18.1 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
+| `M8.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
 | `M8.S.5`, `M8.S.6`, `M8.S.7`, `M8.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
-| `M9.S.4` | Table 3.18.1 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
+| `M9.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
 | `M9.S.5`, `M9.S.6`, `M9.S.7`, `M9.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
 | `V9.PAD.EN.2`, `V9.AUX.1` | Table 3.19.1 | PAD (DRM mask 96) is not a layer of the pinned asap7.lyp, so the deck does not read it | #3156 |
 
