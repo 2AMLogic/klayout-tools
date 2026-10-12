@@ -4638,6 +4638,8 @@ def _corner_measurement_results(
         )
     measurement_results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
+    meas_errors = {} if is_xyce else _parse_meas_errors(log_text)
+    attributed: set[str] = set()
     for spec in measurements_spec:
         name = spec["name"]
         value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
@@ -4652,12 +4654,13 @@ def _corner_measurement_results(
                     "margin": None,
                 }
             )
+            message = _no_value_message(spec, save_mode=save_mode)
+            cause = meas_errors.get(str(name).lower()) if spec.get("spice") else None
+            if cause is not None:
+                attributed.add(str(name).lower())
+                message += f" -- ngspice reported: {cause}"
             diagnostics.append(
-                {
-                    "severity": "error",
-                    "code": "measurement",
-                    "message": _no_value_message(spec, save_mode=save_mode),
-                }
+                {"severity": "error", "code": "measurement", "message": message}
             )
             continue
         # `_grade_measurement_value` owns the plausibility-pre-check ->
@@ -4674,7 +4677,51 @@ def _corner_measurement_results(
             }
         )
         diagnostics.extend(grading_diagnostics)
+    # Corner-level fallback (issue #2826): engine `.meas` errors that could
+    # not be tied to a missing result by name are still surfaced, as a
+    # warning so grading is unchanged, but only when something is missing.
+    if diagnostics and any(d["code"] == "measurement" for d in diagnostics):
+        unattributed = [
+            f"{n}: {t}" for n, t in meas_errors.items() if n not in attributed
+        ]
+        if unattributed:
+            diagnostics.append(
+                {
+                    "severity": "warning",
+                    "code": "measurement",
+                    "message": "ngspice reported .meas errors not matched to a "
+                    "missing measurement: "
+                    + "; ".join(unattributed[:_MEAS_ERROR_MAX_ENTRIES]),
+                }
+            )
     return measurement_results, diagnostics, {}
+
+
+#: ngspice's own ``.meas`` failure line, e.g.
+#: ``Error: measure  bad  when(WHEN) : Expressions like 0.5*1.62 are not
+#: supported.`` (verified on ngspice-46). Group 1 is the card's (lower-cased)
+#: name, group 2 the engine's reason.
+_MEAS_ERROR_RE = re.compile(
+    r"^\s*Error:\s*measure\s+(\S+)\s+\S+\s*:\s*(.+?)\s*$", re.MULTILINE
+)
+_MEAS_ERROR_MAX_ENTRIES = 5
+_MEAS_ERROR_MAX_CHARS = 200
+
+
+def _parse_meas_errors(log_text: str) -> dict[str, str]:
+    """``{lower-cased measurement name: bounded ngspice error text}`` for the
+    ``.meas`` failures the ngspice log names (first one per name wins; at
+    most :data:`_MEAS_ERROR_MAX_ENTRIES` entries, each truncated). An unknown
+    log format simply yields an empty map -- the generic message stands."""
+    errors: dict[str, str] = {}
+    for match in _MEAS_ERROR_RE.finditer(log_text or ""):
+        if len(errors) >= _MEAS_ERROR_MAX_ENTRIES:
+            break
+        text = match.group(2)
+        if len(text) > _MEAS_ERROR_MAX_CHARS:
+            text = text[: _MEAS_ERROR_MAX_CHARS - 3] + "..."
+        errors.setdefault(match.group(1).lower(), text)
+    return errors
 
 
 def _harvest_measurement_value(

@@ -1492,6 +1492,72 @@ later expression may reference an earlier one's name:
 ]
 ```
 
+### `expr` cannot read `.meas` results
+
+The chaining rule above covers **`expr` -> `expr`** only. A `spice` entry's
+`.meas` card is a file-scope card that ngspice evaluates itself; its scalar is
+printed to the log but is **not** a vector the generated `let` can see. An
+`expr` that names a `.meas` result grades the corner `error` with the
+`measurement` diagnostic "printed no '<name> = <value>' line" (the engine log
+shows `vector <name> is not available or has zero length`). This applies to
+ordinary file-scope `.meas` cards; `analysis_steps[]` control-scope `meas`
+has different semantics (see that section). Making `.meas` scalars visible to
+`expr` is a separate contract change.
+
+```json
+"measurements": [
+  { "name": "ta", "spice": ".meas tran ta when v(o)=0.8 rise=3" },
+  { "name": "tb", "spice": ".meas tran tb when v(o)=0.8 rise=11" },
+  { "name": "t",  "expr": "(tb - ta)/8" }
+]
+```
+
+The `t` entry above errors. Note that grading `tb - ta` instead does not help:
+that is still an `expr` over two `.meas` results and fails the same way. The
+working fix is a single **trig/targ** `.meas` card that measures the interval
+directly, with the bounds scaled to match:
+
+```json
+"measurements": [
+  { "name": "p8", "spice": ".meas tran p8 trig v(o) val=0.8 rise=3 targ v(o) val=0.8 rise=11", "unit": "s" }
+]
+```
+
+`p8` is eight periods, so bound it at 8x the per-period limits (on ngspice-46
+a 1 MHz sine gives `p8 = 8.00000e-06`). A constant offset or unit conversion
+works the same way: rather than grading `180 + ph*180/pi` as an `expr`, grade
+the raw `.meas` result `ph` against bounds converted back into its own unit
+(radians). Other options are to derive the figure outside `klt sim` from the
+reported raw measurements, or to compute it directly from vectors in `expr`
+(a `vecmax()`/`mean()` reduction that does not reference any `.meas` result).
+
+### `.meas` `WHEN` thresholds must be literal numbers
+
+ngspice's `.meas ... when v(x)=<value>` accepts only a literal number (or a
+`.param`-style parameter reference) on the right-hand side, not an arithmetic
+expression. Verified on ngspice-46:
+
+```
+.meas tran good when v(o)=0.81        ; works
+.meas tran bad  when v(o)=0.5*1.62    ; fails
+```
+
+The failing card logs `Error: measure  bad  when(WHEN) : Expressions like
+0.5*1.62 are not supported.` and no value is printed. `klt sim` does not lint
+card text (parameterized cards are valid); instead, when the log names the
+failing measurement, that error text is appended to its `measurement`
+diagnostic (`measurement 'bad' produced no value -- ngspice reported:
+Expressions like 0.5*1.62 are not supported.`), bounded in length and
+available without `keep_artifacts`. An engine `.meas` error that cannot be
+matched to a missing measurement is reported once as a corner-level
+`measurement` diagnostic with severity `warning`; grading is unchanged.
+
+`FIND ... AT=` does not accept an arithmetic expression either. On ngspice-46,
+`at=0.5*2.5u` fails with the misleading `find(AT) : out of interval`. Use a
+literal time or a `.param` reference. This error follows the same
+`Error: measure <name> ...` log format, so it is attached to the measurement's
+diagnostic in the same way.
+
 ### The expression must reduce to a single real scalar
 
 This is the one contract rule the tool cannot check up front. ngspice's
