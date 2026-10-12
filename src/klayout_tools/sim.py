@@ -1192,6 +1192,21 @@ def _validate_save_mode(options: dict[str, Any]) -> tuple[str, bool]:
     return value, True
 
 
+def _own_persistent_roots(
+    ownership: contextlib.ExitStack,
+    artifacts_dir: str,
+    plot_dir: str | None,
+    *,
+    persistent: bool,
+) -> None:
+    """Enter the output-directory lock for each persistent root (#2770)."""
+    if persistent:
+        ownership.enter_context(output_lock.hold_output_dir(artifacts_dir))
+    if plot_dir is not None:
+        ownership.enter_context(output_lock.hold_output_dir(plot_dir))
+
+
+@output_lock.owns_run
 def run_sim(
     request_path: str,
     *,
@@ -1406,21 +1421,6 @@ def run_sim(
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
     """
-    if _ownership is None:
-        with contextlib.ExitStack() as stack:
-            return run_sim(
-                request_path,
-                artifacts_dir=artifacts_dir,
-                backend=backend,
-                max_workers=max_workers,
-                hosts=hosts,
-                budget_s=budget_s,
-                resume=resume,
-                plot_dir=plot_dir,
-                fail_fast_probe=fail_fast_probe,
-                fail_on_diagnostic=fail_on_diagnostic,
-                _ownership=stack,
-            )
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
@@ -1769,10 +1769,12 @@ def run_sim(
     # Issue #2770: own every persistent artifact root before the first write
     # to it. Temporary-only runs (no keep_artifacts/resume/plots, local
     # backends) never touch `artifacts_dir`, so they take no lock.
-    if keep_artifacts or resume or backend in _OFFHOST_BACKENDS:
-        _ownership.enter_context(output_lock.hold_output_dir(artifacts_dir))
-    if plot_dir is not None:
-        _ownership.enter_context(output_lock.hold_output_dir(plot_dir))
+    _own_persistent_roots(
+        _ownership,
+        artifacts_dir,
+        plot_dir,
+        persistent=bool(keep_artifacts or resume or backend in _OFFHOST_BACKENDS),
+    )
     checkpoint_path = _checkpoint_path(artifacts_dir)
     pre_completed: dict[str, dict[str, Any]] = {}
     loaded_engine_version: str | None = None

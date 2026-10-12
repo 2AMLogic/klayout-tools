@@ -1918,6 +1918,20 @@ def _response_warnings(
     return warnings
 
 
+def _own_stage_root(ownership: contextlib.ExitStack, request_path: str) -> None:
+    """Own the fixed ``.klt/place-and-route/`` stage root (#2770)."""
+    ownership.enter_context(
+        output_lock.hold_output_dir(
+            os.path.join(
+                os.path.dirname(os.path.abspath(request_path)),
+                ".klt",
+                "place-and-route",
+            )
+        )
+    )
+
+
+@output_lock.owns_run
 def run_place_and_route(
     request_path: str,
     *,
@@ -1958,23 +1972,7 @@ def run_place_and_route(
     interleaving stage artifacts. ``_ownership`` is internal: the exit stack
     that releases the lock when the run ends.
     """
-    if _ownership is None:
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(
-                output_lock.hold_output_dir(
-                    os.path.join(
-                        os.path.dirname(os.path.abspath(request_path)),
-                        ".klt",
-                        "place-and-route",
-                    )
-                )
-            )
-            return run_place_and_route(
-                request_path,
-                pdk_variant=pdk_variant,
-                pdk_root=pdk_root,
-                _ownership=stack,
-            )
+    _own_stage_root(_ownership, request_path)
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
 

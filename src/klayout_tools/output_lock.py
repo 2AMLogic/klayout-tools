@@ -54,6 +54,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import errno
+import functools
 import hashlib
 import json
 import os
@@ -348,3 +349,27 @@ def hold_output_dir(path: str | os.PathLike[str]) -> Iterator[str]:
         # place (unlinking would let two processes lock different inodes).
         for held in fds:
             os.close(held)
+
+
+def owns_run(fn: Any) -> Any:
+    """Decorator: give a public ``run_*`` entry point an ownership stack.
+
+    The wrapped function takes a keyword-only ``_ownership``
+    :class:`contextlib.ExitStack`. A top-level call (``_ownership`` omitted)
+    gets a fresh stack that is closed -- releasing every lock entered on it,
+    on success or exception -- when the call returns; an internal nested call
+    passes its parent's stack through unchanged so ownership is inherited,
+    never re-acquired. Kept out of the entry points so their (baselined)
+    cyclomatic complexity does not grow for each integration site.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(
+        *args: Any, _ownership: contextlib.ExitStack | None = None, **kwargs: Any
+    ) -> Any:
+        if _ownership is not None:
+            return fn(*args, _ownership=_ownership, **kwargs)
+        with contextlib.ExitStack() as stack:
+            return fn(*args, _ownership=stack, **kwargs)
+
+    return wrapper
