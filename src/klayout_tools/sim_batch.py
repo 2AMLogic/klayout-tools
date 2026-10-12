@@ -89,6 +89,7 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -232,6 +233,34 @@ DEFAULT_POLL_INTERVAL_S = 30.0
 #: job command starts. Overridable wholesale via ``request.batch.poll_timeout_s``.
 _BATCH_PROVISION_SLACK_S = 1800.0
 
+#: Fixed per-job slack :func:`_default_batch_job_timeout_s` adds to the
+#: fully-serial unit budget for `klt` startup on the job instance.
+_BATCH_JOB_OVERHEAD_S = 120.0
+
+#: The fleet's whole-job ceiling when no named setting supplies one (issue
+#: #2833). This is not a client-side guess: it is the value 2am's
+#: ``batch-fleet-harness.sh`` itself falls back to when the instance's
+#: ``MaxJobSeconds`` tag (written from ``BATCH_MAX_JOB_SECONDS``) is absent
+#: or malformed. A report that used it says so
+#: (``max_job_seconds_source: "default"``).
+DEFAULT_BATCH_MAX_JOB_SECONDS = 3600.0
+
+#: 2am's ``batch-fleet.env`` key for the whole-job ceiling -- the value its
+#: ``launch`` tags the instance with and its harness kills the job at.
+FLEET_MAX_JOB_SECONDS_KEY = "BATCH_MAX_JOB_SECONDS"
+
+#: ``request.batch.job_ceiling_check`` values (issue #2833): ``"warn"``
+#: (default) submits and reports a structured warning; ``"enforce"`` refuses
+#: before any S3 write.
+JOB_CEILING_CHECK_MODES = ("warn", "enforce")
+
+#: Machine-readable ``error.code`` of an ``"enforce"`` refusal.
+BATCH_JOB_CEILING_CODE = "batch_job_ceiling_exceeded"
+
+#: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
+#: request-derived fully-serial upper bound, never a measured runtime.
+JOB_CEILING_BASIS = "conservative_serial_bound"
+
 #: Per-invocation timeout for one `aws` CLI call (upload/poll/collect).
 _BATCH_AWS_TIMEOUT_S = 900.0
 
@@ -276,6 +305,7 @@ PROVISION_SCRIPT_ENV = "KLT_BATCH_PROVISION_SCRIPT"
 BUCKET_ENV = "KLT_BATCH_JOB_BUCKET"
 REGION_ENV = "KLT_BATCH_REGION"
 PROFILE_ENV = "KLT_BATCH_PROFILE"
+MAX_JOB_SECONDS_ENV = "KLT_BATCH_MAX_JOB_SECONDS"
 
 #: 2am's own fleet config, read (never written) from beside the resolved
 #: provision script -- the file whose ``BATCH_JOB_BUCKET``/``BATCH_JOBS_PREFIX``
@@ -594,9 +624,11 @@ def _default_batch_job_timeout_s(
     finishes far inside this bound -- it exists only so a wedged job is
     killed by the harness rather than billing until the instance watchdog
     fires. The harness clamps it down to its own ``MAX_JOB_SECONDS``, never
-    up, so an over-large value here is safe.
+    up, so an over-large value here is safe *for the harness* -- but the job
+    is then killed at that ceiling, which is what
+    :func:`_assess_job_ceiling` warns about before submission (issue #2833).
     """
-    return per_corner_timeout_s * max(1, corner_count) + 120.0
+    return per_corner_timeout_s * max(1, corner_count) + _BATCH_JOB_OVERHEAD_S
 
 
 def _default_batch_poll_timeout_s(
@@ -637,6 +669,13 @@ class BatchConfig:
     capacity_wait_s: float = 0.0
     #: ``request.batch.runner_version_check`` (issue #2719).
     runner_version_check: str = "enforce"
+    #: The fleet's whole-job ceiling in seconds and where it came from
+    #: (``"request"``, ``"env"``, ``"fleet_config"`` or ``"default"``) --
+    #: see :func:`_resolve_max_job_seconds` (issue #2833).
+    max_job_seconds: float = DEFAULT_BATCH_MAX_JOB_SECONDS
+    max_job_seconds_source: str = "default"
+    #: ``request.batch.job_ceiling_check`` (issue #2833).
+    job_ceiling_check: str = "warn"
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -775,6 +814,10 @@ def _resolve_batch_config(
         )
     capacity_wait_s = _resolve_capacity_wait_s(batch_spec)
     runner_version_check = _resolve_runner_version_check(batch_spec)
+    max_job_seconds, max_job_seconds_source = _resolve_max_job_seconds(
+        batch_spec, fleet
+    )
+    job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
     return BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -806,7 +849,174 @@ def _resolve_batch_config(
         ),
         capacity_wait_s=capacity_wait_s,
         runner_version_check=runner_version_check,
+        max_job_seconds=max_job_seconds,
+        max_job_seconds_source=max_job_seconds_source,
+        job_ceiling_check=job_ceiling_check,
     )
+
+
+def _resolve_max_job_seconds(
+    batch_spec: dict[str, Any], fleet: dict[str, str]
+) -> tuple[float, str]:
+    """The fleet's whole-job ceiling and its provenance (issue #2833).
+
+    Resolution order: ``request.batch.max_job_seconds`` (``"request"``),
+    ``$KLT_BATCH_MAX_JOB_SECONDS`` (``"env"``), ``BATCH_MAX_JOB_SECONDS`` in
+    the ``batch-fleet.env`` beside the provision script (``"fleet_config"``,
+    the value 2am's ``launch`` tags the instance with), else
+    :data:`DEFAULT_BATCH_MAX_JOB_SECONDS` (``"default"``, the harness's own
+    fallback). A value that is present but not a positive, finite number is
+    a :class:`~klayout_tools.sim.SimError` naming its source -- raised
+    before any S3 write -- rather than silently falling through to a less
+    specific source.
+    """
+    from .sim import SimError
+
+    candidates: tuple[tuple[str, str, Any], ...] = (
+        ("request", "request.batch.max_job_seconds", batch_spec.get("max_job_seconds")),
+        ("env", f"${MAX_JOB_SECONDS_ENV}", os.environ.get(MAX_JOB_SECONDS_ENV)),
+        (
+            "fleet_config",
+            f"{FLEET_MAX_JOB_SECONDS_KEY} in {FLEET_CONFIG_FILENAME}",
+            fleet.get(FLEET_MAX_JOB_SECONDS_KEY),
+        ),
+    )
+    for source, label, raw in candidates:
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        value: Any = raw
+        if isinstance(raw, str):
+            try:
+                value = float(raw.strip())
+            except ValueError:
+                value = None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise SimError(
+                f"{label} must be a positive number of seconds (got {raw!r})"
+            )
+        return float(value), source
+    return DEFAULT_BATCH_MAX_JOB_SECONDS, "default"
+
+
+def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
+    """``request.batch.job_ceiling_check``: ``"warn"`` (default) or
+    ``"enforce"``, else :class:`~klayout_tools.sim.SimError` before any S3
+    write (issue #2833)."""
+    from .sim import SimError
+
+    value = batch_spec.get("job_ceiling_check", "warn")
+    if value not in JOB_CEILING_CHECK_MODES:
+        raise SimError(
+            "request.batch.job_ceiling_check must be one of "
+            f"{', '.join(repr(m) for m in JOB_CEILING_CHECK_MODES)} "
+            f"(got {value!r})"
+        )
+    return value
+
+
+def _assess_job_ceiling(
+    *, unit_count: int, per_unit_timeout_s: float, config: BatchConfig
+) -> dict[str, Any]:
+    """Deterministic pre-submit runtime-risk assessment of **one** batch job
+    against the fleet's whole-job ceiling (issue #2833).
+
+    The bound is :func:`_default_batch_job_timeout_s` -- every unit burning
+    its full ``options.timeout_s`` one after another, plus
+    :data:`_BATCH_JOB_OVERHEAD_S`. It is derived from the request alone and
+    is a conservative *upper bound*, never a measured or predicted ngspice
+    runtime (``basis`` says so); a job whose units finish well inside their
+    ``timeout_s`` can run far below it. It is compared with
+    ``config.max_job_seconds``: a bound *equal* to the ceiling does not
+    exceed it.
+
+    ``max_units_per_job`` is the largest shard whose own bound stays within
+    the ceiling (``0`` when even one unit's bound exceeds it), and
+    ``recommended_hosts`` the smallest ``remote.hosts`` whose largest shard
+    -- :func:`sim_remote._shard_corner_points` balances shards to at most
+    ``ceil(units / hosts)`` -- fits it, or ``None`` when no ``hosts`` value
+    can (lower ``options.timeout_s`` instead). When the bound exceeds the
+    ceiling the result carries a human-readable ``warning``.
+    """
+    units = max(1, unit_count)
+    ceiling = config.max_job_seconds
+    bound = _default_batch_job_timeout_s(units, per_unit_timeout_s)
+    if per_unit_timeout_s > 0:
+        per_job = max(0, int((ceiling - _BATCH_JOB_OVERHEAD_S) // per_unit_timeout_s))
+        # Settle float rounding against the bound function itself, so the
+        # recommendation and the comparison can never disagree.
+        while per_job > 0 and (
+            _default_batch_job_timeout_s(per_job, per_unit_timeout_s) > ceiling
+        ):
+            per_job -= 1
+        while _default_batch_job_timeout_s(per_job + 1, per_unit_timeout_s) <= ceiling:
+            per_job += 1
+    else:
+        per_job = units if bound <= ceiling else 0
+    recommended = math.ceil(units / per_job) if per_job > 0 else None
+    exceeds = bound > ceiling
+    assessment: dict[str, Any] = {
+        "basis": JOB_CEILING_BASIS,
+        "unit_count": units,
+        "per_unit_timeout_s": per_unit_timeout_s,
+        "overhead_s": _BATCH_JOB_OVERHEAD_S,
+        "job_bound_s": bound,
+        "max_job_seconds": ceiling,
+        "max_job_seconds_source": config.max_job_seconds_source,
+        "exceeds_ceiling": exceeds,
+        "check": config.job_ceiling_check,
+        "max_units_per_job": per_job,
+        "recommended_hosts": recommended,
+    }
+    if exceeds:
+        message = (
+            f"batch job bound {bound:g}s (options.timeout_s {per_unit_timeout_s:g}s "
+            f"x {units} units + {_BATCH_JOB_OVERHEAD_S:g}s; a conservative "
+            "fully-serial upper bound, not a runtime estimate) exceeds the "
+            f"fleet's whole-job ceiling of {ceiling:g}s (max_job_seconds from "
+            f"{config.max_job_seconds_source}); a job still running at the "
+            "ceiling is killed and every unit is reported batch_job_timeout. "
+        )
+        if recommended is not None:
+            message += (
+                f"Set request.remote.hosts to at least {recommended} to run one "
+                f"job per shard of at most {per_job} units, each within the "
+                "ceiling"
+            )
+        else:
+            message += (
+                "No remote.hosts value fits: a single unit's bound exceeds the "
+                "ceiling -- lower options.timeout_s to at most "
+                f"{ceiling - _BATCH_JOB_OVERHEAD_S:g}s"
+            )
+        assessment["warning"] = message
+    return assessment
+
+
+def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
+    """Act on :func:`_assess_job_ceiling`'s result before any S3 write:
+    under ``"enforce"`` an exceeded ceiling is a
+    :class:`~klayout_tools.sim.SimError` with code
+    :data:`BATCH_JOB_CEILING_CODE`; under ``"warn"`` the same message is
+    printed to stderr (so a caller piping ``--format json`` to a file still
+    sees it before the job launches) and the assessment is reported in
+    ``environment.remote.job_ceiling``."""
+    from .sim import SimError
+
+    warning = assessment.get("warning")
+    if warning is None:
+        return
+    if assessment["check"] == "enforce":
+        raise SimError(
+            f"backend 'batch' refused before submission: {warning} (or set "
+            'request.batch.job_ceiling_check to "warn" to submit anyway)',
+            code=BATCH_JOB_CEILING_CODE,
+        )
+    print(f"klt sim: warning: {warning}", file=sys.stderr)
 
 
 def _resolve_runner_version_check(batch_spec: dict[str, Any]) -> str:
@@ -1698,6 +1908,13 @@ def _run_batch(
     reason). The batch path's own wall-clock bound is
     ``request.batch.poll_timeout_s``, whose overrun reports every unit
     through the same unrun-corner shape.
+
+    Before submitting, the job's conservative bound is checked against the
+    fleet's whole-job ceiling (:func:`_assess_job_ceiling`, issue #2833):
+    ``request.batch.job_ceiling_check: "enforce"`` refuses an overlong job,
+    the default ``"warn"`` submits it with a stderr warning, and either way
+    the assessment is reported as ``environment.remote.job_ceiling``. The
+    ``hosts > 1`` path (:func:`_run_batch_fleet`) is unchanged.
     """
     from .sim import SimError
 
@@ -1707,8 +1924,15 @@ def _run_batch(
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
+    # Issue #2833: assess the one job against the fleet's whole-job ceiling
+    # before `submit_job`'s first S3 write, so an "enforce" refusal can never
+    # leave a partial contract or launch a billable job.
+    job_ceiling = _assess_job_ceiling(
+        unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
+    )
+    _enforce_job_ceiling(job_ceiling)
     try:
-        return _run_batch_job(
+        corners, engine_version, environment = _run_batch_job(
             config=config,
             job_id=new_job_id(),
             corner_points=corner_points,
@@ -1723,6 +1947,11 @@ def _run_batch(
         )
     except BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    if environment is not None:
+        # Additive (issue #2833): the assessment and the ceiling's provenance
+        # ride every one-job batch report, exceeded or not.
+        environment = {**environment, "job_ceiling": job_ceiling}
+    return corners, engine_version, environment
 
 
 def _run_batch_fleet(
@@ -1819,6 +2048,7 @@ def _run_batch_fleet(
 #: the `remote` backend established -- see that module's import block.
 __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
+    "BATCH_JOB_CEILING_CODE",
     "BATCH_JOB_TOOL",
     "BATCH_NO_CAPACITY_CODE",
     "BATCH_NETLIST_FILENAME",

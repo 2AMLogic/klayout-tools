@@ -1359,3 +1359,244 @@ def test_cli_readback_failure_is_error_envelope_exit_1(tmp_path, monkeypatch, ca
     payload = json.loads(captured.err)
     assert payload["error"]["command"] == "lef-abstract"
     assert "could not read back" in payload["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# power_pins verdict + T1 item 11 port accessibility end to end (issue #2839)
+# --------------------------------------------------------------------------- #
+
+
+def _supply_block(
+    *,
+    vdd_box: tuple[float, float, float, float] = (0.0, 2.0, 0.2, 3.0),
+    vdd_layer: tuple[int, int] = MET1_NET,
+    draw_vss: bool = True,
+) -> kdb.Layout:
+    """A 5x5 um block with a VDD port (left edge by default) and a VSS port
+    on the right edge, each a drawn met1 box labelled at its centre -- so
+    `klt socket-check` (which needs the labels) and `klt lef-abstract`
+    (which needs the metal) can both run on the same stream."""
+    layout = kdb.Layout()
+    layout.dbu = DBU_UM
+    top = layout.create_cell("ANALOG_BLOCK")
+    ports = [("VDD", vdd_box, vdd_layer)]
+    vss_box = (4.8, 2.0, 5.0, 3.0)
+    ports.append(("VSS", vss_box, MET1_NET))
+    for name, (x0, y0, x1, y1), layer in ports:
+        index = layout.layer(*layer)
+        if name != "VSS" or draw_vss:
+            top.shapes(index).insert(_box_um(x0, y0, x1, y1))
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        top.shapes(index).insert(
+            kdb.Text(
+                name, kdb.Trans(kdb.Vector(round(cx / DBU_UM), round(cy / DBU_UM)))
+            )
+        )
+    return layout
+
+
+def _supply_socket(
+    *,
+    vdd_box: tuple[float, float, float, float] = (0.0, 2.0, 0.2, 3.0),
+    vdd_layer: tuple[int, int] = MET1_NET,
+    vdd_use: str = "POWER",
+    with_vss: bool = True,
+) -> dict:
+    pins = [
+        {
+            "name": "VDD",
+            "layer": list(vdd_layer),
+            "x": (vdd_box[0] + vdd_box[2]) / 2,
+            "y": (vdd_box[1] + vdd_box[3]) / 2,
+            "use": vdd_use,
+            "direction": "INOUT",
+        }
+    ]
+    if with_vss:
+        pins.append(
+            {
+                "name": "VSS",
+                "layer": list(MET1_NET),
+                "x": 4.9,
+                "y": 2.5,
+                "use": "GROUND",
+                "direction": "INOUT",
+            }
+        )
+    return _basic_descriptor(pins=pins)
+
+
+def test_power_pins_pass_for_drawn_power_and_ground(tmp_path, monkeypatch):
+    report = _run(
+        tmp_path, monkeypatch, layout=_supply_block(), descriptor=_supply_socket()
+    )
+
+    assert report["power_pins"]["status"] == "pass", report["power_pins"]
+    assert report["power_pins"]["pins"] == [
+        {
+            "name": "VDD",
+            "use": "POWER",
+            "use_read_back": "POWER",
+            "layer": "met1",
+            "geometry_source": "drawn",
+        },
+        {
+            "name": "VSS",
+            "use": "GROUND",
+            "use_read_back": "GROUND",
+            "layer": "met1",
+            "geometry_source": "drawn",
+        },
+    ]
+    # Additive per-pin echo of the descriptor's declared GDS layer.
+    assert {pin["name"]: pin["gds_layer"] for pin in report["pins"]} == {
+        "VDD": [68, 20],
+        "VSS": [68, 20],
+    }
+
+
+def test_power_pins_fail_without_ground_and_for_synthesized_port(tmp_path, monkeypatch):
+    no_ground = _run(
+        tmp_path,
+        monkeypatch,
+        layout=_supply_block(),
+        descriptor=_supply_socket(with_vss=False),
+    )
+    assert [f["code"] for f in no_ground["power_pins"]["findings"]] == ["no_ground_pin"]
+
+    synthesized = _run(
+        tmp_path,
+        monkeypatch,
+        layout=_supply_block(draw_vss=False),
+        descriptor=_supply_socket(),
+    )
+    findings = synthesized["power_pins"]["findings"]
+    assert [(f["code"], f["pin"]) for f in findings] == [("port_not_drawn", "VSS")]
+    assert synthesized["power_pins"]["status"] == "fail"
+    # The structural self-check is unaffected -- a synthesized PORT is not a
+    # structural defect.
+    assert synthesized["self_check"]["status"] == "pass"
+
+
+def test_read_back_pin_uses_reads_the_written_use():
+    from klayout_tools.lef_abstract import _read_back_pin_uses, check_power_pins
+
+    text = (
+        "VERSION 5.7 ;\nMACRO m\n  PIN VDD\n    DIRECTION INOUT ;\n    USE SIGNAL ;\n"
+        "  END VDD\n  PIN VSS\n    USE GROUND ;\n  END VSS\nEND m\nEND LIBRARY\n"
+    )
+    assert _read_back_pin_uses(text) == {"VDD": "SIGNAL", "VSS": "GROUND"}
+    verdict = check_power_pins(
+        [
+            {
+                "name": "VDD",
+                "use": "POWER",
+                "lef_layer": "met1",
+                "geometry_source": "drawn",
+            },
+            {
+                "name": "VSS",
+                "use": "GROUND",
+                "lef_layer": "met1",
+                "geometry_source": "drawn",
+            },
+        ],
+        text,
+    )
+    assert [(f["code"], f["pin"]) for f in verdict["findings"]] == [
+        ("use_not_written", "VDD")
+    ]
+
+
+def test_cli_require_power_pins_exit_code(tmp_path, monkeypatch, capsys):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    layout_path = _write_layout(_supply_block(draw_vss=False), tmp_path / "block.gds")
+    socket_path = _write_socket(_supply_socket(), tmp_path / "socket.json")
+    argv = [
+        "lef-abstract",
+        layout_path,
+        "--socket",
+        socket_path,
+        "--macro-name",
+        "analog_block",
+        "--cell-library",
+        "sky130_fd_sc_hd",
+        "--output",
+        str(tmp_path / "out.lef"),
+        "--format",
+        "json",
+    ]
+
+    assert main(argv) == 0
+    capsys.readouterr()
+    assert main([*argv, "--require-power-pins"]) == 3
+    assert json.loads(capsys.readouterr().out)["power_pins"]["status"] == "fail"
+
+
+def _real_port_evidence(tmp_path, monkeypatch, *, layout, descriptor):
+    """Real `klt socket-check` + `klt lef-abstract` envelopes for one block,
+    shaped as the resolutions `klt signoff`'s item 11 grades."""
+    from klayout_tools.socket_check import run_socket_check
+
+    lef_report = _run(tmp_path, monkeypatch, layout=layout, descriptor=descriptor)
+    socket_report = run_socket_check(
+        str(tmp_path / "block.gds"), str(tmp_path / "socket.json")
+    )
+    return {"envelope": socket_report}, {"envelope": lef_report}
+
+
+@pytest.mark.parametrize(
+    ("layout_kwargs", "socket_kwargs", "expected"),
+    [
+        # Both supplies on the boundary, on a routing layer: met.
+        ({}, {}, None),
+        # VDD moved to the block interior.
+        (
+            {"vdd_box": (2.0, 2.0, 2.2, 3.0)},
+            {"vdd_box": (2.0, 2.0, 2.2, 3.0)},
+            "power_port_interior_only",
+        ),
+        # VDD on nwell: drawn and on the edge, but no LEF routing layer.
+        (
+            {"vdd_layer": NWELL},
+            {"vdd_layer": NWELL},
+            "power_port_layer_disallowed",
+        ),
+        # Descriptor declares VDD as a signal: the LEF says USE SIGNAL, so
+        # no supply port of that name exists on the GDS side either.
+        ({}, {"vdd_use": "SIGNAL"}, "no_edge_power_port"),
+    ],
+)
+def test_item_11_port_accessibility_end_to_end(
+    tmp_path, monkeypatch, layout_kwargs, socket_kwargs, expected
+):
+    """Issue #2839: item 11's port-accessibility half graded from envelopes
+    the real verbs produced, not hand-written fixtures."""
+    from klayout_tools.signoff_power_delivery import (
+        _grade_power_ports,
+        _read_power_port_policy,
+    )
+
+    socket, lef = _real_port_evidence(
+        tmp_path,
+        monkeypatch,
+        layout=_supply_block(**layout_kwargs),
+        descriptor=_supply_socket(**socket_kwargs),
+    )
+    reason, block = _grade_power_ports(
+        socket, lef, ["VDD", "VSS"], _read_power_port_policy({"required": True})
+    )
+
+    assert reason == expected, block
+    if expected is None:
+        assert [entry["net"] for entry in block["ports"]] == ["VDD", "VSS"]
+        assert block["ports"][0]["port"]["accessible_edges"] == ["left"]
+        assert block["ports"][0]["lef_pin"] == {
+            "name": "VDD",
+            "use": "POWER",
+            "layer": "met1",
+            "geometry_source": "drawn",
+        }

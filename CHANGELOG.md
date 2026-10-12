@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
+  unequal top-circuit pin counts yield `status: mismatch` with a new
+  `pin.count` error finding (both counts in `details`). Default unchanged;
+  additive `options` echo key, no `schema_version` bump. A `pin.count` error
+  is never downgraded to `inconclusive` by an exhausted `combine_devices`.
+- **T1 item 11 port accessibility: edge power ports + LEF abstract
+  (provisional)** (issue #2839, operator ruling 2AMLogic/product#134, not yet
+  ratified). `klt signoff --manifest` grades a new item-11 sub-check for a
+  block that opts in (manifest `power_ports.required: true`, or a
+  `socket-check`/`lef-abstract` part cited in item 11's list): every declared
+  supply needs an edge-accessible port and a matching LEF `PIN` with
+  `USE POWER`/`USE GROUND`. New unmet reasons `power_port_unproven`,
+  `no_edge_power_port`, `power_port_interior_only`,
+  `power_port_layer_disallowed`, `lef_power_pin_missing`,
+  `lef_power_pin_mismatch`; met citations gain
+  `power_delivery.power_ports`. Defaults (edge band `0` um, all four edges,
+  any LEF routing layer) are provisional and overridable per block. A block
+  that does not opt in grades exactly as before. Additive verb changes:
+  `klt socket-check` gains a fourth check `power_ports` (skipped unless
+  requested via descriptor `power_ports` or `--require-power-ports`;
+  `--edge-band-um`), a top-level `power_ports` fact block, and an optional
+  descriptor `pins[].metal_layer`; `klt lef-abstract` gains `pins[].gds_layer`,
+  a read-back `power_pins` verdict and `--require-power-pins`; `klt signoff`
+  recognises both envelopes as opt-in kinds scoped to item 11.
 - **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
   (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
   persistent artifact root; a competing cooperating run fails fast with the
