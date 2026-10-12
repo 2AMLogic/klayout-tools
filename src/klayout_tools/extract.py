@@ -290,6 +290,7 @@ from .extract_spef import ExtractError as ExtractError
 from .extract_spef import _write_spef
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
 from .metrics import is_registered
+from .parasitic_integrity import empty_integrity_summary
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import (
     MOS_FLAVOUR_PROPERTY,
@@ -2835,6 +2836,11 @@ def run_extract(
                     "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
                     "nets": [],
                 },
+                # Additive field (issue #2764): no nets injected, so the
+                # integrity summary reports an all-zero check -- same shape
+                # as the checked branch's summary, per the schema-stability
+                # convention above.
+                "integrity": empty_integrity_summary(),
             }
         # `parasitics_deck` is only non-None when `--parasitics` was given
         # (see above), which is exactly when `parasitic_nets is not None`.

@@ -160,7 +160,9 @@ reports only `merged` and `area`, with the `&` time charged to the
 caller's `tottime`). Instead, `--attribute-walk` re-runs the primary
 extraction through `erc`'s own helpers and times each statement of the
 walk's per-net prologue separately. This replica is used for measurement
-only and is never compared with or fed back into a report.
+only and is never compared with or fed back into a report. With
+`--repeat 0` it runs on its own, with no `run_erc` call at all
+(issue #2753) -- the recipe the attribution commands below use.
 
 Tool versions: `klt 0.6.0+g7e047a5df68f` (worktree at `7e047a5d`;
 `src/klayout_tools/erc.py` is unchanged from `origin/main`
@@ -226,19 +228,39 @@ order as the measured walk of 2,156 s CPU / 3,890 s wall. `w255np` was
 not run end to end with `active_layer`; by the same arithmetic it would
 take about 40,443 x 0.42 s, roughly 4.7 h.
 
-Attribution commands (`--attribute-walk-limit` bounds the replica;
-`w16` timed all candidates):
+Attribution commands (issue #2753 recipe). `--repeat 0` skips every
+`run_erc` call -- the output carries `runs: []` and only
+`walk_attribution` -- so a sampled attribution costs no full ERC run on
+top of the replica; `w16` timed all candidates:
 
 ```bash
 python scripts/research/profile_erc.py /tmp/erc2229/w16/.klt/place-and-route/modexp.gds \
-    scripts/research/erc_profile_specs/sky130_stack_nets_ties.json --attribute-walk
+    scripts/research/erc_profile_specs/sky130_stack_nets_ties.json \
+    --repeat 0 --attribute-walk
 python scripts/research/profile_erc.py /tmp/erc2229/w128/.klt/place-and-route/modexp.gds \
     scripts/research/erc_profile_specs/sky130_stack_nets_ties.json \
-    --attribute-walk --attribute-walk-limit 500
+    --repeat 0 --attribute-walk --attribute-walk-limit 500
 python scripts/research/profile_erc.py /tmp/erc2229/w255np/.klt/place-and-route/modexp.gds \
     scripts/research/erc_profile_specs/sky130_stack_nets_ties.json \
-    --attribute-walk --attribute-walk-limit 300
+    --repeat 0 --attribute-walk --attribute-walk-limit 300
 ```
+
+`--attribute-walk-limit` bounds only the timed per-candidate loop
+(cluster-id order). Layout loading, the primary extraction, and the
+active-region build still run once at full size before the first
+candidate is timed, so a sample does not bound those setup costs.
+`--check-identical` performs an additional uninstrumented full ERC run
+and needs a profiled baseline (`--repeat >= 1`), and `--cprofile` runs
+another full ERC pass under cProfile; neither belongs in this recipe.
+Specs declaring `devices[]` (or a `--deck`) are rejected.
+
+As originally recorded, these commands relied on the `--repeat 1`
+default, which runs one full profiled ERC pass before the attribution
+sample -- so the `w255np` command as written would include exactly the
+~4.7 h end-to-end `active_layer` run the text above says was not
+performed. `--repeat 0` is the supported recipe from issue #2753 on.
+The attribution table itself is unaffected either way: its numbers come
+from the replica's own timers, not from the profiled run.
 
 ### 2. Without `active_layer`
 
