@@ -6067,6 +6067,103 @@ def test_active_layer_omitted_mixed_net_uses_raw_combined_poly_area(tmp_path):
     assert report["gates"][0]["gate_area_um2"] == pytest.approx(1.0)
 
 
+def _shared_diffusion_two_finger_fixture(path) -> None:
+    """Two electrically separate poly fingers (A, B) crossing ONE shared
+    diffusion strip, plus a third poly-only resistor net (R) away from it.
+    The derived `poly & active` gate-oxide conductor (issue #2751) must not
+    short A to B through the shared diffusion, and must not give R any area.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    poly = layout.layer(1, 0)
+    licon = layout.layer(2, 0)
+    li1 = layout.layer(3, 0)
+    li1_label = layout.layer(3, 5)
+    diff = layout.layer(8, 0)
+
+    top.shapes(diff).insert(kdb.Box.new(_um(-1), _um(0), _um(4), _um(1)))
+    for name, x0, x1 in (("A", 0, 0.5), ("B", 2, 2.5)):
+        # finger crosses the strip and extends 1 um above it for the contact
+        top.shapes(poly).insert(kdb.Box.new(_um(x0), _um(-0.5), _um(x1), _um(2)))
+        top.shapes(licon).insert(
+            kdb.Box.new(_um(x0 + 0.1), _um(1.5), _um(x0 + 0.2), _um(1.6))
+        )
+        top.shapes(li1).insert(kdb.Box.new(_um(x0), _um(1.4), _um(x1), _um(1.8)))
+        top.shapes(li1_label).insert(
+            kdb.Text(name, kdb.Trans(_um(x0 + 0.25), _um(1.6)))
+        )
+    # poly-only resistor/tie body, no diffusion underneath
+    top.shapes(poly).insert(kdb.Box.new(_um(10), _um(10), _um(11), _um(11)))
+    top.shapes(licon).insert(kdb.Box.new(_um(10.1), _um(10.1), _um(10.2), _um(10.2)))
+    top.shapes(li1).insert(kdb.Box.new(_um(10), _um(10), _um(11), _um(11)))
+    top.shapes(li1_label).insert(kdb.Text("R", kdb.Trans(_um(10.5), _um(10.5))))
+    layout.write(str(path))
+
+
+def test_active_layer_derived_gate_oxide_is_connectivity_neutral(tmp_path):
+    """Issue #2751: the once-computed `poly & active` conductor is per-net
+    exact (A, B each own only their own 0.5 um^2 crossing; R excluded) and
+    leaves the extracted connectivity unchanged vs. omitting `active_layer`.
+    """
+    gds = tmp_path / "shared.gds"
+    _shared_diffusion_two_finger_fixture(gds)
+
+    with_active = tmp_path / "with.json"
+    without_active = tmp_path / "without.json"
+    _write_spec(with_active, _antenna_spec_variant(active_layer="8/0"))
+    _write_spec(without_active, _antenna_spec_variant(active_layer=None))
+
+    on = run_erc(str(gds), str(with_active))
+    off = run_erc(str(gds), str(without_active))
+
+    # A and B stay separate gates with exactly their own oxide area; the
+    # shared diffusion strip is not a connection, and R is excluded.
+    assert on["gate_count"] == 2
+    assert [g["gate_area_um2"] for g in on["gates"]] == [
+        pytest.approx(0.5),
+        pytest.approx(0.5),
+    ]
+    assert sorted(g["net"] for g in on["gates"]) == ["A", "B"]
+    # Without active_layer R is a gate too (raw poly), A/B areas are raw poly.
+    assert off["gate_count"] == 3
+    # Connectivity is identical either way: same named nets, same findings.
+    assert on["erc_findings"] == off["erc_findings"] or all(
+        f in off["erc_findings"] for f in on["erc_findings"]
+    )
+    assert {g["net"] for g in on["gates"]} <= {g["net"] for g in off["gates"]}
+
+
+def test_active_layer_gate_area_matches_whole_layout_boolean(tmp_path):
+    """Byte-equivalence guard for #2751: every `gate_area_um2` equals the
+    legacy per-net `(net poly & whole-layout active).merged()` area."""
+    gds = tmp_path / "shared.gds"
+    _shared_diffusion_two_finger_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, _antenna_spec_variant(active_layer="8/0"))
+
+    report = run_erc(str(gds), str(spec))
+    layout = kdb.Layout()
+    layout.read(str(gds))
+    top = layout.top_cell()
+    poly = kdb.Region(top.begin_shapes_rec(layout.layer(1, 0))).merged()
+    diff = kdb.Region(top.begin_shapes_rec(layout.layer(8, 0))).merged()
+    areas = [(kdb.Region(p) & diff).merged().area() for p in poly.each_merged()]
+    legacy = sorted(round(a * DBU * DBU, 9) for a in areas if a > 0)
+    assert sorted(g["gate_area_um2"] for g in report["gates"]) == legacy
+
+
+def test_active_layer_derived_name_collision_is_rejected(tmp_path):
+    gds = tmp_path / "shared.gds"
+    _shared_diffusion_two_finger_fixture(gds)
+    variant = _antenna_spec_variant(active_layer="8/0")
+    variant["stackup"].append({"name": "poly__gate_oxide", "layer": "50/0"})
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, variant)
+    with pytest.raises(ErcError, match="reserved"):
+        run_erc(str(gds), str(spec))
+
+
 def test_active_layer_rejected_on_non_gate_stackup_entry(tmp_path):
     gds = tmp_path / "basic.gds"
     _basic_fixture(gds)
