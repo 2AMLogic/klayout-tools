@@ -25,7 +25,13 @@ EXIT_FAIL = 3
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_socket_check(args.file, args.socket, top=args.top)
+        report = run_socket_check(
+            args.file,
+            args.socket,
+            top=args.top,
+            require_power_ports=getattr(args, "require_power_ports", False),
+            edge_band_um=getattr(args, "edge_band_um", None),
+        )
     except SocketCheckError as exc:
         return emit_error("socket-check", str(exc), args.format)
 
@@ -56,6 +62,8 @@ def _print_text(report: dict) -> None:
         for entry in check["violations"]:
             print(f"  {entry}")
 
+    _print_power_ports(report.get("power_ports") or {})
+
     budgets = report["budgets"]
     if budgets:
         print()
@@ -63,3 +71,22 @@ def _print_text(report: dict) -> None:
         for budget in budgets:
             note = f" -- {budget['notes']}" if budget["notes"] else ""
             print(f"  {budget['name']}: {budget['value']} {budget['unit']}{note}")
+
+
+def _print_power_ports(power_ports: dict) -> None:
+    """Issue #2839: the per-supply-pin port facts, one line each."""
+    if not power_ports.get("ports"):
+        return
+    print()
+    params = power_ports["parameters"]
+    print(
+        f"power ports (edge band {params['edge_band_um']} um, edges "
+        f"{','.join(params['edges'])}):"
+    )
+    for port in power_ports["ports"]:
+        distances = port["edge_distance_um"]
+        nearest = min(distances.values()) if isinstance(distances, dict) else None
+        print(
+            f"  {port['name']} ({port['use']}) on {port['metal_layer']}: "
+            f"{port['geometry_source']}, nearest edge {nearest} um"
+        )
