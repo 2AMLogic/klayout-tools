@@ -1492,6 +1492,54 @@ later expression may reference an earlier one's name:
 ]
 ```
 
+### `expr` cannot read `.meas` results
+
+The chaining rule above covers **`expr` -> `expr`** only. A `spice` entry's
+`.meas` card is a file-scope card that ngspice evaluates itself; its scalar is
+printed to the log but is **not** a vector the generated `let` can see. An
+`expr` that names a `.meas` result grades the corner `error` with the
+`measurement` diagnostic "printed no '<name> = <value>' line" (the engine log
+shows `vector <name> is not available or has zero length`). This applies to
+ordinary file-scope `.meas` cards; `analysis_steps[]` control-scope `meas`
+has different semantics (see that section). Making `.meas` scalars visible to
+`expr` is a separate contract change.
+
+```json
+"measurements": [
+  { "name": "ta", "spice": ".meas tran ta when v(o)=0.8 rise=3" },
+  { "name": "tb", "spice": ".meas tran tb when v(o)=0.8 rise=11" },
+  { "name": "t",  "expr": "(tb - ta)/8" }
+]
+```
+
+The `t` entry above errors. Workarounds: grade an algebraically equivalent raw
+measurement (e.g. bound `tb - ta` as `8 * t`, or an offset bound in the raw
+unit), derive the figure outside `klt sim` from the two reported crossings, or
+express the quantity directly from vectors in `expr` (e.g. a `meas`-free
+`vecmax()`/`mean()` reduction). The same applies to a `.meas` result plus a
+constant offset or unit conversion, such as `180 + ph*180/pi`.
+
+### `.meas` `WHEN`/`AT` thresholds must be literal numbers
+
+ngspice's `.meas ... when v(x)=<value>` accepts only a literal number (or a
+`.param`-style parameter reference) on the right-hand side, not an arithmetic
+expression. Verified on ngspice-46:
+
+```
+.meas tran good when v(o)=0.81        ; works
+.meas tran bad  when v(o)=0.5*1.62    ; fails
+```
+
+The failing card logs `Error: measure  bad  when(WHEN) : Expressions like
+0.5*1.62 are not supported.` and no value is printed. `klt sim` does not lint
+card text (parameterized cards are valid); instead, when the log names the
+failing measurement, that error text is appended to its `measurement`
+diagnostic (`measurement 'bad' produced no value -- ngspice reported:
+Expressions like 0.5*1.62 are not supported.`), bounded in length and
+available without `keep_artifacts`. An engine `.meas` error that cannot be
+matched to a missing measurement is reported once as a corner-level
+`measurement` diagnostic with severity `warning`; grading is unchanged.
+
 ### The expression must reduce to a single real scalar
 
 This is the one contract rule the tool cannot check up front. ngspice's
