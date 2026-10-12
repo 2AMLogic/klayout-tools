@@ -329,7 +329,7 @@
     },
     {
       "path": "src/klayout_tools/lef_abstract.py",
-      "lines": 834
+      "lines": 1350
     },
     {
       "path": "src/klayout_tools/liberty_compare.py",
@@ -697,7 +697,7 @@
     },
     {
       "path": "tests/test_lef_abstract.py",
-      "lines": 846
+      "lines": 1361
     },
     {
       "path": "tests/test_lef_header.py",
