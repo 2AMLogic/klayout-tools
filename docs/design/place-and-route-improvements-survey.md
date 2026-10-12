@@ -696,6 +696,245 @@ production legalizer merged on faith.
 
 **Not in scope:** global placement or routing (later, harder phases per Epic #700's own phase ordering); wiring this into the actual `klt place-and-route`/`klt par` request/response contract (a separate, larger issue once/if this spike says "Go").
 
+## 6. Design spike: P&R iteration cost and safe checkpoint reuse (issue #2783)
+
+Part of #2734 (original item 4). **Status: design spike, docs only. No
+persistent cache is implemented or proposed for immediate build without the
+gates below.** The reporter's "~30 minutes for a 16-corner run" figure came
+from an older build and **was not remeasured here**.
+
+### 6.1 What already exists on `main` (verified by source inspection, 0e952ded)
+
+| Capability | Where | What it gives an iterating caller |
+|---|---|---|
+| `pdk.sweep_corners` | `place_and_route.py` / `place_and_route_sta.py` (`_run_corner_sweep`); `docs/cli/place-and-route.md`, "Per-corner breakdown ... `pdk.sweep_corners`" | Scopes the post-route multi-corner sweep to a named subset of the library's shipped corners. Unresolvable names fail before any engine launch. The docs state an unscoped N-corner sweep pays one combined invocation plus one extra engine launch per corner. |
+| `target_stage` | same | Stops after `floorplan`/`place`/`cts`/`route`; one engine process per stage. |
+| Stage ODB checkpoints | `place_and_route.py` (`<top>_<stage>.odb` under `<request dir>/.klt/place-and-route/`) | Each stage `read_db`s the previous stage's checkpoint **within one request**. Nothing reads a checkpoint written by an earlier request. |
+| Standalone routed-artifact STA | `klt sta` (`docs/cli/sta.md`, `pdk.corner` / `pdk.corners`, `post_route_sta.py::_validate_corners`) | Re-times an already-routed DEF (optionally with caller SPEF) at a caller-selected corner list with no placement/CTS/route. The DEF is loaded fresh per corner, so every corner sees identical geometry. |
+
+Selected-corner recipe (already sufficient for timing iteration):
+
+1. Run `klt place-and-route` once, with `pdk.sweep_corners` naming only the
+   corner(s) the design operates at (or a single sign-off corner).
+2. Keep the routed `.def` (and `post_route_spef` output if wanted).
+3. For every further corner or constraint-only tweak that does not move
+   geometry, call `klt sta` with `pdk.corners: [...]` on that DEF. This
+   never re-runs floorplan/place/CTS/route.
+
+When this already meets the need: the question is "what does this *routed*
+design do at other corners / other SDC-style constraints". It does **not**
+meet the need when the iteration changes anything that feeds
+implementation (utilization, floorplan, PDN, macros, placement or CTS
+options, timing-driven constraints, engine build): those require a real
+re-implementation, and a cache can only help if it can prove that the
+unchanged *prefix* of stages is still valid.
+
+Differences between the two paths that must be explained, not assumed
+equal: (a) `klt sta` on a DEF times the DEF's wires with ideal clocks unless
+`constraints.propagated_clock` is set and a SPEF is supplied, whereas the
+in-flow sweep reads the ODB checkpoint with the engine's own estimated
+parasitics and the flow's own clock/constraint setup; (b) `klt sta` does not
+carry detailed-route-time state (for example post-`repair_antennas` diode
+insertion is in the DEF, but engine-side estimated-parasitic settings are
+not); (c) a *full repeated route* is re-seeded and not corner-invariant (the
+STA doc states this), so route-to-route slack differences are expected and
+are not an equivalence defect in either path. Numerical comparison of the
+two paths on a real routed design was **not** performed (see 6.2).
+
+### 6.2 Measurement: what was and was not measured
+
+Environment: Apple M3 Ultra (arm64), macOS (Darwin 27.0.0), `klt
+0.7.0+g0e952ded20c1`, OpenROAD native build reporting version `unknown`
+(`openroad -version`; `Features: -GPU +GUI -Python`), Yosys 0.69+post
+(143eb14f), date 2026-10-12.
+
+**Not measured (blocked by the environment, stated rather than estimated):**
+
+- No end-to-end `klt place-and-route` or `klt sta` run. `find_pdk()` found
+  no usable sky130 install under `~/.ciel`, `~/.volare`, `~/pdks`,
+  `/usr/local/share/pdk`, `/usr/share/pdk`, `~/share/pdk`, and no
+  `$PDK_ROOT` was set; only gf180mcu (A/B/C/D) is installed, and
+  `find_pdk("gf180mcu")` also fails with "no supported-layout PDK install".
+  The KLayout Python module (`pya`) is also not installed here. Therefore
+  **no stage timings, no per-corner `klt` sweep timings, no
+  existing-STA-versus-full-route comparison, and no 16-corner figure exist
+  in this spike.** The acceptance item "run the documented small
+  selected-corner recipe" is therefore **deferred**; it is item 0 of the
+  plan in 6.6 and must be executed on a host with sky130 before the
+  recommendation is built.
+- Docker was available but no OpenROAD image/PDK mount was set up; this
+  spike did not pursue a container run.
+
+**Measured (raw engine, not through `klt`; open gf180mcu 7-track library
+only, as the single available open PDK):** wall-clock of `openroad -no_init
+-exit` with a Tcl script, library files copied to a scratch directory
+(OpenROAD under the agent sandbox could not read the originals in
+`~/.volare`, "cannot read file", but read byte-identical copies). Each row
+is 3 runs unless noted.
+
+| Probe | Wall-clock (s) |
+|---|---|
+| Engine start, empty script | 0.61, 0.64, 0.63 |
+| Engine start, `-exit` with no script | 0.73, 0.68, 0.63 |
+| `read_liberty` of one corner (`tt_025C_5v00`, ~20 MB) | 1.19, 1.21, 1.23 |
+| `read_liberty` of all 15 shipped corners in **one** process | 9.83, 9.79, 10.64 |
+| 15 separate processes, one corner each (1 run) | 19.8 total |
+
+Reading, with the limits of the evidence: engine start-up is ~0.6 s;
+parsing one ~20 MB liberty deck adds ~0.6 s; so a per-corner subprocess
+(the design `pdk.sweep_corners` documents for `corners[]`) costs roughly
+twice the in-process load for the same corners (~1.3 s versus ~0.65 s per
+corner here) *before* any design is read or timed. This characterizes
+cold setup (process + liberty parse) only. It says nothing about stage
+times (floorplan/place/CTS/route), which on a real design are expected to
+dominate and are unmeasured. It does support one qualitative conclusion:
+corner analysis cost scales linearly with corner count even with no
+design, so scoping corners (`sweep_corners`, `klt sta pdk.corners`) is the
+first lever, and "repeated work" in a corner sweep is mostly repeated
+liberty parsing and process launches, not repeated placement. Caveats:
+different PDK than the project's primary (sky130); different library
+sizes; one machine; the 15-corner single process and the per-process run
+are not an identical STA workload (no design, no `define_corners`).
+
+### 6.3 Which work repeats on main
+
+Established by source/docs, not by timing:
+
+- **Across requests: all of it.** A new `klt place-and-route` request
+  re-runs every requested stage from RTL; the previous request's ODB files
+  are overwritten in the fixed `<request dir>/.klt/place-and-route/`
+  directory and are never consumed.
+- **Within a request:** each stage process re-issues `read_liberty` and
+  `create_clock`; the sweep spawns one extra engine launch per swept corner
+  beyond the first (documented in `docs/cli/place-and-route.md`).
+- **Via `klt sta`:** only the corner analysis repeats, by design.
+
+### 6.4 Recommendation (one bounded follow-up)
+
+**Recommend analysis-only replay, not validated checkpoint resume.** Make
+the existing selected-corner path first-class: a way for a completed
+`place-and-route` run to emit a content-addressed *routed bundle* (routed
+ODB or DEF, SPEF if produced, the exact SDC/constraints used, and a
+manifest), and an analysis verb or mode that re-times that bundle at a
+requested corner list after verifying the manifest. Rationale:
+
+1. It reuses the already-shipped, already-tested single-corner session
+   mechanics and the `klt sta` envelope; it adds no new engine-stage
+   semantics.
+2. Its validity condition is simple (the bundle is the input; corners and
+   analysis-only constraints are the free variables), whereas stage resume
+   must prove that placement/CTS/route are deterministic functions of the
+   digested inputs across engine builds and thread counts, which has not
+   been demonstrated and which the docs already flag for detailed routing
+   ("seeded but not corner-invariant").
+3. It addresses the reported pain (many-corner timing iteration) without
+   claiming speed-ups for implementation changes.
+
+Checkpoint resume (skip floorplan/place/CTS when only later-stage options
+changed) is **deferred** and gated on first measuring real stage times
+(6.6 item 0). If stage times show floorplan+place dominate and callers
+iterate on CTS/route options, file it as a separate issue then.
+
+### 6.5 Specification (applies to the analysis-replay bundle; a future stage resume must meet a strict superset)
+
+**Manifest (`schema_version`-ed, in the shared envelope's `provenance`
+style):** SHA-256 of every input file consumed (RTL/netlist, constraints /
+SDC text, floorplan and PDN inputs, macro LEF/lib/GDS, tech LEF, every
+liberty deck loaded, the DEF/ODB bundle members); resolved `find_pdk()`
+triple and PDK content digest (not just the path); engine identity
+(`openroad -version` string plus binary SHA-256, since this build reports
+`unknown`); `klt` version and git sha; the canonicalised request (all stage
+options, `target_stage`, `sweep_corners`, seeds, thread count, platform
+overrides); the stage reached; a manifest digest over all of the above; and
+the list of produced artifacts with their own digests.
+
+**Invalidation (any one mismatch means reject, never partial reuse):**
+
+| Changed | Effect |
+|---|---|
+| Any input file digest (RTL, netlist, SDC/constraints) | Reject; full re-run (resume) or re-time with new constraints only if the bundle is analysis-only and the changed item is declared analysis-only (see below). |
+| PDK, tech LEF, cell LEF, or liberty content | Reject. A *new corner within the same library* is allowed for replay only if that deck's digest is recorded in the replay result; the bundle's own implementation inputs must be unchanged. |
+| Engine build digest or `klt` version | Reject for resume. For replay: reject unless the same engine can still read the bundle (version-checked on load), and always record both identities. |
+| Floorplan, PDN, macro placement, IO placement inputs | Reject (implementation-affecting). |
+| Stage options (utilization, density, CTS/route flags, seeds, thread count) | Reject for resume of that stage and every later stage; irrelevant to replay except where they alter the routed artifact, which they cannot since it is the input. |
+| Constraints | A constraint is *analysis-only* only if listed in a closed allow-list (for example clock period for timing-only checks and I/O delays, once reported with clearly different semantics); anything else, including anything that the flow's timing-driven placement or repair consumed, is implementation-affecting. Default: implementation-affecting. |
+| Checkpoint compatibility | Each bundle member carries a format tag (ODB/engine db version). Unknown or older/newer tag means reject. |
+
+**Rejection behavior:** fail closed, before any engine launch where
+possible, with a JSON error in the shared envelope (`docs/json-contract.md`
+error shape) carrying a stable `code` (suggested: `bundle_stale`,
+`bundle_incompatible`, `bundle_corrupt`, `bundle_locked`), the first
+mismatching manifest field, expected vs actual digest, and the remediation
+("re-run place-and-route"). No silent fallback to a full re-run unless the
+caller passes an explicit opt-in flag, so a cache can never change a
+verdict invisibly. Corrupt bundles (truncated member, digest mismatch,
+unparsable manifest) are rejected the same way and never deleted
+automatically.
+
+**Provenance retained:** every replay result embeds the full bundle
+manifest digest and the bundle's origin run (stage reached, original
+request digest, original engine), plus the replay's own engine, corner
+decks (digest each) and wall-clock, in the `provenance` block, with an
+explicit `source: "replay"` marker so a consumer can never confuse replayed
+timing with a fresh implementation run. The original run's response and
+metrics files are copied into the bundle unmodified, not regenerated.
+
+**Concurrency:** bundles are write-once and immutable. Writers create the
+bundle in a temp directory beside the destination and publish with an
+atomic rename, so readers see either nothing or a complete bundle. Same
+destination, two writers: second publisher fails with `bundle_locked`
+(no overwrite). Readers never take a write lock. The existing fixed
+`.klt/place-and-route/` output directory is a separate hazard owned by
+**#2770** (output-directory lock). #2770 is **open and unmerged** as of this
+spike (checked 2026-10-12), so this proposal must not depend on it: the
+bundle publish protocol above is self-contained. If #2770 lands first, the
+producer step should take its lock around reading the run directory into
+the bundle, so a concurrent run cannot interleave members.
+
+### 6.6 Implementation and test plan (not implemented here)
+
+0. **Gate: measure.** On a host with sky130 and OpenROAD (container or
+   native), run the documented selected-corner recipe on a small design
+   (for example the repo's smallest sky130 example) and record: command,
+   `klt` sha, `openroad -version` plus binary digest, PDK digest, per-stage
+   wall-clock from the response, per-corner sweep time, `klt sta` time on
+   the routed DEF at the same corners, and the slack difference between
+   `klt sta` and the in-flow sweep with the parasitic/clock differences
+   explained (6.1). Append the table to this section. If cold setup plus
+   corner analysis is under a few seconds per corner, stop: the existing
+   recipe suffices and only a docs change is warranted.
+1. Add manifest + digest utilities (pure Python, no engine), with unit
+   tests for canonicalisation (key order, path-independence).
+2. Bundle writer (atomic publish) and reader/verifier; wire the producer
+   into `place-and-route` behind an explicit request field (default off,
+   so existing responses are byte-identical).
+3. Analysis replay path reusing `klt sta`'s session code; envelope fields
+   `source: "replay"`, manifest digest; docs in `docs/cli/sta.md` and
+   `docs/json-contract.md` if the envelope grows.
+4. Tests (all runnable without the engine unless marked engine-gated):
+   - stale input: modify RTL/SDC/liberty byte; expect `bundle_stale` naming
+     the field, no engine launched;
+   - changed constraints, PDK content, engine identity, `klt` version,
+     stage option: each rejected with the specific field (parametrised
+     table mirroring 6.5);
+   - analysis-only constraint allow-list: an allowed change replays and
+     records it; a disallowed one rejects;
+   - corrupt bundles: truncated ODB member, flipped digest, invalid JSON
+     manifest, missing member, unknown format tag; all `bundle_corrupt` /
+     `bundle_incompatible`, nothing deleted;
+   - concurrent writers: two processes publishing to one destination,
+     exactly one succeeds, loser gets `bundle_locked`, destination is
+     never partial; reader during publish sees nothing or the full
+     bundle (loop/stress test);
+   - interplay with #2770: producer under an output-dir lock does not
+     deadlock; skipped/xfail until #2770 lands;
+   - engine-gated equivalence: replayed slack at a corner versus a fresh
+     `klt sta` on the same DEF is equal within the documented tolerance,
+     and both are compared (not asserted equal) to the in-flow sweep.
+5. Only after step 0 data: decide whether to file the deferred stage-resume
+   issue; if so it needs a determinism study (same inputs, same engine,
+   repeated runs, byte-compare of checkpoints) before any resume logic.
+
 ## References
 
 - Cheng, C.-K., Kahng, A. B., Kang, I., Wang, L. "RePlAce: Advancing
