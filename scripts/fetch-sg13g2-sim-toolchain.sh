@@ -281,6 +281,27 @@ EOF
     return 0
 }
 
+# preflight_host_arch: the pinned openvaf-r asset is a linux_x64 build, and
+# its compiled OSDI objects are native to the host that ran it. Fail closed on
+# any other Linux architecture rather than letting the x86-64 compiler fail
+# opaquely later (#2727).
+preflight_host_arch() {
+    local arch
+    arch="$(uname -m)"
+    if [[ "$(uname -s)" == "Linux" && "$arch" != "x86_64" ]]; then
+        cat >&2 <<EOF
+error: host architecture $arch is not supported by the pinned openvaf-r build
+
+  openvaf-r $OPENVAF_R_TAG is fetched as a linux_x64 asset. OSDI objects must
+  be compiled on the architecture that will load them, so build the image on
+  an x86-64 instance (build-remote-sim-ami.sh defaults to c7i.xlarge) or
+  re-pin this script to an asset for $arch.
+EOF
+        return 1
+    fi
+    return 0
+}
+
 fetch_compiler() {
     if [[ $FORCE -eq 0 && -f "$COMPILER_MARKER" && -x "$COMPILER_BIN" && "$(cat "$COMPILER_MARKER")" == "$OPENVAF_R_TAG" ]]; then
         echo "openvaf-r $OPENVAF_R_TAG already cached at $COMPILER_BIN (use --force to refetch)"
@@ -376,6 +397,7 @@ if [[ -f "$MODELS_MARKER" && $FORCE -eq 0 && "$(cat "$MODELS_MARKER" 2>/dev/null
 fi
 
 if [[ $NEED_COMPILE -eq 1 ]]; then
+    preflight_host_arch || exit 1
     fetch_compiler
     apply_libllvm_workaround "$COMPILER_BIN" "$COMPILER_PREFIX" || exit 1
     compile_models
