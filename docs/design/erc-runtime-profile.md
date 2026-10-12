@@ -284,6 +284,56 @@ user (`/usr/bin/time -p klt erc GDS sky130_stack_noactive.json --pdk
 sky130 --format json`). Its user time matches the profiled run's 27.2 s
 CPU, so the wrappers add no material overhead.
 
+## After #2751: bounded per-net active lookup
+
+**Change.** `run_erc` no longer evaluates `(gate_poly_region & active_region).merged()`
+against the whole-layout active region once per candidate net. The active
+region is loaded once into a scratch cell (`erc._ActiveIndex`), and each
+net is intersected only with the active polygons whose bounding box
+touches the net's own poly bbox (a spatial query on the shape tree). Active
+polygons outside that window cannot intersect the net, so the merged
+result and its area are identical to the whole-layout boolean.
+
+The first attempt registered `poly & active` as an extra connected layer in
+the primary `LayoutToNetlist`. It was rejected: the extra layer changes
+KLayout's cluster numbering, so `gates[]` came out in a different order
+(same multiset of nets and areas, but not byte-identical). The bounded
+lookup does not touch the connectivity graph at all.
+
+**Method and provenance (partial).** Only the `WIDTH=16` fixture was
+re-measured. It was regenerated for this change with
+`python scripts/research/regenerate_erc_profile_fixture.py 16 /tmp/erc2751/w16`
+(2,466 nets; the routed GDS differs slightly from the `w16` above, which
+had 2,470), on the shared 8-vCPU dispatch host with other sweeps running.
+"Before" is `HEAD~1` of the change (the pre-change `src/` run through
+`PYTHONPATH`); "after" is this branch's change on top of it. Both ran
+`klt erc GDS scripts/research/erc_profile_specs/sky130_stack_nets_ties.json --pdk sky130 --format json`.
+
+| `w16`, `active_layer` + `ties[]`, full mode | before | after |
+| --- | --- | --- |
+| `klt erc` end to end (wall / user CPU) | 17.3 s / 17.3 s | 2.4 s / 2.4 s |
+| `& active` per candidate (`--attribute-walk`, all 2,466 candidates) | 15.4 ms (table above) | 0.057 ms |
+
+- Output check: the two JSON reports are identical (parsed-JSON equality after
+  masking `provenance.klt_version`, which embeds the git revision):
+  `gates[]` (all 1,854, including every `gate_area_um2` and the order),
+  `erc_findings`, `status`, and `erc_status`.
+- The "before" `per candidate` figure is the earlier measurement on the
+  earlier fixture, not a same-run comparison; the end-to-end row is.
+- Timings are single runs on a loaded host, so only the order of magnitude
+  is meaningful.
+
+**Pending.** The `WIDTH=128` re-measurement that the issue's acceptance
+asks for (baseline 3,890 s walk / 3,940 s wall) has **not** been done: it
+needs the regenerated `w128` routed GDS, which is about an hour of
+synth/P&R plus profile time and was not appropriate on a shared host.
+To close it, regenerate `w128` and run
+`profile_erc.py GDS sky130_stack_nets_ties.json --pdk sky130 --check-identical`
+(plus `--attribute-walk --attribute-walk-limit 500`) and add the `w128` row
+here. The expected result is a walk in the same order as the
+no-`active_layer` walk (a few seconds), by the `w16` ratio above; that is
+an expectation, not a measurement.
+
 ## Comparison with #2219 and with #2229's synthetic table
 
 - #2219 measured ~26 min for 16,640 gate nets, about 94 ms per gate net.

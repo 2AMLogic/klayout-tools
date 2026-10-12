@@ -297,6 +297,9 @@ def _attribute_walk(args: argparse.Namespace) -> dict[str, Any]:
         if active_layer is not None
         else None
     )
+    active_index = (
+        erc._ActiveIndex(active_region) if active_region is not None else None
+    )
     candidates = sorted(
         (n for n in circuit.each_net() if n.cluster_id != 0), key=lambda n: n.cluster_id
     )
@@ -309,9 +312,7 @@ def _attribute_walk(args: argparse.Namespace) -> dict[str, Any]:
         gate_poly = l2n.polygons_of_net(net, gate_index).merged()
         t1 = time.perf_counter()
         gate_area_region = (
-            (gate_poly & active_region).merged()
-            if active_region is not None
-            else gate_poly
+            active_index.intersect(gate_poly) if active_index is not None else gate_poly
         )
         t2 = time.perf_counter()
         area = gate_area_region.area()
