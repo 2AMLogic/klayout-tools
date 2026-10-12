@@ -119,6 +119,9 @@ BATCH_JOB_FAILED_CODE = "batch_job_failed"
 BATCH_JOB_TIMEOUT_CODE = "batch_job_timeout"
 BATCH_INPUT_TOO_LARGE_CODE = "batch_input_too_large"
 
+#: Appended to every batch failure message: the reason the backend exists.
+_NO_FALLBACK = "(no local fallback: xschem was not run on this host)"
+
 
 # --------------------------------------------------------------------------- #
 # Backend selection
@@ -568,8 +571,7 @@ def _read_runner_report(collected: str, job_id: str) -> dict[str, Any]:
         report = sim_batch.read_collected_report(collected)
     except sim_batch.BatchError as exc:
         raise NetlistError(
-            f"batch job {job_id}: {exc} (no local fallback: xschem was not run "
-            "on this host)",
+            f"batch job {job_id}: {exc} {_NO_FALLBACK}",
             code=BATCH_JOB_FAILED_CODE,
             job_id=job_id,
         ) from exc
@@ -624,6 +626,131 @@ def _read_collected_netlist(
 # --------------------------------------------------------------------------- #
 
 
+def _validate_batch_args(
+    schematic: str,
+    *,
+    pdk: str | None,
+    timeout_s: float,
+    xschem_binary: str,
+) -> str:
+    """The local refusals, all before any packaging or upload. Returns the
+    (required) PDK variant."""
+    if xschem_binary != DEFAULT_XSCHEM_BINARY:
+        raise NetlistError(
+            "--xschem-binary names an executable on this host and cannot apply "
+            "to --backend batch, which runs the runner image's own xschem; "
+            "drop it, or use --backend local"
+        )
+    if not pdk:
+        raise NetlistError(
+            "--backend batch requires --pdk (it selects the runner image and the "
+            "runner's PDK, e.g. --pdk sky130A)"
+        )
+    if timeout_s <= 0:
+        raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
+    _validate_schematic(schematic)
+    return pdk
+
+
+def _transport_error(job_id: str, exc: sim_batch.BatchError) -> NetlistError:
+    if isinstance(exc, sim_batch.BatchPollTimeout):
+        return NetlistError(
+            f"batch job {job_id}: {exc} -- it may still finish on the fleet, but "
+            f"no netlist was collected {_NO_FALLBACK}",
+            code=BATCH_POLL_TIMEOUT_CODE,
+            job_id=job_id,
+        )
+    return NetlistError(
+        f"batch job {job_id}: {exc} {_NO_FALLBACK}", code=exc.code, job_id=job_id
+    )
+
+
+def _submit_and_wait(
+    config: sim_batch.BatchConfig,
+    job_id: str,
+    spec: sim_batch.BatchJobSpec,
+    *,
+    runner: remote_transport.CommandRunner | None,
+    sleep: Callable[[float], None],
+) -> dict[str, Any]:
+    """Upload, launch and poll to a terminal ``status.json``. Every transport
+    failure, the poll timeout included, becomes a :class:`NetlistError`."""
+    try:
+        sim_batch.submit_job(config, job_id, spec, runner=runner)
+        sim_batch.launch_job(config, job_id, runner=runner, sleep=sleep)
+        return sim_batch.poll_status(config, job_id, runner=runner, sleep=sleep)
+    except sim_batch.BatchError as exc:
+        raise _transport_error(job_id, exc) from exc
+
+
+def _collect(
+    config: sim_batch.BatchConfig,
+    job_id: str,
+    status: dict[str, Any],
+    collected: str,
+    *,
+    runner: remote_transport.CommandRunner | None,
+) -> None:
+    """Collect ``outputs/``. A job that did not finish ``done`` is turned
+    into a :class:`NetlistError` carrying the runner's own error, when one
+    can be recovered."""
+    done = status.get("state") == "done" and (
+        sim_batch._status_exit_code(status) in (0, None)
+    )
+    if done:
+        try:
+            sim_batch.collect_outputs(config, job_id, collected, runner=runner)
+        except sim_batch.BatchError as exc:
+            raise _transport_error(job_id, exc) from exc
+        return
+    runner_error: dict[str, Any] | None = None
+    try:
+        sim_batch.collect_outputs(config, job_id, collected, runner=runner)
+        runner_error, note = _runner_error(collected)
+    except sim_batch.BatchError as exc:
+        note = str(exc)
+    raise _job_failure(
+        job_id=job_id, status=status, runner_error=runner_error, note=note
+    )
+
+
+def _payload(
+    *,
+    schematic: str,
+    output: str,
+    check: bool,
+    report: dict[str, Any],
+    data: bytes,
+    remote: dict[str, Any],
+) -> dict[str, Any]:
+    """The ``schema_version: 1`` payload a local run returns, from the
+    runner's report, plus ``environment.remote``; writes ``output`` unless
+    ``check``."""
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "schematic": schematic,
+        "output": output,
+        "mode": "check" if check else "generate",
+        "xschem": report["xschem"],
+    }
+    for key in ("pdk", "block"):
+        if isinstance(report.get(key), dict):
+            payload[key] = report[key]
+    payload["environment"] = {"remote": remote}
+
+    if check:
+        status_value, drift = _check_result(output, data)
+        payload["status"] = status_value
+        payload["netlist"] = _netlist_block(None, data)
+        payload["drift"] = drift
+        return payload
+
+    _write_output(output, data)
+    payload["status"] = STATUS_GENERATED
+    payload["netlist"] = _netlist_block(output, data)
+    return payload
+
+
 def run_netlist_batch(
     schematic: str,
     output: str,
@@ -648,28 +775,17 @@ def run_netlist_batch(
     Raises :class:`NetlistError` for every failure, before any upload when
     the cause is local, and never runs xschem on this host.
     """
-    if xschem_binary != DEFAULT_XSCHEM_BINARY:
-        raise NetlistError(
-            "--xschem-binary names an executable on this host and cannot apply "
-            "to --backend batch, which runs the runner image's own xschem; "
-            "drop it, or use --backend local"
-        )
-    if not pdk:
-        raise NetlistError(
-            "--backend batch requires --pdk (it selects the runner image and the "
-            "runner's PDK, e.g. --pdk sky130A)"
-        )
-    if timeout_s <= 0:
-        raise NetlistError(f"--timeout-s must be positive (got {timeout_s})")
-    _validate_schematic(schematic)
+    variant = _validate_batch_args(
+        schematic, pdk=pdk, timeout_s=timeout_s, xschem_binary=xschem_binary
+    )
     if pdk_root is not None and warn is not None:
         warn(
             "--pdk-root names a path on this host and is not forwarded to the "
             "batch runner, which resolves its own PDK"
         )
 
-    tree = package_tree(schematic, rcfile=rcfile, pdk=pdk, batch_root=batch_root)
-    config = _resolve_config(pdk, timeout_s)
+    tree = package_tree(schematic, rcfile=rcfile, pdk=variant, batch_root=batch_root)
+    config = _resolve_config(variant, timeout_s)
     job_id = new_job_id()
 
     with tempfile.TemporaryDirectory(prefix="klt-netlist-batch-") as scratch:
@@ -678,56 +794,14 @@ def run_netlist_batch(
         spec = build_job_spec(
             tree,
             tarball_path=tarball,
-            pdk=pdk,
+            pdk=variant,
             timeout_s=timeout_s,
             block=block,
             version_check=config.runner_version_check,
         )
-        try:
-            sim_batch.submit_job(config, job_id, spec, runner=runner)
-            sim_batch.launch_job(config, job_id, runner=runner, sleep=sleep)
-            status = sim_batch.poll_status(config, job_id, runner=runner, sleep=sleep)
-        except sim_batch.BatchPollTimeout as exc:
-            raise NetlistError(
-                f"batch job {job_id}: {exc} -- it may still finish on the "
-                "fleet, but no netlist was collected (no local fallback: xschem "
-                "was not run on this host)",
-                code=BATCH_POLL_TIMEOUT_CODE,
-                job_id=job_id,
-            ) from exc
-        except sim_batch.BatchError as exc:
-            raise NetlistError(
-                f"batch job {job_id}: {exc} (no local fallback: xschem was not "
-                "run on this host)",
-                code=exc.code,
-                job_id=job_id,
-            ) from exc
-
+        status = _submit_and_wait(config, job_id, spec, runner=runner, sleep=sleep)
         collected = os.path.join(scratch, "outputs")
-        done = status.get("state") == "done" and (
-            sim_batch._status_exit_code(status) in (0, None)
-        )
-        if not done:
-            runner_error: dict[str, Any] | None = None
-            note = ""
-            try:
-                sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-                runner_error, note = _runner_error(collected)
-            except sim_batch.BatchError as exc:
-                note = str(exc)
-            raise _job_failure(
-                job_id=job_id, status=status, runner_error=runner_error, note=note
-            )
-
-        try:
-            sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-        except sim_batch.BatchError as exc:
-            raise NetlistError(
-                f"batch job {job_id}: {exc} (no local fallback: xschem was not "
-                "run on this host)",
-                code=exc.code,
-                job_id=job_id,
-            ) from exc
+        _collect(config, job_id, status, collected, runner=runner)
         report = _read_runner_report(collected, job_id)
         data = _read_collected_netlist(collected, report, job_id)
         data = _rewrite_runner_paths(data, _read_tree_roots(collected), tree.root)
@@ -739,30 +813,14 @@ def run_netlist_batch(
             "input_bytes": tree.total_bytes,
         }
 
-    payload: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "schematic": schematic,
-        "output": output,
-        "mode": "check" if check else "generate",
-        "xschem": report["xschem"],
-    }
-    if isinstance(report.get("pdk"), dict):
-        payload["pdk"] = report["pdk"]
-    if isinstance(report.get("block"), dict):
-        payload["block"] = report["block"]
-    payload["environment"] = {"remote": remote}
-
-    if check:
-        status_value, drift = _check_result(output, data)
-        payload["status"] = status_value
-        payload["netlist"] = _netlist_block(None, data)
-        payload["drift"] = drift
-        return payload
-
-    _write_output(output, data)
-    payload["status"] = STATUS_GENERATED
-    payload["netlist"] = _netlist_block(output, data)
-    return payload
+    return _payload(
+        schematic=schematic,
+        output=output,
+        check=check,
+        report=report,
+        data=data,
+        remote=remote,
+    )
 
 
 __all__ = [

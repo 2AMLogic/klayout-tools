@@ -79,6 +79,19 @@ def run(args: argparse.Namespace) -> int:
     return EXIT_DRIFTED if report["status"] == "drifted" else EXIT_OK
 
 
+def _print_remote(report: dict) -> None:
+    """The batch job line, only for a ``--backend batch`` run."""
+    remote = (report.get("environment") or {}).get("remote")
+    if remote is None:
+        return
+    print(
+        f"batch: job {remote.get('job_id')} state={remote.get('state')} "
+        f"instance={remote.get('instance_type') or '-'} "
+        f"runner_klt={remote.get('runner_klt_version') or '-'} "
+        f"({remote.get('runner_compatibility')})"
+    )
+
+
 def _print_text(report: dict) -> None:
     print(f"schematic: {report['schematic']}")
     print(f"output: {report['output']}")
@@ -95,15 +108,7 @@ def _print_text(report: dict) -> None:
         f"netlist)  duration={xschem['duration_s']}s"
     )
     print(f"  flags: {' '.join(xschem['forced_flags'])} (always forced)")
-
-    remote = (report.get("environment") or {}).get("remote")
-    if remote is not None:
-        print(
-            f"batch: job {remote.get('job_id')} state={remote.get('state')} "
-            f"instance={remote.get('instance_type') or '-'} "
-            f"runner_klt={remote.get('runner_klt_version') or '-'} "
-            f"({remote.get('runner_compatibility')})"
-        )
+    _print_remote(report)
 
     netlist = report["netlist"]
     print(
