@@ -406,6 +406,7 @@
     "sim": {
       "kind": "verb",
       "description": "`klt sim` implementation: core modules plus CLI adapter.",
+        "klayout_tools.asap7_bsimcmg",
       "modules": [
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.digital_fleet",
