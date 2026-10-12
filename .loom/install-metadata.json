@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1073",
-  "loom_commit": "abb0872ba7d1d3f6f3a14f71f51a562e89308181",
+  "loom_version": "0.19.1081",
+  "loom_commit": "6966a93d1cd1b005f2a6b22bf9691ade8793ed73",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -410,9 +410,18 @@
     ".loom/docs/stale-check-inputs.md",
     ".loom/scripts/tests/test-check-ci-status.sh",
     ".loom/docs/fleet-config-lifecycle.md",
-    ".loom/docs/session-output.md"
+    ".loom/docs/session-output.md",
+    ".loom/docs/branch-update-strategy.md",
+    ".loom/docs/push-lease-pinning.md",
+    ".loom/scripts/tests/test-merge-pr-required-checks.sh",
+    ".loom/scripts/tests/test-sweep-wave-judge-done-staleness.sh",
+    ".agents/skills/loom-builder-worktree/SKILL.md",
+    ".loom/docs/merge-pr-exit-code-exceptions.md",
+    ".loom/scripts/tests/test-judge-payload-drop-guard.sh",
+    ".loom/scripts/tests/test-merge-pr-ci-result.sh",
+    ".loom/scripts/tests/test-version-check-gate-callsites.sh"
   ],
-  "last_resync": "2026-10-11",
+  "last_resync": "2026-10-12",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
-  "requires_daemon": "0.19.772"
+  "requires_daemon": "0.19.1081"
 }
