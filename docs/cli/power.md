@@ -292,6 +292,30 @@ analysis/solver runs. This applies to the top level and to every nested object
 `current_model`, its `instances[]` and their `activity` objects). A key that is
 valid in a *different* section is still unknown in the section it appears in.
 
+**Inline annotations (`_comment`, issue #2822).** The one exception is the
+exact key `_comment`, accepted in every object listed above (top level and
+each entry of an array). Its value may be any JSON value (string, array,
+object, number, boolean, `null`) and is opaque: it is never validated or
+interpreted, keys inside it are not spec fields, and it does not satisfy any
+required field of the object that carries it. The spec file is not rewritten,
+so provenance hashes still cover the exact bytes you supplied. Nothing else is
+exempt -- `_commment`, `_other`, `$comment` and any other key are still
+rejected with the full field path.
+
+```json
+{
+  "_comment": "VPWR grid, worst-case corner",
+  "pads": [{"_comment": {"why": "pad on the west edge"}, "net": "VPWR",
+            "x_um": 0, "y_um": 0, "voltage_v": 1.8}],
+  "current_model": {
+    "_comment": ["estimated from post-synthesis power report"],
+    "supply_net": "VPWR", "ground_net": "VGND", "vdd_v": 1.8,
+    "instances": [{"_comment": "clock buffer", "x_um": 1, "y_um": 1,
+                   "current_a": 0.1}]
+  }
+}
+```
+
 The reason is version skew: a spec written against a newer `klt` that carries a
 field this build predates would otherwise run green and report the older
 semantics, indistinguishable from a spec that never asked for the field. Upgrade
