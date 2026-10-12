@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import textwrap
 import zipfile
 from pathlib import Path
 
@@ -34,6 +35,10 @@ packaging_version = pytest.importorskip("packaging.version")
 packaging_specifiers = pytest.importorskip("packaging.specifiers")
 
 _BASE = "9.9.9"
+#: Console script (and the module backing it) the throwaway project installs,
+#: so the launcher test can run the installed artifact the way `klt` runs.
+_SCRIPT = "klt-identity-probe"
+_PROBE_MODULE = "_identity_probe"
 _PACKAGE_FILES = ("__init__.py", "_version_scheme.py", "build_identity.py")
 
 
@@ -83,6 +88,9 @@ def _make_project(directory: Path) -> Path:
             'dynamic = ["version"]',
             'requires-python = ">=3.10"',
             "",
+            "[project.scripts]",
+            f'{_SCRIPT} = "klayout_tools.{_PROBE_MODULE}:main"',
+            "",
             _table(real, "[build-system]"),
             _table(real, "[tool.hatch.build.targets.wheel]"),
             version_table,
@@ -95,6 +103,9 @@ def _make_project(directory: Path) -> Path:
     shutil.copy(_ROOT / "hatch_build.py", directory / "hatch_build.py")
     for name in _PACKAGE_FILES:
         shutil.copy(_ROOT / "src" / "klayout_tools" / name, package / name)
+    (package / f"{_PROBE_MODULE}.py").write_text(
+        f"def main():\n{textwrap.indent(_PROBE, '    ')}\n", encoding="utf-8"
+    )
     (directory / ".gitignore").write_text("dist/\n")
     _git(directory, "init", "-q", ".")
     _git(directory, "add", "-A")
@@ -278,3 +289,36 @@ def test_post_tag_build_reports_one_identity_on_every_surface(artifacts, tmp_pat
     } == {expected}
     assert probe["is_release"] is False
     assert probe["git_commit"] == artifacts["dev_commit"]
+
+
+def test_one_artifact_reports_one_identity_under_every_launcher(artifacts, tmp_path):
+    """Running the same installed wheel via its console script, `uvx`, and
+    `uv run --no-project --with` reports the same identity: it comes from the
+    artifact's metadata and build record, never from how it was launched."""
+    expected = _wheel_version(_wheel(artifacts["dev"]))
+    requirement = f"klayout-tools=={expected}"
+    venv = tmp_path / "venv"
+    _install_and_probe(venv.parent, artifacts["links"], requirement)
+    script = venv / ("Scripts" if sys.platform == "win32" else "bin") / _SCRIPT
+
+    offline = (
+        "--python", sys.executable,
+        "--no-index", "--find-links", str(artifacts["links"]),
+        "--cache-dir", str(tmp_path / "uv-cache"),
+    )  # fmt: skip
+    runs = {
+        "console_script": _run(str(script), cwd=tmp_path),
+        "uvx": _run(
+            _UV, "tool", "run", *offline, "--from", requirement, _SCRIPT,
+            cwd=tmp_path,
+        ),
+        "uv_run_no_project": _run(
+            _UV, "run", "--no-project", *offline, "--with", requirement,
+            _SCRIPT, cwd=tmp_path,
+        ),
+    }  # fmt: skip
+    reports = {name: json.loads(out) for name, out in runs.items()}
+    assert reports["console_script"]["version"] == expected
+    assert reports["console_script"]["git_commit"] == artifacts["dev_commit"]
+    for name, report in reports.items():
+        assert report == reports["console_script"], name
