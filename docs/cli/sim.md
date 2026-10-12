@@ -1552,11 +1552,11 @@ available without `keep_artifacts`. An engine `.meas` error that cannot be
 matched to a missing measurement is reported once as a corner-level
 `measurement` diagnostic with severity `warning`; grading is unchanged.
 
-`FIND ... AT=` is stricter than `WHEN`. On ngspice-46, `at=0.5*2.5u` fails with
-the misleading `find(AT) : out of interval`, and unlike `WHEN`, a `.param`
-reference (`at=th`) also fails (`bad syntax of WHEN`). Use a literal time for
-`AT=`. Both errors follow the same `Error: measure <name> ...` log format, so
-they are attached to the measurement's diagnostic in the same way.
+`FIND ... AT=` does not accept an arithmetic expression either. On ngspice-46,
+`at=0.5*2.5u` fails with the misleading `find(AT) : out of interval`. Use a
+literal time or a `.param` reference. This error follows the same
+`Error: measure <name> ...` log format, so it is attached to the measurement's
+diagnostic in the same way.
 
 ### The expression must reduce to a single real scalar
 
