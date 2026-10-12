@@ -1277,6 +1277,28 @@ covered by drawn conductor — is named in
 `def_net_names.unresolved_single_pin_nets` and simply keeps the pre-#1488
 `$<id>` fallback downstream; the merge itself never fails over it.
 
+### Metal density coverage declaration (`coverage`, issue #2781)
+
+Every successful response, at every `target_stage` (`floorplan`, `place`,
+`cts`, `route`), carries an additive top-level `coverage` object stating what
+this command does **not** do:
+
+```json
+"coverage": {
+  "metal_density_fill": {"status": "unsupported", "inserted": false, "reason": "..."},
+  "density_compliance": {"status": "unsupported", "evaluated": false, "reason": "..."}
+}
+```
+
+No metal density fill is inserted and density compliance is never evaluated.
+The standard-cell gap fillers placed by `filler_placement` at `route` are not
+metal fill, and a zero `route_drc_violation_count` (routing DRC only) must not
+be read as density compliance. Whether density rules are covered for a layout
+must be determined separately: `klt drc --deck sky130` density coverage comes
+from that deck's own rule inventory, not from this field. Failures use the
+standard error envelope and do not carry `coverage`. The field is additive;
+`schema_version` is unchanged.
+
 ### Minimum-area repair (issue #2139)
 
 A routed design's metal on any one layer is the **merge** of everything the

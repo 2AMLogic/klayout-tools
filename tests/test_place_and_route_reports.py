@@ -237,3 +237,23 @@ def test_failed_metrics_publication_preserves_engine_artifact(tmp_path, monkeypa
         )
     assert metrics_path.read_text() == original
     assert list(tmp_path.iterdir()) == [metrics_path]
+
+
+@pytest.mark.parametrize("stage", ["floorplan", "place", "cts", "route"])
+def test_coverage_declares_metal_density_unsupported_at_every_stage(
+    tmp_path, monkeypatch, stage
+):
+    request = _setup_success_env(tmp_path, monkeypatch, target_stage=stage)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    result = place_and_route.run_place_and_route(request)
+    cov = result["coverage"]
+    assert cov["metal_density_fill"]["status"] == "unsupported"
+    assert cov["metal_density_fill"]["inserted"] is False
+    assert cov["density_compliance"]["status"] == "unsupported"
+    assert cov["density_compliance"]["evaluated"] is False
+    assert result["schema_version"] == place_and_route.SCHEMA_VERSION
+    if stage == "route":
+        # Zero routing DRC (and gap fillers) must not imply density compliance.
+        assert result["route_drc_violation_count"] == 0
+        assert cov["density_compliance"]["status"] != "clean"

@@ -1707,6 +1707,33 @@ _SPEF_NET_CHECK_RE = re.compile(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)")
 #: value, restated at top level" -- see the contract spike section 5's
 #: `stages` field description. Built once via `dict.get` so a field a stage
 #: didn't populate degrades to `null`, never a `KeyError`.
+def _coverage_declaration():
+    """Issue #2781: fixed declaration of metal-density coverage.
+
+    Standard-cell gap fillers (`filler_placement`) are not metal density
+    fill, and a zero routing-DRC count is not density compliance.
+    """
+    return {
+        "metal_density_fill": {
+            "status": "unsupported",
+            "inserted": False,
+            "reason": (
+                "no metal density fill is inserted at any stage; "
+                "standard-cell gap fillers are not metal fill"
+            ),
+        },
+        "density_compliance": {
+            "status": "unsupported",
+            "evaluated": False,
+            "reason": (
+                "metal density rules are not evaluated by place-and-route; "
+                "a zero route_drc_violation_count does not imply density "
+                "compliance"
+            ),
+        },
+    }
+
+
 _TOP_LEVEL_METRIC_KEYS = (
     "die_area_um2",
     "core_area_um2",
@@ -2585,6 +2612,8 @@ def run_place_and_route(
         "status": "ok",
         "stage_reached": target_stage,
         "seed": seed,
+        # Additive field (issue #2781): see `_coverage_declaration`.
+        "coverage": _coverage_declaration(),
         # Additive field (issue #1100): the tech-LEF parasitic-extraction
         # corner actually resolved (`"min"`/`"nom"`/`"max"`,
         # `request.pdk.interconnect_corner`, default `"nom"`) -- distinct
