@@ -106,7 +106,7 @@ def test_sg13cmos5l_deck_registered_with_six_width_space_rules():
     (Name kept from #1400 for git-blame continuity even though #1417 below
     grew the deck well past six rules -- the `Activ`/`GatPoly`/`Metal1`
     width/space-only *subset* this test asserts is still exactly six rules;
-    see `test_sg13cmos5l_deck_has_27_rules_after_metal_stack_extension` for
+    see `test_sg13cmos5l_deck_has_30_rules_after_metal_stack_extension` for
     the full, current rule count.)"""
     deck = get_deck("sg13cmos5l")
     mos_only_rules = [
@@ -118,14 +118,15 @@ def test_sg13cmos5l_deck_registered_with_six_width_space_rules():
     assert {rule.check for rule in mos_only_rules} == {"width", "space"}
 
 
-def test_sg13cmos5l_deck_has_27_rules_after_metal_stack_extension():
+def test_sg13cmos5l_deck_has_30_rules_after_metal_stack_extension():
     """Issue #1417 extends the curated deck past its #1400 Activ/GatPoly/
     Metal1-only starter to cover the full Metal1-TopMetal1 stack and its
-    Via1/Via2/Via3/TopVia1 vias -- 27 rules total across 11 layers, and now
+    Via1/Via2/Via3/TopVia1 vias -- 30 rules total (27 + 3 upper-landing containment
+    rules, #2726) across 11 layers, and now
     an `"enclosing"` check kind (the via/metal enclosure rules) alongside
     `"width"`/`"space"`."""
     deck = get_deck("sg13cmos5l")
-    assert len(deck) == 27
+    assert len(deck) == 30
     assert {rule.check for rule in deck} == {"width", "space", "enclosing"}
     assert {rule.layer for rule in deck} == {
         (1, 0),  # Activ.drawing
