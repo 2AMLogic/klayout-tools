@@ -26,6 +26,47 @@ not `klt --version`, if you need to detect this kind of drift. See
   `marker_gated` is `true`, and the leaves are folded into
   `required_layers`/`excluded_layers`. `schema_version` is unchanged.
 
+- **`klt sim --batch-set a.json b.json ...`** (issue #2869): submit a set of
+  independent `backend: batch` requests in one invocation, with at most
+  `--max-in-flight` (default 4) in flight and the rest queued. Reuses
+  `sim_batch.launch_job`'s `capacity_wait_s` backoff (no second retry loop),
+  never falls back to local ngspice, keeps one `report.json` per request, and
+  emits one new aggregate envelope (`schema_version: 1`,
+  `docs/schemas/sim-set-report.schema.json`) with per-request status, job id
+  and error code. Exit code is the worst per-request code (partial set: `4`).
+  Additive: single-request `klt sim` and its JSON are unchanged; the
+  concurrency-cap refusal classification stays with #2917.
+
+- **`klt sim` returns a signal's threshold-crossing time series from one
+  declaration** (issue #2868): a new `measurements[].crossings` form
+  (`{"signal": "v(ro1)", "level": 0.9, "edge": "rise"|"fall"|"either",
+  "from"?, "to"?, "max"?}`, `analysis.kind: "tran"` only) replaces a stack of
+  per-edge `.meas ... WHEN v(x)=<thr> RISE=<k>` cards. Times are linearly
+  interpolated between samples and computed inside the corner run, so the
+  series comes back inline on every backend — including `batch`, sharded or
+  not, with `options.keep_artifacts: false`. The entry's `value` is the
+  crossing count (still a number, graded by `limits` like any scalar); the
+  series rides a new, additive `crossings` object (`times`, `edges`,
+  `truncated`) on that `corners[].measurements[]` entry. No `schema_version`
+  bump. Refused for `engine: "xyce"` and inside `analysis_steps[]`.
+
+- **`klt sim` rejects a `corners.supply_v` key that names a `.param`**
+  (issue #2867): ngspice's `alter <param>=<value>` cannot change a `.param`
+  (its dependents were evaluated when the deck was parsed; ngspice only logs
+  `no such device or model name`), so such a sweep used to report N
+  identical `pass` corners at the nominal value. A key the netlist declares
+  as a top-level `.param` with no element of that name now fails with a
+  `SimError` before any run or off-host submission, pointing at the source
+  that reads the parameter (or at `corners.params`, #3035). The same rule
+  applies to `analysis_steps[].alter` targets. Keys naming a source, a name
+  declared as both, and names whose declaration sits behind an unresolvable
+  `.include`/`.lib` are unaffected. **Behaviour change:** a request keyed by
+  a `.param` name now errors instead of passing; key it by the voltage
+  source instead. The `sky130-bandgap-reference` and `ldo-pmos-pass-error-amp`
+  kb requests were keyed this way and are re-keyed to their sources (`vdd`,
+  `vin`); the LDO entry's recorded `vout_v` at the 3.0 V corner is corrected
+  from 1.80324 V (actually the 3.3 V nominal) to 1.80264 V.
+
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time
   from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the

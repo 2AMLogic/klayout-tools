@@ -74,7 +74,18 @@ two disagree, this document (and the code) win.
   "next to the input" convention `klt render`/`klt sim` already use). The
   output path's parent directory is created automatically if it does not
   already exist (including any missing intermediate directories), matching
-  `klt render`/`klt lvs`.
+  `klt render`/`klt lvs`. For a read-only census that must not drop a
+  `<block>.spice` into the source tree, use `--no-netlist` instead.
+- `--no-netlist` — census-only run (issue #2850): write **no** netlist
+  anywhere (nothing lands next to the input). Counts, `device_counts`,
+  `status` and exit codes are identical to a normal run; the report carries
+  `netlist_path: null` and `netlist_sha256: null`. Rejected with exit 1 when
+  combined with `-o/--output` (contradictory) or `--subcircuit`/
+  `--subcircuit-output` (the sub-circuit deck is sliced from the written
+  netlist). `--parasitics`, `--spef` and the other flags do not read the
+  netlist back and combine freely (`--spef` still writes its own file).
+  Without the flag the default is unchanged. A report recorded with
+  `--no-netlist` is replayed as `--no-netlist` by `--check --rerun`.
 - `--top` — top cell to extract when the stream has more than one (required
   in that case; optional otherwise, and must name the sole top cell if
   given).
@@ -6953,8 +6964,8 @@ exit codes).
 | `deck`             | string                     | Extraction deck used (`"sky130"` / `"gf180mcu"`).                                                      |
 | `top`              | string                     | Top cell the netlist was extracted from.                                                               |
 | `dbu_um`           | number (float)             | Database unit in micrometres, same semantics as `klt layers`/`klt drc`.                                |
-| `netlist_path`     | string                     | Resolved path of the written SPICE netlist (echoes `--output` or the computed default).                |
-| `netlist_sha256`   | string                     | SHA-256 hex digest of the written netlist file.                                                        |
+| `netlist_path`     | string \| null             | Resolved path of the written SPICE netlist (echoes `--output` or the computed default). `null` only when `--no-netlist` was passed. |
+| `netlist_sha256`   | string \| null             | SHA-256 hex digest of the written netlist file. `null` only when `--no-netlist` was passed.            |
 | `status`           | `"extracted"`              | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes).                    |
 | `device_count`     | integer                    | `len(devices)`.                                                                                        |
 | `net_count`        | integer                    | `len(nets)`.                                                                                           |

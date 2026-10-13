@@ -23556,3 +23556,83 @@ def test_resistance_path_request_document_round_trip(tmp_path):
         )
         with pytest.raises(ExtractError):
             _apply_request(create_parser().parse_args(["extract", str(request_path)]))
+
+
+# --no-netlist (issue #2850) -------------------------------------------------
+
+
+def _extract_json(capsys, *argv):
+    code = main(["extract", *argv, "--format", "json"])
+    return code, capsys.readouterr()
+
+
+def test_no_netlist_writes_nothing_and_reports_null(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    normal = run_extract(path, "sky130", output=str(tmp_path / "ref.spice"))
+    before = sorted(os.listdir(tmp_path))
+
+    result = run_extract(path, "sky130", no_netlist=True)
+
+    assert sorted(os.listdir(tmp_path)) == before
+    assert not (tmp_path / "inv.spice").exists()
+    assert result["netlist_path"] is None
+    assert result["netlist_sha256"] is None
+    for key in ("status", "device_count", "net_count", "device_counts"):
+        assert result[key] == normal[key]
+
+
+def test_default_still_writes_next_to_input(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    result = run_extract(path, "sky130")
+    assert result["netlist_path"] == str(tmp_path / "inv.spice")
+    assert (tmp_path / "inv.spice").is_file()
+    assert isinstance(result["netlist_sha256"], str)
+
+
+def test_no_netlist_cli_json_and_text(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code, out = _extract_json(capsys, path, "--deck", "sky130", "--no-netlist")
+    assert code == 0
+    assert json.loads(out.out)["netlist_path"] is None
+    assert not (tmp_path / "inv.spice").exists()
+
+    code = main(["extract", path, "--deck", "sky130", "--no-netlist"])
+    assert code == 0
+    assert "netlist_path: None" in capsys.readouterr().out
+    assert not (tmp_path / "inv.spice").exists()
+
+
+def test_no_netlist_with_output_is_rejected(tmp_path, capsys):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    out = tmp_path / "o.spice"
+    code, cap = _extract_json(
+        capsys, path, "--deck", "sky130", "--no-netlist", "-o", str(out)
+    )
+    assert code == 1
+    assert "--no-netlist" in cap.out + cap.err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--subcircuit", "INV"],
+        ["--subcircuit", "INV", "--subcircuit-output", "x.spice"],
+    ],
+)
+def test_no_netlist_with_subcircuit_is_rejected(tmp_path, capsys, extra):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    code, cap = _extract_json(capsys, path, "--deck", "sky130", "--no-netlist", *extra)
+    assert code == 1
+    assert "--no-netlist" in cap.out + cap.err
+    assert not (tmp_path / "inv.spice").exists()
+
+
+def test_no_netlist_with_spef_still_works(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    spef = tmp_path / "o.spef"
+    result = run_extract(
+        path, "sky130", no_netlist=True, parasitics=True, spef_output=str(spef)
+    )
+    assert result["netlist_path"] is None
+    assert not (tmp_path / "inv.spice").exists()

@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import jsonschema
@@ -1988,8 +1989,13 @@ def test_run_sim_waits_out_a_capacity_refusal(tmp_path, monkeypatch):
     # The job contract was uploaded once and reused by the re-launch.
     assert len(runner.argvs_matching("job.json")) == 1
     # One backoff sleep (through the patched `time.sleep`), within [15, 30].
-    assert len(runner.sleeps) >= 1
-    assert 15.0 <= runner.sleeps[0] <= 30.0
+    # The patch is the global `time.sleep`, so it also records CPython's
+    # sub-second `Popen._wait` polls (e.g. the `git rev-list` the version
+    # scheme runs inside a git checkout, issue #3173); only >= 1 s sleeps
+    # are this module's own.
+    own_sleeps = [s for s in runner.sleeps if s >= 1.0]
+    assert len(own_sleeps) >= 1
+    assert 15.0 <= own_sleeps[0] <= 30.0
 
 
 def _error_envelope(stderr: str) -> dict:
@@ -2265,6 +2271,11 @@ def test_a_lost_shard_never_aborts_its_siblings(tmp_path, monkeypatch):
     ]
     assert "lost_shard" in codes
     assert None in codes  # the healthy shard still reported its own corner
+    lost = [c for c in corners if c["diagnostics"]]
+    assert lost and all(
+        c["engine_exit_code"] is None and c["engine_killed_by_signal"] is None
+        for c in lost
+    )
     assert None in environment["fleet"]
 
 
@@ -3263,3 +3274,613 @@ def test_hosts_greater_than_one_is_not_assessed_or_refused(tmp_path, monkeypatch
 
     assert len(runner.argvs_matching("launch", "--apply")) == 2
     assert all("job_ceiling" not in entry for entry in environment["fleet"])
+
+
+# --------------------------------------------------------------------------- #
+# Worker-observed environment capture (issue #2834)
+# --------------------------------------------------------------------------- #
+
+
+def _capture(**overrides) -> str:
+    doc = {
+        "schema": 1,
+        "simulator": {
+            "requested_binary": "ngspice",
+            "binary_source": "PATH",
+            "selected_path": "/opt/ngspice/bin/ngspice",
+            "version_banner": "ngspice-46 build A\nfeatures: osdi",
+            "version_probe": "ok",
+        },
+        "pdk": {
+            "variant": "sky130A",
+            "root": "/opt/pdk",
+            "stamp_scheme": "sources-sha256",
+            "stamp_sha256": "a" * 64,
+            "stamp_text": "open_pdks abc",
+            "models_staged": False,
+        },
+        "cpu_model": "Fake CPU",
+        "omp_num_threads": "1",
+        "image_manifest": {"pdk_snapshot": "sky130A-2026.08.03", "path": "/etc/m.json"},
+        "diagnostics": [],
+    }
+    doc.update(overrides)
+    return json.dumps(doc)
+
+
+def _worker_env(tmp_path, monkeypatch, files, request=None):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report(), **files}
+    kwargs = {} if request is None else {"request": request}
+    return _run_one_job(tmp_path, monkeypatch, runner, **kwargs)[2]
+
+
+def _local_pdk(tmp_path, monkeypatch, text="open_pdks abc\n"):
+    root = tmp_path / "pdkroot"
+    (root / "sky130A").mkdir(parents=True)
+    (root / "sky130A" / "SOURCES").write_text(text)
+    monkeypatch.setenv("PDK_ROOT", str(root))
+    return {"netlist": "body.spice", "models": {"pdk": "sky130A"}}
+
+
+def test_worker_environment_round_trips_and_is_not_the_clients(tmp_path, monkeypatch):
+    env = _worker_env(tmp_path, monkeypatch, {"worker_environment.json": _capture()})[
+        "worker_environment"
+    ]
+    assert env["capture"] == "ok"
+    assert env["simulator"]["selected_path"] == "/opt/ngspice/bin/ngspice"
+    assert env["simulator"]["version_banner"] == "ngspice-46 build A\nfeatures: osdi"
+    assert env["pdk"]["variant"] == "sky130A"
+    assert env["cpu_model"] == "Fake CPU"
+    assert env["omp_num_threads"] == "1"
+    assert env["image_manifest"]["pdk_snapshot"] == "sky130A-2026.08.03"
+    json.dumps(env)
+
+
+@pytest.mark.parametrize(
+    "payload", [None, "{nope", "[1]", '"x"', "\xff", "{" + '"a":1,' * 20000 + '"b":1}']
+)
+def test_absent_or_malformed_worker_capture_is_unknown_and_job_still_runs(
+    tmp_path, monkeypatch, payload
+):
+    files = {} if payload is None else {"worker_environment.json": payload}
+    environment = _worker_env(tmp_path, monkeypatch, files)
+    env = environment["worker_environment"]
+    assert env["capture"] == ("absent" if payload is None else env["capture"])
+    if payload is not None and payload not in ('"x"', "[1]", "{nope", "\xff"):
+        assert env["capture"] in {"malformed", "ok"}
+    if payload in ('"x"', "[1]", "{nope", "\xff") or (payload and len(payload) > 65536):
+        assert env["capture"] == "malformed"
+    if env["capture"] != "ok":
+        assert env["simulator"] is None and env["pdk"] is None
+    assert environment["state"] == "done"  # outcome untouched
+
+
+def test_hostile_capture_values_are_bounded_and_sanitized(tmp_path, monkeypatch):
+    big = "x" * 20000
+    payload = _capture(
+        simulator={"version_banner": big, "selected_path": 5, "extra": "drop"},
+        cpu_model="Q\"uo'te\x00\x1b ünï",
+        diagnostics=["d" * 500] * 50,
+        image_manifest={"k": "m" * 1000, "n": 3, "nested": {"a": 1}},
+    )
+    env = _worker_env(tmp_path, monkeypatch, {"worker_environment.json": payload})[
+        "worker_environment"
+    ]
+    assert len(env["simulator"]["version_banner"]) == sb.WORKER_CAPTURE_BANNER_MAX
+    assert env["simulator"]["selected_path"] is None
+    assert "extra" not in env["simulator"]
+    assert "\x00" not in env["cpu_model"] and "\x1b" not in env["cpu_model"]
+    assert "ünï" in env["cpu_model"]
+    assert len(env["diagnostics"]) == 20
+    assert all(len(d) <= 200 for d in env["diagnostics"])
+    assert "nested" not in env["image_manifest"]
+    assert len(env["image_manifest"]["k"]) == sb.WORKER_CAPTURE_STR_MAX
+    json.dumps(env)
+
+
+def test_legacy_worker_without_capture_keeps_runner_identity(tmp_path, monkeypatch):
+    environment = _worker_env(
+        tmp_path, monkeypatch, {"runner_identity.json": _identity("0.4.2")}
+    )
+    assert environment["runner_klt_version"] == "0.4.2"
+    assert environment["worker_environment"]["capture"] == "absent"
+
+
+def test_pdk_stamp_mismatch_warns_only_when_comparable(tmp_path, monkeypatch):
+    import hashlib
+
+    request = _local_pdk(tmp_path, monkeypatch, "open_pdks abc\n")
+    same = hashlib.sha256(b"open_pdks abc").hexdigest()
+
+    def comparison(pdk):
+        env = _worker_env(
+            tmp_path,
+            monkeypatch,
+            {"worker_environment.json": _capture(pdk=pdk)},
+            request=request,
+        )
+        return env["worker_environment"]["pdk_stamp_comparison"]
+
+    base = {"variant": "sky130A", "stamp_scheme": "sources-sha256"}
+    assert comparison({**base, "stamp_sha256": same})["status"] == "match"
+    mismatch = comparison({**base, "stamp_sha256": "b" * 64})
+    assert mismatch["status"] == "mismatch" and "warning" in mismatch
+    # unlike scheme, other variant, missing stamp: never a proven mismatch
+    for pdk in (
+        {**base, "stamp_scheme": "git-rev", "stamp_sha256": "b" * 64},
+        {**base, "variant": "gf180mcuD", "stamp_sha256": "b" * 64},
+        {**base, "stamp_sha256": None},
+        {"variant": "sky130A"},
+    ):
+        result = comparison(pdk)
+        assert result == {"status": "not_comparable"}
+
+
+def test_pdk_stamp_not_comparable_without_a_local_stamp(tmp_path, monkeypatch):
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    env = _worker_env(
+        tmp_path,
+        monkeypatch,
+        {"worker_environment.json": _capture()},
+        request={"netlist": "body.spice", "models": {"pdk": "sky130A"}},
+    )
+    assert env["worker_environment"]["pdk_stamp_comparison"] == {
+        "status": "not_comparable"
+    }
+
+
+def test_failed_job_recovers_worker_environment(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="1"))
+    runner.outputs = {
+        "stderr.log": "",
+        "worker_environment.json": _capture(cpu_model="Recovered CPU"),
+    }
+    _, _, environment = _run_one_job(tmp_path, monkeypatch, runner)
+    assert environment["worker_environment"]["cpu_model"] == "Recovered CPU"
+
+
+def test_poll_timeout_worker_environment_is_absent(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+    _pin_client_version(monkeypatch)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _, _, environment = sb._run_batch_job(
+        config=_config(tmp_path, poll_timeout_s=0.0),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+    assert environment["worker_environment"]["capture"] == "absent"
+
+
+def test_mixed_worker_identities_stay_per_shard(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch)
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    def _register(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
+            points = json.loads(Path(source).read_text())["_explicit_points"]
+            first = int(points[0]["temperature_c"])
+            files = {
+                "report.json": _sim_report(
+                    corner_ids=tuple(
+                        f"tt_1.800_{int(p['temperature_c'])}" for p in points
+                    )
+                )
+            }
+            if first == 0:  # the other shard is a legacy worker
+                files["worker_environment.json"] = _capture(cpu_model="CPU-A")
+            runner.outputs_by_job[job_id_of(destination)] = files
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _register)
+    _, _, environment = sb._run_batch_fleet(
+        corner_points=_corner_points(3),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={
+            "netlist": "body.spice",
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0.0,
+            },
+        },
+        hosts=2,
+        measurements_spec=_measurements_spec(),
+    )
+    captures = [e["worker_environment"] for e in environment["fleet"]]
+    assert [c["capture"] for c in captures] == ["ok", "absent"]
+    assert captures[0]["cpu_model"] == "CPU-A"
+
+
+def _run_capture_program(
+    tmp_path, *, ngspice_script, args=("", "sky130A", "0"), env=None
+):
+    """Run the real worker capture program with a fake simulator on PATH."""
+    bin_dir = tmp_path / "wbin"
+    bin_dir.mkdir(exist_ok=True)
+    if ngspice_script is not None:
+        sim = bin_dir / "ngspice"
+        sim.write_text(ngspice_script)
+        sim.chmod(0o755)
+    out = tmp_path / "worker_environment.json"
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", sb._WORKER_CAPTURE_PROGRAM, str(out), *args],
+        env={
+            "PATH": f"{bin_dir}" + ("" if ngspice_script is None else ":/usr/bin:/bin"),
+            **(env or {}),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(out.read_text())
+
+
+def test_capture_program_records_selected_binary_banner_and_pdk_stamp(tmp_path):
+    root = tmp_path / "pdk"
+    (root / "sky130A").mkdir(parents=True)
+    (root / "sky130A" / "SOURCES").write_text("open_pdks 123\n")
+    doc = _run_capture_program(
+        tmp_path,
+        ngspice_script=(
+            "#!/bin/sh\nprintf 'ngspice-46 \"quoted\"\\nline2 \\303\\251\\n'\n"
+        ),
+        env={"PDK_ROOT": str(root), "OMP_NUM_THREADS": "3"},
+    )
+    assert doc["simulator"]["selected_path"].endswith("/wbin/ngspice")
+    assert doc["simulator"]["version_probe"] == "ok"
+    assert '"quoted"' in doc["simulator"]["version_banner"]
+    assert doc["pdk"]["stamp_scheme"] == "sources-sha256"
+    assert doc["pdk"]["stamp_sha256"]
+    assert doc["omp_num_threads"] == "3"
+
+
+def test_capture_program_honors_requested_binary_override(tmp_path):
+    custom = tmp_path / "wbin" / "custom-sim"
+    (tmp_path / "wbin").mkdir()
+    custom.write_text("#!/bin/sh\necho custom-build\n")
+    custom.chmod(0o755)
+    doc = _run_capture_program(
+        tmp_path,
+        ngspice_script="#!/bin/sh\necho path-build\n",
+        args=(str(custom), "", "1"),
+    )
+    assert doc["simulator"]["version_banner"].strip() == "custom-build"
+    assert doc["simulator"]["binary_source"] == "request"
+    assert doc["pdk"]["models_staged"] is True
+
+
+def test_capture_program_missing_simulator_pdk_and_omp_are_null_with_diagnostics(
+    tmp_path,
+):
+    doc = _run_capture_program(tmp_path, ngspice_script=None)
+    assert doc["simulator"]["selected_path"] is None
+    assert doc["simulator"]["version_banner"] is None
+    assert doc["pdk"]["stamp_sha256"] is None
+    assert doc["omp_num_threads"] is None
+    assert doc["diagnostics"]
+
+
+def test_capture_program_bounds_oversized_banner(tmp_path):
+    doc = _run_capture_program(
+        tmp_path, ngspice_script="#!/bin/sh\nyes x | head -c 500000\n"
+    )
+    assert len(doc["simulator"]["version_banner"]) <= sb.WORKER_CAPTURE_BANNER_MAX
+
+
+def test_capture_program_version_probe_timeout_is_recorded(tmp_path, monkeypatch):
+    program = sb._WORKER_CAPTURE_PROGRAM.replace(
+        f"{sb.WORKER_CAPTURE_PROBE_TIMEOUT_S}", "1", 1
+    )
+    monkeypatch.setattr(sb, "_WORKER_CAPTURE_PROGRAM", program)
+    doc = _run_capture_program(tmp_path, ngspice_script="#!/bin/sh\nsleep 20\n")
+    assert doc["simulator"]["version_probe"] == "timeout"
+
+
+def test_job_cmd_capture_never_fails_the_job_and_keeps_rejecting_skew(tmp_path):
+    spec = _init_spec(tmp_path)
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt("klt 0.4.2")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    # rejected jobs still leave the worker capture collectable
+    capture = json.loads((out_dir / sb.BATCH_WORKER_ENVIRONMENT_FILENAME).read_text())
+    assert capture["schema"] == 1
+
+
+def test_job_cmd_with_capture_still_runs_the_simulation(tmp_path):
+    spec = _init_spec(tmp_path)
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(f"klt {_CLIENT_VERSION}")
+    )
+    # sanity: the matching runner runs the simulation with capture present
+    assert marker.exists()
+    assert proc.returncode == 0
+
+
+# --------------------------------------------------------------------------- #
+# `klt sim --batch-set` (issue #2869)
+# --------------------------------------------------------------------------- #
+
+SET_SCHEMA_PATH = REPO_ROOT / "docs" / "schemas" / "sim-set-report.schema.json"
+
+
+def _write_set(tmp_path: Path, count: int) -> list[str]:
+    _write_body(tmp_path)
+    paths = []
+    for i in range(count):
+        path = tmp_path / f"req{i}.json"
+        path.write_text(json.dumps(_batch_request(tmp_path)))
+        paths.append(str(path))
+    return paths
+
+
+def _fake_report(status: str = "pass", job_id: str = "klt-sim-x") -> dict:
+    return {"status": status, "environment": {"remote": {"job_id": job_id}}}
+
+
+def test_sim_set_bounds_in_flight_and_aggregates(tmp_path):
+    import threading
+
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 6)
+    lock = threading.Lock()
+    state = {"now": 0, "peak": 0}
+
+    def fake_run(path, **kwargs):
+        assert kwargs["backend"] == "batch"
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        import time
+
+        time.sleep(0.02)
+        with lock:
+            state["now"] -= 1
+        return _fake_report(job_id="job-" + os.path.basename(path))
+
+    report = sim_set.run_sim_set(paths, max_in_flight=2, run=fake_run)
+
+    assert state["peak"] <= 2
+    assert report["status"] == "pass"
+    assert report["request_count"] == 6
+    assert [r["index"] for r in report["requests"]] == list(range(6))
+    assert report["requests"][0]["job_id"] == "job-req0.json"
+    jsonschema.validate(report, json.loads(SET_SCHEMA_PATH.read_text()))
+    for entry in report["requests"]:
+        assert json.loads(Path(entry["report"]).read_text())["status"] == "pass"
+    # one distinct report directory per request
+    assert len({r["report"] for r in report["requests"]}) == 6
+
+
+def test_sim_set_partial_refusal_is_one_summary(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 3)
+
+    def fake_run(path, **kwargs):
+        if path.endswith("req1.json"):
+            raise sim.SimError(
+                "batch backend failed: no capacity", code="batch_no_capacity"
+            )
+        return _fake_report()
+
+    report = sim_set.run_sim_set(paths, run=fake_run)
+
+    assert report["status"] == "error"
+    assert report["submitted"] == 2
+    assert report["refused"] == 1
+    assert report["refused_codes"] == ["batch_no_capacity"]
+    bad = report["requests"][1]
+    assert bad["error"]["code"] == "batch_no_capacity"
+    assert bad["job_id"] is None and bad["report"] is None
+    jsonschema.validate(report, json.loads(SET_SCHEMA_PATH.read_text()))
+
+
+def test_sim_set_rejects_empty_and_bad_bound():
+    from klayout_tools import sim_set
+
+    with pytest.raises(sim.SimError):
+        sim_set.run_sim_set([])
+    with pytest.raises(sim.SimError):
+        sim_set.run_sim_set(["a.json"], max_in_flight=0)
+
+
+def test_cli_batch_set_end_to_end_partial_exit_code(tmp_path, monkeypatch, capsys):
+    from klayout_tools.cli import main
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    # The first launch is refused (no capacity_wait_s => fail fast); the
+    # other request succeeds. max-in-flight 1 makes the order deterministic.
+    _queue_refusals(runner, 1)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    paths = _write_set(tmp_path, 2)
+
+    code = main(
+        ["sim", "--batch-set", *paths, "--max-in-flight", "1", "--format", "json"]
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert code == 4
+    assert out["status"] == "error"
+    assert [r["status"] for r in out["requests"]] == ["error", "not_checked"]
+    assert out["requests"][0]["error"]["code"] == "batch_no_capacity"
+    assert out["requests"][1]["job_id"].startswith("klt-sim-")
+    assert len(runner.argvs_matching("launch")) == 2
+    jsonschema.validate(out, json.loads(SET_SCHEMA_PATH.read_text()))
+
+
+def test_cli_batch_set_all_pass_exits_zero_and_refuses_other_backend(
+    tmp_path, monkeypatch, capsys
+):
+    from klayout_tools import sim_set
+    from klayout_tools.cli import main
+
+    monkeypatch.setattr(sim_set, "run_sim", lambda path, **kw: _fake_report())
+    # run_sim_set bound the default at import; patch the default arg's source.
+    monkeypatch.setattr(
+        sim_set.run_sim_set,
+        "__kwdefaults__",
+        {
+            **sim_set.run_sim_set.__kwdefaults__,
+            "run": lambda path, **kw: _fake_report(),
+        },
+    )
+    paths = _write_set(tmp_path, 2)
+
+    assert main(["sim", "--batch-set", *paths, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "pass"
+
+    assert main(["sim", "--batch-set", *paths, "--backend", "local"]) == 2
+    assert main(["sim", paths[0], "--max-in-flight", "2"]) == 2
+    # Bare ``klt sim`` keeps the argparse-style SystemExit(2) contract.
+    with pytest.raises(SystemExit) as exc:
+        main(["sim"])
+    assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# measurements[].crossings through the batch fleet (issue #2868)
+# --------------------------------------------------------------------------- #
+
+_CROSSINGS_DECL = {
+    "name": "t_out",
+    "crossings": {"signal": "v(out)", "level": 0.5, "edge": "rise", "max": 2},
+}
+
+
+def _crossings_entry() -> dict:
+    """What the job instance's own `klt sim` reports for `_CROSSINGS_DECL`:
+    the count as `value`, the series inline beside it."""
+    return {
+        "name": "t_out",
+        "value": 3,
+        "unit": None,
+        "status": "pass",
+        "margin": None,
+        "crossings": {
+            "times": [1.25e-07, 3.25e-07],
+            "edges": ["rise", "rise"],
+            "truncated": True,
+        },
+    }
+
+
+def _crossings_report(corner_ids=("tt_1.800_27",)) -> str:
+    document = json.loads(_sim_report(corner_ids=corner_ids))
+    for corner in document["corners"]:
+        corner["measurements"] = [_crossings_entry()]
+    return json.dumps(document)
+
+
+def test_run_sim_batch_carries_a_crossings_series_inline(tmp_path, monkeypatch):
+    """The series is computed on the job instance and comes back inside the
+    collected report, with `keep_artifacts: false` -- no waveform artifact
+    and no per-edge `.meas` card is involved -- and a crossings-only request
+    counts as checked (it does not degrade to `not_checked`, cf. #3158)."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _crossings_report()}
+    uploaded: dict[str, str] = {}
+    real_open = open
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            with real_open(argv[-3], encoding="utf-8") as handle:
+                uploaded["request"] = handle.read()
+        return runner(argv, timeout_s)
+
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+
+    _write_body(tmp_path)
+    request = _batch_request(
+        tmp_path,
+        measurements=[_CROSSINGS_DECL],
+        options={"keep_artifacts": False},
+    )
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+
+    # The declaration reaches the worker verbatim (it regenerates the deck).
+    document = json.loads(uploaded["request"])
+    assert document["measurements"] == [_CROSSINGS_DECL]
+    (corner,) = report["corners"]
+    assert corner["measurements"] == [_crossings_entry()]
+    assert report["status"] == "pass"
+    assert report["coverage"]["nothing_checked"] is False
+
+
+def test_sharded_batch_run_merges_each_shards_crossings_series(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    def _register_shard_report(argv, timeout_s):
+        joined = " ".join(argv)
+        if "inputs/request.json" in joined:
+            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
+            document = json.loads(Path(source).read_text())
+            assert document["measurements"] == [_CROSSINGS_DECL]
+            runner.outputs_by_job[job_id_of(destination)] = {
+                "report.json": _crossings_report(
+                    corner_ids=tuple(
+                        f"tt_1.800_{int(point['temperature_c'])}"
+                        for point in document["_explicit_points"]
+                    )
+                )
+            }
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _register_shard_report)
+
+    corners, _, environment = sb._run_batch_fleet(
+        corner_points=_corner_points(3),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={
+            "netlist": "body.spice",
+            "measurements": [_CROSSINGS_DECL],
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0.0,
+            },
+        },
+        hosts=2,
+        measurements_spec=[_CROSSINGS_DECL],
+    )
+
+    assert len(environment["fleet"]) == 2
+    assert [corner["corner_id"] for corner in corners] == [
+        "tt_1.800_0",
+        "tt_1.800_1",
+        "tt_1.800_2",
+    ]
+    assert all(corner["measurements"] == [_crossings_entry()] for corner in corners)

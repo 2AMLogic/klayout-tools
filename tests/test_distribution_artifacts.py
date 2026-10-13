@@ -179,6 +179,14 @@ def _install_and_probe(tmp: Path, links: Path, requirement: str) -> dict:
     venv = tmp / "venv"
     _run(_UV, "venv", "--quiet", "--python", sys.executable, str(venv))
     python = venv / ("Scripts" if sys.platform == "win32" else "bin") / "python"
+    # `--cache-dir` scoped to this call's own scratch space: a uv cache shared
+    # across sessions (CI restores one) serves same-named find-links wheels
+    # from a path-keyed unpack, and every wheel this module builds lands at a
+    # path CI reuses verbatim (`/tmp/pytest-of-runner/pytest-0/...`) — so a
+    # restored cache can install a *previous* run's release wheel, whose
+    # build record carries that run's throwaway-repo commit. Same isolation
+    # `test_one_artifact_reports_one_identity_under_every_launcher` already
+    # gives its uvx/uv-run probes.
     _run(
         _UV,
         "pip",
@@ -189,6 +197,8 @@ def _install_and_probe(tmp: Path, links: Path, requirement: str) -> dict:
         "--no-index",
         "--find-links",
         str(links),
+        "--cache-dir",
+        str(tmp / "uv-cache"),
         "--no-deps",
         requirement,
     )

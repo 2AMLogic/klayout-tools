@@ -1129,8 +1129,17 @@ def run_extract(
     subcircuit_output: str | None = None,
     substrate_spreading_net: str | None = None,
     hierarchical_cells: Sequence[str] = (),
+    no_netlist: bool = False,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
+
+    ``no_netlist`` (issue #2850, ``klt extract --no-netlist``) is the opt-in
+    census-only mode: nothing is written beside the input (or anywhere
+    persistent) and the report carries ``netlist_path: null`` and
+    ``netlist_sha256: null``; every count/status field is identical to a
+    normal run. Incompatible with ``output`` and ``subcircuit_cell``/
+    ``subcircuit_output`` (both need the written netlist). ``False`` (the
+    default) is byte-identical to before this parameter existed.
 
     ``deck_name`` selects the curated :class:`~klayout_tools.decks.ExtractionDeck`
     (currently ``"sky130"``/``"gf180mcu"``). ``output`` overrides the written
@@ -2471,6 +2480,7 @@ def run_extract(
     _validate_subcircuit_flags(
         subcircuit_cell, subcircuit_output, abstract_cell_patterns
     )
+    _validate_no_netlist_flags(no_netlist, output, subcircuit_cell, subcircuit_output)
     hierarchical_names = _normalize_hierarchical_cells(
         hierarchical_cells,
         parasitics=parasitics,
@@ -2547,12 +2557,7 @@ def run_extract(
 
     import klayout.db as kdb
 
-    netlist_path = output if output is not None else _default_output_path(path)
-    out_dir = os.path.dirname(os.path.abspath(netlist_path))
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-    except OSError as exc:
-        raise ExtractError(f"cannot create output directory {out_dir}: {exc}") from exc
+    netlist_path, scratch_dir = _resolve_netlist_target(path, output, no_netlist)
 
     # `_purge_preserving_named_nets()` (in `_extract_netlist`) still drops a
     # circuit entirely when it has no devices, no named/labelled nets, and no
@@ -3228,9 +3233,13 @@ def run_extract(
     try:
         netlist.write(netlist_path, writer, netlist_description)
     except Exception as exc:
+        if scratch_dir is not None:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
         raise ExtractError(f"could not write netlist '{netlist_path}': {exc}") from exc
 
-    netlist_sha256 = sha256_file(netlist_path)
+    reported_netlist_path, netlist_sha256 = _finish_netlist_write(
+        netlist_path, scratch_dir
+    )
 
     # `--subcircuit` (issue #2245): a *second*, independent deck carrying one
     # named `.SUBCKT <cell>` for the sub-cell's own extracted devices. Run
@@ -3263,7 +3272,7 @@ def run_extract(
         "deck": deck_name,
         "top": top_cell_name,
         "dbu_um": dbu_um,
-        "netlist_path": netlist_path,
+        "netlist_path": reported_netlist_path,
         "netlist_sha256": netlist_sha256,
         "status": "extracted",
         "device_count": len(devices),
@@ -3533,6 +3542,59 @@ def _require_hierarchy_cells_populated(
             f"--hierarchical-cells {missing[0]!r} matched no extracted device "
             "-- the cell is placed in the layout hierarchy but none of the "
             "devices this deck recognized resolve to a placement of it"
+        )
+
+
+def _resolve_netlist_target(
+    path: str, output: str | None, no_netlist: bool
+) -> tuple[str, str | None]:
+    """Where the netlist is written, plus the scratch dir to delete after (or
+    ``None``). ``--no-netlist`` (issue #2850) writes into a private temp dir
+    so nothing persists; otherwise ``output`` or the next-to-input default,
+    with its parent directory created."""
+    if no_netlist:
+        scratch_dir = tempfile.mkdtemp(prefix="klt-extract-")
+        return os.path.join(scratch_dir, "extracted.spice"), scratch_dir
+    netlist_path = output if output is not None else _default_output_path(path)
+    out_dir = os.path.dirname(os.path.abspath(netlist_path))
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        raise ExtractError(f"cannot create output directory {out_dir}: {exc}") from exc
+    return netlist_path, None
+
+
+def _finish_netlist_write(
+    netlist_path: str, scratch_dir: str | None
+) -> tuple[str | None, str | None]:
+    """``(reported netlist_path, netlist_sha256)``; both ``None`` after
+    discarding the scratch dir of a ``--no-netlist`` run (issue #2850)."""
+    if scratch_dir is not None:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        return None, None
+    return netlist_path, sha256_file(netlist_path)
+
+
+def _validate_no_netlist_flags(
+    no_netlist: bool,
+    output: str | None,
+    subcircuit_cell: str | None,
+    subcircuit_output: str | None,
+) -> None:
+    """``--no-netlist`` (issue #2850) rejections: it contradicts ``-o`` and
+    the ``--subcircuit`` family, which slices/hashes the written netlist."""
+    if not no_netlist:
+        return
+    if output is not None:
+        raise ExtractError(
+            "--no-netlist cannot be combined with -o/--output -- no netlist "
+            "is written, so there is nothing to place at that path"
+        )
+    if subcircuit_cell is not None or subcircuit_output is not None:
+        raise ExtractError(
+            "--no-netlist cannot be combined with --subcircuit/"
+            "--subcircuit-output -- the sub-circuit deck is sliced from the "
+            "written netlist"
         )
 
 
@@ -4083,6 +4145,9 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
         file_path,
         deck_name,
         output=committed.get("netlist_path"),
+        # A report recorded by `--no-netlist` (issue #2850) has a null path:
+        # replay it as census-only rather than writing beside the input.
+        no_netlist="netlist_path" in committed and committed["netlist_path"] is None,
         top=committed.get("top"),
         deck_options=deck_options,
         label_layers=label_layers,

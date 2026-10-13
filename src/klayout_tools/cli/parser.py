@@ -564,7 +564,34 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "docs/cli/sim.md for the request/response contract."
         ),
     )
-    sim_parser.add_argument("request", help="path to a klt sim request JSON file")
+    sim_parser.add_argument(
+        "request",
+        nargs="?",
+        default=None,
+        help="path to a klt sim request JSON file (or use --batch-set)",
+    )
+    sim_parser.add_argument(
+        "--batch-set",
+        dest="batch_set",
+        nargs="+",
+        metavar="REQUEST",
+        default=None,
+        help=(
+            "submit several independent request files to the batch fleet in "
+            "one invocation (issue #2869) instead of the single positional "
+            "request: at most --max-in-flight run at once, the rest queue, "
+            "and one aggregate JSON envelope reports every request. Always "
+            "backend `batch`; never falls back to local ngspice. See "
+            "docs/cli/sim.md 'Submitting a set of requests'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--max-in-flight",
+        dest="max_in_flight",
+        type=int,
+        default=None,
+        help="with --batch-set, how many requests are in flight at once (default: 4)",
+    )
     sim_parser.add_argument(
         "-o",
         "--outdir",
@@ -1763,7 +1790,19 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "path to write the extracted SPICE netlist "
-            "(default: <file> with its extension replaced by .spice)"
+            "(default: <file> with its extension replaced by .spice; "
+            "see --no-netlist)"
+        ),
+    )
+    extract_parser.add_argument(
+        "--no-netlist",
+        action="store_true",
+        default=False,
+        help=(
+            "census-only run: write no netlist anywhere (nothing lands next "
+            "to the input) and report netlist_path/netlist_sha256 as null. "
+            "Counts and status are identical to a normal run. Cannot be "
+            "combined with -o/--output or --subcircuit/--subcircuit-output"
         ),
     )
     extract_parser.add_argument(

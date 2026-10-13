@@ -88,6 +88,17 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+`measurements[].crossings` (issue #2868) is the third form and the first
+whose result is a **series**, not a scalar. It does *not* retype `value`:
+`value` stays a number (the count of crossings found), so every consumer that
+reads `corners[].measurements[].value` as a number — the rollup, Monte Carlo
+statistics, coverage, `limits` grading — is unaffected. The ordered crossing
+times ride a new optional `crossings` object on that entry only, present only
+when the series was extracted (absent on every other entry and on an errored
+one) — the "new optional member, absent when not applicable" rule above.
+No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
+"Threshold-crossing time series (`measurements[].crossings`)".
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt
@@ -314,6 +325,17 @@ made against different deck revisions or PDK releases are otherwise
 indistinguishable in the output, so a signoff claim can't be checked or
 reproduced. This block is **additive** (see above): adopting it required no
 `schema_version` bump on any verb.
+
+**Client vs. worker scope (issue #2834).** `provenance` (and
+`environment.client_klt_version`) describes the *submitting client*. For
+`klt sim --backend batch`, what the executing worker actually resolved --
+simulator binary and full version banner, PDK `SOURCES` stamp, CPU model,
+`OMP_NUM_THREADS`, a worker-local image manifest -- is reported separately and
+additively as `environment.remote.worker_environment` (and in each
+`environment.remote.fleet[]` member), never merged into `provenance`. Missing
+observations are `null` (never the client's values) and `capture` is `ok`,
+`absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
+environment" for the field names and limits.
 
 `klt erc` (issue #1968) is a partial exception on `pdk`: its `--pdk` selects
 a built-in antenna-ratio limit table baked into `erc.py` itself (see
@@ -1090,7 +1112,7 @@ any list index.
 |---|---|---|
 | `drc` | `file` | input layout, as provided by the caller |
 | `extract` | `file` | input layout, as provided by the caller |
-| `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`) |
+| `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`); `null` only under `--no-netlist` (issue #2850), where `netlist_sha256` is `null` too |
 | `extract` | `spef_path` | written SPEF (`--spef`), else `null` |
 | `extract` | `subcircuit.path` | written sub-circuit netlist (`--subcircuit`) |
 | `extract` | `abstracted_cells.*.lef_path` | LEF file an abstracted cell's pins came from |
@@ -1482,6 +1504,18 @@ artifacts:
   unusable, the run fails with `outdir_lock_unavailable` rather than running
   unprotected. A `fork()` without `exec` shares the lock descriptor; such
   workers outliving a killed owner keep the lock until they exit.
+
+### Aggregate (set) envelopes: `klt sim --batch-set` (issue #2869)
+
+A verb that submits several independent requests in one invocation emits one
+aggregate payload with its own `schema_version` (versioned like any command
+payload), a rollup `status`, and a `requests[]` array of per-request entries
+(`status`, `exit_code`, `job_id`, `error.{message,code}`). A request-level
+failure is an entry, not a command error: the command exits with the **worst
+per-request code** (a partial set exits `4` for `klt sim`), which is `>= 3`,
+so the "a report was emitted" rule below holds. See
+[`docs/cli/sim.md`](cli/sim.md) "Submitting a set of requests" and
+`docs/schemas/sim-set-report.schema.json`.
 
 ## Exit codes
 
