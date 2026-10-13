@@ -2557,9 +2557,9 @@ def test_rename_declared_pins_skips_and_reports_a_colliding_rename(tmp_path):
 
 def test_rerun_extract_report_replays_the_declared_pin_rename(tmp_path):
     """Issue #2854: `--check --rerun` reconstructs the declared-pin rename
-    from the committed report's own echoes (`rename_declared_pins` +
-    `pin_renames.declared`), so a rename run reproduces -- without the
-    replay the fresh run would rename nothing and drift on every renamed
+    from the committed report's own echoes (`rename_declared_pins` + the
+    `pin_renames` declared-set echoes), so a rename run reproduces -- without
+    the replay the fresh run would rename nothing and drift on every renamed
     pin field."""
     path = _write_gds(
         _make_inverter_layout(extra_y_label="clk"), tmp_path / "multi_label.gds"
@@ -2581,6 +2581,138 @@ def test_rerun_extract_report_replays_the_declared_pin_rename(tmp_path):
     assert result["status"] == "match"
     assert result["drift"] == []
     assert result["fresh"]["pin_renames"]["renamed"] == [{"from": "Y|clk", "to": "clk"}]
+
+
+def test_rerun_extract_report_replays_def_pins_separately(tmp_path):
+    """PR #3224 review: a DEF-only rename run replays `def_pins` as
+    `def_pins`, not its union with `declared_pins` folded into `--pins`. The
+    two filters are not interchangeable: only the `--def-pins` pass runs the
+    `def_pin_promotion` report, so a union-as-`--pins` replay demotes the
+    same nets but drops that block (and rewords the demotion warning), and
+    the rerun drifts."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "def_only.gds")
+    report_path = tmp_path / "def_only.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "def_only.spice"),
+        def_pins=frozenset({"A", "VGND", "VPWR", "VPB"}),
+        rename_declared_pins=True,
+    )
+    _write_report(report_path, committed)
+
+    # Each original argument is echoed on its own: `null` for the flag not
+    # given, the given set as a list, the union retained as `declared`.
+    assert committed["pin_renames"]["declared_pins"] is None
+    assert committed["pin_renames"]["def_pins"] == ["A", "VGND", "VPB", "VPWR"]
+    assert committed["pin_renames"]["declared"] == ["A", "VGND", "VPB", "VPWR"]
+    # Y is demoted by the DEF reconciliation, and that reconciliation's own
+    # report block is present.
+    assert {n["name"] for n in committed["nets"] if n["pin"]} == {
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+    }
+    assert committed["def_pin_promotion"] is not None
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    # The DEF promotion report ran on the replay too -- the clearest signal
+    # the replay used `def_pins`, not a `declared_pins` union.
+    assert result["fresh"]["def_pin_promotion"] is not None
+
+
+def test_rerun_extract_report_replays_differing_declared_and_def_sets(tmp_path):
+    """PR #3224 review: when `--pins` and `--def-pins` were both given and
+    differ, the rerun replays *both* original sets. The original run applies
+    `--pins`'s demotion and then `--def-pins`'s own, which only further
+    restricts the survivors -- here Y survives `--pins` but is demoted by
+    `--def-pins`. Replaying the union as `--pins` alone (the pre-review
+    behavior) re-promotes Y and drifts on every pin field."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "both_sets.gds")
+    report_path = tmp_path / "both_sets.extract.json"
+    committed = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "both_sets.spice"),
+        declared_pins=frozenset({"A", "Y", "VGND", "VPWR", "VPB"}),
+        def_pins=frozenset({"A", "VGND", "VPWR", "VPB"}),
+        rename_declared_pins=True,
+    )
+    _write_report(report_path, committed)
+
+    # The echoes carry each original set separately; the union `declared`
+    # (the rename pass's matching set) is strictly larger than `def_pins`.
+    assert committed["pin_renames"]["declared_pins"] == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+        "Y",
+    ]
+    assert committed["pin_renames"]["def_pins"] == ["A", "VGND", "VPB", "VPWR"]
+    assert committed["pin_renames"]["declared"] == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+        "Y",
+    ]
+    # Y survived the `--pins` pass but was demoted by `--def-pins`'s.
+    assert {n["name"] for n in committed["nets"] if n["pin"]} == {
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+    }
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["pin_renames"]["def_pins"] == [
+        "A",
+        "VGND",
+        "VPB",
+        "VPWR",
+    ]
+
+
+def test_rerun_extract_report_union_echo_still_replays_a_legacy_block(tmp_path):
+    """A `pin_renames` block without the separate `declared_pins`/`def_pins`
+    echoes -- an earlier build of this unreleased feature, or a hand-edited
+    report -- still replays through its union `declared` echo, as it did
+    before. For a `--pins`-only run that union *is* the original argument,
+    so the replay reproduces the rename exactly; the only drift is the
+    schema evolution itself (the fresh report carries the separate echoes
+    the committed block predates)."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="clk"), tmp_path / "legacy.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "legacy.spice"),
+        declared_pins=frozenset({"clk", "VGND", "VPWR", "VPB", "A"}),
+        rename_declared_pins=True,
+    )
+    # Simulate the pre-echo block shape: the union `declared` only.
+    del report["pin_renames"]["declared_pins"]
+    del report["pin_renames"]["def_pins"]
+    report_path = _write_report(tmp_path / "legacy.extract.json", report)
+
+    result = rerun_extract_report(str(report_path))
+
+    # The replay reconstructed the rename -- and drifted on nothing except
+    # the two echo keys the simulated legacy block lacks.
+    assert result["fresh"]["pin_renames"]["renamed"] == [{"from": "Y|clk", "to": "clk"}]
+    assert [entry["field"] for entry in result["drift"]] == [
+        "pin_renames.declared_pins",
+        "pin_renames.def_pins",
+    ]
 
 
 # --------------------------------------------------------------------------- #

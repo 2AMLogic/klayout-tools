@@ -31,8 +31,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   with an existing net name is skipped and reported
   (`declared_pin_rename_collision`). Disclosed via `warnings` plus the
   additive `pin_renames` response field; the always-present
-  `rename_declared_pins` echo plus `pin_renames.declared` let
-  `--check --rerun` replay the rename. Plumbed through `klt pex
+  `rename_declared_pins` echo plus the `pin_renames.declared_pins`/
+  `def_pins` echoes of the two original declared sets let
+  `--check --rerun` replay the rename *and* both demotion passes (the sets
+  are not interchangeable — `--def-pins`'s demotion only further restricts
+  what `--pins` kept, and it alone runs the `def_pin_promotion` report).
+  Plumbed through `klt pex
   --rename-declared-pins` (echoed as `extraction.rename_declared_pins`) and
   `klt lvs`'s `layout.rename_declared_pins` (a boolean; requires
   `layout.declared_pins`). Default off — byte-identical output; the flag

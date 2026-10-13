@@ -211,7 +211,8 @@ three surfaces at once: a `warnings[]` entry per aggregate (renames) and
 per finding (the `declared_pin_short`/`declared_pin_rename_collision`
 cases), the `null`-unless-given `pin_renames` block, and the
 always-present boolean `rename_declared_pins` echo (so `--check --rerun`
-can replay the rename from it plus `pin_renames.declared`). `klt pex`
+can replay the rename from it plus the `pin_renames.declared_pins`/
+`pin_renames.def_pins` echoes of the two original declared sets). `klt pex`
 echoes the passthrough as `extraction.rename_declared_pins` (`false` when
 the flag was not given), and `klt lvs` gained the optional request field
 `layout.rename_declared_pins` plus one new `mismatches[].category` value

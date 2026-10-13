@@ -3385,8 +3385,9 @@ def run_extract(
         "pin_renames": pin_renames,
         # Additive field (issue #2854): the effective `--rename-declared-pins`
         # value, always present (`false` when the flag was not given) so
-        # `--check --rerun` can replay the rename alongside the declared set
-        # `pin_renames.declared` echoes -- see `rerun_extract_report`.
+        # `--check --rerun` can replay the rename alongside the declared
+        # sets `pin_renames.declared_pins`/`pin_renames.def_pins` echo --
+        # see `rerun_extract_report`.
         "rename_declared_pins": rename_declared_pins,
         # Additive field (issue #2656): `null` unless `label_layers`
         # (--label-layer) was given, otherwise the caller's own role ->
@@ -4114,9 +4115,17 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     committed report itself names, plus ``provenance.deck.options`` (issue
     #595's ``--deck-option`` selections) when present, ``label_layers``
     (issue #2656's ``--label-layer`` override) when present, and the
-    declared-pin rename (issue #2854) -- ``rename_declared_pins`` replayed
-    together with the declared set its own ``pin_renames.declared`` echo
-    records -- when the committed report carries a ``pin_renames`` block,
+    declared-pin sets (issue #2854) -- ``rename_declared_pins`` replayed
+    together with the ``--pins``/``--def-pins`` sets the ``pin_renames``
+    block's own ``declared_pins``/``def_pins`` echoes record (each ``null``
+    for "flag not given" versus a list, ``[]`` included, for "flag given";
+    the two sets are replayed separately because they are not
+    interchangeable -- ``def_pins``'s demotion only further restricts what
+    ``declared_pins``'s kept, and it alone runs the ``def_pin_promotion``
+    report -- while a block without the separate echoes, i.e. one produced
+    by an earlier build of this unreleased feature or hand-edited, replays
+    its ``declared`` union as ``--pins`` alone) -- when the committed report
+    carries a ``pin_renames`` block,
     writing the fresh netlist back to the same ``netlist_path`` the
     committed report recorded
     (so that field, too, is a meaningful comparison rather than an
@@ -4125,8 +4134,8 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     ``klt extract`` flag (``--parasitics``, ``--mom-net``, ``--spef``,
     ``--critical-net``, ``--distributed-rc``, ``--def-net-names``,
     ``--def-net-connections``, ``--mom-rlc-*``, ``--top-cell-pins``,
-    ``--pins`` -- except through the ``pin_renames.declared`` echo a run
-    that also used ``--rename-declared-pins`` carries, see above --,
+    ``--pins``/``--def-pins`` -- except through the ``pin_renames`` echoes
+    a run that also used ``--rename-declared-pins`` carries, see above --,
     ``--defer-resistor-fixed-offset``, ``--abstract-cells``,
     ``--abstract-cell-lef``, ``--matched-group``, ``--subcircuit``/
     ``--subcircuit-output``, ``--pdk``/``--pdk-root``)
@@ -4192,24 +4201,56 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     # -- the drift this mode exists to surface.
     label_layers = _label_layers_from_report(committed)
 
-    # Issue #2854: replay the declared-pin rename. The rename needs the
-    # declared set it resolved against, and `--pins`/`--def-pins` themselves
-    # are not echoed anywhere -- but `pin_renames.declared` (always emitted
-    # when the flag was on) is exactly that set, union of both flags, so a
-    # report carrying it reruns the same rename (and, because that union is
-    # what drove the demotions too, the same surviving pin set). A report
-    # without the block -- or one whose block lost its `declared` echo --
-    # replays without the flag and legitimately drifts on the pin fields,
-    # the same documented limitation every other unechoed flag has.
+    # Issue #2854: replay the declared-pin rename, and the declared sets it
+    # resolved against. `--pins`/`--def-pins` themselves are not echoed
+    # anywhere -- but the `pin_renames` block (always emitted when the flag
+    # was on) is: it echoes each original argument separately
+    # (`declared_pins`/`def_pins`, `null` for "flag not given" versus a
+    # list -- `[]` included -- for "flag given"), so the rerun reconstructs
+    # both demotion passes exactly. The two sets are *not* interchangeable:
+    # the original run applies `declared_pins`'s filter and then
+    # `def_pins`'s own, which can only further restrict the survivors (and
+    # alone runs the `def_pin_promotion` report), so replaying their union
+    # as `--pins` alone would re-promote nets the original demoted and skip
+    # the DEF report (PR #3224 review). The union itself stays in the block
+    # as `declared` -- the rename pass's own matching set, and the fallback
+    # a block without the separate echoes replays. A report without the
+    # block -- or one whose echoes lost their shape -- replays without the
+    # flag and legitimately drifts on the pin fields, the same documented
+    # limitation every other unechoed flag has.
     rename_declared_pins = committed.get("rename_declared_pins") is True
-    declared_pins_echo = get_path(committed, ("pin_renames", "declared"))
-    if rename_declared_pins and not (
-        isinstance(declared_pins_echo, list)
-        and all(isinstance(name, str) for name in declared_pins_echo)
-    ):
+    pin_renames_echo = committed.get("pin_renames")
+    rerun_declared_pins: frozenset[str] | None = None
+    rerun_def_pins: frozenset[str] | None = None
+    if rename_declared_pins and isinstance(pin_renames_echo, dict):
+        if "declared_pins" in pin_renames_echo or "def_pins" in pin_renames_echo:
+            valid_pins, rerun_declared_pins = _parse_declared_set_echo(
+                pin_renames_echo.get("declared_pins")
+            )
+            valid_def, rerun_def_pins = _parse_declared_set_echo(
+                pin_renames_echo.get("def_pins")
+            )
+            if not (valid_pins and valid_def):
+                rename_declared_pins = False
+                rerun_declared_pins = None
+                rerun_def_pins = None
+        else:
+            # A block without the separate echoes (an earlier build of this
+            # unreleased feature, or a hand-edited report): the union
+            # `declared` is the only echo -- replay it as `--pins` alone
+            # (the previous behavior; imperfect when the original run's
+            # `--def-pins` further restricted the surviving set, but
+            # strictly better than discarding the rename the block does
+            # carry).
+            union_echo = pin_renames_echo.get("declared")
+            if isinstance(union_echo, list) and all(
+                isinstance(name, str) for name in union_echo
+            ):
+                rerun_declared_pins = frozenset(union_echo) if union_echo else None
+            else:
+                rename_declared_pins = False
+    else:
         rename_declared_pins = False
-        declared_pins_echo = None
-    rerun_declared_pins = frozenset(declared_pins_echo) if declared_pins_echo else None
 
     fresh = run_extract(
         file_path,
@@ -4222,6 +4263,7 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
         deck_options=deck_options,
         label_layers=label_layers,
         declared_pins=rerun_declared_pins,
+        def_pins=rerun_def_pins,
         rename_declared_pins=rename_declared_pins,
     )
     return build_rerun_result(
@@ -4231,6 +4273,23 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
         committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
         fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
     )
+
+
+def _parse_declared_set_echo(value: Any) -> tuple[bool, frozenset[str] | None]:
+    """Parse one ``pin_renames`` declared-set echo (PR #3224 review) into
+    the replay argument :func:`rerun_extract_report` feeds back to
+    :func:`run_extract`: ``(True, None)`` for ``null`` ("flag not given"),
+    ``(True, frozenset(...))`` for a list of names ("flag given", an empty
+    list preserved as an empty set -- absent versus empty are deliberately
+    distinct, the demotion passes treat them differently), and
+    ``(False, None)`` for any other shape (malformed -- the caller disables
+    the rename replay and lets the drift surface, mirroring how the
+    union-only echo that predates this helper was validated)."""
+    if value is None:
+        return True, None
+    if isinstance(value, list) and all(isinstance(name, str) for name in value):
+        return True, frozenset(value)
+    return False, None
 
 
 def extract_netlist_from_layout(
@@ -5333,17 +5392,40 @@ def _rename_declared_pin_nets(
     -- rejected earlier by :func:`extract_netlist_from_layout`, treated
     defensively here) returns ``(None, [])`` and touches nothing:
     byte-identical to a run predating this pass.
+
+    The returned block echoes the two *original* arguments separately, as
+    ``declared_pins``/``def_pins`` (``null`` for "flag not given", a list --
+    ``[]`` included -- for "flag given"), preserving absent versus empty:
+    the union ``declared`` is this pass's own matching set, but it is *not*
+    enough to replay the run -- ``declared_pins``'s and ``def_pins``'s
+    demotion passes are not interchangeable (``def_pins``'s can only further
+    restrict what ``declared_pins``'s kept, and it alone runs the
+    ``def_pin_promotion`` report), so :func:`rerun_extract_report` replays
+    both arguments from these echoes, not the union.
     """
     if not enabled:
         return None, []
     declared = set(declared_pins or ()) | set(def_pins or ())
     if not declared:
         return None, []
+    declared_pin_echoes: dict[str, Any] = {
+        # Each original argument on its own (PR #3224 review): `null` versus
+        # a list keeps "flag not given" distinguishable from "flag given
+        # with an empty set" -- the two replay as `None` and `frozenset()`
+        # respectively, which the demotion passes treat differently.
+        "declared_pins": sorted(declared_pins) if declared_pins is not None else None,
+        "def_pins": sorted(def_pins) if def_pins is not None else None,
+    }
 
     circuit = netlist.circuit_by_name(top_name)
     if circuit is None:
         return (
-            {"declared": sorted(declared), "renamed": [], "findings": []},
+            {
+                "declared": sorted(declared),
+                **declared_pin_echoes,
+                "renamed": [],
+                "findings": [],
+            },
             [],
         )
 
@@ -5390,6 +5472,7 @@ def _rename_declared_pin_nets(
     return (
         {
             "declared": sorted(declared),
+            **declared_pin_echoes,
             "renamed": sorted(renamed, key=lambda entry: entry["from"]),
             "findings": findings,
         },
