@@ -5348,8 +5348,9 @@ def _resolve_input_artifact_value(
       ``layout.spice``) is only resolvable this way.
 
     The ``{path, scope}`` shape (issue #1261 -- `klt sim`'s ``netlist``,
-    `klt pex`'s ``layout``; issue #2403 -- a ``generic`` envelope's opt-in
-    ``provenance.input.path``) is resolved against the repo root discovered
+    `klt pex`'s ``layout``; issue #2879 -- `klt sta` schema 2's
+    ``def_path``/``verilog_path``; issue #2403 -- a ``generic`` envelope's
+    opt-in ``provenance.input.path``) is resolved against the repo root discovered
     from the evidence file's own location, which is what ``scope: "repo"``
     means by construction. ``scope: "external"`` carries no path at all (it
     is ``null`` on purpose, so a host-specific absolute path never lands in
@@ -5362,6 +5363,10 @@ def _resolve_input_artifact_value(
     has no ``.git`` ancestor to find, so every repo-scoped path would be
     unresolvable without it. The caller validates the directory exists --
     an explicit root is never second-guessed by a ``.git`` walk here.
+
+    A plain absolute string (schema-1 `klt sta` evidence, issue #2879) is
+    tried only as written: it is never re-rooted by stripping a guessed host
+    prefix, so it verifies only where that exact path still exists.
     """
     candidates: list[str] = []
     if isinstance(value, str) and value:
