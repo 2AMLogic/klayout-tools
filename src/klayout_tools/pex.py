@@ -836,6 +836,39 @@ def _flat_dut_mismatch(
 _DEVICE_MODEL_CARD_PREFIXES = "MXQD"
 
 
+def _split_spice_tokens(line: str) -> list[str]:
+    """Split a SPICE card on whitespace, keeping a quoted ``'...'``/``"..."``
+    or braced ``{...}`` expression (which may contain spaces, e.g.
+    ``ad='int((nf+1)/2) * W/nf * 0.18u'``) inside its ``name=value`` token."""
+    tokens: list[str] = []
+    current: list[str] = []
+    quote = ""
+    depth = 0
+    for ch in line:
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+            current.append(ch)
+        elif ch == "{":
+            depth += 1
+            current.append(ch)
+        elif ch == "}":
+            depth = max(depth - 1, 0)
+            current.append(ch)
+        elif ch.isspace() and depth == 0:
+            if current:
+                tokens.append("".join(current))
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
 def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
     """``{lowercased model/subcircuit name: (name as written, instance
     count)}`` for every `M` (raw MOSFET)/`X` (subcircuit call, `klt
@@ -864,7 +897,9 @@ def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
         stripped = line.strip()
         if not stripped or stripped[0].upper() not in _DEVICE_MODEL_CARD_PREFIXES:
             continue
-        parts = [token for token in stripped.split() if "=" not in token]
+        parts = [
+            token for token in _split_spice_tokens(stripped) if "=" not in token
+        ]
         if len(parts) < 2:
             continue  # no nodes/model at all -- not a real device instance
         name = parts[-1]
@@ -900,7 +935,9 @@ def _reference_is_hierarchical(netlist_text: str) -> bool:
         stripped = line.strip()
         if not stripped or stripped[0].upper() != "X":
             continue
-        parts = [token for token in stripped.split() if "=" not in token]
+        parts = [
+            token for token in _split_spice_tokens(stripped) if "=" not in token
+        ]
         if len(parts) < 2:
             continue
         if parts[-1].lower() in local_subckts:

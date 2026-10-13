@@ -849,6 +849,29 @@ def test_model_mismatch_none_when_models_agree(tmp_path):
     )
 
 
+def test_model_mismatch_quoted_expression_params_with_spaces(tmp_path):
+    """Issue #2866: a quoted parameter expression containing spaces must be
+    one name=value token, not mis-read as the model name."""
+    from klayout_tools.pex import _device_model_counts
+
+    card = (
+        "XMn y a vss vss nfet_03v3 L=0.28u W=0.22u nf=1 "
+        "ad='int((nf+1)/2) * W/nf * 0.18u' "
+        "as='int((nf+2)/2) * W/nf * 0.18u'\n"
+    )
+    reference = tmp_path / "ref.spice"
+    extracted = tmp_path / "ext.spice"
+    reference.write_text(card)
+    extracted.write_text(card.replace("XMn", "X0"))
+    assert _device_model_counts(card) == {"nfet_03v3": ("nfet_03v3", 1)}
+    assert (
+        _model_mismatch(
+            reference_netlist=str(reference), extracted_netlist=str(extracted)
+        )
+        is None
+    )
+
+
 def test_model_mismatch_case_insensitive_model_names(tmp_path):
     """ngspice is case-insensitive about model/subcircuit names -- so is this
     comparison, mirroring `_subckt_interfaces`'s own convention."""
