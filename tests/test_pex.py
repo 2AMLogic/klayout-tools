@@ -4640,9 +4640,7 @@ def test_run_pex_each_schematic_side_digest_tracks_only_its_own_file(
         # Paths differ per tmp dir, so compare only digest *content* that
         # does not embed a path: the DUT text and the extracted netlist.
         return {
-            k
-            for k in keys
-            if base["testbenches"][0][k] != other["testbenches"][0][k]
+            k for k in keys if base["testbenches"][0][k] != other["testbenches"][0][k]
         }
 
     assert "schematic_netlist_sha256" in differing(dut_changed)
@@ -4652,8 +4650,9 @@ def test_run_pex_each_schematic_side_digest_tracks_only_its_own_file(
         == base["testbenches"][0]["schematic_netlist_sha256"]
     )
     for other in (dut_changed, body_changed):
-        assert other["extraction"]["netlist_sha256"] == (
-            base["extraction"]["netlist_sha256"]
+        assert (
+            other["extraction"]["netlist_sha256"]
+            == base["extraction"]["netlist_sha256"]
         )
 
 

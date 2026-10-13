@@ -217,8 +217,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from . import env_provenance, output_lock
-from ._provenance import sha256_file
 from ._paths import _fold_spice_continuations, _resolve_relative
+from ._provenance import sha256_file
 from .coverage import (
     REASON_NO_DELTA_ROWS,
     build_check_coverage,
