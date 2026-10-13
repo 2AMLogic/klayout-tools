@@ -1513,23 +1513,12 @@ def run_lvs(request: str) -> dict[str, Any]:
         finfet_layout, layout_netlist, layout_circuit, reference_netlist, finfet_bulk
     )
 
-    if reference_form != "gate-level-verilog":
-        # Issue #2853 (option (b)): a mixed-level compare -- a transistor-
-        # level region next to cells extracted as pin-only black boxes
-        # (`layout.abstract_cells`, or a `klt extract --abstract-cells`
-        # `layout.netlist`) -- against a reference carrying pin-only stubs
-        # for the same cells. Those stubs' power/ground pins are compared,
-        # but as ordinary subcircuit-pin connectivity, not by the
-        # per-instance audit `_power_connectivity_report` runs for the
-        # gate-level form. Say so, naming the stub cells, instead of the
-        # generic reason -- see `_stub_power_connectivity_reason`. Resolved
-        # here, after both sides' optional flatten, because a flattened
-        # side no longer carries the stub instances this reason talks about.
-        stub_cells = _pin_only_stub_cells(layout_circuit)
-        if stub_cells:
-            power_connectivity = _power_connectivity_unchecked(
-                _stub_power_connectivity_reason(reference_form, stub_cells)
-            )
+    # Issue #2853 (option (b)): resolved here, after both sides' optional
+    # flatten, because a flattened side no longer carries the stub instances
+    # the reason talks about -- see `_with_stub_power_connectivity_reason`.
+    power_connectivity = _with_stub_power_connectivity_reason(
+        power_connectivity, reference_form, layout_circuit
+    )
 
     # What the layout-side deck can structurally recognise
     # (`ExtractionDeck.device_classes`, issue #221) -- `null` when no
@@ -9612,6 +9601,28 @@ def _stub_power_connectivity_reason(reference_form: str, stub_cells: list[str]) 
         "silent pass. No separate per-instance power-pin audit ran: that "
         "audit needs a library-derived power/ground pin universe, which only "
         "the 'gate-level-verilog' form has"
+    )
+
+
+def _with_stub_power_connectivity_reason(
+    power_connectivity: dict[str, Any],
+    reference_form: str,
+    layout_circuit: Any,
+) -> dict[str, Any]:
+    """``power_connectivity`` with its ``unchecked`` reason replaced by
+    :func:`_stub_power_connectivity_reason` when a non-``gate-level-verilog``
+    compare's layout instantiates pin-only black-box cells (issue #2853
+    option (b): a transistor-level region next to abstracted cells, against a
+    reference carrying pin-only stubs for them). Unchanged for the
+    ``gate-level-verilog`` form (it runs the real audit) and when the layout
+    instantiates no such cell."""
+    if reference_form == "gate-level-verilog":
+        return power_connectivity
+    stub_cells = _pin_only_stub_cells(layout_circuit)
+    if not stub_cells:
+        return power_connectivity
+    return _power_connectivity_unchecked(
+        _stub_power_connectivity_reason(reference_form, stub_cells)
     )
 
 
