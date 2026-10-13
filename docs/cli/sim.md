@@ -919,6 +919,46 @@ update the runner image to the client's `klt` build, or submit from a client
 matching the image. Jobs that never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.
 
+### Worker-observed environment (`worker_environment`, [#2834](https://github.com/2AMLogic/klayout-tools/issues/2834))
+
+`environment.remote` (and every `environment.remote.fleet[]` entry for
+`hosts > 1`) carries an additive `worker_environment` object describing what
+the **job instance** resolved -- distinct from the client-scoped
+`provenance` / `client_klt_version` fields, which describe the submitter. The
+same runner preflight that writes `runner_identity.json` also writes
+`outputs/worker_environment.json` (no second preflight), before the
+version-skew gate, so a rejected job still leaves it behind. Capture is
+best-effort and cannot change the job: bounded probe timeouts, an
+allowlist of observations (never the whole environment or arbitrary manifest
+contents), size-capped, serialised with a JSON encoder, errors recorded as
+`diagnostics`, and the capture step can never fail the job.
+
+| Field | Meaning |
+| --- | --- |
+| `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, all observations are `null` -- never the client's values. |
+| `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
+| `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree). Stamp fields are `null` when `SOURCES` is absent. |
+| `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
+| `omp_num_threads` | The worker's effective `OMP_NUM_THREADS`, `null` when unset. |
+| `image_manifest` | Allowlisted fields of a worker-local manifest (`$KLT_IMAGE_MANIFEST`, `/etc/klt-image-manifest.json`, `/opt/klt/image-manifest.json`), or `null` when none exists. This is the worker's own file, not the submitter's AMI selection metadata (`ami_id`, `data/remote-sim-ami-manifest.json`); a selected image is not evidence of the model bytes executed. Whether an image pins its PDK revision is reported only if the worker manifest says so (`pdk_pinned`); otherwise unknown. |
+| `diagnostics` | Bounded list of capture problems (missing binary, unreadable stamp, ...). |
+| `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable`. |
+
+`pdk_stamp_comparison` compares the worker's stamp with the `SOURCES` stamp the
+submitter resolves locally (`models.pdk_root` or `$PDK_ROOT`) and reports a
+`mismatch` only when both sides give the **same variant under the same stamp
+scheme**; a missing stamp or an unlike scheme is `not_comparable`, never a
+proven mismatch. A matching stamp does not prove model-closure equality
+(see #3071), and a matching major version (`engine_version`, the top-level
+simulator version) does not imply the same build: compare `version_banner`
+and `selected_path` for build identity.
+
+Coverage: the `batch` backend only, single jobs and every sharded member
+(mixed worker identities stay individually visible; recovered failed-job
+artifacts are included). The `remote` (SSH) backend does not write this
+capture yet and reports no `worker_environment`. Workers that predate the
+capture, or lack `python3`, report `capture: "absent"`.
+
 ### Failed jobs: output recovery and the diagnostic you get
 
 When a job reaches a terminal `failed`/`timeout` state with an exit code
