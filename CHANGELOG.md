@@ -38,6 +38,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   `truncated`) on that `corners[].measurements[]` entry. No `schema_version`
   bump. Refused for `engine: "xyce"` and inside `analysis_steps[]`.
 
+- **`klt extract`/`decks`: optional four-terminal bipolar (`substrate`)**
+  (issue #2862): `BipolarDevice` accepts an optional `substrate` layer, for a
+  PDK whose bipolar has a drawn substrate contact distinct from the collector
+  (SG13G2's four-terminal NPN flavours are the motivating case). An entry
+  that declares it extracts through KLayout's `DeviceExtractorBJT4Transistor`
+  (terminals C/B/E/S) and reports an additive `"s"` key in `devices[].nets`;
+  an entry that leaves it `None` — every deck shipped today (sky130,
+  gf180mcu, asap7, sg13cmos5l) — extracts byte-identically to before. The
+  substrate terminal joins the contact/metal stack like any drawn diffusion,
+  never the deck's `substrate_net` global, and `klt lvs` compares a
+  four-terminal reference instance (`Q c b e s model`, read natively, or
+  converted from a four-node `X` card through an object-form
+  `reference.device_map` `kind: "bipolar"` binding) against it — a substrate
+  mis-tie is a `device.unmatched`/`net.unmatched` mismatch. `klt deck
+  devices` reports the substrate terminal as a fourth entry only for
+  entries that declare it. No `sg13g2.py` bipolar entry yet — the deck
+  entry stays gated on #2860/#2861 (see #2864).
 - **`klt sim` rejects a `corners.supply_v` key that names a `.param`**
   (issue #2867): ngspice's `alter <param>=<value>` cannot change a `.param`
   (its dependents were evaluated when the deck was parsed; ngspice only logs
