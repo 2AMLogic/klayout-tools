@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --batch-set a.json b.json ...`** (issue #2869): submit a set of
+  independent `backend: batch` requests in one invocation, with at most
+  `--max-in-flight` (default 4) in flight and the rest queued. Reuses
+  `sim_batch.launch_job`'s `capacity_wait_s` backoff (no second retry loop),
+  never falls back to local ngspice, keeps one `report.json` per request, and
+  emits one new aggregate envelope (`schema_version: 1`,
+  `docs/schemas/sim-set-report.schema.json`) with per-request status, job id
+  and error code. Exit code is the worst per-request code (partial set: `4`).
+  Additive: single-request `klt sim` and its JSON are unchanged; the
+  concurrency-cap refusal classification stays with #2917.
 - **`klt sim` rejects a `corners.supply_v` key that names a `.param`**
   (issue #2867): ngspice's `alter <param>=<value>` cannot change a `.param`
   (its dependents were evaluated when the deck was parsed; ngspice only logs

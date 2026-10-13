@@ -3617,3 +3617,147 @@ def test_job_cmd_with_capture_still_runs_the_simulation(tmp_path):
     # sanity: the matching runner runs the simulation with capture present
     assert marker.exists()
     assert proc.returncode == 0
+
+
+# --------------------------------------------------------------------------- #
+# `klt sim --batch-set` (issue #2869)
+# --------------------------------------------------------------------------- #
+
+SET_SCHEMA_PATH = REPO_ROOT / "docs" / "schemas" / "sim-set-report.schema.json"
+
+
+def _write_set(tmp_path: Path, count: int) -> list[str]:
+    _write_body(tmp_path)
+    paths = []
+    for i in range(count):
+        path = tmp_path / f"req{i}.json"
+        path.write_text(json.dumps(_batch_request(tmp_path)))
+        paths.append(str(path))
+    return paths
+
+
+def _fake_report(status: str = "pass", job_id: str = "klt-sim-x") -> dict:
+    return {"status": status, "environment": {"remote": {"job_id": job_id}}}
+
+
+def test_sim_set_bounds_in_flight_and_aggregates(tmp_path):
+    import threading
+
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 6)
+    lock = threading.Lock()
+    state = {"now": 0, "peak": 0}
+
+    def fake_run(path, **kwargs):
+        assert kwargs["backend"] == "batch"
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        import time
+
+        time.sleep(0.02)
+        with lock:
+            state["now"] -= 1
+        return _fake_report(job_id="job-" + os.path.basename(path))
+
+    report = sim_set.run_sim_set(paths, max_in_flight=2, run=fake_run)
+
+    assert state["peak"] <= 2
+    assert report["status"] == "pass"
+    assert report["request_count"] == 6
+    assert [r["index"] for r in report["requests"]] == list(range(6))
+    assert report["requests"][0]["job_id"] == "job-req0.json"
+    jsonschema.validate(report, json.loads(SET_SCHEMA_PATH.read_text()))
+    for entry in report["requests"]:
+        assert json.loads(Path(entry["report"]).read_text())["status"] == "pass"
+    # one distinct report directory per request
+    assert len({r["report"] for r in report["requests"]}) == 6
+
+
+def test_sim_set_partial_refusal_is_one_summary(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 3)
+
+    def fake_run(path, **kwargs):
+        if path.endswith("req1.json"):
+            raise sim.SimError(
+                "batch backend failed: no capacity", code="batch_no_capacity"
+            )
+        return _fake_report()
+
+    report = sim_set.run_sim_set(paths, run=fake_run)
+
+    assert report["status"] == "error"
+    assert report["submitted"] == 2
+    assert report["refused"] == 1
+    assert report["refused_codes"] == ["batch_no_capacity"]
+    bad = report["requests"][1]
+    assert bad["error"]["code"] == "batch_no_capacity"
+    assert bad["job_id"] is None and bad["report"] is None
+    jsonschema.validate(report, json.loads(SET_SCHEMA_PATH.read_text()))
+
+
+def test_sim_set_rejects_empty_and_bad_bound():
+    from klayout_tools import sim_set
+
+    with pytest.raises(sim.SimError):
+        sim_set.run_sim_set([])
+    with pytest.raises(sim.SimError):
+        sim_set.run_sim_set(["a.json"], max_in_flight=0)
+
+
+def test_cli_batch_set_end_to_end_partial_exit_code(tmp_path, monkeypatch, capsys):
+    from klayout_tools.cli import main
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    # The first launch is refused (no capacity_wait_s => fail fast); the
+    # other request succeeds. max-in-flight 1 makes the order deterministic.
+    _queue_refusals(runner, 1)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    paths = _write_set(tmp_path, 2)
+
+    code = main(
+        ["sim", "--batch-set", *paths, "--max-in-flight", "1", "--format", "json"]
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert code == 4
+    assert out["status"] == "error"
+    assert [r["status"] for r in out["requests"]] == ["error", "not_checked"]
+    assert out["requests"][0]["error"]["code"] == "batch_no_capacity"
+    assert out["requests"][1]["job_id"].startswith("klt-sim-")
+    assert len(runner.argvs_matching("launch")) == 2
+    jsonschema.validate(out, json.loads(SET_SCHEMA_PATH.read_text()))
+
+
+def test_cli_batch_set_all_pass_exits_zero_and_refuses_other_backend(
+    tmp_path, monkeypatch, capsys
+):
+    from klayout_tools import sim_set
+    from klayout_tools.cli import main
+
+    monkeypatch.setattr(sim_set, "run_sim", lambda path, **kw: _fake_report())
+    # run_sim_set bound the default at import; patch the default arg's source.
+    monkeypatch.setattr(
+        sim_set.run_sim_set,
+        "__kwdefaults__",
+        {
+            **sim_set.run_sim_set.__kwdefaults__,
+            "run": lambda path, **kw: _fake_report(),
+        },
+    )
+    paths = _write_set(tmp_path, 2)
+
+    assert main(["sim", "--batch-set", *paths, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "pass"
+
+    assert main(["sim", "--batch-set", *paths, "--backend", "local"]) == 2
+    assert main(["sim", paths[0], "--max-in-flight", "2"]) == 2
+    # Bare ``klt sim`` keeps the argparse-style SystemExit(2) contract.
+    with pytest.raises(SystemExit) as exc:
+        main(["sim"])
+    assert exc.value.code == 2
