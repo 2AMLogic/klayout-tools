@@ -416,6 +416,7 @@
         "klayout_tools.sim_batch",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_remote",
+        "klayout_tools.sim_set",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps"
       ]
