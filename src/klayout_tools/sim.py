@@ -4191,39 +4191,48 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
     top level, since a loaded section is."""
     decl = _NetlistDeclarations(set(), set(), {}, [])
     depth = 0
-    in_control = False
-    for line in _logical_netlist_lines(netlist_text):
-        lowered = line.lower()
-        if in_control:
-            if lowered.split(None, 1)[0] == ".endc":
-                in_control = False
-            continue
-        if lowered.startswith("."):
-            parts = line.split()
-            word = parts[0].lower()
-            if word == ".control":
-                in_control = True
-            elif word == ".subckt":
-                depth += 1
-            elif word == ".ends":
-                depth = max(0, depth - 1)
-            elif depth:
-                continue
-            elif word in (".include", ".inc") and len(parts) >= 2:
-                decl.includes.append(line.split(None, 1)[1].strip())
-            elif word == ".lib" and len(parts) >= 3:
-                decl.includes.append(" ".join(parts[1:-1]))
-            elif word == ".param" and len(parts) > 1:
-                body = _PARAM_DECL_EXPR_RE.sub(" 0 ", lowered.split(None, 1)[1])
-                decl.params.update(_PARAM_DECL_NAME_RE.findall(body))
-            continue
-        if depth:
-            continue
-        tokens = lowered.split()
-        decl.elements.add(tokens[0])
-        if tokens[0].startswith("v") and len(tokens) >= 4:
-            decl.voltage_specs[tokens[0]] = " ".join(tokens[3:])
+    for line in _top_level_cards(_logical_netlist_lines(netlist_text)):
+        word = line.split(None, 1)[0].lower()
+        if word == ".subckt":
+            depth += 1
+        elif word == ".ends":
+            depth = max(0, depth - 1)
+        elif not depth:
+            _record_declaration(decl, line)
     return decl
+
+
+def _top_level_cards(lines: list[str]) -> list[str]:
+    """``lines`` without ``.control`` ... ``.endc`` blocks."""
+    kept: list[str] = []
+    in_control = False
+    for line in lines:
+        word = line.split(None, 1)[0].lower()
+        if word == ".control":
+            in_control = True
+        elif word == ".endc":
+            in_control = False
+        elif not in_control:
+            kept.append(line)
+    return kept
+
+
+def _record_declaration(decl: _NetlistDeclarations, line: str) -> None:
+    """Record one top-level card (outside any ``.subckt``) into ``decl``."""
+    lowered = line.lower()
+    parts = line.split()
+    word = parts[0].lower()
+    if word in (".include", ".inc") and len(parts) >= 2:
+        decl.includes.append(line.split(None, 1)[1].strip())
+    elif word == ".lib" and len(parts) >= 3:
+        decl.includes.append(" ".join(parts[1:-1]))
+    elif word == ".param" and len(parts) > 1:
+        body = _PARAM_DECL_EXPR_RE.sub(" 0 ", lowered.split(None, 1)[1])
+        decl.params.update(_PARAM_DECL_NAME_RE.findall(body))
+    elif not word.startswith("."):
+        decl.elements.add(word)
+        if word.startswith("v") and len(parts) >= 4:
+            decl.voltage_specs[word] = " ".join(lowered.split()[3:])
 
 
 def _resolve_netlist_include(reference: str, base_dir: str) -> str | None:
