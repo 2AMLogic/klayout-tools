@@ -1494,6 +1494,18 @@ artifacts:
   unprotected. A `fork()` without `exec` shares the lock descriptor; such
   workers outliving a killed owner keep the lock until they exit.
 
+### Aggregate (set) envelopes: `klt sim --batch-set` (issue #2869)
+
+A verb that submits several independent requests in one invocation emits one
+aggregate payload with its own `schema_version` (versioned like any command
+payload), a rollup `status`, and a `requests[]` array of per-request entries
+(`status`, `exit_code`, `job_id`, `error.{message,code}`). A request-level
+failure is an entry, not a command error: the command exits with the **worst
+per-request code** (a partial set exits `4` for `klt sim`), which is `>= 3`,
+so the "a report was emitted" rule below holds. See
+[`docs/cli/sim.md`](cli/sim.md) "Submitting a set of requests" and
+`docs/schemas/sim-set-report.schema.json`.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                     |

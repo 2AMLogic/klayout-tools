@@ -655,8 +655,71 @@ made. Things worth knowing:
   concurrently. A shard whose budget runs out is reported as a `lost_shard`
   (see "Fleet sharding" below) like any other launch failure, not as a
   request-level `error.code` — its sibling shards' results are kept.
+- **Fan-out:** several requests can be submitted at once with `--batch-set`
+  (below).
 - **There is no `--wait-for-capacity` CLI flag yet.** The request field is
   the one control for now; a flag mirroring it is a possible follow-up.
+
+### Submitting a set of requests (`--batch-set`, [#2869](https://github.com/2AMLogic/klayout-tools/issues/2869))
+
+A campaign of N independent `backend: batch` requests can be submitted in one
+command instead of N invocations that each back off alone:
+
+```bash
+klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
+```
+
+- **Bounded in flight.** At most `--max-in-flight` requests (default **4**)
+  run at once -- submit, launch, and poll; the rest queue and start as slots
+  free. The bound is a client-side politeness knob, not the fleet's cap.
+- **One retry loop.** Each request runs the ordinary batch path, so
+  capacity-refusal waiting is exactly `batch.capacity_wait_s` (above) via
+  `sim_batch.launch_job`; set mode adds no retry of its own. Set
+  `capacity_wait_s` in the requests if you want refusals waited out.
+- **Batch only, never local.** The backend is forced to `batch` (`--backend`
+  other than `batch` is a usage error, exit `2`); a refused or failed request is
+  reported, never re-run on local ngspice. `--resume`, `--plot` and
+  `--op-lint` cannot be combined with it.
+- **Per-request reports.** Each request writes its full single-request report
+  to `report.json` in its own directory, `<outdir>/<request-stem>/` (without
+  `-o`: `.klt/sim/<request-stem>/` next to the request file).
+- **Invalid request.** A request that fails validation (before any S3 write) or
+  is refused becomes an `error` entry; the others proceed.
+
+The stdout payload is one aggregate envelope
+([`docs/schemas/sim-set-report.schema.json`](../schemas/sim-set-report.schema.json),
+`schema_version: 1`; the single-request report is unchanged):
+
+```json
+{
+  "schema_version": 1,
+  "status": "error",
+  "request_count": 2,
+  "max_in_flight": 2,
+  "submitted": 1,
+  "refused": 1,
+  "refused_codes": ["batch_no_capacity"],
+  "requests": [
+    {"index": 0, "request": "a.json", "status": "pass", "exit_code": 0,
+     "job_id": "klt-sim-1f2e...", "job_ids": ["klt-sim-1f2e..."],
+     "report": "out/a/report.json", "error": null},
+    {"index": 1, "request": "b.json", "status": "error", "exit_code": 1,
+     "job_id": null, "job_ids": [], "report": null,
+     "error": {"message": "batch backend failed: ...", "code": "batch_no_capacity"}}
+  ]
+}
+```
+
+`job_id`/`job_ids` come from each report's `environment.remote` (several ids
+for a sharded request). Aggregate `status` is `pass`, `fail` (a measurement
+failed, nothing errored) or `error` (any request errored or was refused, or any
+request's own status was `error`/`not_checked`/`inconclusive`).
+
+**Exit code:** the worst per-request code -- `0` all passed, `3` a measurement
+failed, `4` at least one request errored or was refused (**a partial set exits
+`4`**, with the report on stdout). Exit `1` means the set could not start
+(e.g. an empty or invalid `--max-in-flight`) and no report was written; the
+error envelope goes to stderr as usual.
 
 ### Three budgets, and the fleet's whole-job ceiling
 
