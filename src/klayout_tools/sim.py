@@ -89,7 +89,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, NamedTuple
 
-from . import env_provenance, output_lock, sim_steps
+from . import env_provenance, output_lock, sim_crossings, sim_steps
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -852,6 +852,8 @@ def _resolve_analysis_and_measurements(
     # `.control` block) are the two declarable forms, exactly one per entry
     # -- see `_validate_measurement_forms` for the full rule set.
     _validate_measurement_forms(measurements_spec)
+    # Issue #2868: a crossings series is a transient-time quantity.
+    sim_crossings.validate_crossings_context(measurements_spec, analysis)
     return analysis, measurements_spec
 
 
@@ -975,12 +977,25 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     name = spec.get("name")
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
-    if name is None or not (has_spice or has_expr):
+    has_crossings = sim_crossings.is_crossings(spec)
+    if name is None or not (has_spice or has_expr or has_crossings):
         raise SimError(
             "each request.measurements[] entry requires 'name' and "
-            "exactly one of 'spice' (a verbatim .meas card) or 'expr' "
-            "(an ngspice expression evaluated after the analysis)"
+            "exactly one of 'spice' (a verbatim .meas card), 'expr' "
+            "(an ngspice expression evaluated after the analysis) or "
+            "'crossings' (a threshold-crossing time series)"
         )
+    if has_crossings:
+        # Issue #2868: a third, mutually exclusive form.
+        if has_spice or has_expr:
+            raise SimError(
+                f"measurement '{name}' declares 'crossings' together with "
+                f"'{'spice' if has_spice else 'expr'}': they are alternative "
+                "forms of a measurement -- declare exactly one (use a "
+                "separate measurements[] entry for the scalar)"
+            )
+        sim_crossings.validate_crossings_spec(name, spec["crossings"])
+        return
     if has_spice and has_expr:
         raise SimError(
             f"measurement '{name}' declares both 'spice' and 'expr': "
@@ -1671,6 +1686,9 @@ def run_sim(
         expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
         save_mode_declared=save_mode_declared,
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
+        crossings_declared=bool(
+            sim_crossings.crossings_measurements(measurements_spec)
+        ),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -3580,6 +3598,41 @@ class _Checkpoint:
 # --------------------------------------------------------------------------- #
 
 
+def _refuse_xyce_control_block_measurements(
+    *, expr_declared: bool, crossings_declared: bool
+) -> None:
+    """The ``engine: "xyce"`` refusals for measurement forms that exist only
+    as commands in klt's generated ngspice ``.control`` block (``expr``,
+    issue #2533; ``crossings``, issue #2868). Split out of
+    :func:`_enforce_xyce_support_boundary` to keep that gate under the
+    complexity limit."""
+    if expr_declared:
+        # Issue #2533: an `expr` measurement is emitted as ngspice
+        # `let`/`print` commands inside the generated `.control` block, and
+        # the Xyce deck has no control block to carry them (see
+        # `_write_xyce_deck`'s docstring). Refused by name rather than
+        # silently dropped: a corner that ran without its `expr` lines would
+        # report every such measurement as "produced no value", which reads
+        # as a circuit regression rather than an unsupported request field.
+        raise SimError(
+            "measurements[].expr is not supported for engine 'xyce': it is "
+            "evaluated by ngspice `let`/`print` commands inside a `.control` "
+            "block, and the Xyce deck has none (its analysis is a plain "
+            "top-level dot card); use engine 'ngspice', or express the "
+            "quantity as a `.meas` card in measurements[].spice"
+        )
+    if crossings_declared:
+        # Issue #2868: the series is dumped by ngspice `let`/`write`
+        # commands in the generated `.control` block -- same boundary as
+        # `expr`, refused by name for the same reason.
+        raise SimError(
+            "measurements[].crossings is not supported for engine 'xyce': "
+            "the signal is dumped by ngspice `let`/`write` commands inside a "
+            "`.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'"
+        )
+
+
 def _enforce_xyce_support_boundary(
     *,
     engine: str,
@@ -3591,6 +3644,7 @@ def _enforce_xyce_support_boundary(
     expr_measurements_declared: bool = False,
     save_mode_declared: bool = False,
     analysis_steps_declared: bool = False,
+    crossings_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -3656,21 +3710,10 @@ def _enforce_xyce_support_boundary(
             "Verilog-A models as its own compiled plugins (`-plugin`), not "
             "OSDI shared libraries; use engine 'ngspice' or drop the option"
         )
-    if expr_measurements_declared:
-        # Issue #2533: an `expr` measurement is emitted as ngspice
-        # `let`/`print` commands inside the generated `.control` block, and
-        # the Xyce deck has no control block to carry them (see
-        # `_write_xyce_deck`'s docstring). Refused by name rather than
-        # silently dropped: a corner that ran without its `expr` lines would
-        # report every such measurement as "produced no value", which reads
-        # as a circuit regression rather than an unsupported request field.
-        raise SimError(
-            "measurements[].expr is not supported for engine 'xyce': it is "
-            "evaluated by ngspice `let`/`print` commands inside a `.control` "
-            "block, and the Xyce deck has none (its analysis is a plain "
-            "top-level dot card); use engine 'ngspice', or express the "
-            "quantity as a `.meas` card in measurements[].spice"
-        )
+    _refuse_xyce_control_block_measurements(
+        expr_declared=expr_measurements_declared,
+        crossings_declared=crossings_declared,
+    )
     if save_mode_declared:
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
         # `.control` block carries `save all`; the Xyce deck has no control
@@ -4694,6 +4737,10 @@ def _run_corner(
     # *response* below still echoes the caller's original `name` spelling --
     # only the internal lookup is case-folded.
     measurement_values = _parse_engine_measurements(log_text, engine)
+    # Issue #2868: crossings series are read from this corner's own working
+    # directory now, before it is cleaned up below -- so the reduced array is
+    # what leaves the corner, on every backend, whatever `keep_artifacts` is.
+    crossings = sim_crossings.extract_corner_crossings(measurements_spec, corner_dir)
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -4702,6 +4749,7 @@ def _run_corner(
             log_text=log_text,
             is_xyce=is_xyce,
             save_mode=save_mode,
+            crossings=crossings,
         )
     )
     diagnostics.extend(measurement_diagnostics)
@@ -4837,9 +4885,16 @@ def _corner_measurement_results(
     log_text: str,
     is_xyce: bool,
     save_mode: str,
+    crossings: dict[int, sim_crossings.CrossingsOutcome] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
     from its harvested log values.
+
+    ``crossings`` (issue #2868) maps a ``measurements_spec`` position to that
+    ``crossings`` entry's extracted series (see
+    :func:`klayout_tools.sim_crossings.extract_corner_crossings`); such an
+    entry is graded by :func:`_crossings_measurement_result` instead of being
+    looked up in the log.
 
     An ``analysis_steps[]`` corner (issue #2482) is graded by
     :func:`klayout_tools.sim_steps.grade_step_measurements`, which adds the
@@ -4860,7 +4915,14 @@ def _corner_measurement_results(
     diagnostics: list[dict[str, Any]] = []
     meas_errors = {} if is_xyce else _parse_meas_errors(log_text)
     attributed: set[str] = set()
-    for spec in measurements_spec:
+    for position, spec in enumerate(measurements_spec):
+        if sim_crossings.is_crossings(spec):
+            result, extra = _crossings_measurement_result(
+                spec, (crossings or {}).get(position), save_mode=save_mode
+            )
+            measurement_results.append(result)
+            diagnostics.extend(extra)
+            continue
         name = spec["name"]
         value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
         unit = spec.get("unit")
@@ -4915,6 +4977,54 @@ def _corner_measurement_results(
                 }
             )
     return measurement_results, diagnostics, {}
+
+
+def _crossings_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_crossings.CrossingsOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``crossings`` measurement's response entry (issue #2868).
+
+    ``value`` is the number of crossings found inside the window -- a plain
+    number, graded through :func:`_grade_measurement_value` exactly like any
+    scalar -- and the series itself rides the additive ``crossings`` sibling.
+    No series (signal did not resolve, rawfile unreadable) is an ordinary
+    ``status: "error"`` entry with a ``code: "measurement"`` diagnostic and
+    no ``crossings`` member, like any other measurement with no value."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.error is not None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no crossings series"
+        )
+        if save_mode == "netlist":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {"severity": "error", "code": "measurement", "message": message}
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.total
+    )
+    result = {
+        "name": name,
+        "value": outcome.total,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "crossings": outcome.report(),
+    }
+    return result, grading_diagnostics
 
 
 #: ngspice's own ``.meas`` failure line, e.g.
@@ -5159,6 +5269,7 @@ def _write_corner_deck(
             raw_path=raw_path,
             osdi_preload=osdi_preload,
             save_mode=save_mode,
+            corner_dir=os.path.dirname(os.path.abspath(deck_path)),
         )
     )
     lines.append(".end")
@@ -5175,6 +5286,7 @@ def _corner_deck_control_lines(
     raw_path: str | None,
     osdi_preload: tuple[str, ...],
     save_mode: str = DEFAULT_SAVE_MODE,
+    corner_dir: str = ".",
 ) -> list[str]:
     """The ``.control``/``.endc`` block of :func:`_write_corner_deck`'s
     generated deck, in emission order -- this function owns the ordering
@@ -5238,6 +5350,14 @@ def _corner_deck_control_lines(
 
        No lines at all when no ``expr`` is declared, so every pre-#2533
        request's deck is byte-identical.
+    5. Per ``measurements[].crossings`` entry (issue #2868), a
+       ``let __klt_xing_<k> = <signal>`` / ``write <corner_dir>/crossings_<k>.raw``
+       pair (:func:`klayout_tools.sim_crossings.control_lines`), last before
+       ``quit`` -- after the waveform ``write`` for the same reason as the
+       ``expr`` lines, and after them so a signal may read an ``expr``
+       vector. ``set filetype=ascii`` is emitted before the analysis when
+       any are declared (the rawfile reader is ASCII-only). None of this
+       appears without a crossings entry.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -5257,7 +5377,8 @@ def _corner_deck_control_lines(
         lines.extend(sim_steps.control_lines(analysis, measurements_spec))
         lines.extend(["quit", ".endc"])
         return lines
-    if raw_path is not None:
+    crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
+    if raw_path is not None or crossings_lines:
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {analysis['args']}")
     if raw_path is not None:
@@ -5265,6 +5386,7 @@ def _corner_deck_control_lines(
     for spec in _expr_measurements(measurements_spec):
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
+    lines.extend(crossings_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines

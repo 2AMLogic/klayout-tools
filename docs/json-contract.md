@@ -88,6 +88,17 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+`measurements[].crossings` (issue #2868) is the third form and the first
+whose result is a **series**, not a scalar. It does *not* retype `value`:
+`value` stays a number (the count of crossings found), so every consumer that
+reads `corners[].measurements[].value` as a number — the rollup, Monte Carlo
+statistics, coverage, `limits` grading — is unaffected. The ordered crossing
+times ride a new optional `crossings` object on that entry only, present only
+when the series was extracted (absent on every other entry and on an errored
+one) — the "new optional member, absent when not applicable" rule above.
+No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
+"Threshold-crossing time series (`measurements[].crossings`)".
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt

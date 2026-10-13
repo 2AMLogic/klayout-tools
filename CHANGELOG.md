@@ -24,6 +24,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   and error code. Exit code is the worst per-request code (partial set: `4`).
   Additive: single-request `klt sim` and its JSON are unchanged; the
   concurrency-cap refusal classification stays with #2917.
+
+- **`klt sim` returns a signal's threshold-crossing time series from one
+  declaration** (issue #2868): a new `measurements[].crossings` form
+  (`{"signal": "v(ro1)", "level": 0.9, "edge": "rise"|"fall"|"either",
+  "from"?, "to"?, "max"?}`, `analysis.kind: "tran"` only) replaces a stack of
+  per-edge `.meas ... WHEN v(x)=<thr> RISE=<k>` cards. Times are linearly
+  interpolated between samples and computed inside the corner run, so the
+  series comes back inline on every backend — including `batch`, sharded or
+  not, with `options.keep_artifacts: false`. The entry's `value` is the
+  crossing count (still a number, graded by `limits` like any scalar); the
+  series rides a new, additive `crossings` object (`times`, `edges`,
+  `truncated`) on that `corners[].measurements[]` entry. No `schema_version`
+  bump. Refused for `engine: "xyce"` and inside `analysis_steps[]`.
+
 - **`klt sim` rejects a `corners.supply_v` key that names a `.param`**
   (issue #2867): ngspice's `alter <param>=<value>` cannot change a `.param`
   (its dependents were evaluated when the deck was parsed; ngspice only logs
