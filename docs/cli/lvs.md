@@ -217,6 +217,67 @@ application error (exit 1) rather than guessing; this is the exact failure
 mode ("a bad report parse could silently produce a false match") this
 engine exists to catch, so it is designed to fail loud instead.
 
+### `"klayout-runset"` (issue #2849 — the PDK's own LVS runset)
+
+The LVS-side sibling of `klt drc --engine klayout`. Runs a PDK's **own**
+KLayout LVS runset (e.g. IHP's `libs.tech/klayout/tech/lvs/sg13g2.lvs`) with
+the standalone `klayout` application, so device families the curated
+extraction deck does not declare (HBT, varactor, inductor, ...) are still
+recognized and compared:
+
+```
+klayout -b -r <deck_file> -rd input=<gds> -rd schematic=<spice> \
+        -rd report=<tmp>.lvsdb [-rd top=<top> -rd topcell=<top>] [-rd k=v ...]
+```
+
+Request fields (in addition to `layout.file` [+ `layout.top`] and
+`reference.netlist` [+ `reference.top`]):
+
+| Field | Meaning |
+|---|---|
+| `deck_file` | Required. Path to the runset script (resolved like other request paths). |
+| `deck_vars` | Optional `{name: value}` appended as `-rd name=value`. `input`, `schematic`, `report`, `top`, `topcell` are set by the engine and may not be overridden. |
+| `options.runset_timeout_s` | Wall-clock budget (default 600). |
+| `options.klayout_binary` | Binary override; else `$KLT_KLAYOUT_BINARY`, else `klayout` on `PATH`. A missing binary is an actionable error (exit 1); the default engine stays pip-only. |
+
+`hints`, `parameter_tolerance`, `layout.deck`/`layout.netlist` and any
+`reference.form` are refused (the runset does its own extraction and the
+reference must already be in the runset's SPICE dialect); no field is silently
+ignored.
+
+**The verdict is taken from the `.lvsdb`, not the process.** The database is
+read back with `klayout.db.LayoutVsSchematic.read()` + `xref()`. A PDK driver
+may exit `0` on a non-matching pair, so exit status is only used to detect a
+runset that failed to run (non-zero exit, or no database written: exit 1).
+`status` is `match` only when every circuit pair is `Match`/`MatchWithWarning`;
+unmatched devices, nets, pins and circuits become `mismatches[]` entries using
+the shared categories (`device.unmatched`, `device.property`, `net.unmatched`,
+`pin.unmatched`, `topology`).
+
+**Coverage honesty.** Additive fields:
+
+- `device_census` — `{layout: {class: n}, reference: {class: n}}`.
+- `coverage` — the common v1 block (`checked` = classes with instances),
+  plus `declared_device_classes`/`recognized_device_classes` (per side) and
+  `declared_not_recognized` (declared by the runset, zero instances; also
+  listed under `skipped` with reason `declared_not_recognized`).
+- A run in which the runset recognizes **no** device on either side reports
+  `status: "inconclusive"` (exit 4), `coverage.nothing_checked: true` and a
+  `coverage.no_devices_recognized` mismatch — never a clean match.
+
+`power_connectivity` is present and `unchecked` with an explanatory `reason`
+(the walk needs the curated engine's layout netlist). Evidence-relevant
+fields downstream consumers can key on: `engine`, `provenance.runset`
+(`deck_file`, `deck_vars`, `content_hash`, `klayout_application_version`),
+`coverage`, `device_census`.
+
+`--check` re-hashes the layout, reference and runset
+(`provenance.runset.content_hash`). `--check --rerun` replays the request and
+needs the same standalone `klayout`; it never falls back to another engine.
+Not yet implemented: a `reference.device_map` kind for inductor/varactor
+(split to a follow-up issue) and the CLI `--deck-file`/`--deck-var` flags
+(request fields only for now).
+
 ### FinFET decks: ASAP7 (issues #2761, #2813)
 
 A `layout.deck` naming a FinFET extraction deck (today `asap7`) compares

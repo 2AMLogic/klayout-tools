@@ -196,6 +196,7 @@ from .lvs_power import (
     _power_connectivity_unchecked,
     _with_stub_power_connectivity_reason,
 )
+from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
 from .lvs_supply import parse_supply_nets, supply_fragmentation_findings
 from .netlist_capacitor_recovery import (
     custom_device_classes_for_deck,
@@ -223,7 +224,7 @@ SCHEMA_VERSION = 1
 #: ``netgen`` (issue #343) is a second, independent comparator wrapped as a
 #: subprocess in netlist-vs-netlist mode only -- see this module's docstring
 #: for the scope boundary the accepted spike drew around it.
-SUPPORTED_ENGINES = ("klayout", "netgen")
+SUPPORTED_ENGINES = ("klayout", "netgen", "klayout-runset")
 
 #: Accepted ``request.reference.form`` values (issue #280, extended by issue
 #: #1336). ``"plain-element"`` (default) is the schematic-equivalent form
@@ -990,6 +991,11 @@ def run_lvs(request: str) -> dict[str, Any]:
     reference_spec = request["reference"]
     if not isinstance(reference_spec, dict):
         raise LvsError("request.reference must be a JSON object")
+
+    if engine == RUNSET_ENGINE:
+        # Issue #2849: the PDK's own runset does extraction and compare; the
+        # verdict is read back from its .lvsdb (see lvs_runset.py).
+        return run_lvs_klayout_runset(request, request_dir)
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
     # resolved `{key: value}` mapping, one layer down: this is a JSON object
@@ -2850,12 +2856,27 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
         ),
     ]
     deck = get_path(committed, ("provenance", "deck"))
-    if isinstance(deck, dict) and deck.get("name") is not None:
+    if (
+        committed.get("engine") != RUNSET_ENGINE
+        and isinstance(deck, dict)
+        and deck.get("name") is not None
+    ):
         checks.append(
             hash_check(
                 "provenance.deck.content_hash",
                 deck.get("content_hash"),
                 _content_hash(deck_source_path(deck["name"])),
+            )
+        )
+    runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
+    if committed.get("engine") == RUNSET_ENGINE and runset_hash is not None:
+        # Issue #2849: the PDK runset is an input too -- a changed runset
+        # can change the verdict without moving the layout or reference.
+        checks.append(
+            hash_check(
+                "provenance.runset.content_hash",
+                runset_hash,
+                _content_hash(committed.get("deck_file")),
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)
@@ -2876,6 +2897,30 @@ def _strict_top_level_pin_count_replay_options(
     if echoed.get("compare_mos_flavour") is True:
         replay["compare_mos_flavour"] = True
     return replay
+
+
+def _reconstruct_runset_request(committed: dict[str, Any]) -> dict[str, Any]:
+    """Issue #2849: replay a ``klayout-runset`` report from its own echo
+    (``layout``/``reference``/``top``/``deck_file``/``deck_vars``/``options``).
+    Re-running needs the same standalone ``klayout`` application; there is no
+    fallback to another engine."""
+    layout_spec: dict[str, Any] = {"file": committed.get("layout")}
+    if committed.get("top"):
+        layout_spec["top"] = committed["top"]
+    reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
+    if committed.get("reference_top"):
+        reference_spec["top"] = committed["reference_top"]
+    request: dict[str, Any] = {
+        "engine": RUNSET_ENGINE,
+        "layout": layout_spec,
+        "reference": reference_spec,
+        "deck_file": committed.get("deck_file"),
+    }
+    if committed.get("deck_vars"):
+        request["deck_vars"] = committed["deck_vars"]
+    if committed.get("options"):
+        request["options"] = committed["options"]
+    return request
 
 
 def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
@@ -3180,6 +3225,7 @@ def _supply_nets_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
 _LVS_RERUN_EXCLUDE_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
     ("environment", "extracted_netlist"),
     ("environment", "netgen_binary"),
+    ("environment", "klayout_binary"),  # Issue #2849: host-local path
 }
 
 
@@ -3266,7 +3312,11 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
             f"committed report has no 'layout'/'reference' field to rerun: "
             f"{report_path}"
         )
-    request = _reconstruct_lvs_request(committed)
+    request = (
+        _reconstruct_runset_request(committed)
+        if committed.get("engine") == RUNSET_ENGINE
+        else _reconstruct_lvs_request(committed)
+    )
     fresh = _run_reconstructed_lvs(request)
     exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
     exclude.update(

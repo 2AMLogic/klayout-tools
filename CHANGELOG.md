@@ -816,6 +816,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   always the source. S/D interchange stays electrically legal for LVS; only
   the reported orientation changes, and only on hosts that were iterating in
   the other order.
+- `klt lvs`: new `"engine": "klayout-runset"` runs a PDK's own KLayout LVS runset (`deck_file`, `deck_vars`) and takes the verdict from its `.lvsdb` cross-reference, with `device_census`, a `coverage` block and `provenance.runset` (issue #2849). Additive; no `schema_version` bump.
+
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time
   from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the
