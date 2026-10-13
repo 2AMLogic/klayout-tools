@@ -34,6 +34,19 @@ optionally `read_spef`) and reports the same timing/power fields
 This is what makes N-corner characterization correct: the same DEF,
 unmodified, is loaded fresh for every corner run.
 
+**Selected-corner iteration on a routed artifact.** After one
+`klt place-and-route` run, point `def` at its routed DEF and list only the
+corners you need in `pdk.corners` (optionally with `spef` and
+`constraints.propagated_clock`). This is the supported way to iterate on
+corner timing without repeating implementation; it times the DEF's wires
+with the parasitics you supply, so its slack is not guaranteed equal to the
+in-flow sweep's — compare, don't assume. Without `spef` no wire RC is
+attached, so the result is optimistic relative to the in-flow sweep's
+global-route estimate. With the run's own `post_route_spef` SPEF it matched
+`spef_sta` exactly on the measured fixtures. The in-flow sweep is
+ideal-clock. See
+`docs/design/place-and-route-improvements-survey.md` section 6 (issue #2783).
+
 (This section describes `klt sta`'s original `def`-mode request. Issue
 #1825 additionally added a `verilog`-mode request that *does* run
 `link_design` against a from-scratch structural netlist, with no DEF at
@@ -153,6 +166,12 @@ A request naming both, or neither, is a request error.
   "worst_hold_slack_ns": 0.03812,
   "total_negative_hold_slack_ns": 0.0,
   "timing_status": "constrained",
+  "constraint_completeness": {
+    "status": "complete",
+    "unconstrained_endpoints": { "status": "ok", "count": 0, "sample": [], "truncated": false, "reason": null },
+    "unclocked_registers": { "status": "ok", "count": 0, "sample": [], "truncated": false, "reason": null },
+    "sample_limit": 20
+  },
   "fmax_mhz": 512.3456,
   "setup_violation_count": 3,
   "hold_violation_count": 0,
@@ -204,6 +223,7 @@ string" for the full enumeration and rationale.
 | `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. A design with **no constrained path at all** reports OpenSTA's own unconstrained sentinel (`1e+39`/`0`) here rather than a real number — check `timing_status` below before treating this as a measurement. |
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
+| `constraint_completeness` | object | Additive field (issue #2780), present on every response and every `corners[]` entry. Whether every timing endpoint is constrained and every register is clocked in this session — **separate from `timing_status`**, which only says whether the slack numbers are measurements: a design can report a finite WNS (`timing_status: "constrained"`) and still have unconstrained endpoints or unclocked registers. `{status, unconstrained_endpoints, unclocked_registers, sample_limit}`; `status` is `"complete"` \| `"incomplete"` \| `"unknown"`. Each check is `{status: "ok" \| "unavailable", count, sample, truncated, reason}` — a check that could not run reports `count: null`, never `0`. See "Constraint completeness" below. |
 | `fmax_mhz` | number \| null | `report_fmax_metric`'s own `1/(T-WNS)` extrapolation — see "What this is not" above for the not-yet-bisected caveat. |
 | `setup_violation_count` / `hold_violation_count` | integer | Number of **violating endpoints** (one `report_check_types -violators -format end` row per failing endpoint per path group — not every enumerated timing path), counted over the **same timing-check families** the WNS/TNS fields above measure: setup side = data setup (`-max_delay`, incl. output-delay checks) + asynchronous **recovery** + inferred **clock-gating setup**; hold side = data hold (`-min_delay`) + asynchronous **removal** + inferred **clock-gating hold** (issue #2741). See "Violation counts: check families" below. |
 | `worst_setup_path` / `worst_hold_path` | object | Additive fields (issue #2740), present on every response and every `corners[]` entry. Identity of the worst setup-side / hold-side path end in this session: `{status, check_type, engine_check_role, startpoint, endpoint, slack_ns, consistent_with_aggregate, reason}`. `check_type` is one of `setup`, `hold`, `recovery`, `removal`, `clock_gating_setup`, `clock_gating_hold`, `output_setup`, `output_hold`, `latch_setup`, `latch_hold`, or `unknown`, so async recovery/removal is never reported as data setup/hold. `status` is `"ok"`, `"no_paths"`, `"unavailable"` or `"inconsistent"`. Identity fields are `null` unless a path was found. See "Per-port I/O delays and worst-path identity" below. |
@@ -256,6 +276,118 @@ sentinel WNS with a count of `0` — check `timing_status == "constrained"`
 first. The same policy applies to every `corners[]` entry of a
 `pdk.corners` response, and to `klt place-and-route`'s nominal-stage and
 `spef_sta` counts (one shared Tcl helper).
+
+## Constraint completeness (issue #2780)
+
+`timing_status: "constrained"` means the slack fields are measurements, not
+OpenSTA's `1e+39` sentinel. It does **not** mean every path was timed: one
+constrained path is enough to make WNS finite while other endpoints have no
+constraint and other registers have no clock. `constraint_completeness`
+reports those gaps separately, per analyzed corner:
+
+```json
+"constraint_completeness": {
+  "status": "incomplete",
+  "unconstrained_endpoints": {
+    "status": "ok", "count": 2, "sample": ["q2", "ff_unclk/D"],
+    "truncated": false, "reason": null
+  },
+  "unclocked_registers": {
+    "status": "ok", "count": 1, "sample": ["ff_unclk/CLK"],
+    "truncated": false, "reason": null
+  },
+  "sample_limit": 20
+}
+```
+
+That block is real output from OpenROAD `26Q3-1510-g6cb3f2b704` for a design
+with one flop clocked by `clk`, one flop clocked from a plain input
+(`other_clk`, not a declared clock), and one AND gate. Scalar I/O delays were
+set. The same response reports `timing_status: "constrained"` and
+`worst_slack_ns: 1.63849`, so the finite WNS covers only part of the design.
+
+### What is counted
+
+Both checks call OpenSTA's structured `sta::check_timing_cmd`, the query
+behind `check_setup`. Each call enables exactly one check, and the response
+uses the pin list the engine returns. Warning text is never parsed. The
+engine defines what counts:
+
+| Check | Engine flag | An entry is | Counted when |
+| --- | --- | --- | --- |
+| `unconstrained_endpoints` | `-unconstrained_endpoints` | a timing endpoint: a top-level output port (bare port name, e.g. `q2`) or a timing-check pin such as a register `D` (`inst/pin`, e.g. `ff_unclk/D`) | no clocked arrival meets a required time there. Examples: an output with no output delay, a flop `D` whose only fan-in is an input with no input delay, or anything launched or captured by an unclocked register |
+| `unclocked_registers` | `-no_clock` | a register or latch **clock pin** (e.g. `ff_unclk/CLK`), one per sequential cell | no defined clock reaches the pin |
+
+`count` is the engine's full total. `sample` holds the first `sample_limit`
+(20) pin names in engine order. `truncated` is `true` when `count` is larger
+than the sample. In the captured 25-flop fixture, `count` is 25 and the sample
+has 20 pins.
+
+**Roll-up `status`:**
+
+- `"incomplete"`: a check that ran found at least one offending pin.
+- `"complete"`: both checks ran and both reported zero.
+- `"unknown"`: no gap was found, but at least one check could not run.
+
+If one check finds a gap and the other is unavailable, the status is still
+`"incomplete"`.
+
+**Combinational-only designs.** A design with no registers reports
+`unclocked_registers.count: 0`. This zero comes from a query that ran, so it
+is not unknown. Its outputs are ordinary endpoints. With
+`output_delay_ns`/`input_delay_ns` set they are constrained against the
+request clock, and the block is `"complete"`. Without those delays the outputs
+are unconstrained, so the block is `"incomplete"` and `timing_status` is
+`"unconstrained"`.
+
+**Timing exceptions.** A `klt sta` request cannot express timing exceptions
+yet. When exceptions are present, for example from a future SDC input, the
+pinned engine behaves as follows. These results come from captured sessions
+with `set_false_path` added to the generated script:
+
+- An endpoint that has a constraint keeps it under a false path. For example,
+  an output with an output delay is still not counted as unconstrained, even
+  when `find_timing_paths -to` it returns no path. An intentionally excepted
+  endpoint is not a constraint gap.
+- A false path does not remove an endpoint that never had a constraint. The
+  endpoint stays in the list.
+
+`complete` therefore means "no endpoint or register lacks a constraint". It
+does not mean "every endpoint is timed with no exceptions".
+
+### Unavailable, never zero
+
+A check reports `status: "unavailable"` with `count: null`,
+`truncated: null`, `sample: []` and a `reason` in any of these cases:
+
+- The marker block is missing from engine output.
+- The engine query raised an error. For example, an OpenSTA build whose
+  `check_timing_cmd` has a different argument list. Each check is
+  `catch`-wrapped on its own, so one failure does not hide the other result.
+- The rows are malformed. This covers a missing or duplicate total, a
+  non-integer total, an empty pin name, or a sample size that disagrees with
+  the total and the cap.
+
+A check that did not run never reports `0`. Other lines interleaved in the
+block, such as engine warnings, are ignored and never count as identities.
+
+### Relation to the other fields
+
+The block is additive. The slack fields, `timing_status`, the violation
+counts and `worst_*_path` keep their existing meaning and values. The query
+runs last in each session, after every metric and report. A gate that needs
+full coverage should require all three of these:
+
+- `timing_status == "constrained"`
+- `constraint_completeness.status == "complete"`
+- the slack or violation condition it already checks
+
+On a `pdk.corners` response, each `corners[]` entry carries its own block from
+its own session. Nothing is hoisted to the top level.
+
+Fixtures with real engine output for the fully constrained, mixed,
+unconstrained, combinational-only, 25-flop (truncated) and false-path cases
+are in `tests/fixtures/sta_constraint_completeness/`.
 
 ## Multi-corner characterization (`pdk.corners`, issue #1871)
 
@@ -313,6 +445,7 @@ closes that gap natively:
       "worst_hold_slack_ns": 0.02011,
       "total_negative_hold_slack_ns": 0.0,
       "timing_status": "constrained",
+      "constraint_completeness": { "status": "complete", "...": "..." },
       "fmax_mhz": 401.552,
       "setup_violation_count": 5,
       "hold_violation_count": 0,
@@ -333,8 +466,10 @@ closes that gap natively:
 `provenance.pdk`/`provenance.input` (the shared-geometry `content_hash`
 this whole feature exists to let a caller trust). They are never repeated
 inside a `corners[]` entry. The fields that *do* vary per corner — the
-resolved liberty deck, and (issue #2739) the propagated-clock evidence —
-move into each `corners[]` entry's own `deck`/`clock_propagation` fields,
+resolved liberty deck, (issue #2739) the propagated-clock evidence, and
+(issue #2780) the constraint-completeness block — move into each
+`corners[]` entry's own `deck`/`clock_propagation`/`constraint_completeness`
+fields,
 alongside that corner's own
 `worst_slack_ns`/`total_negative_slack_ns`/`worst_hold_slack_ns`/
 `total_negative_hold_slack_ns`/`timing_status`/`fmax_mhz`/

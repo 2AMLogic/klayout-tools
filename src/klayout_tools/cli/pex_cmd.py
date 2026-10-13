@@ -28,6 +28,7 @@ import argparse
 import shlex
 
 from ..env_provenance import render_path_field
+from ..output_lock import OutputLockError
 from ..pex import PexError, run_pex
 from ._parsing import parse_deck_options, parse_declared_pins, parse_label_layers
 
@@ -117,6 +118,8 @@ def run(args: argparse.Namespace) -> int:
         )
     except PexError as exc:
         return emit_error("pex", str(exc), args.format)
+    except OutputLockError as exc:
+        return emit_error("pex", str(exc), args.format, code=exc.code)
 
     emit_success(report, args.format, _print_text)
 

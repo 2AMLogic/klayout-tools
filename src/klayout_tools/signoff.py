@@ -843,7 +843,7 @@ import os
 import shlex
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import cache
 from pathlib import Path
 from typing import (
@@ -935,7 +935,11 @@ from .signoff_envelopes import _YieldRequired as _YieldRequired
 # everything else that subsystem needs back from here it imports itself,
 # deferred into its own function bodies -- see that module's own docstring
 # for why.
-from .signoff_power_delivery import _build_power_delivery_item, _strap_layers
+from .signoff_power_delivery import (
+    _build_power_delivery_item,
+    _read_power_port_policy,
+    _strap_layers,
+)
 
 __all__ = [
     "SignoffError",
@@ -1206,6 +1210,16 @@ _ITEMS_ACCEPTING_ERC_EVIDENCE: frozenset[int] = frozenset({11})
 #: extract` on items 3 and 4.
 _ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE: frozenset[int] = frozenset({11})
 
+#: T1 item ids a ``"socket-check"``-kind citation (issue #2839) may satisfy:
+#: item 11 alone, as its port-accessibility half's GDS-side evidence (the
+#: ``power_ports`` facts). A socket fit says nothing about any other item.
+_ITEMS_ACCEPTING_SOCKET_CHECK_EVIDENCE: frozenset[int] = frozenset({11})
+
+#: T1 item ids a ``"lef-abstract"``-kind citation (issue #2839) may satisfy:
+#: item 11 alone, as its port-accessibility half's abstract evidence. Its
+#: own pass (a structurally sound LEF) proves nothing about any other item.
+_ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE: frozenset[int] = frozenset({11})
+
 #: Every **opt-in** kind, mapped to the T1 item ids that accept it -- the
 #: single table :func:`_build_tier_item` consults, so a new opt-in kind is
 #: one entry here rather than a fourth near-identical branch there. A kind
@@ -1221,6 +1235,8 @@ _OPT_IN_KIND_ITEMS: dict[str, frozenset[int]] = {
     "power": _ITEMS_ACCEPTING_POWER_EVIDENCE,
     "erc": _ITEMS_ACCEPTING_ERC_EVIDENCE,
     "place-and-route": _ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE,
+    "socket-check": _ITEMS_ACCEPTING_SOCKET_CHECK_EVIDENCE,
+    "lef-abstract": _ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE,
 }
 
 #: T1 item ids graded by the dedicated **compound** evidence path
@@ -1997,7 +2013,8 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                     "source": <str, the entry from `sources`>,
                     "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "pex"
                             | "power" | "sta" | "functional-verification"
-                            | "erc" | "place-and-route" | "generic" | "error",
+                            | "erc" | "place-and-route" | "socket-check"
+                            | "lef-abstract" | "generic" | "error",
                     "status": <str> | None,
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
@@ -2293,9 +2310,10 @@ def _raise_unclassified(envelope: Mapping[str, Any], source: str) -> NoReturn:
     raise SignoffError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
-        "yield/pex/power/sta/functional-verification/erc/place-and-route "
-        "success or error envelope, and not a generic evidence envelope "
-        '("kind": "generic") either -- klt signoff aggregates those eleven '
+        "yield/pex/power/sta/functional-verification/erc/place-and-route/"
+        "socket-check/lef-abstract success or error envelope, and not a "
+        'generic evidence envelope ("kind": "generic") either -- klt '
+        "signoff aggregates those thirteen "
         "verbs' output plus opt-in generic evidence today (see "
         "docs/cli/signoff.md)"
     )
@@ -2309,6 +2327,76 @@ def _classify_failure_reason(error: SignoffError) -> str:
     if isinstance(error, EnvelopeVersionSkewError):
         return _REASON_ENVELOPE_VERSION_SKEW
     return _REASON_UNRECOGNIZED_ENVELOPE
+
+
+def _is_erc_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt erc` (issue #2025; docs/cli/erc.md): a top-level `gates` list plus
+    # `gate_role` (the `stackup[0].name` echo) is unique to this shape -- no
+    # other verb emits either field. Recognised since `klt erc` grew a
+    # top-level `status` (`"clean"`/`"violations"`) and the shared
+    # `provenance` block in issue #1968, which is what made its output
+    # gradeable at all. See this module's "Power delivery (structural)"
+    # docstring section.
+    return isinstance(envelope.get("gates"), list) and "gate_role" in envelope
+
+
+def _is_place_and_route_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt place-and-route` (issue #2025; docs/cli/place-and-route.md): a
+    # top-level `stage_reached` string plus the always-present `power`
+    # object is unique to this response -- no other verb emits either. The
+    # `power` block is the whole reason this kind is recognised (T1 item
+    # 11's digital branch asks whether the routed artifact was produced with
+    # a PDN at all); this module still deliberately ignores the response's
+    # own `worst_setup_slack_ns`/`corners` timing, whose corner set is the
+    # PDK's full shipped list rather than a declared one -- see "Digital-flow
+    # evidence" above on why `klt sta`, not this, is item 5's timing
+    # evidence.
+    return isinstance(envelope.get("stage_reached"), str) and isinstance(
+        envelope.get("power"), dict
+    )
+
+
+def _is_socket_check_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt socket-check` (issue #2839; docs/cli/socket-check.md): a
+    # top-level `socket` (the descriptor path) plus the `checks` and
+    # `budgets` lists is unique to this response. Recognised only so T1
+    # item 11 can cite its additive `power_ports` facts -- see
+    # `_ITEMS_ACCEPTING_SOCKET_CHECK_EVIDENCE`.
+    return (
+        "socket" in envelope
+        and isinstance(envelope.get("checks"), list)
+        and isinstance(envelope.get("budgets"), list)
+    )
+
+
+def _is_lef_abstract_shape(envelope: Mapping[str, Any]) -> bool:
+    # `klt lef-abstract` (issue #2839; docs/cli/lef-abstract.md): a
+    # top-level `macro_name` plus a `pins` list and the `self_check` block
+    # (issue #2769) is unique to this response. Recognised for T1 item 11's
+    # LEF-abstract half -- see `_ITEMS_ACCEPTING_LEF_ABSTRACT_EVIDENCE`.
+    return (
+        isinstance(envelope.get("macro_name"), str)
+        and isinstance(envelope.get("pins"), list)
+        and isinstance(envelope.get("self_check"), dict)
+    )
+
+
+#: The kinds :func:`_classify` matches last, in order, each by a pair of
+#: fields unique to its verb's response (none can collide with an earlier
+#: kind's markers). One table rather than one branch each (issue #2839).
+_STRUCTURAL_KINDS: tuple[tuple[str, Callable[[Mapping[str, Any]], bool]], ...] = (
+    ("erc", _is_erc_shape),
+    ("place-and-route", _is_place_and_route_shape),
+    ("socket-check", _is_socket_check_shape),
+    ("lef-abstract", _is_lef_abstract_shape),
+)
+
+
+def _structural_kind(envelope: Mapping[str, Any]) -> str | None:
+    """The first :data:`_STRUCTURAL_KINDS` kind ``envelope`` matches."""
+    return next(
+        (kind for kind, matches in _STRUCTURAL_KINDS if matches(envelope)), None
+    )
 
 
 def _classify(envelope: Mapping[str, Any], source: str) -> str:
@@ -2442,30 +2530,12 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     elif isinstance(envelope.get("tests"), list) and "test_count" in envelope:
         kind = "functional-verification"
 
-    # `klt erc` (issue #2025; docs/cli/erc.md): a top-level `gates` list plus
-    # `gate_role` (the `stackup[0].name` echo) is unique to this shape -- no
-    # other verb emits either field. Recognised since `klt erc` grew a
-    # top-level `status` (`"clean"`/`"violations"`) and the shared
-    # `provenance` block in issue #1968, which is what made its output
-    # gradeable at all. See this module's "Power delivery (structural)"
-    # docstring section.
-    elif isinstance(envelope.get("gates"), list) and "gate_role" in envelope:
-        kind = "erc"
-
-    # `klt place-and-route` (issue #2025; docs/cli/place-and-route.md): a
-    # top-level `stage_reached` string plus the always-present `power`
-    # object is unique to this response -- no other verb emits either. The
-    # `power` block is the whole reason this kind is recognised (T1 item
-    # 11's digital branch asks whether the routed artifact was produced with
-    # a PDN at all); this module still deliberately ignores the response's
-    # own `worst_setup_slack_ns`/`corners` timing, whose corner set is the
-    # PDK's full shipped list rather than a declared one -- see "Digital-flow
-    # evidence" above on why `klt sta`, not this, is item 5's timing
-    # evidence.
-    elif isinstance(envelope.get("stage_reached"), str) and isinstance(
-        envelope.get("power"), dict
-    ):
-        kind = "place-and-route"
+    # `klt erc`, `klt place-and-route`, `klt socket-check` and `klt
+    # lef-abstract`: matched through one table (`_STRUCTURAL_KINDS`, which
+    # carries each shape's own recognition rationale) so a new kind is one
+    # table entry rather than another branch here (issue #2839).
+    elif (structural_kind := _structural_kind(envelope)) is not None:
+        kind = structural_kind
 
     else:
         # Issue #2198: refused either as version skew (a kind's primary
@@ -2894,6 +2964,18 @@ def _drc_rule_selection_detail(envelope: Mapping[str, Any]) -> dict[str, Any]:
     return {"rule_selection": envelope.get("rule_selection")}
 
 
+#: The kinds whose verdict is exactly one passing ``status`` token, read by
+#: :func:`_check_passed` through one table rather than one branch each
+#: (issue #2839 added ``socket-check`` here without growing that function).
+_PASSING_STATUS_BY_KIND: dict[str, str] = {
+    "sim": "pass",
+    "pex": "pass",
+    "place-and-route": "ok",
+    "socket-check": "pass",
+    "generic": "pass",
+}
+
+
 def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     """Whether this one check counts as passing.
 
@@ -3026,6 +3108,12 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       see "Digital-flow evidence" above). Because it cannot fail on
       quality, this kind is opt-in per item exactly like ``generic`` --
       only T1 item 11 accepts it, and only for its ``power`` block.
+    - ``socket-check`` (issue #2839) passes on ``status == "pass"`` and
+      ``lef-abstract`` on ``self_check.status == "pass"`` (it has no
+      top-level ``status``). Both are opt-in kinds scoped to T1 item 11,
+      whose port-accessibility grading reads their additive
+      ``power_ports``/``power_pins`` blocks rather than these verdicts
+      alone.
     - ``generic`` (issue #1152) passes on ``status == "pass"`` -- the
       envelope's own, caller-asserted verdict; unlike every native kind
       above, nothing here re-derives that verdict from any other field,
@@ -3042,14 +3130,13 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
             envelope.get("status") == "match"
             and power_connectivity.get("status") != "mismatch"
         )
-    elif kind == "sim":
-        passed = envelope.get("status") == "pass"
+    elif kind in _PASSING_STATUS_BY_KIND:
+        # sim/pex/place-and-route/socket-check/generic: one passing token.
+        passed = envelope.get("status") == _PASSING_STATUS_BY_KIND[kind]
     elif kind == "yield":
         passed = envelope.get("status") in ("pass", "reported")
     elif kind == "extract":
         passed = True
-    elif kind == "pex":
-        passed = envelope.get("status") == "pass"
     elif kind == "power":
         em_verdict = envelope.get("em_verdict")
         passed = isinstance(em_verdict, dict) and em_verdict.get("status") == "pass"
@@ -3059,10 +3146,10 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
         passed = _functional_verification_passed(envelope)
     elif kind == "erc":
         passed = _erc_passed(envelope)
-    elif kind == "place-and-route":
-        passed = envelope.get("status") == "ok"
-    elif kind == "generic":
-        passed = envelope.get("status") == "pass"
+    elif kind == "lef-abstract":
+        # Issue #2839: no top-level `status`; the structural self-check of
+        # the LEF read back from disk is the verb's verdict of record.
+        passed = (envelope.get("self_check") or {}).get("status") == "pass"
     else:
         passed = False  # kind == "error"
 
@@ -3683,10 +3770,10 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "sdf_annotated": _is_sdf_annotated(envelope),
             "sdf_corner": sdf.get("corner"),
         }
-    elif kind == "erc":
-        detail = _erc_detail(envelope)
-    elif kind == "place-and-route":
-        detail = _place_and_route_detail(envelope)
+    elif kind in _DETAIL_BUILDERS:
+        # erc/place-and-route/socket-check/lef-abstract: one builder each,
+        # looked up rather than branched on (issue #2839).
+        detail = _DETAIL_BUILDERS[kind](envelope)
     elif kind == "generic":
         detail = {
             "summary": envelope.get("summary"),
@@ -3767,6 +3854,39 @@ def _place_and_route_detail(envelope: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Provenance consistency (issue #251's provenance block; #309 AC #2)
 # --------------------------------------------------------------------------- #
+
+
+def _socket_check_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"socket-check"`` excerpt (issue #2839)."""
+    return {
+        "socket": envelope.get("socket"),
+        "socket_name": envelope.get("socket_name"),
+        "failed_checks": [
+            check.get("name")
+            for check in envelope.get("checks") or []
+            if isinstance(check, dict) and check.get("status") == "fail"
+        ],
+    }
+
+
+def _lef_abstract_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"lef-abstract"`` excerpt (issue #2839)."""
+    return {
+        "macro_name": envelope.get("macro_name"),
+        "output": envelope.get("output"),
+        "self_check_status": (envelope.get("self_check") or {}).get("status"),
+        "power_pins_status": (envelope.get("power_pins") or {}).get("status"),
+    }
+
+
+#: :func:`_detail`'s per-kind excerpt builders for the kinds that have one
+#: of their own (issue #2839 moved ``erc``/``place-and-route`` here).
+_DETAIL_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "erc": _erc_detail,
+    "place-and-route": _place_and_route_detail,
+    "socket-check": _socket_check_detail,
+    "lef-abstract": _lef_abstract_detail,
+}
 
 
 def _provenance_consistency(checks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4509,6 +4629,8 @@ def build_tier_report(
         )
 
     partition_boundary = _read_partition_boundary(manifest, kind)
+    # Issue #2839: T1 item 11's port-accessibility policy (provisional).
+    power_port_policy = _read_power_port_policy(manifest.get("power_ports"))
 
     doc = parse_tier_doc(tiers_doc)
     partitions: tuple[str, ...] = (
@@ -4541,6 +4663,7 @@ def build_tier_report(
                     partition_boundary=partition_boundary.get(partition),
                     evidence=evidence,
                     graded_by_build=graded_by_build,
+                    power_port_policy=power_port_policy,
                 )
             else:
                 entry = _build_tier_item(
@@ -5169,6 +5292,7 @@ _INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
     "sim": ("netlist",),
     "pex": ("layout",),
     "sta": ("def_path", "verilog_path"),
+    "lef-abstract": ("file",),
 }
 
 
@@ -6282,13 +6406,14 @@ def build_fleet_report(
 #:
 #: - ``uv tool install "klayout-tools @ git+URL@<sha>"`` builds in a
 #:   package-manager-owned scratch checkout, so ``hatch_build.py`` records
-#:   real git facts: ``git_commit: "<sha>"``, ``version: "X.Y.Z+g<sha>"``
+#:   real git facts: ``git_commit: "<sha>"``, a version such as
+#:   ``"X.Y.(Z+1).devN+g<sha>"`` (``"X.Y.Z+g<sha>"`` before issue #2823)
 #:   (and, before issue #2248, ``dirty: true`` from that checkout's own
 #:   build-tool residue).
 #: - ``pip install`` of a source *tarball* of the same ``<sha>`` (a GitHub
 #:   ``/archive/<sha>.tar.gz``, a vendored copy) builds in a tree with no
 #:   ``.git`` at all, so the hook records nothing and the same commit
-#:   reports ``git_commit: null``, ``version: "X.Y.Z+unknown"``,
+#:   reports ``git_commit: null``, ``version: "X.Y.Z.dev0+unknown"``,
 #:   ``is_release: null``.
 #:
 #: Neither is wrong -- each honestly describes the build it identifies, which
