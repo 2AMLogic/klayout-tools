@@ -849,6 +849,29 @@ def test_model_mismatch_none_when_models_agree(tmp_path):
     )
 
 
+def test_model_mismatch_quoted_expression_params_with_spaces(tmp_path):
+    """Issue #2866: a quoted parameter expression containing spaces must be
+    one name=value token, not mis-read as the model name."""
+    from klayout_tools.pex import _device_model_counts
+
+    card = (
+        "XMn y a vss vss nfet_03v3 L=0.28u W=0.22u nf=1 "
+        "ad='int((nf+1)/2) * W/nf * 0.18u' "
+        "as='int((nf+2)/2) * W/nf * 0.18u'\n"
+    )
+    reference = tmp_path / "ref.spice"
+    extracted = tmp_path / "ext.spice"
+    reference.write_text(card)
+    extracted.write_text(card.replace("XMn", "X0"))
+    assert _device_model_counts(card) == {"nfet_03v3": ("nfet_03v3", 1)}
+    assert (
+        _model_mismatch(
+            reference_netlist=str(reference), extracted_netlist=str(extracted)
+        )
+        is None
+    )
+
+
 def test_model_mismatch_case_insensitive_model_names(tmp_path):
     """ngspice is case-insensitive about model/subcircuit names -- so is this
     comparison, mirroring `_subckt_interfaces`'s own convention."""
@@ -3404,6 +3427,57 @@ def test_cli_pex_deck_option_and_pins_reach_run_pex(tmp_path, monkeypatch):
     assert captured["declared_pins"] == frozenset({"RA", "RB"})
 
 
+def test_cli_pex_rename_declared_pins_reaches_run_pex(tmp_path, monkeypatch):
+    """Issue #2854's CLI half: `klt pex --rename-declared-pins` parses as a
+    plain boolean flag and forwards `False` when omitted -- the exact
+    `run_pex` call every site that predates it makes."""
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    captured: dict = {}
+
+    def _fake_run_pex(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "pass",
+            "layout": {"path": "mim.gds", "scope": "repo"},
+            "netlist": {"path": "mim.spice", "scope": "repo"},
+            "reference_netlist": {"path": "dut.spice", "scope": "repo"},
+            "corner_count": 0,
+            "delta": [],
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "extraction": {"deck": "gf180mcu", "device_count": 1, "net_count": 2},
+            "testbenches": [],
+        }
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _fake_run_pex)
+
+    layout, request = _mim_pex_inputs(tmp_path)
+    exit_code = main(
+        ["pex", str(layout), str(request), "--deck", "gf180mcu", "--format", "json"]
+    )
+    assert exit_code == 0
+    assert captured["rename_declared_pins"] is False
+
+    exit_code = main(
+        [
+            "pex",
+            str(layout),
+            str(request),
+            "--deck",
+            "gf180mcu",
+            "--pins",
+            "RA,RB",
+            "--rename-declared-pins",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    assert captured["rename_declared_pins"] is True
+
+
 def test_cli_pex_omitting_the_new_flags_passes_none(tmp_path, monkeypatch):
     """Omitting both flags forwards `None` for both -- the exact `run_pex`
     call every caller made before issue #1558."""
@@ -4509,3 +4583,146 @@ def test_cli_pex_unknown_label_layer_role_is_a_clean_error(
     err = json.loads(capsys.readouterr().err)
     assert err["error"]["command"] == "pex"
     assert "no label-layer role" in err["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2875: content identity of the schematic-side inputs
+# --------------------------------------------------------------------------- #
+
+
+def _sha(path) -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _fake_two_sided_sim(monkeypatch, *, extracted_side_runs=True):
+    import klayout_tools.pex as pex_module
+
+    report = {
+        "corners": [
+            {"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.4)]},
+        ],
+        "corner_count": 1,
+        "measurements": [{"name": "vout"}],
+    }
+    monkeypatch.setattr(pex_module, "run_sim", lambda *a, **k: report)
+
+
+def _run_two_testbenches(tmp_path, layout, monkeypatch, *, dut_ohm=289.2, load=1000.0):
+    _fake_two_sided_sim(monkeypatch)
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice", dut_ohm)
+    tb_a = _write_testbench(tmp_path / "tb_a.spice", dut, load_ohm=load)
+    tb_b = _write_testbench(tmp_path / "tb_b.spice", dut)
+    req_a = _write_request(tmp_path / "a.json", tb_a)
+    req_b = _write_request(tmp_path / "b.json", tb_b, measurement_name="vout")
+    report = run_pex(layout, [str(req_a), str(req_b)], "sky130")
+    return report, req_a, tb_a, dut, req_b
+
+
+def test_run_pex_records_content_identity_of_schematic_side_inputs(
+    tmp_path, resistor_layout, monkeypatch
+):
+    report, req_a, tb_a, dut, req_b = _run_two_testbenches(
+        tmp_path, resistor_layout, monkeypatch
+    )
+
+    first, second = report["testbenches"]
+    assert first["request_sha256"] == _sha(req_a)
+    assert first["netlist_sha256"] == _sha(tb_a)
+    assert first["schematic_netlist_sha256"] == _sha(dut)
+    assert second["request_sha256"] == _sha(req_b)
+    # Two testbenches sharing one DUT keep the same DUT identity, and each
+    # retains its own request/body identity.
+    assert second["schematic_netlist_sha256"] == first["schematic_netlist_sha256"]
+    assert second["request_sha256"] != first["request_sha256"]
+    assert report["reference_netlist_sha256"] == _sha(dut)
+    assert first["netlist"] == {"path": None, "scope": "external"}
+    # The layout/extraction identity is a distinct role.
+    assert report["extraction"]["netlist_sha256"] != first["schematic_netlist_sha256"]
+
+
+def test_run_pex_each_schematic_side_digest_tracks_only_its_own_file(
+    tmp_path, resistor_layout, monkeypatch
+):
+    base, *_ = _run_two_testbenches(tmp_path, resistor_layout, monkeypatch)
+    tmp2 = tmp_path / "dut_changed"
+    tmp2.mkdir()
+    dut_changed, *_ = _run_two_testbenches(
+        tmp2, resistor_layout, monkeypatch, dut_ohm=300.0
+    )
+    tmp3 = tmp_path / "body_changed"
+    tmp3.mkdir()
+    body_changed, *_ = _run_two_testbenches(
+        tmp3, resistor_layout, monkeypatch, load=2000.0
+    )
+
+    keys = ("request_sha256", "netlist_sha256", "schematic_netlist_sha256")
+
+    def differing(other):
+        # Paths differ per tmp dir, so compare only digest *content* that
+        # does not embed a path: the DUT text and the extracted netlist.
+        return {
+            k for k in keys if base["testbenches"][0][k] != other["testbenches"][0][k]
+        }
+
+    assert "schematic_netlist_sha256" in differing(dut_changed)
+    assert "netlist_sha256" in differing(body_changed)
+    assert (
+        body_changed["testbenches"][0]["schematic_netlist_sha256"]
+        == base["testbenches"][0]["schematic_netlist_sha256"]
+    )
+    for other in (dut_changed, body_changed):
+        assert (
+            other["extraction"]["netlist_sha256"]
+            == base["extraction"]["netlist_sha256"]
+        )
+
+
+def test_run_pex_diagnostic_branch_carries_same_digest_keys(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """The extracted-side-skipped branch (pre-flight pin mismatch) builds its
+    summary entry separately; it must carry the same provenance keys."""
+    report_full, *_ = _run_two_testbenches(tmp_path, resistor_layout, monkeypatch)
+    sub = tmp_path / "diag"
+    sub.mkdir()
+    _fake_two_sided_sim(monkeypatch)
+    dut = sub / "schematic_dut.spice"
+    dut.write_text(".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES\n")
+    tb = sub / "tb.spice"
+    tb.write_text(f'.include "{dut}"\nXres RA RB 0 RES\nRload RB 0 1k\n')
+    request = _write_request(sub / "r.json", tb)
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+    assert report["pin_count_mismatch"] is not None
+    assert set(report["testbenches"][0]) == set(report_full["testbenches"][0])
+    assert report["testbenches"][0]["schematic_netlist_sha256"] == _sha(dut)
+
+
+def test_run_pex_measure_command_records_reference_netlist_digest(
+    tmp_path, resistor_layout, measure_reference
+):
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+    )
+    assert report["testbenches"] == []
+    assert report["reference_netlist_sha256"] == _sha(measure_reference)
+    assert report["extraction"]["netlist_sha256"] != report["reference_netlist_sha256"]
+
+
+def test_run_pex_external_paths_still_carry_digests(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """A path redacted as `scope: external` keeps its digest."""
+    report, *_ = _run_two_testbenches(tmp_path, resistor_layout, monkeypatch)
+    entry = report["testbenches"][0]
+    assert entry["schematic_netlist"]["scope"] == "external"
+    assert entry["schematic_netlist"]["path"] is None
+    assert entry["schematic_netlist_sha256"].startswith("sha256:")
+    assert len(entry["schematic_netlist_sha256"]) == len("sha256:") + 64

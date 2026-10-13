@@ -1989,8 +1989,13 @@ def test_run_sim_waits_out_a_capacity_refusal(tmp_path, monkeypatch):
     # The job contract was uploaded once and reused by the re-launch.
     assert len(runner.argvs_matching("job.json")) == 1
     # One backoff sleep (through the patched `time.sleep`), within [15, 30].
-    assert len(runner.sleeps) >= 1
-    assert 15.0 <= runner.sleeps[0] <= 30.0
+    # The patch is the global `time.sleep`, so it also records CPython's
+    # sub-second `Popen._wait` polls (e.g. the `git rev-list` the version
+    # scheme runs inside a git checkout, issue #3173); only >= 1 s sleeps
+    # are this module's own.
+    own_sleeps = [s for s in runner.sleeps if s >= 1.0]
+    assert len(own_sleeps) >= 1
+    assert 15.0 <= own_sleeps[0] <= 30.0
 
 
 def _error_envelope(stderr: str) -> dict:
@@ -2266,6 +2271,11 @@ def test_a_lost_shard_never_aborts_its_siblings(tmp_path, monkeypatch):
     ]
     assert "lost_shard" in codes
     assert None in codes  # the healthy shard still reported its own corner
+    lost = [c for c in corners if c["diagnostics"]]
+    assert lost and all(
+        c["engine_exit_code"] is None and c["engine_killed_by_signal"] is None
+        for c in lost
+    )
     assert None in environment["fleet"]
 
 
@@ -2836,6 +2846,10 @@ def _run_job_cmd_with_fake_klt(tmp_path, spec, klt_script):
             "EDA_INPUT_DIR": str(tmp_path),
             "PATH": f"{bin_dir}:/usr/bin:/bin",
         },
+        # Anything the job (or a payload it wrongly evaluates) writes with a
+        # relative path lands in the test's own directory, never the
+        # checkout pytest runs from (issue #3153).
+        cwd=tmp_path,
         capture_output=True,
         text=True,
     )
@@ -2843,9 +2857,19 @@ def _run_job_cmd_with_fake_klt(tmp_path, spec, klt_script):
 
 
 def _fake_klt(version_line: str) -> str:
+    """A fake runner `klt` whose `--version` prints ``version_line``
+    verbatim. The line goes through a quoted heredoc, so shell
+    metacharacters in it reach the job command's preflight as data instead
+    of running inside this fixture's own shell (issue #3153)."""
+    assert "KLT_VERSION_EOF" not in version_line
     return (
         "#!/bin/bash\n"
-        f'if [ "$1" = "--version" ]; then echo "{version_line}"; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then\n'
+        "cat <<'KLT_VERSION_EOF'\n"
+        f"{version_line}\n"
+        "KLT_VERSION_EOF\n"
+        "exit 0\n"
+        "fi\n"
         'touch "@MARKER@"; echo \'{"corners": []}\'; exit 0\n'
     )
 
@@ -2922,12 +2946,20 @@ def test_warn_mode_runs_the_simulation_despite_skew(tmp_path):
 
 
 def test_hostile_runner_version_output_cannot_break_the_envelope(tmp_path):
+    hostile = 'klt 1.0" ; touch x ; "'
     proc, out_dir, marker = _run_job_cmd_with_fake_klt(
-        tmp_path, _init_spec(tmp_path), _fake_klt('klt 1.0" ; touch x ; "')
+        tmp_path, _init_spec(tmp_path), _fake_klt(hostile)
     )
     assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
     json.loads((out_dir / "report.json").read_text())  # still valid JSON
-    json.loads((out_dir / "runner_identity.json").read_text())
+    identity = json.loads((out_dir / "runner_identity.json").read_text())
+    # The fixture delivered the hostile text to the preflight (which strips
+    # the quoting characters) rather than running it itself.
+    assert "touch x" in identity["runner_klt_version"]
+    # The payload reached the preflight as data and was never evaluated:
+    # no `x` in the job's working directory, nor in the checkout.
+    assert not (tmp_path / "x").exists()
+    assert not (REPO_ROOT / "x").exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -3839,3 +3871,270 @@ def test_job_cmd_with_capture_still_runs_the_simulation(tmp_path):
     # sanity: the matching runner runs the simulation with capture present
     assert marker.exists()
     assert proc.returncode == 0
+
+
+# --------------------------------------------------------------------------- #
+# `klt sim --batch-set` (issue #2869)
+# --------------------------------------------------------------------------- #
+
+SET_SCHEMA_PATH = REPO_ROOT / "docs" / "schemas" / "sim-set-report.schema.json"
+
+
+def _write_set(tmp_path: Path, count: int) -> list[str]:
+    _write_body(tmp_path)
+    paths = []
+    for i in range(count):
+        path = tmp_path / f"req{i}.json"
+        path.write_text(json.dumps(_batch_request(tmp_path)))
+        paths.append(str(path))
+    return paths
+
+
+def _fake_report(status: str = "pass", job_id: str = "klt-sim-x") -> dict:
+    return {"status": status, "environment": {"remote": {"job_id": job_id}}}
+
+
+def test_sim_set_bounds_in_flight_and_aggregates(tmp_path):
+    import threading
+
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 6)
+    lock = threading.Lock()
+    state = {"now": 0, "peak": 0}
+
+    def fake_run(path, **kwargs):
+        assert kwargs["backend"] == "batch"
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        import time
+
+        time.sleep(0.02)
+        with lock:
+            state["now"] -= 1
+        return _fake_report(job_id="job-" + os.path.basename(path))
+
+    report = sim_set.run_sim_set(paths, max_in_flight=2, run=fake_run)
+
+    assert state["peak"] <= 2
+    assert report["status"] == "pass"
+    assert report["request_count"] == 6
+    assert [r["index"] for r in report["requests"]] == list(range(6))
+    assert report["requests"][0]["job_id"] == "job-req0.json"
+    jsonschema.validate(report, json.loads(SET_SCHEMA_PATH.read_text()))
+    for entry in report["requests"]:
+        assert json.loads(Path(entry["report"]).read_text())["status"] == "pass"
+    # one distinct report directory per request
+    assert len({r["report"] for r in report["requests"]}) == 6
+
+
+def test_sim_set_partial_refusal_is_one_summary(tmp_path):
+    from klayout_tools import sim_set
+
+    paths = _write_set(tmp_path, 3)
+
+    def fake_run(path, **kwargs):
+        if path.endswith("req1.json"):
+            raise sim.SimError(
+                "batch backend failed: no capacity", code="batch_no_capacity"
+            )
+        return _fake_report()
+
+    report = sim_set.run_sim_set(paths, run=fake_run)
+
+    assert report["status"] == "error"
+    assert report["submitted"] == 2
+    assert report["refused"] == 1
+    assert report["refused_codes"] == ["batch_no_capacity"]
+    bad = report["requests"][1]
+    assert bad["error"]["code"] == "batch_no_capacity"
+    assert bad["job_id"] is None and bad["report"] is None
+    jsonschema.validate(report, json.loads(SET_SCHEMA_PATH.read_text()))
+
+
+def test_sim_set_rejects_empty_and_bad_bound():
+    from klayout_tools import sim_set
+
+    with pytest.raises(sim.SimError):
+        sim_set.run_sim_set([])
+    with pytest.raises(sim.SimError):
+        sim_set.run_sim_set(["a.json"], max_in_flight=0)
+
+
+def test_cli_batch_set_end_to_end_partial_exit_code(tmp_path, monkeypatch, capsys):
+    from klayout_tools.cli import main
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    # The first launch is refused (no capacity_wait_s => fail fast); the
+    # other request succeeds. max-in-flight 1 makes the order deterministic.
+    _queue_refusals(runner, 1)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    paths = _write_set(tmp_path, 2)
+
+    code = main(
+        ["sim", "--batch-set", *paths, "--max-in-flight", "1", "--format", "json"]
+    )
+
+    out = json.loads(capsys.readouterr().out)
+    assert code == 4
+    assert out["status"] == "error"
+    assert [r["status"] for r in out["requests"]] == ["error", "not_checked"]
+    assert out["requests"][0]["error"]["code"] == "batch_no_capacity"
+    assert out["requests"][1]["job_id"].startswith("klt-sim-")
+    assert len(runner.argvs_matching("launch")) == 2
+    jsonschema.validate(out, json.loads(SET_SCHEMA_PATH.read_text()))
+
+
+def test_cli_batch_set_all_pass_exits_zero_and_refuses_other_backend(
+    tmp_path, monkeypatch, capsys
+):
+    from klayout_tools import sim_set
+    from klayout_tools.cli import main
+
+    monkeypatch.setattr(sim_set, "run_sim", lambda path, **kw: _fake_report())
+    # run_sim_set bound the default at import; patch the default arg's source.
+    monkeypatch.setattr(
+        sim_set.run_sim_set,
+        "__kwdefaults__",
+        {
+            **sim_set.run_sim_set.__kwdefaults__,
+            "run": lambda path, **kw: _fake_report(),
+        },
+    )
+    paths = _write_set(tmp_path, 2)
+
+    assert main(["sim", "--batch-set", *paths, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "pass"
+
+    assert main(["sim", "--batch-set", *paths, "--backend", "local"]) == 2
+    assert main(["sim", paths[0], "--max-in-flight", "2"]) == 2
+    # Bare ``klt sim`` keeps the argparse-style SystemExit(2) contract.
+    with pytest.raises(SystemExit) as exc:
+        main(["sim"])
+    assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# measurements[].crossings through the batch fleet (issue #2868)
+# --------------------------------------------------------------------------- #
+
+_CROSSINGS_DECL = {
+    "name": "t_out",
+    "crossings": {"signal": "v(out)", "level": 0.5, "edge": "rise", "max": 2},
+}
+
+
+def _crossings_entry() -> dict:
+    """What the job instance's own `klt sim` reports for `_CROSSINGS_DECL`:
+    the count as `value`, the series inline beside it."""
+    return {
+        "name": "t_out",
+        "value": 3,
+        "unit": None,
+        "status": "pass",
+        "margin": None,
+        "crossings": {
+            "times": [1.25e-07, 3.25e-07],
+            "edges": ["rise", "rise"],
+            "truncated": True,
+        },
+    }
+
+
+def _crossings_report(corner_ids=("tt_1.800_27",)) -> str:
+    document = json.loads(_sim_report(corner_ids=corner_ids))
+    for corner in document["corners"]:
+        corner["measurements"] = [_crossings_entry()]
+    return json.dumps(document)
+
+
+def test_run_sim_batch_carries_a_crossings_series_inline(tmp_path, monkeypatch):
+    """The series is computed on the job instance and comes back inside the
+    collected report, with `keep_artifacts: false` -- no waveform artifact
+    and no per-edge `.meas` card is involved -- and a crossings-only request
+    counts as checked (it does not degrade to `not_checked`, cf. #3158)."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _crossings_report()}
+    uploaded: dict[str, str] = {}
+    real_open = open
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            with real_open(argv[-3], encoding="utf-8") as handle:
+                uploaded["request"] = handle.read()
+        return runner(argv, timeout_s)
+
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+
+    _write_body(tmp_path)
+    request = _batch_request(
+        tmp_path,
+        measurements=[_CROSSINGS_DECL],
+        options={"keep_artifacts": False},
+    )
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+
+    # The declaration reaches the worker verbatim (it regenerates the deck).
+    document = json.loads(uploaded["request"])
+    assert document["measurements"] == [_CROSSINGS_DECL]
+    (corner,) = report["corners"]
+    assert corner["measurements"] == [_crossings_entry()]
+    assert report["status"] == "pass"
+    assert report["coverage"]["nothing_checked"] is False
+
+
+def test_sharded_batch_run_merges_each_shards_crossings_series(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    def _register_shard_report(argv, timeout_s):
+        joined = " ".join(argv)
+        if "inputs/request.json" in joined:
+            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
+            document = json.loads(Path(source).read_text())
+            assert document["measurements"] == [_CROSSINGS_DECL]
+            runner.outputs_by_job[job_id_of(destination)] = {
+                "report.json": _crossings_report(
+                    corner_ids=tuple(
+                        f"tt_1.800_{int(point['temperature_c'])}"
+                        for point in document["_explicit_points"]
+                    )
+                )
+            }
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _register_shard_report)
+
+    corners, _, environment = sb._run_batch_fleet(
+        corner_points=_corner_points(3),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={
+            "netlist": "body.spice",
+            "measurements": [_CROSSINGS_DECL],
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0.0,
+            },
+        },
+        hosts=2,
+        measurements_spec=[_CROSSINGS_DECL],
+    )
+
+    assert len(environment["fleet"]) == 2
+    assert [corner["corner_id"] for corner in corners] == [
+        "tt_1.800_0",
+        "tt_1.800_1",
+        "tt_1.800_2",
+    ]
+    assert all(corner["measurements"] == [_crossings_entry()] for corner in corners)
