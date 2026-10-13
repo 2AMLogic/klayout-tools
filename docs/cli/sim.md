@@ -930,11 +930,12 @@ report a pass. Policy: **reject before simulating**.
 }
 ```
 
-Limits: version identity does not prove equivalent behavior between two
-differently built copies that share one release (a `+g<sha>` client can carry
-unreleased changes the `0.7.0` runner lacks). **Remediation:**
-update the runner image to the client's `klt` build, or submit from a client
-matching the image. Jobs that never reach a terminal state (`batch_poll_timeout`)
+Limits: a major.minor match does not prove equivalent behavior between two
+builds of one minor (a `0.7.1.devN+g<sha>` client or a `0.7.3` release can
+carry changes the `0.7.0` runner lacks; by the release discipline above, none
+of them may break the runner contract). **Remediation** on a mismatch:
+update the runner image to the client's minor, or submit from a client of the
+image's minor. Jobs that never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.
 
 ### Worker-observed environment (`worker_environment`, [#2834](https://github.com/2AMLogic/klayout-tools/issues/2834))
