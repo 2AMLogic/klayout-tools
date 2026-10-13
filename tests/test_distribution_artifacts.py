@@ -16,6 +16,7 @@ fetches into its isolated build environment (from its cache when warm).
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -42,15 +43,33 @@ _PROBE_MODULE = "_identity_probe"
 _PACKAGE_FILES = ("__init__.py", "_version_scheme.py", "build_identity.py")
 
 
-def _run(*args: str, cwd: Path | None = None) -> str:
+def _run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
     completed = subprocess.run(
-        args, cwd=cwd, capture_output=True, text=True, timeout=600
+        args, cwd=cwd, env=env, capture_output=True, text=True, timeout=600
     )
     assert completed.returncode == 0, (
         f"{args} failed ({completed.returncode}):\n"
         f"{completed.stdout}\n{completed.stderr}"
     )
     return completed.stdout.strip()
+
+
+def _uv_env(cache: Path) -> dict[str, str]:
+    """Environment running the `uv pip install` steps against a private
+    ``UV_CACHE_DIR`` (issue #3186).
+
+    uv's wheel cache is keyed by the wheel's path and name, not its content.
+    Every session here builds a ``klayout_tools-9.9.9-py3-none-any.whl`` whose
+    *content* (the embedded git commit) differs, under a basetemp path that
+    repeats across runs on a fresh CI runner (``/tmp/pytest-of-runner/
+    pytest-0/...``) -- so with the ``UV_CACHE_DIR`` that setup-uv persists
+    across CI runs, the install could serve the *previous* session's unpacked
+    wheel and the identity probe would report the previous session's
+    throwaway commit. Pointing these steps at a directory inside this
+    session's own tmp tree makes every install unpack the wheel that was
+    actually just built.
+    """
+    return {**os.environ, "UV_CACHE_DIR": str(cache)}
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -176,8 +195,17 @@ print(json.dumps({
 
 
 def _install_and_probe(tmp: Path, links: Path, requirement: str) -> dict:
+    uv_env = _uv_env(tmp / "uv-cache")
     venv = tmp / "venv"
-    _run(_UV, "venv", "--quiet", "--python", sys.executable, str(venv))
+    _run(
+        _UV,
+        "venv",
+        "--quiet",
+        "--python",
+        sys.executable,
+        str(venv),
+        env=uv_env,
+    )
     python = venv / ("Scripts" if sys.platform == "win32" else "bin") / "python"
     # `--cache-dir` scoped to this call's own scratch space: a uv cache shared
     # across sessions (CI restores one) serves same-named find-links wheels
@@ -201,6 +229,7 @@ def _install_and_probe(tmp: Path, links: Path, requirement: str) -> dict:
         str(tmp / "uv-cache"),
         "--no-deps",
         requirement,
+        env=uv_env,
     )
     # `-I`: isolated mode, so the probe imports the installed artifact, never
     # this checkout's own `src/`.
