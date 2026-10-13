@@ -80,15 +80,16 @@ import json
 import math
 import os
 import re
+import signal
 import statistics
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from typing import Any
+from typing import Any, NamedTuple
 
-from . import env_provenance, output_lock, sim_steps
+from . import env_provenance, output_lock, sim_crossings, sim_steps
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -221,8 +222,13 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "netlist",
         "model_bin_range",
         "no_such_vector",
+        # Missing-capability prerequisites (issue #2814).
+        "unsupported_model_level",
+        "osdi_abi_mismatch",
+        "osdi_load_failed",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
+        "engine_killed",
         "measurement",
         "unknown",
         # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
@@ -732,6 +738,37 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
+        # ngspice's own text when a `.model ... level = N` card names a MOS
+        # level this binary was not built with, e.g. ASAP7's BSIM-CMG
+        # `level = 72` on a stock ngspice (`Only MOS device levels
+        # 1-6,8-10,14,49,54-58,60,68,73 are supported in this binary`,
+        # issue #2814). It is a missing *capability*, not a netlist or bin
+        # problem, so it gets its own code and (see `_classify_diagnostics`)
+        # suppresses the misleading `model_bin_range` follow-on error.
+        "unsupported_model_level",
+        re.compile(
+            r"^.*Only MOS device levels .* supported in this binary",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
+        # ngspice rejecting a compiled `.osdi` whose OSDI ABI it cannot
+        # load, e.g. `NGSPICE only supports OSDI v0.3 but "x.osdi" targets
+        # v0.4!` (ngspice < 44 against an OpenVAF-Reloaded module).
+        "osdi_abi_mismatch",
+        re.compile(r"NGSPICE only supports OSDI v\d+\.\d+ but", re.IGNORECASE),
+    ),
+    (
+        # `Error: Library <x>.osdi couldn't be loaded!` -- the module file is
+        # unreadable or not a shared library this ngspice can dlopen (wrong
+        # platform, or built against another OSDI runtime).
+        "osdi_load_failed",
+        re.compile(
+            r"^Error:\s*Library\s+.*\.osdi\s+couldn't be loaded",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
         # ngspice's own diagnostic when a BSIM model card's per-instance
         # width *bin range* is exceeded, e.g. gf180mcu's undocumented
         # ~100 um ceiling on `nfet_06v0`/`pfet_06v0` (issue #1214). The raw
@@ -747,6 +784,30 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
 )
+
+
+#: Prerequisite messages (issue #2814) for the capability diagnostics: they
+#: name the missing capability instead of leaving the caller to decode
+#: ngspice's raw line. ``{raw}`` is ngspice's own line, kept verbatim.
+_PREREQUISITE_MESSAGES: dict[str, str] = {
+    "unsupported_model_level": (
+        "prerequisite missing: this ngspice build cannot run the model "
+        "card's MOS level (BSIM-CMG `level = 72` needs a compiled OSDI "
+        "module declared in options.osdi_preload; see docs/cli/sim.md "
+        '"ASAP7 FinFET (BSIM-CMG) simulation") -- ngspice said: {raw}'
+    ),
+    "osdi_abi_mismatch": (
+        "prerequisite missing: ngspice cannot load the OSDI module's ABI "
+        "(an OpenVAF-Reloaded module needs ngspice >= 44; see "
+        "scripts/fetch-asap7-sim-toolchain.sh) -- ngspice said: {raw}"
+    ),
+    "osdi_load_failed": (
+        "prerequisite missing: ngspice could not load the OSDI module "
+        "(wrong platform or OSDI ABI; rebuild it with "
+        "scripts/fetch-asap7-sim-toolchain.sh on this host's ngspice) -- "
+        "ngspice said: {raw}"
+    ),
+}
 
 
 class SimError(Exception):
@@ -850,6 +911,8 @@ def _resolve_analysis_and_measurements(
     # `.control` block) are the two declarable forms, exactly one per entry
     # -- see `_validate_measurement_forms` for the full rule set.
     _validate_measurement_forms(measurements_spec)
+    # Issue #2868: a crossings series is a transient-time quantity.
+    sim_crossings.validate_crossings_context(measurements_spec, analysis)
     return analysis, measurements_spec
 
 
@@ -973,12 +1036,25 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     name = spec.get("name")
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
-    if name is None or not (has_spice or has_expr):
+    has_crossings = sim_crossings.is_crossings(spec)
+    if name is None or not (has_spice or has_expr or has_crossings):
         raise SimError(
             "each request.measurements[] entry requires 'name' and "
-            "exactly one of 'spice' (a verbatim .meas card) or 'expr' "
-            "(an ngspice expression evaluated after the analysis)"
+            "exactly one of 'spice' (a verbatim .meas card), 'expr' "
+            "(an ngspice expression evaluated after the analysis) or "
+            "'crossings' (a threshold-crossing time series)"
         )
+    if has_crossings:
+        # Issue #2868: a third, mutually exclusive form.
+        if has_spice or has_expr:
+            raise SimError(
+                f"measurement '{name}' declares 'crossings' together with "
+                f"'{'spice' if has_spice else 'expr'}': they are alternative "
+                "forms of a measurement -- declare exactly one (use a "
+                "separate measurements[] entry for the scalar)"
+            )
+        sim_crossings.validate_crossings_spec(name, spec["crossings"])
+        return
     if has_spice and has_expr:
         raise SimError(
             f"measurement '{name}' declares both 'spice' and 'expr': "
@@ -1669,6 +1745,9 @@ def run_sim(
         expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
         save_mode_declared=save_mode_declared,
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
+        crossings_declared=bool(
+            sim_crossings.crossings_measurements(measurements_spec)
+        ),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -3578,6 +3657,41 @@ class _Checkpoint:
 # --------------------------------------------------------------------------- #
 
 
+def _refuse_xyce_control_block_measurements(
+    *, expr_declared: bool, crossings_declared: bool
+) -> None:
+    """The ``engine: "xyce"`` refusals for measurement forms that exist only
+    as commands in klt's generated ngspice ``.control`` block (``expr``,
+    issue #2533; ``crossings``, issue #2868). Split out of
+    :func:`_enforce_xyce_support_boundary` to keep that gate under the
+    complexity limit."""
+    if expr_declared:
+        # Issue #2533: an `expr` measurement is emitted as ngspice
+        # `let`/`print` commands inside the generated `.control` block, and
+        # the Xyce deck has no control block to carry them (see
+        # `_write_xyce_deck`'s docstring). Refused by name rather than
+        # silently dropped: a corner that ran without its `expr` lines would
+        # report every such measurement as "produced no value", which reads
+        # as a circuit regression rather than an unsupported request field.
+        raise SimError(
+            "measurements[].expr is not supported for engine 'xyce': it is "
+            "evaluated by ngspice `let`/`print` commands inside a `.control` "
+            "block, and the Xyce deck has none (its analysis is a plain "
+            "top-level dot card); use engine 'ngspice', or express the "
+            "quantity as a `.meas` card in measurements[].spice"
+        )
+    if crossings_declared:
+        # Issue #2868: the series is dumped by ngspice `let`/`write`
+        # commands in the generated `.control` block -- same boundary as
+        # `expr`, refused by name for the same reason.
+        raise SimError(
+            "measurements[].crossings is not supported for engine 'xyce': "
+            "the signal is dumped by ngspice `let`/`write` commands inside a "
+            "`.control` block, and the Xyce deck has none; use engine "
+            "'ngspice'"
+        )
+
+
 def _enforce_xyce_support_boundary(
     *,
     engine: str,
@@ -3589,6 +3703,7 @@ def _enforce_xyce_support_boundary(
     expr_measurements_declared: bool = False,
     save_mode_declared: bool = False,
     analysis_steps_declared: bool = False,
+    crossings_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -3654,21 +3769,10 @@ def _enforce_xyce_support_boundary(
             "Verilog-A models as its own compiled plugins (`-plugin`), not "
             "OSDI shared libraries; use engine 'ngspice' or drop the option"
         )
-    if expr_measurements_declared:
-        # Issue #2533: an `expr` measurement is emitted as ngspice
-        # `let`/`print` commands inside the generated `.control` block, and
-        # the Xyce deck has no control block to carry them (see
-        # `_write_xyce_deck`'s docstring). Refused by name rather than
-        # silently dropped: a corner that ran without its `expr` lines would
-        # report every such measurement as "produced no value", which reads
-        # as a circuit regression rather than an unsupported request field.
-        raise SimError(
-            "measurements[].expr is not supported for engine 'xyce': it is "
-            "evaluated by ngspice `let`/`print` commands inside a `.control` "
-            "block, and the Xyce deck has none (its analysis is a plain "
-            "top-level dot card); use engine 'ngspice', or express the "
-            "quantity as a `.meas` card in measurements[].spice"
-        )
+    _refuse_xyce_control_block_measurements(
+        expr_declared=expr_measurements_declared,
+        crossings_declared=crossings_declared,
+    )
     if save_mode_declared:
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
         # `.control` block carries `save all`; the Xyce deck has no control
@@ -4160,17 +4264,189 @@ def _top_level_waveform_sources(netlist_text: str) -> dict[str, str]:
     return found
 
 
+#: ``.param`` assignment names: ``name=`` (not ``==``), once ``{...}`` and
+#: quoted expressions have been blanked out of the line.
+_PARAM_DECL_NAME_RE = re.compile(r"(?:^|[\s,])([a-z_][a-z0-9_]*)\s*=(?!=)")
+_PARAM_DECL_EXPR_RE = re.compile(r"\{[^{}]*\}|'[^']*'|\"[^\"]*\"")
+
+#: Bound on the ``.include``/``.lib`` files followed while looking for an
+#: element a ``.param``-only target might really name. Past it the
+#: declaration counts as unresolved (never rejected).
+_MAX_DECLARATION_FILES = 256
+
+
+class _NetlistDeclarations(NamedTuple):
+    """Lexical top-level declarations of one netlist file (#2867)."""
+
+    #: Lower-cased names assigned by a top-level ``.param`` card.
+    params: set[str]
+    #: Lower-cased names of top-level elements (first token of a card).
+    elements: set[str]
+    #: Top-level ``V`` source name -> its value/waveform specification.
+    voltage_specs: dict[str, str]
+    #: Raw file references of ``.include``/``.inc``/``.lib <file> <sect>``.
+    includes: list[str]
+
+
+def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
+    """Scan a netlist's top level for ``.param`` names, element names and
+    include references. ``.subckt`` bodies and ``.control`` blocks are
+    skipped; ``.lib`` *section* bodies (``.lib tt`` ... ``.endl``) count as
+    top level, since a loaded section is."""
+    decl = _NetlistDeclarations(set(), set(), {}, [])
+    depth = 0
+    for line in _top_level_cards(_logical_netlist_lines(netlist_text)):
+        word = line.split(None, 1)[0].lower()
+        if word == ".subckt":
+            depth += 1
+        elif word == ".ends":
+            depth = max(0, depth - 1)
+        elif not depth:
+            _record_declaration(decl, line)
+    return decl
+
+
+def _top_level_cards(lines: list[str]) -> list[str]:
+    """``lines`` without ``.control`` ... ``.endc`` blocks."""
+    kept: list[str] = []
+    in_control = False
+    for line in lines:
+        word = line.split(None, 1)[0].lower()
+        if word == ".control":
+            in_control = True
+        elif word == ".endc":
+            in_control = False
+        elif not in_control:
+            kept.append(line)
+    return kept
+
+
+def _record_declaration(decl: _NetlistDeclarations, line: str) -> None:
+    """Record one top-level card (outside any ``.subckt``) into ``decl``."""
+    lowered = line.lower()
+    parts = line.split()
+    word = parts[0].lower()
+    if word in (".include", ".inc") and len(parts) >= 2:
+        decl.includes.append(line.split(None, 1)[1].strip())
+    elif word == ".lib" and len(parts) >= 3:
+        decl.includes.append(" ".join(parts[1:-1]))
+    elif word == ".param" and len(parts) > 1:
+        body = _PARAM_DECL_EXPR_RE.sub(" 0 ", lowered.split(None, 1)[1])
+        decl.params.update(_PARAM_DECL_NAME_RE.findall(body))
+    elif not word.startswith("."):
+        decl.elements.add(word)
+        if word.startswith("v") and len(parts) >= 4:
+            decl.voltage_specs[word] = " ".join(lowered.split()[3:])
+
+
+def _resolve_netlist_include(reference: str, base_dir: str) -> str | None:
+    path = os.path.expanduser(reference.strip().strip("\"'"))
+    if not os.path.isabs(path):
+        path = os.path.join(base_dir, path)
+    return path if os.path.isfile(path) else None
+
+
+def _included_elements(netlist_path: str, includes: list[str]) -> set[str] | None:
+    """Element names declared at the top level of every file the netlist
+    pulls in through ``.include``/``.lib`` (recursively), or ``None`` when
+    any reference cannot be resolved and read -- an unresolved declaration
+    is never assumed absent."""
+    elements: set[str] = set()
+    seen: set[str] = set()
+    pending = [
+        (ref, os.path.dirname(os.path.abspath(netlist_path))) for ref in includes
+    ]
+    while pending:
+        reference, base_dir = pending.pop()
+        path = _resolve_netlist_include(reference, base_dir)
+        if path is None:
+            return None
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        if len(seen) > _MAX_DECLARATION_FILES:
+            return None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                decl = _netlist_declarations(handle.read())
+        except OSError:
+            return None
+        elements |= decl.elements
+        pending.extend((ref, os.path.dirname(path)) for ref in decl.includes)
+    return elements
+
+
+def _param_only_targets(netlist_path: str, targets: list[str]) -> dict[str, list[str]]:
+    """The ``alter`` targets that name a top-level ``.param`` and no element
+    (#2867), each mapped to the top-level voltage sources whose value
+    references that parameter (a hint for the error message).
+
+    ngspice evaluates ``.param`` expressions when it parses the deck, and
+    ``alter <param>=<value>`` addresses no device: ngspice logs ``no such
+    device or model name`` and simulates the nominal value, so a sweep over
+    such a key reports N identical ``pass`` corners. A target is only
+    reported when the lexical scan is conclusive: a name declared as an
+    element anywhere the scan can see is not a ``.param``-only name, and when
+    an ``.include``/``.lib`` reference cannot be resolved nothing is
+    reported. Hierarchical names never match (a ``.param`` name has no dot).
+    """
+    try:
+        with open(netlist_path, encoding="utf-8") as handle:
+            decl = _netlist_declarations(handle.read())
+    except (OSError, UnicodeDecodeError):
+        return {}
+    candidates = [
+        t
+        for t in targets
+        if t.strip().lower() in decl.params and t.strip().lower() not in decl.elements
+    ]
+    if not candidates:
+        return {}
+    if decl.includes:
+        included = _included_elements(netlist_path, decl.includes)
+        if included is None:
+            return {}
+        candidates = [t for t in candidates if t.strip().lower() not in included]
+    found: dict[str, list[str]] = {}
+    for target in candidates:
+        name = re.escape(target.strip().lower())
+        pattern = re.compile(rf"(?<![a-z0-9_]){name}(?![a-z0-9_])")
+        found[target] = sorted(
+            source
+            for source, spec in decl.voltage_specs.items()
+            if pattern.search(spec)
+        )
+    return found
+
+
+def _param_target_hint(param: str, sources: list[str]) -> str:
+    if sources:
+        names = ", ".join(repr(s) for s in sources)
+        return (
+            f"To sweep the supply, key corners.supply_v by the source itself "
+            f"({names} reads {param!r}); to sweep the parameter, use a "
+            "parameter axis (corners.params, issue #3035) instead"
+        )
+    return (
+        "Key corners.supply_v by the name of a DC voltage source, or sweep the "
+        "parameter with a parameter axis (corners.params, issue #3035) instead"
+    )
+
+
 def _validate_supply_override_targets(
     netlist_path: str, corner_points: list[CornerPoint]
 ) -> None:
-    """Reject a ``supply_v`` override aimed at a waveform source (#2706).
+    """Reject a ``supply_v`` override that ngspice's ``alter`` cannot apply.
 
-    ngspice's ``alter name=value`` silently has no effect on a
-    PWL/PULSE/SIN source, so the request fails as a whole rather than
-    simulating the wrong voltage. Validates the actual expanded points
-    (including worker ``_explicit_points``). Inspection is lexical over the
-    top-level netlist file only: included files and hierarchical targets are
-    not resolved, and an unresolved declaration is never assumed DC."""
+    Two silent no-ops fail the request as a whole rather than simulating
+    the wrong voltage: a source with an explicit PWL/PULSE/SIN/... waveform
+    (#2706), and a name that is only a top-level ``.param`` with no element
+    of that name (#2867). Validates the actual expanded points (including
+    worker ``_explicit_points``). Inspection is lexical: the waveform rule
+    reads the top-level netlist file only, the ``.param`` rule additionally
+    follows ``.include``/``.lib`` references to look for an element of that
+    name, and an unresolved declaration is never assumed DC or absent."""
     targets = sorted({key for point in corner_points for key in point.supply_v})
     if not targets:
         return
@@ -4192,6 +4468,16 @@ def _validate_supply_override_targets(
                 "source as a plain DC value, or remove it from "
                 "corners.supply_v"
             )
+    for target, sources in _param_only_targets(netlist_path, targets).items():
+        raise SimError(
+            f"corners.supply_v key {target!r} names a .param, not a source: "
+            f"the netlist declares `.param {target}=...` and no element "
+            f"{target!r}, and ngspice's `alter {target}=<value>` cannot change "
+            "a .param (expressions that read it -- a source value, a SIN() "
+            "amplitude -- were evaluated when the deck was parsed, so every "
+            "corner would silently simulate the nominal value). "
+            + _param_target_hint(target, sources)
+        )
 
 
 def _prepare_corner_run(
@@ -4438,6 +4724,8 @@ def _run_corner(
     timed_out = False
     engine_version: str | None = None
     stdout_text = ""
+    engine_exit_code: int | None = None
+    engine_killed_by_signal: str | None = None
     try:
         completed = subprocess.run(
             command,
@@ -4447,6 +4735,9 @@ def _run_corner(
             cwd=corner_dir,
         )
         stdout_text = completed.stdout or ""
+        engine_exit_code, engine_killed_by_signal = _split_returncode(
+            completed.returncode
+        )
     except subprocess.TimeoutExpired:
         timed_out = True
     except FileNotFoundError as exc:
@@ -4479,6 +4770,18 @@ def _run_corner(
             }
         )
     else:
+        if engine_killed_by_signal is not None:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "engine_killed",
+                    "message": (
+                        f"{engine_name} was killed by {engine_killed_by_signal} "
+                        "(not by the harness timeout) -- e.g. the OOM killer, "
+                        "a host reaper, or a reclaimed worker"
+                    ),
+                }
+            )
         diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
 
     # Both engines fold a `.meas`/`.measure` card's name to lower-case in
@@ -4493,6 +4796,10 @@ def _run_corner(
     # *response* below still echoes the caller's original `name` spelling --
     # only the internal lookup is case-folded.
     measurement_values = _parse_engine_measurements(log_text, engine)
+    # Issue #2868: crossings series are read from this corner's own working
+    # directory now, before it is cleaned up below -- so the reduced array is
+    # what leaves the corner, on every backend, whatever `keep_artifacts` is.
+    crossings = sim_crossings.extract_corner_crossings(measurements_spec, corner_dir)
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -4501,6 +4808,7 @@ def _run_corner(
             log_text=log_text,
             is_xyce=is_xyce,
             save_mode=save_mode,
+            crossings=crossings,
         )
     )
     diagnostics.extend(measurement_diagnostics)
@@ -4598,6 +4906,11 @@ def _run_corner(
         "temperature_c": point.temperature_c,
         "status": status,
         "runtime_s": runtime_s,
+        # Additive (issue #2848): the engine process's raw outcome. Both are
+        # null when the harness itself ended the run (timeout) or the engine
+        # never launched.
+        "engine_exit_code": engine_exit_code,
+        "engine_killed_by_signal": engine_killed_by_signal,
         "measurements": measurement_results,
         "diagnostics": diagnostics,
         "artifacts": artifacts,
@@ -4609,6 +4922,20 @@ def _run_corner(
     return corner, engine_version
 
 
+def _split_returncode(returncode: int) -> tuple[int | None, str | None]:
+    """``(engine_exit_code, engine_killed_by_signal)`` from a POSIX
+    ``subprocess`` return code (issue #2848): a negative code is the killing
+    signal's number (``None`` exit code, signal name), anything else a plain
+    exit code. An unnamed signal number falls back to ``SIG<n>``.
+    """
+    if returncode >= 0:
+        return returncode, None
+    try:
+        return None, signal.Signals(-returncode).name
+    except ValueError:
+        return None, f"SIG{-returncode}"
+
+
 def _corner_measurement_results(
     measurement_values: dict[str, float],
     measurements_spec: list[dict[str, Any]],
@@ -4617,9 +4944,16 @@ def _corner_measurement_results(
     log_text: str,
     is_xyce: bool,
     save_mode: str,
+    crossings: dict[int, sim_crossings.CrossingsOutcome] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
     from its harvested log values.
+
+    ``crossings`` (issue #2868) maps a ``measurements_spec`` position to that
+    ``crossings`` entry's extracted series (see
+    :func:`klayout_tools.sim_crossings.extract_corner_crossings`); such an
+    entry is graded by :func:`_crossings_measurement_result` instead of being
+    looked up in the log.
 
     An ``analysis_steps[]`` corner (issue #2482) is graded by
     :func:`klayout_tools.sim_steps.grade_step_measurements`, which adds the
@@ -4640,7 +4974,14 @@ def _corner_measurement_results(
     diagnostics: list[dict[str, Any]] = []
     meas_errors = {} if is_xyce else _parse_meas_errors(log_text)
     attributed: set[str] = set()
-    for spec in measurements_spec:
+    for position, spec in enumerate(measurements_spec):
+        if sim_crossings.is_crossings(spec):
+            result, extra = _crossings_measurement_result(
+                spec, (crossings or {}).get(position), save_mode=save_mode
+            )
+            measurement_results.append(result)
+            diagnostics.extend(extra)
+            continue
         name = spec["name"]
         value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
         unit = spec.get("unit")
@@ -4695,6 +5036,54 @@ def _corner_measurement_results(
                 }
             )
     return measurement_results, diagnostics, {}
+
+
+def _crossings_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_crossings.CrossingsOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``crossings`` measurement's response entry (issue #2868).
+
+    ``value`` is the number of crossings found inside the window -- a plain
+    number, graded through :func:`_grade_measurement_value` exactly like any
+    scalar -- and the series itself rides the additive ``crossings`` sibling.
+    No series (signal did not resolve, rawfile unreadable) is an ordinary
+    ``status: "error"`` entry with a ``code: "measurement"`` diagnostic and
+    no ``crossings`` member, like any other measurement with no value."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.error is not None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no crossings series"
+        )
+        if save_mode == "netlist":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {"severity": "error", "code": "measurement", "message": message}
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(
+        spec, outcome.total
+    )
+    result = {
+        "name": name,
+        "value": outcome.total,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "crossings": outcome.report(),
+    }
+    return result, grading_diagnostics
 
 
 #: ngspice's own ``.meas`` failure line, e.g.
@@ -4939,6 +5328,7 @@ def _write_corner_deck(
             raw_path=raw_path,
             osdi_preload=osdi_preload,
             save_mode=save_mode,
+            corner_dir=os.path.dirname(os.path.abspath(deck_path)),
         )
     )
     lines.append(".end")
@@ -4955,6 +5345,7 @@ def _corner_deck_control_lines(
     raw_path: str | None,
     osdi_preload: tuple[str, ...],
     save_mode: str = DEFAULT_SAVE_MODE,
+    corner_dir: str = ".",
 ) -> list[str]:
     """The ``.control``/``.endc`` block of :func:`_write_corner_deck`'s
     generated deck, in emission order -- this function owns the ordering
@@ -5018,6 +5409,14 @@ def _corner_deck_control_lines(
 
        No lines at all when no ``expr`` is declared, so every pre-#2533
        request's deck is byte-identical.
+    5. Per ``measurements[].crossings`` entry (issue #2868), a
+       ``let __klt_xing_<k> = <signal>`` / ``write <corner_dir>/crossings_<k>.raw``
+       pair (:func:`klayout_tools.sim_crossings.control_lines`), last before
+       ``quit`` -- after the waveform ``write`` for the same reason as the
+       ``expr`` lines, and after them so a signal may read an ``expr``
+       vector. ``set filetype=ascii`` is emitted before the analysis when
+       any are declared (the rawfile reader is ASCII-only). None of this
+       appears without a crossings entry.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -5037,7 +5436,8 @@ def _corner_deck_control_lines(
         lines.extend(sim_steps.control_lines(analysis, measurements_spec))
         lines.extend(["quit", ".endc"])
         return lines
-    if raw_path is not None:
+    crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
+    if raw_path is not None or crossings_lines:
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {analysis['args']}")
     if raw_path is not None:
@@ -5045,6 +5445,7 @@ def _corner_deck_control_lines(
     for spec in _expr_measurements(measurements_spec):
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
+    lines.extend(crossings_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines
@@ -5722,7 +6123,13 @@ def _classify_diagnostics(
             continue
         message = _line_containing(log_text, match.start())
         if code == "model_bin_range":
+            if any(d["code"] == "unsupported_model_level" for d in diagnostics):
+                # The follow-on "could not find a valid modelname" is a
+                # consequence of the rejected model level, not a bin range.
+                continue
             message = _diagnose_modelname_error(netlist_path) or message
+        elif code in _PREREQUISITE_MESSAGES:
+            message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
 

@@ -1713,6 +1713,74 @@ def test_classify_diagnostics_does_not_false_positive_on_title_text():
 
 
 # --------------------------------------------------------------------------- #
+# BSIM-CMG / OSDI prerequisite diagnostics (issue #2814)
+# --------------------------------------------------------------------------- #
+
+_NO_LEVEL72_LOG = (
+    "Only MOS device levels 1-6,8-10,14,49,54-58,60,68,73 are supported in "
+    "this binary\nError: could not find a valid modelname\n"
+)
+
+
+def test_unsupported_model_level_names_the_missing_capability():
+    diagnostics = sim._classify_diagnostics(_NO_LEVEL72_LOG)
+    codes = [d["code"] for d in diagnostics]
+    # The follow-on modelname error is a consequence, not a bin range.
+    assert codes == ["unsupported_model_level"]
+    (diag,) = diagnostics
+    assert diag["severity"] == "error"
+    assert "prerequisite missing" in diag["message"]
+    assert "BSIM-CMG" in diag["message"] and "osdi_preload" in diag["message"]
+    assert "Only MOS device levels" in diag["message"]
+
+
+def test_osdi_abi_mismatch_names_the_missing_capability():
+    log = 'NGSPICE only supports OSDI v0.3 but "bsimcmg.osdi" targets v0.4!\n'
+    (diag,) = sim._classify_diagnostics(log)
+    assert diag["code"] == "osdi_abi_mismatch"
+    assert diag["severity"] == "error"
+    assert "prerequisite missing" in diag["message"]
+    assert "ngspice >= 44" in diag["message"]
+
+
+def test_osdi_load_failure_names_the_missing_capability():
+    log = (
+        'Error opening osdi lib "x.osdi": no such file\n'
+        "Error: Library x.osdi couldn't be loaded!\n"
+    )
+    (diag,) = sim._classify_diagnostics(log)
+    assert diag["code"] == "osdi_load_failed"
+    assert "prerequisite missing" in diag["message"]
+
+
+def test_unsupported_model_level_corner_is_an_error_never_a_pass(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(_NO_LEVEL72_LOG)
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    report = sim.run_sim(str(request))
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    assert report["status"] != "pass"
+    assert any(d["code"] == "unsupported_model_level" for d in corner["diagnostics"])
+
+
+# --------------------------------------------------------------------------- #
 # Model bin-range diagnostic (`model_bin_range`, issue #1214)
 # --------------------------------------------------------------------------- #
 
@@ -2666,6 +2734,7 @@ def _stub_subprocess_run(
     log_text: str = "",
     stdout: str = "** ngspice-99\n",
     side_effect=None,
+    returncode: int = 0,
 ):
     def fake_run(cmd, capture_output, text, timeout, cwd=None):
         log_path = cmd[cmd.index("-o") + 1]
@@ -2673,7 +2742,7 @@ def _stub_subprocess_run(
             raise side_effect
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
-        return fake_completed(stdout)
+        return fake_completed(stdout, returncode=returncode)
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
@@ -2721,6 +2790,64 @@ def test_run_sim_stubbed_timeout_is_corner_error(tmp_path, monkeypatch):
     assert corner["status"] == "error"
     codes = [d["code"] for d in corner["diagnostics"]]
     assert codes == ["timeout"]
+
+
+def _engine_outcome_corner(tmp_path, monkeypatch, **stub):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"timeout_s": 5},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, **stub)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_corner_records_engine_exit_code(tmp_path, monkeypatch, returncode):
+    """Issue #2848: a normal exit records its code, no signal, no
+    `engine_killed` diagnostic (a nonzero exit alone is not a kill)."""
+    corner = _engine_outcome_corner(tmp_path, monkeypatch, returncode=returncode)
+    assert corner["engine_exit_code"] == returncode
+    assert corner["engine_killed_by_signal"] is None
+    assert "engine_killed" not in [d["code"] for d in corner["diagnostics"]]
+
+
+def test_corner_killed_by_signal_gets_distinct_diagnostic(tmp_path, monkeypatch):
+    corner = _engine_outcome_corner(tmp_path, monkeypatch, returncode=-9)
+    assert corner["engine_exit_code"] is None
+    assert corner["engine_killed_by_signal"] == "SIGKILL"
+    assert corner["status"] == "error"
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "engine_killed" in codes
+    assert "engine_killed" in sim.DIAGNOSTIC_CODES
+
+
+def test_corner_timeout_and_launch_failure_leave_both_fields_null(
+    tmp_path, monkeypatch
+):
+    corner = _engine_outcome_corner(
+        tmp_path,
+        monkeypatch,
+        side_effect=subprocess.TimeoutExpired(cmd=["ngspice"], timeout=5),
+    )
+    assert corner["engine_exit_code"] is None
+    assert corner["engine_killed_by_signal"] is None
+    assert [d["code"] for d in corner["diagnostics"]] == ["timeout"]
+    corner = _engine_outcome_corner(
+        tmp_path, monkeypatch, side_effect=FileNotFoundError("no ngspice")
+    )
+    assert corner["engine_exit_code"] is None
+    assert corner["engine_killed_by_signal"] is None
+
+
+def test_split_returncode_unnamed_signal_falls_back():
+    assert sim._split_returncode(-250) == (None, "SIG250")
+    assert sim._split_returncode(3) == (3, None)
 
 
 def test_run_sim_stubbed_no_such_vector_augments_generic_measurement_code(
@@ -11470,6 +11597,171 @@ def test_supply_override_explicit_points_are_validated(tmp_path, monkeypatch):
     }
     with pytest.raises(sim.SimError, match="PWL"):
         sim.run_sim(str(_write_request(tmp_path, request)))
+
+
+# --- #2867: supply override vs. a `.param` (PDK-free) ---------------------- #
+
+
+def _param_targets(tmp_path, body, keys, name="n.spice"):
+    (tmp_path / name).write_text(body)
+    return sim._param_only_targets(str(tmp_path / name), list(keys))
+
+
+def _validate_supply(tmp_path, body, supply, name="n.spice"):
+    (tmp_path / name).write_text(body)
+    sim._validate_supply_override_targets(
+        str(tmp_path / name), [sim.CornerPoint(None, supply, 27)]
+    )
+
+
+def test_supply_override_on_param_driven_sin_source_is_rejected(tmp_path, monkeypatch):
+    """The issue's repro: sweeping the `.param` a SIN() source reads used to
+    return N identical `pass` corners; it now fails before any run."""
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    monkeypatch.setattr(sim.subprocess, "Popen", _boom)
+    body = (
+        ".param vnom=1.8 amp=0.05\nVrail rail 0 sin({vnom} {amp} 1meg)\nR1 rail 0 1k\n"
+    )
+    path = _supply_deck_request(tmp_path, body, {"amp": [0.01, 0.1, 0.2]})
+    with pytest.raises(sim.SimError) as exc:
+        sim.run_sim(str(path))
+    message = str(exc.value)
+    assert "'amp'" in message and ".param" in message
+    assert "alter amp=<value>" in message
+    assert "corners.params" in message and "'vrail'" in message
+
+
+def test_supply_override_on_param_hints_the_reading_source(tmp_path):
+    with pytest.raises(sim.SimError) as exc:
+        _validate_supply(
+            tmp_path,
+            ".param vdd_val=1.8\nVdd vdd 0 DC {vdd_val}\nR1 vdd 0 1k\n",
+            {"vdd_val": 1.62},
+        )
+    assert "'vdd_val'" in str(exc.value) and "'vdd'" in str(exc.value)
+
+
+def test_supply_override_on_source_or_element_named_like_param_passes(tmp_path):
+    # A DC source key is unchanged; a name declared as both `.param` and an
+    # element is the element.
+    _validate_supply(
+        tmp_path,
+        ".param vdd=1.8 vdd_val=1.8\nVdd vdd 0 DC {vdd}\nR1 vdd 0 1k\n",
+        {"vdd": 1.62},
+    )
+
+
+@pytest.mark.parametrize(
+    "body,key",
+    [
+        (".PARAM a=1\n+ VBIAS={a*2} c='a+1'\nVdd d 0 1\n", "vbias"),
+        (".param a=1\n+ VBIAS={a*2} c='a+1'\nVdd d 0 1\n", "C"),
+        (".param a = 1 b = {a == 1 ? 2 : 3}\nVdd d 0 1\n", "B"),
+        ("* .param x\n.param ripple=0.1 ; tone amplitude\nVdd d 0 1\n", "Ripple"),
+        # A `.control`-block line is not an element declaration.
+        (".param vb=1\nVdd d 0 1\n.control\nvb x y\n.endc\n", "vb"),
+    ],
+)
+def test_param_only_target_lexical_forms(tmp_path, body, key):
+    assert list(_param_targets(tmp_path, body, [key])) == [key]
+
+
+@pytest.mark.parametrize(
+    "body,key",
+    [
+        # Commented-out or subckt-local `.param`: not a top-level parameter.
+        ("* .param vb=1\nVdd d 0 1\n", "vb"),
+        (".subckt blk a\n.param vb=1\nR1 a 0 {vb}\n.ends\nVdd d 0 1\n", "vb"),
+        # A subckt-local `.param` shadowing a top-level source's name.
+        (".subckt blk a\n.param vdd=1\n.ends\nVdd vdd 0 1.8\n", "vdd"),
+        # A parameter value referencing a name is not a declaration of it.
+        (".param a={vb}\nVdd d 0 1\n", "vb"),
+        # Hierarchical name: never a `.param`.
+        (".param vdd=1\nVdd d 0 1\n", "x1.vdd"),
+    ],
+)
+def test_param_only_target_non_matches(tmp_path, body, key):
+    assert _param_targets(tmp_path, body, [key]) == {}
+
+
+def test_param_only_target_follows_includes(tmp_path):
+    (tmp_path / "stim").mkdir()
+    (tmp_path / "stim" / "rails.spice").write_text(
+        ".include nested.spice\n.subckt x a\nVinner a 0 1\n.ends\n"
+    )
+    (tmp_path / "stim" / "nested.spice").write_text("Vbias b 0 {vbias}\n")
+    (tmp_path / "models.lib").write_text(
+        ".lib tt\nVlib l 0 {vlib}\n.endl tt\n.lib ff\n.endl ff\n"
+    )
+    body = (
+        ".param vbias=0.5 vlib=1 vinner=1 vamp=0.1\n"
+        ".include 'stim/rails.spice'\n"
+        ".lib models.lib tt\n"
+    )
+    # Elements declared in (nested) includes and `.lib` sections are found;
+    # a subckt-local one in an include is not a top-level element.
+    targets = _param_targets(tmp_path, body, ["vbias", "vlib", "vinner", "vamp"])
+    assert sorted(targets) == ["vamp", "vinner"]
+
+
+def test_param_only_target_unresolved_include_is_never_rejected(tmp_path):
+    body = ".param vbias=0.5\n.include missing/stim.spice\nR1 a 0 1k\n"
+    assert _param_targets(tmp_path, body, ["vbias"]) == {}
+    _validate_supply(tmp_path, body, {"vbias": 0.6})
+
+
+def test_param_only_target_include_cycle_terminates(tmp_path):
+    (tmp_path / "a.spice").write_text(".include b.spice\n")
+    (tmp_path / "b.spice").write_text(".include a.spice\n")
+    body = ".param vb=1\n.include a.spice\n"
+    assert list(_param_targets(tmp_path, body, ["vb"])) == ["vb"]
+
+
+def test_supply_override_param_explicit_points_are_validated(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    (tmp_path / "body.spice").write_text(
+        ".param amp=0.1\nVs s 0 SIN(0 {amp} 1k)\nR1 s 0 1k\n"
+    )
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "_explicit_points": [
+            {"process": None, "supply_v": {"amp": 0.2}, "temperature_c": 27}
+        ],
+    }
+    with pytest.raises(sim.SimError, match=r"'amp' names a \.param"):
+        sim.run_sim(str(_write_request(tmp_path, request)))
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_ngspice_alter_of_param_is_a_logged_no_op(tmp_path):
+    """Negative control pinning #2867's premise against the installed
+    ngspice: `alter <param>=<value>` addresses no device (a log line, no
+    error exit) and the parameter's dependents keep their nominal value."""
+    deck = tmp_path / "deck.cir"
+    deck.write_text(
+        "* alter of a .param\n"
+        ".param vdc=1.0\n"
+        "V1 d 0 {vdc}\n"
+        "R1 d 0 1k\n"
+        ".control\n"
+        "alter vdc=2.0\n"
+        "op\n"
+        "print v(d)\n"
+        "quit\n"
+        ".endc\n"
+        ".end\n"
+    )
+    proc = subprocess.run(
+        [shutil.which("ngspice"), "-b", str(deck)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    log = proc.stdout + proc.stderr
+    assert "no such device or model name vdc" in log.lower()
+    match = re.search(r"v\(d\)\s*=\s*([-+0-9.e]+)", log, re.I)
+    assert match and float(match.group(1)) == pytest.approx(1.0)
 
 
 # --------------------------------------------------------------------------- #
