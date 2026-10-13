@@ -655,8 +655,71 @@ made. Things worth knowing:
   concurrently. A shard whose budget runs out is reported as a `lost_shard`
   (see "Fleet sharding" below) like any other launch failure, not as a
   request-level `error.code` — its sibling shards' results are kept.
+- **Fan-out:** several requests can be submitted at once with `--batch-set`
+  (below).
 - **There is no `--wait-for-capacity` CLI flag yet.** The request field is
   the one control for now; a flag mirroring it is a possible follow-up.
+
+### Submitting a set of requests (`--batch-set`, [#2869](https://github.com/2AMLogic/klayout-tools/issues/2869))
+
+A campaign of N independent `backend: batch` requests can be submitted in one
+command instead of N invocations that each back off alone:
+
+```bash
+klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
+```
+
+- **Bounded in flight.** At most `--max-in-flight` requests (default **4**)
+  run at once -- submit, launch, and poll; the rest queue and start as slots
+  free. The bound is a client-side politeness knob, not the fleet's cap.
+- **One retry loop.** Each request runs the ordinary batch path, so
+  capacity-refusal waiting is exactly `batch.capacity_wait_s` (above) via
+  `sim_batch.launch_job`; set mode adds no retry of its own. Set
+  `capacity_wait_s` in the requests if you want refusals waited out.
+- **Batch only, never local.** The backend is forced to `batch` (`--backend`
+  other than `batch` is a usage error, exit `2`); a refused or failed request is
+  reported, never re-run on local ngspice. `--resume`, `--plot` and
+  `--op-lint` cannot be combined with it.
+- **Per-request reports.** Each request writes its full single-request report
+  to `report.json` in its own directory, `<outdir>/<request-stem>/` (without
+  `-o`: `.klt/sim/<request-stem>/` next to the request file).
+- **Invalid request.** A request that fails validation (before any S3 write) or
+  is refused becomes an `error` entry; the others proceed.
+
+The stdout payload is one aggregate envelope
+([`docs/schemas/sim-set-report.schema.json`](../schemas/sim-set-report.schema.json),
+`schema_version: 1`; the single-request report is unchanged):
+
+```json
+{
+  "schema_version": 1,
+  "status": "error",
+  "request_count": 2,
+  "max_in_flight": 2,
+  "submitted": 1,
+  "refused": 1,
+  "refused_codes": ["batch_no_capacity"],
+  "requests": [
+    {"index": 0, "request": "a.json", "status": "pass", "exit_code": 0,
+     "job_id": "klt-sim-1f2e...", "job_ids": ["klt-sim-1f2e..."],
+     "report": "out/a/report.json", "error": null},
+    {"index": 1, "request": "b.json", "status": "error", "exit_code": 1,
+     "job_id": null, "job_ids": [], "report": null,
+     "error": {"message": "batch backend failed: ...", "code": "batch_no_capacity"}}
+  ]
+}
+```
+
+`job_id`/`job_ids` come from each report's `environment.remote` (several ids
+for a sharded request). Aggregate `status` is `pass`, `fail` (a measurement
+failed, nothing errored) or `error` (any request errored or was refused, or any
+request's own status was `error`/`not_checked`/`inconclusive`).
+
+**Exit code:** the worst per-request code -- `0` all passed, `3` a measurement
+failed, `4` at least one request errored or was refused (**a partial set exits
+`4`**, with the report on stdout). Exit `1` means the set could not start
+(e.g. an empty or invalid `--max-in-flight`) and no report was written; the
+error envelope goes to stderr as usual.
 
 ### Three budgets, and the fleet's whole-job ceiling
 
@@ -1785,6 +1848,120 @@ Worked `op` example — the case that had no expression at all before:
   well as from `spice`, so an operating-point measurement naming a node the
   netlist does not define is still a named finding rather than a silent 0 V
   (see "Operating-point lint" below).
+
+## Threshold-crossing time series (`measurements[].crossings`)
+
+Issue [#2868](https://github.com/2AMLogic/klayout-tools/issues/2868). A
+cycle-by-cycle reduction (period, jitter, phase drift between oscillators,
+lock/slip detection) needs the **sequence** of times a signal crosses a
+level. With `spice`/`expr` that takes one `.meas ... WHEN v(x)=<thr>
+RISE=<k>` card per edge — 160 cards for 4 signals x 40 edges — and the number
+of observable cycles is frozen when the request is written. One `crossings`
+declaration returns the whole ordered list instead:
+
+```json
+{
+  "name": "t_ro1",
+  "crossings": {
+    "signal": "v(ro1)",
+    "level": 0.9,
+    "edge": "rise",
+    "from": "10n",
+    "max": 200
+  }
+}
+```
+
+| Key      | Required | Meaning |
+| -------- | -------- | ------- |
+| `signal` | yes      | One-line ngspice vector expression (`"v(ro1)"`, `"v(outp) - v(outn)"`, `"i(vdd)"`), evaluated against the transient's saved vectors. |
+| `level`  | yes      | Finite number, in the signal's own unit. |
+| `edge`   | no       | `"rise"` (default), `"fall"`, or `"either"`. |
+| `from`/`to` | no    | Window, inclusive, in seconds: a number or a SPICE time literal (`"10n"`). A crossing outside it is not counted. |
+| `max`    | no       | Cap on the returned times, integer in `[1, 100000]`; default `1000`. |
+
+`crossings` is a third measurement form: an entry declares **exactly one** of
+`spice`, `expr`, or `crossings` (declaring two is exit 1). It requires
+`analysis.kind: "tran"`; an unknown key, a missing `signal`/`level`, an
+unknown `edge`, a malformed window or `max` are all refused up front
+(`SimError`, exit 1) with a corrective message. Optional `unit`, `limits`,
+`plausible_range` and `k_sigma` apply to the entry's `value` (the count).
+
+### Response
+
+The entry is an ordinary `corners[].measurements[]` entry plus one additive
+member:
+
+```json
+{
+  "name": "t_ro1",
+  "value": 212,
+  "unit": null,
+  "status": "pass",
+  "margin": null,
+  "crossings": {
+    "times": [1.0423e-08, 1.9871e-08, "..."],
+    "edges": ["rise", "rise", "..."],
+    "truncated": true
+  }
+}
+```
+
+- `value` is the **number of crossings found inside the window**, before the
+  `max` cap — still a number, so `limits` grade it like any scalar
+  (`"limits": {"min": 40}` = "at least 40 edges were observed"), and Monte
+  Carlo statistics and coverage need nothing new. Zero crossings (the level is
+  never reached) is `value: 0`, `times: []`, not an error. A
+  crossings-only request is therefore a checked request: it never degrades to
+  `status: "not_checked"` / exit 4.
+- `crossings.times` are seconds, ascending, at most `max` long; `edges[i]` is
+  the polarity (`"rise"`/`"fall"`) of `times[i]` — informative for
+  `edge: "either"`. `truncated` is `true` exactly when `value >
+  len(times)`: the cap dropped later crossings; it is never silent.
+- `crossings` is present only when the series was extracted. When the signal
+  does not resolve (unknown node, or a vector the netlist's own `.save` cards
+  dropped under `options.save_mode: "netlist"`), the entry is `status:
+  "error"`, `value: null`, no `crossings` member, plus a `code:
+  "measurement"` diagnostic naming the signal — like any measurement that
+  produced no value. One unresolvable signal does not affect the others.
+
+### How times are computed
+
+Each crossing is **linearly interpolated** between the two samples that
+bracket the level (`t = t0 + (level - y0)(t1 - t0)/(y1 - y0)`), so its error
+is set by the waveform's curvature over one timestep, not by the timestep
+itself — nearest-sample extraction would report the simulator's step as
+jitter. A segment is a rising crossing when `y0 < level <= y1` and a falling
+one when `y0 > level >= y1`: a sample exactly on the level counts once, and a
+signal that merely *starts* above the level has no crossing at t=0.
+Reductions over the series (period, cycle-to-cycle, TIE) are not computed
+here — see issue #56; they can consume `times` directly.
+
+### What `klt sim` generates, and why it works off-host
+
+After the analysis (and after any `options.waveforms` rawfile write and
+`expr` lines, so neither the waveform artifact nor an `expr` is affected),
+each `crossings` entry adds
+
+```
+let __klt_xing_<k> = <signal>
+write <corner_dir>/crossings_<k>.raw __klt_xing_<k>
+```
+
+to the generated `.control` block (plus `set filetype=ascii` before the
+analysis). `klt sim` reads those small rawfiles inside the corner run,
+extracts the series, and removes them with the corner's scratch directory
+when `options.keep_artifacts` is false. Because this happens in the corner
+code itself, a `remote` or `batch` worker (sharded or not) reports the series
+inline in its collected report: no waveform artifact, no artifact retrieval,
+no per-edge `.meas` card. Like every request-surface addition, the off-host
+runner must carry this implementation (see "Runner/client `klt` version
+skew"); an older runner refuses the request rather than ignoring it.
+
+### Not supported
+
+- `engine: "xyce"` (exit 1): the dump is ngspice `.control` commands.
+- Inside `analysis_steps[]` (exit 1): no per-step series is implemented.
 
 ## Several solves per corner (`analysis_steps[]`)
 
@@ -3478,7 +3655,7 @@ the *response* echoes back.
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, measurements?}`. With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card) or `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) plus **exactly one** of `spice` (a verbatim `.meas` card), `expr` (issue #2533 — a single-line ngspice expression evaluated after the analysis inside `klt sim`'s own `.control` block; see "Measurements that are not `.meas` cards" above), or `crossings` (issue #2868 — `{signal, level, edge?, from?, to?, max?}`, a threshold-crossing time series, `tran` only; see "Threshold-crossing time series" above), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. Declaring both `spice` and `expr`, or neither, is an application error (exit 1). `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
@@ -3665,7 +3842,7 @@ corner-sweep rollup fields above are declared.
 | `runtime_s`      | number           | Engine wall-clock time for this corner (or time-to-timeout, on a killed run).                                                  |
 | `engine_exit_code` | integer \| null | Additive (issue #2848): the simulator process's exit code (`0` or nonzero). `null` when the engine was killed by a signal, when the harness's own `timeout` ended it, when it never launched, and for corners that never ran (`budget_exceeded`, `orphaned`, `lost_shard`, …). A nonzero exit alone does not change `status`. Rides in `report.json` unchanged on `--backend batch`/`remote`. |
 | `engine_killed_by_signal` | string \| null | Additive (issue #2848): the signal name (e.g. `"SIGKILL"`) when the engine process was killed by a signal the harness did not send; such a corner also carries an `engine_killed` error diagnostic. `null` otherwise, including on a harness `timeout`. |
-| `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. |
+| `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. |
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. Every other code is always `"error"`. Empty for a clean run. |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |

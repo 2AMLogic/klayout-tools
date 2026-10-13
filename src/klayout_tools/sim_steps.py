@@ -124,6 +124,18 @@ def _error(message: str) -> Exception:
     return SimError(message)
 
 
+def _refuse_crossings(spec: dict[str, Any]) -> None:
+    """Issue #2868: a ``crossings`` series reads one transient plot's
+    rawfile; no per-step equivalent is implemented, so it is refused by
+    name rather than silently reduced to something else."""
+    if spec.get("crossings") is not None:
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'crossings' is not supported "
+            "with analysis_steps -- use the scalar analysis "
+            '(kind "tran") for a threshold-crossing series'
+        )
+
+
 def is_steps_analysis(analysis: dict[str, Any]) -> bool:
     """Whether a resolved ``analysis`` object is a step sequence."""
     return analysis.get("kind") == STEPS_KIND and "steps" in analysis
@@ -293,6 +305,7 @@ def _resolve_step_measurements(
     local_names: set[str] = set()
     for spec in specs:
         _validate_measurement_form(spec)
+        _refuse_crossings(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
             raise _error(
@@ -432,6 +445,7 @@ def _resolve_derived_measurements(
     resolved: list[dict[str, Any]] = []
     for position, spec in enumerate(specs):
         name = spec["name"]
+        _refuse_crossings(spec)
         if spec.get("spice") is not None:
             raise _error(
                 f"measurement {name!r}: with analysis_steps, a top-level "

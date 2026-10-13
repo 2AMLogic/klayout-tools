@@ -24,6 +24,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   with extraction. `klt deck devices` gains an additive `topology` field on
   `resistor` entries.
 
+- **`klt sim --batch-set a.json b.json ...`** (issue #2869): submit a set of
+  independent `backend: batch` requests in one invocation, with at most
+  `--max-in-flight` (default 4) in flight and the rest queued. Reuses
+  `sim_batch.launch_job`'s `capacity_wait_s` backoff (no second retry loop),
+  never falls back to local ngspice, keeps one `report.json` per request, and
+  emits one new aggregate envelope (`schema_version: 1`,
+  `docs/schemas/sim-set-report.schema.json`) with per-request status, job id
+  and error code. Exit code is the worst per-request code (partial set: `4`).
+  Additive: single-request `klt sim` and its JSON are unchanged; the
+  concurrency-cap refusal classification stays with #2917.
+
+- **`klt sim` returns a signal's threshold-crossing time series from one
+  declaration** (issue #2868): a new `measurements[].crossings` form
+  (`{"signal": "v(ro1)", "level": 0.9, "edge": "rise"|"fall"|"either",
+  "from"?, "to"?, "max"?}`, `analysis.kind: "tran"` only) replaces a stack of
+  per-edge `.meas ... WHEN v(x)=<thr> RISE=<k>` cards. Times are linearly
+  interpolated between samples and computed inside the corner run, so the
+  series comes back inline on every backend — including `batch`, sharded or
+  not, with `options.keep_artifacts: false`. The entry's `value` is the
+  crossing count (still a number, graded by `limits` like any scalar); the
+  series rides a new, additive `crossings` object (`times`, `edges`,
+  `truncated`) on that `corners[].measurements[]` entry. No `schema_version`
+  bump. Refused for `engine: "xyce"` and inside `analysis_steps[]`.
+
 - **`klt sim` rejects a `corners.supply_v` key that names a `.param`**
   (issue #2867): ngspice's `alter <param>=<value>` cannot change a `.param`
   (its dependents were evaluated when the deck was parsed; ngspice only logs

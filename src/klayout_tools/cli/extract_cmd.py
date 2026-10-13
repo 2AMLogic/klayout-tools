@@ -325,6 +325,7 @@ _REQUEST_FIELD_DESTS = {
         "file",
         "deck",
         "output",
+        "no_netlist",
         "top",
         "pdk",
         "pdk_root",
@@ -423,6 +424,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "file": _path("file"),
             "deck": _str("deck"),
             "output": _path("output"),
+            "no_netlist": _bool("no_netlist"),
             "top": _str("top"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
@@ -516,6 +518,7 @@ def run(args: argparse.Namespace) -> int:
             args.file,
             args.deck,
             output=args.output,
+            no_netlist=args.no_netlist,
             top=args.top,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
@@ -738,6 +741,7 @@ def _print_text(report: dict) -> None:
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")
+    # Both are None under `--no-netlist` (issue #2850).
     print(f"netlist_path: {report['netlist_path']}")
     print(f"netlist_sha256: {report['netlist_sha256']}")
     print(
