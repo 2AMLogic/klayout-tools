@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from typing import Any
 
@@ -120,6 +121,7 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
                 f"{where}: measurement '{name}' limits.{key} must be a number"
             )
         limits[key] = float(value)
+    _read_qualification_keys(raw, limits, f"{where}: measurement '{name}' limits.")
     # issue #1083: optional strict-inequality flags -- `exclusive_min` /
     # `exclusive_max` make the corresponding `min`/`max` a strict bound
     # (`>`/`<` instead of `>=`/`<=`). Booleans only; the native extension is
@@ -134,6 +136,34 @@ def _limits_from(raw: Any, name: str, where: str) -> dict[str, Any]:
             )
         limits[key] = value
     return limits
+
+
+def _read_qualification_keys(
+    raw: dict[str, Any], out: dict[str, Any], prefix: str
+) -> None:
+    """Validate the issue-#2873 keys ``target_sigma`` (a number ``> 0``) and
+    ``min_converged_samples`` (a non-negative integer) found in ``raw`` and
+    copy them into ``out``. Absent/``null`` keys are skipped, so a spec that
+    declares neither is unchanged."""
+    k = raw.get("target_sigma")
+    if k is not None:
+        if isinstance(k, bool) or not isinstance(k, (int, float)):
+            raise YieldError(f"{prefix}target_sigma must be a number")
+        if not math.isfinite(k) or k <= 0:
+            raise YieldError(f"{prefix}target_sigma must be > 0 (got {k})")
+        out["target_sigma"] = float(k)
+    n = raw.get("min_converged_samples")
+    if n is not None:
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise YieldError(
+                f"{prefix}min_converged_samples must be a non-negative integer"
+            )
+        if n < 0:
+            raise YieldError(
+                f"{prefix}min_converged_samples must be a non-negative integer "
+                f"(got {n})"
+            )
+        out["min_converged_samples"] = n
 
 
 def _failed_unmeasurable_from(raw: Any, name: str, where: str) -> int:
@@ -653,6 +683,7 @@ def _read_spec(path: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     for key in ("confidence", "target_ci_halfwidth", "min_samples", "target_yield"):
         if doc.get(key) is not None:
             defaults[key] = doc[key]
+    _read_qualification_keys(doc, defaults, f"limits '{path}': ")
 
     raw = doc.get("measurements")
     if raw is None:
@@ -727,6 +758,11 @@ def run_yield(
         limits.update(spec_limits.get(name, {}))
         if run_target_yield is not None and "target_yield" not in limits:
             limits["target_yield"] = run_target_yield
+        # issue #2873: run-level defaults for the qualification keys; a
+        # per-measurement value wins, exactly like `target_yield`.
+        for key in ("target_sigma", "min_converged_samples"):
+            if key in spec_defaults and key not in limits:
+                limits[key] = spec_defaults[key]
         if limits.get("min") is None and limits.get("max") is None:
             if measurements is not None:
                 raise YieldError(

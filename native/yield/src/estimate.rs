@@ -19,9 +19,9 @@
 //! Issue #816 (Phase 1a of the statistical/yield epic #710).
 
 use crate::contract::{
-    AnalyticCrossCheckReport, AnalyticCrossCheckRequest, Capability, Distribution, Estimate,
-    Interval, Limits, MeasurementReport, MeasurementRequest, NegativeControlReport,
-    NegativeControlRequest, Normality, SampleSize, SamplingReport, SamplingRequest,
+    AnalyticCrossCheckReport, AnalyticCrossCheckRequest, Capability, ConvergedN, Distribution,
+    Estimate, Interval, Limits, MeasurementReport, MeasurementRequest, NegativeControlReport,
+    NegativeControlRequest, Normality, SampleSize, SamplingReport, SamplingRequest, SigmaTarget,
     VarianceReducedSampleSize, YieldBlock, YieldRequest, YieldResponse, ABSOLUTE_MIN_SAMPLES,
     SCHEMA_VERSION,
 };
@@ -68,6 +68,8 @@ pub fn analyze(request: &YieldRequest) -> Result<YieldResponse, String> {
 
     let status = if reports.iter().any(|r| r.status == "fail") {
         "fail"
+    } else if reports.iter().any(|r| r.status == "insufficient_evidence") {
+        "insufficient_evidence"
     } else if reports.iter().any(|r| r.status == "pass") {
         "pass"
     } else {
@@ -75,7 +77,11 @@ pub fn analyze(request: &YieldRequest) -> Result<YieldResponse, String> {
     };
 
     let mut warnings = Vec::new();
-    if reports.iter().all(|r| r.limits.target_yield.is_none()) {
+    if reports.iter().all(|r| {
+        r.limits.target_yield.is_none()
+            && r.limits.target_sigma.is_none()
+            && r.limits.min_converged_samples.is_none()
+    }) {
         warnings.push(
             "no measurement declared a target_yield, so no yield claim was checked -- the \
              estimates below are reported, never failed"
@@ -208,6 +214,13 @@ fn analyze_measurement(
         if !(t > 0.0 && t <= 1.0) {
             return Err(format!(
                 "measurement '{name}' has target_yield {t}, which must be in (0, 1]"
+            ));
+        }
+    }
+    if let Some(k) = m.limits.target_sigma {
+        if !(k.is_finite() && k > 0.0) {
+            return Err(format!(
+                "measurement '{name}' has target_sigma {k}, which must be a finite number > 0"
             ));
         }
     }
@@ -599,15 +612,92 @@ fn analyze_measurement(
     });
 
     // ---- verdict --------------------------------------------------------- //
-    let status = match m.limits.target_yield {
-        None => "reported",
-        Some(target) => {
-            if empirical.confidence_interval.low >= target {
-                "pass"
-            } else {
-                "fail"
+    // Issue #2873: the optional sigma-multiple gate and converged-N check.
+    // Precedence: fail > insufficient_evidence > pass > reported.
+    let sigma_target = m.limits.target_sigma.map(|k| {
+        let sigma = capability.sigma_to_spec;
+        let lower = capability
+            .sigma_to_spec_confidence_interval
+            .as_ref()
+            .map(|i| i.low);
+        let importance = matches!(&m.sampling, Some(SamplingRequest::Importance { .. }));
+        let (met, reason) = if importance {
+            (None, Some("importance_sampled"))
+        } else {
+            match lower {
+                Some(l) => (Some(l >= k), None),
+                None => (None, Some("degenerate_fit")),
             }
+        };
+        if let Some(r) = reason {
+            warnings.push(format!(
+                "measurement '{name}': target_sigma {k} could not be evaluated ({r}); the \
+                 measurement cannot pass on it"
+            ));
+        } else if met == Some(false) {
+            warnings.push(format!(
+                "measurement '{name}': sigma_to_spec lower bound {:.4} is below target_sigma {k}",
+                lower.unwrap_or(f64::NAN)
+            ));
         }
+        SigmaTarget {
+            k,
+            sigma_to_spec: sigma,
+            lower_bound: lower,
+            gate: "lower_bound".to_string(),
+            met,
+            reason: reason.map(str::to_string),
+        }
+    });
+    let converged_n = m.limits.min_converged_samples.map(|min| {
+        let n_requested = n_u + m.errored + m.failed_unmeasurable + m.censored + m.inconclusive;
+        let sufficient = n_u >= min;
+        if !sufficient {
+            warnings.push(format!(
+                "measurement '{name}': only {n_u} of {n_requested} sample(s) converged, below \
+                 min_converged_samples {min} -- insufficient evidence"
+            ));
+        }
+        ConvergedN {
+            n_requested,
+            n_converged: n_u,
+            min_converged_samples: min,
+            verdict: if sufficient {
+                "sufficient"
+            } else {
+                "insufficient"
+            }
+            .to_string(),
+        }
+    });
+    let yield_verdict = m.limits.target_yield.map(|target| {
+        if empirical.confidence_interval.low >= target {
+            "pass"
+        } else {
+            "fail"
+        }
+    });
+    let sigma_verdict = sigma_target.as_ref().map(|s| match s.met {
+        Some(true) => "pass",
+        Some(false) => "fail",
+        None => "insufficient_evidence",
+    });
+    let converged_verdict = converged_n.as_ref().map(|c| {
+        if c.verdict == "sufficient" {
+            "pass"
+        } else {
+            "insufficient_evidence"
+        }
+    });
+    let verdicts = [yield_verdict, sigma_verdict, converged_verdict];
+    let status = if verdicts.contains(&Some("fail")) {
+        "fail"
+    } else if verdicts.contains(&Some("insufficient_evidence")) {
+        "insufficient_evidence"
+    } else if verdicts.contains(&Some("pass")) {
+        "pass"
+    } else {
+        "reported"
     };
 
     Ok(MeasurementReport {
@@ -631,6 +721,8 @@ fn analyze_measurement(
         analytic_cross_check,
         sampling,
         sample_size,
+        sigma_target,
+        converged_n,
         status: status.to_string(),
         warnings,
     })
@@ -1803,6 +1895,7 @@ mod tests {
                 target_yield: None,
                 exclusive_min: true,
                 exclusive_max: true,
+                ..Default::default()
             },
         );
         let resp = analyze(&req).unwrap();
@@ -1977,6 +2070,118 @@ mod tests {
         let mut req = request(samples, limits);
         req.measurements[0].errored = errored;
         req
+    }
+
+    // ---- issue #2873: sigma target + converged-N ---------------------- //
+
+    fn sigma_limits(k: Option<f64>, min_n: Option<u64>) -> Limits {
+        Limits {
+            min: Some(-4.0),
+            max: Some(4.0),
+            target_sigma: k,
+            min_converged_samples: min_n,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sigma_target_met_when_lower_bound_reaches_k() {
+        let req = request(normal_grid(4000, 0.0, 1.0), sigma_limits(Some(3.5), None));
+        let m = &analyze(&req).unwrap().measurements[0];
+        let st = m.sigma_target.as_ref().unwrap();
+        assert_eq!(st.met, Some(true));
+        assert!(st.lower_bound.unwrap() >= 3.5);
+        assert_eq!(m.status, "pass");
+    }
+
+    #[test]
+    fn sigma_target_not_met_fails_even_without_a_target_yield() {
+        let req = request(normal_grid(4000, 0.0, 1.0), sigma_limits(Some(4.5), None));
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.sigma_target.as_ref().unwrap().met, Some(false));
+        assert_eq!(m.status, "fail");
+        assert_eq!(resp.status, "fail");
+    }
+
+    #[test]
+    fn sigma_target_gates_on_the_lower_bound_not_the_point_estimate() {
+        let req = request(normal_grid(30, 0.0, 1.0), sigma_limits(Some(3.0), None));
+        let m = &analyze(&req).unwrap().measurements[0];
+        let st = m.sigma_target.as_ref().unwrap();
+        assert!(st.sigma_to_spec.unwrap() >= 3.0);
+        assert!(st.lower_bound.unwrap() < 3.0);
+        assert_eq!(st.met, Some(false));
+    }
+
+    #[test]
+    fn sigma_target_is_not_evaluable_for_a_degenerate_fit() {
+        let req = request(vec![1.0; 50], sigma_limits(Some(3.0), None));
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        let st = m.sigma_target.as_ref().unwrap();
+        assert_eq!(st.met, None);
+        assert_eq!(st.reason.as_deref(), Some("degenerate_fit"));
+        assert_eq!(m.status, "insufficient_evidence");
+    }
+
+    #[test]
+    fn sigma_target_is_not_evaluable_for_importance_sampling() {
+        let n = 200;
+        let req = request_with_sampling(
+            normal_grid(n, 0.0, 1.0),
+            sigma_limits(Some(1.0), None),
+            Some(SamplingRequest::Importance {
+                weights: vec![1.0; n],
+            }),
+        );
+        let m = &analyze(&req).unwrap().measurements[0];
+        let st = m.sigma_target.as_ref().unwrap();
+        assert_eq!(st.met, None);
+        assert_eq!(st.reason.as_deref(), Some("importance_sampled"));
+    }
+
+    #[test]
+    fn invalid_target_sigma_is_rejected() {
+        for k in [0.0, -1.0, f64::NAN] {
+            let req = request(normal_grid(100, 0.0, 1.0), sigma_limits(Some(k), None));
+            assert!(analyze(&req).is_err());
+        }
+    }
+
+    #[test]
+    fn converged_n_shortfall_is_insufficient_evidence_and_counts_the_full_draw() {
+        let mut req = request(normal_grid(100, 0.0, 1.0), sigma_limits(None, Some(150)));
+        req.measurements[0].errored = 10;
+        req.measurements[0].censored = 5;
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        let c = m.converged_n.as_ref().unwrap();
+        assert_eq!((c.n_requested, c.n_converged), (115, 100));
+        assert_eq!(c.verdict, "insufficient");
+        assert_eq!(m.status, "insufficient_evidence");
+        assert_eq!(resp.status, "insufficient_evidence");
+    }
+
+    #[test]
+    fn converged_n_met_passes_and_a_fail_outranks_insufficient_evidence() {
+        let req = request(normal_grid(100, 0.0, 1.0), sigma_limits(None, Some(100)));
+        assert_eq!(analyze(&req).unwrap().measurements[0].status, "pass");
+        let req = request(
+            normal_grid(100, 0.0, 1.0),
+            sigma_limits(Some(9.0), Some(500)),
+        );
+        assert_eq!(analyze(&req).unwrap().measurements[0].status, "fail");
+    }
+
+    #[test]
+    fn undeclared_keys_emit_neither_block() {
+        let req = request(normal_grid(100, 0.0, 1.0), sigma_limits(None, None));
+        let v = serde_json::to_value(analyze(&req).unwrap()).unwrap();
+        let m = &v["measurements"][0];
+        assert!(m.get("sigma_target").is_none());
+        assert!(m.get("converged_n").is_none());
+        assert!(m["limits"].get("target_sigma").is_none());
     }
 
     #[test]

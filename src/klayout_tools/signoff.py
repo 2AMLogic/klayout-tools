@@ -67,8 +67,10 @@ via a file-backed *or* command-backed ``evidence`` entry exactly like every
 other kind, no new evidence shape. A ``"met"`` verdict passes on ``status ==
 "pass"`` (every declared ``target_yield`` met) or ``status == "reported"``
 (no measurement declared one, so nothing could fail); ``status == "fail"``
-(a declared ``target_yield`` was not supported at the stated confidence)
-renders ``"unmet"``, same as every other kind's failing check.
+(a declared ``target_yield`` or ``target_sigma`` was not supported at the
+stated confidence) renders ``"unmet"``; so does ``status ==
+"insufficient_evidence"`` (issue #2873: ``min_converged_samples`` unmet or a
+``target_sigma`` not evaluable), with reason ``undersized_sample``.
 
 `klt yield`'s current JSON shape (as of issue #816) carries no `provenance`
 block of its own -- unlike drc/lvs/extract/sim, its envelope names no content
@@ -3320,6 +3322,11 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
     """
     if _critical_metric_blockers(envelope):
         return _REASON_CHECK_FAILED
+    # Issue #2873: a `klt yield` run whose only shortfall is evidence
+    # (`min_converged_samples` unmet, or a `target_sigma` that could not be
+    # evaluated) is "draw more / fix the sample set", not a design defect.
+    if kind == "yield" and envelope.get("status") == "insufficient_evidence":
+        return _REASON_UNDERSIZED_SAMPLE
     if _reports_partial_status(kind, envelope):
         return _REASON_PARTIAL_COVERAGE
     # Issue #2768: a `klt drc --rules` subset whose only shortfall is the
