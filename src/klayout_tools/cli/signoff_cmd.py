@@ -150,14 +150,9 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 def run(args: argparse.Namespace) -> int:
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
-    if getattr(args, "attest", None) is not None:
-        return _run_attest(args, manifest_source, fleet_source)
-    if getattr(args, "inventory", None) or getattr(args, "output", None):
-        return emit_error(
-            "signoff",
-            "--inventory/--output only apply to --attest",
-            args.format,
-        )
+    attest_result = _maybe_run_attest(args, manifest_source, fleet_source)
+    if attest_result is not None:
+        return attest_result
     if getattr(args, "describe_grader", False):
         return _run_describe_grader(args, manifest_source, fleet_source)
     if manifest_source and fleet_source:
@@ -203,6 +198,28 @@ def run(args: argparse.Namespace) -> int:
     if manifest_source:
         return _run_tier_report(args, manifest_source, repo_root=repo_root)
     return _run_envelope_aggregation(args)
+
+
+def _maybe_run_attest(
+    args: argparse.Namespace,
+    manifest_source: str | None,
+    fleet_source: str | None,
+) -> int | None:
+    """``--attest`` dispatch (issue #2844) -- run it, or refuse its flags.
+
+    Returns the exit code when the invocation is an ``--attest`` one (run it)
+    or an ``--inventory``/``--output`` misuse (refuse them), and ``None``
+    otherwise so ``run`` can fall through to the other modes.
+    """
+    if getattr(args, "attest", None) is not None:
+        return _run_attest(args, manifest_source, fleet_source)
+    if getattr(args, "inventory", None) or getattr(args, "output", None):
+        return emit_error(
+            "signoff",
+            "--inventory/--output only apply to --attest",
+            args.format,
+        )
+    return None
 
 
 def _run_describe_grader(

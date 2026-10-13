@@ -15227,6 +15227,8 @@ def test_command_backed_attestation_is_graded_like_a_file(tmp_path):
     assert item["citation"]["artifact_binding"]["attestation"]["producer"] == (
         "klt signoff --attest"
     )
+
+
 # --------------------------------------------------------------------------- #
 # Issue #2879: `klt sta` input paths are portable `{path, scope}` envelopes
 # (schema 2), so `input_verified` does not depend on the checkout root.
