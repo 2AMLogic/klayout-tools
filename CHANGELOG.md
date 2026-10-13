@@ -54,6 +54,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   kb requests were keyed this way and are re-keyed to their sources (`vdd`,
   `vin`); the LDO entry's recorded `vout_v` at the 3.0 V corner is corrected
   from 1.80324 V (actually the 3.3 V nominal) to 1.80264 V.
+- **Bipolar terminal relations** (issue #2863): `BipolarDevice` gains
+  optional `base_relation`/`emitter_relation`/`collector_relation` fields
+  (a new `TerminalRelation(source, op="interacting", extents=False)`), so a
+  terminal can be the part of its layer that interacts with another terminal
+  of the same device — optionally through that layer's per-polygon extents,
+  the SG13G2 `pnpMPA` idiom
+  `pnp_b.interacting(pnp_b.extents.interacting(pnp_mpa_e))`. Self-references,
+  cycles, and relations on/against a `None` collector are rejected at deck
+  construction. Entries without a relation (every shipped deck entry)
+  extract unchanged. **Additive contract change:** `klt deck devices`'
+  `terminals[]` entries gain a `relation` key (`null`, or
+  `{source, op, extents}`); no existing field changes.
 
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time

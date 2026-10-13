@@ -529,9 +529,12 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
       ``marker is not None``; ``predicate_gated`` is ``True`` when any
       terminal declares a non-empty ``requires``.
     - ``terminals`` -- one entry per recognised terminal, each
-      ``{name, layer, requires, excludes}``. ``layer`` is ``None`` for a
-      terminal formed by the substrate rather than by a drawn mask (e.g.
-      ``diode_nd2ps_06v0``'s anode).
+      ``{name, layer, requires, excludes, relation}``. ``layer`` is ``None``
+      for a terminal formed by the substrate rather than by a drawn mask
+      (e.g. ``diode_nd2ps_06v0``'s anode). ``relation`` (issue #2863) is
+      ``None`` unless the terminal is selected by geometric interaction with
+      another terminal of the same device, then ``{"source", "op",
+      "extents"}`` -- see :class:`~klayout_tools.decks.TerminalRelation`.
     - ``required_layers`` / ``excluded_layers`` -- the flattened union, in
       first-mention order: every layer that must be drawn over the geometry
       for this class to be recognised, and every layer whose presence
@@ -610,13 +613,31 @@ def _terminal_entry(
     requires: tuple[tuple[int, int], ...],
     excludes: tuple[tuple[int, int], ...],
     layer_names: dict[tuple[int, int], str],
+    relation: Any = None,
 ) -> dict[str, Any]:
-    """One terminal of a device class, in :func:`deck_devices`' shape."""
+    """One terminal of a device class, in :func:`deck_devices`' shape.
+
+    ``relation`` is the terminal's
+    :class:`~klayout_tools.decks.TerminalRelation` (issue #2863) -- reported
+    as ``{"source", "op", "extents"}`` so two entries differing only in a
+    relation project differently -- or ``None`` (``null``) for a terminal
+    defined by its static layer/``requires``/``excludes`` alone, which is
+    every terminal of every non-bipolar class.
+    """
     return {
         "name": name,
         "layer": _layer_entry(layer, layer_names),
         "requires": [_layer_entry(pair, layer_names) for pair in requires],
         "excludes": [_layer_entry(pair, layer_names) for pair in excludes],
+        "relation": (
+            None
+            if relation is None
+            else {
+                "source": relation.source,
+                "op": relation.op,
+                "extents": relation.extents,
+            }
+        ),
     }
 
 
@@ -747,16 +768,29 @@ def _project_device_classes(
                 kind="bipolar",
                 marker=bipolar.marker,
                 terminals=[
-                    _terminal_entry("base", bipolar.base, (), (), layer_names),
+                    _terminal_entry(
+                        "base",
+                        bipolar.base,
+                        (),
+                        (),
+                        layer_names,
+                        bipolar.base_relation,
+                    ),
                     _terminal_entry(
                         "emitter",
                         bipolar.emitter,
                         bipolar.emitter_requires,
                         bipolar.emitter_excludes,
                         layer_names,
+                        bipolar.emitter_relation,
                     ),
                     _terminal_entry(
-                        "collector", bipolar.collector, (), (), layer_names
+                        "collector",
+                        bipolar.collector,
+                        (),
+                        (),
+                        layer_names,
+                        bipolar.collector_relation,
                     ),
                 ],
                 layer_names=layer_names,

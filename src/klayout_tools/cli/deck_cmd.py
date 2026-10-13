@@ -180,6 +180,10 @@ def _print_devices_text(report: dict) -> None:
             print(f"    layer: {_layer_text(terminal['layer'])}")
             print(f"    requires: {_layers_text(terminal['requires'])}")
             print(f"    excludes: {_layers_text(terminal['excludes'])}")
+            relation = terminal.get("relation")
+            if relation is not None:
+                via = " (via extents)" if relation["extents"] else ""
+                print(f"    relation: {relation['op']} {relation['source']}{via}")
         for flavour in entry.get("flavours", []):
             print(f"  flavour {flavour['flavour']}: {_layer_text(flavour['marker'])}")
         print(f"  required_layers: {_layers_text(entry['required_layers'])}")
