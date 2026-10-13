@@ -2836,6 +2836,10 @@ def _run_job_cmd_with_fake_klt(tmp_path, spec, klt_script):
             "EDA_INPUT_DIR": str(tmp_path),
             "PATH": f"{bin_dir}:/usr/bin:/bin",
         },
+        # Anything the job (or a payload it wrongly evaluates) writes with a
+        # relative path lands in the test's own directory, never the
+        # checkout pytest runs from (issue #3153).
+        cwd=tmp_path,
         capture_output=True,
         text=True,
     )
@@ -2843,9 +2847,19 @@ def _run_job_cmd_with_fake_klt(tmp_path, spec, klt_script):
 
 
 def _fake_klt(version_line: str) -> str:
+    """A fake runner `klt` whose `--version` prints ``version_line``
+    verbatim. The line goes through a quoted heredoc, so shell
+    metacharacters in it reach the job command's preflight as data instead
+    of running inside this fixture's own shell (issue #3153)."""
+    assert "KLT_VERSION_EOF" not in version_line
     return (
         "#!/bin/bash\n"
-        f'if [ "$1" = "--version" ]; then echo "{version_line}"; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then\n'
+        "cat <<'KLT_VERSION_EOF'\n"
+        f"{version_line}\n"
+        "KLT_VERSION_EOF\n"
+        "exit 0\n"
+        "fi\n"
         'touch "@MARKER@"; echo \'{"corners": []}\'; exit 0\n'
     )
 
@@ -2922,12 +2936,20 @@ def test_warn_mode_runs_the_simulation_despite_skew(tmp_path):
 
 
 def test_hostile_runner_version_output_cannot_break_the_envelope(tmp_path):
+    hostile = 'klt 1.0" ; touch x ; "'
     proc, out_dir, marker = _run_job_cmd_with_fake_klt(
-        tmp_path, _init_spec(tmp_path), _fake_klt('klt 1.0" ; touch x ; "')
+        tmp_path, _init_spec(tmp_path), _fake_klt(hostile)
     )
     assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
     json.loads((out_dir / "report.json").read_text())  # still valid JSON
-    json.loads((out_dir / "runner_identity.json").read_text())
+    identity = json.loads((out_dir / "runner_identity.json").read_text())
+    # The fixture delivered the hostile text to the preflight (which strips
+    # the quoting characters) rather than running it itself.
+    assert "touch x" in identity["runner_klt_version"]
+    # The payload reached the preflight as data and was never evaluated:
+    # no `x` in the job's working directory, nor in the checkout.
+    assert not (tmp_path / "x").exists()
+    assert not (REPO_ROOT / "x").exists()
 
 
 # --------------------------------------------------------------------------- #
