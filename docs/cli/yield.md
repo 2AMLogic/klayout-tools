@@ -344,6 +344,12 @@ limits the sample document carried — it is the caller's explicit spec.
 - The four run-level keys are defaults; a CLI flag beats the file, which
   beats the documented default. A run-level `target_yield` applies to every
   measurement that does not state its own.
+- `target_sigma` and `min_converged_samples` (optional; per measurement or
+  run-level default, per-measurement wins) declare a parametric qualification
+  criterion and a minimum converged-sample count — see
+  ["Sigma target and converged-N"](#sigma-target-and-converged-n). Invalid
+  values (non-number or boolean, `target_sigma <= 0`, a negative or
+  non-integer `min_converged_samples`) are an error (exit `1`).
 - A measurement present in the sample document but **not** in this file keeps
   whatever limits it already had. A measurement that ends up with neither
   `min` nor `max` is skipped with a warning — unless it was named explicitly
@@ -433,7 +439,80 @@ A measurement that declares a `target_yield` **passes only if the lower
 confidence bound reaches it** — a claim at the stated confidence, not a point
 estimate that happened to clear the bar. A measurement with no `target_yield`
 is `reported`: it can never fail, exactly as an unlimited measurement in `klt
-sim` is reported and never failed.
+sim` is reported and never failed. A measurement may additionally declare a
+[`target_sigma` and/or `min_converged_samples`](#sigma-target-and-converged-n),
+which can fail it or leave it `insufficient_evidence`.
+
+### Sigma target and converged-N
+
+Two optional, append-only criteria (issue #2873). A spec that declares
+neither produces a byte-identical envelope to one from before they existed:
+the `limits` echo, the `sigma_target`/`converged_n` blocks and the changed
+statuses below appear **only when the corresponding key is declared**.
+
+**`target_sigma: k`** — the sample mean ± `k` sample standard deviations must
+lie inside `[min, max]`, which is exactly `capability.sigma_to_spec >= k`
+(one-sided limits work: the limiting side is the declared one). It is a
+comparison against an existing statistic, not a new one. The measurement
+gains:
+
+```json
+"sigma_target": {
+  "k": 4.0, "sigma_to_spec": 4.31, "lower_bound": 3.92,
+  "gate": "lower_bound", "met": false
+}
+```
+
+- **Gate rule: the lower bound, not the point estimate.** `met` is
+  `capability.sigma_to_spec_confidence_interval.low >= k`, consistent with how
+  `target_yield` gates on its lower bound — a claim at the stated confidence.
+  Both numbers are reported so a consumer can see the point estimate cleared
+  `k` while the bound did not (`gate` names the quantity judged on). The
+  bound is the lower end of the two-sided `confidence` interval (Bissell's
+  Cpk interval × 3).
+- **Not evaluable ⇒ `met: null` plus a `reason`, never a pass.**
+  `"degenerate_fit"` (zero sample spread: `sigma_to_spec` is `null`, not
+  infinity) and `"importance_sampled"` (`capability` is computed from the
+  unweighted draws, which are not a sample of the target distribution, so the
+  criterion does not apply to importance-weighted measurements). A declared
+  but non-evaluable criterion makes the measurement `insufficient_evidence`.
+- `met: false` makes the measurement `fail` even when its `target_yield` is
+  met or absent.
+
+**`min_converged_samples: N`** — distinct from `min_samples` (a hard floor
+that makes the run exit `1`). The measurement gains:
+
+```json
+"converged_n": {
+  "n_requested": 120, "n_converged": 100,
+  "min_converged_samples": 110, "verdict": "insufficient"
+}
+```
+
+`n_requested` is the full draw, `n + errored + failed_unmeasurable +
+censored + inconclusive`; `n_converged` is `n` (numeric-valued samples).
+`errored`/`censored`/`inconclusive`/`failed_unmeasurable` draws therefore
+reduce `n_converged` but never `n_requested`. `n_converged < N` ⇒
+`verdict: "insufficient"` (`"sufficient"` otherwise) and the measurement is
+`insufficient_evidence`. This reuses the `sufficient`/`insufficient`
+vocabulary of [`sample_size.verdict`](#sample-size-verdict).
+
+**Status precedence** (per measurement and for the run):
+`fail` > `insufficient_evidence` > `pass` > `reported`. A definite failure is
+never masked by a shortfall of evidence elsewhere. `insufficient_evidence`
+means "nothing failed, but the evidence cannot decide" — it is **not** a pass
+and **not** an error (exit `1`): the report is written and exits `4`.
+
+**Schema policy: no `schema_version` bump.** Every new input key and output
+field is additive-optional and absent unless declared. The two outcomes a
+consumer can newly see — `status: "insufficient_evidence"` (exit `4`) and
+`status: "fail"` caused by a `target_sigma` — can only occur for a spec that
+opted in by declaring a new key, so no pre-existing spec changes verdict.
+Consumers gate on `status` (see [Exit codes](#exit-codes)); `klt signoff`
+treats `insufficient_evidence` as not passing (reason `undersized_sample`).
+`klt yield-campaign` accepts both keys in per-measurement `limits` (run-level
+defaults are `klt yield --limits` only). `klt yield-samples` output feeds
+`klt yield` unchanged and needs no change.
 
 ### Errored samples and conditional yield
 
@@ -1054,7 +1133,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `confidence` | number | Effective two-sided confidence level. |
 | `target_ci_halfwidth` | number | Effective sample-size target. |
 | `min_samples` | integer | Effective per-measurement minimum. |
-| `status` | string | `"pass"`, `"fail"`, or `"reported"` (no measurement declared a `target_yield`). `fail` wins over `pass`. |
+| `status` | string | `"pass"`, `"fail"`, `"insufficient_evidence"` or `"reported"` (no measurement declared a `target_yield`, `target_sigma` or `min_converged_samples`). Precedence `fail` > `insufficient_evidence` > `pass` > `reported`. |
 | `measurement_count` | integer | `== len(measurements)`. |
 | `measurements` | array\<object\> | One entry per analysed measurement, in input order. |
 | `warnings` | array\<string\> | Run-level warnings (skipped measurements, no `target_yield` declared, no measurement declared a `negative_control`, one that did not detect degradation, one that [excluded errored samples](#errored-samples-and-conditional-yield) from its denominator, one that [counted `failed_unmeasurable` draws as failures](#errored-samples-and-conditional-yield), or one that [excluded `censored` or `inconclusive` draws](#errored-samples-and-conditional-yield) from its denominator), followed by the core's own. |
@@ -1078,7 +1157,7 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `failed_unmeasurable` | integer | Draws that left the measurement's regime and produced no value (a design failure, not a tooling one). **Counted as failures** in `yield.empirical`'s numerator's complement and denominator — `yield.empirical.n == n + failed_unmeasurable` — while still excluded from `distribution`/`capability` like `errored`. Non-zero adds a per-measurement warning and a matching run-level one — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
 | `censored` | integer | Draws whose measurement precondition was never satisfied inside the analysis window (neither a tooling failure nor a design failure charged to this row). **Gets `errored`'s denominator treatment**: excluded from both the numerator and denominator of `yield.empirical` (unlike `failed_unmeasurable`), and excluded from `distribution`/`capability` like both other categories. Non-zero adds its own distinct per-measurement warning (naming the rate against the full draw) and a matching run-level one — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
 | `inconclusive` | integer | Draws whose value *existed* but was not trustworthy — `klt sim` graded the measurement, or its whole corner, `"inconclusive"` (a plausibility-bound violation, or an `options.fail_on_diagnostic` disqualification). The only category here that is not a missing value, and the only one derived from the input report rather than supplied by the caller (on the sim-report path). **Gets `errored`'s denominator treatment**: excluded from both the numerator and denominator of `yield.empirical`, and from `distribution`/`capability` — the same exclusion `klt sim`'s own Monte Carlo rollup applies to the same draw, so the two verbs report the same population. Non-zero adds its own distinct per-measurement warning (naming the rate against the full draw) and a matching run-level one — see ["Errored samples and conditional yield"](#errored-samples-and-conditional-yield). |
-| `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`, each present only when set; `exclusive_min`/`exclusive_max` are echoed back only when `true` — the default `false` is omitted). |
+| `limits` | object | The **merged** limits actually used (`min`/`max`/`target_yield`/`target_sigma`/`min_converged_samples`, each present only when set; `exclusive_min`/`exclusive_max` are echoed back only when `true` — the default `false` is omitted). |
 | `source_corners` | array\<string\> | Originating corners the draw was pooled from. |
 | `distribution` | object | See "Distribution fit" above. |
 | `yield` | object | `empirical` (always present -- its own `n` is `n + failed_unmeasurable`, not `n` alone, once `failed_unmeasurable` is non-zero; `censored`/`inconclusive` never change it), `normal` (`null` when the fit is degenerate), and `variance_reduced` (`null` unless `sampling.strategy` is `latin_hypercube`/`importance`) — see "Two yield estimates" and "Sampling strategies (variance reduction)". |
@@ -1087,7 +1166,9 @@ worked example declares no `sampling` strategy — see "Sampling strategies
 | `negative_control` | object \| null | `null` unless the input declared one — see "Negative control" above. |
 | `analytic_cross_check` | object \| null | `null` unless the input declared one — see "Analytic cross-check" above. |
 | `sampling` | object | Always present, even for the `plain_random` default — see "Sampling strategies (variance reduction)" above. |
-| `status` | string | `"pass"`, `"fail"`, or `"reported"`. |
+| `sigma_target` | object | **Only when `limits.target_sigma` is declared:** `k`, `sigma_to_spec`, `lower_bound`, `gate` (`"lower_bound"`), `met` (`true`/`false`/`null`) and, when `met` is `null`, `reason` — see ["Sigma target and converged-N"](#sigma-target-and-converged-n). |
+| `converged_n` | object | **Only when `limits.min_converged_samples` is declared:** `n_requested`, `n_converged`, `min_converged_samples`, `verdict` (`"sufficient"`/`"insufficient"`). |
+| `status` | string | `"pass"`, `"fail"`, `"insufficient_evidence"` or `"reported"`. |
 | `warnings` | array\<string\> | Per-measurement warnings (non-normal fit, a one-sided interval, an insufficient `n`, [excluded errored samples and the conditional yield](#errored-samples-and-conditional-yield), [`failed_unmeasurable` draws counted as failures](#errored-samples-and-conditional-yield), [`censored`/`inconclusive` draws excluded from the denominator](#errored-samples-and-conditional-yield), pooled corners, a negative control that did not degrade, an inconsistent analytic cross-check). |
 
 ## Why Rust
@@ -1388,10 +1469,11 @@ whole epic:
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Analysis ran; every measurement with a declared `target_yield` met it at the stated confidence (or none declared one). |
+| `0` | Analysis ran; every declared criterion (`target_yield`, `target_sigma`, `min_converged_samples`) was met at the stated confidence (or none was declared). |
 | `1` | Failed to run: input file not found/unreadable, an unrecognised document shape, no measurement with spec limits, a sample set too small to carry a confidence interval, a degenerate `--confidence`, or the `klt_yield_native` extension is not installed. |
 | `2` | Usage error (argparse) — missing/invalid arguments. |
-| `3` | Analysis ran; at least one measurement's yield claim was not supported at the stated confidence. |
+| `3` | Analysis ran; at least one measurement's yield or sigma claim was not supported at the stated confidence (`status: "fail"`). |
+| `4` | Analysis ran; nothing failed but the evidence cannot decide (`status: "insufficient_evidence"` — fewer converged samples than `min_converged_samples`, or a `target_sigma` that is not evaluable). Only emitted for a spec that declares one of those keys. |
 
 Exit `3` matches [`klt sim`](sim.md#exit-codes)'s "ran successfully, a limit
 was missed" precedent rather than inventing a new number.
