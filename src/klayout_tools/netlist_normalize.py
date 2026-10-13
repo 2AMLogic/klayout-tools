@@ -183,16 +183,20 @@ _MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
 #: :func:`_resolve_finger_count` handles it instead (issue #1487).
 _MOS_EXCLUDED_MULTIPLICITY_PARAMS = ("nf",)
 
-#: Terminal count of the curated capacitor/bipolar primitives, used the same
-#: way :data:`_MOS_TERMINALS` is for MOS -- a hard, named error on a
-#: mismatched node count rather than a confusing downstream failure. Not
-#: validated for resistor: a real curated resistor subcircuit is legitimately
-#: either 2-terminal (``r0 r1``) or 3-terminal (bulk-tied ``r0 r1 b`` --
-#: sky130's ``res_high_po``/``res_xhigh_po``, see ``pdk_models.py``'s module
+#: Terminal count of the curated capacitor primitive, used the same way
+#: :data:`_MOS_TERMINALS` is for MOS -- a hard, named error on a mismatched
+#: node count rather than a confusing downstream failure. Not validated for
+#: resistor: a real curated resistor subcircuit is legitimately either
+#: 2-terminal (``r0 r1``) or 3-terminal (bulk-tied ``r0 r1 b`` -- sky130's
+#: ``res_high_po``/``res_xhigh_po``, see ``pdk_models.py``'s module
 #: docstring), and which applies is not encoded in this module's
-#: deck-object-free static tables.
+#: deck-object-free static tables. Bipolar accepts the three-terminal
+#: vertical-PNP shape *and*, since issue #2862, the four-terminal
+#: (``c b e s``) substrate-terminal shape -- both are plain
+#: ``DeviceClassBJT{3,4}Transistor`` cards -- so its accepted count is
+#: spelled out in :func:`_convert_bipolar_card` rather than in a single
+#: constant.
 _CAPACITOR_TERMINALS = 2
-_BIPOLAR_TERMINALS = 3
 
 #: SPICE's own ``PARAMS:`` keyword -- the optional separator between an ``X``
 #: card's positional tokens (nodes + subcircuit name) and its ``key=value``
@@ -779,7 +783,13 @@ def _convert_bipolar_card(
     ``DeviceClassBJT3Transistor``'s native card shape puts the model name
     directly after the three nodes (``Q<name> c b e <model> [key=value
     ...]``, confirmed against the installed ``klayout.db`` module) -- unlike
-    ``R``/``C``, no positional value token is needed at all. The real
+    ``R``/``C``, no positional value token is needed at all. A four-terminal
+    call (``c b e s``, issue #2862's substrate-terminal devices) converts to
+    the identically-shaped four-node card ``Q<name> c b e s <model>``, which
+    the same reader reads back as a ``DeviceClassBJT4Transistor`` -- the
+    four nodes are carried verbatim, no PDK curated table distinguishes the
+    flavours, and every rule below (nominal-``AE`` stating, ``mult`` onto
+    ``NE``) applies unchanged. The real
     sky130 ``pnp_05v5`` subcircuits carry no length/width-style geometry
     parameter (fixed-geometry cells selected by name, see the module
     docstring); their only real call-site parameter is an optional
@@ -813,10 +823,10 @@ def _convert_bipolar_card(
     once the primary ``AE``/``NE`` agree the comparer pairs the devices and
     never reports them (asserted end to end in ``tests/test_lvs.py``).
     """
-    if len(nodes) != _BIPOLAR_TERMINALS:
+    if len(nodes) not in (3, 4):
         raise NormalizeError(
             f"device '{instance}' (subcircuit '{subckt_name}'): expected "
-            f"{_BIPOLAR_TERMINALS} terminals (c b e), found {len(nodes)} "
+            f"3 or 4 terminals (c b e [s]), found {len(nodes)} "
             f"({' '.join(nodes) or '<none>'})"
         )
 

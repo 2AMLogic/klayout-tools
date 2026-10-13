@@ -1687,7 +1687,10 @@ def run_extract(
                 {
                     "name": str, "class": str,
                     # MOS: {"s", "g", "d", "b"}; drawn resistor: {"a", "b"}
-                    # (plus "w" for a bulk-terminal resistor).
+                    # (plus "w" for a bulk-terminal resistor); bipolar:
+                    # {"c", "b", "e"}, plus "s" for a deck entry declaring
+                    # the optional four-terminal substrate layer (issue
+                    # #2862).
                     "nets": {<terminal>: str | None, ...},
                     # MOS: {"w_um", "l_um"}; drawn resistor adds "r_ohm".
                     "params": {<name>: float, ...},
@@ -6867,6 +6870,179 @@ def _netlist_extractor(deck: ExtractionDeck) -> Callable[..., Any]:
     return extract_netlist_tuple if is_finfet_deck(deck) else _extract_netlist
 
 
+def _build_bipolar_regions(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    l2n: kdb.LayoutToNetlist,
+    dummy: kdb.Region,
+) -> tuple[
+    list[
+        tuple[
+            BipolarDevice,
+            kdb.Region,
+            kdb.Region,
+            kdb.Region,
+            kdb.Region,
+            kdb.Region | None,
+        ]
+    ],
+    int,
+]:
+    """Register and extract every ``deck.bipolars`` entry's device
+    recognition regions -- the ``Bipolar (BJT) device recognition`` pass
+    of :func:`_extract_netlist` (issue #223), split out under the
+    complexity ratchet the same way ``_resolve_resistors`` and the other
+    per-family builders were.
+
+    Returns ``(bipolar_regions, dummy_devices_dropped)``: the regions the
+    caller's connectivity section wires (see the 6-tuple shape and the
+    issue #2862 four-terminal notes documented inline), plus the count of
+    base components fully consumed by the dummy marker to fold into the
+    caller's own counter.
+
+    Registration and ``extract_devices`` calls happen here, once per
+    entry, before any of the regions can be used in a ``connect()`` call
+    -- the caller wires them afterwards.
+    """
+    import klayout.db as kdb
+
+    bipolar_regions: list[
+        tuple[
+            BipolarDevice,
+            kdb.Region,
+            kdb.Region,
+            kdb.Region,
+            kdb.Region,
+            kdb.Region | None,
+        ]
+    ] = []
+    dummy_devices_dropped = 0
+    # Bipolar (BJT) device recognition (issue #223): each of the deck's
+    # optional `bipolars` entries (see `BipolarDevice` in `decks/__init__.py`)
+    # scopes recognition to genuine device-cell instances by intersecting the
+    # deck's own MOS-recognition `base`/`emitter` layers with the PDK's
+    # bipolar device-mark `marker` layer *before* handing them to KLayout's
+    # `DeviceExtractorBJT3Transistor` -- without that intersection, every
+    # ordinary PMOS nwell in the layout would be misrecognised as a bipolar
+    # base. `bipolar_regions` carries the built regions back to the caller,
+    # whose connectivity section wires them (registration/extraction must
+    # happen once per entry, before any layer can be used in a `connect()`
+    # call).
+    #
+    # Dummy-device suppression (issue #295, extended to bipolars in #462):
+    # `dummy` (resolved in `_extract_netlist`, before `_resolve_resistors`)
+    # is subtracted
+    # from `bipolar_base` *before* the emitter/collector regions are derived
+    # from it -- mirroring the MOS gate-suppression block's "cut before
+    # recognition" idiom, and (because both `bipolar_emitter` and
+    # `bipolar_collector` are themselves intersections against `bipolar_base`
+    # below) the cut propagates to all three terminals for free, so a
+    # dummy-covered bipolar unit is dropped as a single connected whole
+    # rather than leaving an orphaned emitter/collector fragment behind. A
+    # base component fully consumed by the marker is counted into the
+    # returned `dummy_devices_dropped` counter; a component only partially
+    # covered survives as a clean geometric cut, matching the MOS behaviour.
+    #
+    # Four-terminal substrate terminal (issue #2862): an entry that declares
+    # `substrate` extracts through KLayout's `DeviceExtractorBJT4Transistor`
+    # (terminals C/B/E/S) instead of the three-terminal one; its `S` region
+    # is `substrate & base` -- the same marker-scoped-subset idiom the drawn
+    # collector uses, so the dummy cut propagates to it for free too -- and
+    # a `substrate`-free entry keeps the three-terminal extractor
+    # byte-identically. See `BipolarDevice.substrate`'s docstring.
+    #
+    # `bipolar_regions` carries the substrate *raw layer* through to the
+    # connectivity section alongside the terminal regions (6-tuple, `None`
+    # for a three-terminal entry): the `S` terminal region must not share a
+    # `connect()` target layer with the emitter/collector terminals --
+    # verified against `klayout==0.30.12` that `DeviceExtractorBJT4Transistor`
+    # merges two same-device terminals' nets that both `connect()` into one
+    # shared layer (e.g. both into `contact`), so the substrate wires through
+    # its own raw layer instead and that raw layer joins `contact`. A
+    # three-terminal entry's wiring (emitter and drawn collector straight
+    # into `contact`) is untouched -- `DeviceExtractorBJT3Transistor` does
+    # not exhibit the merge.
+    for bipolar in deck.bipolars:
+        bipolar_base_layer = _region(layout, top_cell, bipolar.base)
+        bipolar_marker = _region(layout, top_cell, bipolar.marker)
+        bipolar_emitter_layer = _region(layout, top_cell, bipolar.emitter)
+        bipolar_base = bipolar_base_layer & bipolar_marker
+        if not dummy.is_empty():
+            for component in bipolar_base.merged().each():
+                if (kdb.Region(component) - dummy).is_empty():
+                    dummy_devices_dropped += 1
+            bipolar_base = bipolar_base - dummy
+        bipolar_emitter = bipolar_emitter_layer & bipolar_base
+        # Narrow the emitter the same requires/excludes idiom the resistor
+        # (`_resolve_resistors`) and capacitor blocks use, so a base-contact
+        # ring drawn on the *same* diffusion layer inside the same marked base
+        # is not misrecognised as a second emitter/device (issue #302). No-op
+        # when the entry declares neither field (both default to `()`).
+        for layer in bipolar.emitter_requires:
+            bipolar_emitter = bipolar_emitter & _region(layout, top_cell, layer)
+        for layer in bipolar.emitter_excludes:
+            bipolar_emitter = bipolar_emitter - _region(layout, top_cell, layer)
+        l2n.register(bipolar_base, f"{bipolar.class_name}_base")
+        l2n.register(bipolar_emitter, f"{bipolar.class_name}_emitter")
+        if bipolar.collector is not None:
+            bipolar_collector_layer = _region(layout, top_cell, bipolar.collector)
+            bipolar_collector = bipolar_collector_layer & bipolar_base
+        else:
+            # No drawn collector layer for this PDK's vertical bipolar --
+            # `DeviceExtractorBJT3Transistor` (and, identically, the
+            # four-terminal flavour below) treats an empty `C` input as
+            # "collector formed by the substrate" and outputs the base
+            # region's own footprint onto it (see `BipolarDevice`'s
+            # docstring); `connect_global` below ties that footprint to the
+            # deck's substrate net, mirroring `nfet_body` above.
+            bipolar_collector = kdb.Region()
+        l2n.register(bipolar_collector, f"{bipolar.class_name}_collector")
+        if bipolar.substrate is not None:
+            bipolar_substrate_layer = _region(layout, top_cell, bipolar.substrate)
+            bipolar_substrate = bipolar_substrate_layer & bipolar_base
+            l2n.register(
+                bipolar_substrate_layer, f"{bipolar.class_name}_substrate_layer"
+            )
+        else:
+            # Three-terminal entry: the `S` input below is only ever read by
+            # `DeviceExtractorBJT4Transistor`, which a `substrate`-free entry
+            # never reaches -- an empty placeholder keeps the regions tuple's
+            # shape uniform.
+            bipolar_substrate = kdb.Region()
+            bipolar_substrate_layer = None
+        l2n.register(bipolar_substrate, f"{bipolar.class_name}_substrate")
+
+        if bipolar.substrate is not None:
+            bjt_extractor = kdb.DeviceExtractorBJT4Transistor(bipolar.class_name)
+            l2n.extract_devices(
+                bjt_extractor,
+                {
+                    "B": bipolar_base,
+                    "E": bipolar_emitter,
+                    "C": bipolar_collector,
+                    "S": bipolar_substrate,
+                },
+            )
+        else:
+            bjt_extractor = kdb.DeviceExtractorBJT3Transistor(bipolar.class_name)
+            l2n.extract_devices(
+                bjt_extractor,
+                {"B": bipolar_base, "E": bipolar_emitter, "C": bipolar_collector},
+            )
+        bipolar_regions.append(
+            (
+                bipolar,
+                bipolar_base,
+                bipolar_emitter,
+                bipolar_collector,
+                bipolar_substrate,
+                bipolar_substrate_layer,
+            )
+        )
+    return bipolar_regions, dummy_devices_dropped
+
+
 def _extract_netlist(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -7739,73 +7915,16 @@ def _extract_netlist(
             if device.id() not in before_ids:
                 device.set_property(MOS_FLAVOUR_PROPERTY, flavour.flavour)
 
-    # Bipolar (BJT) device recognition (issue #223): each of the deck's
-    # optional `bipolars` entries (see `BipolarDevice` in `decks/__init__.py`)
-    # scopes recognition to genuine device-cell instances by intersecting the
-    # deck's own MOS-recognition `base`/`emitter` layers with the PDK's
-    # bipolar device-mark `marker` layer *before* handing them to KLayout's
-    # `DeviceExtractorBJT3Transistor` -- without that intersection, every
-    # ordinary PMOS nwell in the layout would be misrecognised as a bipolar
-    # base. `bipolar_regions` carries the built regions through to the
-    # connectivity section below (registration/extraction must happen once
-    # per entry, before any layer can be used in a `connect()` call).
-    #
-    # Dummy-device suppression (issue #295, extended to bipolars in #462):
-    # `dummy` (resolved above, before `_resolve_resistors`) is subtracted
-    # from `bipolar_base` *before* the emitter/collector regions are derived
-    # from it -- mirroring the MOS gate-suppression block's "cut before
-    # recognition" idiom, and (because both `bipolar_emitter` and
-    # `bipolar_collector` are themselves intersections against `bipolar_base`
-    # below) the cut propagates to all three terminals for free, so a
-    # dummy-covered bipolar unit is dropped as a single connected whole
-    # rather than leaving an orphaned emitter/collector fragment behind. A
-    # base component fully consumed by the marker is counted into the
-    # shared `dummy_devices_dropped` counter; a component only partially
-    # covered survives as a clean geometric cut, matching the MOS behaviour.
-    bipolar_regions: list[tuple[BipolarDevice, kdb.Region, kdb.Region, kdb.Region]] = []
-    for bipolar in deck.bipolars:
-        bipolar_base_layer = _region(layout, top_cell, bipolar.base)
-        bipolar_marker = _region(layout, top_cell, bipolar.marker)
-        bipolar_emitter_layer = _region(layout, top_cell, bipolar.emitter)
-        bipolar_base = bipolar_base_layer & bipolar_marker
-        if not dummy.is_empty():
-            for component in bipolar_base.merged().each():
-                if (kdb.Region(component) - dummy).is_empty():
-                    dummy_devices_dropped += 1
-            bipolar_base = bipolar_base - dummy
-        bipolar_emitter = bipolar_emitter_layer & bipolar_base
-        # Narrow the emitter the same requires/excludes idiom the resistor
-        # (`_resolve_resistors`) and capacitor blocks use, so a base-contact
-        # ring drawn on the *same* diffusion layer inside the same marked base
-        # is not misrecognised as a second emitter/device (issue #302). No-op
-        # when the entry declares neither field (both default to `()`).
-        for layer in bipolar.emitter_requires:
-            bipolar_emitter = bipolar_emitter & _region(layout, top_cell, layer)
-        for layer in bipolar.emitter_excludes:
-            bipolar_emitter = bipolar_emitter - _region(layout, top_cell, layer)
-        l2n.register(bipolar_base, f"{bipolar.class_name}_base")
-        l2n.register(bipolar_emitter, f"{bipolar.class_name}_emitter")
-        if bipolar.collector is not None:
-            bipolar_collector_layer = _region(layout, top_cell, bipolar.collector)
-            bipolar_collector = bipolar_collector_layer & bipolar_base
-        else:
-            # No drawn collector layer for this PDK's vertical bipolar --
-            # `DeviceExtractorBJT3Transistor` treats an empty `C` input as
-            # "collector formed by the substrate" and outputs the base
-            # region's own footprint onto it (see `BipolarDevice`'s
-            # docstring); `connect_global` below ties that footprint to the
-            # deck's substrate net, mirroring `nfet_body` above.
-            bipolar_collector = kdb.Region()
-        l2n.register(bipolar_collector, f"{bipolar.class_name}_collector")
-
-        bjt_extractor = kdb.DeviceExtractorBJT3Transistor(bipolar.class_name)
-        l2n.extract_devices(
-            bjt_extractor,
-            {"B": bipolar_base, "E": bipolar_emitter, "C": bipolar_collector},
-        )
-        bipolar_regions.append(
-            (bipolar, bipolar_base, bipolar_emitter, bipolar_collector)
-        )
+    # Bipolar (BJT) device recognition (issue #223): built, registered and
+    # extracted by `_build_bipolar_regions` (split out under the complexity
+    # ratchet, the same precedent as `_resolve_resistors`).
+    # `bipolar_regions` carries every entry's terminal regions through to
+    # the connectivity section below, which is where their `connect()`
+    # wiring lives.
+    bipolar_regions, bipolar_dummy_dropped = _build_bipolar_regions(
+        layout, top_cell, deck, l2n, dummy
+    )
+    dummy_devices_dropped += bipolar_dummy_dropped
 
     # Junction-diode device recognition (issue #542): each of the deck's
     # optional `diodes` entries (see `DiodeDevice` in `decks/__init__.py`)
@@ -8306,7 +8425,14 @@ def _extract_netlist(
         l2n.connect_global(island_body, island_net)
         l2n.connect_global(tap_substrate_isolated[index], island_net)
 
-    for bipolar, bipolar_base, bipolar_emitter, bipolar_collector in bipolar_regions:
+    for (
+        bipolar,
+        bipolar_base,
+        bipolar_emitter,
+        bipolar_collector,
+        bipolar_substrate,
+        bipolar_substrate_layer,
+    ) in bipolar_regions:
         # Base shares net identity with the deck's own `nwell` (`bipolar_base`
         # is always a geometric subset of it, further restricted by the
         # marker), so a base contact/pin already wired to `nwell` elsewhere in
@@ -8318,6 +8444,20 @@ def _extract_netlist(
             l2n.connect(bipolar_collector, contact)
         else:
             l2n.connect_global(bipolar_collector, deck.substrate_net)
+        # Four-terminal substrate terminal (issue #2862): a drawn diffusion
+        # like any other, but wired through its own raw layer rather than
+        # straight into `contact` -- the BJT4 extractor merges two
+        # same-device terminals' nets that both `connect()` into one shared
+        # layer (see the `bipolar_regions` block above), so the terminal
+        # joins `bipolar_substrate_layer` and that layer joins `contact`,
+        # picking the substrate's net up from ordinary contact/metal routing
+        # exactly as the straight-in wiring would. Never the `substrate_net`
+        # global: that stays the collector-less collector's net (see
+        # `BipolarDevice.substrate`'s docstring). `None`/empty for every
+        # three-terminal entry, so this is a no-op there.
+        if bipolar.substrate is not None:
+            l2n.connect(bipolar_substrate, bipolar_substrate_layer)
+            l2n.connect(bipolar_substrate_layer, contact)
 
     # Diode terminal connectivity (issue #542), derived from each terminal's
     # declared layer rather than configured separately per entry -- see

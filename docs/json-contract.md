@@ -151,6 +151,15 @@ absent (not `null`) when unmeasured and always absent on `cap_cmomf`. No
 existing member changed, so **no `schema_version` bump**. See
 `docs/cli/extract.md`'s "MoM capacitor devices" section.
 
+**A new terminal key on one device class's `nets` map is additive by the
+same per-class reasoning.** Issue #2862 added an `"s"` (substrate) key to
+`devices[].nets` for a bipolar device class of a deck entry that declares
+the optional four-terminal `substrate` layer — absent (not `null`) on every
+three-terminal entry, i.e. every deck shipped today, whose `nets` maps are
+byte-identical to before. No existing key changed, so **no
+`schema_version` bump**. See `docs/cli/extract.md`'s "Bipolar (BJT) device
+recognition" section.
+
 **A new opt-in flag adding `null`-by-default fields to an already-shipped
 per-entry shape is likewise additive** — the field exists on every entry
 regardless of whether the flag was given, but only carries a real value when
