@@ -40,6 +40,7 @@ see ``docs/cli/sim.md``'s "Operating-point lint" section.
 """
 
 import argparse
+import sys
 
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
@@ -57,12 +58,13 @@ def run(args: argparse.Namespace) -> int:
     if getattr(args, "batch_set", None) is not None:
         return _run_batch_set(args)
     if args.request is None:
-        return emit_error(
-            "sim",
-            "a request file (or --batch-set REQUEST...) is required",
-            args.format,
-            exit_code=EXIT_USAGE_ERROR,
+        # Keep the pre---batch-set contract: a bare ``klt sim`` is an
+        # argparse-style usage failure (stderr message, SystemExit(2)).
+        sys.stderr.write(
+            "klt sim: error: the following arguments are required: "
+            "request (or --batch-set REQUEST...)\n"
         )
+        raise SystemExit(2)
     if getattr(args, "max_in_flight", None) is not None:
         return emit_error(
             "sim",

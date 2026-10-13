@@ -3752,4 +3752,7 @@ def test_cli_batch_set_all_pass_exits_zero_and_refuses_other_backend(
 
     assert main(["sim", "--batch-set", *paths, "--backend", "local"]) == 2
     assert main(["sim", paths[0], "--max-in-flight", "2"]) == 2
-    assert main(["sim"]) == 2
+    # Bare ``klt sim`` keeps the argparse-style SystemExit(2) contract.
+    with pytest.raises(SystemExit) as exc:
+        main(["sim"])
+    assert exc.value.code == 2
