@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1144",
-  "loom_commit": "9e4381cbbd2386393e44c7a979583252948a3998",
+  "loom_version": "0.19.1148",
+  "loom_commit": "1448fdfa79ac2dcab7fad6b95b72697b450f2a4a",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -443,7 +443,7 @@
     ".loom/scripts/tests/test-resync-installed-retired-migrate.sh",
     ".loom/scripts/tests/test-sync-labels-migrate-retired.sh"
   ],
-  "last_resync": "2026-10-12",
+  "last_resync": "2026-10-13",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",
   "requires_daemon": "0.19.1081"
 }

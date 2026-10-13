@@ -315,6 +315,17 @@ indistinguishable in the output, so a signoff claim can't be checked or
 reproduced. This block is **additive** (see above): adopting it required no
 `schema_version` bump on any verb.
 
+**Client vs. worker scope (issue #2834).** `provenance` (and
+`environment.client_klt_version`) describes the *submitting client*. For
+`klt sim --backend batch`, what the executing worker actually resolved --
+simulator binary and full version banner, PDK `SOURCES` stamp, CPU model,
+`OMP_NUM_THREADS`, a worker-local image manifest -- is reported separately and
+additively as `environment.remote.worker_environment` (and in each
+`environment.remote.fleet[]` member), never merged into `provenance`. Missing
+observations are `null` (never the client's values) and `capture` is `ok`,
+`absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
+environment" for the field names and limits.
+
 `klt erc` (issue #1968) is a partial exception on `pdk`: its `--pdk` selects
 a built-in antenna-ratio limit table baked into `erc.py` itself (see
 [`docs/cli/erc.md`](cli/erc.md)'s "Sky130 antenna-ratio limits"), not an
