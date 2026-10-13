@@ -6,6 +6,7 @@ from importlib.metadata import version
 import pytest
 
 from klayout_tools import __version__, gen_compose
+from klayout_tools.build_identity import build_version
 from klayout_tools.cli import main
 from klayout_tools.cli.parser import create_parser
 
@@ -24,7 +25,9 @@ def test_cli_version_flag(capsys):
     with pytest.raises(SystemExit) as exc_info:
         main(["--version"])
     assert exc_info.value.code == 0
-    assert __version__ in capsys.readouterr().out
+    # The live build identity: for an editable install it can be ahead of
+    # the metadata `__version__` recorded at install time (issue #2823).
+    assert build_version() in capsys.readouterr().out
 
 
 # Regression coverage for #2395: `jsonschema` -> `referencing` -> `rpds-py`'s
@@ -58,7 +61,7 @@ def run_klt_with_broken_jsonschema(argv: list[str]) -> subprocess.CompletedProce
 def test_cli_version_flag_survives_broken_jsonschema_import():
     result = run_klt_with_broken_jsonschema(["--version"])
     assert result.returncode == 0, result.stderr
-    assert __version__ in result.stdout
+    assert build_version() in result.stdout
     assert "jsonschema" not in result.stderr
 
 

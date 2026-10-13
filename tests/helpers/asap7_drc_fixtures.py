@@ -1,4 +1,4 @@
-"""Generated per-rule fixtures for the ASAP7 DRC deck (issue #2760).
+"""Generated per-rule fixtures for the ASAP7 DRC deck (#2760, #2810).
 
 Every rule id in :data:`klayout_tools.decks.asap7_rules.RULES` gets at least
 one *fail* case, which must trip that id, and one *pass* case, drawn at the
@@ -13,13 +13,14 @@ without also breaking a WELL width); each such case says why next to it.
 
 Coordinates are nanometres at the DRM's 1x drawing scale; the layout dbu is
 0.25 nm (``asap7.lyt``), so ``D`` (one database unit) is the smallest step
-past a threshold. :func:`write_cases` places every case in its own 5 um slot
+past a threshold. :func:`write_cases` places every case in its own 5.376 um slot
 along x in one top cell, so one deck run checks them all and
 :func:`slot_of` maps a finding back to its case.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -38,6 +39,23 @@ LAYERS = {
     "LISD": 17,
     "V0": 18,
     "M1": 19,
+    "M2": 20,
+    "V1": 21,
+    "V2": 25,
+    "M3": 30,
+    "V3": 35,
+    "M4": 40,
+    "V4": 45,
+    "M5": 50,
+    "V5": 55,
+    "M6": 60,
+    "V6": 65,
+    "M7": 70,
+    "V7": 75,
+    "M8": 80,
+    "V8": 85,
+    "M9": 90,
+    "V9": 95,
     "SDT": 88,
     "SLVT": 97,
     "LVT": 98,
@@ -48,10 +66,13 @@ LAYERS = {
 DBU_UM = 0.00025
 #: One database unit, in nm.
 D = 0.25
-#: Width of each case's slot along x, in nm.
-SLOT_NM = 5000.0
+#: Width of each case's slot along x, in nm. Slot and origin are multiples
+#: of 192 nm (the least common multiple of the M4-M7 grids and track
+#: pitches, 24 / 32 / 48 / 64 nm), so the absolute-grid rules (M5.AUX.1,
+#: M7.AUX.2, ...) see the same x coordinates in every slot.
+SLOT_NM = 5376.0
 #: Offset of a case's origin inside its slot, in nm.
-ORIGIN_NM = 1000.0
+ORIGIN_NM = 1152.0
 
 Point = tuple[float, float]
 #: ``(layer, x1, y1, x2, y2)``
@@ -684,19 +705,647 @@ def _v0_cases() -> list[Case]:
             shapes.append(box(under, 0, 0, 24, 100))
         return shapes
 
-    return [
+    c = [
         _fail("V0.W.1", via(18 - D)),
         _pass("V0.W.1", via(18)),
         _fail("V0.AUX.1", via(18, under=None)),
         _pass("V0.AUX.1", via(18)),
     ]
 
+    # V0 landing on the end of an 18 nm LIG bar (x 0..100) under an M1 bar:
+    # the V0/LIG overlap is `ov` x 18 nm, 288 nm^2 at ov = 16 nm.
+    def on_lig(ov: float) -> list[Shape]:
+        x0 = 100 - ov
+        return [
+            box("LIG", 0, 0, 100, 18),
+            box("V0", x0, 0, x0 + 18, 18),
+            box("M1", -50, 0, 150, 18),
+        ]
+
+    c += [_fail("V0.LIG.A.1", on_lig(16 - D)), _pass("V0.LIG.A.1", on_lig(16))]
+    # A V0 inside LISD is exempt even when its LIG overlap is small (here
+    # 5 x 18 = 90 nm^2): the rule is scoped to V0 not inside LISD. The LIG
+    # overlaps LISD by exactly the LIG.LISD.OV.1 / LIG.LISD.A.2 minimums.
+    c.append(
+        _pass(
+            "V0.LIG.A.1",
+            [
+                box("LISD", 0, 0, 24, 100),
+                box("V0", 3, 40, 21, 58),
+                box("LIG", 16, 40, 116, 58),
+                box("M1", -50, 40, 100, 58),
+            ],
+        )
+    )
+    return c
+
+
+def _metal_cases(layer: str) -> list[Case]:
+    """Table 3.12.1, identical for M1, M2 and M3."""
+    c: list[Case] = []
+    c += [
+        _fail(f"{layer}.W.1", [box(layer, 0, 0, 18 - D, 100)]),
+        _pass(f"{layer}.W.1", [box(layer, 0, 0, 18, 100)]),
+    ]
+    for gap, mk in ((18 - D, _fail), (18, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.1",
+                [box(layer, 0, 0, 18, 100), box(layer, 18 + gap, 0, 36 + gap, 100)],
+            )
+        )
+    # The side-to-side rule is not axis-bound: the same pair rotated by 90
+    # degrees (horizontal bars) trips it too.
+    c.append(
+        _fail(
+            f"{layer}.S.1",
+            [box(layer, 0, 0, 100, 18), box(layer, 0, 36 - D, 100, 54 - D)],
+        )
+    )
+    for gap, mk in ((25 - D, _fail), (25, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.2",
+                [
+                    box(layer, 0, 0, 24, 100),
+                    box(layer, -100, 100 + gap, 124, 118 + gap),
+                ],
+            )
+        )
+    for gap, mk in ((27 - D, _fail), (27, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.3",
+                [box(layer, 0, 0, 24, 100), box(layer, 0, 100 + gap, 24, 200 + gap)],
+            )
+        )
+    for gap, mk in ((31 - D, _fail), (31, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.4",
+                [box(layer, 0, 0, 18, 100), box(layer, 0, 100 + gap, 18, 200 + gap)],
+            )
+        )
+        c.append(
+            mk(
+                f"{layer}.S.5",
+                [box(layer, 0, 0, 24, 100), box(layer, 0, 100 + gap, 18, 200 + gap)],
+            )
+        )
+    # Corner-to-corner: 12 nm across, `dy` up, no projected overlap; 20 nm
+    # Euclidean at dy = 16 nm.
+    for dy, mk in ((16 - D, _fail), (16, _pass)):
+        c.append(
+            mk(
+                f"{layer}.S.6",
+                [box(layer, 0, 0, 100, 40), box(layer, 112, 40 + dy, 212, 80 + dy)],
+            )
+        )
+    # Side-to-side bars at exactly 18 nm whose facing edges overlap by one
+    # database unit are a side-to-side pair, not a corner pair: no S.6.
+    c.append(
+        _pass(
+            f"{layer}.S.6",
+            [box(layer, 0, 0, 100, 40), box(layer, 100 - D, 58, 200 - D, 98)],
+        )
+    )
+    c += [
+        _fail(f"{layer}.A.1", [box(layer, 0, 0, 18, 28 - D)]),
+        _pass(f"{layer}.A.1", [box(layer, 0, 0, 18, 28)]),
+    ]
+    return c
+
+
+#: Via -> (metal below, metal above), DRM section 3.13.
+_VIA_METALS = {"V1": ("M1", "M2"), "V2": ("M2", "M3"), "V3": ("M3", "M4")}
+
+
+def _stack(
+    via: str,
+    w: float = 18,
+    lower: tuple[float, float, float, float] | None = (0, -50, 18, 68),
+    upper: tuple[float, float, float, float] | str | None = "track",
+    via_y0: float = 0,
+) -> list[Shape]:
+    """A ``w`` x 18 nm via at ``(0, via_y0)`` on a vertical lower-metal bar
+    and a horizontal upper-metal bar (``None`` omits that metal). Both bars
+    are 18 nm wide and flush with the via across their track, except M4
+    above V3, drawn as a legal minimum-width M4 track: 24 nm tall on track
+    0 (M4.W.1, M4.AUX.1, M4.AUX.2)."""
+    lo, up = _VIA_METALS[via]
+    if upper == "track":
+        upper = (-50, 0, 68, 24 if up == "M4" else 18)
+    shapes: list[Shape] = [box(via, 0, via_y0, w, via_y0 + 18)]
+    if lower is not None:
+        shapes.append(box(lo, *lower))
+    if upper is not None:
+        assert not isinstance(upper, str)
+        shapes.append(box(up, *upper))
+    return shapes
+
+
+def _via_cases() -> list[Case]:
+    c: list[Case] = []
+    for via in _VIA_METALS:
+        c += [
+            _fail(f"{via}.W.1", _stack(via, 18 - D)),
+            _pass(f"{via}.W.1", _stack(via)),
+        ]
+        # Partly off the upper metal: the via sticks out 1 nm across it. An
+        # M4 track cannot move 1 nm off its grid, so under M4 the via moves.
+        off = (
+            _stack(via, via_y0=-1)
+            if via == "V3"
+            else _stack(via, upper=(-50, 1, 68, 19))
+        )
+        c += [
+            _fail(f"{via}.AUX.1", _stack(via, upper=None)),
+            _fail(f"{via}.AUX.1", _stack(via, lower=None)),
+            _fail(f"{via}.AUX.1", off),
+            _pass(f"{via}.AUX.1", _stack(via)),
+        ]
+
+    # "At least two opposite sides": the enclosing metal is a 26 nm bar
+    # (4 nm past the via on both sides across it, short of every threshold)
+    # that extends `e0` / `e1` past the via at its two ends -- top/bottom
+    # for a vertical bar, left/right for a horizontal one. The 26 nm width
+    # keeps the bar above the 504 nm^2 M2/M3 area minimum even at e = 5 nm.
+    # The other metal keeps its long default bar.
+    def capped(
+        via: str, which: str, e0: float, e1: float, vertical: bool
+    ) -> list[Shape]:
+        bar = (-4, -e0, 22, 18 + e1) if vertical else (-e0, -4, 18 + e1, 22)
+        return _stack(via, **{which: bar})
+
+    for rule, via, which, e in (
+        ("V2.M2.EN.1", "V2", "lower", 5),
+        ("V3.M3.EN.1", "V3", "lower", 5),
+    ):
+        for vertical in (True, False):
+            c.append(_fail(rule, capped(via, which, e - D, e - D, vertical)))
+            c.append(_pass(rule, capped(via, which, e, e, vertical)))
+        # Short at one end only is still short on that pair.
+        c.append(_fail(rule, capped(via, which, e, e - D, True)))
+
+    # V3.M4.EN.2 (11 nm) on a legal M4 track (24 nm tall on track 0: 0 / 6
+    # nm past the via vertically). M4.W.5 makes M4 at least 44 nm long, so
+    # the two ends share 26 nm: one end exactly 11 nm passes, one dbu less
+    # at either end fails. (A vertically enclosing M4 would be 72 nm tall
+    # and at least 44 nm wide, i.e. >= 13 nm past the via on both pairs, so
+    # no M4-legal shape fails in that orientation.)
+    def m4_capped(e0: float, e1: float) -> list[Shape]:
+        return _stack("V3", upper=(-e0, 0, 18 + e1, 24))
+
+    c += [
+        _fail("V3.M4.EN.2", m4_capped(11 - D, 15 + D)),
+        _fail("V3.M4.EN.2", m4_capped(15 + D, 11 - D)),
+        _pass("V3.M4.EN.2", m4_capped(11, 15)),
+        _pass("V3.M4.EN.2", m4_capped(15, 11)),
+    ]
+    return c
+
+
+def _transpose(shapes: Iterable[Shape]) -> list[Shape]:
+    """Mirror shapes about the x = y diagonal (a horizontal bar becomes a
+    vertical one), to draw a vertically routed layer's cases from the
+    horizontally routed layer's."""
+    out: list[Shape] = []
+    for s in shapes:
+        if len(s) == 5:
+            layer, x1, y1, x2, y2 = s  # type: ignore[misc]
+            out.append(box(layer, y1, x1, y2, x2))
+        else:
+            layer, hull, holes = s  # type: ignore[misc]
+            out.append(
+                (
+                    layer,
+                    tuple((y, x) for x, y in hull),
+                    tuple(tuple((y, x) for x, y in h) for h in holes),
+                )
+            )
+    return out
+
+
+def _flip(case: Case) -> Case:
+    return Case(case.rule, case.kind, tuple(_transpose(case.shapes)), case.expect)
+
+
+#: M4-M7 -> (routing direction, minimum width = grid g, W.2 maximum), DRM
+#: Tables 3.14.1-3.14.2 / 3.16.1-3.16.2.
+_SADP = {
+    "M4": ("h", 24, 480),
+    "M5": ("v", 24, 480),
+    "M6": ("h", 32, 640),
+    "M7": ("v", 32, 640),
+}
+
+
+def _sadp_metal_cases(layer: str) -> list[Case]:
+    """Drawn for a horizontally routed layer (bars along x, on track 0 at
+    y = 0) and transposed for M5 / M7."""
+    direction, g, wmax = _SADP[layer]
+
+    def bar(y0: float, h: float, x0: float = 0, x1: float = 200) -> Box:
+        return box(layer, x0, y0, x1, y0 + h)
+
+    def ids(*suffixes: str) -> list[str]:
+        return [f"{layer}.{x}" for x in suffixes]
+
+    r = f"{layer}."
+    c: list[Case] = [
+        # With both horizontal edges on the g grid (AUX.1) every width is a
+        # multiple of g: a width one dbu off any multiple is inseparable
+        # from an off-grid edge.
+        _fail(r + "W.1", [bar(0, g - D)], ids("AUX.1")),
+        _pass(r + "W.1", [bar(0, g)]),
+        _fail(r + "W.2", [bar(0, wmax + D)], ids("AUX.1")),
+        _fail(r + "W.2", [bar(0, wmax + g)]),
+        # The W.2 maximum itself is an even multiple of g (20 g), which
+        # W.3 forbids: the boundary passes W.2 but trips W.3.
+        _pass(r + "W.2", [bar(0, wmax)], ids("W.3")),
+        _pass(r + "W.2", [bar(0, wmax - g)]),
+        _fail(r + "W.3", [bar(0, 2 * g)]),
+        _fail(r + "W.3", [bar(0, 4 * g)]),
+        _pass(r + "W.3", [bar(0, 3 * g)]),
+        _fail(r + "W.5", [bar(0, g, 0, 44 - D)]),
+        _pass(r + "W.5", [bar(0, g, 0, 44)]),
+        # Across the track: g apart on tracks 0 and 1. A neighbour one dbu
+        # closer has an off-grid edge (see W.1); it is drawn 3 g wide so it
+        # is not also an off-track minimum-width bar (AUX.2).
+        _fail(r + "S.1", [bar(0, g), bar(2 * g - D, 3 * g)], ids("AUX.1")),
+        _pass(r + "S.1", [bar(0, g), bar(2 * g, 3 * g)]),
+        _pass(r + "S.1", [bar(0, g), bar(2 * g, g)]),
+        # Along the track: tip to tip on one track.
+        _fail(r + "S.2", [bar(0, g, 0, 100), bar(0, g, 140 - D, 240 - D)]),
+        _pass(r + "S.2", [bar(0, g, 0, 100), bar(0, g, 140, 240)]),
+        _fail(r + "AUX.1", [bar(g / 2, 3 * g)]),
+        _pass(r + "AUX.1", [bar(g, 3 * g)]),
+        # A minimum-width bar between tracks 0 and 1 (on the g grid, off the
+        # 2 g track pitch).
+        _fail(r + "AUX.2", [bar(g, g)]),
+        _pass(r + "AUX.2", [bar(2 * g, g)]),
+        _fail(
+            r + "AUX.3",
+            [poly(layer, (0, 0), (200, 0), (200, g), (44, g), (44, 3 * g), (0, 3 * g))],
+        ),
+        _pass(r + "AUX.3", [bar(0, g)]),
+    ]
+    return [_flip(x) for x in c] if direction == "v" else c
+
+
+@dataclass(frozen=True)
+class _Lele:
+    """A V4-V7 via drawn in a frame where the upper metal runs along y and
+    the lower metal along x (``flip`` transposes it to the real one)."""
+
+    lower: str
+    upper: str
+    flip: bool
+    along: float  # via size along the upper metal (y): its W.1 value
+    across: float  # via size across the upper metal (x): the upper's width
+    s: float  # S.1 / S.3
+    g_lo: float  # lower metal grid / minimum width
+    direction_known: bool  # W.1 / AUX.2 checkable (upper is not M8)
+
+
+_LELE = {
+    "V4": _Lele("M4", "M5", False, 24, 24, 33, 24, True),
+    "V5": _Lele("M5", "M6", True, 24, 32, 33, 24, True),
+    "V6": _Lele("M6", "M7", False, 32, 32, 45, 32, True),
+    "V7": _Lele("M7", "M8", True, 32, 32, 45, 32, False),
+}
+
+
+def _odd_grid_top(g: float, need: float) -> float:
+    """Smallest top edge >= ``need`` for a bar from ``-g`` that is an odd
+    multiple of ``g`` tall (M4-M7 W.3) with both edges on the g grid."""
+    top = -(-need // g) * g
+    if ((top + g) / g) % 2 == 0:
+        top += g
+    return top
+
+
+def _lele_upper_bar(
+    p: _Lele, y0: float, y1: float, x0: float = 0, x1: float | None = None
+) -> Box:
+    """The upper metal over ``x0..x1`` (default: flush with the via) and
+    ``y0..y1``. M8 (no track grid, 40 nm minimum width, 7520 nm^2 minimum
+    area) is drawn 4 nm wider than the via on each side and 50 nm longer at
+    both ends."""
+    x1 = p.across if x1 is None else x1
+    if p.upper == "M8":
+        return box(p.upper, x0 - 4, y0 - 50, x1 + 4, y1 + 50)
+    return box(p.upper, x0, y0, x1, y1)
+
+
+def _lele_stack(
+    via: str,
+    p: _Lele,
+    v: tuple[float, float, float, float] | None = None,
+    lower: Box | None = None,
+    upper: Box | None = None,
+    no_lower: bool = False,
+    no_upper: bool = False,
+) -> list[Shape]:
+    """One clean via (``v`` overrides its box) on its default lower and
+    upper bars; ``lower`` / ``upper`` replace a bar, ``no_*`` omit it."""
+    a, c = p.along, p.across
+    shapes: list[Shape] = [box(via, *(v or (0, 0, c, a)))]
+    if not no_lower:
+        shapes.append(lower or box(p.lower, -50, 0, c + 50, a))
+    if not no_upper:
+        shapes.append(upper or _lele_upper_bar(p, -50, a + 50))
+    return shapes
+
+
+def _lele_size_cases(via: str, p: _Lele) -> list[Case]:
+    """W.1 (exact size along the upper metal) and AUX.2 (exactly as wide as
+    the upper metal), V4-V6 only."""
+    a, c, g, lo, up = p.along, p.across, p.g_lo, p.lower, p.upper
+    w1, aux2 = f"{via}.W.1", f"{via}.{up}.AUX.2"
+    wide_lower = box(lo, -50, -g, c + 50, a + g)
+    return [
+        _fail(w1, _lele_stack(via, p, (0, 0, c, a - D))),
+        _fail(w1, _lele_stack(via, p, (0, 0, c, a + D), lower=wide_lower)),
+        _pass(w1, _lele_stack(via, p)),
+        _fail(aux2, _lele_stack(via, p, (0, 0, c - D, a))),
+        # A 3-track-wide upper metal with a 1-track via.
+        _fail(aux2, _lele_stack(via, p, upper=box(up, 0, -50, 3 * c, a + 50))),
+        _pass(aux2, _lele_stack(via, p)),
+        _pass(
+            aux2,
+            _lele_stack(
+                via,
+                p,
+                (0, 0, 3 * c, a),
+                lower=box(lo, -50, 0, 3 * c + 50, a),
+                upper=box(up, 0, -50, 3 * c, a + 50),
+            ),
+        ),
+    ]
+
+
+def _lele_corner_dy(p: _Lele) -> tuple[float, float, float]:
+    """``(dx, dy_fail, dy_pass)`` for S.3. On M5-M7 the second via sits on
+    the next track (dx = one track width) and s is not a lattice distance,
+    so the fail / pass pair straddles it by one dbu in dy. Under M8 one
+    wide bar holds both vias and (dx, dy) = (27, 36) is exactly 45 nm."""
+    if p.upper == "M8":
+        return 27.0, 36 - D, 36.0
+    dx = p.across
+    dy0 = math.sqrt(p.s * p.s - dx * dx)
+    dy_fail, dy_pass = math.floor(dy0 / D) * D, math.ceil(dy0 / D) * D
+    assert dy_fail < dy0 < dy_pass
+    return dx, dy_fail, dy_pass
+
+
+def _lele_spacing_cases(via: str, p: _Lele) -> list[Case]:
+    a, c, s, g, lo = p.along, p.across, p.s, p.g_lo, p.lower
+
+    # S.1: two vias stacked along one upper bar, `gap` apart, on one lower
+    # bar wide enough (an odd number of grid units) for both.
+    def pair(gap: float) -> list[Shape]:
+        return [
+            box(via, 0, 0, c, a),
+            box(via, 0, a + gap, c, 2 * a + gap),
+            box(lo, -50, -g, c + 50, _odd_grid_top(g, 2 * a + s)),
+            _lele_upper_bar(p, -50, 2 * a + s + 50),
+        ]
+
+    # S.3: two vias diagonally apart with no projected overlap.
+    dx, dy_fail, dy_pass = _lele_corner_dy(p)
+
+    def corner(dy: float) -> list[Shape]:
+        x1 = c + dx
+        shapes: list[Shape] = [
+            box(via, 0, 0, c, a),
+            box(via, x1, a + dy, x1 + c, 2 * a + dy),
+            box(lo, -50, -g, x1 + c + 50, _odd_grid_top(g, 2 * a + dy)),
+        ]
+        if p.upper == "M8":
+            return [*shapes, _lele_upper_bar(p, -50, 2 * a + dy + 50, 0, x1 + c)]
+        return [
+            *shapes,
+            _lele_upper_bar(p, -50, a + 50),
+            _lele_upper_bar(p, a + dy - 50, 2 * a + dy + 50, x1, x1 + c),
+        ]
+
+    return [
+        _fail(f"{via}.S.1", pair(s - D)),
+        _pass(f"{via}.S.1", pair(s)),
+        _fail(f"{via}.S.3", corner(dy_fail)),
+        _pass(f"{via}.S.3", corner(dy_pass)),
+    ]
+
+
+def _lele_enclosure_cases(via: str, p: _Lele) -> list[Case]:
+    a, c, g, lo, up = p.along, p.across, p.g_lo, p.lower, p.upper
+    en1, en2 = f"{via}.{lo}.EN.1", f"{via}.{up}.EN.2"
+
+    # Enclosure by the lower metal, 11 nm past the via ends along x (flush
+    # across).
+    def lower_capped(e0: float, e1: float) -> list[Shape]:
+        return _lele_stack(via, p, lower=box(lo, -e0, 0, c + e1, a))
+
+    def upper_box(x0: float, y0: float, x1: float, y1: float) -> list[Shape]:
+        return _lele_stack(via, p, upper=box(up, x0, y0, x1, y1))
+
+    cs = [
+        _fail(en1, lower_capped(11 - D, 11 - D)),
+        _fail(en1, lower_capped(11, 11 - D)),
+        _pass(en1, lower_capped(11, 11)),
+        # Short along the bar, but 3 grid units tall: the other pair of
+        # sides meets the minimum.
+        _pass(
+            en1, _lele_stack(via, p, lower=box(lo, -(11 - D), -g, c + 11 - D, a + g))
+        ),
+    ]
+    # Enclosure by the upper metal, 11 nm past the via ends along y.
+    if up == "M8":
+        # M8 needs 7520 nm^2: one end stays long; across is 4 nm.
+        return cs + [
+            _fail(en2, upper_box(-4, -(11 - D), c + 4, a + 200)),
+            _pass(en2, upper_box(-4, -11, c + 4, a + 200)),
+            _pass(en2, upper_box(-11, -4, c + 11, a + 200)),
+        ]
+    return cs + [
+        _fail(en2, upper_box(0, -(11 - D), c, a + 11 - D)),
+        _fail(en2, upper_box(0, -11, c, a + 11 - D)),
+        _pass(en2, upper_box(0, -11, c, a + 11)),
+    ]
+
+
+def _lele_via_one(via: str, p: _Lele) -> list[Case]:
+    aux1 = f"{via}.AUX.1"
+    cs = [
+        *(_lele_size_cases(via, p) if p.direction_known else []),
+        *_lele_spacing_cases(via, p),
+        *_lele_enclosure_cases(via, p),
+        _fail(aux1, _lele_stack(via, p, no_lower=True)),
+        _fail(aux1, _lele_stack(via, p, no_upper=True)),
+        _pass(aux1, _lele_stack(via, p)),
+    ]
+    return [_flip(x) for x in cs] if p.flip else cs
+
+
+def _lele_via_cases() -> list[Case]:
+    return [c for via, p in _LELE.items() for c in _lele_via_one(via, p)]
+
+
+def _top_metal_cases(layer: str) -> list[Case]:
+    """Tables 3.18.1-3.18.2, identical for M8 and M9."""
+    r = f"{layer}."
+
+    def b(x1: float, y1: float, x2: float, y2: float) -> Box:
+        return box(layer, x1, y1, x2, y2)
+
+    def neck(h: float) -> Poly:
+        y0, y1 = 55, 55 + h
+        return poly(
+            layer,
+            (0, 0), (0, 150), (150, 150), (150, y1), (200, y1), (200, 150),
+            (350, 150), (350, 0), (200, 0), (200, y0), (150, y0), (150, 0),
+        )  # fmt: skip
+
+    c: list[Case] = [
+        # Two 150 nm squares joined by a 50 nm long neck `h` tall: a
+        # rectangle under 40 nm wide would also have an edge under 40 nm
+        # (L.1); the neck's edges are all >= 50 nm.
+        _fail(r + "W.1", [neck(40 - D)]),
+        _pass(r + "W.1", [neck(40)]),
+        _fail(r + "W.2", [b(0, 0, 60 - D, 400)]),
+        _pass(r + "W.2", [b(0, 0, 60, 400)]),
+        # One dbu shorter than 400 nm: the 60 nm minimum does not apply.
+        _pass(r + "W.2", [b(0, 0, 60 - D, 400 - D)]),
+        _fail(r + "W.3", [b(0, 0, 80 - D, 1200)]),
+        _pass(r + "W.3", [b(0, 0, 80, 1200)]),
+        _fail(r + "W.4", [b(0, 0, 120 - D, 1800)]),
+        _pass(r + "W.4", [b(0, 0, 120, 1800)]),
+        _fail(r + "W.5", [b(0, 0, 2000 + D, 2000 + D)]),
+        _pass(r + "W.5", [b(0, 0, 2000, 2000)]),
+    ]
+    for gap, mk in ((40 - D, _fail), (40, _pass)):
+        c.append(mk(r + "S.1", [b(0, 0, 40, 300), b(40 + gap, 0, 80 + gap, 300)]))
+    for gap, mk in ((43 - D, _fail), (43, _pass)):
+        c.append(mk(r + "S.2", [b(0, 0, 40, 300), b(-100, 300 + gap, 140, 340 + gap)]))
+    for gap, mk in ((46 - D, _fail), (46, _pass)):
+        c.append(mk(r + "S.3", [b(0, 0, 40, 300), b(0, 300 + gap, 40, 600 + gap)]))
+    c += [
+        _fail(r + "A.1", [b(0, 0, 40, 188 - D)]),
+        _pass(r + "A.1", [b(0, 0, 40, 188)]),
+    ]
+
+    # A 200 x 100 nm block with a 100 nm wide step `j` tall on its left
+    # half: the step's right edge is j long, every width stays >= 100 nm.
+    def jog(j: float) -> Poly:
+        return poly(
+            layer,
+            (0, 0),
+            (200, 0),
+            (200, 100),
+            (100, 100),
+            (100, 100 + j),
+            (0, 100 + j),
+        )
+
+    c += [_fail(r + "L.1", [jog(40 - D)]), _pass(r + "L.1", [jog(40)])]
+    return c
+
+
+#: V8 / V9 -> (metal below, metal above or None: PAD is not read).
+_TOP_VIAS: dict[str, tuple[str, str | None]] = {"V8": ("M8", "M9"), "V9": ("M9", None)}
+
+
+def _top_via_one(via: str, lo: str, up: str | None) -> list[Case]:
+    out: list[Case] = []
+    metal_default = (-100.0, -20.0, 140.0, 60.0)
+
+    def stack(
+        v: tuple[float, float, float, float] = (0, 0, 40, 40),
+        *extra: tuple[float, float, float, float],
+        metal: tuple[float, float, float, float] = metal_default,
+        lower: tuple[float, float, float, float] | None = None,
+        upper: tuple[float, float, float, float] | None = None,
+        no_lower: bool = False,
+        no_upper: bool = False,
+    ) -> list[Shape]:
+        shapes: list[Shape] = [box(via, *v), *(box(via, *e) for e in extra)]
+        if not no_lower:
+            shapes.append(box(lo, *(lower or metal)))
+        if up is not None and not no_upper:
+            shapes.append(box(up, *(upper or metal)))
+        return shapes
+
+    big = (-100.0, -100.0, 220.0, 220.0)
+    w1 = f"{via}.W.1"
+    out += [
+        _fail(w1, stack((0, 0, 40, 40 - D))),
+        _fail(w1, stack((0, 0, 40, 40 + D))),
+        _fail(w1, stack((0, 0, 120, 120), metal=big)),
+        _pass(w1, stack()),
+        _pass(w1, stack((0, 0, 40, 120), metal=big)),
+        _pass(w1, stack((0, 0, 120, 40), metal=big)),
+    ]
+    for gap, mk in ((57 - D, _fail), (57, _pass)):
+        out.append(
+            mk(
+                f"{via}.S.1",
+                stack(
+                    (0, 0, 40, 40),
+                    (40 + gap, 0, 80 + gap, 40),
+                    metal=(-100, -20, 240, 60),
+                ),
+            )
+        )
+    # Diagonal, 40 nm across: 57 nm is not a lattice distance, so the
+    # fail / pass pair straddles it by one dbu in dy.
+    for dy, mk in ((40.5, _fail), (40.75, _pass)):
+        out.append(
+            mk(
+                f"{via}.S.2",
+                stack(
+                    (0, 0, 40, 40),
+                    (80, 40 + dy, 120, 80 + dy),
+                    metal=(-100, -20, 220, 160),
+                ),
+            )
+        )
+    # Enclosure 20 nm, past the via's left end; the right end is long
+    # and the metal is 10 nm past the via across.
+    en1 = f"{via}.{lo}.EN.1"
+    out += [
+        _fail(en1, stack(lower=(-(20 - D), -10, 300, 50))),
+        _pass(en1, stack(lower=(-20, -10, 300, 50))),
+    ]
+    if up is not None:
+        en2 = f"{via}.{up}.EN.2"
+        out += [
+            _fail(en2, stack(upper=(-(20 - D), -10, 300, 50))),
+            _pass(en2, stack(upper=(-20, -10, 300, 50))),
+        ]
+        aux1 = f"{via}.AUX.1"
+        out += [
+            _fail(aux1, stack(no_lower=True)),
+            _fail(aux1, stack(no_upper=True)),
+            _pass(aux1, stack()),
+        ]
+    return out
+
+
+def _top_via_cases() -> list[Case]:
+    return [c for via, (lo, up) in _TOP_VIAS.items() for c in _top_via_one(via, lo, up)]
+
 
 def _geometry_cases() -> list[Case]:
     chamfered = poly("WELL", (0, 0), (0, 300), (240, 300), (300, 240), (300, 0))
+    # The top BEOL layer, chamfered so that it meets every M9 width, area
+    # and edge-length rule: only the geometry check can see it.
+    beol = poly("M9", (0, 0), (0, 300), (240, 300), (300, 240), (300, 0))
     return [
         _fail("GEOMETRY.NONORTHOGONAL", [chamfered]),
         _pass("GEOMETRY.NONORTHOGONAL", [box("WELL", 0, 0, 300, 300)]),
+        _fail("GEOMETRY.NONORTHOGONAL", [beol]),
+        _pass("GEOMETRY.NONORTHOGONAL", [box("M9", 0, 0, 300, 300)]),
     ]
 
 
@@ -714,6 +1363,18 @@ def all_cases() -> list[Case]:
         *_lisd_cases(),
         *_lig_cases(),
         *_v0_cases(),
+        *_metal_cases("M1"),
+        *_metal_cases("M2"),
+        *_metal_cases("M3"),
+        *_via_cases(),
+        *_sadp_metal_cases("M4"),
+        *_sadp_metal_cases("M5"),
+        *_sadp_metal_cases("M6"),
+        *_sadp_metal_cases("M7"),
+        *_lele_via_cases(),
+        *_top_metal_cases("M8"),
+        *_top_metal_cases("M9"),
+        *_top_via_cases(),
     ]
 
 

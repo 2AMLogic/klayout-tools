@@ -197,8 +197,9 @@ def create_parser() -> argparse.ArgumentParser:
         action=_BuildVersionAction,
         help=(
             "print the running build's identity and exit -- bare `klt X.Y.Z` "
-            "for a tagged release, `klt X.Y.Z+g<sha>` otherwise (see `klt "
-            "version --format json`)"
+            "for a tagged release, a dev version such as "
+            "`klt X.Y.(Z+1).devN+g<sha>` otherwise (see `klt version "
+            "--format json`)"
         ),
     )
     # No default handler: absence of a subcommand is handled by main().
@@ -3252,6 +3253,16 @@ def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="output LEF path (default: <macro-name>.lef)",
     )
+    lef_abstract_parser.add_argument(
+        "--require-power-pins",
+        action="store_true",
+        help=(
+            "exit 3 when the supply-pin verdict (power_pins, issue #2839) "
+            "fails: no USE POWER or no USE GROUND pin, a supply pin whose "
+            "written USE differs, or a supply PORT that is not drawn layout "
+            "geometry. Without it the verdict is reported only."
+        ),
+    )
     _add_format_arg(lef_abstract_parser)
     lef_abstract_parser.set_defaults(func=lef_abstract_cmd.run)
 
@@ -4282,13 +4293,13 @@ def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Report which klayout-tools build is running: its version, the "
             "git commit it was built from, and whether that commit is this "
-            "version's release tag. The package version alone cannot answer "
-            "the last question -- a source build made after a release tag "
-            "declares the same version the release does -- so `version` "
-            "reports a PEP 440 local-version form (`X.Y.Z+g<sha>`) for any "
-            "build that is not a confirmed release, and a bare `X.Y.Z` for "
-            "one that is. Identifying the build never fails: an "
-            "unrecoverable identity is reported as `X.Y.Z+unknown` with "
+            "version's release tag. Only a clean build made exactly at the "
+            "release tag carries the bare `X.Y.Z`; any other build's "
+            "distribution version is a distinct PEP 440 dev version "
+            "(`X.Y.(Z+1).devN+g<sha>`, plus `.dirty` for uncommitted "
+            "changes), so it can never satisfy a `klayout-tools==X.Y.Z` "
+            "pin. Identifying the build never fails: an unrecoverable "
+            "identity is reported as `X.Y.Z.dev0+unknown` with "
             "`is_release: null`, not as an error."
         ),
     )
@@ -5094,6 +5105,27 @@ def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "top cell to check when the stream has more than one; omit to "
             "check every top cell"
+        ),
+    )
+    socket_check_parser.add_argument(
+        "--require-power-ports",
+        action="store_true",
+        help=(
+            "run the power_ports check (issue #2839) even when the descriptor "
+            "declares no 'power_ports' object: every POWER/GROUND pin name "
+            "needs an edge-accessible port, and at least one POWER and one "
+            "GROUND pin must be declared. See docs/cli/socket-check.md."
+        ),
+    )
+    socket_check_parser.add_argument(
+        "--edge-band-um",
+        type=float,
+        default=None,
+        metavar="UM",
+        help=(
+            "power_ports edge band in micrometres, overriding the "
+            "descriptor's power_ports.edge_band_um (default 0: the port must "
+            "touch the outline; provisional, see docs/cli/socket-check.md)"
         ),
     )
     _add_format_arg(socket_check_parser)

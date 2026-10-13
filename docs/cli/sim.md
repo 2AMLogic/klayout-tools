@@ -600,6 +600,8 @@ What differs from `remote` is *who acquires the machine*:
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`); see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
+| `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
+| `batch.job_ceiling_check` | `"warn"` \| `"enforce"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`. Any other value is rejected before any S3 write. |
 
 ### Capacity refusal and `batch_no_capacity`
 
@@ -655,6 +657,100 @@ made. Things worth knowing:
   request-level `error.code` — its sibling shards' results are kept.
 - **There is no `--wait-for-capacity` CLI flag yet.** The request field is
   the one control for now; a flag mirroring it is a possible follow-up.
+
+### Three budgets, and the fleet's whole-job ceiling
+
+A batch request is bounded by three separate time limits. Only one of them is
+the fleet's own, and that one is the limit that loses results when it is hit
+([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)):
+
+| Limit | Set by | Bounds | What happens when it is hit |
+| --- | --- | --- | --- |
+| `options.timeout_s` (default `120`) | The request | **One unit** (one corner or Monte Carlo sample) on the job instance | That unit is killed and reported with its own timeout diagnostic. The other units still run. |
+| `options.wall_clock_budget_s` | The request | The **in-worker dispatch loop**: the job's own `klt sim --backend local-parallel` stops starting units once the budget is spent, and writes a complete report with the rest marked `budget_exceeded` | Only applies if the worker reaches that point. It does **not** save a report when the fleet kills the enclosing job first. `--budget-s` overrides it on the submitting client only. The client's dispatch loop does not run on `batch`, so the flag is not forwarded to the job. To bound the worker, put the budget in the request. |
+| Fleet whole-job ceiling (`batch.max_job_seconds`) | 2am's fleet (`BATCH_MAX_JOB_SECONDS`, default `3600`) | The **whole job**. The harness kills the job command at this age, and the instance powers off soon after. | `status.json` reports `state: "timeout"`, `exit_code: 124`. The interrupted `report.json` is not a complete report, so **every** unit of the job comes back `batch_job_timeout`. Units that had finished are not recovered (see "Failed jobs" below). |
+
+**Pre-submit check (one-job requests).** Before the first S3 write, a
+`remote.hosts: 1` batch request is checked against the ceiling. The check
+uses the job's **conservative bound**, which is the same number `job.json`'s
+`timeout_seconds` carries:
+
+```
+job_bound_s = options.timeout_s × units + 120
+```
+
+This assumes every unit uses its full `options.timeout_s`, one after another.
+It is derived from the request alone and is an upper bound, **not** a measured
+or predicted ngspice runtime. A job whose units finish quickly can run far
+below it. The bound is compared with `max_job_seconds`. A bound equal to the
+ceiling passes. When the bound exceeds the ceiling:
+
+- under `batch.job_ceiling_check: "warn"` (the default), the client prints
+  `klt sim: warning: batch job bound ...` to stderr before submitting, then
+  submits as before;
+- under `"enforce"`, the request fails with exit `1` and
+  `error.code: "batch_job_ceiling_exceeded"` before anything is uploaded or
+  launched.
+
+Either way, the message names the bound, the ceiling and its source, and the
+smallest `remote.hosts` value whose largest shard fits within the ceiling.
+That value is `ceil(units / max_units_per_job)`, where
+`max_units_per_job = floor((max_job_seconds - 120) / options.timeout_s)`.
+If even one unit's bound exceeds the ceiling, no `hosts` value can help, and
+the message says to lower `options.timeout_s` to at most
+`max_job_seconds - 120` instead.
+
+Every one-job batch report also records the assessment as
+`environment.remote.job_ceiling`, whether or not the ceiling was exceeded. The
+field is additive:
+
+```json
+"job_ceiling": {
+  "basis": "conservative_serial_bound",
+  "unit_count": 63,
+  "per_unit_timeout_s": 120,
+  "overhead_s": 120.0,
+  "job_bound_s": 7680.0,
+  "max_job_seconds": 3600.0,
+  "max_job_seconds_source": "default",
+  "exceeds_ceiling": true,
+  "check": "warn",
+  "max_units_per_job": 29,
+  "recommended_hosts": 3,
+  "warning": "batch job bound 7680s (options.timeout_s 120s x 63 units + 120s; ...) ... Set request.remote.hosts to at least 3 ..."
+}
+```
+
+`max_job_seconds_source` is one of `"request"` (`batch.max_job_seconds`),
+`"env"` (`$KLT_BATCH_MAX_JOB_SECONDS`), `"fleet_config"`
+(`BATCH_MAX_JOB_SECONDS` in `batch-fleet.env`), or `"default"` (`3600`,
+the value 2am's harness falls back to when the instance's `MaxJobSeconds`
+tag is absent). `warning` is present only when `exceeds_ceiling` is `true`.
+`recommended_hosts` is `null` when no `hosts` value fits.
+
+**The mitigation is the existing shard path.** Worked example: the report
+in #2833 had 63 corners at the default `options.timeout_s: 120`, so the bound
+is `120 × 63 + 120 = 7680 s`, above `3600 s`. At most
+`floor((3600 - 120) / 120) = 29` units fit in one job, so the recommendation
+is `remote.hosts: 3`. That gives shards of 21 units each, and each shard's
+bound is `120 × 21 + 120 = 2640 s`, within the ceiling:
+
+```json
+{
+  "backend": "batch",
+  "remote": { "hosts": 3 },
+  "options": { "timeout_s": 120 },
+  "batch": { "job_ceiling_check": "enforce" }
+}
+```
+
+`remote.hosts > 1` submits one independent job per shard and merges them in
+global unit order (see "Fleet sharding" below). That path is not changed by
+this check, and its shards are not assessed. Each extra shard is one more
+launch against the fleet's shared concurrency cap. Because the bound is
+conservative, a tighter `options.timeout_s` that still covers each unit (see
+"Timeout-budget preflight" below) often needs far fewer shards than a
+generous one.
 
 ### Both off-host backends validate `models.pdk` up front
 
@@ -836,6 +932,13 @@ A `done` job (or exit 3/4) whose collection fails still raises as before. A
 `batch_poll_timeout` is not a terminal failure (the job may still be
 running), so no recovery is attempted. Raw logs are never copied into the
 JSON; use the retained artifacts below.
+
+A job killed at the fleet's whole-job ceiling is the common `timeout` case.
+Its `report.json` is truncated or missing, so every unit stays
+`batch_job_timeout`. The client never parses a partial report, and it never
+infers that a unit completed from status timing. To avoid this, size the job
+before submitting it; see "Three budgets, and the fleet's whole-job ceiling"
+above.
 
 **Note.** Only the envelope's structured `message`/`code` reach the JSON;
 raw `stderr.log` text never does. The stderr capture is part of the command
@@ -1491,6 +1594,72 @@ later expression may reference an earlier one's name:
   { "name": "vmid_mv", "expr": "vmid * 1e3",  "unit": "mV" }
 ]
 ```
+
+### `expr` cannot read `.meas` results
+
+The chaining rule above covers **`expr` -> `expr`** only. A `spice` entry's
+`.meas` card is a file-scope card that ngspice evaluates itself; its scalar is
+printed to the log but is **not** a vector the generated `let` can see. An
+`expr` that names a `.meas` result grades the corner `error` with the
+`measurement` diagnostic "printed no '<name> = <value>' line" (the engine log
+shows `vector <name> is not available or has zero length`). This applies to
+ordinary file-scope `.meas` cards; `analysis_steps[]` control-scope `meas`
+has different semantics (see that section). Making `.meas` scalars visible to
+`expr` is a separate contract change.
+
+```json
+"measurements": [
+  { "name": "ta", "spice": ".meas tran ta when v(o)=0.8 rise=3" },
+  { "name": "tb", "spice": ".meas tran tb when v(o)=0.8 rise=11" },
+  { "name": "t",  "expr": "(tb - ta)/8" }
+]
+```
+
+The `t` entry above errors. Note that grading `tb - ta` instead does not help:
+that is still an `expr` over two `.meas` results and fails the same way. The
+working fix is a single **trig/targ** `.meas` card that measures the interval
+directly, with the bounds scaled to match:
+
+```json
+"measurements": [
+  { "name": "p8", "spice": ".meas tran p8 trig v(o) val=0.8 rise=3 targ v(o) val=0.8 rise=11", "unit": "s" }
+]
+```
+
+`p8` is eight periods, so bound it at 8x the per-period limits (on ngspice-46
+a 1 MHz sine gives `p8 = 8.00000e-06`). A constant offset or unit conversion
+works the same way: rather than grading `180 + ph*180/pi` as an `expr`, grade
+the raw `.meas` result `ph` against bounds converted back into its own unit
+(radians). Other options are to derive the figure outside `klt sim` from the
+reported raw measurements, or to compute it directly from vectors in `expr`
+(a `vecmax()`/`mean()` reduction that does not reference any `.meas` result).
+
+### `.meas` `WHEN` thresholds must be literal numbers
+
+ngspice's `.meas ... when v(x)=<value>` accepts only a literal number (or a
+`.param`-style parameter reference) on the right-hand side, not an arithmetic
+expression. Verified on ngspice-46:
+
+```
+.meas tran good when v(o)=0.81        ; works
+.meas tran bad  when v(o)=0.5*1.62    ; fails
+```
+
+The failing card logs `Error: measure  bad  when(WHEN) : Expressions like
+0.5*1.62 are not supported.` and no value is printed. `klt sim` does not lint
+card text (parameterized cards are valid); instead, when the log names the
+failing measurement, that error text is appended to its `measurement`
+diagnostic (`measurement 'bad' produced no value -- ngspice reported:
+Expressions like 0.5*1.62 are not supported.`), bounded in length and
+available without `keep_artifacts`. An engine `.meas` error that cannot be
+matched to a missing measurement is reported once as a corner-level
+`measurement` diagnostic with severity `warning`; grading is unchanged.
+
+`FIND ... AT=` does not accept an arithmetic expression either. On ngspice-46,
+`at=0.5*2.5u` fails with the misleading `find(AT) : out of interval`. Use a
+literal time or a `.param` reference. This error follows the same
+`Error: measure <name> ...` log format, so it is attached to the measurement's
+diagnostic in the same way.
 
 ### The expression must reduce to a single real scalar
 
@@ -2272,11 +2441,22 @@ already-supported mismatch-enabled `.lib` section like sky130's `tt_mm`
 points to be re-run `n` times with a different seed. A request combining
 both expands to `corner_count * monte_carlo.n` total runs.
 
-**Seed contract.** `monte_carlo.seed` makes the sampled sequence
-reproducible run-to-run: the same `seed` always derives the same per-sample
-seed values (module hardware/OS variance aside), in any process, on any
-machine — the derivation is SHA-256-based, never Python's salted built-in
-`hash()`. Each sample derives two independent components — `process_seed`
+**Seed contract.** `monte_carlo.seed` makes the derived per-sample seed
+integers reproducible: the same `seed` always derives the same per-sample
+seed values, in any process, on any machine — the derivation is
+SHA-256-based, never Python's salted built-in `hash()`. Those integers are
+stable; the random *draws* ngspice produces from them are not part of the
+contract. Reproducing a given sample's draws requires the same engine build,
+netlist, model inputs and request. Identical seeds do not guarantee identical
+draws across ngspice versions or builds (a different build can draw a
+different sequence from the same `.options seed=`, shifting measurements by
+far more than run-to-run noise on a fixed engine), nor bit-identical
+numerical measurements. This matters when comparing local, `--backend batch`
+and `--backend remote` results, which may run different ngspice builds:
+compare `environment.engine_version` first. A matching version string is
+useful provenance but does not uniquely identify every build, and a
+mismatch means per-sample differences are not evidence about the circuit.
+Each sample derives two independent components — `process_seed`
 and `mismatch_seed` — plus a combined `rndseed` written into the generated
 deck as `.options seed=<rndseed>` (ngspice's documented mechanism for
 seeding `AGAUSS`/`GAUSS`/`random()`, which must appear before the netlist's
@@ -3522,8 +3702,29 @@ the full reasoning):
 - **Reproducibility is in-band** — `environment` hashes the netlist and
   resolved model library so a stored result can be checked against the
   inputs that produced it; a `monte_carlo` request additionally makes the
-  sampled seed sequence itself reproducible from `monte_carlo.seed` alone
-  (see "Monte Carlo sampling" above).
+  derived per-sample seed integers themselves reproducible from
+  `monte_carlo.seed` alone — the draws ngspice makes from them are only
+  reproducible on the same engine build (see "Seed contract." under "Monte
+  Carlo sampling" above).
+
+## Output-directory ownership
+
+**Output-directory ownership (issue #2770).** A `klt sim` run that writes
+persistent artifacts -- `options.keep_artifacts`, `--resume` (the
+checkpoint), `--plot` (the plot directory, also owned), or the
+`remote`/`batch` backends that collect results locally -- owns `--outdir`
+(default `.klt/sim/` next to the request) for the whole run. A second
+cooperating run on the same directory (any relative or symlink alias of it)
+-- or on an ancestor or descendant of it -- fails immediately with error
+code `outdir_locked`: exit `1`, empty stdout, the standard error envelope on
+stderr, and nothing under the directory modified. A run that uses only
+temporary directories writes nothing there and takes no lock;
+sharded/parallel workers inside one run share the run's ownership. A killed
+or crashed run releases ownership automatically; a leftover owner record
+never blocks the next run. `outdir_lock_unavailable` (same exit/streams)
+means locking itself is not possible here. Full policy, library exceptions
+and platform scope: [json-contract.md](../json-contract.md)
+"Output-directory ownership".
 
 ## Exit codes
 

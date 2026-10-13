@@ -1272,7 +1272,6 @@ wheels = [
 
 [[package]]
 name = "klayout-tools"
-version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },

@@ -2927,3 +2927,339 @@ def test_hostile_runner_version_output_cannot_break_the_envelope(tmp_path):
     assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
     json.loads((out_dir / "report.json").read_text())  # still valid JSON
     json.loads((out_dir / "runner_identity.json").read_text())
+
+
+# --------------------------------------------------------------------------- #
+# Whole-job ceiling: pre-submit runtime-risk assessment (issue #2833)
+# --------------------------------------------------------------------------- #
+
+
+def _ceiling_request(tmp_path: Path, **batch) -> dict:
+    request = _batch_request(tmp_path)
+    request["batch"].update(batch)
+    return request
+
+
+def _run_one_batch(tmp_path, monkeypatch, runner, *, units, timeout_s, **batch):
+    """Drive the one-job `batch` entry point with ``units`` corners."""
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    return sb._run_batch(
+        corner_points=_corner_points(units),
+        netlist_path=str(_write_body(tmp_path)),
+        models_lib=None,
+        analysis={"kind": "tran", "args": "1n 1u"},
+        measurements_spec=_measurements_spec(),
+        timeout_s=timeout_s,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        max_workers=None,
+        request=_ceiling_request(tmp_path, **batch),
+    )
+
+
+def _assess(tmp_path, *, units, timeout_s, **batch):
+    config = sb._resolve_batch_config(
+        _ceiling_request(tmp_path, **batch), corner_count=units, timeout_s=timeout_s
+    )
+    return sb._assess_job_ceiling(
+        unit_count=units, per_unit_timeout_s=timeout_s, config=config
+    )
+
+
+@pytest.mark.parametrize(
+    ("units", "exceeds"),
+    [(28, False), (29, False), (30, True)],  # 120 x 29 + 120 == 3600 exactly
+)
+def test_job_ceiling_boundary_below_equal_and_above(
+    tmp_path, monkeypatch, units, exceeds
+):
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    assessment = _assess(tmp_path, units=units, timeout_s=120.0)
+
+    assert assessment["job_bound_s"] == 120.0 * units + 120.0
+    assert assessment["max_job_seconds"] == 3600.0
+    assert assessment["max_job_seconds_source"] == "default"
+    assert assessment["basis"] == "conservative_serial_bound"
+    assert assessment["exceeds_ceiling"] is exceeds
+    assert assessment["max_units_per_job"] == 29
+    assert assessment["recommended_hosts"] == (2 if units == 30 else 1)
+    assert ("warning" in assessment) is exceeds
+
+
+def test_enforce_refuses_before_any_s3_write_with_an_actionable_message(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError) as excinfo:
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=63,
+            timeout_s=120.0,
+            job_ceiling_check="enforce",
+        )
+
+    assert runner.calls == []  # no upload, no launch
+    assert excinfo.value.code == sb.BATCH_JOB_CEILING_CODE
+    message = str(excinfo.value)
+    assert "batch job bound 7680s" in message
+    assert "not a runtime estimate" in message
+    assert "whole-job ceiling of 3600s (max_job_seconds from default)" in message
+    assert "request.remote.hosts to at least 3" in message
+    assert "at most 29 units" in message
+    assert 'job_ceiling_check to "warn"' in message
+
+
+def test_enforce_refusal_reaches_the_cli_error_envelope_code(
+    tmp_path, monkeypatch, capsys
+):
+    from klayout_tools.cli import main
+
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    runner = _install_fake_batch_transport(monkeypatch, runner=_FakeRunner())
+    _write_body(tmp_path)
+    request = _ceiling_request(
+        tmp_path, job_ceiling_check="enforce", max_job_seconds=150
+    )
+    request["options"] = {"timeout_s": 60}
+    path = _write_request(tmp_path, request)
+
+    assert main(["sim", str(path), "--format", "json"]) == 1
+
+    envelope = _error_envelope(capsys.readouterr().err)
+    assert envelope["error"]["code"] == "batch_job_ceiling_exceeded"
+    assert "max_job_seconds from request" in envelope["error"]["message"]
+    assert runner.calls == []
+
+
+def test_warn_mode_submits_and_reports_the_assessment(tmp_path, monkeypatch, capsys):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_one_batch(
+        tmp_path, monkeypatch, runner, units=30, timeout_s=120.0
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+    ceiling = environment["job_ceiling"]
+    assert ceiling["check"] == "warn"
+    assert ceiling["exceeds_ceiling"] is True
+    assert ceiling["job_bound_s"] == 3720.0
+    assert ceiling["recommended_hosts"] == 2
+    assert ceiling["warning"].startswith("batch job bound 3720s")
+    err = capsys.readouterr().err
+    assert "klt sim: warning: batch job bound 3720s" in err
+    assert environment["provider"] == "aws-batch-fleet"
+
+
+def test_within_ceiling_reports_the_assessment_without_a_warning(
+    tmp_path, monkeypatch, capsys
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_one_batch(
+        tmp_path,
+        monkeypatch,
+        runner,
+        units=1,
+        timeout_s=120.0,
+        job_ceiling_check="enforce",
+    )
+
+    assert environment["job_ceiling"]["exceeds_ceiling"] is False
+    assert "warning" not in environment["job_ceiling"]
+    assert "warning" not in capsys.readouterr().err
+
+
+def test_warning_is_printed_before_the_first_s3_write(tmp_path, monkeypatch, capsys):
+    seen_before_upload: list[str] = []
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    def _record(argv, timeout_s):
+        if not seen_before_upload:
+            seen_before_upload.append(capsys.readouterr().err)
+        return runner(argv, timeout_s)
+
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    monkeypatch.setattr(sb, "_run_subprocess", _record)
+    _write_body(tmp_path)
+    request = _ceiling_request(tmp_path, max_job_seconds=100)
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+
+    assert "klt sim: warning: batch job bound" in seen_before_upload[0]
+    assert report["environment"]["remote"]["job_ceiling"]["max_job_seconds"] == 100.0
+
+
+@pytest.mark.parametrize(
+    ("units", "timeout_s"),
+    [(63, 60.0), (63, 120.0), (45, 600.0), (8, 1200.0), (13500, 120.0), (30, 120.0)],
+)
+def test_recommended_hosts_keeps_every_shard_within_the_ceiling(
+    tmp_path, monkeypatch, units, timeout_s
+):
+    """The recommendation is checked against the shard engine's real split
+    (`sim_remote._shard_corner_points`), and is the minimal sufficient value."""
+    from klayout_tools.sim_remote import _shard_corner_points
+
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    assessment = _assess(tmp_path, units=units, timeout_s=timeout_s)
+    hosts = assessment["recommended_hosts"]
+    ceiling = assessment["max_job_seconds"]
+
+    def _largest_shard_bound(count):
+        shards = _shard_corner_points(_corner_points(units), count)
+        return max(
+            sb._default_batch_job_timeout_s(len(shard), timeout_s) for shard in shards
+        )
+
+    assert 1 <= hosts <= units
+    assert _largest_shard_bound(hosts) <= ceiling
+    if hosts > 1:
+        assert _largest_shard_bound(hosts - 1) > ceiling
+
+
+def test_reported_63_corner_case_matches_the_documented_calculation(
+    tmp_path, monkeypatch
+):
+    """docs/cli/sim.md's worked calculation: 63 units at options.timeout_s 120
+    -> bound 7680 s > 3600 s; at most 29 units per job -> remote.hosts 3."""
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    assessment = _assess(tmp_path, units=63, timeout_s=120.0)
+    assert assessment["job_bound_s"] == 7680.0
+    assert assessment["max_units_per_job"] == 29
+    assert assessment["recommended_hosts"] == 3
+
+
+def test_no_hosts_value_fits_when_one_unit_exceeds_the_ceiling(tmp_path, monkeypatch):
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    assessment = _assess(tmp_path, units=8, timeout_s=5400.0)
+    assert assessment["exceeds_ceiling"] is True
+    assert assessment["max_units_per_job"] == 0
+    assert assessment["recommended_hosts"] is None
+    assert "No remote.hosts value fits" in assessment["warning"]
+    assert "lower options.timeout_s to at most 3480s" in assessment["warning"]
+
+
+def test_ceiling_resolution_order_and_provenance(tmp_path, monkeypatch):
+    script = _provision_script(tmp_path, fleet_env='BATCH_MAX_JOB_SECONDS="7200"\n')
+    base = {"provision_script_path": str(script), "bucket": FAKE_BUCKET}
+
+    def _resolve(**batch):
+        config = sb._resolve_batch_config(
+            {"batch": dict(base, **batch)}, corner_count=1, timeout_s=30.0
+        )
+        return config.max_job_seconds, config.max_job_seconds_source
+
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    assert _resolve() == (7200.0, "fleet_config")
+    monkeypatch.setenv(sb.MAX_JOB_SECONDS_ENV, "5400")
+    assert _resolve() == (5400.0, "env")
+    assert _resolve(max_job_seconds=1800) == (1800.0, "request")
+
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV)
+    (tmp_path / "batch-fleet.env").unlink()
+    assert _resolve() == (sb.DEFAULT_BATCH_MAX_JOB_SECONDS, "default")
+
+
+@pytest.mark.parametrize(
+    "bad", [0, -1, True, "abc", [3600], float("inf"), float("nan")]
+)
+def test_invalid_request_ceiling_is_rejected_before_any_s3_write(
+    tmp_path, monkeypatch, bad
+):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError, match=r"request\.batch\.max_job_seconds"):
+        _run_one_batch(
+            tmp_path, monkeypatch, runner, units=1, timeout_s=30.0, max_job_seconds=bad
+        )
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("bad", ["abc", "0", "-60", "inf"])
+def test_invalid_env_or_fleet_ceiling_names_its_source(tmp_path, monkeypatch, bad):
+    runner = _install_fake_batch_transport(monkeypatch, runner=_FakeRunner())
+    script = _provision_script(tmp_path, fleet_env=f"BATCH_MAX_JOB_SECONDS={bad}\n")
+    base = {"provision_script_path": str(script), "bucket": FAKE_BUCKET}
+
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+    with pytest.raises(sim.SimError, match="BATCH_MAX_JOB_SECONDS in batch-fleet.env"):
+        sb._resolve_batch_config({"batch": base}, corner_count=1, timeout_s=30.0)
+
+    monkeypatch.setenv(sb.MAX_JOB_SECONDS_ENV, bad)
+    with pytest.raises(sim.SimError, match=r"\$KLT_BATCH_MAX_JOB_SECONDS"):
+        sb._resolve_batch_config({"batch": base}, corner_count=1, timeout_s=30.0)
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("bad", ["refuse", "ENFORCE", True, None, 1])
+def test_invalid_job_ceiling_check_is_rejected_before_any_s3_write(
+    tmp_path, monkeypatch, bad
+):
+    runner = _FakeRunner()
+    with pytest.raises(sim.SimError, match="job_ceiling_check"):
+        _run_one_batch(
+            tmp_path,
+            monkeypatch,
+            runner,
+            units=1,
+            timeout_s=30.0,
+            job_ceiling_check=bad,
+        )
+    assert runner.calls == []
+
+
+def test_timed_out_overlong_job_stays_batch_job_timeout_for_every_unit(
+    tmp_path, monkeypatch
+):
+    """Warn mode submits; when the fleet then kills the job at its ceiling
+    and the collected report is truncated, no unit is claimed complete."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("timeout", exit_code="124"))
+    runner.outputs = {"report.json": _sim_report(corner_ids=("a", "b"))[:80]}
+
+    corners, engine_version, environment = _run_one_batch(
+        tmp_path, monkeypatch, runner, units=3, timeout_s=2000.0
+    )
+
+    assert engine_version is None
+    assert [c["diagnostics"][0]["code"] for c in corners] == ["batch_job_timeout"] * 3
+    assert all(c["status"] == "error" for c in corners)
+    assert environment["state"] == "timeout"
+    assert environment["job_ceiling"]["exceeds_ceiling"] is True
+    assert len(runner.argvs_matching("launch")) == 1  # never resubmitted
+
+
+def test_hosts_greater_than_one_is_not_assessed_or_refused(tmp_path, monkeypatch):
+    """`remote.hosts > 1` keeps its existing one-job-per-shard dispatch even
+    under "enforce": the ceiling check guards only the one-job path."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report(corner_ids=("tt_1.800_0",))}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    monkeypatch.delenv(sb.MAX_JOB_SECONDS_ENV, raising=False)
+
+    _, _, environment = sb._run_batch_fleet(
+        corner_points=_corner_points(2),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request=_ceiling_request(
+            tmp_path, max_job_seconds=60, job_ceiling_check="enforce"
+        ),
+        hosts=2,
+        measurements_spec=_measurements_spec(),
+    )
+
+    assert len(runner.argvs_matching("launch", "--apply")) == 2
+    assert all("job_ceiling" not in entry for entry in environment["fleet"])

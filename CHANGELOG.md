@@ -14,6 +14,78 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
+  absorbing #2888): the distribution version is now computed at build time
+  from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the
+  checkout's git facts. A clean build exactly at tag `vX.Y.Z` still declares
+  bare `X.Y.Z`. A post-tag build now declares `X.Y.(Z+1).devN+g<sha>` in its
+  wheel/sdist metadata (a commit before the base is tagged declares
+  `X.Y.Z.devN+g<sha>`, uncommitted changes add `.dirty`, no git facts gives
+  `X.Y.Z.dev0+unknown`). Previously only `klt`'s output carried `+g<sha>`, so
+  a cached or tool-installed dev build silently satisfied an exact pin. A
+  wheel rebuilt from the sdist keeps the originating version. **Contract
+  change:** `klt version --format json`'s `package_version` (and `klt
+  signoff`'s `build.package_version`) is the distribution's own version, so
+  on non-release builds it now carries the same dev form as `version`
+  instead of the static base. Field names and types are unchanged, so no
+  `schema_version` bump; see `docs/cli/version.md`. Release managers now bump
+  `base-version` instead of `[project] version` (`RELEASING.md`).
+- **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
+  unequal top-circuit pin counts yield `status: mismatch` with a new
+  `pin.count` error finding (both counts in `details`). Default unchanged;
+  additive `options` echo key, no `schema_version` bump. A `pin.count` error
+  is never downgraded to `inconclusive` by an exhausted `combine_devices`.
+- **T1 item 11 port accessibility: edge power ports + LEF abstract
+  (provisional)** (issue #2839, operator ruling 2AMLogic/product#134, not yet
+  ratified). `klt signoff --manifest` grades a new item-11 sub-check for a
+  block that opts in (manifest `power_ports.required: true`, or a
+  `socket-check`/`lef-abstract` part cited in item 11's list): every declared
+  supply needs an edge-accessible port and a matching LEF `PIN` with
+  `USE POWER`/`USE GROUND`. New unmet reasons `power_port_unproven`,
+  `no_edge_power_port`, `power_port_interior_only`,
+  `power_port_layer_disallowed`, `lef_power_pin_missing`,
+  `lef_power_pin_mismatch`; met citations gain
+  `power_delivery.power_ports`. Defaults (edge band `0` um, all four edges,
+  any LEF routing layer) are provisional and overridable per block. A block
+  that does not opt in grades exactly as before. Additive verb changes:
+  `klt socket-check` gains a fourth check `power_ports` (skipped unless
+  requested via descriptor `power_ports` or `--require-power-ports`;
+  `--edge-band-um`), a top-level `power_ports` fact block, and an optional
+  descriptor `pins[].metal_layer`; `klt lef-abstract` gains `pins[].gds_layer`,
+  a read-back `power_pins` verdict and `--require-power-pins`; `klt signoff`
+  recognises both envelopes as opt-in kinds scoped to item 11.
+
+- **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
+  (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
+  persistent artifact root; a competing cooperating run fails fast with the
+  additive `error.code` `outdir_locked` (exit `1`, empty stdout, existing
+  error envelope) instead of interleaving artifacts. Ancestor/descendant
+  roots exclude each other, aliases contend, dead owners release
+  automatically. See `docs/json-contract.md` "Output-directory ownership".
+
+- **ASAP7 KLayout DRC deck: BEOL M1-M9 / V0-V9** (issue #2810): the in-repo
+  deck (`src/klayout_tools/decks/asap7.drc`) grows from 106 to 232 rule
+  categories, adding `V0.LIG.A.1` and the M1-M9 / V1-V9 width, spacing,
+  area, grid/track and enclosure rules from DRM Tables 3.11.2-3.19.1, and
+  applies `GEOMETRY.NONORTHOGONAL` to every BEOL layer. Pass
+  `--expect-rule-categories 232`. Rules that need routing-track assignment,
+  net connectivity, an M8 routing direction or the PAD layer are listed with
+  reasons in `asap7_rules.NOT_IMPLEMENTED` and `docs/cli/drc.md` (#3147,
+  #3155, #3156). Additive: no existing rule id changes.
+
+- **`klt sta`: per-corner constraint completeness** (issue #2780): every
+  response and every `corners[]` entry carries an additive
+  `constraint_completeness` block. It reports `unconstrained_endpoints` and
+  `unclocked_registers`, each as `{status, count, sample, truncated, reason}`,
+  plus a roll-up `status` of `complete`/`incomplete`/`unknown`. The data comes
+  from OpenSTA's structured `sta::check_timing_cmd`, one check per call, and
+  identities come from the engine's pin list, not from warning text. A finite
+  WNS (`timing_status: "constrained"`) can now come with `status:
+  "incomplete"`. A check that could not run, or that returned malformed
+  output, reports `unavailable` with `count: null`, never `0`. Samples are
+  capped at 20 pins with explicit truncation. Slack fields, `timing_status` and
+  violation counts are unchanged. No `schema_version` bump.
+
 - **`klt lef-abstract`: structural self-check of the emitted LEF** (issue
   #2769): after writing, the command reads the file back from disk and
   validates the emitted subset -- a library-level `VERSION`, properly nested

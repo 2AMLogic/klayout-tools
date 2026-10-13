@@ -1000,6 +1000,16 @@ many-corner library should use `sweep_corners` to scope the sweep down to
 the corners the design actually operates at, which also caps this added
 cost at the scoped subset's own size.
 
+**Iterating on timing after a route (recipe).** Run `place-and-route` once
+with `pdk.sweep_corners` naming only the corners the design operates at,
+keep the routed `.def` (and SPEF if `post_route_spef` is set), then re-time
+other corners with `klt sta` and `pdk.corners` on that DEF — no
+floorplan/place/CTS/route is repeated (see `docs/cli/sta.md`). Any change
+that feeds implementation still needs a full run; there is deliberately no
+cross-request checkpoint cache today. Design analysis and the proposed
+(unimplemented) routed-bundle replay: `docs/design/place-and-route-improvements-survey.md`
+section 6 (issue #2783).
+
 ### Design-rule-check verdict (`max_transition_violation_count`, `max_capacitance_violation_count`, issue #1709; library-only counterpart issue #2357)
 
 The sweep re-times the routed design at the `sweep_corners` decks, but until
@@ -2908,6 +2918,22 @@ which is why it is the default.
 `0` when `status` is `"match"`, `3` when `"drifted"`, `1` for a missing or
 unparseable report or an unresolvable request. `--rerun` without `--check` is
 a clean exit `1`, not a usage error.
+
+## Output-directory ownership
+
+**Output-directory ownership (issue #2770).** `klt place-and-route` owns its
+fixed `.klt/place-and-route/` directory next to the request (it has no
+`--outdir` flag) for the whole run, including `--check <report> --rerun`. A
+second cooperating run on the same directory (any relative or symlink alias
+of it) -- or on an ancestor or descendant of it -- fails immediately with
+error code `outdir_locked`: exit `1`, empty stdout, the standard error
+envelope on stderr, and nothing under the directory modified. Two requests
+in the same directory therefore cannot run at once; copy one elsewhere or
+run them sequentially. A killed or crashed run releases ownership
+automatically; a leftover owner record never blocks the next run.
+`outdir_lock_unavailable` (same exit/streams) means locking itself is not
+possible here. Full policy, library exceptions and platform scope:
+[json-contract.md](../json-contract.md) "Output-directory ownership".
 
 ## Exit codes
 
