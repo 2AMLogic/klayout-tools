@@ -218,6 +218,7 @@ from typing import Any
 
 from . import env_provenance, output_lock
 from ._paths import _fold_spice_continuations, _resolve_relative
+from ._provenance import sha256_file
 from .coverage import (
     REASON_NO_DELTA_ROWS,
     build_check_coverage,
@@ -440,6 +441,15 @@ def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
     to matter) and stay raw strings, unchanged.
     """
     return env_provenance.repo_relative_path(path, repo_root=repo_root)
+
+
+def _content_id(path: str | None) -> str | None:
+    """``sha256:<64 lowercase hex>`` of the exact bytes of ``path`` (issue
+    #2875), or ``None`` when it is not a readable file. The same digest
+    convention ``provenance.input.content_hash`` uses, so ``klt signoff``
+    re-hashes the cited file with the identical function."""
+    digest = sha256_file(path)
+    return None if digest is None else f"sha256:{digest}"
 
 
 def _strip_quotes(token: str) -> str:
@@ -1793,6 +1803,28 @@ def _prepare_extracted_request(
     return extracted_request_path
 
 
+def _testbench_inputs(
+    testbench_path: str,
+    dut_path: str,
+    identity: Mapping[str, Any],
+    *,
+    repo_root: str | None,
+) -> dict[str, Any]:
+    """The path + content-identity fields of one ``testbenches[]`` entry
+    (issue #2875). Shared by both summary-construction branches so a
+    diagnostic/partial run (extracted side skipped) carries exactly the same
+    keys as a full one. Digests are present even when a path is redacted as
+    ``scope: external``."""
+    return {
+        "request": _report_path(testbench_path, repo_root=repo_root),
+        "request_sha256": identity["request_sha256"],
+        "netlist": _report_path(identity["netlist"], repo_root=repo_root),
+        "netlist_sha256": identity["netlist_sha256"],
+        "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
+        "schematic_netlist_sha256": identity["schematic_netlist_sha256"],
+    }
+
+
 def _own_pex_root(
     ownership: contextlib.ExitStack, artifacts_dir: str | None, layout_path: str
 ) -> None:
@@ -2104,6 +2136,10 @@ def run_pex(
     single_testbench = len(testbench_paths) == 1
     labels: list[str] = []
     dut_paths: list[str] = []
+    # Issue #2875: per-testbench content identities of the schematic-side
+    # inputs, taken at the resolution points below -- before either side
+    # simulates -- so the digests describe the files this run used.
+    input_identity: list[dict[str, Any]] = []
 
     # Issue #2478: in `--measure-command` mode there is no testbench at all,
     # so the loop below is a no-op (`testbench_paths` is validated empty
@@ -2146,6 +2182,13 @@ def run_pex(
             )
         with open(schematic_body_path, encoding="utf-8") as handle:
             body_text = handle.read()
+        input_identity.append(
+            {
+                "request_sha256": _content_id(testbench_path),
+                "netlist": schematic_body_path,
+                "netlist_sha256": _content_id(schematic_body_path),
+            }
+        )
         _include_line, dut_path = _find_dut_include(
             body_text, os.path.dirname(schematic_body_path)
         )
@@ -2155,6 +2198,7 @@ def run_pex(
         # if it were the DUT.
         _check_dut_declares_a_circuit(testbench_path, dut_path)
         dut_paths.append(dut_path)
+        input_identity[-1]["schematic_netlist_sha256"] = _content_id(dut_path)
 
     if len(set(dut_paths)) > 1:
         raise PexError(
@@ -2171,6 +2215,9 @@ def run_pex(
         if measured_reference_netlist is not None
         else dut_paths[0]
     )
+
+    # Issue #2875: hashed at the resolution point, before either side runs.
+    reference_netlist_sha256 = _content_id(reference_netlist_path)
 
     # Gap 2 (issue #1255): a schematic DUT netlisted flat (no `.SUBCKT`
     # wrapper at all) against `klt extract`'s always-`.SUBCKT`-wrapped
@@ -2355,8 +2402,12 @@ def run_pex(
             )
             testbenches_summary.append(
                 {
-                    "request": _report_path(testbench_path, repo_root=repo_root),
-                    "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
+                    **_testbench_inputs(
+                        testbench_path,
+                        dut_path,
+                        input_identity[index],
+                        repo_root=repo_root,
+                    ),
                     "corner_count": schematic_report["corner_count"],
                     "measurement_names": [
                         m["name"] for m in schematic_report["measurements"]
@@ -2390,8 +2441,12 @@ def run_pex(
         delta.extend(rows)
         testbenches_summary.append(
             {
-                "request": _report_path(testbench_path, repo_root=repo_root),
-                "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
+                **_testbench_inputs(
+                    testbench_path,
+                    dut_path,
+                    input_identity[index],
+                    repo_root=repo_root,
+                ),
                 "corner_count": extracted_report["corner_count"],
                 "measurement_names": [
                     m["name"] for m in extracted_report["measurements"]
@@ -2418,6 +2473,9 @@ def run_pex(
         "layout": _report_path(layout_path, repo_root=repo_root),
         "netlist": _report_path(extracted_netlist_path, repo_root=repo_root),
         "reference_netlist": _report_path(reference_netlist_path, repo_root=repo_root),
+        # Additive field (issue #2875): content identity of the schematic
+        # DUT / `--reference-netlist` the schematic leg used.
+        "reference_netlist_sha256": reference_netlist_sha256,
         "extraction": {
             "deck": deck_name,
             "device_count": extract_report["device_count"],

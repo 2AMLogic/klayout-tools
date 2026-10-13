@@ -5440,6 +5440,75 @@ def _verify_input_artifact(
     return False if read_any else None
 
 
+def _pex_schematic_inputs(envelope: Mapping[str, Any]) -> list[tuple[str, Any, Any]]:
+    """``(role, path_value, recorded_digest)`` for every schematic-side
+    content identity a ``klt pex`` envelope records (issue #2875): per
+    testbench the request JSON, its simulation body and the schematic DUT,
+    plus the run's ``reference_netlist``. A digest the envelope does not
+    carry (every pre-#2875 envelope) yields no entry -- legacy envelopes keep
+    their layout-only verification, visibly lacking this one."""
+    found: list[tuple[str, Any, Any]] = []
+    testbenches = envelope.get("testbenches")
+    if isinstance(testbenches, list):
+        for index, entry in enumerate(testbenches):
+            if not isinstance(entry, Mapping):
+                continue
+            for role, path_key in (
+                ("request", "request"),
+                ("netlist", "netlist"),
+                ("schematic_netlist", "schematic_netlist"),
+            ):
+                digest = entry.get(f"{path_key}_sha256")
+                if isinstance(digest, str) and digest:
+                    found.append(
+                        (f"testbenches[{index}].{role}", entry.get(path_key), digest)
+                    )
+    digest = envelope.get("reference_netlist_sha256")
+    if isinstance(digest, str) and digest:
+        found.append(("reference_netlist", envelope.get("reference_netlist"), digest))
+    return found
+
+
+def _verify_pex_schematic_inputs(
+    envelope: Mapping[str, Any], spec: Mapping[str, Any], evidence_file: str | None
+) -> list[dict[str, Any]]:
+    """Re-hash each schematic-side input of a ``klt pex`` envelope (issue
+    #2875). One ``{role, path, sha256, status}`` per recorded digest, where
+    ``status`` is ``"verified"`` (a resolvable candidate re-hashed to the
+    recorded digest), ``"stale"`` (candidates were read and none matched) or
+    ``"unverifiable"`` (external/redacted path, or nothing readable from the
+    grading context). These roles are distinct from the layout's
+    ``content_hash`` and never feed layout-consistency comparisons."""
+    evidence_dir = (
+        os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
+    )
+    results: list[dict[str, Any]] = []
+    for role, path_value, recorded in _pex_schematic_inputs(envelope):
+        read_any = False
+        matched = False
+        for candidate in _resolve_input_artifact_value(path_value, spec, evidence_dir):
+            digest = sha256_file(candidate)
+            if digest is None:
+                continue
+            read_any = True
+            if f"sha256:{digest}" == recorded:
+                matched = True
+                break
+        results.append(
+            {
+                "role": role,
+                "path": path_value.get("path")
+                if isinstance(path_value, Mapping)
+                else path_value,
+                "sha256": recorded,
+                "status": "verified"
+                if matched
+                else ("stale" if read_any else "unverifiable"),
+            }
+        )
+    return results
+
+
 def _grade_evidence(
     spec: dict[str, Any],
     *,
@@ -5728,6 +5797,29 @@ def _generic_artifact_binding(
     return binding
 
 
+def _fold_pex_schematic_inputs(
+    envelope: dict[str, Any],
+    spec: dict[str, Any],
+    file_label: str | None,
+    input_verified: bool | None,
+) -> tuple[list[dict[str, Any]] | None, bool | None]:
+    """Verify a ``pex`` envelope's schematic-side inputs (issue #2875) and
+    fold the per-role statuses into ``input_verified``.
+
+    Returns ``(pex_inputs, input_verified)``; ``pex_inputs`` is ``None`` when
+    there is nothing to report and ``input_verified`` is then unchanged.
+    """
+    checked_inputs = _verify_pex_schematic_inputs(envelope, spec, file_label)
+    if not checked_inputs:
+        return None, input_verified
+    statuses = {item["status"] for item in checked_inputs}
+    if input_verified is False or "stale" in statuses:
+        return checked_inputs, False
+    if input_verified is True and statuses == {"verified"}:
+        return checked_inputs, True
+    return checked_inputs, None
+
+
 def _resolve_evidence(
     spec: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -5865,6 +5957,15 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, file_label
         )
 
+    # Issue #2875: a `pex` envelope also pins the schematic side of its
+    # comparison. Verified per role and folded into `input_verified` so a
+    # changed resolvable input can never keep a fully verified citation.
+    pex_inputs: list[dict[str, Any]] | None = None
+    if check_kind == "pex":
+        pex_inputs, input_verified = _fold_pex_schematic_inputs(
+            envelope, spec, file_label, input_verified
+        )
+
     return (
         {
             "spec": spec,
@@ -5876,6 +5977,7 @@ def _resolve_evidence(
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
             "input_verified": input_verified,
+            "pex_inputs": pex_inputs,
         },
         None,
     )
@@ -5900,6 +6002,11 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    # Issue #2875: per-role verification of a `pex` envelope's schematic-side
+    # inputs (request, body, DUT, reference netlist). Present only when the
+    # cited envelope records those digests; legacy envelopes omit it.
+    if resolution.get("pex_inputs"):
+        citation["pex_inputs"] = resolution["pex_inputs"]
     # Issue #2002: a `drc` citation also carries the three `coverage` fields
     # item 3's doc text requires the claim to disclose -- so the disclosure a
     # claim owes and the numbers it owes it about are in the same artifact.
