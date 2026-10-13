@@ -159,6 +159,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   reasons in `asap7_rules.NOT_IMPLEMENTED` and `docs/cli/drc.md` (#3147,
   #3155, #3156). Additive: no existing rule id changes.
 
+- **`klt sim`: ASAP7 BSIM-CMG OSDI simulation of extracted netlists, and
+  missing-capability diagnostics** (issue #2814, part of #2761): new
+  `scripts/fetch-asap7-sim-toolchain.sh` compiles a commit- and
+  checksum-pinned CMC BSIM-CMG Verilog-A source to an OSDI module in the
+  ignored `pdks/asap7-sim/` store and load-verifies it in the ngspice on
+  `PATH`. `klayout_tools.asap7_bsimcmg` adapts the lambdapdk `level = 72`
+  cards and the extracted `M` cards (`L`, total `NFIN`, no `W`/`NF`) to the
+  module. `klt sim` gains three additive diagnostic codes,
+  `unsupported_model_level`, `osdi_abi_mismatch` and `osdi_load_failed`
+  (selectable in `options.fail_on_diagnostic`), each worded `prerequisite
+  missing: ...`; the first suppresses the misleading follow-on
+  `model_bin_range`. No `schema_version` bump.
+
 - **`klt sta`: per-corner constraint completeness** (issue #2780): every
   response and every `corners[]` entry carries an additive
   `constraint_completeness` block. It reports `unconstrained_endpoints` and

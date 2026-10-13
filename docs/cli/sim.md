@@ -2434,6 +2434,85 @@ fails with `Unable to find definition of model …` and every corner errors.
 `klt characterize` forwards its own `options.osdi_preload` to this option
 (see [`characterize.md`](characterize.md)).
 
+## ASAP7 FinFET (BSIM-CMG) simulation
+
+Netlists from `klt extract --deck asap7` (FinFET, geometry-counted `NFIN`)
+simulate in ngspice with the ASAP7 BSIM-CMG models once ngspice has a
+BSIM-CMG OSDI module
+([#2814](https://github.com/2AMLogic/klayout-tools/issues/2814)). Stock
+ngspice has no BSIM-CMG: the pinned PDK's `level = 72` cards fail with
+`Only MOS device levels ... are supported in this binary`.
+
+**Provisioning.** `scripts/fetch-asap7-sim-toolchain.sh` (see
+[`pdks/README.md`](../../pdks/README.md)) fetches the CMC BSIM-CMG 111.0.0
+Verilog-A source (dwarning/VA-Models commit `6099b4e1...`, tarball sha256
+`357d6956...`), compiles it with the same pinned OpenVAF-Reloaded
+(`osdi_0.4-153-g2e066436`) as the SG13G2 flow, and load-verifies the module
+in the `ngspice` on `PATH` (`pre_osdi` + `devhelp` must list `bsimcmg_va`).
+It needs ngspice >= 44 built with OSDI and, for the pinned compiler, Linux
+x86-64 (elsewhere set `OPENVAF_R_BIN`). The `.osdi` lands in the ignored
+`pdks/asap7-sim/osdi/`; nothing fetched or built is tracked.
+
+**Card adaptation** (`klayout_tools.asap7_bsimcmg`, pure text-to-text):
+
+- `adapt_model_cards` rewrites `.model nmos_rvt nmos level = 72 ...` as
+  `.model nmos_rvt bsimcmg_va type=1 ...` (`type=-1` for pmos) and drops
+  `level` and `version` (the Verilog-A module has neither; the cards say
+  `version = 107`, the module is 111.0.0). All other parameters are carried
+  over verbatim. The module does not know `coremod`, `capmod` and `nseg`;
+  ngspice reports them as `unrecognized parameter ... - ignored`, so those
+  three have no effect. `corner_library` wraps the TT/FF/SS cards as
+  `.lib tt|ff|ss` sections, so `models.lib` plus `corners.process` makes a
+  multi-corner run an ordinary `klt sim` sweep.
+- `adapt_extracted_netlist` turns `M<name> d g s b <model> L=.. W=.. NFIN=..`
+  into the OSDI element `N<name> d g s b <model> L=.. NFIN=..`. BSIM-CMG has
+  no `W` (width is quantised by the fin count), so it is dropped; `NFIN` is
+  the **total** fin count and is passed through unchanged (an `NF=`/`FINGERS=`/
+  `AS`/`AD`/`PS`/`PD` on the card is refused, since BSIM-CMG's `NF` would
+  multiply `NFIN`). KLayout's `\$11` / `VDD$1` names become `11` / `VDD_1`.
+  The extractor's `M` card (`finfet_card`) is unchanged: it stays the
+  CDL-shaped card LVS compares. Measured: `NFIN=6` draws exactly twice the
+  drain current of `NFIN=3`.
+- The extracted cell's separate `VDD`/`VDD$1` (tap vs. source) and
+  `vsubs`/`VSS` pins are distinct nets; the testbench ties them.
+
+**Request.**
+
+```json
+"models": {"lib": "asap7_bsimcmg.lib"},
+"corners": {"process": ["tt", "ff", "ss"], "supply_v": {"vdd": [0.7]}, "temperature_c": [25]},
+"options": {"osdi_preload": ["pdks/asap7-sim/osdi/bsimcmg.osdi"]}
+```
+
+**Prerequisite failures are errors, never passes.** Without the module (or
+with an ngspice that cannot load it) every corner is `status: "error"` with
+a `prerequisite missing: ...` diagnostic naming the capability:
+`unsupported_model_level` (the `level = 72` line above),
+`osdi_abi_mismatch` (`NGSPICE only supports OSDI v0.3 but ...`, ngspice <
+44) or `osdi_load_failed` (`Library x.osdi couldn't be loaded`). A missing
+`.osdi` file is refused up front (`osdi_preload file not found`). The
+`unsupported_model_level` diagnostic suppresses the follow-on
+`model_bin_range` code, which would misattribute the failure to a width bin.
+`tests/test_asap7_bsimcmg_sim.py` skips with the missing capability named
+when the corpus, the module or a loading ngspice is absent.
+
+**Verification status (2026-10-12).** The real-run evidence (extracted
+`INVx1_ASAP7_75t_R` / `NAND2xp5_ASAP7_75t_R` simulated at TT through
+`klt sim`, with the VTC switching point or delay recorded) is **outstanding**:
+it needs a host with ngspice >= 44 built with OSDI support and a Linux x86-64
+OpenVAF-Reloaded compile, which the fleet worker (ngspice-42, no OSDI/OpenVAF)
+does not provide. The integration test in `tests/test_asap7_bsimcmg_sim.py`
+runs that simulation and skips, naming the missing capability, until the
+toolchain and the ASAP7 corpus are present. What *is* pinned and verified:
+the BSIM-CMG Verilog-A tarball sha256
+`357d69569a6fbfd7632887f28a1b3f26102605e1e64ccfcfb2de85b2399af0ab`
+(dwarning/VA-Models `6099b4e1`, contains `code/bsimcmg/vacode111/bsimcmg.va`),
+and the lambdapdk 0.2.17 TT card sha256
+`684708eec0f7d5960be1df6a045de811c8dd2d6b0e1ed7d0f805a3f697f262fc`. The
+`.osdi` hash, simulator build and electrical results are to be recorded here
+by the first run on a provisioned host. The unadapted cards on a stock ngspice
+produce the `unsupported_model_level` diagnostic above.
+
 ## Corner axes
 
 - **`corners.process`** (`array<string | {"name": string, "sections":
@@ -3133,6 +3212,9 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
+| `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
+| `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
+| `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
 | `engine_killed`    | The engine process died from a signal the harness did not send (OOM killer, host reaper, reclaimed worker). `corners[].engine_killed_by_signal` names it (issue #2848). Always `error`; accepted by `options.fail_on_diagnostic`. A harness `timeout` is never reported this way. |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |

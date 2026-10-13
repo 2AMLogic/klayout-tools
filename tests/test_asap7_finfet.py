@@ -23,7 +23,7 @@ from pathlib import Path
 import klayout.db as kdb
 import pytest
 
-from klayout_tools import pdk_capabilities
+from klayout_tools import asap7_bsimcmg, pdk_capabilities
 from klayout_tools.cli import main
 from klayout_tools.decks import (
     FinFETExtractionDeck,
@@ -271,6 +271,77 @@ def test_exported_spice_card_carries_nfin_and_cdl_parameter_set(tmp_path):
     # the simulator (BSIM-CMG's NF would multiply NFIN).
     for forbidden in ("AS=", "AD=", "PS=", "PD=", "FINGERS", " NF="):
         assert forbidden not in card
+
+
+# --------------------------------------------------------------------------- #
+# BSIM-CMG / ngspice OSDI adaptation (issue #2814)
+# --------------------------------------------------------------------------- #
+
+_HSPICE_CARDS = """\
+* header comment
+.model nmos_rvt nmos level = 72
++version = 107             bulkmod = 1               igcmod  = 1
++l       = 2.1e-008        tfin    = 6.5e-009
+.model pmos_rvt pmos level = 72
++version = 107             bulkmod = 1
+"""
+
+
+def test_adapt_model_cards_targets_osdi_module_and_polarity():
+    text = asap7_bsimcmg.adapt_model_cards(_HSPICE_CARDS)
+    assert ".model nmos_rvt bsimcmg_va type=1" in text
+    assert ".model pmos_rvt bsimcmg_va type=-1" in text
+    # level/version have no counterpart in the Verilog-A module.
+    assert "level" not in text.split("\n", 1)[1]
+    assert "version" not in text.split("\n", 1)[1]
+    # Everything else is carried over verbatim.
+    assert "bulkmod=1" in text and "tfin=6.5e-009" in text and "l=2.1e-008" in text
+
+
+def test_adapt_model_cards_refuses_non_bsimcmg_cards():
+    with pytest.raises(ValueError, match="level = 72"):
+        asap7_bsimcmg.adapt_model_cards(".model nmos_x nmos level = 54\n")
+    with pytest.raises(ValueError, match="no BSIM-CMG"):
+        asap7_bsimcmg.adapt_model_cards("* nothing\n")
+
+
+def test_adapt_extracted_netlist_card_contract(tmp_path):
+    _extract(tmp_path, fins=3, fingers=2)
+    adapted = asap7_bsimcmg.adapt_extracted_netlist(
+        (tmp_path / "dev.spice").read_text()
+    )
+    cards = [ln for ln in adapted.splitlines() if ln.startswith("N")]
+    assert len(cards) == 1
+    # OSDI element, L kept, W dropped, NFIN the *total* fin count (3 x 2).
+    assert re.search(r"\snmos_rvt L=0\.02U NFIN=6$", cards[0]), cards[0]
+    for forbidden in ("W=", "AS=", "AD=", "PS=", "PD=", "FINGERS", " NF="):
+        assert forbidden not in cards[0]
+    assert not any(ln.startswith("M") for ln in adapted.splitlines())
+
+
+def test_adapt_extracted_netlist_sanitizes_klayout_names_consistently():
+    text = (
+        ".SUBCKT X A VDD VDD$1 Y\n"
+        "M$1 \\$11 A Y VDD$1 nmos_rvt L=0.02U W=0.081U NFIN=3\n"
+        ".ENDS\n"
+    )
+    out = asap7_bsimcmg.adapt_extracted_netlist(text)
+    assert ".SUBCKT X A VDD VDD_1 Y" in out
+    assert "N_1 _11 A Y VDD_1 nmos_rvt L=0.02U NFIN=3" in out
+
+
+@pytest.mark.parametrize(
+    "card, fragment",
+    [
+        ("M1 d g s b nmos_rvt L=0.02U W=0.1U", "no NFIN"),
+        ("M1 d g s b nmos_rvt L=0.02U W=0.1U NFIN=3 NF=2", "NF="),
+        ("M1 d g s b nmos_rvt L=0.02U W=0.1U NFIN=3 FINGERS=2", "FINGERS="),
+        ("M1 d g s nmos_rvt L=0.02U NFIN=3", "unexpected FinFET card shape"),
+    ],
+)
+def test_adapt_extracted_netlist_refuses_cards_it_would_mis_scale(card, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        asap7_bsimcmg.adapt_extracted_netlist(card + "\n")
 
 
 def test_different_fin_counts_stay_distinguishable(tmp_path):
