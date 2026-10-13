@@ -190,6 +190,14 @@ def _install_and_probe(tmp: Path, links: Path, requirement: str) -> dict:
         "--find-links",
         str(links),
         "--no-deps",
+        # `--no-cache`: the release wheel's *filename* (`klayout_tools-9.9.9-...`)
+        # and its `--find-links` path are identical across runs, and uv's
+        # install cache keys on them without validating file content, so a
+        # wheel from a previous run of this suite (a different throwaway
+        # checkout, hence a different recorded `git_commit`) could satisfy
+        # this run's install (issue #3186: CI's persisted uv cache produced
+        # exactly that). Every install here must read the wheel it is given.
+        "--no-cache",
         requirement,
     )
     # `-I`: isolated mode, so the probe imports the installed artifact, never
