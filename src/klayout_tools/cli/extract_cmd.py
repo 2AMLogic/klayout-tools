@@ -325,6 +325,7 @@ _REQUEST_FIELD_DESTS = {
         "file",
         "deck",
         "output",
+        "no_netlist",
         "top",
         "pdk",
         "pdk_root",
@@ -348,6 +349,7 @@ _REQUEST_FIELD_DESTS = {
         "top_cell_pins",
         "pins",
         "def_pins",
+        "rename_declared_pins",
         "pin_source_cells",
         "deck_options",
         "label_layers",
@@ -423,6 +425,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "file": _path("file"),
             "deck": _str("deck"),
             "output": _path("output"),
+            "no_netlist": _bool("no_netlist"),
             "top": _str("top"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
@@ -450,6 +453,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "top_cell_pins": _bool("top_cell_pins"),
             "pins": _comma_joined("pins"),
             "def_pins": _path("def_pins"),
+            "rename_declared_pins": _bool("rename_declared_pins"),
             "pin_source_cells": _comma_joined("pin_source_cells"),
             "deck_options": reqdoc.get_str_map_as_pairs(
                 request,
@@ -516,6 +520,7 @@ def run(args: argparse.Namespace) -> int:
             args.file,
             args.deck,
             output=args.output,
+            no_netlist=args.no_netlist,
             top=args.top,
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
@@ -616,6 +621,12 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that
             # predates it.
             def_pins=def_pins,
+            # `--rename-declared-pins` (issue #2854): renames each
+            # surviving promoted pin net to its declared name, so the
+            # written `.SUBCKT` header carries canonical interface names.
+            # `False` when the flag was never given, unchanged from every
+            # call site that predates it.
+            rename_declared_pins=args.rename_declared_pins,
             # `--pin-source-cells` (issue #1513): the positional, probe-based
             # declared-pin mechanism for a `klt gen-compose`d assembly with
             # no governing top-level DEF -- derives the declared top-level
@@ -738,6 +749,7 @@ def _print_text(report: dict) -> None:
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")
+    # Both are None under `--no-netlist` (issue #2850).
     print(f"netlist_path: {report['netlist_path']}")
     print(f"netlist_sha256: {report['netlist_sha256']}")
     print(

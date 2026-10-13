@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1148",
-  "loom_commit": "1448fdfa79ac2dcab7fad6b95b72697b450f2a4a",
+  "loom_version": "0.19.1152",
+  "loom_commit": "2d5fe17958dca799058f16bdd74a12336990bec0",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -441,7 +441,18 @@
     ".loom/docs/forge-events.md",
     ".loom/scripts/tests/test-merge-pr-closed-issue-cleanup.sh",
     ".loom/scripts/tests/test-resync-installed-retired-migrate.sh",
-    ".loom/scripts/tests/test-sync-labels-migrate-retired.sh"
+    ".loom/scripts/tests/test-sync-labels-migrate-retired.sh",
+    ".loom/docs/configuring-resources.md",
+    ".loom/docs/hyperparameters.md",
+    ".loom/scripts/classify-ac-verification.sh",
+    ".loom/scripts/extract-capability-markers.sh",
+    ".loom/scripts/tests/test-classify-error.sh",
+    ".loom/docs/operator-presence.md",
+    ".loom/scripts/tests/test-approval-history-per-issue-events.sh",
+    ".agents/skills/loom-guide/SKILL.md",
+    ".agents/skills/loom-judge-reference/SKILL.md",
+    ".loom/docs/trace-identity.md",
+    ".loom/scripts/tests/test-build-gate-runner.sh"
   ],
   "last_resync": "2026-10-13",
   "loom_source_remote": "git@github.com:rjwalters/loom.git",

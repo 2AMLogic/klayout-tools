@@ -229,8 +229,11 @@ import json
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
+from . import env_provenance
 from ._openroad_engine import (
     _container_runtime_hint,
     _count_violations,
@@ -260,7 +263,15 @@ from .pdk_cells import resolve_liberty_for_cell_library
 #: JSON shape -- versioned independently of every other verb's own
 #: ``SCHEMA_VERSION`` (docs/json-contract.md: "versioned per command, not
 #: globally").
-SCHEMA_VERSION = 1
+#:
+#: ``2`` (issue #2879): ``def_path``/``verilog_path``/``spef_path`` are the
+#: ``{path, scope}`` envelope (``env_provenance.repo_relative_path``, the
+#: shape ``klt sim``/``klt pex`` adopted in issue #1261) instead of plain
+#: absolute-path strings, and the SPEF reader-warning sample no longer
+#: embeds the producing checkout's absolute input paths. A schema-``1``
+#: response carried the absolute host path, which made committed STA
+#: evidence verifiable only on the host that produced it.
+SCHEMA_VERSION = 2
 
 _SETUP_VIOLATIONS_BEGIN = "===KLT_STA_SETUP_VIOLATIONS_BEGIN==="
 _SETUP_VIOLATIONS_END = "===KLT_STA_SETUP_VIOLATIONS_END==="
@@ -631,6 +642,176 @@ def run_sta(
     assert input_path is not None
     basename = os.path.splitext(os.path.basename(input_path))[0]
 
+    # Issue #2879: the absolute `def_path`/`verilog_path`/`spef_path` above
+    # are *engine* paths -- what `read_def`/`read_verilog`/`read_spef` and
+    # the hashing below consume. What the response persists is derived from
+    # them exactly once, here, and never fed back to the engine.
+    report_paths = _ReportPaths.build(
+        def_path=def_path,
+        verilog_path=verilog_path,
+        spef_path=spef_path,
+        repo_root=env_provenance.find_repo_root(request_dir),
+    )
+    with report_paths.scrubbing_errors():
+        return _dispatch_sta(
+            requested_corner=requested_corner,
+            requested_corners=requested_corners,
+            report_paths=report_paths,
+            cell_library=cell_library,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            has_def=has_def,
+            def_path=def_path,
+            verilog_path=verilog_path,
+            hdl_toplevel=hdl_toplevel,
+            geometry_source=geometry_source,
+            clock_port=clock_port,
+            clock_period_ns=clock_period_ns,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
+            input_delays=input_delays,
+            output_delays=output_delays,
+            spef_path=spef_path,
+            wire_load_model=wire_load_model,
+            wire_load_mode=wire_load_mode,
+            propagated_clock=propagated_clock,
+            output_dir=output_dir,
+            input_path=input_path,
+            basename=basename,
+        )
+
+
+class _ReportPaths:
+    """Issue #2879: the persisted identity of ``klt sta``'s three input
+    files, kept separate from the absolute engine paths they derive from.
+
+    ``def_path``/``verilog_path``/``spef_path`` are each the ``{path,
+    scope}`` envelope :func:`env_provenance.repo_relative_path` defines
+    (``scope: "repo"`` with a repo-relative POSIX path, or ``{"path": null,
+    "scope": "external"}`` for an input outside any repository -- never an
+    absolute host path), or plain ``None`` when this request does not use
+    that input at all (``def_path`` in ``verilog`` mode, ``verilog_path`` in
+    ``def`` mode, ``spef_path`` with no ``request.spef``). ``None`` rather
+    than ``scope: "absent"`` keeps the schema-1 "not applicable" value, and
+    is what lets ``klt signoff`` fall through from ``def_path`` to
+    ``verilog_path`` when choosing which artifact to re-hash.
+
+    :meth:`scrub` is the bounded warning/error normaliser: it replaces only
+    the literal resolved forms of these three files (``abspath`` and
+    ``realpath``, longest first so one never half-rewrites the other) with
+    their report identity -- the repo-relative path, or ``<outside repo>``.
+    Any other absolute-looking text an engine diagnostic carries is left
+    exactly as the engine wrote it.
+    """
+
+    def __init__(
+        self,
+        *,
+        def_path: dict[str, Any] | None,
+        verilog_path: dict[str, Any] | None,
+        spef_path: dict[str, Any] | None,
+        replacements: list[tuple[str, str]],
+    ) -> None:
+        self.def_path = def_path
+        self.verilog_path = verilog_path
+        self.spef_path = spef_path
+        self._replacements = replacements
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        def_path: str | None,
+        verilog_path: str | None,
+        spef_path: str | None,
+        repo_root: str | None,
+    ) -> _ReportPaths:
+        envelopes: dict[str, dict[str, Any] | None] = {}
+        labels: dict[str, str] = {}
+        for field, engine_path in (
+            ("def_path", def_path),
+            ("verilog_path", verilog_path),
+            ("spef_path", spef_path),
+        ):
+            if engine_path is None:
+                envelopes[field] = None
+                continue
+            envelope = env_provenance.repo_relative_path(
+                engine_path, repo_root=repo_root
+            )
+            envelopes[field] = envelope
+            label = (
+                envelope["path"]
+                if envelope.get("scope") == "repo"
+                else env_provenance.render_path_field(envelope)
+            )
+            for variant in (engine_path, os.path.realpath(engine_path)):
+                labels.setdefault(variant, label)
+        replacements = sorted(
+            labels.items(), key=lambda item: len(item[0]), reverse=True
+        )
+        return cls(
+            def_path=envelopes["def_path"],
+            verilog_path=envelopes["verilog_path"],
+            spef_path=envelopes["spef_path"],
+            replacements=replacements,
+        )
+
+    def scrub(self, text: str) -> str:
+        for engine_path, label in self._replacements:
+            text = text.replace(engine_path, label)
+        return text
+
+    @contextmanager
+    def scrubbing_errors(self) -> Iterator[None]:
+        """Re-raise a :class:`PostRouteStaError` whose message quotes one of
+        the three resolved input paths (``[ERROR ODB-...] ... /abs/checkout/
+        flows/gcd.def``) with that path rewritten to the input's report
+        identity, exactly like the warning sample. The message is otherwise
+        untouched, and an error that quotes none of them propagates as-is."""
+        try:
+            yield
+        except PostRouteStaError as exc:
+            scrubbed = self.scrub(str(exc))
+            if scrubbed == str(exc):
+                raise
+            raise PostRouteStaError(scrubbed) from exc
+
+
+def _identity(text: str) -> str:
+    return text
+
+
+def _dispatch_sta(
+    *,
+    requested_corner: str | None,
+    requested_corners: list[str] | None,
+    report_paths: _ReportPaths,
+    cell_library: str,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    has_def: bool,
+    def_path: str | None,
+    verilog_path: str | None,
+    hdl_toplevel: str | None,
+    geometry_source: str,
+    clock_port: str,
+    clock_period_ns: float,
+    input_delay_ns: float | None,
+    output_delay_ns: float | None,
+    input_delays: dict[str, dict[str, float]] | None,
+    output_delays: dict[str, dict[str, float]] | None,
+    spef_path: str | None,
+    wire_load_model: str | None,
+    wire_load_mode: str | None,
+    propagated_clock: bool,
+    output_dir: str,
+    input_path: str,
+    basename: str,
+) -> dict[str, Any]:
+    """Run the single- or multi-corner analysis :func:`run_sta` resolved,
+    and assemble its response. Every ``*_path`` argument is an absolute
+    engine path; ``report_paths`` carries what the response persists."""
     # Issue #1871: `pdk.corners` (a list) is the multi-corner alternative to
     # the scalar `pdk.corner` above -- both share every request field
     # resolved up to this point (`def`/`verilog` are loaded fresh in *every*
@@ -660,6 +841,7 @@ def run_sta(
             output_dir=output_dir,
             input_path=input_path,
             basename=basename,
+            report_paths=report_paths,
         )
 
     corner_fields, resolution = _run_corner_session(
@@ -683,6 +865,7 @@ def run_sta(
         propagated_clock=propagated_clock,
         output_dir=output_dir,
         script_tag=basename,
+        scrub=report_paths.scrub,
     )
 
     engine_version = _openroad_version()
@@ -706,10 +889,12 @@ def run_sta(
         "engine_version": engine_version,
         "hdl_toplevel": hdl_toplevel,
         "status": "ok",
-        "def_path": def_path,
+        # Issue #2879 (schema 2): `{path, scope}` envelopes, never the
+        # absolute engine path -- see `_ReportPaths`.
+        "def_path": report_paths.def_path,
         # Additive field (issue #1825): `null` unless `request.verilog` was
         # given -- the mutually-exclusive counterpart to `def_path` above.
-        "verilog_path": verilog_path,
+        "verilog_path": report_paths.verilog_path,
         # Additive field (issue #1826): echo of `request.geometry_source` --
         # see this module's own docstring "Pre-route DEFs" section. Always
         # present (never `null`): `"routed"` is the default when the request
@@ -732,7 +917,7 @@ def run_sta(
         # shapes; never infer it from clock_skew_ns, which is a measured
         # metric that is non-zero under ideal timing too.
         "clock_mode": "propagated" if propagated_clock else "ideal",
-        "spef_path": spef_path,
+        "spef_path": report_paths.spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
         "total_negative_slack_ns": corner_fields["total_negative_slack_ns"],
         "worst_hold_slack_ns": corner_fields["worst_hold_slack_ns"],
@@ -795,6 +980,7 @@ def _run_corner_session(
     propagated_clock: bool,
     output_dir: str,
     script_tag: str,
+    scrub: Callable[[str], str] = _identity,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one complete, fresh OpenSTA session (``read_lef`` x2, ``read_def``
     or ``read_verilog``/``link_design``, ``read_liberty``, ``create_clock``,
@@ -940,9 +1126,15 @@ def _run_corner_session(
         ),
     }
     if spef_path is not None:
-        corner_fields["spef_annotation"] = _spef_annotation_block(
-            completed, spef_net_names
-        )
+        spef_annotation = _spef_annotation_block(completed, spef_net_names)
+        # Issue #2879: an OpenSTA reader warning quoting the SPEF (or DEF)
+        # by its resolved absolute path is persisted with that input's
+        # report identity instead -- bounded to the three known input
+        # paths, so every other diagnostic byte is kept verbatim.
+        spef_annotation["reader_warning_sample"] = [
+            scrub(line) for line in spef_annotation["reader_warning_sample"]
+        ]
+        corner_fields["spef_annotation"] = spef_annotation
     else:
         corner_fields["spef_annotation"] = None
     # Issue #2739: the propagated-clock evidence block -- what propagation
@@ -983,6 +1175,7 @@ def _run_multi_corner(
     output_dir: str,
     input_path: str,
     basename: str,
+    report_paths: _ReportPaths,
 ) -> dict[str, Any]:
     """Issue #1871: ``request.pdk.corners`` -- characterize the *same*
     loaded ``def``/``verilog`` geometry at every corner in ``corners``, one
@@ -1042,6 +1235,7 @@ def _run_multi_corner(
             propagated_clock=propagated_clock,
             output_dir=output_dir,
             script_tag=f"{basename}__{corner_name}",
+            scrub=report_paths.scrub,
         )
         if shared_pdk_info is None:
             shared_pdk_info = resolution["pdk_info"]
@@ -1084,8 +1278,8 @@ def _run_multi_corner(
         "engine_version": engine_version,
         "hdl_toplevel": hdl_toplevel,
         "status": "ok",
-        "def_path": def_path,
-        "verilog_path": verilog_path,
+        "def_path": report_paths.def_path,
+        "verilog_path": report_paths.verilog_path,
         "geometry_source": geometry_source,
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
@@ -1096,7 +1290,7 @@ def _run_multi_corner(
         # entry carries that session's own `clock_propagation` evidence
         # block (the network latencies it reports *do* vary per corner).
         "clock_mode": "propagated" if propagated_clock else "ideal",
-        "spef_path": spef_path,
+        "spef_path": report_paths.spef_path,
         "provenance": provenance,
         # Additive field (issue #1871): one entry per requested
         # `request.pdk.corners` name, in the same order the request gave

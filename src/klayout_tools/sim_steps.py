@@ -124,6 +124,18 @@ def _error(message: str) -> Exception:
     return SimError(message)
 
 
+def _refuse_crossings(spec: dict[str, Any]) -> None:
+    """Issue #2868: a ``crossings`` series reads one transient plot's
+    rawfile; no per-step equivalent is implemented, so it is refused by
+    name rather than silently reduced to something else."""
+    if spec.get("crossings") is not None:
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'crossings' is not supported "
+            "with analysis_steps -- use the scalar analysis "
+            '(kind "tran") for a threshold-crossing series'
+        )
+
+
 def is_steps_analysis(analysis: dict[str, Any]) -> bool:
     """Whether a resolved ``analysis`` object is a step sequence."""
     return analysis.get("kind") == STEPS_KIND and "steps" in analysis
@@ -293,6 +305,7 @@ def _resolve_step_measurements(
     local_names: set[str] = set()
     for spec in specs:
         _validate_measurement_form(spec)
+        _refuse_crossings(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
             raise _error(
@@ -432,6 +445,7 @@ def _resolve_derived_measurements(
     resolved: list[dict[str, Any]] = []
     for position, spec in enumerate(specs):
         name = spec["name"]
+        _refuse_crossings(spec)
         if spec.get("spice") is not None:
             raise _error(
                 f"measurement {name!r}: with analysis_steps, a top-level "
@@ -541,10 +555,12 @@ def validate_alter_targets(
     (``corners.supply_v`` -- the step would silently replace the corner's own
     value for every later solve), or at a source declared with an explicit
     transient waveform (ngspice's ``alter`` has no effect on it -- the same
-    rule as ``_validate_supply_override_targets``, issue #2706)."""
+    rule as ``_validate_supply_override_targets``, issue #2706), or at a name
+    that is only a top-level ``.param`` (``alter`` cannot change a parameter
+    -- issue #2867)."""
     if not is_steps_analysis(analysis):
         return
-    from .sim import _top_level_waveform_sources
+    from .sim import _param_only_targets, _top_level_waveform_sources
 
     supply_targets = {
         key.strip().lower() for point in corner_points for key in point.supply_v
@@ -557,6 +573,20 @@ def validate_alter_targets(
     for step in analysis["steps"]:
         for target, _value in step["alter"]:
             _check_alter_target(step["name"], target, supply_targets, waveforms)
+    step_targets = sorted(
+        {target for step in analysis["steps"] for target, _value in step["alter"]}
+    )
+    params = _param_only_targets(netlist_path, step_targets) if step_targets else {}
+    for step in analysis["steps"]:
+        for target, _value in step["alter"]:
+            if target in params:
+                raise _error(
+                    f"step {step['name']!r}: alter target {target!r} names a "
+                    f".param, not an element: ngspice's alter cannot change a "
+                    "parameter (expressions that read it were evaluated when "
+                    "the deck was parsed, so the step would silently solve at "
+                    "the nominal value) -- alter the source or element itself"
+                )
 
 
 def _check_alter_target(
