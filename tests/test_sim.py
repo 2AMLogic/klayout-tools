@@ -11472,6 +11472,171 @@ def test_supply_override_explicit_points_are_validated(tmp_path, monkeypatch):
         sim.run_sim(str(_write_request(tmp_path, request)))
 
 
+# --- #2867: supply override vs. a `.param` (PDK-free) ---------------------- #
+
+
+def _param_targets(tmp_path, body, keys, name="n.spice"):
+    (tmp_path / name).write_text(body)
+    return sim._param_only_targets(str(tmp_path / name), list(keys))
+
+
+def _validate_supply(tmp_path, body, supply, name="n.spice"):
+    (tmp_path / name).write_text(body)
+    sim._validate_supply_override_targets(
+        str(tmp_path / name), [sim.CornerPoint(None, supply, 27)]
+    )
+
+
+def test_supply_override_on_param_driven_sin_source_is_rejected(tmp_path, monkeypatch):
+    """The issue's repro: sweeping the `.param` a SIN() source reads used to
+    return N identical `pass` corners; it now fails before any run."""
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    monkeypatch.setattr(sim.subprocess, "Popen", _boom)
+    body = (
+        ".param vnom=1.8 amp=0.05\nVrail rail 0 sin({vnom} {amp} 1meg)\nR1 rail 0 1k\n"
+    )
+    path = _supply_deck_request(tmp_path, body, {"amp": [0.01, 0.1, 0.2]})
+    with pytest.raises(sim.SimError) as exc:
+        sim.run_sim(str(path))
+    message = str(exc.value)
+    assert "'amp'" in message and ".param" in message
+    assert "alter amp=<value>" in message
+    assert "corners.params" in message and "'vrail'" in message
+
+
+def test_supply_override_on_param_hints_the_reading_source(tmp_path):
+    with pytest.raises(sim.SimError) as exc:
+        _validate_supply(
+            tmp_path,
+            ".param vdd_val=1.8\nVdd vdd 0 DC {vdd_val}\nR1 vdd 0 1k\n",
+            {"vdd_val": 1.62},
+        )
+    assert "'vdd_val'" in str(exc.value) and "'vdd'" in str(exc.value)
+
+
+def test_supply_override_on_source_or_element_named_like_param_passes(tmp_path):
+    # A DC source key is unchanged; a name declared as both `.param` and an
+    # element is the element.
+    _validate_supply(
+        tmp_path,
+        ".param vdd=1.8 vdd_val=1.8\nVdd vdd 0 DC {vdd}\nR1 vdd 0 1k\n",
+        {"vdd": 1.62},
+    )
+
+
+@pytest.mark.parametrize(
+    "body,key",
+    [
+        (".PARAM a=1\n+ VBIAS={a*2} c='a+1'\nVdd d 0 1\n", "vbias"),
+        (".param a=1\n+ VBIAS={a*2} c='a+1'\nVdd d 0 1\n", "C"),
+        (".param a = 1 b = {a == 1 ? 2 : 3}\nVdd d 0 1\n", "B"),
+        ("* .param x\n.param ripple=0.1 ; tone amplitude\nVdd d 0 1\n", "Ripple"),
+        # A `.control`-block line is not an element declaration.
+        (".param vb=1\nVdd d 0 1\n.control\nvb x y\n.endc\n", "vb"),
+    ],
+)
+def test_param_only_target_lexical_forms(tmp_path, body, key):
+    assert list(_param_targets(tmp_path, body, [key])) == [key]
+
+
+@pytest.mark.parametrize(
+    "body,key",
+    [
+        # Commented-out or subckt-local `.param`: not a top-level parameter.
+        ("* .param vb=1\nVdd d 0 1\n", "vb"),
+        (".subckt blk a\n.param vb=1\nR1 a 0 {vb}\n.ends\nVdd d 0 1\n", "vb"),
+        # A subckt-local `.param` shadowing a top-level source's name.
+        (".subckt blk a\n.param vdd=1\n.ends\nVdd vdd 0 1.8\n", "vdd"),
+        # A parameter value referencing a name is not a declaration of it.
+        (".param a={vb}\nVdd d 0 1\n", "vb"),
+        # Hierarchical name: never a `.param`.
+        (".param vdd=1\nVdd d 0 1\n", "x1.vdd"),
+    ],
+)
+def test_param_only_target_non_matches(tmp_path, body, key):
+    assert _param_targets(tmp_path, body, [key]) == {}
+
+
+def test_param_only_target_follows_includes(tmp_path):
+    (tmp_path / "stim").mkdir()
+    (tmp_path / "stim" / "rails.spice").write_text(
+        ".include nested.spice\n.subckt x a\nVinner a 0 1\n.ends\n"
+    )
+    (tmp_path / "stim" / "nested.spice").write_text("Vbias b 0 {vbias}\n")
+    (tmp_path / "models.lib").write_text(
+        ".lib tt\nVlib l 0 {vlib}\n.endl tt\n.lib ff\n.endl ff\n"
+    )
+    body = (
+        ".param vbias=0.5 vlib=1 vinner=1 vamp=0.1\n"
+        ".include 'stim/rails.spice'\n"
+        ".lib models.lib tt\n"
+    )
+    # Elements declared in (nested) includes and `.lib` sections are found;
+    # a subckt-local one in an include is not a top-level element.
+    targets = _param_targets(tmp_path, body, ["vbias", "vlib", "vinner", "vamp"])
+    assert sorted(targets) == ["vamp", "vinner"]
+
+
+def test_param_only_target_unresolved_include_is_never_rejected(tmp_path):
+    body = ".param vbias=0.5\n.include missing/stim.spice\nR1 a 0 1k\n"
+    assert _param_targets(tmp_path, body, ["vbias"]) == {}
+    _validate_supply(tmp_path, body, {"vbias": 0.6})
+
+
+def test_param_only_target_include_cycle_terminates(tmp_path):
+    (tmp_path / "a.spice").write_text(".include b.spice\n")
+    (tmp_path / "b.spice").write_text(".include a.spice\n")
+    body = ".param vb=1\n.include a.spice\n"
+    assert list(_param_targets(tmp_path, body, ["vb"])) == ["vb"]
+
+
+def test_supply_override_param_explicit_points_are_validated(tmp_path, monkeypatch):
+    monkeypatch.setattr(sim.subprocess, "run", _boom)
+    (tmp_path / "body.spice").write_text(
+        ".param amp=0.1\nVs s 0 SIN(0 {amp} 1k)\nR1 s 0 1k\n"
+    )
+    request = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        "_explicit_points": [
+            {"process": None, "supply_v": {"amp": 0.2}, "temperature_c": 27}
+        ],
+    }
+    with pytest.raises(sim.SimError, match=r"'amp' names a \.param"):
+        sim.run_sim(str(_write_request(tmp_path, request)))
+
+
+@_SKIP_NO_NGSPICE
+def test_integration_ngspice_alter_of_param_is_a_logged_no_op(tmp_path):
+    """Negative control pinning #2867's premise against the installed
+    ngspice: `alter <param>=<value>` addresses no device (a log line, no
+    error exit) and the parameter's dependents keep their nominal value."""
+    deck = tmp_path / "deck.cir"
+    deck.write_text(
+        "* alter of a .param\n"
+        ".param vdc=1.0\n"
+        "V1 d 0 {vdc}\n"
+        "R1 d 0 1k\n"
+        ".control\n"
+        "alter vdc=2.0\n"
+        "op\n"
+        "print v(d)\n"
+        "quit\n"
+        ".endc\n"
+        ".end\n"
+    )
+    proc = subprocess.run(
+        [shutil.which("ngspice"), "-b", str(deck)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    log = proc.stdout + proc.stderr
+    assert "no such device or model name vdc" in log.lower()
+    match = re.search(r"v\(d\)\s*=\s*([-+0-9.e]+)", log, re.I)
+    assert match and float(match.group(1)) == pytest.approx(1.0)
+
+
 # --------------------------------------------------------------------------- #
 # Measurement output precision (issue #2681)
 #

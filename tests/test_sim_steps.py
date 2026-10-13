@@ -530,6 +530,17 @@ def test_run_sim_refuses_alter_of_a_waveform_source(tmp_path, monkeypatch):
     assert decks == []
 
 
+def test_run_sim_refuses_alter_of_a_param_only_name(tmp_path, monkeypatch):
+    """Issue #2867: `alter <param>=...` is a silent no-op in ngspice."""
+    _write_body(tmp_path, _BODY + ".param vbias=0.5\nRb out 0 {vbias*1meg}\n")
+    decks = _stub_ngspice(monkeypatch, "")
+    request = _two_point_request()
+    request["analysis_steps"][1]["alter"] = {"vbias": 0.7}
+    with pytest.raises(sim.SimError, match=r"step 'hi'.*'vbias' names a \.param"):
+        sim.run_sim(str(_write_request(tmp_path, request)))
+    assert decks == []
+
+
 # --------------------------------------------------------------------------- #
 # Deck generation
 # --------------------------------------------------------------------------- #

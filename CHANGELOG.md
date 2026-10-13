@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` rejects a `corners.supply_v` key that names a `.param`**
+  (issue #2867): ngspice's `alter <param>=<value>` cannot change a `.param`
+  (its dependents were evaluated when the deck was parsed; ngspice only logs
+  `no such device or model name`), so such a sweep used to report N
+  identical `pass` corners at the nominal value. A key the netlist declares
+  as a top-level `.param` with no element of that name now fails with a
+  `SimError` before any run or off-host submission, pointing at the source
+  that reads the parameter (or at `corners.params`, #3035). The same rule
+  applies to `analysis_steps[].alter` targets. Keys naming a source, a name
+  declared as both, and names whose declaration sits behind an unresolvable
+  `.include`/`.lib` are unaffected. **Behaviour change:** a request keyed by
+  a `.param` name now errors instead of passing; key it by the voltage
+  source instead. The `sky130-bandgap-reference` and `ldo-pmos-pass-error-amp`
+  kb requests were keyed this way and are re-keyed to their sources (`vdd`,
+  `vin`); the LDO entry's recorded `vout_v` at the 3.0 V corner is corrected
+  from 1.80324 V (actually the 3.3 V nominal) to 1.80264 V.
+
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time
   from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the

@@ -1864,7 +1864,11 @@ error, exit 1).
       silently replace the corner's own value;
     - a source declared with an explicit transient waveform, where `alter`
       has no effect (the same rule as the supply axis,
-      [#2706](https://github.com/2AMLogic/klayout-tools/issues/2706)).
+      [#2706](https://github.com/2AMLogic/klayout-tools/issues/2706));
+    - a name the netlist declares only as a top-level `.param` (no element
+      of that name), where `alter` also has no effect -- the same rule and
+      the same lexical limits as the supply axis
+      ([#2867](https://github.com/2AMLogic/klayout-tools/issues/2867)).
 - **Step measurements** use the same two forms as the top level, and each
   is evaluated against **that step's own solve**:
   - `expr`: any ngspice expression reducing to one real scalar. It may also
@@ -2336,13 +2340,29 @@ fails with `Unable to find definition of model …` and every corner errors.
   the section (sky130-style) or the mismatch switch (gf180mcu-style) resolves in
   the actual `.lib` file before using it in production.
 
-- **`corners.supply_v`** (`object`, optional) — keyed by source/`.param` name
+- **`corners.supply_v`** (`object`, optional) — keyed by voltage-source name
   (`vdd`, `vdda`, …), each an array of volts. **Multiple keys sweep together
   by index** (rails move as a set, not a cross product) — all arrays must be
   the same length. Each value becomes an `alter <key>=<value>` command in the
-  generated `.control` block, so `<key>` must name either a voltage source or
-  a `.param` the netlist body defines and its sources reference (e.g.
-  `.param vdd=1.8` / `Vdd vdd 0 DC {vdd}`).
+  generated `.control` block, so `<key>` must name a top-level independent
+  voltage source (for `.param vdd_val=1.8` / `Vdd vdd 0 DC {vdd_val}`, the key
+  is `vdd`, the source -- not `vdd_val`).
+  **Not a `.param`.** ngspice evaluates `.param` expressions when it parses
+  the deck, and `alter <param>=<value>` addresses no device: ngspice only logs
+  `no such device or model name <param>` and simulates the nominal value, so
+  a sweep keyed by a parameter used to report N identical `pass` corners
+  (#2867). `klt sim` now rejects, with a `SimError` before any probe, local
+  run or `remote`/`batch` submission, a key the netlist declares as a
+  top-level `.param` (multi-name `.param a=1 b=2` lines and `+` continuations
+  included, case-insensitive) with no element of that name; the message names
+  the key and, when a top-level voltage source reads the parameter, that
+  source. To sweep the parameter itself (a `SIN()` amplitude or frequency, a
+  bias current) use a parameter axis, `corners.params` (#3035), rather than
+  `supply_v`. A name declared as both a `.param` and an element is the
+  element, and stays valid. This check follows `.include`/`.lib` references
+  looking for an element of that name; if any reference cannot be resolved
+  and read, the key is not rejected (an unresolved declaration is never
+  assumed absent). Hierarchical names are never treated as parameters.
   **Scalar sources only.** ngspice's `alter` silently has no effect on an
   independent voltage source with an explicit transient waveform
   (`PWL`/`PULSE`/`SIN`/`EXP`/`SFFM`/`AM`), so `klt sim` rejects such a request
@@ -3447,7 +3467,7 @@ the *response* echoes back.
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set **and** at least one selected section reads from it (a bundle whose every section names its own `lib` needs none — issue #2522). See "Model library resolution" above. |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` — and any per-section `lib` — through `klt pdk find` instead of a literal path.                                                                    |
 | `corners.process`        | array\<string \| {name, sections: array\<string \| {lib, section}\>}\> | Process-corner axis. Each entry is either a bare `.lib` section name (single `.lib` card) or a bundle object `{"name": str, "sections": [...]}` (one `.lib` card per section, in order). Each `sections[]` entry is a bare section name (read from `models.lib`) or `{"lib": str, "section": str}` naming its own model library for that section (issue #2522 — `$VAR`/`~` expand, relative refs resolve like `models.lib`; each must exist, checked before any corner runs, exit 1 otherwise). See "Corner axes" above. |
-| `corners.supply_v`       | object            | Supply axis, keyed by source/`.param` name; arrays sweep together by index.                                                                                            |
+| `corners.supply_v`       | object            | Supply axis, keyed by voltage-source name (not a `.param`); arrays sweep together by index.                                                                            |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
 | `exclude`                | array\<object\>   | Partial corner specs dropped from the expansion.                                                                                                                       |
 | `monte_carlo.n`          | integer           | Number of samples per expanded corner point. Positive integer, required when `monte_carlo` is present. See "Monte Carlo sampling" above.                              |
@@ -3638,7 +3658,7 @@ corner-sweep rollup fields above are declared.
 | ---------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `corner_id`      | string           | `<process>/<supply>V/<temp>C` (e.g. `ss/1.620V/125C`); `<process>` is `"default"` and `<supply>` is `"novdd"` when that axis is absent from the request. Multiple supply rails join as `key=value` pairs. A Monte Carlo sample appends `/mc<sample_index>` (e.g. `ss/1.620V/125C/mc7`). |
 | `process`        | string \| null   | Process-corner section used, or `null` when the request declares no process axis.                                              |
-| `supply_v`       | object           | Supply values for this corner, keyed by source/`.param` name (`{}` when the request declares no supply axis).                  |
+| `supply_v`       | object           | Supply values for this corner, keyed by voltage-source name (`{}` when the request declares no supply axis).                   |
 | `temperature_c`  | number           | Temperature for this corner.                                                                                                  |
 | `status`         | string           | `"pass"`, `"fail"`, `"error"`, or `"inconclusive"` (issues #2492/#2493 — only reachable when the request declares `options.fail_on_diagnostic` or a plausibility bound; see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above). Precedence `error > inconclusive > fail > pass`. |
 | `runtime_s`      | number           | Engine wall-clock time for this corner (or time-to-timeout, on a killed run).                                                  |
