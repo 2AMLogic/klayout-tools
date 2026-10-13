@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
+  extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in
+  ngspice-46 with the pinned OpenVAF-Reloaded-compiled BSIM-CMG 111.0.0 OSDI
+  module; simulator build, hashes and results are documented in
+  `docs/cli/sim.md`. Docs only; no code change.
+
 - **`klt techmap` / `klt wave` find their native binary under a redirected
   cargo target dir** (issue #3189): the `klt-techmap` / `klt-wave` lookup
   only checked `native/<crate>/target/`, so a binary built with
