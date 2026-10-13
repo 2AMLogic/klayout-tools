@@ -644,6 +644,15 @@ def _print_partition_boundary(result: dict) -> None:
         print(f"  {partition}: {text}")
 
 
+def _status_marker(status: str, palette: Palette) -> tuple[str, str]:
+    """The ``(marker, color)`` for an item ``status`` in the text report."""
+    if status == "met":
+        return "MET  ", palette.green
+    if status == "not_applicable":
+        return "N/A  ", palette.green
+    return "UNMET", palette.red
+
+
 def _not_applicable_suffix(report: dict) -> str:
     """``", N not_applicable"`` when the report has items satisfied by a
     recorded "not applicable" (issue #2865); empty otherwise, so a report
@@ -697,12 +706,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
     for item in result["items"]:
         # Issue #2865: a recorded "not applicable" is its own marker, never
         # the plain MET one.
-        if item["status"] == "met":
-            marker, color = "MET  ", palette.green
-        elif item["status"] == "not_applicable":
-            marker, color = "N/A  ", palette.green
-        else:
-            marker, color = "UNMET", palette.red
+        marker, color = _status_marker(item["status"], palette)
         item_id = str(item["id"]) if item["id"] is not None else "-"
         partition = f" [{item['partition']}]" if item["partition"] else ""
         print(

@@ -1945,6 +1945,29 @@ _NA_STATISTICAL_TEXT_RE = re.compile(
 )
 
 
+def _na_scan_dict(value: dict[str, Any], path: str) -> str | None:
+    """:func:`_na_scan_statistical` for a JSON object."""
+    for key, child in value.items():
+        key_path = f"{path}.{key}" if path else str(key)
+        if str(key).lower() == "statistical":
+            if child not in (None, False, 0, "", "false", "no"):
+                return key_path
+            continue
+        keyed = _NA_STATISTICAL_KEY_RE.search(str(key)) and child not in (
+            None,
+            False,
+            "",
+            [],
+            {},
+        )
+        if keyed:
+            return key_path
+        hit = _na_scan_statistical(child, key_path)
+        if hit is not None:
+            return hit
+    return None
+
+
 def _na_scan_statistical(value: Any, path: str) -> str | None:
     """Conservative scan of one spec/statement row for anything statistical.
 
@@ -1957,29 +1980,14 @@ def _na_scan_statistical(value: Any, path: str) -> str | None:
     ``klt yield`` evidence.
     """
     if isinstance(value, dict):
-        for key, child in value.items():
-            key_path = f"{path}.{key}" if path else str(key)
-            if str(key).lower() == "statistical":
-                if child not in (None, False, 0, "", "false", "no"):
-                    return key_path
-                continue
-            if _NA_STATISTICAL_KEY_RE.search(str(key)) and child not in (
-                None,
-                False,
-                "",
-                [],
-                {},
-            ):
-                return key_path
-            hit = _na_scan_statistical(child, key_path)
-            if hit is not None:
-                return hit
-    elif isinstance(value, list):
+        return _na_scan_dict(value, path)
+    if isinstance(value, list):
         for index, child in enumerate(value):
             hit = _na_scan_statistical(child, f"{path}[{index}]")
             if hit is not None:
                 return hit
-    elif isinstance(value, str) and _NA_STATISTICAL_TEXT_RE.search(value):
+        return None
+    if isinstance(value, str) and _NA_STATISTICAL_TEXT_RE.search(value):
         return path
     return None
 
@@ -2036,6 +2044,122 @@ def _na_load(
     return doc, None, {}
 
 
+_NaRefusal = tuple[str, str | None, None, dict[str, Any]]
+
+
+def _na_refusal(reason: str | None, detail: dict[str, Any]) -> _NaRefusal:
+    """An ``unmet`` :func:`_grade_not_applicable` result."""
+    return "unmet", reason, None, detail
+
+
+def _na_load_documents(
+    form: Any,
+) -> tuple[tuple[dict, dict, dict, dict] | None, _NaRefusal | None]:
+    """Validate the form and load both documents -> ``((spec_ref,
+    statement_ref, spec_doc, statement_doc), None)`` or ``(None, refusal)``."""
+    if not isinstance(form, dict):
+        return None, _na_refusal(
+            _REASON_INVALID_EVIDENCE, {"problem": "'not_applicable' must be an object"}
+        )
+    refs = []
+    for label in ("spec", "statement"):
+        ref, bad = _na_document(form.get(label), label)
+        if ref is None:
+            return None, _na_refusal(_REASON_INVALID_EVIDENCE, bad or {})
+        refs.append(ref)
+    docs = []
+    for ref, label in zip(refs, ("spec", "statement"), strict=True):
+        doc, reason, detail = _na_load(ref, label)
+        if doc is None:
+            return None, _na_refusal(reason, detail)
+        docs.append(doc)
+    return (refs[0], refs[1], docs[0], docs[1]), None
+
+
+def _na_spec_shape_refusal(spec_rows: Any) -> _NaRefusal | None:
+    """Refuse a spec whose ``rows`` are malformed, duplicated or empty."""
+    if not isinstance(spec_rows, list) or not all(
+        isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
+        for row in spec_rows
+    ):
+        return _na_refusal(
+            _REASON_INVALID_EVIDENCE,
+            {
+                "document": "spec",
+                "problem": "'rows' must be a list of objects each with a string 'id'",
+            },
+        )
+    spec_ids = [row["id"] for row in spec_rows]
+    if len(set(spec_ids)) != len(spec_ids):
+        return _na_refusal(
+            _REASON_INVALID_EVIDENCE,
+            {"document": "spec", "problem": "duplicate row ids"},
+        )
+    if not spec_rows:
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
+            {"problem": "the cited spec has no rows"},
+        )
+    return None
+
+
+def _na_spec_refusal(spec_doc: dict[str, Any]) -> _NaRefusal | None:
+    """Ratification, row shape and the statistical scan of the spec."""
+    status_value = spec_doc.get("status")
+    if not (
+        isinstance(status_value, str) and status_value.strip().lower() == "ratified"
+    ):
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_SPEC_UNRATIFIED, {"spec_status": status_value}
+        )
+    spec_rows = spec_doc.get("rows")
+    shape = _na_spec_shape_refusal(spec_rows)
+    if shape is not None:
+        return shape
+    for row in spec_rows:
+        hit = _na_scan_statistical(row, "")
+        if hit is not None:
+            return _na_refusal(
+                _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
+                {"row": row["id"], "field": hit or "id", "document": "spec"},
+            )
+    return None
+
+
+def _na_statement_refusal(
+    statement_rows: Any, spec_ids: list[str]
+) -> _NaRefusal | None:
+    """Shape, statistical-class and coverage checks of the statement."""
+    if not isinstance(statement_rows, list) or not all(
+        isinstance(row, dict)
+        and all(
+            isinstance(row.get(key), str) and row[key].strip()
+            for key in ("id", "class", "reason")
+        )
+        for row in statement_rows
+    ):
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
+            {"problem": "statement 'rows' needs string id, class and reason per row"},
+        )
+    for row in statement_rows:
+        # The statement's own class must not concede a statistical row.
+        if _na_scan_statistical({"class": row["class"]}, "") is not None:
+            return _na_refusal(
+                _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
+                {"row": row["id"], "field": "class", "document": "statement"},
+            )
+    statement_ids = [row["id"] for row in statement_rows]
+    uncovered = [rid for rid in spec_ids if rid not in statement_ids]
+    unknown = [rid for rid in statement_ids if rid not in spec_ids]
+    if uncovered or unknown or len(set(statement_ids)) != len(statement_ids):
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
+            {"uncovered_row_ids": uncovered, "unknown_row_ids": unknown},
+        )
+    return None
+
+
 def _grade_not_applicable(
     form: Any, partition_kind: str
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
@@ -2058,122 +2182,22 @@ def _grade_not_applicable(
     statement completeness.
     """
     if partition_kind != _NOT_APPLICABLE_PARTITION:
-        return (
-            "unmet",
-            _REASON_NOT_APPLICABLE_WRONG_PARTITION,
-            None,
-            {"partition": partition_kind},
+        return _na_refusal(
+            _REASON_NOT_APPLICABLE_WRONG_PARTITION, {"partition": partition_kind}
         )
-    if not isinstance(form, dict):
-        return (
-            "unmet",
-            _REASON_INVALID_EVIDENCE,
-            None,
-            {"problem": "'not_applicable' must be an object"},
-        )
-    spec_ref, bad = _na_document(form.get("spec"), "spec")
-    if spec_ref is None:
-        return "unmet", _REASON_INVALID_EVIDENCE, None, bad or {}
-    statement_ref, bad = _na_document(form.get("statement"), "statement")
-    if statement_ref is None:
-        return "unmet", _REASON_INVALID_EVIDENCE, None, bad or {}
+    loaded, refusal = _na_load_documents(form)
+    if loaded is None:
+        return cast(_NaRefusal, refusal)
+    spec_ref, statement_ref, spec_doc, statement_doc = loaded
 
-    spec_doc, reason, detail = _na_load(spec_ref, "spec")
-    if spec_doc is None:
-        return "unmet", reason, None, detail
-    statement_doc, reason, detail = _na_load(statement_ref, "statement")
-    if statement_doc is None:
-        return "unmet", reason, None, detail
-
-    status_value = spec_doc.get("status")
-    if not (
-        isinstance(status_value, str) and status_value.strip().lower() == "ratified"
-    ):
-        return (
-            "unmet",
-            _REASON_NOT_APPLICABLE_SPEC_UNRATIFIED,
-            None,
-            {"spec_status": status_value},
-        )
-
-    spec_rows = spec_doc.get("rows")
-    if not isinstance(spec_rows, list) or not all(
-        isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
-        for row in spec_rows
-    ):
-        return (
-            "unmet",
-            _REASON_INVALID_EVIDENCE,
-            None,
-            {
-                "document": "spec",
-                "problem": "'rows' must be a list of objects each with a string 'id'",
-            },
-        )
-    spec_ids = [row["id"] for row in spec_rows]
-    if len(set(spec_ids)) != len(spec_ids):
-        return (
-            "unmet",
-            _REASON_INVALID_EVIDENCE,
-            None,
-            {
-                "document": "spec",
-                "problem": "duplicate row ids",
-            },
-        )
-    if not spec_rows:
-        return (
-            "unmet",
-            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
-            None,
-            {"problem": "the cited spec has no rows"},
-        )
-
-    for row in spec_rows:
-        hit = _na_scan_statistical(row, "")
-        if hit is not None:
-            return (
-                "unmet",
-                _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
-                None,
-                {"row": row["id"], "field": hit or "id", "document": "spec"},
-            )
-
+    refusal = _na_spec_refusal(spec_doc)
+    if refusal is not None:
+        return refusal
+    spec_rows = spec_doc["rows"]
     statement_rows = statement_doc.get("rows")
-    if not isinstance(statement_rows, list) or not all(
-        isinstance(row, dict)
-        and all(
-            isinstance(row.get(key), str) and row[key].strip()
-            for key in ("id", "class", "reason")
-        )
-        for row in statement_rows
-    ):
-        return (
-            "unmet",
-            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
-            None,
-            {"problem": "statement 'rows' needs string id, class and reason per row"},
-        )
-    for row in statement_rows:
-        # The statement's own class must not concede a statistical row.
-        hit = _na_scan_statistical({"class": row["class"]}, "")
-        if hit is not None:
-            return (
-                "unmet",
-                _REASON_NOT_APPLICABLE_STATISTICAL_ROW,
-                None,
-                {"row": row["id"], "field": "class", "document": "statement"},
-            )
-    statement_ids = [row["id"] for row in statement_rows]
-    uncovered = [rid for rid in spec_ids if rid not in statement_ids]
-    unknown = [rid for rid in statement_ids if rid not in spec_ids]
-    if uncovered or unknown or len(set(statement_ids)) != len(statement_ids):
-        return (
-            "unmet",
-            _REASON_NOT_APPLICABLE_STATEMENT_INCOMPLETE,
-            None,
-            {"uncovered_row_ids": uncovered, "unknown_row_ids": unknown},
-        )
+    refusal = _na_statement_refusal(statement_rows, [r["id"] for r in spec_rows])
+    if refusal is not None:
+        return refusal
 
     block = {
         "spec": {
@@ -4997,10 +5021,8 @@ def build_tier_report(
                     repo_root=repo_root,
                 )
             total += 1
-            if entry["status"] == "met":
-                met_count += 1
-            elif entry["status"] == STATUS_NOT_APPLICABLE:
-                not_applicable_count += 1
+            met_count += entry["status"] == "met"
+            not_applicable_count += entry["status"] == STATUS_NOT_APPLICABLE
             items.append(entry)
 
     for ladder_row in doc["ladder"]:
