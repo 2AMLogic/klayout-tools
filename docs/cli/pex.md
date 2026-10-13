@@ -236,9 +236,17 @@ switch-parameter file (gf180mcu's `design.ngspice`) ahead of its DUT is
 entirely legitimate ngspice — but before this was an error, `klt pex`
 swapped the **first** matching line, silently re-pointing that file at the
 extracted netlist, leaving the real schematic DUT in place on both sides,
-and reporting the wrong `reference_netlist` (issue #1030). Fold any other
-included file into the DUT netlist itself, or inline it into the testbench
-body, so exactly one `.include`/`.inc` line remains.
+and reporting the wrong `reference_netlist` (issue #1030).
+
+Keep exactly one `.include`/`.inc` line: it is the swap point. Do **not**
+fold another included file into that DUT netlist. The line is replaced by
+the extracted netlist for the extracted-side run, so anything folded into
+the schematic DUT file is present on the schematic side only — a PDK
+switch-parameter file (needed by the corner `.lib` sections on both sides)
+would then be missing from the extracted run, which fails with errors such
+as `Undefined parameter`. Content both legs need must instead be inlined
+into the testbench body (for example as a `.param` card). If that is not
+possible, the testbench cannot be represented by the current request shape.
 
 ### That one line must plausibly name the DUT
 
