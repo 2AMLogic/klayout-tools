@@ -2666,6 +2666,7 @@ def _stub_subprocess_run(
     log_text: str = "",
     stdout: str = "** ngspice-99\n",
     side_effect=None,
+    returncode: int = 0,
 ):
     def fake_run(cmd, capture_output, text, timeout, cwd=None):
         log_path = cmd[cmd.index("-o") + 1]
@@ -2673,7 +2674,7 @@ def _stub_subprocess_run(
             raise side_effect
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(log_text)
-        return fake_completed(stdout)
+        return fake_completed(stdout, returncode=returncode)
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
 
@@ -2721,6 +2722,64 @@ def test_run_sim_stubbed_timeout_is_corner_error(tmp_path, monkeypatch):
     assert corner["status"] == "error"
     codes = [d["code"] for d in corner["diagnostics"]]
     assert codes == ["timeout"]
+
+
+def _engine_outcome_corner(tmp_path, monkeypatch, **stub):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"timeout_s": 5},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, **stub)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_corner_records_engine_exit_code(tmp_path, monkeypatch, returncode):
+    """Issue #2848: a normal exit records its code, no signal, no
+    `engine_killed` diagnostic (a nonzero exit alone is not a kill)."""
+    corner = _engine_outcome_corner(tmp_path, monkeypatch, returncode=returncode)
+    assert corner["engine_exit_code"] == returncode
+    assert corner["engine_killed_by_signal"] is None
+    assert "engine_killed" not in [d["code"] for d in corner["diagnostics"]]
+
+
+def test_corner_killed_by_signal_gets_distinct_diagnostic(tmp_path, monkeypatch):
+    corner = _engine_outcome_corner(tmp_path, monkeypatch, returncode=-9)
+    assert corner["engine_exit_code"] is None
+    assert corner["engine_killed_by_signal"] == "SIGKILL"
+    assert corner["status"] == "error"
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "engine_killed" in codes
+    assert "engine_killed" in sim.DIAGNOSTIC_CODES
+
+
+def test_corner_timeout_and_launch_failure_leave_both_fields_null(
+    tmp_path, monkeypatch
+):
+    corner = _engine_outcome_corner(
+        tmp_path,
+        monkeypatch,
+        side_effect=subprocess.TimeoutExpired(cmd=["ngspice"], timeout=5),
+    )
+    assert corner["engine_exit_code"] is None
+    assert corner["engine_killed_by_signal"] is None
+    assert [d["code"] for d in corner["diagnostics"]] == ["timeout"]
+    corner = _engine_outcome_corner(
+        tmp_path, monkeypatch, side_effect=FileNotFoundError("no ngspice")
+    )
+    assert corner["engine_exit_code"] is None
+    assert corner["engine_killed_by_signal"] is None
+
+
+def test_split_returncode_unnamed_signal_falls_back():
+    assert sim._split_returncode(-250) == (None, "SIG250")
+    assert sim._split_returncode(3) == (3, None)
 
 
 def test_run_sim_stubbed_no_such_vector_augments_generic_measurement_code(

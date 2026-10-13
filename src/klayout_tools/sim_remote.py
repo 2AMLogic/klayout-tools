@@ -223,6 +223,8 @@ def _unrun_corner_report(
         "temperature_c": point.temperature_c,
         "status": "error",
         "runtime_s": 0.0,
+        "engine_exit_code": None,
+        "engine_killed_by_signal": None,
         "measurements": measurements,
         "diagnostics": [diagnostic],
         "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},

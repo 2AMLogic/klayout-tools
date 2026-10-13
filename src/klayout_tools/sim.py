@@ -80,6 +80,7 @@ import json
 import math
 import os
 import re
+import signal
 import statistics
 import subprocess
 import sys
@@ -223,6 +224,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "no_such_vector",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
+        "engine_killed",
         "measurement",
         "unknown",
         # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
@@ -4620,6 +4622,8 @@ def _run_corner(
     timed_out = False
     engine_version: str | None = None
     stdout_text = ""
+    engine_exit_code: int | None = None
+    engine_killed_by_signal: str | None = None
     try:
         completed = subprocess.run(
             command,
@@ -4629,6 +4633,9 @@ def _run_corner(
             cwd=corner_dir,
         )
         stdout_text = completed.stdout or ""
+        engine_exit_code, engine_killed_by_signal = _split_returncode(
+            completed.returncode
+        )
     except subprocess.TimeoutExpired:
         timed_out = True
     except FileNotFoundError as exc:
@@ -4661,6 +4668,18 @@ def _run_corner(
             }
         )
     else:
+        if engine_killed_by_signal is not None:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "engine_killed",
+                    "message": (
+                        f"{engine_name} was killed by {engine_killed_by_signal} "
+                        "(not by the harness timeout) -- e.g. the OOM killer, "
+                        "a host reaper, or a reclaimed worker"
+                    ),
+                }
+            )
         diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
 
     # Both engines fold a `.meas`/`.measure` card's name to lower-case in
@@ -4780,6 +4799,11 @@ def _run_corner(
         "temperature_c": point.temperature_c,
         "status": status,
         "runtime_s": runtime_s,
+        # Additive (issue #2848): the engine process's raw outcome. Both are
+        # null when the harness itself ended the run (timeout) or the engine
+        # never launched.
+        "engine_exit_code": engine_exit_code,
+        "engine_killed_by_signal": engine_killed_by_signal,
         "measurements": measurement_results,
         "diagnostics": diagnostics,
         "artifacts": artifacts,
@@ -4789,6 +4813,20 @@ def _run_corner(
         **step_fields,
     }
     return corner, engine_version
+
+
+def _split_returncode(returncode: int) -> tuple[int | None, str | None]:
+    """``(engine_exit_code, engine_killed_by_signal)`` from a POSIX
+    ``subprocess`` return code (issue #2848): a negative code is the killing
+    signal's number (``None`` exit code, signal name), anything else a plain
+    exit code. An unnamed signal number falls back to ``SIG<n>``.
+    """
+    if returncode >= 0:
+        return returncode, None
+    try:
+        return None, signal.Signals(-returncode).name
+    except ValueError:
+        return None, f"SIG{-returncode}"
 
 
 def _corner_measurement_results(

@@ -2271,6 +2271,11 @@ def test_a_lost_shard_never_aborts_its_siblings(tmp_path, monkeypatch):
     ]
     assert "lost_shard" in codes
     assert None in codes  # the healthy shard still reported its own corner
+    lost = [c for c in corners if c["diagnostics"]]
+    assert lost and all(
+        c["engine_exit_code"] is None and c["engine_killed_by_signal"] is None
+        for c in lost
+    )
     assert None in environment["fleet"]
 
 
