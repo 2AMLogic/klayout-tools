@@ -415,9 +415,9 @@ issue revisits this with a narrower, explicitly-approximate scope.
 Operator ruling 2026-10-08 (#2864): the PDK's own KLayout LVS runset (#2849) is
 the accepted route for SG13G2 bipolars -- runset-backed LVS recognises them,
 the curated deck still does not. The four native gaps above are tracked as
-#2860-#2863: #2860/#2861 stay open as general improvements, #2862/#2863 are
-deferred until something the runset path cannot serve needs them. The evidence
-acceptance conditions for runset-backed results live in #2870.
+#2860-#2863: #2860/#2861 stay open as general improvements, #2862 has landed,
+#2863 is deferred until something the runset path cannot serve needs it. The
+evidence acceptance conditions for runset-backed results live in #2870.
 
 ## No #524 cross-check
 
