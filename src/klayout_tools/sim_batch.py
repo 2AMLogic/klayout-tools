@@ -82,11 +82,13 @@ recorded-call-log discipline on the other side of the same seam.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -431,7 +433,151 @@ class BatchJobSpec:
         return document
 
 
-def _runner_preflight_script(client_version: str, *, enforce: bool) -> str:
+#: Filename the worker capture writes under ``$EDA_OUTPUT_DIR`` (issue #2834):
+#: what the *job instance* actually resolved -- simulator binary and banner,
+#: PDK variant revision stamp, CPU model, ``OMP_NUM_THREADS``, a worker-local
+#: image manifest when present. Written by the same runner preflight that
+#: writes :data:`BATCH_RUNNER_IDENTITY_FILENAME`; absent on older workers.
+BATCH_WORKER_ENVIRONMENT_FILENAME = "worker_environment.json"
+
+#: Bounds shared by the worker-side capture and the client-side re-validation.
+WORKER_CAPTURE_BANNER_MAX = 2000
+WORKER_CAPTURE_STR_MAX = 300
+WORKER_CAPTURE_FILE_MAX = 65536
+WORKER_CAPTURE_PROBE_TIMEOUT_S = 10
+
+#: The worker-side capture program. It is passed to ``python3 -I -c`` as one
+#: shell-quoted argument (never interpolated with untrusted text); request
+#: values arrive as ``sys.argv`` and everything it observes is serialised with
+#: :mod:`json`. Stdlib only, every probe individually guarded and bounded, and
+#: it always exits 0 -- a failed capture is a ``diagnostics`` entry, never a
+#: job failure. Only allowlisted environment variables are read.
+_WORKER_CAPTURE_PROGRAM = r"""
+import hashlib, json, os, shutil, sys
+import subprocess as sp
+BAN, STR, T = @BAN@, @STR@, @TIMEOUT@
+out, req_bin, variant, staged = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+diag = []
+def clip(v, n=STR):
+    if not isinstance(v, str):
+        return None
+    v = "".join(c if (c >= " " or c in "\n\t") else "?" for c in v)
+    return v[:n]
+def guard(label, fn, default=None):
+    try:
+        return fn()
+    except BaseException as exc:
+        diag.append(label + ": " + clip(type(exc).__name__ + " " + str(exc), 160))
+        return default
+def read(path, n):
+    with open(path, "rb") as h:
+        return h.read(n + 1)[:n].decode("utf-8", "replace")
+doc = {"schema": 1}
+def sim():
+    sel = req_bin or os.environ.get("KLT_NGSPICE_BINARY") or "ngspice"
+    src = "request" if req_bin else ("KLT_NGSPICE_BINARY" if os.environ.get("KLT_NGSPICE_BINARY") else "PATH")
+    path = shutil.which(sel)
+    s = {"requested_binary": clip(sel), "binary_source": src,
+         "selected_path": clip(path) if path else None, "version_banner": None,
+         "version_probe": "unavailable"}
+    if path:
+        try:
+            r = sp.run([path, "--version"], stdin=sp.DEVNULL,
+                               stdout=sp.PIPE, stderr=sp.STDOUT,
+                               timeout=T)
+            s["version_banner"] = clip(r.stdout[:BAN * 4].decode("utf-8", "replace"), BAN)
+            s["version_probe"] = "ok" if r.returncode == 0 else "exit_%d" % r.returncode
+        except sp.TimeoutExpired:
+            s["version_probe"] = "timeout"
+        except BaseException as exc:
+            s["version_probe"] = "error"
+            diag.append("simulator probe: " + clip(type(exc).__name__, 80))
+    else:
+        diag.append("simulator binary not found on worker")
+    return s
+doc["simulator"] = guard("simulator", sim, {"selected_path": None, "version_banner": None})
+def pdk():
+    root = os.environ.get("PDK_ROOT")
+    p = {"variant": clip(variant) or None, "root": clip(root), "stamp_scheme": None,
+         "stamp_sha256": None, "stamp_text": None, "models_staged": staged == "1"}
+    if not (root and variant):
+        diag.append("pdk root or variant unknown on worker")
+        return p
+    stamp = os.path.join(root, variant, "SOURCES")
+    try:
+        text = read(stamp, 16384)
+    except OSError as exc:
+        diag.append("pdk stamp unreadable: " + clip(type(exc).__name__, 80))
+        return p
+    norm = "\n".join(l.rstrip() for l in text.replace("\r\n", "\n").strip().split("\n"))
+    p["stamp_scheme"] = "sources-sha256"
+    p["stamp_sha256"] = hashlib.sha256(norm.encode("utf-8")).hexdigest()
+    p["stamp_text"] = clip(norm, 1000)
+    return p
+doc["pdk"] = guard("pdk", pdk, {"variant": clip(variant) or None})
+def cpu():
+    for line in read("/proc/cpuinfo", 1 << 18).split("\n"):
+        if line.lower().startswith("model name") and ":" in line:
+            return clip(line.split(":", 1)[1].strip())
+    diag.append("cpu model not reported")
+doc["cpu_model"] = guard("cpu", cpu)
+doc["omp_num_threads"] = clip(os.environ.get("OMP_NUM_THREADS"), 40)
+def manifest():
+    path = os.environ.get("KLT_IMAGE_MANIFEST")
+    for cand in ([path] if path else []) + ["/etc/klt-image-manifest.json", "/opt/klt/image-manifest.json"]:
+        if not os.path.isfile(cand):
+            continue
+        data = json.loads(read(cand, 65536))
+        if not isinstance(data, dict):
+            raise ValueError("manifest is not an object")
+        keep = ("pdk", "pdk_snapshot", "pdk_ref", "pdk_pinned", "ngspice_version",
+                "klt_ref", "built_at", "image_id")
+        m = {k: (data[k] if isinstance(data[k], (bool, int)) else clip(data[k]))
+             for k in keep if k in data and isinstance(data[k], (str, bool, int))}
+        m["path"] = clip(cand)
+        return m
+    return None
+doc["image_manifest"] = guard("image manifest", manifest)
+doc["diagnostics"] = diag[:20]
+body = json.dumps(doc, ensure_ascii=True)
+tmp = out + ".tmp"
+with open(tmp, "w") as h:
+    h.write(body)
+os.replace(tmp, out)
+"""  # noqa: E501
+_WORKER_CAPTURE_PROGRAM = (
+    _WORKER_CAPTURE_PROGRAM.replace("@BAN@", str(WORKER_CAPTURE_BANNER_MAX))
+    .replace("@STR@", str(WORKER_CAPTURE_STR_MAX))
+    .replace("@TIMEOUT@", str(WORKER_CAPTURE_PROBE_TIMEOUT_S))
+)
+
+
+def _worker_capture_command(remote_request: dict[str, Any]) -> str:
+    """The best-effort worker capture invocation (issue #2834), run from the
+    runner preflight. Bounded by ``timeout`` when present, stderr discarded,
+    ``|| true`` so it can never fail or alter the job."""
+    options = remote_request.get("options") or {}
+    models = remote_request.get("models") or {}
+    binary = options.get("ngspice_binary")
+    variant = models.get("pdk")
+    staged = "1" if options.get("stage_model_inputs") else "0"
+    args = [
+        shlex.quote(str(binary) if isinstance(binary, str) else ""),
+        shlex.quote(str(variant) if isinstance(variant, str) else ""),
+        staged,
+    ]
+    target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
+    return (
+        'wt=; command -v timeout >/dev/null 2>&1 && wt="timeout 30"; '
+        "{ command -v python3 >/dev/null 2>&1 && "
+        f"$wt python3 -I -c {shlex.quote(_WORKER_CAPTURE_PROGRAM)} "
+        f"{target} {' '.join(args)} 2>/dev/null; true; }}"
+    )
+
+
+def _runner_preflight_script(
+    client_version: str, *, enforce: bool, capture: str = ""
+) -> str:
     """The shell prefix of the job command that pins the runner's ``klt``
     identity (issue #2719).
 
@@ -481,6 +627,10 @@ def _runner_preflight_script(client_version: str, *, enforce: bool) -> str:
         + '"}\\n\' "$rj" >'
         + identity_path,
     ]
+    if capture:
+        # Issue #2834: the worker capture rides the same preflight, *before*
+        # the enforce gate so a rejected job still leaves it collectable.
+        lines.append(capture)
     if enforce:
         lines.append(
             'if [ -n "$rcode" ]; then '
@@ -557,6 +707,7 @@ def _build_batch_job_spec(
     command = _runner_preflight_script(
         client_version if client_version is not None else _provenance._klt_version(),
         enforce=version_check == "enforce",
+        capture=_worker_capture_command(remote_request),
     ) + (
         f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
         "--backend local-parallel --format json"
@@ -1485,6 +1636,156 @@ def _batch_environment(
     }
 
 
+def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
+    """A JSON-safe, bounded, control-character-free copy of a captured string
+    (``None`` for anything that is not a string)."""
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in value)
+    return cleaned[:limit]
+
+
+def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The submitter's own local view of the requested PDK variant's
+    ``SOURCES`` stamp, in the same ``sources-sha256`` scheme the worker
+    capture uses. ``None`` when nothing comparable can be read locally."""
+    models = (request or {}).get("models") or {}
+    variant = models.get("pdk")
+    root = models.get("pdk_root") or os.environ.get("PDK_ROOT")
+    if not (isinstance(variant, str) and variant and isinstance(root, str) and root):
+        return None
+    try:
+        with open(os.path.join(root, variant, "SOURCES"), "rb") as handle:
+            text = handle.read(16385)[:16384].decode("utf-8", "replace")
+    except OSError:
+        return None
+    normalized = "\n".join(
+        line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")
+    )
+    return {
+        "variant": variant,
+        "stamp_scheme": "sources-sha256",
+        "stamp_sha256": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+    }
+
+
+def _compare_pdk_stamps(
+    worker_pdk: dict[str, Any], client: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Compare worker and client PDK stamps -- only when both provide the
+    same variant under the same stamp scheme. Anything else is
+    ``not_comparable``, never a proven mismatch. A match is not model-closure
+    equality (see docs/cli/sim.md)."""
+    worker_ok = (
+        worker_pdk.get("variant")
+        and worker_pdk.get("stamp_scheme")
+        and worker_pdk.get("stamp_sha256")
+    )
+    if (
+        not worker_ok
+        or client is None
+        or client.get("variant") != worker_pdk.get("variant")
+        or client.get("stamp_scheme") != worker_pdk.get("stamp_scheme")
+    ):
+        return {"status": "not_comparable"}
+    if client.get("stamp_sha256") == worker_pdk.get("stamp_sha256"):
+        return {"status": "match"}
+    return {
+        "status": "mismatch",
+        "warning": (
+            f"the worker's PDK revision stamp for {worker_pdk['variant']} differs "
+            "from the one the submitter resolved locally; results may differ "
+            "from a local run (a matching stamp would not prove identical models)"
+        ),
+    }
+
+
+def _read_worker_environment(
+    local_dir: str | None, request: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """The ``worker_environment`` block of ``environment.remote`` (issue #2834).
+
+    Worker-observed: it describes what the job instance resolved, never the
+    submitter's values. Always present; ``capture`` is ``"ok"``, ``"absent"``
+    (legacy worker or no collected artifact) or ``"malformed"``, and a
+    non-ok capture carries ``None`` observations. Every field is
+    re-validated and bounded here -- the file is untrusted input.
+    """
+    unknown: dict[str, Any] = {
+        "capture": "absent",
+        "simulator": None,
+        "pdk": None,
+        "cpu_model": None,
+        "omp_num_threads": None,
+        "image_manifest": None,
+        "diagnostics": [],
+        "pdk_stamp_comparison": {"status": "not_comparable"},
+    }
+    if local_dir is None:
+        return unknown
+    path = os.path.join(local_dir, BATCH_WORKER_ENVIRONMENT_FILENAME)
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(WORKER_CAPTURE_FILE_MAX + 1)
+    except OSError:
+        return unknown
+    try:
+        if len(raw) > WORKER_CAPTURE_FILE_MAX:
+            raise ValueError("oversized")
+        doc = json.loads(raw.decode("utf-8"))
+        if not isinstance(doc, dict):
+            raise ValueError("not an object")
+        sim_in = doc.get("simulator")
+        sim_in = sim_in if isinstance(sim_in, dict) else {}
+        simulator = {
+            "requested_binary": _bounded_str(sim_in.get("requested_binary")),
+            "binary_source": _bounded_str(sim_in.get("binary_source"), 40),
+            "selected_path": _bounded_str(sim_in.get("selected_path")),
+            "version_banner": _bounded_str(
+                sim_in.get("version_banner"), WORKER_CAPTURE_BANNER_MAX
+            ),
+            "version_probe": _bounded_str(sim_in.get("version_probe"), 40),
+        }
+        pdk_in = doc.get("pdk")
+        pdk_in = pdk_in if isinstance(pdk_in, dict) else {}
+        pdk = {
+            "variant": _bounded_str(pdk_in.get("variant")),
+            "root": _bounded_str(pdk_in.get("root")),
+            "stamp_scheme": _bounded_str(pdk_in.get("stamp_scheme"), 40),
+            "stamp_sha256": _bounded_str(pdk_in.get("stamp_sha256"), 64),
+            "stamp_text": _bounded_str(pdk_in.get("stamp_text"), 1000),
+            "models_staged": pdk_in.get("models_staged") is True,
+        }
+        manifest_in = doc.get("image_manifest")
+        manifest: dict[str, Any] | None = None
+        if isinstance(manifest_in, dict):
+            manifest = {}
+            for key, value in list(manifest_in.items())[:16]:
+                if isinstance(value, bool | int):
+                    manifest[_bounded_str(key, 40) or "?"] = value
+                elif isinstance(value, str):
+                    manifest[_bounded_str(key, 40) or "?"] = _bounded_str(value)
+        diagnostics = [
+            _bounded_str(item, 200)
+            for item in (doc.get("diagnostics") or [])[:20]
+            if isinstance(item, str)
+        ]
+        return {
+            "capture": "ok",
+            "simulator": simulator,
+            "pdk": pdk,
+            "cpu_model": _bounded_str(doc.get("cpu_model")),
+            "omp_num_threads": _bounded_str(doc.get("omp_num_threads"), 40),
+            "image_manifest": manifest,
+            "diagnostics": diagnostics,
+            "pdk_stamp_comparison": _compare_pdk_stamps(
+                pdk, _client_pdk_stamp(request)
+            ),
+        }
+    except (ValueError, TypeError, AttributeError, UnicodeDecodeError):
+        return {**unknown, "capture": "malformed"}
+
+
 def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
     """The ``environment.remote`` runner-identity fields (issue #2719).
 
@@ -1535,6 +1836,17 @@ def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
     if warning is not None:
         fields["runner_compatibility_warning"] = warning
     return fields
+
+
+def _read_job_identity(
+    local_dir: str | None, request: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Runner identity plus the worker-observed environment capture, merged
+    into ``environment.remote``. Neither reader can raise."""
+    return {
+        **_read_runner_identity(local_dir),
+        "worker_environment": _read_worker_environment(local_dir, request),
+    }
 
 
 def _status_exit_code(status: dict[str, Any]) -> int | None:
@@ -1670,6 +1982,7 @@ def _recover_failed_job_corners(
     measurements_spec: list[dict[str, Any]],
     status: dict[str, Any],
     runner: remote_transport.CommandRunner | None,
+    request: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Bounded, collection-only recovery after a terminal job failure: one
     outputs download, one read of ``report.json`` and, when that holds no
@@ -1681,11 +1994,11 @@ def _recover_failed_job_corners(
     raw stderr text never does."""
     runner_error: dict[str, Any] | None = None
     note: str | None = None
-    identity = _read_runner_identity(None)
+    identity = _read_job_identity(None)
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             collect_outputs(config, job_id, collected, runner=runner)
-            identity = _read_runner_identity(collected)
+            identity = _read_job_identity(collected, request)
             try:
                 kind, runner_error = _classify_collected_report(
                     read_collected_report(collected)
@@ -1826,7 +2139,7 @@ def _run_batch_job(
                 "bucket": config.bucket,
                 "region": config.region,
                 "state": exc.last_state,
-                **_read_runner_identity(None),
+                **_read_job_identity(None),
             },
         )
 
@@ -1841,13 +2154,14 @@ def _run_batch_job(
             measurements_spec=measurements_spec,
             status=status,
             runner=runner,
+            request=request,
         )
         return failed_corners, None, {**environment, **identity}
 
     with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
         collect_outputs(config, job_id, collected, runner=runner)
         report = read_collected_report(collected)
-        environment = {**environment, **_read_runner_identity(collected)}
+        environment = {**environment, **_read_job_identity(collected, request)}
         corners = report.get("corners") or []
         if keep_artifacts:
             _install_batch_artifacts(
