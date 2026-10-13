@@ -120,7 +120,9 @@ fn resolve(base_dir: &Path, path_str: &str) -> PathBuf {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256:{hex}")
 }
 
 /// Returns `(response, exit_code)` on a run that at least executed to

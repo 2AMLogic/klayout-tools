@@ -203,7 +203,9 @@ fn sha256_file(path: &Path) -> Result<String, BuildError> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("sha256:{hex}"))
 }
 
 fn cycle_of(tick: u64, anchor: Option<u64>, period: Option<u64>) -> Option<u64> {
