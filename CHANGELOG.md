@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt techmap` / `klt wave` find their native binary under a redirected
+  cargo target dir** (issue #3189): the `klt-techmap` / `klt-wave` lookup
+  only checked `native/<crate>/target/`, so a binary built with
+  `CARGO_TARGET_DIR` set, or under a cargo-config `build.target-dir`, was
+  reported as "not built". The lookup now also checks `$CARGO_TARGET_DIR`
+  and the target directory `cargo metadata` reports. It still never builds.
 - **`klt extract --rename-declared-pins`** (issue #2854): opt-in rename of
   surviving promoted pin nets to their declared names. `--pins`/`--def-pins`
   reconciliation only *demotes* — a surviving pin net whose conductor carries
@@ -41,7 +47,6 @@ not `klt --version`, if you need to detect this kind of drift. See
   `klt lvs`'s `layout.rename_declared_pins` (a boolean; requires
   `layout.declared_pins`). Default off — byte-identical output; the flag
   without `--pins`/`--def-pins` is a clean error. No `schema_version` bump.
-
 - **`klt sim --batch-set a.json b.json ...`** (issue #2869): submit a set of
   independent `backend: batch` requests in one invocation, with at most
   `--max-in-flight` (default 4) in flight and the rest queued. Reuses
