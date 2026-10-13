@@ -210,52 +210,61 @@ assert_eq "$(field "$p1" CONCLUSION_HASH)" "$(field "$p_reordered" CONCLUSION_HA
 STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
 
+# The stub is REPO-AWARE (#2437, after upstream rjwalters/loom#8510's
+# T15i-T15k stub): a repo-qualified fixture `<owner>__<name>-<kind>-N.json`
+# answers only for that `--repo`. The unqualified `<kind>-N.json` fixtures
+# every pre-#2437 test ships stand for the DEFAULT invoking repo, and answer
+# only when gh is called with no `--repo` or with `--repo owner/repo` (the
+# repo every pre-#2437 live-mode test passes) — deliberately STRICTER than
+# upstream's "qualified, else unqualified for any repo" fallback, so a
+# cross-repo lookup can never be satisfied by a same-numbered local fixture.
+# That is what lets T18 prove *which* repo was queried, and that a failed
+# cross-repo lookup fails closed instead of silently reading the local one.
+# Every call is also appended to $D/calls.log ("<kind> <num> <repo>").
 cat >"$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
 D="${LOOM_TEST_STUB_DIR:?stub gh: LOOM_TEST_STUB_DIR not set}"
 
+# fixture <kind> <number> <repo> - repo-qualified fixture first; the
+# unqualified one only for the default invoking repo (none, or owner/repo).
+fixture() {
+  local kind="$1" num="$2" repo="${3:-}" f
+  if [[ -n "$repo" ]]; then
+    f="$D/${repo//\//__}-$kind-$num.json"
+    [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
+  fi
+  if [[ -z "$repo" || "$repo" == "owner/repo" ]]; then
+    f="$D/$kind-$num.json"
+    [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
+  fi
+  return 1
+}
+
 case "${1:-}" in
-  issue)
-    shift
+  issue|pr)
+    kind="$1"; shift
     sub="$1"; shift
     num=""
     jqexpr=""
+    repo=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --json) shift 2 ;;
         --jq) jqexpr="${2:-}"; shift 2 ;;
-        --repo) shift 2 ;;
+        --repo) repo="${2:-}"; shift 2 ;;
         *) [[ -z "$num" ]] && num="$1"; shift ;;
       esac
     done
+    printf '%s %s %s\n' "$kind" "$num" "${repo:-<none>}" >>"$D/calls.log"
     if [[ "$sub" == "view" ]]; then
-      f="$D/issue-$num.json"
-      [[ -f "$f" ]] || { echo "stub gh: missing $f" >&2; exit 1; }
+      f="$(fixture "$kind" "$num" "$repo")" || {
+        echo "stub gh: missing fixture for $kind #$num (repo='${repo:-<none>}')" >&2
+        exit 1
+      }
       if [[ -n "$jqexpr" ]]; then jq -r "$jqexpr" "$f"; else cat "$f"; fi
     else
-      echo "stub gh: unhandled issue sub '$sub'" >&2; exit 3
-    fi
-    ;;
-  pr)
-    shift
-    sub="$1"; shift
-    num=""
-    jqexpr=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --json) shift 2 ;;
-        --jq) jqexpr="${2:-}"; shift 2 ;;
-        --repo) shift 2 ;;
-        *) [[ -z "$num" ]] && num="$1"; shift ;;
-      esac
-    done
-    if [[ "$sub" == "view" ]]; then
-      f="$D/pr-$num.json"
-      [[ -f "$f" ]] || { echo "stub gh: missing $f" >&2; exit 1; }
-      if [[ -n "$jqexpr" ]]; then jq -r "$jqexpr" "$f"; else cat "$f"; fi
-    else
-      echo "stub gh: unhandled pr sub '$sub'" >&2; exit 3
+      echo "stub gh: unhandled $kind sub '$sub'" >&2; exit 3
     fi
     ;;
   *) echo "stub gh: unhandled args: $*" >&2; exit 3 ;;
@@ -489,6 +498,158 @@ deps_prose="$(printf '%s\n' "$out_prose_prefixed" | sed -n '/^DEPS=/,/^CONCLUSIO
 # (the parenthetical "Closes #N" aside on each line, which must be ignored).
 assert_eq "$(printf '1602:OPEN\n1607:OPEN')" "$deps_prose" \
     "T17b: DEPS extracts 1607 (the FIRST #N on its line, not the parenthetical 'Closes #1600') and 1602 (not 1599) -- and the line with no #N at all is skipped, not mis-parsed"
+
+# --- T18: named-dependency - REPO ROUTING (#2437, ported from upstream
+# rjwalters/loom#8510 @ 418d1bad, whose T15i-T15k these extend) ------------
+#
+# THE BUG: `_extract_named_deps` took only the bare `#N` token, so
+# `- [ ] 2AMLogic/2am#1015: ...` (#2348's real Dependencies entry) was looked
+# up as THIS repo's unrelated, already-CLOSED #1015 and reported
+# `DEPS=1015:CLOSED` / `VERDICT=clear` while 2AMLogic/2am#1015 was still OPEN.
+#
+# Every fixture pair below deliberately DISAGREES: the invoking repo's #N
+# (unqualified fixture) is CLOSED while the cross-repo #N is OPEN, so a
+# `blocked` verdict can ONLY come from resolving the reference in the repo it
+# names. The stub never lets an unqualified fixture answer a foreign --repo.
+
+# Live runs below end in `|| true` so a regressed script (e.g. one that sends
+# a cross-repo lookup to the invoking repo, which the strict stub refuses)
+# reports every failing assertion instead of aborting the suite under `set -e`.
+deps_of() { # <output> - the full (possibly multi-line) DEPS block
+    printf '%s\n' "$1" | sed -n '/^DEPS=/,/^CONCLUSION_HASH=/p' | sed '$d' | sed 's/^DEPS=//'
+}
+
+# T18a: same-repo output/hash compatibility (#1546 spirit, AC 4). These
+# values were captured from the pre-#2437 script for the same fixture; the
+# repo-aware encoding must leave a same-repo entry's rendering - and so every
+# existing same-repo `curator:named-dependency:<hash>` marker - byte-identical,
+# whether `repo` is omitted (the pre-#2437 shape) or explicitly null.
+EXPECTED_ND_PINNED_PLAIN='VERDICT=blocked
+DEPS=100:checked
+6333:OPEN
+CONCLUSION_HASH=259e5967b4c62101'
+out="$(echo '{"deps":[{"number":6333,"checked":false,"state":"OPEN"},{"number":100,"checked":true}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "$EXPECTED_ND_PINNED_PLAIN" "$out" \
+    "T18a: same-repo named-dependency KEY=VALUE output is pinned to its pre-#2437 bytes (no same-repo CONCLUSION_HASH moves)"
+out="$(echo '{"deps":[{"number":6333,"repo":null,"checked":false,"state":"OPEN"},{"number":100,"repo":null,"checked":true}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "$EXPECTED_ND_PINNED_PLAIN" "$out" \
+    "T18a: an explicit \"repo\": null renders exactly like an omitted repo"
+
+# T18b (THE #2348 REGRESSION): local #1015 CLOSED, 2AMLogic/2am#1015 OPEN.
+rm -f "$STUB_DIR/calls.log"
+jq -n '{body: "## Dependencies\n\n- [ ] 2AMLogic/2am#1015: `fleet-burndown.yml` workflow must exist before this README can embed a real chart.\n"}' \
+    >"$STUB_DIR/issue-2348.json"
+jq -n '{state: "CLOSED"}' >"$STUB_DIR/issue-1015.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/2AMLogic__2am-issue-1015.json"
+out_x="$("$TARGET_SCRIPT" named-dependency --number 2348 --repo owner/repo)" || true
+assert_eq "blocked" "$(field "$out_x" VERDICT)" \
+    "T18b: a '- [ ] owner/repo#N' item is resolved in owner/repo (OPEN), not as the invoking repo's same-numbered CLOSED #N -- VERDICT=blocked, not the #2348 false clear"
+assert_eq "2AMLogic/2am#1015:OPEN" "$(deps_of "$out_x")" \
+    "T18b: DEPS names the cross-repo reference in full (owner/repo#N:STATE), never a bare number"
+assert_eq "issue 1015 2AMLogic/2am" "$(grep -E '^(issue|pr) 1015 ' "$STUB_DIR/calls.log")" \
+    "T18b: the cross-repo state lookup was issued with --repo 2AMLogic/2am, and the invoking repo was never asked about #1015"
+
+# T18c: closing ONLY the cross-repo fixture (local #1015 unchanged) flips the
+# verdict to clear and moves CONCLUSION_HASH.
+jq -n '{state: "CLOSED"}' >"$STUB_DIR/2AMLogic__2am-issue-1015.json"
+out_x_closed="$("$TARGET_SCRIPT" named-dependency --number 2348 --repo owner/repo)" || true
+assert_eq "clear" "$(field "$out_x_closed" VERDICT)" \
+    "T18c: once the cross-repo dependency closes, the same body reports VERDICT=clear"
+assert_ne "$(field "$out_x" CONCLUSION_HASH)" "$(field "$out_x_closed" CONCLUSION_HASH)" \
+    "T18c: a cross-repo dependency's state change moves CONCLUSION_HASH"
+
+# T18d: mixed checklist - bare #1015 (local, CLOSED), two DIFFERENT upstream
+# repos with the SAME number (one OPEN, one MERGED via the pr-view fallback),
+# and a CHECKED cross-repo item that must never be looked up at all.
+rm -f "$STUB_DIR/calls.log"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/2AMLogic__2am-issue-1015.json"
+jq -n '{state: "MERGED"}' >"$STUB_DIR/rjwalters__loom-pr-1015.json"
+jq -n '{body: "## Dependencies\n\n- [ ] #1015: local, same number on purpose\n- [ ] 2AMLogic/2am#1015: upstream fleet repo\n- [ ] rjwalters/loom#1015: upstream loom PR\n- [x] other-org/some.repo_x#5: already done upstream\n"}' \
+    >"$STUB_DIR/issue-7001.json"
+out_mixed="$("$TARGET_SCRIPT" named-dependency --number 7001 --repo owner/repo)" || true
+assert_eq "$(printf '%s\n' '1015:CLOSED' '2AMLogic/2am#1015:OPEN' 'other-org/some.repo_x#5:checked' 'rjwalters/loom#1015:MERGED' | sort)" "$(deps_of "$out_mixed")" \
+    "T18d: same-numbered local/cross-repo entries stay distinct, each resolved in its own repo (incl. a cross-repo PR via the pr-view fallback); a checked cross-repo item renders owner/repo#N:checked"
+assert_eq "blocked" "$(field "$out_mixed" VERDICT)" \
+    "T18d: the still-OPEN 2AMLogic/2am#1015 blocks even though local #1015 is CLOSED and rjwalters/loom#1015 is MERGED"
+assert_eq "" "$(grep -E '^(issue|pr) 5 ' "$STUB_DIR/calls.log" || true)" \
+    "T18d: a checked cross-repo item is never looked up"
+jq -n '{state: "CLOSED"}' >"$STUB_DIR/2AMLogic__2am-issue-1015.json"
+out_mixed_clear="$("$TARGET_SCRIPT" named-dependency --number 7001 --repo owner/repo)" || true
+assert_eq "clear" "$(field "$out_mixed_clear" VERDICT)" \
+    "T18d: once the only OPEN cross-repo dependency closes, the mixed checklist reports clear"
+
+# T18e: an EXPLICIT invoking --repo other than the default. The issue body and
+# every bare #N are read in acme/widgets; the cross-repo item still goes to the
+# repo it names. acme/widgets#7 is OPEN while the default repo's #7 is CLOSED.
+rm -f "$STUB_DIR/calls.log"
+jq -n '{body: "## Dependencies\n\n- [ ] #7: invoking-repo prerequisite\n- [ ] 2AMLogic/2am#1015: upstream\n"}' \
+    >"$STUB_DIR/acme__widgets-issue-7002.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/acme__widgets-issue-7.json"
+jq -n '{state: "CLOSED"}' >"$STUB_DIR/issue-7.json"
+out_inv="$("$TARGET_SCRIPT" named-dependency --number 7002 --repo acme/widgets)" || true
+assert_eq "$(printf '%s\n' '2AMLogic/2am#1015:CLOSED' '7:OPEN')" "$(deps_of "$out_inv")" \
+    "T18e: with an explicit --repo, a bare #N resolves in that invoking repo (OPEN), not the default; the cross-repo item still resolves in its own repo"
+assert_eq "blocked" "$(field "$out_inv" VERDICT)" "T18e: the invoking repo's OPEN #7 blocks"
+assert_eq "$(printf '%s\n' 'issue 7002 acme/widgets' 'issue 7 acme/widgets' 'issue 1015 2AMLogic/2am')" "$(cat "$STUB_DIR/calls.log")" \
+    "T18e: exact lookup routing -- body and bare #7 via --repo acme/widgets, 2AMLogic/2am#1015 via --repo 2AMLogic/2am"
+
+# T18f: no --repo at all (gh's cwd default) - bare #N is passed no --repo,
+# a cross-repo ref still carries its own.
+rm -f "$STUB_DIR/calls.log"
+jq -n '{body: "## Dependencies\n\n- [ ] #1015: local\n- [ ] 2AMLogic/2am#1015: upstream\n"}' >"$STUB_DIR/issue-7003.json"
+out_norepo="$("$TARGET_SCRIPT" named-dependency --number 7003)" || true
+assert_eq "$(printf '%s\n' 'issue 7003 <none>' 'issue 1015 <none>' 'issue 1015 2AMLogic/2am')" "$(cat "$STUB_DIR/calls.log")" \
+    "T18f: without --repo, bare refs use gh's default repo and cross-repo refs pass their own --repo"
+assert_eq "$(printf '%s\n' '1015:CLOSED' '2AMLogic/2am#1015:CLOSED')" "$(deps_of "$out_norepo")" \
+    "T18f: DEPS still distinguishes the two same-numbered references"
+
+# T18g: FAIL CLOSED - a cross-repo reference that cannot be read in its own
+# repo is fatal (exit 1, no VERDICT) even though the invoking repo HAS a
+# same-numbered issue. Pre-#2437 this silently reported that local issue's
+# state; it must never fall back to the invoking repo.
+jq -n '{body: "## Dependencies\n\n- [ ] #1015: local\n- [ ] ghost-org/missing#1015: unreadable upstream\n"}' >"$STUB_DIR/issue-7004.json"
+rc=0
+out_fail="$("$TARGET_SCRIPT" named-dependency --number 7004 --repo owner/repo 2>"$STUB_DIR/err.txt")" || rc=$?
+assert_eq "1" "$rc" "T18g: an unreadable cross-repo dependency exits 1 (fail closed), never a verdict"
+assert_eq "" "$(field "$out_fail" VERDICT)" "T18g: no VERDICT is emitted on a failed cross-repo lookup"
+assert_eq "1" "$(grep -c 'ghost-org/missing#1015' "$STUB_DIR/err.txt" || true)" \
+    "T18g: the error names the full cross-repo reference that could not be read"
+# ... and an unreadable bare #N still fails closed too (unchanged behavior).
+jq -n '{body: "## Dependencies\n\n- [ ] #424242: nonexistent local\n"}' >"$STUB_DIR/issue-7005.json"
+rc=0
+"$TARGET_SCRIPT" named-dependency --number 7005 --repo owner/repo >/dev/null 2>&1 || rc=$?
+assert_eq "1" "$rc" "T18g: an unreadable bare #N still exits 1 (fail closed, unchanged)"
+
+# T18h: #1671 first-reference behavior with repo-qualified tokens: the FIRST
+# reference on a prose-prefixed line wins, qualified or not, and a later
+# `Closes #M` / `owner/repo#M` aside is ignored.
+rm -f "$STUB_DIR/calls.log"
+jq -n '{body: "## Dependencies\n\n- [ ] PR rjwalters/loom#8510 (Closes #2437) merged -- lands the upstream fix.\n- [ ] Blocked by #1602 (see also 2AMLogic/2am#9) for the local half.\n"}' \
+    >"$STUB_DIR/issue-7006.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/rjwalters__loom-issue-8510.json"
+jq -n '{state: "CLOSED"}' >"$STUB_DIR/issue-1602.json"
+out_first="$("$TARGET_SCRIPT" named-dependency --number 7006 --repo owner/repo)" || true
+assert_eq "$(printf '%s\n' '1602:CLOSED' 'rjwalters/loom#8510:OPEN')" "$(deps_of "$out_first")" \
+    "T18h: a prose-prefixed line takes its FIRST reference (rjwalters/loom#8510, #1602), never the later 'Closes #2437' / '2AMLogic/2am#9' aside (#1671 preserved)"
+assert_eq "" "$(grep -E '^(issue|pr) (2437|9) ' "$STUB_DIR/calls.log" || true)" \
+    "T18h: the aside references are never looked up"
+
+# T18i: #1569 last-Dependencies-section behavior with a cross-repo checklist:
+# a stale first section naming a local #1015 is superseded by the later
+# corrected section naming the upstream one.
+jq -n '{body: "## Dependencies\n\n- [ ] #1015: stale original entry\n\n## Notes\n\nprose\n\n### Dependencies (corrected)\n\n- [ ] 2AMLogic/2am#1015: the real upstream prerequisite\n"}' \
+    >"$STUB_DIR/issue-7007.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/2AMLogic__2am-issue-1015.json"
+out_corr="$("$TARGET_SCRIPT" named-dependency --number 7007 --repo owner/repo)" || true
+assert_eq "2AMLogic/2am#1015:OPEN" "$(deps_of "$out_corr")" \
+    "T18i: only the LAST (corrected) Dependencies section is read, and its cross-repo item is resolved upstream (#1569 preserved)"
+assert_eq "blocked" "$(field "$out_corr" VERDICT)" "T18i: the corrected section's OPEN upstream dependency blocks"
+
+# T18j: --json carries the qualified reference too.
+out_json="$("$TARGET_SCRIPT" named-dependency --number 2348 --repo owner/repo --json)" || true
+assert_eq "2AMLogic/2am#1015:OPEN" "$(jq -r '.deps' <<<"$out_json")" \
+    "T18j: --json deps names the cross-repo reference as owner/repo#N:STATE"
+assert_eq "blocked" "$(jq -r '.verdict' <<<"$out_json")" "T18j: --json verdict is blocked"
 
 # --- Summary ---
 echo ""

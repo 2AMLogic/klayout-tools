@@ -62,7 +62,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
-from . import remote_fleet, remote_transport, sim_staging
+from . import remote_fleet, remote_transport, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
 
 if TYPE_CHECKING:
@@ -192,6 +192,9 @@ def _unrun_corner_report(
             "unit": spec.get("unit"),
             "status": "error",
             "margin": None,
+            # Issue #2482: the same additive `step`/`derived_from`
+            # provenance a ran corner's entry carries (empty otherwise).
+            **sim_steps.measurement_provenance(spec),
         }
         for spec in measurements_spec
     ]

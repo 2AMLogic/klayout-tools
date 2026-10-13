@@ -67,6 +67,20 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local haystack="$1" needle="$2" msg="$3"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if ! grep -qF -- "$needle" <<<"$haystack"; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: $msg"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: $msg"
+        echo "    unexpected substring: '$needle'"
+        echo "    in: $haystack"
+    fi
+}
+
 assert_eq() {
     local expected="$1" actual="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -92,6 +106,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
 FUNCS_FILE="$WORKDIR/funcs.sh"
 awk '
   /^# requires-daemon:/                 { print; next }
+  /^# daemon-verb-hint:/                { print; next }
   /^_mp_daemon_roll_hint\(\) \{/        { print; next }
   /^_mp_refs\(\) \{/                    { capture = 1 }
   capture                               { print }
@@ -277,13 +292,18 @@ echo "Testing the merge-pr floor covers every fail-closed sub-subcommand (#8967)
 #   classify-response  97609b86f (#9228, squash)          0.19.455 -> 0.19.456
 #   partial-conflict   2ab7630c5 (merge of #9246)          0.19.463 -> 0.19.464
 #   checks-failure     397f06feb (merge of #9272)          0.19.464 -> 0.19.465
+#   ci-result          01d5b279f (merge of #10447, #10444) 0.19.762 -> 0.19.763
+#                      (fail-open until #10567 made an unanswered CI-run gate hold the merge)
 # tree-checks (#10026) is `open` BY CONSTRUCTION: _check_tree_checks only calls it when .loom/config.json
 # declares merge.treeChecks (opt-in), so no repo that has not opted in is gated on a daemon carrying it; an
 # opted-in repo on an older binary is refused (fail closed) and told to roll the host.
+# required-checks (#10688) is `open`: a binary without the verb warns and leaves branch protection as
+# the guard. Its forge-read failures DO refuse, but only a binary that has the verb can report one.
 MERGE_PR_VERB_TABLE="verdict-contradiction closed 0.19.172
+required-checks open -
 tree-checks open -
 chain-lock open -
-ci-result open -
+ci-result closed 0.19.763
 stale-checks closed 0.19.221
 loom-pr-guard closed 0.19.375
 classify-response closed 0.19.456
@@ -297,6 +317,7 @@ zero-checks-settle open -
 check-runs-streak open -
 check-runs-rollup open -
 stacked-children open -
+retarget-children open -
 version-policy open -
 partial-reset open -
 partial-comment open -
@@ -306,7 +327,13 @@ issue-close-gate open -
 dirty-guard open -
 worktree-contains open -
 worktree-preserve open -
-cleanup-paths open -"
+discovered-worktree open -
+retries-used open -
+pr-state open -
+poll-wait open -
+revalidate-head open -
+cleanup-paths open -
+workflow-scope open -"
 
 # Shared comparison, so the controls below exercise the SAME logic the real
 # assertion does rather than a paraphrase of it. `sort -V` over a here-string
@@ -340,7 +367,7 @@ CALLED_VERBS="$(grep -o 'loom-daemon}" merge-pr [a-z][a-z0-9-]*' "$MERGE_PR_SRC"
 # If the invocation idiom is ever refactored, the scan above could come back
 # empty and every assertion below would vacuously pass. Pin the three verbs
 # that are fail-closed TODAY so that refactor fails loudly instead.
-for _known in verdict-contradiction stale-checks loom-pr-guard classify-response partial-conflict checks-failure; do
+for _known in verdict-contradiction stale-checks loom-pr-guard classify-response partial-conflict checks-failure ci-result; do
     assert_contains "$CALLED_VERBS" "$_known" \
       "the invocation scan still finds 'merge-pr $_known' in merge-pr.sh"
 done
@@ -380,6 +407,45 @@ else
 fi
 
 echo ""
+echo "Testing a fail-open verb's roll-hint names its OWN floor (#9377, via #11167)…"
+
+# The family `requires-daemon: merge-pr` marker tracks the newest FAIL-CLOSED
+# verb (#8967). A fail-open verb deliberately does not raise it, so a hint
+# that always quoted the family floor named a version unrelated to the verb
+# that actually failed — rjwalters/repo#494: told ">= 0.19.172" on a 0.19.461
+# host that lacked issue-close-gate (first released in 0.19.462). The per-verb
+# `# daemon-verb-hint:` annotation is MESSAGE TEXT ONLY: these assertions pin
+# that the hint uses it, and that nothing gates on it.
+DECLARED_ICG_HINT="$(sed -n '/^# daemon-verb-hint: merge-pr issue-close-gate >= /{s/^# daemon-verb-hint: merge-pr issue-close-gate >= \([0-9][0-9.]*\).*/\1/p;q;}' "$FUNCS_FILE")"
+assert_eq "0.19.462" "$DECLARED_ICG_HINT" \
+  "issue-close-gate carries a daemon-verb-hint naming its own landing version (f4517bb46, #9240 -> v0.19.462)"
+HINT_ICG="$(SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr "$WORKDIR/stale-loom-daemon" issue-close-gate)"
+assert_contains "$HINT_ICG" "loom-daemon >= 0.19.462 for 'merge-pr issue-close-gate'" \
+  "fail-open issue-close-gate: the hint names THAT verb and ITS floor"
+assert_not_contains "$HINT_ICG" "loom-daemon >= $DECLARED_MERGEPR_MIN" \
+  "fail-open issue-close-gate: the hint does NOT quote the fail-closed family floor ($DECLARED_MERGEPR_MIN)"
+assert_contains "$HINT_ICG" "merge-pr issue-close-gate --help" \
+  "fail-open issue-close-gate: the confirm step probes the verb itself, not just the family"
+HINT_UNANNOTATED="$(SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr "" no-such-verb)"
+assert_contains "$HINT_UNANNOTATED" "loom-daemon >= $DECLARED_MERGEPR_MIN for 'merge-pr'." \
+  "an unannotated verb falls back to the family floor (the pre-#9377 message, unchanged)"
+assert_eq "$HINT_MERGEPR" "$(SCRIPT_DIR="$HELPERS_DIR" _mp_daemon_roll_hint merge-pr)" \
+  "two-argument callers are unaffected (no verb -> family floor)"
+assert_contains "$(grep -F "merge-pr issue-close-gate' exited" "$MERGE_PR_SRC")" '2>/dev/null || true)" issue-close-gate)' \
+  "merge-pr.sh's issue-close-gate warning passes its verb to _mp_daemon_roll_hint"
+
+# Every merge-pr `daemon-verb-hint:` must name a verb classified `open` in the
+# fail-direction table above: a fail-CLOSED verb's floor is the family marker
+# itself (#8967), so a per-verb hint for one would let the message and the
+# gate disagree — the exact drift the single marker exists to prevent.
+while read -r _hint_verb; do
+    [[ -n "$_hint_verb" ]] || continue
+    read -r _ignored _dir _ver <<<"$(_verb_row "$_hint_verb")"
+    assert_eq "open" "${_dir:-<unclassified>}" \
+      "daemon-verb-hint for 'merge-pr $_hint_verb' annotates a fail-OPEN verb (message text only, never a gate)"
+done <<<"$(sed -n 's/^# daemon-verb-hint: merge-pr \([a-z][a-z0-9-]*\) >= .*/\1/p' "$FUNCS_FILE")"
+
+echo ""
 echo "Testing the merge.reverifyStaleChecks version-floor warning (#10465)…"
 
 # Fail-OPEN by design: the warning never refuses a merge and never raises the
@@ -398,8 +464,8 @@ mkdir -p "$WORKDIR/rv-repo/.loom"
 REPO_ROOT_SAVED="$REPO_ROOT"
 REPO_ROOT="$WORKDIR/rv-repo"
 
-REV_OFF="$(LOOM_MERGE_REVERIFY_STALE_CHECKS="" LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"; REV_OFF_RC=$?
-assert_eq "" "$REV_OFF" "no warning while reverify is off (default)"
+REV_OFF="$(LOOM_MERGE_REVERIFY_STALE_CHECKS=off LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"; REV_OFF_RC=$?
+assert_eq "" "$REV_OFF" "no warning while reverify is explicitly off (env)"
 assert_eq "0" "$REV_OFF_RC" "off: returns 0"
 
 REV_ON="$(LOOM_MERGE_REVERIFY_STALE_CHECKS=1 LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"; REV_ON_RC=$?
@@ -413,6 +479,9 @@ assert_contains "$REV_ON" "$(hostname 2>/dev/null || echo unknown)" "the warning
 echo '{"merge":{"reverifyStaleChecks":true}}' >"$REPO_ROOT/.loom/config.json"
 REV_CFG="$(LOOM_MERGE_REVERIFY_STALE_CHECKS="" LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"
 assert_contains "$REV_CFG" "0.19.161" "the config key enables the check too"
+echo '{"merge":{"reverifyStaleChecks":false}}' >"$REPO_ROOT/.loom/config.json"
+REV_CFG_OFF="$(LOOM_MERGE_REVERIFY_STALE_CHECKS="" LOOM_DAEMON_BIN="$WORKDIR/stale-loom-daemon" _mp_warn_reverify_floor 2>&1)"
+assert_eq "" "$REV_CFG_OFF" "config false disables the warning"
 
 cat >"$WORKDIR/new-loom-daemon" <<'FAKE'
 #!/usr/bin/env bash

@@ -1017,13 +1017,18 @@ def _measurement_node_references(
     analysis this lint runs -- so leaving it unscanned would blind the lint to
     exactly the measurements most likely to reach it.
 
+    Also scans each ``analysis_steps[].measurements[]`` entry (issue #2482),
+    reported as ``<step>.<name>`` -- with a step sequence, the top-level list
+    holds only derived expressions, and the node references live in the
+    steps.
+
     Split out of :func:`_declared_nodes` so that function's branch count does
     not grow with the number of scanned fields (see
     ``scripts/check_complexity_baseline.py``).
     """
     references: list[tuple[str, str]] = []
-    for spec in request.get("measurements") or []:
-        origin = f"measurement {spec.get('name', '?')!r}"
+    for label, spec in _all_measurement_specs(request):
+        origin = f"measurement {label!r}"
         for field in ("spice", "expr"):
             text = spec.get(field)
             if not isinstance(text, str):
@@ -1031,6 +1036,30 @@ def _measurement_node_references(
             for match in _MEAS_NODE_RE.finditer(text):
                 references.extend((group, origin) for group in match.groups() if group)
     return references
+
+
+def _all_measurement_specs(
+    request: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    """``(label, spec)`` for every measurement object the request declares:
+    the top-level ``measurements[]``, then each ``analysis_steps[]`` step's
+    own (labelled ``<step>.<name>``). Malformed entries are skipped -- ``klt
+    sim`` itself owns validating the request's shape."""
+    specs = [
+        (str(spec.get("name", "?")), spec)
+        for spec in request.get("measurements") or []
+        if isinstance(spec, dict)
+    ]
+    steps = request.get("analysis_steps")
+    for step in steps if isinstance(steps, list) else []:
+        if not isinstance(step, dict) or not isinstance(step.get("measurements"), list):
+            continue
+        specs.extend(
+            (f"{step.get('name', '?')}.{spec.get('name', '?')}", spec)
+            for spec in step["measurements"]
+            if isinstance(spec, dict)
+        )
+    return specs
 
 
 # --------------------------------------------------------------------------- #

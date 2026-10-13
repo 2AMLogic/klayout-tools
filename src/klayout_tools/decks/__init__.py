@@ -52,6 +52,7 @@ from .extraction import (
     ResistorDevice,
     ResistorFlavour,
 )
+from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
     InvalidDeckOptionError,
     LayerRC,
@@ -68,6 +69,8 @@ __all__ = [
     "DiodeDevice",
     "DrcRule",
     "ExtractionDeck",
+    "FinFETExtractionDeck",
+    "FinFETFlavour",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
     "LayerRC",
@@ -268,13 +271,17 @@ def get_nominal_dbu(name: str) -> float:
 
 
 def _extraction_registry() -> dict[str, ExtractionDeck]:
-    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
+    from . import asap7, gf180mcu, sg13cmos5l, sg13g2, sky130
 
     return {
         "sky130": sky130.EXTRACTION_DECK,
         "gf180mcu": gf180mcu.EXTRACTION_DECK,
         "sg13g2": sg13g2.EXTRACTION_DECK,
         "sg13cmos5l": sg13cmos5l.EXTRACTION_DECK,
+        # Issue #2761: extraction-only FinFET deck. ASAP7 is deliberately
+        # absent from the DRC registries above (#2760) and from
+        # `_parasitics_registry` below -- see `pdk_capabilities.DECISIONS`.
+        "asap7": asap7.EXTRACTION_DECK,
     }
 
 

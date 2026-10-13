@@ -205,6 +205,7 @@ each row's comparison does and does not account for.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import math
@@ -215,7 +216,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import env_provenance
+from . import env_provenance, output_lock
 from ._paths import _fold_spice_continuations, _resolve_relative
 from .coverage import (
     REASON_NO_DELTA_ROWS,
@@ -381,6 +382,49 @@ def _body_bias_report(extract_report: Mapping[str, Any]) -> dict[str, Any]:
         "unbiased_nets": sorted({entry["net"] for entry in entries}),
         "unbiased_pmos_body_nets": entries,
     }
+
+
+def _parasitic_integrity_report(
+    parasitics: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """The ``extraction.parasitic_integrity`` block (issue #2764):
+    propagate the extraction's own per-net parasitic RC network integrity
+    diagnostics into this command's summary.
+
+    ``klt pex`` re-simulates the netlist the extraction wrote, so a broken
+    emitted network (a ladder split into islands, a shorted pair, a
+    NaN-valued resistor) is exactly the kind of defect that would otherwise
+    surface only as a confusing ``delta[]`` row. ``klt extract --parasitics``
+    already checks the network it emits and reports per-net status values;
+    `klt pex` carries them through so a committed pex record is
+    self-describing about the health of the network its numbers were
+    measured on.
+
+    ``None`` when the extraction report carries no ``integrity`` summary
+    (never for this command's own runs -- extraction always runs with
+    ``--parasitics`` here -- but kept for a caller-supplied report from an
+    older build). The per-net entries are re-attached from the extraction's
+    ``parasitics.nets[]`` entries (where ``run_extract`` inlines them, so
+    rerun canonicalization re-sorts them together) in that same order,
+    verbatim, under the summary's ``nets`` key -- byte-identical payloads to
+    ``klt extract``'s own inline blocks. This block is reported, never
+    folded into ``status``: like ``body_bias`` above, grading on it is a
+    policy decision for the evidence consumer, not one this command makes.
+    """
+    summary = parasitics.get("integrity")
+    if not isinstance(summary, dict):
+        return None
+    nets = [
+        {
+            "net": entry.get("net"),
+            "net_id": entry.get("net_id"),
+            "rc_model": entry.get("rc_model"),
+            "integrity": entry.get("integrity"),
+        }
+        for entry in parasitics.get("nets") or []
+        if isinstance(entry, dict) and entry.get("integrity") is not None
+    ]
+    return {**summary, "nets": nets}
 
 
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
@@ -1749,6 +1793,22 @@ def _prepare_extracted_request(
     return extracted_request_path
 
 
+def _own_pex_root(
+    ownership: contextlib.ExitStack, artifacts_dir: str | None, layout_path: str
+) -> None:
+    """Own the PEX artifact root (``artifacts_dir`` or ``.klt/pex/``) (#2770)."""
+    ownership.enter_context(
+        output_lock.hold_output_dir(
+            artifacts_dir
+            if artifacts_dir
+            else os.path.join(
+                os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex"
+            )
+        )
+    )
+
+
+@output_lock.owns_run
 def run_pex(
     layout_path: str,
     testbench_paths: Sequence[str],
@@ -1762,6 +1822,7 @@ def run_pex(
     backend: str | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
+    label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     critical_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
     mom_rlc_net: str | None = None,
@@ -1771,6 +1832,7 @@ def run_pex(
     measure_command: Sequence[str] | None = None,
     reference_netlist: str | None = None,
     measure_timeout_s: float | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
     testbench in ``testbench_paths`` against both the schematic DUT it
@@ -1794,7 +1856,17 @@ def run_pex(
     caller resolves a ``pin_count_mismatch`` caused by flat extraction
     promoting more top-level pins than the schematic DUT declares. ``None``
     for both (the default) resolves the deck and promotes pins exactly as
-    before this feature existed. ``critical_nets`` (``klt
+    before this feature existed. ``label_layers`` (``klt pex --label-layer
+    <role>=<layer>/<datatype>``, repeatable, issue #2686) is likewise passed
+    straight through to :func:`~klayout_tools.extract.run_extract` -- it
+    redirects which GDS purpose extraction reads net/pin name text from, per
+    label role, for a layout whose names sit on a text purpose the curated
+    deck does not read (see ``run_extract``'s own ``label_layers`` docstring
+    paragraph, issue #2656). Without it such a layout extracts with no
+    promoted top-level pins and the extracted-side testbench cannot bind the
+    DUT. The applied mapping is echoed as ``extraction.label_layers`` (``None``
+    when no override was given -- the extraction is then byte-identical to
+    before this parameter existed). ``critical_nets`` (``klt
     pex --critical-net``, repeatable, issue #976, Epic #709 Phase 2a) is
     also passed straight through to :func:`~klayout_tools.extract.run_extract`
     -- extracts lateral (same-layer, sidewall) coupling capacitance for any
@@ -1916,7 +1988,19 @@ def run_pex(
     in testbench mode. See this module's "Measuring with a caller-supplied
     command" docstring section.
 
+
+    **Output-directory ownership (issue #2770).** The run owns its artifact
+    root (``artifacts_dir``, default ``.klt/pex/`` beside the layout) for its
+    whole lifetime through :func:`klayout_tools.output_lock.hold_output_dir`,
+    taken before anything is created: a competing cooperating run raises
+    :class:`~klayout_tools.output_lock.OutputDirLockedError`. The per-testbench
+    ``run_sim`` calls on ``<root>/<label>/schematic|extracted`` inherit that
+    ownership (they never re-acquire it), and a separate cooperating
+    ``run_sim``/``run_pex`` on one of those child directories is refused
+    while this run holds the root. ``_ownership`` is internal: the exit
+    stack that releases the lock when the run ends.
     """
+    _own_pex_root(_ownership, artifacts_dir, layout_path)
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
     # mode and `None` in the default testbench mode -- the single flag every
@@ -1950,6 +2034,9 @@ def run_pex(
             # `run_extract` call this module made before they existed.
             deck_options=deck_options,
             declared_pins=declared_pins,
+            # Issue #2686: `--label-layer` passthrough. `None` when the flag
+            # was never given -- the exact `run_extract` call made before it.
+            label_layers=label_layers,
             critical_nets=critical_nets,
             distributed_rc=distributed_rc,
             mom_rlc_net=mom_rlc_net,
@@ -2335,6 +2422,17 @@ def run_pex(
             # `run_extract`'s `mom_rlc_net` docstring paragraph) --
             # byte-identical to before this feature existed otherwise.
             "mom_rlc_override": parasitics.get("mom_rlc_override"),
+            # Additive field (issue #2686): `klt extract`'s own
+            # `label_layers` echo for this run's extraction -- the applied
+            # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
+            # or `None` when the flag was never given.
+            "label_layers": extract_report.get("label_layers"),
+            # Additive field (issue #2764): the extraction's own
+            # per-net parasitic RC network integrity diagnostics --
+            # threshold/tolerances, aggregate counts, and one entry per net
+            # (verbatim per-net payloads, `parasitics.nets[]` order). See
+            # `_parasitic_integrity_report`.
+            "parasitic_integrity": _parasitic_integrity_report(parasitics),
         },
         # Additive field (issue #1983): whether the extracted netlist this
         # run re-simulated has a DC bias path for every device body, reduced

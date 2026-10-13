@@ -699,6 +699,33 @@ def test_expr_measurement_referencing_a_nonexistent_node_is_flagged(
     assert "'vout'" in finding["message"]
 
 
+def test_step_scoped_measurement_referencing_a_nonexistent_node_is_flagged(
+    tmp_path, monkeypatch
+):
+    """Issue #2482: with `analysis_steps[]` the top-level `measurements[]` hold
+    only derived expressions; the `v(...)` references live in each step's own
+    measurements, so those must be scanned too (labelled `<step>.<name>`)."""
+    request = _write_request(
+        tmp_path,
+        _GOOD_NETLIST,
+        analysis_steps=[
+            {
+                "name": "lo",
+                "analysis": {"kind": "op", "args": ""},
+                "measurements": [{"name": "vout", "expr": "v(vout_node)"}],
+            }
+        ],
+        measurements=[{"name": "twice", "expr": "lo.vout * 2"}],
+    )
+    _install_fake_ngspice(monkeypatch, {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS})
+
+    report = op_sanity.run_op_sanity(str(request))
+
+    (finding,) = _findings(report, "missing_node")
+    assert finding["node"] == "vout_node"
+    assert "'lo.vout'" in finding["message"]
+
+
 def test_declared_io_node_present_in_netlist_is_not_flagged(tmp_path, monkeypatch):
     request = _write_request(
         tmp_path,

@@ -25,9 +25,10 @@ Four modes, one verb:
    until issue #1152 (Phase 3) additionally let item 8 ("Characterization
    report"), the one T1 item with no named `klt` verb, accept a generic
    evidence citation too — no other item may cite one. Since issue #2044
-   **every T1 item that names evidence (3-8) is kind-restricted**; only
-   items 1, 2, 9 and 10, which name none, still accept any passing envelope.
-   See "Tier-verdict report" below.
+   **every T1 item that names evidence (3-8) is kind-restricted**. Items 1,
+   2, 9 and 10, which name none, still accept any passing envelope. Since
+   issue #2718 they can also be bound to an audited artifact through an
+   artifact-anchored generic envelope. See "Tier-verdict report" below.
 3. **Fleet roll-up** (`--fleet`, issue #827 — Phase 1c of epic #706) — grade
    every block named in a **fleet manifest** (one tier-verdict report per
    block) and reduce each block's result down to its current tier and, for
@@ -685,6 +686,36 @@ coverage is reported, not graded" above) and is never re-read as a common
 `partial` statement — absence of the versioned block is absence of evidence,
 in both directions.
 
+### A `--rules` subset is never full DRC credit
+
+`klt drc --rules '<id|glob>,...'` (issue #2768) runs only part of a curated
+deck. Such a report is evidence about the rules it ran and nothing else, so
+`klt signoff` never counts it as a passing DRC check — in envelope
+aggregation (`checks[].passed: false`) or numbered-citation grading (T1 item
+3 renders `unmet` with `reason: "partial_coverage"`):
+
+- The producer already reports a clean proper subset as `clean_partial`:
+  every omitted rule is a `coverage.skipped` record with reason
+  `not_selected`, so the row above ("partial token") applies unchanged.
+- Independently, a `klt drc` envelope whose top-level `rule_selection` block
+  declares a subset — a non-empty `omitted` list, `subset` not `false`, or a
+  present but malformed block — never passes, even if its `status` reads
+  `"clean"` (e.g. a hand-edited report). Its reason is `partial_coverage`
+  too, not `check_failed`: the run found no defect, it omitted rules.
+- A subset that **found** violations still fails as `check_failed`, like any
+  other failing DRC report.
+- `checks[].detail.rule_selection` quotes the block verbatim, so the omitted
+  rules are visible in the report; `coverage_qualification.skipped` lists them
+  with reason `not_selected`, distinguishable from a naturally inapplicable
+  rule (which is never listed there) and from an `absent_input_layer` skip.
+
+A `--rules` run that selected **every** registered rule has `omitted: []` and
+`subset: false`, and grades exactly like a full run. A report with no
+`rule_selection` key — every report written before the flag, and every
+default run — grades exactly as before. A `klt drc --list-rules` listing is
+not a DRC report at all (no `status`/`violations`) and is refused as an
+unrecognised envelope. To earn DRC credit, re-run without `--rules`.
+
 ### Device-body bias is reported, not graded
 
 [`extract.md`](extract.md#coverage) states that a device body left on an
@@ -827,7 +858,8 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
   entry, either **file-backed** or **command-backed**:
   - **File-backed** (issue #722) — a bare file path (a `klt
     drc`/`lvs`/`extract`/`sim`/`yield`/`pex` `--format json` envelope, or
-    (issue #1152, item 8 only) a generic evidence envelope, or `"-"` for
+    (issue #1152) a generic evidence envelope for item 8, or (issue #2718)
+    an artifact-anchored one for items 1, 2, 9 or 10, or `"-"` for
     stdin) or `{"file": ..., "content_hash": ..., "pointer": ...}` to also
     pin the check to an expected input revision, and/or (issue #2342) to
     name where inside that file the envelope lives. A `klt power` envelope
@@ -892,8 +924,10 @@ accept (items 3-8 each accept only the kind(s) `design-evidence-tiers.md`
 names for them — see "Item 7 is kind-restricted, per block kind" and "Items
 5, 6 and 8 are kind-restricted too" below, e.g. item 7
 accepts `pex` for an analog block and `pex` or an SDF-annotated
-`functional-verification` run for a digital one; every item
-other than item 8 rejects a `generic` citation; **every** item rejects a
+`functional-verification` run for a digital one; items 3-7 and 11 reject a
+`generic` citation, and items 1, 2, 9 and 10 accept only an
+artifact-anchored one — see "Items 1, 2, 9, and 10: bind them to an audited
+artifact" below; **every** item rejects a
 `power` citation — see "No T1
 item accepts `power` evidence" below) — also renders `"unmet"`: **this phase
 never infers a `"met"` verdict for an item with no runnable check behind
@@ -922,7 +956,8 @@ below).
 it to item 8, the one T1 item naming no specific `klt` verb — and, like item
 7's restriction, gates which item a `generic` citation may satisfy, so it
 cannot substitute for items 3-7's own evidence requirements (see "Generic
-evidence (opt-in, non-`klt`-native)" below). **Phase 4 (issue #1321, Phase 2
+evidence (opt-in, non-`klt`-native)" below). Issue #2718 extends `generic`
+to items 1, 2, 9 and 10, in an artifact-anchored form only. **Phase 4 (issue #1321, Phase 2
 of epic #712)** adds `klt power`'s IR-drop/EM verdict as a recognised
 envelope kind for *envelope-aggregation mode only* — `docs/design-evidence-
 tiers.md`'s T1 checklist has no item for power-grid evidence yet, so a
@@ -1068,49 +1103,106 @@ reduction — tier, counts, and what is blocking — and already directs a
 reader to the block's own `--manifest` report, which carries the
 declaration in full.
 
-### Items 1, 2, 9, and 10: `klt signoff` cannot check topical relevance
+### Items 1, 2, 9, and 10: bind them to an audited artifact
 
-**These four items have no `klt` verb behind them, and the tool does not
-pretend otherwise.** Items 3-7 each have a natural verb a well-formed
-manifest is expected to cite (`klt drc`, `klt lvs`, `klt sim`, `klt yield`,
-`klt pex`), and item 8 has the purpose-built `generic` envelope. Items **1**
-(Design sources), **2** (Layout), **9** (Testbenches shipped), and **10**
-(Repo hygiene) have none — they are claims about what a repository
-*contains*, not about a check that can be run.
+**These four items have no `klt` verb behind them.** Items 3-7 each have a
+natural verb a well-formed manifest is expected to cite (`klt drc`, `klt
+lvs`, `klt sim`, `klt yield`, `klt pex`), and item 8 has the purpose-built
+`generic` envelope. Items **1** (Design sources), **2** (Layout), **9**
+(Testbenches shipped), and **10** (Repo hygiene) are claims about what a
+repository *contains*, not about a check that can be run.
 
-The grading consequence is blunt and worth stating plainly: any recognised,
-*native* envelope kind (`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`) whose own
-check passed renders these four items `"met"`, **even if it is topically
-unrelated to what the item actually claims**. Citing the same clean `klt
-drc` report for item 3 and again for item 10 produces two `MET` rows, and
-`klt signoff` has no basis on which to object. (The two existing
-restrictions still apply: a `generic` citation satisfies item 8 only, and a
-`power` citation satisfies no item at all — so neither can be used here.)
+**The evidence the grader can read: an artifact-anchored generic envelope**
+(issue #2718). A `generic` envelope can be cited for one of these four when
+it is bound to the artifact that was audited. All four conditions below
+must hold, or the row is `unmet`:
 
-**These four are the only unrestricted items left** (issue #2044). Every
-item that names evidence — 3 through 8 — accepts only the kind(s) named for
-it. That asymmetry is deliberate and not an oversight here: the restriction
-mechanism works by naming the right artifact, and for items 1, 2, 9 and 10
-there is no right artifact to name. In particular a `klt extract` report,
-which cannot fail, still satisfies these four exactly like a clean `klt drc`
-report does — equally irrelevant, equally accepted, for the same structural
-reason.
+| Condition | Where | If missing or wrong |
+| --------- | ----- | ------------------- |
+| The envelope declares the item it attests: `"t1_item": <id>` (an integer) | envelope | absent or not an integer: `unanchored_evidence`; a different item: `wrong_item` |
+| The envelope names the audited artifact in `provenance.input.path` (a string resolved beside the envelope, or a `{"path", "scope": "repo"}` object) and records its `provenance.input.content_hash` | envelope | `unanchored_evidence` |
+| The manifest entry pins the same `content_hash` | manifest | not pinned: `unanchored_evidence`; pinned but different: `stale_evidence` |
+| The named artifact re-hashes to that value from the grading context (`input_verified: true`) | filesystem | changed since the envelope was written: `stale_evidence`; not found or not readable here: `unverifiable_provenance` |
 
-What `klt signoff` *does* verify for these items is what it verifies
-everywhere: that the evidence resolves to a readable, recognised envelope;
-that the check it reports actually passed; and that it is fresh against any
-`content_hash` the manifest pinned. What it cannot verify is **relevance** —
-whether the cited artifact has anything to do with the claim. For items 1,
-2, 9, and 10 that gap is structural, not an oversight to be fixed by a
-future phase: there is no verb to bind them to.
+What each item binds:
 
-**So citing these four honestly is the manifest author's responsibility, not
-something this command enforces.** The safest default is to leave them
-uncited — an `UNMET`/`no_evidence` row is an accurate statement that no
-check backs the claim, which is exactly the failure mode this verb exists to
-make visible (see "Proving a skipped check is caught, not silently passed"
-below). `examples/signoff/` follows that default: it cites items 3 and 4
-only, and leaves the rest visibly `UNMET`.
+| Item | Bind to (the artifact `provenance.input.path` names) |
+| ---- | ---------------------------------------------------- |
+| **1** Design sources | The design-source inventory: a committed list of the schematic/RTL sources and the derived netlist, or the netlist itself. |
+| **2** Layout | The committed GDS/OASIS stream. |
+| **9** Testbenches shipped | The testbench inventory: a committed list of every claimed measurement's testbench and its cold-start invocation. |
+| **10** Repo hygiene | The hygiene audit record: the CI workflow file, or a committed checklist covering README, spec table and license. |
+
+The `status: "pass"` inside the envelope is still the author's own
+assertion; `klt signoff` does not re-audit a testbench list. What the
+binding adds is that the attestation names the exact bytes it was made
+about, that it cannot be cited for any other item, and that any edit to
+those bytes since the attestation turns the row `unmet`. A `--check` re-run
+also reports that as drift.
+
+A valid item-9 citation (`tb-inventory.json` written beside
+`testbenches.txt`):
+
+```json
+{
+  "schema_version": 1,
+  "kind": "generic",
+  "status": "pass",
+  "t1_item": 9,
+  "summary": "every claimed measurement has a committed testbench; cold-start: make sim",
+  "source": "testbenches.txt",
+  "provenance": {
+    "klt_version": "0.5.0",
+    "klayout_version": "0.30.10",
+    "pdk": null,
+    "deck": null,
+    "input": {"content_hash": "sha256:3f1c...", "path": "testbenches.txt"}
+  }
+}
+```
+
+```json
+{"evidence": {"9": {"file": "evidence/tb-inventory.json", "content_hash": "sha256:3f1c..."}}}
+```
+
+This renders `MET`, and the citation carries
+`artifact_binding: {"t1_item": 9, "path": "testbenches.txt", "content_hash":
+"sha256:3f1c...", "input_verified": true, "summary": ..., "source": ...}`.
+Text output adds `bound: T1 item #9 -> testbenches.txt (content_hash=...)`.
+
+Rejected examples:
+
+- The same envelope cited for item 10 (or item 8): `unmet`/`wrong_item`.
+- The same envelope with no `t1_item`, or cited without the manifest
+  `content_hash` pin: `unmet`/`unanchored_evidence`.
+- `testbenches.txt` edited after the envelope was written:
+  `unmet`/`stale_evidence`.
+- A bare characterization-style `generic` envelope with none of the binding:
+  `unmet`/`unanchored_evidence`.
+
+Command-backed evidence follows the same rules. The binding is read from
+the command's stdout envelope, and a relative `provenance.input.path` is
+resolved against the entry's `cwd`.
+
+**Native envelopes are still accepted for these four, for compatibility,
+and they carry no information about the item.** Any recognised, passing
+native envelope kind (`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`/`sta`/
+`functional-verification`) still renders these items `"met"` exactly as
+before, **even when it is topically unrelated to the claim**. Citing the
+same clean `klt drc` report for item 3 and again for item 10 produces two
+`MET` rows. Such a citation has **no `artifact_binding` key**. That absence
+is the machine-readable difference between "a passing envelope was cited"
+and "the item is bound to an audited artifact", and text output says so
+on the row (`topic: not bound -- ...`). (`power`, `erc` and
+`place-and-route` citations are still refused for these items, as before.)
+Do not use a borrowed native pass to make these rows agree with a human
+audit. Bind the audited artifact instead.
+
+**Leaving them uncited is still honest.** An `UNMET`/`no_evidence` row is
+an accurate statement that no check backs the claim, which is exactly the
+failure mode this verb exists to make visible (see "Proving a skipped check
+is caught, not silently passed" below). `examples/signoff/` cites items 3
+and 4 only, and leaves the rest visibly `UNMET`.
 
 **Taking that advice does not cost you the fleet roll-up's answer** (issue
 #2178). Because these four render `unmet` by construction for any manifest
@@ -1308,9 +1400,9 @@ identically:
 
 | How the pinned commit `<sha>` was provisioned | What the `build` block says |
 | --- | --- |
-| `uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>"` | real git facts recorded by `hatch_build.py` from the package manager's own scratch checkout: `git_commit: "<sha>"`, `version: "X.Y.Z+g<sha>"`. Before issue #2248 that checkout's untracked build residue (`uv` drops a checkout-completion sentinel into the tree) also made `dirty: true` and `version: "X.Y.Z+g<sha>.dirty"`. |
+| `uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>"` | real git facts recorded by `hatch_build.py` from the package manager's own scratch checkout: `git_commit: "<sha>"`, a version such as `"X.Y.(Z+1).devN+g<sha>"` (issue #2823; `"X.Y.Z+g<sha>"` before it). Before issue #2248 that checkout's untracked build residue (`uv` drops a checkout-completion sentinel into the tree) also made `dirty: true` and `version: "X.Y.Z+g<sha>.dirty"`. |
 | A clean `git worktree add <sha>` / `git clone` + local `uv build` | the same commit, `dirty: false` |
-| `pip install` of a source **tarball** of `<sha>` (a GitHub `/archive/<sha>.tar.gz`, a vendored copy) | no `.git` exists at build time, so no facts are recorded at all: `git_commit: null`, `version: "X.Y.Z+unknown"`, `is_release: null` |
+| `pip install` of a source **tarball** of `<sha>` (a GitHub `/archive/<sha>.tar.gz`, a vendored copy) | no `.git` exists at build time, so no facts are recorded at all: `git_commit: null`, `version: "X.Y.Z.dev0+unknown"`, `is_release: null` |
 
 Every row is honest about the build it names — that is exactly why issue
 #2176 put the block in the report — and the last row is **not fixable**: the
@@ -1546,8 +1638,8 @@ Two mechanisms close that gap, both driven by the same content hash:
    drift from it:
 
    ```json
-   "opt_in_evidence_kinds": {"generic": [8], "power": [], "erc": [11], "place-and-route": [11]},
-   "opt_in_kinds_by_item": {"8": ["generic"], "11": ["erc", "place-and-route"]}
+   "opt_in_evidence_kinds": {"generic": [1, 2, 8, 9, 10], "power": [], "erc": [11], "place-and-route": [11], "socket-check": [11], "lef-abstract": [11]},
+   "opt_in_kinds_by_item": {"1": ["generic"], "2": ["generic"], "8": ["generic"], "9": ["generic"], "10": ["generic"], "11": ["erc", "place-and-route", "socket-check", "lef-abstract"]}
    ```
 
    `opt_in_evidence_kinds` maps kind to the item ids it may satisfy; an
@@ -1687,7 +1779,7 @@ reader of the citation.
 
 What has *not* changed: a hand-rolled `"kind": "generic"` envelope asserting
 that a post-layout comparison happened is still `"unmet"`/`"wrong_kind"` for
-item 7 (`generic` remains item 8 only — see "Generic evidence (opt-in,
+item 7 (`generic` is never accepted for items 3-7 — see "Generic evidence (opt-in,
 non-`klt`-native)" below), and so is a `drc`/`lvs`/`sim`/`extract`/`yield`/
 `sta` citation. Item 7 still requires a real, disclosed
 schematic-vs-extracted comparison.
@@ -1891,10 +1983,11 @@ citation is refused by the second — no item is doubly restricted into
 accepting nothing.
 
 **Items 1, 2, 9 and 10 are deliberately left alone**, including for
-`extract` — see "Items 1, 2, 9, and 10: `klt signoff` cannot check topical
-relevance" above. They name no evidence at all, so there is no right
-artifact to restrict them *to*, and singling out one irrelevant kind while
-every other irrelevant kind still counts would be arbitrary.
+`extract` — see "Items 1, 2, 9, and 10: bind them to an audited artifact"
+above. They name no `klt` verb, so there is no native kind to restrict them
+*to*, and singling out one irrelevant kind while every other irrelevant
+kind still counts would be arbitrary. Issue #2718 later gave them an
+artifact-anchored `generic` form instead, without restricting native kinds.
 
 ### Generic evidence (opt-in, non-`klt`-native)
 
@@ -1922,6 +2015,11 @@ misclassify it as a native kind instead:
 ```
 
 - `kind` — required, must be the literal string `"generic"`.
+- `t1_item` — optional integer (issue #2718), the T1 item this envelope
+  attests. **Required**, and must match, when the envelope is cited for
+  item 1, 2, 9 or 10. When present it must match for item 8 too, so an
+  attestation cannot be replayed onto another item (`unmet`/`wrong_item`).
+  An item-8 envelope that omits it grades exactly as before.
 - `status` — required, `"pass"` or `"fail"` — the envelope's own,
   caller-asserted verdict. Nothing else is re-derived from any other field,
   since a generic envelope's content is not otherwise defined.
@@ -1991,16 +2089,22 @@ above alongside (or generated from) its own non-`klt`-native record; feeding
 `klt signoff` a bare `.md` file directly still fails to parse as JSON,
 exactly as it always has, and is out of this feature's scope.
 
-**Only item 8 accepts a `generic` citation.** Naively recognising `generic`
+**Which items accept a `generic` citation.** Item 8 accepts a bare one.
+Items 1, 2, 9 and 10 accept only the artifact-anchored form (issue #2718,
+see "Items 1, 2, 9, and 10: bind them to an audited artifact"). Items 3-7
+and 11 never accept one. The rest of this paragraph is the original
+(issue #1152) reasoning for scoping it at all. Naively recognising `generic`
 in `_classify` with no further restriction would let it satisfy *any*
 unrestricted item (1-6, 8-10) the same way any other recognised, passing
 kind already can — letting a hand-rolled "yep, it's fine" record stand in
 for DRC/LVS/corner/Monte-Carlo/post-layout evidence it never actually
 proved. `klt signoff` closes that independently of item 7's `pex`-only
-restriction: a `generic` citation for **any item other than item 8** —
-including items 3-7, and including the otherwise-unrestricted items 1, 2,
-9, and 10 — renders `"unmet"` with `reason: "wrong_kind"`, never a borrowed
-pass, even when the generic envelope's own `status` genuinely is `"pass"`.
+restriction: a `generic` citation for items 3-7 (and 11) renders
+`"unmet"` with `reason: "wrong_kind"`, never a borrowed pass, even when the
+generic envelope's own `status` genuinely is `"pass"`. Before issue #2718
+the same was true for items 1, 2, 9 and 10. A bare generic envelope cited
+for them now renders `"unanchored_evidence"` instead, which is still
+`unmet` and names what is missing.
 Item 8 itself was otherwise unrestricted when this shipped: it also accepted
 any native kind's passing citation, `generic` being an *additional* accepted
 kind for item 8 rather than a replacement. Issue #2044 closed that half too
@@ -2031,7 +2135,9 @@ exactly as every other item accepts:
 ```
 
 Every part must independently resolve to a readable, recognised envelope of
-a kind item 11 accepts (`erc`, `lvs`, `place-and-route`) — one malformed part
+a kind item 11 accepts (`erc`, `lvs`, `place-and-route`, and — for the
+provisional port-accessibility half, issue #2839 — `socket-check` and
+`lef-abstract`; see "Port accessibility" below) — one malformed part
 renders the whole item `invalid_evidence` rather than being silently dropped
 from the cited set, and a part of any other kind renders `wrong_kind`.
 
@@ -2180,6 +2286,94 @@ citation of one would reopen the "cannot fail, therefore always passes" hole
 issue #1987 closed for `klt extract` on items 3 and 4. In particular it can
 never satisfy item 5: the corner set that response sweeps is the PDK's full
 shipped list, not a declared one — `klt sta` is item 5's timing evidence.
+
+### Item 11 port accessibility: edge power ports + LEF abstract (issue #2839, provisional)
+
+**Status: provisional.** The operator ruled (2AMLogic/product#134) that an
+edge-accessible power port plus a machine-readable abstract becomes a bronze
+precondition through an amendment to T1 item 11. The amendment text (drafted
+in 2AMLogic/product PR #168) is **not yet ratified**, so this half is graded
+only when a block **opts in** — its manifest sets `power_ports.required:
+true`, or its item-11 evidence list cites a `socket-check` or `lef-abstract`
+part (citing port evidence is opting in; cited evidence is never silently
+ignored). A block that does neither grades exactly as it did before #2839,
+and its met citation carries no `power_ports` key. Ratification flips the
+default `required` to `true`; nothing else about the grading changes.
+
+The half is graded **after** the ERC/LVS(/PDN) rows above are all proven, so
+every pre-existing reason keeps precedence: a block whose supply is not
+continuous still reports `supply_not_continuous`, whatever its ports look
+like. Two more parts join the cited list:
+
+```json
+{
+  "block": "my-analog-block",
+  "kind": "analog",
+  "power_ports": {"required": true, "edge_band_um": 0.0},
+  "evidence": {
+    "11": ["erc-supply.json", "lvs.json", "socket-check.json", "lef-abstract.json"]
+  }
+}
+```
+
+- a [`klt socket-check`](socket-check.md) envelope, whose additive
+  `power_ports` block carries per-supply-pin **facts** (drawn port bounding
+  box, distance to each outline edge, approach-channel clearance per edge);
+- a [`klt lef-abstract`](lef-abstract.md) envelope (its `pins[]`, the
+  read-back `power_pins` verdict, `size_um`, and `self_check`).
+
+The **supplies** are the cited ERC spec's declared `"kind": "supply"` nets —
+the same names the rest of item 11 grades — matched to socket pins and LEF
+pins by name, case-insensitively. Every declared supply needs, in order:
+
+| Condition | Read from | Unmet reason |
+| --------- | --------- | ------------ |
+| A `socket-check` part carrying `power_ports` facts is cited | the cited set | `power_port_unproven` |
+| A socket pin of that name with `use` `POWER`/`GROUND`, its label found, drawn conductor under it | `socket-check` `power_ports.ports[]` | `no_edge_power_port` |
+| At least one such port within `edge_band_um` of a counted outline edge **with a clear approach channel** (no other conductor on its layer between it and that edge) | the same facts, re-graded under the manifest's policy | `power_port_interior_only` |
+| A `lef-abstract` part is cited, it passes its structural `self_check`, and it has a `PIN` of that name | `lef-abstract` `pins[]` | `lef_power_pin_missing` (`check_failed` for a failing `self_check`) |
+| The LEF pin's written `USE` is `POWER`/`GROUND` and equals the port's | `power_pins.pins[].use_read_back`, else `pins[].use` | `lef_power_pin_mismatch` (`aspect: "use"`) |
+| The port's layer is allowed: by default, the LEF pin resolves to a LEF **routing** layer; with `allowed_layers`, the LEF layer name or the port's GDS `layer/datatype` is listed | `pins[].layer`, port `metal_layer`/`layer` | `power_port_layer_disallowed` |
+| The LEF `PORT` is drawn layout geometry (not a synthesized placeholder), was emitted from the same GDS layer as the port, and its rectangles touch the edge-accessible port; the macro `SIZE` equals the socket outline | `pins[].geometry_source`/`gds_layer`/`rects_um`, `size_um` | `lef_power_pin_mismatch` (`aspect`: `geometry`/`layer`/`location`/`size`) |
+
+**The policy is a manifest field, with provisional defaults**, so a grade is
+reproducible from the report alone (it is echoed as
+`power_ports.policy`):
+
+| `power_ports.` field | Default | Meaning |
+| --- | --- | --- |
+| `required` | `false` | Grade this half even when no port evidence is cited (a missing part then renders `power_port_unproven`/`lef_power_pin_missing`). |
+| `edge_band_um` | `0` | Maximum distance (um) from the port's drawn shape to a counted outline edge. `0` means the shape must **touch** the outline — the strictest, PDK-independent reading of the draft's open "edge band" (it proposes "one minimum metal pitch of the port's layer"); widen it per block. The boundary is inclusive. |
+| `edges` | all four | Which outline edges count (`left`/`bottom`/`right`/`top`). |
+| `allowed_layers` | `null` | `null` allows any layer that resolves to a LEF routing layer (the draft's recommendation: "any routing metal the PDK stackup declares"); a list of LEF layer names (`"met4"`) or GDS `"layer/datatype"` strings restricts it. |
+
+A malformed `power_ports` object is a manifest error (exit 1), like a
+malformed `partition_boundary`.
+
+**Why `klt signoff` re-grades the facts instead of reading `socket-check`'s
+own verdict.** The verb's `power_ports` check grades its descriptor's (or
+CLI's) parameters; the item grades the manifest's. Re-grading the same
+facts with the verb's own grading function
+(`socket_check.grade_power_ports`) keeps one envelope gradeable under
+whatever policy the block declares, and keeps the two from drifting. The
+socket-check envelope's overall `status` is not graded here either: only
+its `power_ports` facts are item-11 evidence.
+
+**What a met citation says.** `citation.power_delivery.power_ports` holds
+`policy`, `findings: []`, and `ports[]` — per supply, `{"net", "use",
+"port": {"name", "layer", "metal_layer", "bbox_um", "accessible_edges"},
+"lef_pin": {"name", "use", "layer", "geometry_source"}}`. An unmet item
+carries the same block as `detail.power_ports`, with `findings[]` entries
+`{"net", "reason", "aspect", "message"}` (`net: null` for a set-level
+finding such as a missing citation).
+
+**Not graded yet.** The draft's "a supply that declares `nets[].islands` >
+1 needs one accessible port per island" is not graded — one accessible port
+per declared supply name is. Pin names are compared to the ERC spec's
+supply names, not separately to the LVS reference's.
+
+**`socket-check` and `lef-abstract` are accepted by item 11 alone**, like
+`erc`/`place-and-route`: any other item renders `wrong_kind` for them.
 
 ### No T1 item accepts `power` evidence
 
@@ -2414,7 +2608,7 @@ distinguishable from "no samples document was ever named" (see
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
 | `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
 | `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
 
 #### `citation` fields
 
@@ -2422,7 +2616,7 @@ distinguishable from "no samples document was ever named" (see
 | --------------- | --------------- | ------------------------------------------------------------------------------------- |
 | `file`          | string \| null  | The evidence file path, for a file-backed entry; `null` for a command-backed entry (no static file backs it). |
 | `command`       | string \| null  | The executed argv, joined for display, for a command-backed entry; `null` for a file-backed entry (no command was run to produce it). |
-| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
+| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
@@ -2430,9 +2624,10 @@ distinguishable from "no samples document was ever named" (see
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
 | `parts`         | array\<object\> | **Item 11 citations only** (issue #2025): every artifact of the compound cited set, each in this same citation shape (minus `parts`/`power_delivery`), in `erc`/`lvs`/`place-and-route` order. The top-level fields above describe the *leading* (`erc`) part, so a consumer written before item 11 existed still reads a well-formed citation; nothing a reader needs is reachable only through `parts`. **Absent** for every other item. |
-| `power_delivery`| object          | **Item 11 citations only** (issue #2025): `{"partition_kind", "supply_nets", "pdn", "strap_layers", "tapcell_master", "power_connectivity_status", "ties_checked_by_assertion", "ties_checked_by_well_assertion", "supply_unlabelled_islands"}`, plus `disclosed_undeclared_tie_classes` when present — what the grading actually resolved, so a `met` verdict states which supplies were declared and which branch proved them. `pdn` is `false` (with `strap_layers: []`, `tapcell_master: null`) for an analog or full-custom block that cited no `place-and-route` response — "no PDN citation", not "a PDN was checked and found missing", which renders `unmet`/`no_pdn` instead. `ties_checked_by_assertion` (array\<string\>, issue #2234) quotes the cited ERC run's own `erc_coverage.checked_by_assertion`: the `erc.missing_tie` work identities whose tap region came from a caller assertion (`ties[].tap_boxes`) rather than PDK-marker narrowing — `[]` for a purely marker-derived run, and for ERC evidence produced before that field existed. It does not change the verdict (an asserted tie is graded `met` exactly as a marker-derived one, and a degenerate or unmatched assertion is rejected by `klt erc` itself); it states which taps rested on the caller's word, without re-opening the cited envelope. `ties_checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) quotes that run's `erc_coverage.checked_by_well_assertion` the same way, for the **well** side: the work identities whose well side rested on caller-named coordinates, in either of two forms — the substrate region itself asserted (`ties[].well_layer: null` + `ties[].well_boxes`) because the block draws no well/tub layer at all (the native-substrate case), or a *drawn* well whose class selection was named in boxes (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`) because no drawn layer separates the tub's two bias classes. `[]` for a run using neither, and for ERC evidence produced before those fields existed. Kept as a separate list because it is a separate, weaker claim: one says which drawn geometry is the tap, the other says how the well side was named. It does not change the verdict either — `klt erc` rejects an assertion indistinguishable from the whole top-cell extent as `degenerate_well_assertion`, and a box selection that kept every shape of the drawn layer or none of them as `degenerate_well_selection`, both landing in `erc_coverage.skipped` where this item already refuses to read them as a clean missing-tie verdict. A purely marker-layer selection (`well_requires`/`well_excludes`) stays out of this list: the stream draws its own partition. `supply_unlabelled_islands` (object, issue #2524) is the **severed-rail negative** this item could not previously state: `{<declared supply name>: <nets[].unlabelled_islands>}` for each cited supply whose ERC spec declared the `stackup` roles it owns (`nets[].roles`, issue #2510), every value `0` for a met item. `erc.unconnected_net` counts islands *carrying the declared label*, so a single-label rail severed into a labelled piece and an unlabelled orphan grades clean — this key is what says the clean read was measured over the whole conductor on the owned roles, not only over what carried a label (its non-zero counterpart is `erc.unlabelled_conductor`, already an `unmet`/`supply_not_continuous` blocker in the table above). `{}` when no cited supply declared `roles`, and for every ERC envelope produced before those keys existed — the honest "not measured", never a fabricated zero, so a grader can tell "checked, and it is zero" from "nobody asked". Like the two assertion lists, it does not change the verdict; it states the negative the verdict rests on. `disclosed_undeclared_tie_classes` (array\<object\>, issue #2623) is the **partial-declaration** counterpart of `detail.ties_disclosure_reason` below: `[{"class", "reason"}, …]`, one entry per `erc.missing_tie:["<class>"]` the cited ERC run recorded in `erc_coverage.inapplicable` with a disclosed reason (`ties_disclosure.undeclared_classes`, issue #2541) — a well class the spec names as inexpressible or tool-limited *alongside* at least one other tie it did declare and get checked (the `tie_count > 0` path this item is already `met` on). It does not change the verdict — the declared, checked tie(s) already carry the item to `met` on their own merits, and a disclosure is never a substitute for a computed result — it only states, in the report of record, that a second class was considered and why it could not be checked. **Absent** (not an empty list) whenever the cited run disclosed no named class, so a run predating #2541 or naming none renders this citation exactly as it did before this key existed. |
+| `power_delivery`| object          | **Item 11 citations only** (issue #2025): `{"partition_kind", "supply_nets", "pdn", "strap_layers", "tapcell_master", "power_connectivity_status", "ties_checked_by_assertion", "ties_checked_by_well_assertion", "supply_unlabelled_islands"}`, plus `disclosed_undeclared_tie_classes` when present, plus `power_ports` (issue #2839) only when the provisional port-accessibility half was graded (see "Item 11 port accessibility") — what the grading actually resolved, so a `met` verdict states which supplies were declared and which branch proved them. `pdn` is `false` (with `strap_layers: []`, `tapcell_master: null`) for an analog or full-custom block that cited no `place-and-route` response — "no PDN citation", not "a PDN was checked and found missing", which renders `unmet`/`no_pdn` instead. `ties_checked_by_assertion` (array\<string\>, issue #2234) quotes the cited ERC run's own `erc_coverage.checked_by_assertion`: the `erc.missing_tie` work identities whose tap region came from a caller assertion (`ties[].tap_boxes`) rather than PDK-marker narrowing — `[]` for a purely marker-derived run, and for ERC evidence produced before that field existed. It does not change the verdict (an asserted tie is graded `met` exactly as a marker-derived one, and a degenerate or unmatched assertion is rejected by `klt erc` itself); it states which taps rested on the caller's word, without re-opening the cited envelope. `ties_checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) quotes that run's `erc_coverage.checked_by_well_assertion` the same way, for the **well** side: the work identities whose well side rested on caller-named coordinates, in either of two forms — the substrate region itself asserted (`ties[].well_layer: null` + `ties[].well_boxes`) because the block draws no well/tub layer at all (the native-substrate case), or a *drawn* well whose class selection was named in boxes (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`) because no drawn layer separates the tub's two bias classes. `[]` for a run using neither, and for ERC evidence produced before those fields existed. Kept as a separate list because it is a separate, weaker claim: one says which drawn geometry is the tap, the other says how the well side was named. It does not change the verdict either — `klt erc` rejects an assertion indistinguishable from the whole top-cell extent as `degenerate_well_assertion`, and a box selection that kept every shape of the drawn layer or none of them as `degenerate_well_selection`, both landing in `erc_coverage.skipped` where this item already refuses to read them as a clean missing-tie verdict. A purely marker-layer selection (`well_requires`/`well_excludes`) stays out of this list: the stream draws its own partition. `supply_unlabelled_islands` (object, issue #2524) is the **severed-rail negative** this item could not previously state: `{<declared supply name>: <nets[].unlabelled_islands>}` for each cited supply whose ERC spec declared the `stackup` roles it owns (`nets[].roles`, issue #2510), every value `0` for a met item. `erc.unconnected_net` counts islands *carrying the declared label*, so a single-label rail severed into a labelled piece and an unlabelled orphan grades clean — this key is what says the clean read was measured over the whole conductor on the owned roles, not only over what carried a label (its non-zero counterpart is `erc.unlabelled_conductor`, already an `unmet`/`supply_not_continuous` blocker in the table above). `{}` when no cited supply declared `roles`, and for every ERC envelope produced before those keys existed — the honest "not measured", never a fabricated zero, so a grader can tell "checked, and it is zero" from "nobody asked". Like the two assertion lists, it does not change the verdict; it states the negative the verdict rests on. `disclosed_undeclared_tie_classes` (array\<object\>, issue #2623) is the **partial-declaration** counterpart of `detail.ties_disclosure_reason` below: `[{"class", "reason"}, …]`, one entry per `erc.missing_tie:["<class>"]` the cited ERC run recorded in `erc_coverage.inapplicable` with a disclosed reason (`ties_disclosure.undeclared_classes`, issue #2541) — a well class the spec names as inexpressible or tool-limited *alongside* at least one other tie it did declare and get checked (the `tie_count > 0` path this item is already `met` on). It does not change the verdict — the declared, checked tie(s) already carry the item to `met` on their own merits, and a disclosure is never a substitute for a computed result — it only states, in the report of record, that a second class was considered and why it could not be checked. **Absent** (not an empty list) whenever the cited run disclosed no named class, so a run predating #2541 or naming none renders this citation exactly as it did before this key existed. |
 | `coverage`      | object          | **`drc` citations only**, and only when the cited envelope carries a `coverage` block (issue #2002): `{"layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`, quoted verbatim from it — the three fields [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a DRC claim to disclose. **Absent** for any other kind, and for DRC evidence committed before `klt drc` reported coverage — an absent `coverage` means "this artifact reported no coverage", never "this deck has no gaps". See "DRC coverage is reported, not graded" above. |
 | `yield_campaign` | object | **`yield` citations only**, and only when the cited report carries at least one measurement (issue #2467): `{"sample_size", "undersized_measurements", "negative_control", "measurements_without_negative_control", "undetected_negative_controls"}` — the campaign's own sample-size and negative-control state, rolled up across `measurements[]`. `sample_size` is `"insufficient"` when any measurement says so, `"sufficient"` when at least one says so and none says otherwise, and `null` when none states a verdict; `negative_control` is `"not_detected"` when any declared control failed, `"detected"` when at least one was declared and every declared one detected, and `"not_declared"` when none was declared. The three name-lists are in the report's own measurement order. On a `"met"` citation the refusing values (`"insufficient"`, `"not_detected"`) can never appear — those render `unmet`/`undersized_sample` or `unmet`/`negative_control_not_detected` instead, carrying this same block as the item's `detail.yield_campaign`. **Absent** for any other kind, and for a report with no measurements — an absent key means "this artifact made no campaign statement", never "the campaign was disciplined". See "Campaign discipline on item 6" below. |
+| `artifact_binding` | object | **Items 1, 2, 9 and 10, `generic` citations only** (issue #2718): `{"t1_item", "path", "content_hash", "input_verified", "summary"?, "source"?}`. These are the item the attestation declared, the audited artifact exactly as its `provenance.input.path` names it (a string or a `{path, scope}` object), the hash that artifact re-hashed to, and `input_verified` (always `true` on a met row). `summary`/`source` are echoed when the envelope carries them as strings, and are never graded. **Absent** on every other citation, including a native-kind citation of items 1, 2, 9 or 10. On those four items an absent key means "a passing envelope was cited, but nothing ties it to the item's subject matter". See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
 | `coverage_qualification` | object | **Any kind**, and only when the cited envelope's versioned `coverage` block classifies as `partial` (issue #2109): `{"reason": "partial_coverage", "skipped": [{"id", "reason"}, …]}` — the requested work the cited run did not check. **Absent** for complete, zero, unknown, malformed and pre-contract coverage alike; an absent key means "this artifact made no partial-coverage claim", never "nothing was skipped". Legacy verb-specific gap fields (`coverage.rules_skipped`) are **not** re-read into it. Quoted, never graded on — see "Partial coverage is qualified, not inferred" above. |
 
 #### `reason` values
@@ -2457,9 +2652,11 @@ actually ran and failed):
 | `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, timed out, or exited nonzero — distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
-| `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. |
-| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a `functional-verification` envelope (no `provenance` block by design) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. |
-| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above), every item other than item 11 rejects an `"erc"` or `"place-and-route"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the pin matches the envelope but the audited artifact itself no longer re-hashes to that value (`input_verified: false`), meaning the artifact was edited after it was attested. |
+| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a `functional-verification` envelope (no `provenance` block by design) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
+| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"`, `"place-and-route"`, `"socket-check"` or `"lef-abstract"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"unanchored_evidence"`   | yes | **(issue #2718)** **Items 1, 2, 9 and 10 only.** The evidence resolved to a *passing* `generic` envelope, but it is not bound to an audited artifact. Either the envelope declares no `t1_item` (or a non-integer one), or it names no usable `provenance.input.path`, or the manifest entry pins no `content_hash`. The envelope's `status` is then only its author's word. Add the binding; there is nothing to re-run. A non-integer `t1_item` renders this for item 8 too. See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
+| `"wrong_item"`            | yes | **(issue #2718)** The evidence resolved to a *passing* `generic` envelope whose declared `t1_item` names a different item than the one it is cited for: an attestation replayed across items. Rendered for every item that accepts `generic` (1, 2, 8, 9, 10). An item-8 envelope with no `t1_item` is unaffected. Cite the attestation made for this item. |
 | `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`, or no `power.tapcell_master` was placed. Re-run P&R with a `request.power` block. |
 | `"supply_spec_incomplete"` | yes | **Item 11 only** (issue #2025). The cited `klt erc` run's own spec document does not ask the question this item grades: it could not be read at *any* path it could mean from here (issue #2608 — the ERC report's own directory is tried as well as the producing run's, so this no longer fires for a spec committed beside its evidence), declares no `"kind": "supply"` net, declares no `ties[]` with no disclosure of why — an uncomputed check is not a clean one — declares a `ties[]` entry the ERC run reported as *degenerate* in `erc_coverage.skipped[]` (issue #2199 — a tie whose tap region is indistinguishable from an ordinary source/drain contact is likewise not a clean one; narrow it with `tap_requires`, `tap_is_dedicated`, or assert it directly with `tap_boxes`), or its stackup does not cover every strap layer the P&R response reports. Widen the spec and re-run `klt erc`. A spec that *did* disclose why it declares no `ties[]` renders one of the two sibling reasons below instead, one per disclosed obstacle (`"supply_spec_disclosed_unexpressible"`, issue #2234, or `"supply_spec_disclosed_tool_limitation"`, issue #2247). A spec that *could* be read but no longer matches (or was never pinned against) the envelope's own `provenance.spec.content_hash` renders `"stale_evidence"`/`"unverifiable_provenance"` above instead, never this reason (issue #2496) — an unverified spec is a provenance gap, not a declaration gap. |
 | `"supply_spec_disclosed_unexpressible"` | yes | **Item 11 only** (issue #2234). The cited `klt erc` run declares zero `ties[]`, exactly as `"supply_spec_incomplete"`'s "no `ties[]`" case above — but its spec explicitly disclosed why no tap can be expressed on this stream (`ties_disclosure`). Still unmet: a disclosure proves nothing about the tap's actual connectivity, so it can never substitute for a computed `erc.missing_tie` result — but distinguishable in the rendered reason (and `detail.ties_disclosure_reason`) from "nobody declared ties at all". Express the tap (`tap_boxes`, `tap_requires`, or `tap_is_dedicated`) and re-run `klt erc`, or accept this item stays unmet for this stream. |
@@ -2467,6 +2664,12 @@ actually ran and failed):
 | `"supply_not_continuous"` | no  | **Item 11 only** (issue #2025). The ERC run *did* ask, and the answer is no: a declared supply resolved to zero or several islands (`erc.unconnected_net`), two declared supplies resolved to the same island (`erc.supply_short`), a declared supply's intentional tie to another name (`nets[].same_net_as`, issue #2463) is not drawn (`erc.expected_short_missing` — graded under the same declared-name filter `erc.unconnected_net` uses, since that rule can also name two signal nets), or a well/tub has no connected tap (`erc.missing_tie`). |
 | `"lvs_supply_unproven"`   | no  | **Item 11 only** (issue #2025). The LVS half of the item is unproven: with a PDN citation, the same report's `power_connectivity.status` is not `"match"` (`"unchecked"` satisfies item 4, but not this item, which *is* the question); without one, its `net_correspondence` does not pair every declared supply net to a reference-side net, so the supplies were not part of the compare. Rendered only for a cited LVS report that *passed* — one that did not renders `"lvs_did_not_pass"`/`"check_failed"` below instead. |
 | `"lvs_did_not_pass"`      | no  | **Item 11 only** (issue #2495). The ERC half of the item **is** complete — every declared supply resolved to its declared island count, every declared tie was computed and found, no supply-side finding — and the cited LVS report did not pass on its own terms, so the LVS half is *unavailable* rather than answered. Still unmet: no citation reaches `met` on a failing compare, and `net_correspondence` (matched-nets-only) cannot say the supplies took part in a mismatched one even when the defect is a restated device parameter that has no bearing on any rail. Kept distinct from the plain `"check_failed"` below because the remedy differs and the record would otherwise read as "power delivery unverified" for a block whose rails *are* proven continuous and tied: fix the LVS defect (item 4 is blocked on it too), never the ERC spec, which already asked and answered. `detail.power_delivery` names the supply nets the ERC half proved, plus the LVS report's `status` and `power_connectivity.status`. See "Item 11 is compound" above. |
+| `"power_port_unproven"`   | no  | **Item 11 only** (issue #2839, provisional). The port-accessibility half is in force (manifest `power_ports.required`, or port evidence cited) but no `klt socket-check` envelope carrying `power_ports` facts is cited — none at all, or one produced before #2839. See "Item 11 port accessibility" above. |
+| `"no_edge_power_port"`    | no  | **Item 11 only** (issue #2839). A declared supply has no port: no `POWER`/`GROUND` socket pin of that name, its label not where the descriptor says, or no drawn conductor under it. |
+| `"power_port_interior_only"` | no | **Item 11 only** (issue #2839). The supply has drawn port(s), but none lies within the policy's edge band of a counted outline edge with a clear approach channel. |
+| `"power_port_layer_disallowed"` | no | **Item 11 only** (issue #2839). The supply's edge-accessible port is on a layer the policy does not allow — by default one that resolves to no LEF routing layer. |
+| `"lef_power_pin_missing"` | no  | **Item 11 only** (issue #2839). No `klt lef-abstract` envelope is cited, or its abstract has no `PIN` named for the supply. |
+| `"lef_power_pin_mismatch"` | no | **Item 11 only** (issue #2839). The LEF pin disagrees with the GDS port: its `USE` is not `POWER`/`GROUND` or differs, its `PORT` is not drawn geometry, it came from another GDS layer, its rectangles do not touch the port, or the macro `SIZE` differs from the socket outline. `detail.power_ports.findings[].aspect` says which. |
 | `"not_post_layout"`       | yes | The evidence resolved to a recognised, *passing* envelope **of a kind this item accepts**, but that run is not the post-layout run the item requires — today, a `klt functional-verification` regression cited for item 7 that ran without SDF back-annotation (`environment.sdf` is `null`), i.e. the pre-layout zero-delay simulation item 7's own checklist text excludes. Deliberately distinct from `"wrong_kind"`: the artifact *is* the right one, it just has to be re-run against the post-route netlist with SDF timing. |
 | `"nothing_checked"`       | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, whose own `coverage` block states that the run checked **nothing** (`coverage.nothing_checked: true`, issue #1996) — a DRC deck gated behind an unset `--deck-var`, a `klt sim` corner matrix that expanded to zero corners, a `klt pex` run with no `delta[]` row. The cited check did not fail on its own terms; it measured nothing, so its passing `status` says nothing about the design. See "A check that checked nothing is refused, not reported" above. |
 | `"undersized_sample"`     | yes | **(issue #2467)** **Item 6 only** today. The evidence resolved to a recognised, *passing* `klt yield` envelope, but at least one of its own measurements reports `sample_size.verdict: "insufficient"` — the report stating, about itself, that the draw it published is not sized for the claim (`required_n`/`required_n_for_target` above the `n` actually drawn; see [`yield.md`](yield.md)'s "Sample-size verdict"). No contradiction with its `status`: that token answers only "did every *declared* `target_yield` hold at the stated confidence", and `"reported"` means none was declared at all, so it can never fail. The cited check did not fail on its own terms — draw the `required_n` the report names and re-run *this* campaign, do not go looking for a design defect. The item's `detail.yield_campaign` names which measurements are undersized. See "Campaign discipline on item 6" below. |
@@ -2523,7 +2726,7 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
 
 **`blocking_item` skips items 1, 2, 9 and 10 whenever any other T1 item is
 also unmet.** Those four have no `klt` verb behind them, and this page's
-["Items 1, 2, 9, and 10"](#items-1-2-9-and-10-klt-signoff-cannot-check-topical-relevance)
+["Items 1, 2, 9, and 10"](#items-1-2-9-and-10-bind-them-to-an-audited-artifact)
 section tells a manifest author that the honest default is to leave them
 **uncited** — which renders four `UNMET`/`no_evidence` rows at positions 1,
 2, 9 and 10 *by construction*, for every honestly-authored manifest.
@@ -2798,7 +3001,7 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | Field         | Type              | Description                                                                          |
 | ------------- | ------------------ | ---------------------------------------------------------------------------------------- |
 | `source`      | string              | The input file path (or `"-"`) this check was read from, exactly as given.               |
-| `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"power"`, `"generic"`, or `"error"` — see "What it does" above. |
+| `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"power"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, `"generic"`, or `"error"` — see "What it does" above. A `socket-check` check passes on `status: "pass"`; a `lef-abstract` check (which has no top-level `status`) on `self_check.status: "pass"` (issue #2839). |
 | `status`      | string \| null      | The source envelope's own `status` field, or `"error"` for an `error`-kind check.         |
 | `passed`      | boolean             | Whether this check counts toward `passed_count`/`failed_count` — see "What it does".      |
 | `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. Any kind's detail gains a `nothing_checked_reasons` key (issue #1996) when the source envelope's `coverage` block reports `nothing_checked: true` — the same condition that forces `passed: false`; absent for every envelope that makes no such statement. See "A check that checked nothing is refused, not reported" above. Any kind's detail also gains a `coverage_qualification` key (issue #2109) when the source envelope's versioned `coverage` block classifies as `partial`, naming the requested work it skipped — see "Partial coverage is qualified, not inferred" above — and a `coverage_state` key naming the rollup row for any envelope carrying versioned coverage at all. A `yield`-kind check's detail gains a `yield_campaign` key (issue #2467, absent when the report carries no measurements) rolling up its per-measurement `sample_size.verdict` and `negative_control` state — reported here, never graded on (`passed` is untouched); the grading gate built on the same statement belongs to `--manifest` item 6, see "Campaign discipline on item 6" below. |
@@ -3227,8 +3430,9 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
 ```
 
 `klt signoff` never lets a hand-rolled "yep, it's fine" record stand in for
-a check it never actually ran — only item 8 accepts `"generic"`; items 3-7
-still require their own `klt`-verb-backed (or, for item 7, `pex`-specific)
+a check it never actually ran. Only item 8 accepts a bare `"generic"`
+envelope, and items 1, 2, 9 and 10 accept only an artifact-anchored one
+(issue #2718). Items 3-7 still require their own `klt`-verb-backed (or, for item 7, `pex`-specific)
 evidence, unloosened by this feature.
 
 ## Worked example: a full-custom digital partition, graded like the analog column (no RTL/synthesis evidence)
@@ -3288,6 +3492,13 @@ unchanged from the RTL/synthesis-flow wording (the doc adds no full-custom
 text there — see "Full-custom digital sub-case" in
 [`../design-evidence-tiers.md`](../design-evidence-tiers.md)), since its
 grading already does not depend on which flow produced the evidence.
+
+Items 1 and 2 here are native citations, so their citations carry no
+`artifact_binding`: the grader accepted a passing LVS/DRC report but did
+not check that it is about the design sources or the committed layout. To
+make those rows mean what they say, bind them with artifact-anchored
+`generic` envelopes (issue #2718) instead. See "Items 1, 2, 9, and 10: bind
+them to an audited artifact" above.
 
 ## Worked example: fleet roll-up across four canaries
 

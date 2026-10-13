@@ -9,8 +9,8 @@ library, not the CLI layer (see ``docs/json-contract.md``, "Adding a new
 command").
 
 Always exits 0: identifying the running build cannot fail -- an unrecoverable
-identity is reported as ``+unknown`` with ``is_release: null``, never as an
-error.
+identity is reported as ``X.Y.Z.dev0+unknown`` with ``is_release: null``,
+never as an error.
 """
 
 from __future__ import annotations

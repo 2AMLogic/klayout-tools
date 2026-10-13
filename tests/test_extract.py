@@ -12687,6 +12687,28 @@ def test_parasitics_summary_block_shape(tmp_path):
         "mom_rlc_override",
         "substrate_dc_tie",
         "substrate_spreading",
+        # Additive field (issue #2764): the emitted-network integrity
+        # summary -- present on every `--parasitics` run for schema
+        # stability, exactly like the blocks above.
+        "integrity",
+    }
+    # `integrity` (issue #2764): a healthy extraction trips nothing. The
+    # summary carries the knob values the per-net checks ran with (echoed
+    # verbatim from `parasitic_integrity`'s documented defaults) and
+    # aggregate counts only -- no net names, so rerun canonicalization has
+    # nothing to reorder.
+    assert para["integrity"] == {
+        "short_threshold_ohm": 1.0,
+        "cap_tolerance": {"absolute_ff": 1e-06, "relative": 1e-09},
+        "max_detail_items": 20,
+        "nets_checked": len(para["nets"]),
+        "nets_with_findings": 0,
+        "open_nets": 0,
+        "island_components": 0,
+        "orphan_nodes": 0,
+        "suspicious_resistors": 0,
+        "short_candidates": 0,
+        "capacitance_mismatches": 0,
     }
     # `substrate_spreading` (issue #2561): `None` unless
     # `--substrate-spreading <net>` was given -- present in every
@@ -12759,6 +12781,9 @@ def test_parasitics_summary_block_shape(tmp_path):
             "by_layer",
             "resistance_ohm_top_cell",
             "capacitance_ff_top_cell",
+            # Additive field (issue #2764): this net's emitted-network
+            # integrity diagnostics -- see the per-net assertions below.
+            "integrity",
         }
         # `resistance_ohm_top_cell`/`capacitance_ff_top_cell` (issue #1704):
         # `None` unless `--parasitics-top-cell-only` was given -- additive,
@@ -12775,6 +12800,35 @@ def test_parasitics_summary_block_shape(tmp_path):
         assert entry["coupled"] == []
         assert entry["capacitance_ff"] > 0.0
         assert entry["resistance_ohm"] >= 0.0
+        # `integrity` (issue #2764): every check runs on every net; a
+        # healthy lumped net reports a vacuous-open `not_applicable` (the
+        # star model carries no measurable terminal-connectivity evidence),
+        # zero findings everywhere else, and a capacitance reconciliation
+        # that passes against the net's own declared total.
+        integrity = entry["integrity"]
+        assert set(integrity) == {
+            "open",
+            "islands",
+            "orphan_nodes",
+            "suspicious_resistors",
+            "short_candidates",
+            "capacitance",
+        }
+        assert integrity["open"]["status"] == "not_applicable"
+        assert integrity["open"]["reason"]
+        assert integrity["islands"]["count"] == 0
+        assert integrity["orphan_nodes"]["count"] == 0
+        assert integrity["suspicious_resistors"]["count"] == 0
+        assert integrity["short_candidates"]["count"] == 0
+        assert integrity["capacitance"]["status"] == "pass"
+        assert integrity["capacitance"]["declared_ff"] == pytest.approx(
+            entry["capacitance_ff"], abs=1e-6
+        )
+        assert integrity["capacitance"]["computed_ff"] == pytest.approx(
+            entry["capacitance_ff"], abs=1e-6
+        )
+        assert integrity["capacitance"]["delta_ff"] is not None
+        assert abs(integrity["capacitance"]["delta_ff"]) <= 1e-6
         # `by_layer` (issue #1701): per-role/per-metal-level breakdown of the
         # scalar totals above -- non-empty whenever the net's totals are
         # non-zero (every net in this fixture), one entry per shape, and each
@@ -15656,6 +15710,341 @@ def test_distributed_rc_falls_back_to_star_below_two_terminals(tmp_path):
     assert any(
         "VGND" in w and "fewer than 2 device terminals" in w for w in report["warnings"]
     )
+
+
+# --------------------------------------------------------------------------- #
+# Emitted-network integrity (--parasitics, issue #2764)
+# --------------------------------------------------------------------------- #
+
+
+def _integrity_summary(report: dict) -> dict:
+    return report["parasitics"]["integrity"]
+
+
+def test_distributed_ladder_integrity_reports_pass(tmp_path):
+    """A healthy `--distributed-rc` ladder passes the open check over its
+    own emitted segments, while every lumped net stays `not_applicable` --
+    the two models report different evidence, in the same run."""
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_distributed.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == net_name)
+    assert entry["rc_model"] == "distributed"
+    assert entry["integrity"]["open"]["status"] == "pass"
+    lumped = next(
+        n
+        for n in report["parasitics"]["nets"]
+        if n["net"] != net_name and n["rc_model"] == "lumped"
+    )
+    assert lumped["integrity"]["open"]["status"] == "not_applicable"
+    assert _integrity_summary(report)["nets_with_findings"] == 0
+
+
+def test_parasitic_integrity_corrupted_ladder_trips_open(tmp_path, monkeypatch):
+    """The canary (issue #2764): a deliberately corrupted network -- the
+    distributed ladder built with its segment resistor dropped -- trips the
+    `open` status end to end, naming the disconnected terminal, with the
+    summary counters agreeing."""
+    from klayout_tools import extract_parasitics
+
+    original = extract_parasitics._distributed_rc_segments
+
+    def drop_last_segment(positions, r_total_ohm, c_total_ff):
+        order, segment_r_ohm, node_c_ff = original(positions, r_total_ohm, c_total_ff)
+        return order, segment_r_ohm[:-1], node_c_ff
+
+    monkeypatch.setattr(
+        extract_parasitics, "_distributed_rc_segments", drop_last_segment
+    )
+
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_broken.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == net_name)
+    open_block = entry["integrity"]["open"]
+    assert open_block["status"] == "open"
+    assert open_block["disconnected_count"] == 1
+    # The ladder's middle position reuses the net object itself (issue
+    # #977), so with the single segment dropped, the *net* node is the
+    # disconnected required terminal -- not the fresh `__t0` leg.
+    assert open_block["disconnected_terminals"] == [net_name]
+    summary = _integrity_summary(report)
+    assert summary["nets_with_findings"] == 1
+    assert summary["open_nets"] == 1
+    # Everything else on this run stays clean.
+    assert summary["island_components"] == 0
+    assert summary["orphan_nodes"] == 0
+    assert summary["suspicious_resistors"] == 0
+    assert summary["short_candidates"] == 0
+    assert summary["capacitance_mismatches"] == 0
+
+
+def test_parasitic_integrity_corrupted_record_trips_every_status(tmp_path, monkeypatch):
+    """One deliberately-corrupted record trips all six diagnostics through
+    the real `run_extract` wiring: an open ladder, an island, an orphan
+    node, a malformed resistor, a cross-net short candidate and an
+    altered ground capacitor -- while the rest of the report still
+    serializes as strict finite JSON."""
+    from dataclasses import replace as dc_replace
+
+    from klayout_tools import extract_parasitics
+    from klayout_tools.parasitic_integrity import (
+        IntegrityCapacitor,
+        IntegrityNode,
+        IntegrityResistor,
+    )
+
+    real_check = extract_parasitics.check_parasitic_network
+
+    def corrupt_and_check(
+        record,
+    ):  # 1. open: drop the distributed ladder's segment resistors (star
+        #    legs and DC ties are untouched -- only `_seg` names them).
+        record.resistors[:] = [r for r in record.resistors if "_seg" not in r.name]
+        distributed_net = next(n for n in record.nets if n.rc_model == "distributed")
+        other_net = next(n for n in record.nets if n.net_id != distributed_net.net_id)
+        dist_node = next(
+            n.uid for n in record.nodes if n.owner_net_id == distributed_net.net_id
+        )
+        other_node = next(
+            n.uid for n in record.nodes if n.owner_net_id == other_net.net_id
+        )
+        # 2. short candidate: cross-net resistor at/below the threshold.
+        record.resistors.append(
+            IntegrityResistor(
+                "bug_short", dist_node, other_node, 0.5, distributed_net.net_id
+            )
+        )
+        # 3. suspicious resistor: zero-valued self-loop.
+        record.resistors.append(
+            IntegrityResistor(
+                "bug_zero", dist_node, dist_node, 0.0, distributed_net.net_id
+            )
+        )
+        # 4. orphan: a registered node with no element attached.
+        orphan_uid = len(record.nodes)
+        record.nodes.append(
+            IntegrityNode(
+                uid=orphan_uid, name="bug_orphan", owner_net_id=distributed_net.net_id
+            )
+        )
+        # 5. island: a floating node that *is* attached (a ground cap), so
+        #    it is an island and not a second orphan.
+        island_uid = len(record.nodes)
+        record.nodes.append(
+            IntegrityNode(
+                uid=island_uid, name="bug_island", owner_net_id=distributed_net.net_id
+            )
+        )
+        ground_uid = next(n.uid for n in record.nodes if n.owner_net_id is None)
+        record.capacitors.append(
+            IntegrityCapacitor(
+                name="bug_island_cap",
+                node_a=island_uid,
+                node_b=ground_uid,
+                capacitance_ff=0.1,
+                kind="ground",
+                owner_net_id=distributed_net.net_id,
+            )
+        )
+        # 6. capacitance mismatch: alter one emitted ground capacitor while
+        #    the declared total stays fixed.
+        first_ground = next(
+            i
+            for i, c in enumerate(record.capacitors)
+            if c.kind == "ground" and c.owner_net_id == distributed_net.net_id
+        )
+        record.capacitors[first_ground] = dc_replace(
+            record.capacitors[first_ground],
+            capacitance_ff=record.capacitors[first_ground].capacitance_ff / 2.0,
+        )
+        return real_check(record)
+
+    path = _write_gds(_make_series_nmos_layout(), tmp_path / "series.gds")
+    baseline = run_extract(
+        path, "sky130", output=str(tmp_path / "series_baseline.spice"), parasitics=True
+    )
+    net_name = _distributed_rc_internal_net_name(baseline)
+    # Patch only now: the baseline run above must flow through uncorrupted
+    # (its record carries no distributed net to corrupt).
+    monkeypatch.setattr(
+        extract_parasitics, "check_parasitic_network", corrupt_and_check
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "series_corrupted.spice"),
+        parasitics=True,
+        critical_nets=[net_name],
+        distributed_rc=True,
+    )
+
+    summary = _integrity_summary(report)
+    assert summary["open_nets"] == 1
+    # Both injected defect nodes are islands (a component without a required
+    # terminal): the cap-attached bug_island node and the fully detached
+    # bug_orphan node -- the island and orphan definitions genuinely
+    # overlap for a detached node, by design (documented in
+    # docs/cli/extract.md).
+    assert summary["island_components"] == 2
+    assert summary["orphan_nodes"] == 1
+    assert summary["suspicious_resistors"] == 1
+    assert summary["short_candidates"] == 1
+    assert summary["capacitance_mismatches"] == 1
+    assert summary["nets_with_findings"] == 1
+
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == net_name)
+    integrity = entry["integrity"]
+    assert integrity["open"]["status"] == "open"
+    assert integrity["islands"]["count"] == 2
+    assert integrity["islands"]["details"] == [
+        {"nodes": ["bug_island"]},
+        {"nodes": ["bug_orphan"]},
+    ]
+    assert integrity["orphan_nodes"]["details"] == [{"node": "bug_orphan"}]
+    assert integrity["suspicious_resistors"]["details"][0]["device"] == "bug_zero"
+    assert integrity["suspicious_resistors"]["details"][0]["issues"] == [
+        "self_loop",
+        "zero",
+    ]
+    (short,) = integrity["short_candidates"]["details"]
+    assert short["device"] == "bug_short"
+    assert short["resistance_ohm"] == 0.5
+    assert integrity["capacitance"]["status"] == "mismatch"
+
+    # Strict finite JSON: the full report (integrity blocks included)
+    # round-trips with the encoder's non-finite ban in force.
+    assert "NaN" not in json.dumps(report, allow_nan=False)
+    assert "Infinity" not in json.dumps(report, allow_nan=False)
+
+
+def test_parasitic_integrity_corrupted_lumped_capacitor_trips_mismatch(
+    tmp_path, monkeypatch
+):
+    """The lumped reconciliation checks the value the device actually
+    carries (PR #3127 review): corrupting one emitted lumped ground
+    capacitor's `C` parameter after it is set -- the declared total
+    untouched -- trips `capacitance.status == "mismatch"` on exactly that
+    net, with `computed_ff` reflecting the corrupted device value."""
+    from klayout_tools import extract_parasitics
+
+    real_readback = extract_parasitics._emitted_capacitance_ff
+    corrupted: list[str] = []
+
+    def corrupt_first_lumped_cap(cap_device):
+        # Every net of this layout is lumped (no `--distributed-rc`), so
+        # the first capacitor seen is a lumped hub cap; corrupt only it.
+        if not corrupted:
+            cap_device.set_parameter("C", cap_device.parameter("C") * 2.0)
+            corrupted.append(cap_device.name)
+        return real_readback(cap_device)
+
+    monkeypatch.setattr(
+        extract_parasitics, "_emitted_capacitance_ff", corrupt_first_lumped_cap
+    )
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    assert len(corrupted) == 1
+    summary = _integrity_summary(report)
+    assert summary["capacitance_mismatches"] == 1
+    assert summary["nets_with_findings"] == 1
+    (bad,) = [
+        n
+        for n in report["parasitics"]["nets"]
+        if n["integrity"]["capacitance"]["status"] == "mismatch"
+    ]
+    assert bad["rc_model"] == "lumped"
+    cap = bad["integrity"]["capacitance"]
+    assert cap["declared_ff"] > 0
+    assert cap["computed_ff"] == pytest.approx(2.0 * cap["declared_ff"], rel=1e-6)
+    assert cap["delta_ff"] == pytest.approx(cap["declared_ff"], rel=1e-6)
+
+
+def test_parasitic_integrity_healthy_report_is_strict_finite_json(tmp_path):
+    """A healthy extraction's whole report -- integrity blocks included --
+    serializes under `allow_nan=False` with no NaN/Infinity literals."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    text = json.dumps(report, allow_nan=False)
+    assert "NaN" not in text
+    assert "Infinity" not in text
+
+
+def test_parasitic_integrity_same_label_nets_keep_distinct_identities(tmp_path):
+    """Issue #765's two same-named `VGND` islands each get their own
+    integrity diagnostics under their own `net_id` -- neither absorbs the
+    other's findings, and neither invents a cross-net short against its
+    name-twin."""
+    layout = _make_two_disjoint_nmos_shared_label_layout()
+    path = _write_gds(layout, tmp_path / "two_vgnd.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "two_vgnd.spice"), parasitics=True
+    )
+    para_nets = [n for n in report["parasitics"]["nets"] if n["net"] == "VGND"]
+    assert len(para_nets) == 2
+    assert len({n["net_id"] for n in para_nets}) == 2
+    for entry in para_nets:
+        integrity = entry["integrity"]
+        assert integrity["open"]["status"] == "not_applicable"
+        assert integrity["short_candidates"]["count"] == 0
+        assert integrity["capacitance"]["status"] == "pass"
+    assert _integrity_summary(report)["nets_with_findings"] == 0
+
+
+def test_rerun_extract_report_clean_pass_with_parasitics(tmp_path):
+    """Rerun comparison (issue #2764): the integrity fields ride inline on
+    `parasitics.nets[]` (so canonicalization re-sorts them with their
+    entry) and the summary is net-name-free, so they introduce no drift
+    paths of their own.
+
+    `--rerun`'s documented known limitation (see `rerun_extract_report`)
+    already shows a parasitics report as `drifted` -- the `--parasitics`
+    flag is not replayed, so the fresh run is a schematic-equivalent
+    extraction and the whole `parasitics`/parasitics-metrics half drifts.
+    What issue #2764 must not add is drift *attributable to the integrity
+    fields*: none of the reported drift paths may name them."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report_path = tmp_path / "inv.extract.json"
+    _write_report(
+        report_path,
+        run_extract(
+            path, "sky130", output=str(tmp_path / "inv.spice"), parasitics=True
+        ),
+    )
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "drifted"  # the pre-existing --parasitics gap
+    integrity_drift = [
+        d
+        for d in result["drift"]
+        if "integrity" in d["field"] and d["field"] != "parasitics"
+    ]
+    assert integrity_drift == []
 
 
 def test_distributed_rc_requires_critical_net(tmp_path):
@@ -20188,6 +20577,57 @@ def test_canonicalize_extract_report_still_detects_content_drift(tmp_path):
     assert any(field.endswith("resistance_ohm") for field in drifted_fields)
 
 
+def test_canonicalize_integrity_fields_ride_parasitics_net_reorder(tmp_path):
+    """Issue #2764's integrity fields under rerun comparison: each net's
+    inline `integrity` block must (a) travel *with* its `parasitics.nets[]`
+    entry through the canonicalization re-sort -- reordering the list,
+    permuting `net_id`s and renaming anonymous nets silences bookkeeping
+    churn exactly as before -- while (b) a genuine change inside an
+    integrity block (an `open` status flipping) still diffs as drifted,
+    naming the integrity path."""
+    from klayout_tools._report_verify import (
+        VOLATILE_PROVENANCE_PATHS,
+        diff_verdict_fields,
+    )
+    from klayout_tools.extract import _canonicalize_extract_report_for_rerun_diff
+
+    path = _write_gds(_make_gf180mcu_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(
+        str(path), "gf180mcu", output=str(tmp_path / "inv.spice"), parasitics=True
+    )
+    assert report["parasitics"]["nets"]
+    pfet = next(d for d in report["devices"] if d["class"] == "pfet")
+    anon_name = pfet["nets"]["b"]
+
+    mutated = _mutate_bookkeeping_fields(
+        report, old_name=anon_name, new_name="\\$999", net_id_offset=1000
+    )
+    # The inline integrity blocks ride their entries through the reversal.
+    mutated["parasitics"]["nets"] = list(reversed(mutated["parasitics"]["nets"]))
+
+    normalized_committed = _canonicalize_extract_report_for_rerun_diff(mutated)
+    normalized_fresh = _canonicalize_extract_report_for_rerun_diff(report)
+    assert (
+        diff_verdict_fields(
+            normalized_committed, normalized_fresh, exclude=VOLATILE_PROVENANCE_PATHS
+        )
+        == []
+    )
+
+    # Genuine integrity-content drift is not swallowed: flip one entry's
+    # capacitance verdict on the (reordered) committed side.
+    mutated["parasitics"]["nets"][0]["integrity"]["capacitance"]["status"] = "mismatch"
+    normalized_committed = _canonicalize_extract_report_for_rerun_diff(mutated)
+    drift = diff_verdict_fields(
+        normalized_committed, normalized_fresh, exclude=VOLATILE_PROVENANCE_PATHS
+    )
+    assert drift
+    assert any(
+        "integrity" in entry["field"] and "capacitance" in entry["field"]
+        for entry in drift
+    )
+
+
 def test_rerun_extract_report_missing_deck_field_raises(tmp_path):
     report_path = tmp_path / "bad.extract.json"
     _write_report(report_path, {"file": "x.gds"})
@@ -20748,6 +21188,7 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
                 "abstract_cell_lef": ["lib/cells.lef"],
                 "subcircuit": "delaywin_hv",
                 "subcircuit_output": "design.delaywin_hv.spice",
+                "hierarchical_cells": ["stage_a", "stage_b"],
                 "matched_groups": {"mirror": ["$1", "$2"]},
             }
         )
@@ -20786,6 +21227,7 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
     assert resolved.abstract_cell_lef == [str(tmp_path / "lib" / "cells.lef")]
     assert resolved.subcircuit == "delaywin_hv"
     assert resolved.subcircuit_output == str(tmp_path / "design.delaywin_hv.spice")
+    assert resolved.hierarchical_cells == "stage_a,stage_b"
     assert resolved.matched_groups == ["mirror=$1,$2"]
 
 
@@ -22206,3 +22648,720 @@ def test_flavour_marker_present_does_not_warn_missing(tmp_path, overlap):
         output=str(tmp_path / "g.spice"),
     )
     assert report["missing_flavour_markers"] == []
+
+
+# --------------------------------------------------------------------------- #
+# `--hierarchical-cells`: opt-in hierarchical .SUBCKT emission (issue #2722)
+# --------------------------------------------------------------------------- #
+
+#: right-head centre of the second series resistor inside a `STAGE`-shaped
+#: cell (`_make_subcircuit_slice_layout`'s geometry): used to land a top-cell
+#: pad on it.
+_HIER_OUT_HEAD_X_DBU = round((_STAGE_R2_X_UM + 12.0 - 1.5) * 1000)
+
+
+def _draw_hier_stage(layout: kdb.Layout, name: str, mid_label: str) -> kdb.Cell:
+    """A `STAGE`-shaped cell: two series sky130 poly resistors joined by an
+    in-cell li1 bridge labelled ``mid_label`` (an internal node)."""
+    cell = layout.create_cell(name)
+    bar_um = _draw_sky130_poly_resistor_at(layout, cell, head_b_label=mid_label)
+    _draw_sky130_poly_resistor_at(layout, cell, x_um=_STAGE_R2_X_UM)
+    cell.shapes(layout.layer(67, 20)).insert(
+        kdb.Box(
+            round((bar_um - 1.9) * 1000), 200, round((_STAGE_R2_X_UM + 1.9) * 1000), 800
+        )
+    )
+    return cell
+
+
+def _make_hier_two_children_layout() -> kdb.Layout:
+    """``TOP`` places two *distinct* cells, ``STAGE_A`` and ``STAGE_B`` (same
+    drawing, different names), each pad-labelled in the top cell:
+    ``IN_A``/``OUT_A`` and ``IN_B``/``OUT_B``. The top cell draws no device."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    li1 = layout.layer(67, 20)
+    li1_label = layout.layer(67, 5)
+    for suffix, y in (("A", 0), ("B", 40000)):
+        stage = _draw_hier_stage(layout, f"STAGE_{suffix}", f"MID_{suffix}")
+        top.insert(kdb.CellInstArray(stage.cell_index(), kdb.Trans(0, y)))
+        top.shapes(li1).insert(kdb.Box(1100, 200 + y, 1900, 800 + y))
+        top.shapes(li1_label).insert(kdb.Text(f"IN_{suffix}", kdb.Trans(1500, 500 + y)))
+        top.shapes(li1).insert(
+            kdb.Box(
+                _HIER_OUT_HEAD_X_DBU - 800, 200 + y, _HIER_OUT_HEAD_X_DBU + 800, 800 + y
+            )
+        )
+        top.shapes(li1_label).insert(
+            kdb.Text(f"OUT_{suffix}", kdb.Trans(_HIER_OUT_HEAD_X_DBU, 500 + y))
+        )
+    return layout
+
+
+def _spice_circuits(path: str) -> dict[str, dict[str, Any]]:
+    """Parse a written deck into ``{circuit: {"pins": [...], "cards": [...]}}``
+    (comments dropped; each card is its whitespace-split tokens)."""
+    circuits: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    for line in Path(path).read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("*"):
+            continue
+        tokens = stripped.split()
+        head = tokens[0].upper()
+        if head == ".SUBCKT":
+            current = {"pins": tokens[2:], "cards": []}
+            circuits[tokens[1]] = current
+        elif head == ".ENDS":
+            current = None
+        elif current is not None and head == "+" and current["cards"]:
+            current["cards"][-1].extend(tokens[1:])  # continuation line
+        elif current is not None and not head.startswith("."):
+            current["cards"].append(tokens)
+    return circuits
+
+
+def _run_hier(tmp_path: Path, layout: kdb.Layout, cells: tuple[str, ...], **kwargs):
+    path = _write_gds(layout, tmp_path / "block.gds")
+    output = tmp_path / "block.spice"
+    kwargs.setdefault("top_cell_pins_only", True)
+    report = run_extract(
+        path, "sky130", output=str(output), hierarchical_cells=cells, **kwargs
+    )
+    return report, output
+
+
+def test_hierarchical_cells_two_distinct_children_emit_two_subckts_plus_top(tmp_path):
+    report, output = _run_hier(
+        tmp_path, _make_hier_two_children_layout(), ("STAGE_A", "STAGE_B")
+    )
+    circuits = _spice_circuits(str(output))
+
+    assert set(circuits) == {"TOP", "STAGE_A", "STAGE_B"}
+    for suffix in ("A", "B"):
+        child = circuits[f"STAGE_{suffix}"]
+        assert len(child["cards"]) == 2  # the cell's own two resistors
+        assert all(card[0].startswith("R") for card in child["cards"])
+        assert sorted(child["pins"]) == sorted([f"IN_{suffix}", f"OUT_{suffix}"])
+    # The top holds no selected-child device, only the two X instances,
+    # wired to the top pad nets by name.
+    top_cards = circuits["TOP"]["cards"]
+    assert [card[0] for card in top_cards] == ["XSTAGE_A_1", "XSTAGE_B_1"]
+    assert top_cards[0][1:] == [*_pins_in_order(circuits, "STAGE_A"), "STAGE_A"]
+    assert top_cards[1][1:] == [*_pins_in_order(circuits, "STAGE_B"), "STAGE_B"]
+    # The flat view in the response is unchanged; the hierarchy block says
+    # what was emitted.
+    assert report["device_count"] == 4
+    hierarchy = report["hierarchy"]
+    assert [entry["cell"] for entry in hierarchy["cells"]] == ["STAGE_A", "STAGE_B"]
+    assert hierarchy["top_device_count"] == 0
+    assert hierarchy["top_instance_count"] == 2
+    assert hierarchy["circuits"] == ["TOP", "STAGE_A", "STAGE_B"]
+    from klayout_tools._provenance import sha256_file
+
+    assert report["netlist_sha256"] == sha256_file(str(output))
+
+
+def _pins_in_order(circuits: dict[str, dict[str, Any]], name: str) -> list[str]:
+    """Parent-side net names, in the child's pin order, for a child whose pin
+    names equal the parent's pad-net names (true for the pad-labelled
+    fixtures above)."""
+    return list(circuits[name]["pins"])
+
+
+def test_hierarchical_cells_repeated_placement_is_one_definition_two_instances(
+    tmp_path,
+):
+    layout = _make_subcircuit_slice_layout(
+        second_placement=kdb.Trans(kdb.Vector(0, 80000))
+    )
+    report, output = _run_hier(tmp_path, layout, ("STAGE",))
+    circuits = _spice_circuits(str(output))
+
+    assert list(circuits).count("STAGE") == 1
+    assert set(circuits) == {"TOP", "STAGE"}
+    assert len(circuits["STAGE"]["cards"]) == 2
+    instances = [c for c in circuits["TOP"]["cards"] if c[0].startswith("X")]
+    assert [card[0] for card in instances] == ["XSTAGE_1", "XSTAGE_2"]
+    first, second = instances[0][1:-1], instances[1][1:-1]
+    assert len(first) == len(second) == 2
+    # Independent connections: no net is shared between the two placements.
+    assert not set(first) & set(second)
+    # The one parent-side device (R3, flat in TOP) is still there, and its
+    # `OUT` net is the first placement's OUT pin connection.
+    top_resistors = [c for c in circuits["TOP"]["cards"] if c[0].startswith("R")]
+    assert len(top_resistors) == 1
+    assert top_resistors[0][1] in first
+    assert report["device_count"] == 5  # 2 + 2 (STAGE x2) + 1 (R3)
+    assert report["hierarchy"]["cells"][0]["placements"] == 2
+
+
+def test_hierarchical_cells_conserves_every_device(tmp_path):
+    flat = run_extract(
+        _write_gds(
+            _make_subcircuit_slice_layout(
+                second_placement=kdb.Trans(kdb.Vector(0, 80000))
+            ),
+            tmp_path / "flat.gds",
+        ),
+        "sky130",
+        output=str(tmp_path / "flat.spice"),
+        top_cell_pins_only=True,
+    )
+    report, output = _run_hier(
+        tmp_path,
+        _make_subcircuit_slice_layout(second_placement=kdb.Trans(kdb.Vector(0, 80000))),
+        ("STAGE",),
+    )
+    circuits = _spice_circuits(str(output))
+    top_devices = sum(1 for c in circuits["TOP"]["cards"] if c[0].startswith("R"))
+    child_devices = sum(1 for c in circuits["STAGE"]["cards"] if c[0].startswith("R"))
+    instances = sum(1 for c in circuits["TOP"]["cards"] if c[0].startswith("X"))
+    assert top_devices + child_devices * instances == flat["device_count"]
+
+
+def test_hierarchical_cells_conservation_failure_is_refused_before_output(
+    tmp_path, monkeypatch
+):
+    """Negative control: a transform that loses a device must fail the
+    conservation check rather than write a netlist missing it."""
+    from klayout_tools import extract_hierarchy
+
+    real = extract_hierarchy._build_child
+
+    def lossy(netlist, cell, group):
+        child, pin_sigs = real(netlist, cell, group)
+        child.remove_device(next(iter(child.each_device())))
+        return child, pin_sigs
+
+    monkeypatch.setattr(extract_hierarchy, "_build_child", lossy)
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "block.gds")
+    output = tmp_path / "block.spice"
+    with pytest.raises(ExtractError, match="conservation check failed"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("STAGE",),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_flat_mode_is_byte_identical(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    outputs = {}
+    reports = {}
+    for label, kwargs in (
+        ("omitted", {}),
+        ("empty", {"hierarchical_cells": ()}),
+        ("empty_list", {"hierarchical_cells": []}),
+    ):
+        path = _write_gds(layout, tmp_path / f"{label}.gds")
+        output = tmp_path / f"{label}.spice"
+        reports[label] = run_extract(
+            path, "sky130", output=str(output), top_cell_pins_only=True, **kwargs
+        )
+        outputs[label] = output.read_bytes()
+    assert outputs["omitted"] == outputs["empty"] == outputs["empty_list"]
+    for report in reports.values():
+        assert "hierarchy" not in report
+    keys = {frozenset(report) for report in reports.values()}
+    assert len(keys) == 1
+
+
+@pytest.mark.parametrize(
+    ("cells", "layout_kwargs", "match"),
+    [
+        (("NOPE",), {}, "names no cell in this layout"),
+        (("TOP",), {}, "names the top cell itself"),
+        (("STAGE", "WRAP"), {"wrapper_cell": "WRAP"}, "#2916"),
+        (("WRAP", "STAGE"), {"wrapper_cell": "WRAP"}, "nested selections"),
+    ],
+)
+def test_hierarchical_cells_rejects_bad_selection_before_output(
+    tmp_path, cells, layout_kwargs, match
+):
+    path = _write_gds(
+        _make_subcircuit_slice_layout(**layout_kwargs), tmp_path / "b.gds"
+    )
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match=match):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=cells,
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_rejects_unreachable_cell_before_output(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    layout.create_cell("ORPHAN")
+    layout.cell("ORPHAN").shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 10, 10))
+    path = _write_gds(layout, tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match="no reachable placement"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top="TOP",
+            top_cell_pins_only=True,
+            hierarchical_cells=("ORPHAN",),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_rejects_a_cell_with_no_extracted_device(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    empty = layout.create_cell("EMPTY")
+    empty.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 10, 10))
+    layout.cell("TOP").insert(
+        kdb.CellInstArray(empty.cell_index(), kdb.Trans(0, 90000))
+    )
+    path = _write_gds(layout, tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match="matched no extracted device"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("EMPTY",),
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "flag"),
+    [
+        ({"parasitics": True}, "--parasitics"),
+        ({"subcircuit_cell": "STAGE"}, "--subcircuit"),
+        ({"abstract_cell_patterns": ("SC_*",)}, "--abstract-cells"),
+    ],
+)
+def test_hierarchical_cells_rejects_unsupported_option_combinations(
+    tmp_path, kwargs, flag
+):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match=rf"cannot be combined with {flag}.*#2916"):
+        run_extract(
+            path, "sky130", output=str(output), hierarchical_cells=("STAGE",), **kwargs
+        )
+    assert not output.exists()
+    assert not list(tmp_path.glob("*.spice"))
+
+
+def test_hierarchical_cells_refuses_non_identical_placements(tmp_path):
+    """A top-cell wire shorting one placement's IN to its OUT makes the two
+    placements' net partitions differ: one shared definition would be wrong
+    for one of them, so it is refused rather than guessed."""
+    layout = _make_subcircuit_slice_layout(
+        second_placement=kdb.Trans(kdb.Vector(0, 80000))
+    )
+    layout.cell("TOP").shapes(layout.layer(67, 20)).insert(
+        kdb.Box(1100, 80200, _HIER_OUT_HEAD_X_DBU + 800, 80800)
+    )
+    path = _write_gds(layout, tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    with pytest.raises(ExtractError, match="not electrically identical"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(output),
+            top_cell_pins_only=True,
+            hierarchical_cells=("STAGE",),
+        )
+    assert not output.exists()
+
+
+def test_hierarchical_cells_cli_json_text_and_request(tmp_path, capsys):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "b.gds")
+    output = tmp_path / "b.spice"
+    argv = [
+        "extract",
+        path,
+        "--deck",
+        "sky130",
+        "--output",
+        str(output),
+        "--top-cell-pins",
+        "--hierarchical-cells",
+        "STAGE",
+    ]
+    assert main([*argv, "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["hierarchy"]["cells"][0]["cell"] == "STAGE"
+    assert "STAGE" in _spice_circuits(str(output))
+
+    assert main(argv) == 0
+    text = capsys.readouterr().out
+    assert "hierarchy: 1 cell(s)" in text
+    assert "STAGE: 1 placement(s)" in text
+
+    request = tmp_path / "extract.request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": path,
+                "deck": "sky130",
+                "output": str(tmp_path / "r.spice"),
+                "top_cell_pins": True,
+                "hierarchical_cells": ["STAGE"],
+            }
+        )
+    )
+    assert main(["extract", str(request), "--format", "json"]) == 0
+    assert (
+        json.loads(capsys.readouterr().out)["hierarchy"]["cells"][0]["cell"] == "STAGE"
+    )
+    assert (tmp_path / "r.spice").read_bytes() == output.read_bytes()
+
+
+def test_hierarchical_cells_blank_flag_is_a_usage_error(tmp_path, capsys):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "b.gds")
+    message = _extract_error_message(
+        capsys, [path, "--deck", "sky130", "--hierarchical-cells", ","]
+    )
+    assert "--hierarchical-cells" in message
+
+
+def test_hierarchical_cells_preserves_model_binding_and_mos_flavour(tmp_path):
+    """`--pdk` model binding is preserved inside the emitted child circuits:
+    a NMOS drawn under sky130's `hvi` marker in cell ``HV`` still binds
+    `nfet_g5v0d10v5` (the MOS flavour device property survives the move
+    into the child circuit), while the plain NMOS in ``LV`` binds
+    `nfet_01v8` -- exactly the cards the flat run writes for the same
+    devices."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    hv = layout.create_cell("HV")
+    _draw_sky130_nmos(hv, layout, 0, "S_HV", drain_label="D_HV")
+    hv.shapes(layout.layer(75, 20)).insert(kdb.Box(-500, -500, 2500, 1500))
+    lv = layout.create_cell("LV")
+    _draw_sky130_nmos(lv, layout, 0, "S_LV", drain_label="D_LV")
+    top.insert(kdb.CellInstArray(hv.cell_index(), kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(lv.cell_index(), kdb.Trans(0, 20000)))
+    path = _write_gds(layout, tmp_path / "mixed.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    def extract(output: Path, **kwargs):
+        return run_extract(
+            path,
+            "sky130",
+            pdk_variant="sky130A",
+            pdk_root=root,
+            output=str(output),
+            **kwargs,
+        )
+
+    flat_report = extract(tmp_path / "flat.spice")
+    report = extract(tmp_path / "hier.spice", hierarchical_cells=("HV", "LV"))
+    circuits = _spice_circuits(str(tmp_path / "hier.spice"))
+
+    assert set(circuits) == {"TOP", "HV", "LV"}
+    hv_cards = circuits["HV"]["cards"]
+    lv_cards = circuits["LV"]["cards"]
+    assert len(hv_cards) == len(lv_cards) == 1
+    assert hv_cards[0][0].startswith("X")
+    assert "sky130_fd_pr__nfet_g5v0d10v5" in hv_cards[0]
+    assert "sky130_fd_pr__nfet_01v8" in lv_cards[0]
+    top_cards = circuits["TOP"]["cards"]
+    assert sorted(card[0] for card in top_cards) == ["XHV_1", "XLV_1"]
+    # The flat view in the response is unchanged by the option.
+    assert report["device_counts"] == flat_report["device_counts"] == {"nfet": 2}
+    flat_text = (tmp_path / "flat.spice").read_text()
+    assert flat_text.count("sky130_fd_pr__nfet_g5v0d10v5") == 1
+    assert flat_text.count("sky130_fd_pr__nfet_01v8") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Point-to-point shortest series path resistance (--resistance-path, issue
+# #2765)
+# --------------------------------------------------------------------------- #
+
+
+def _resistance_path_ladder_run(tmp_path, **kwargs) -> tuple[dict, dict]:
+    """`OUT` on :func:`_make_subcircuit_slice_layout`'s fan-out variant has
+    four device terminals, so `--distributed-rc` emits a 4-node, 3-segment
+    ladder -- returns ``(report, OUT's parasitics.nets[] entry)``."""
+    path = _write_gds(
+        _make_subcircuit_slice_layout(out_fanout=True), tmp_path / "block.gds"
+    )
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / f"block{len(kwargs)}.spice"),
+        parasitics=True,
+        critical_nets=["OUT"],
+        distributed_rc=True,
+        **kwargs,
+    )
+    entry = next(n for n in report["parasitics"]["nets"] if n["net"] == "OUT")
+    assert entry["rc_model"] == "distributed"
+    return report, entry
+
+
+def test_resistance_path_queries_real_ladder_terminals(tmp_path):
+    """End to end over the actual emitted ladder: endpoints are real
+    `terminals[].leg_net` values, the returned path walks `segments[]`, and
+    the reported value equals the independent sum of those segments."""
+    _, baseline_entry = _resistance_path_ladder_run(tmp_path)
+    legs = [t["leg_net"] for t in baseline_entry["terminals"]]
+    net_id = baseline_entry["net_id"]
+
+    report, entry = _resistance_path_ladder_run(
+        tmp_path,
+        resistance_paths=[
+            (net_id, legs[0], legs[-1]),
+            (net_id, legs[-1], legs[1]),
+            (net_id, legs[2], legs[2]),
+        ],
+    )
+    end_to_end, partial, same = report["parasitics"]["resistance_paths"]
+
+    assert end_to_end["status"] == "ok"
+    assert end_to_end["quantity"] == "shortest_series_path_resistance"
+    assert (end_to_end["net_id"], end_to_end["net"]) == (net_id, "OUT")
+    assert end_to_end["rc_model"] == "distributed"
+    assert end_to_end["path_nodes"] == legs
+    assert end_to_end["path_resistors"] == ["seg0", "seg1", "seg2"]
+    segments = entry["segments"]
+    independent = sum(
+        segments[int(rid[3:])]["resistance_ohm"] for rid in end_to_end["path_resistors"]
+    )
+    assert end_to_end["resistance_ohm"] == pytest.approx(independent, abs=1e-9)
+    # Every segment's resistance is part of this net's own total -- the end
+    # to end series path of a ladder is the whole net's resistance.
+    assert end_to_end["resistance_ohm"] == pytest.approx(
+        entry["resistance_ohm"], rel=1e-5
+    )
+
+    assert partial["status"] == "ok"
+    assert partial["path_nodes"] == [legs[3], legs[2], legs[1]]
+    assert partial["path_resistors"] == ["seg2", "seg1"]
+    assert partial["resistance_ohm"] == pytest.approx(
+        segments[1]["resistance_ohm"] + segments[2]["resistance_ohm"]
+    )
+
+    assert (same["status"], same["resistance_ohm"], same["path_nodes"]) == (
+        "ok",
+        0.0,
+        [legs[2]],
+    )
+
+    # The written netlist's own segment cards carry the unrounded values the
+    # report rounds to 4 decimals -- the documented <= 5e-5 ohm/segment gap.
+    netlist = Path(report["netlist_path"]).read_text()
+    card_values = [
+        float(line.split()[3])
+        for line in netlist.splitlines()
+        if line.startswith("ROUT_seg")
+    ]
+    assert len(card_values) == 3
+    assert end_to_end["resistance_ohm"] == pytest.approx(
+        sum(card_values), abs=3 * 5e-5 + 1e-9
+    )
+    json.dumps(report["parasitics"]["resistance_paths"], allow_nan=False)
+
+
+def test_resistance_path_non_success_statuses_end_to_end(tmp_path):
+    _, baseline_entry = _resistance_path_ladder_run(tmp_path)
+    legs = [t["leg_net"] for t in baseline_entry["terminals"]]
+    net_id = baseline_entry["net_id"]
+    report, _ = _resistance_path_ladder_run(tmp_path)
+    lumped = next(n for n in report["parasitics"]["nets"] if n["rc_model"] == "lumped")
+    missing_id = max(n["net_id"] for n in report["parasitics"]["nets"]) + 1000
+
+    report, _ = _resistance_path_ladder_run(
+        tmp_path,
+        resistance_paths=[
+            (net_id, legs[0], "NOT_A_NODE"),
+            (missing_id, legs[0], legs[1]),
+            (lumped["net_id"], lumped["terminals"][0]["leg_net"], lumped["hub_net"]),
+            (net_id, legs[0], legs[-1]),
+        ],
+        resistance_path_max_nodes=4,
+        resistance_path_max_resistors=3,
+    )
+    absent, unknown_net, lumped_result, at_cap = report["parasitics"][
+        "resistance_paths"
+    ]
+    for result in (absent, unknown_net, lumped_result):
+        assert result["status"] == "node_not_found"
+        assert result["resistance_ohm"] is None
+        assert result["path_nodes"] == [] and result["path_resistors"] == []
+        assert result["reason"]
+    assert lumped_result["rc_model"] == "lumped"
+    assert unknown_net["net"] is None
+    # Exactly at both caps (4 nodes, 3 resistors) is still answered.
+    assert at_cap["status"] == "ok"
+    assert (at_cap["max_nodes"], at_cap["max_resistors"]) == (4, 3)
+
+    report, _ = _resistance_path_ladder_run(
+        tmp_path,
+        resistance_paths=[(net_id, legs[0], legs[-1])],
+        resistance_path_max_resistors=2,
+    )
+    (over,) = report["parasitics"]["resistance_paths"]
+    assert over["status"] == "limit_exceeded"
+    assert over["resistance_ohm"] is None
+    assert over["path_nodes"] == [] and over["path_resistors"] == []
+    assert (over["node_count"], over["resistor_count"]) == (4, 3)
+
+
+def test_resistance_path_is_additive_and_default_output_unchanged(tmp_path):
+    baseline, entry = _resistance_path_ladder_run(tmp_path)
+    assert "resistance_paths" not in baseline["parasitics"]
+    legs = [t["leg_net"] for t in entry["terminals"]]
+    queried, _ = _resistance_path_ladder_run(
+        tmp_path, resistance_paths=[(entry["net_id"], legs[0], legs[-1])]
+    )
+    queried_parasitics = dict(queried["parasitics"])
+    queried_parasitics.pop("resistance_paths")
+    assert queried_parasitics == baseline["parasitics"]
+    assert queried["warnings"] == baseline["warnings"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"resistance_paths": [(1, "a", "b")]}, "requires --parasitics"),
+        (
+            {"parasitics": True, "resistance_paths": [(1, "a", "b")]},
+            "requires --distributed-rc",
+        ),
+        (
+            {"parasitics": True, "resistance_path_max_nodes": 5},
+            "require --resistance-path",
+        ),
+        (
+            {
+                "parasitics": True,
+                "critical_nets": ["OUT"],
+                "distributed_rc": True,
+                "resistance_paths": [(1, "a", "b")],
+                "resistance_path_max_nodes": 0,
+            },
+            "max_nodes must be a positive integer",
+        ),
+        (
+            {
+                "parasitics": True,
+                "critical_nets": ["OUT"],
+                "distributed_rc": True,
+                "resistance_paths": [(1, "a", "b")],
+                "resistance_path_max_resistors": -3,
+            },
+            "max_resistors must be a positive integer",
+        ),
+        (
+            {
+                "parasitics": True,
+                "critical_nets": ["OUT"],
+                "distributed_rc": True,
+                "resistance_paths": [("1", "a", "b")],
+            },
+            "NET_ID must be an integer",
+        ),
+    ],
+)
+def test_resistance_path_argument_validation(tmp_path, kwargs, match):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    with pytest.raises(ExtractError, match=match):
+        run_extract(path, "sky130", output=str(tmp_path / "inv.spice"), **kwargs)
+
+
+def test_resistance_path_cli_json_and_text(tmp_path, capsys):
+    _, entry = _resistance_path_ladder_run(tmp_path)
+    legs = [t["leg_net"] for t in entry["terminals"]]
+    gds = str(tmp_path / "block.gds")
+    argv = [
+        "extract",
+        gds,
+        "--deck",
+        "sky130",
+        "--output",
+        str(tmp_path / "cli.spice"),
+        "--parasitics",
+        "--critical-net",
+        "OUT",
+        "--distributed-rc",
+        "--resistance-path",
+        str(entry["net_id"]),
+        legs[0],
+        legs[-1],
+        "--resistance-path",
+        str(entry["net_id"]),
+        legs[0],
+        "NOPE",
+    ]
+    capsys.readouterr()
+    assert main([*argv, "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    ok, missing = payload["parasitics"]["resistance_paths"]
+    assert ok["status"] == "ok" and ok["path_nodes"] == legs
+    assert missing["status"] == "node_not_found"
+    # Existing fields keep their place next to the additive one.
+    assert payload["parasitics"]["distributed_rc"] is True
+
+    assert main(argv) == 0
+    text = capsys.readouterr().out
+    assert (
+        f"resistance_path: net_id={entry['net_id']} {legs[0]} -> {legs[-1]}  status=ok"
+        in text
+    )
+    assert "status=node_not_found" in text
+
+    assert (
+        main([*argv[:6], "--resistance-path", "x", "a", "b", "--format", "json"]) == 1
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert "NET_ID must be an integer" in error["error"]["message"]
+
+
+def test_resistance_path_request_document_round_trip(tmp_path):
+    from klayout_tools.cli.extract_cmd import _apply_request, _parse_resistance_paths
+    from klayout_tools.cli.parser import create_parser
+
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema": "klt.extract.request/1",
+                "file": "design.gds",
+                "deck": "sky130",
+                "resistance_paths": [{"net_id": 3, "from": "OUT__t0", "to": "OUT"}],
+                "resistance_path_max_nodes": 50,
+                "resistance_path_max_resistors": 60,
+            }
+        )
+    )
+    resolved = _apply_request(
+        create_parser().parse_args(["extract", str(request_path)])
+    )
+    assert resolved.resistance_paths == [["3", "OUT__t0", "OUT"]]
+    assert _parse_resistance_paths(resolved.resistance_paths) == [(3, "OUT__t0", "OUT")]
+    assert resolved.resistance_path_max_nodes == 50
+    assert resolved.resistance_path_max_resistors == 60
+
+    argv_form = create_parser().parse_args(
+        ["extract", "x.gds", "--resistance-path", "3", "OUT__t0", "OUT"]
+    )
+    assert argv_form.resistance_paths == resolved.resistance_paths
+
+    for bad in (
+        {"resistance_paths": [{"net_id": "3", "from": "a", "to": "b"}]},
+        {"resistance_paths": [["3", "a", "b"]]},
+        {"resistance_path_max_nodes": 2.5},
+    ):
+        request_path.write_text(
+            json.dumps({"schema": "klt.extract.request/1", "file": "d.gds", **bad})
+        )
+        with pytest.raises(ExtractError):
+            _apply_request(create_parser().parse_args(["extract", str(request_path)]))

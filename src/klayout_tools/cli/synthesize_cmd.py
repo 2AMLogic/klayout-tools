@@ -176,6 +176,27 @@ def _print_sta(report: dict) -> None:
         )
 
 
+def _print_memory_mapping(report: dict) -> None:
+    """Render `memory_mapping` / `blackbox_modules` (issue #2745). `.get` so a
+    pre-#2745 report (e.g. `--check` input) still renders."""
+    memory_mapping = report.get("memory_mapping")
+    if memory_mapping is not None:
+        line = f"memory_mapping: {memory_mapping['status']}"
+        if memory_mapping.get("reason"):
+            line += f" ({memory_mapping['reason']})"
+        print(line)
+        for row in memory_mapping.get("modules") or []:
+            print(
+                f"  {row['module']}: {row['status']} "
+                f"(elaborated={row['elaborated_memories']}, "
+                f"pre_lowering={row['pre_lowering_memories']}, "
+                f"final={row['final_memories']})"
+            )
+    blackboxes = report.get("blackbox_modules")
+    if blackboxes:
+        print(f"blackbox_modules (area not included): {', '.join(blackboxes)}")
+
+
 def _print_text(report: dict) -> None:
     print(f"engine: {report['engine']} {report['engine_version'] or ''}".rstrip())
     print(f"hdl_toplevel: {report['hdl_toplevel']}")
@@ -228,6 +249,8 @@ def _print_text(report: dict) -> None:
     print(f"warnings: total={warnings['total']}")
     for category in sorted(warnings["by_category"]):
         print(f"  {category}: {warnings['by_category'][category]}")
+
+    _print_memory_mapping(report)
 
     print()
     # Issue #1844: `netlist_path`/`script_path` are the `{path, scope}`

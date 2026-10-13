@@ -308,6 +308,10 @@ CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 #: See `_correct_combine_parameters`.
 CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED = "device.combine_parameter_corrected"
 CATEGORY_PIN_UNMATCHED = "pin.unmatched"
+#: Issue #2845: `options.strict_top_level_pin_count` found the two compared
+#: top circuits declaring a different number of pins. Always `severity:
+#: "error"`; `details` carries both counts.
+CATEGORY_PIN_COUNT = "pin.count"
 CATEGORY_TOPOLOGY = "topology"
 #: Issue #499: a `hints.same_nets` pairing the caller asserted with
 #: `must_match=True` that the comparer refused to confirm -- see
@@ -612,6 +616,25 @@ class _ReferenceNetlistParseError(LvsError):
 _REQUIRED_REQUEST_FIELDS = ("layout", "reference")
 
 
+def _refuse_finfet_layout_deck(deck_name: object) -> None:
+    """Raise :class:`LvsError` when ``deck_name`` names a FinFET extraction
+    deck (issue #2761). Comparing one would read the reference CDL's
+    ``nfin`` away and fall back to a planar ``W``/``L`` compare -- exactly
+    the silent approximation the FinFET extractor exists to avoid. LVS
+    integration (nfin-preserving reference reader, exact ``NFIN`` compare,
+    the ASAP7 corpus) is tracked by #2813."""
+    from .extract_finfet import is_finfet_deck_name
+
+    if is_finfet_deck_name(deck_name):
+        raise LvsError(
+            f"layout.deck '{deck_name}' is a FinFET extraction deck; klt lvs "
+            "does not yet compare FinFET devices (the reference reader would "
+            "drop nfin and compare planar W/L only) -- use `klt extract "
+            f"--deck {deck_name}` for nfin-carrying netlists; FinFET LVS is "
+            "tracked in issue #2813"
+        )
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt lvs`` request JSON file.
 
@@ -727,6 +750,18 @@ def run_lvs(request: str) -> dict[str, Any]:
     to apply it to). The resolved mapping is echoed under
     ``provenance.deck.options`` when non-empty, matching ``klt extract``'s
     own shape.
+
+    ``layout.label_layers`` (issue #2686) is the request-document counterpart
+    of ``klt extract --label-layer`` (that verb's own ``label_layers`` request
+    field, issue #2656): ``{"<role>": [layer, datatype] | null}`` redirecting
+    which GDS purpose inline extraction reads net/pin name text from, for a
+    layout whose names sit on a text purpose the curated deck does not read.
+    Extraction-only: a non-empty override needs ``layout.file`` +
+    ``layout.deck`` and is a clean :class:`LvsError` on the pre-extracted
+    ``layout.netlist`` shape (see :func:`_parse_layout_label_layers`).
+    Omitting it (or giving ``null``/``{}``) extracts exactly as before. An
+    applied override is echoed as the response's top-level ``label_layers``
+    field (absent otherwise) and replayed by ``--check --rerun``.
 
     Same inline-extraction condition also gates ``device.body_unverified``
     (issue #281, see :func:`_body_net_warnings`): non-blocking
@@ -940,6 +975,17 @@ def run_lvs(request: str) -> dict[str, Any]:
             # `layout.file` specifically.
             raise LvsError("request.layout.deck_options requires request.layout.deck")
 
+    # Issue #2686: `layout.label_layers` mirrors `klt extract --label-layer`
+    # (request field `label_layers`, issue #2656) for inline extraction only
+    # -- see `_parse_layout_label_layers` for the shape and the
+    # extraction-only rule. `None` when omitted/`null`.
+    label_layers = _parse_layout_label_layers(layout_spec)
+
+    # Issue #2761: a FinFET extraction deck's devices are only correct with
+    # their geometry-counted `nfin` compared, which the reference reader does
+    # not yet preserve -- refuse rather than silently compare planar W/L.
+    _refuse_finfet_layout_deck(layout_spec.get("deck"))
+
     options = request.get("options") or {}
     keep_extracted = bool(options.get("keep_extracted", False))
     # Issue #1370: `true`/`false` (the original shape) or a list of
@@ -1013,6 +1059,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         anchor_top_level_pins_requested,
         anchor_top_level_pins_echo,
     ) = _parse_anchor_top_level_pins(options, engine)
+    strict_top_level_pin_count = _parse_strict_top_level_pin_count(options, engine)
     supply_nets = parse_supply_nets(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
@@ -1041,6 +1088,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         keep_extracted,
         combine_devices_enabled,
         deck_options,
+        label_layers,
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.
@@ -1969,6 +2017,18 @@ def run_lvs(request: str) -> dict[str, Any]:
                 '"Engine")'
             )
         setup_file = _resolve_netgen_setup(options, request_dir)
+        # Issue #2673: the same conversion-provenance + all-reference-
+        # instances-zero proof the klayout branch applies, but with the
+        # exclusion carried into netgen's own setup (`property ... delete`)
+        # instead of a `klayout.db` hook. The disclosure is identical.
+        netgen_exclusions: list[tuple[str, str, str]] = []
+        placeholder_warnings = _apply_reference_placeholder_values(
+            reference_placeholder_classes,
+            layout_netlist,
+            reference_netlist,
+            mutate_classes=False,
+            netgen_exclusions=netgen_exclusions,
+        )
         timeout_s = float(options.get("netgen_timeout_s", _NETGEN_DEFAULT_TIMEOUT_S))
         # Issue #2373: resolve *which* netgen binary to run before launching
         # it (`options.netgen_binary` > `$KLT_NETGEN_BINARY` > `netgen` >
@@ -1984,6 +2044,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             setup_file=setup_file,
             timeout_s=timeout_s,
             binary=netgen_binary,
+            excluded_properties=netgen_exclusions,
         )
         layout_net_count = sum(1 for _ in layout_circuit.each_net())
         reference_net_count = sum(1 for _ in reference_circuit.each_net())
@@ -2025,6 +2086,14 @@ def run_lvs(request: str) -> dict[str, Any]:
                 "matched": matched_pins,
             },
         }
+
+    # Issue #2845: opt-in strict pin-count check, at the one point both
+    # engines converge, on the circuits actually compared (after any
+    # flatten/prune) -- the same counts reported as `counts.pins`.
+    status, strict_pin_findings = _strict_pin_count_check(
+        strict_top_level_pin_count, status, counts, layout_circuit, reference_circuit
+    )
+    mismatches.extend(strict_pin_findings)
 
     # `layout_deck_name`/`layout_deck` were already resolved above (before
     # the `combine_devices` block) -- reused here for `device_classes`
@@ -2207,7 +2276,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     mismatches.extend(supply_findings)
     mismatches.sort(key=_sort_key)
 
-    if combine_incomplete and status == "mismatch":
+    # Issue #2845: a strict `pin.count` error is exempt from the downgrade
+    # below -- `combine_devices` only folds devices and never changes a
+    # circuit's declared pins, so the pin-count difference is a real
+    # mismatch whether or not combining applied, and downgrading would hide
+    # it behind `"inconclusive"`.
+    if combine_incomplete and status == "mismatch" and not strict_pin_findings:
         # Issue #1370: `options.combine_devices` was requested, at least one
         # side exhausted its retry budget, and both sides were rolled back to
         # their pre-combine state (the symmetric degrade above). The compare
@@ -2312,6 +2386,11 @@ def run_lvs(request: str) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "layout": layout_echo,
+        # Issue #2686: the applied `layout.label_layers` override (which GDS
+        # purpose inline extraction read net/pin names from, per role) --
+        # see `_label_layers_echo`. Absent when no override was applied, so
+        # those reports stay byte-identical to before.
+        **_label_layers_echo(label_layers),
         "reference": reference_echo,
         "top": layout_circuit.name,
         # Issue #1205: the *reference* side's resolved top circuit name,
@@ -2324,6 +2403,11 @@ def run_lvs(request: str) -> dict[str, Any]:
         # with "top cell/subcircuit not found in reference netlist" -- see
         # `_reconstruct_lvs_request`.
         "reference_top": reference_circuit.name,
+        # Issue #2673: the reference-conversion context `--rerun` needs to
+        # replay a `reference.form: "subckt-call"` reference -- see
+        # `_reference_conversion_echo`. Absent for every other form, so those
+        # reports stay byte-identical to before.
+        **_reference_conversion_echo(reference_form, reference_spec),
         # Issue #589: the effective `options.parameter_tolerance`, echoed so a
         # consumer reading only the response can tell whether a `"match"` was
         # reached under a caller-supplied design tolerance at all. `null` when
@@ -2358,6 +2442,10 @@ def run_lvs(request: str) -> dict[str, Any]:
             # meaningful default value to echo instead of the option being
             # absent.
             "combine_devices_per_circuit": combine_devices_per_circuit,
+            # Issue #2682: the resolved retry budget (the parser's default
+            # when omitted), echoed even when combining is off -- it
+            # describes the configured budget, not retries consumed.
+            "combine_devices_max_attempts": combine_devices_max_attempts,
             "flatten_layout": flatten_layout,
             "flatten_reference": flatten_reference,
             "netgen_setup": netgen_setup_echo,
@@ -2384,6 +2472,8 @@ def run_lvs(request: str) -> dict[str, Any]:
             # it came from; what this run actually *did* is reported as the
             # `topology.top_level_pins_anchored` disclosure in `mismatches[]`.
             "anchor_top_level_pins": anchor_top_level_pins_echo,
+            # Issue #2845: the effective boolean (`false` when omitted).
+            "strict_top_level_pin_count": strict_top_level_pin_count,
             "supply_nets": supply_nets,
         },
         # Issue #1998: every `hints.equivalent_pins` grouping actually passed
@@ -2639,12 +2729,24 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     return result
 
 
+def _strict_top_level_pin_count_replay_options(
+    echoed: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Issue #2845: re-assert ``strict_top_level_pin_count`` only when it was
+    on (``false`` is the default). A helper keeps
+    :func:`_reconstruct_lvs_request` within its complexity baseline."""
+    if echoed.get("strict_top_level_pin_count") is True:
+        return {"strict_top_level_pin_count": True}
+    return {}
+
+
 def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     """Best-effort reconstruction of a ``klt lvs`` request document from a
     previously committed report, for :func:`rerun_lvs_report`.
 
     Reconstructs the fields the response actually echoes: ``engine``,
-    ``layout`` (``file``+``deck``[+``deck_options``] when
+    ``layout`` (``file``+``deck``[+``deck_options``][+``label_layers``,
+    issue #2686, from the report's own ``label_layers`` echo] when
     ``provenance.deck`` is populated, else ``netlist`` -- the pre-extracted
     ``layout.netlist`` shape is unambiguous *without* a deck, since only
     ``layout.file`` and the ``layout.netlist``+``layout.deck`` combo, issue
@@ -2683,9 +2785,11 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     ``layout.file``; that combo will fail loudly (a clean
     :class:`LvsError` from the layout loader, not a silent wrong answer)
     since ``committed["layout"]`` is actually a SPICE netlist, not a
-    layout stream, in that case. ``reference.form`` (a non-default
-    ``"subckt-call"`` or ``"gate-level-verilog"`` reference),
-    ``reference.device_map``/``device_bulk``
+    layout stream, in that case. A ``"subckt-call"`` reference is replayed
+    from the report's ``reference_conversion`` echo (issue #2673; a report
+    committed before it existed stays best-effort), but a
+    ``"gate-level-verilog"`` ``reference.form``,
+    ``reference.device_bulk``
     and ``layout.top_cell_pins``/``declared_pins``/``pin_source_cells`` are
     never echoed anywhere in the response and are always omitted
     (reconstructed as each option's own default). Use ``--check`` (cheap
@@ -2713,12 +2817,16 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         deck_options = explicit_deck_options(deck)
         if deck_options:
             layout_spec["deck_options"] = deck_options
+        # Issue #2686: replay the applied label-purpose override, `null`
+        # roles included; a report without the echo replays without one.
+        layout_spec.update(_label_layers_replay(committed))
     else:
         layout_spec["netlist"] = committed.get("layout")
 
     reference_spec: dict[str, Any] = {"netlist": committed.get("reference")}
     if reference_top:
         reference_spec["top"] = reference_top
+    reference_spec.update(_reference_conversion_replay(committed))
 
     request: dict[str, Any] = {
         "engine": committed.get("engine", "klayout"),
@@ -2792,11 +2900,67 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     # `_reconstruct_lvs_request` is complexity-baselined (see
     # `scripts/check_complexity_baseline.py`).
     options.update(_anchor_top_level_pins_replay_options(echoed))
+    options.update(_strict_top_level_pin_count_replay_options(echoed))
+    # Issue #2682: replay the echoed retry budget verbatim (never through the
+    # boolean flag loop); a malformed recorded value stays malformed so the
+    # parser rejects it rather than it becoming an unrelated valid budget.
+    options.update(_combine_devices_max_attempts_replay_options(echoed))
     # Includes []: explicitly disabling the finding must survive a replay.
     options.update(_supply_nets_replay_options(echoed))
     if options:
         request["options"] = options
     return request
+
+
+def _combine_devices_max_attempts_replay_options(
+    echoed: dict[str, Any],
+) -> dict[str, Any]:
+    """``{"combine_devices_max_attempts": <echoed value>}`` when the committed
+    report recorded one (issue #2682), else ``{}`` so a legacy report replays
+    at the parser's default. The value is passed through unmodified, so a
+    malformed recorded budget is rejected by the parser on replay rather than
+    silently becoming a valid one."""
+    key = "combine_devices_max_attempts"
+    return {key: echoed[key]} if key in echoed else {}
+
+
+def _reference_conversion_echo(
+    reference_form: str, reference_spec: dict[str, Any]
+) -> dict[str, Any]:
+    """``{"reference_conversion": {"form", "deck", "device_map"}}`` for a
+    ``subckt-call`` reference, else ``{}`` (issue #2673).
+
+    The conversion is a function of the reference file *and* this context, so
+    a report that records only the file cannot be replayed: ``--rerun`` would
+    re-read the simulation-form SPICE as plain-element and never rebuild the
+    proven placeholder exclusions. ``deck``/``device_map`` are echoed as the
+    caller gave them (``null`` when omitted).
+    """
+    if reference_form != "subckt-call":
+        return {}
+    return {
+        "reference_conversion": {
+            "form": reference_form,
+            "deck": reference_spec.get("deck"),
+            "device_map": reference_spec.get("device_map"),
+        }
+    }
+
+
+def _reference_conversion_replay(committed: dict[str, Any]) -> dict[str, Any]:
+    """The ``request.reference`` keys that rebuild a committed report's
+    ``reference_conversion`` echo (issue #2673); ``{}`` for a report without
+    one (every non-``subckt-call`` report, and any committed before the echo
+    existed -- those stay best-effort, as documented)."""
+    echoed = committed.get("reference_conversion")
+    if not isinstance(echoed, dict) or echoed.get("form") != "subckt-call":
+        return {}
+    spec: dict[str, Any] = {"form": "subckt-call"}
+    if echoed.get("deck") is not None:
+        spec["deck"] = echoed["deck"]
+    if isinstance(echoed.get("device_map"), dict):
+        spec["device_map"] = dict(echoed["device_map"])
+    return spec
 
 
 def _anchor_top_level_pins_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
@@ -2955,6 +3119,7 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
         (field,)
         for field in (
             "reference_top",
+            "reference_conversion",
             "options",
             "power_connectivity",
             # Issue #1983: same rule -- a report committed before the
@@ -2970,7 +3135,13 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     # block without that key, and the current build's richer echo is not
     # drift.
     committed_options = committed.get("options")
-    for option in ("power_connectivity", "supply_nets", "anchor_top_level_pins"):
+    for option in (
+        "power_connectivity",
+        "supply_nets",
+        "anchor_top_level_pins",
+        "strict_top_level_pin_count",  # Issue #2845
+        "combine_devices_max_attempts",  # Issue #2682
+    ):
         if not isinstance(committed_options, dict) or option not in committed_options:
             exclude.add(("options", option))
     return build_rerun_result(
@@ -2996,12 +3167,123 @@ def _require_path(spec: dict[str, Any], field: str, side: str, request_dir: str)
     return resolved
 
 
+def _parse_layout_label_layers(
+    layout_spec: dict[str, Any],
+) -> dict[str, tuple[int, int] | None] | None:
+    """``request.layout.label_layers`` (issue #2686) as the ``{role: (layer,
+    datatype) | None}`` mapping
+    :func:`~klayout_tools.extract.extract_netlist_from_layout`'s own
+    ``label_layers`` parameter takes, or ``None`` when the field is absent
+    or ``null``.
+
+    The JSON shape is exactly ``klt extract``'s request-document
+    ``label_layers`` field (issue #2656): an object mapping a label role
+    (``well``/``poly``/``metal<i>``) to a ``[layer, datatype]`` pair of
+    non-negative integers, or ``null`` to read no label layer for that role.
+    Validated without coercion (a bool, a float, a string ``"8/25"`` or a
+    wrong-length array is rejected, never converted), matching
+    :func:`klayout_tools.cli._request_document.get_label_layer_map_as_pairs`.
+    An empty object is accepted and is a no-op, the same as ``klt extract``
+    given an empty ``label_layers`` object.
+
+    Role *names* are not checked here: the role set depends on the deck, and
+    :meth:`~klayout_tools.decks.ExtractionDeck.with_label_layers` rejects an
+    unknown one during inline extraction (surfaced as :class:`LvsError`,
+    naming the roles that deck does have).
+
+    A non-empty override is **extraction-only**: it changes where inline
+    extraction reads net/pin name text from, so it requires ``layout.file``
+    plus ``layout.deck``. The pre-extracted ``layout.netlist`` shape is
+    rejected outright -- its net names were fixed when that netlist was
+    written, and silently accepting an override that cannot rename anything
+    would read as "the override had no effect". (``layout.deck_options`` is
+    different on purpose: it *is* honored for that shape, issue #585.)
+    """
+    raw = layout_spec.get("label_layers")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise LvsError(
+            "request.layout.label_layers must be a JSON object mapping a label "
+            'role to a [layer, datatype] pair (or null), e.g. {"metal0": [8, 25]}'
+        )
+    overrides: dict[str, tuple[int, int] | None] = {}
+    for role, value in raw.items():
+        if value is None:
+            overrides[role] = None
+            continue
+        if not (
+            isinstance(value, list)
+            and len(value) == 2
+            and all(
+                isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in value
+            )
+        ):
+            raise LvsError(
+                f"request.layout.label_layers.{role} must be a [layer, datatype] "
+                f"pair of non-negative integers, or null (got {value!r})"
+            )
+        overrides[role] = (value[0], value[1])
+    if overrides and "netlist" in layout_spec:
+        raise LvsError(
+            "request.layout.label_layers applies only to inline extraction "
+            "(request.layout.file + request.layout.deck): a pre-extracted "
+            "request.layout.netlist already carries its net names and cannot "
+            "be re-read from a different label purpose -- re-extract it with "
+            "`klt extract --label-layer ...`, or give request.layout.file instead"
+        )
+    if overrides and not layout_spec.get("deck"):
+        raise LvsError("request.layout.label_layers requires request.layout.deck")
+    return overrides
+
+
+def _label_layers_echo(
+    label_layers: Mapping[str, tuple[int, int] | None] | None,
+) -> dict[str, Any]:
+    """``{"label_layers": {role: [layer, datatype] | null}}`` when this run
+    applied a non-empty ``layout.label_layers`` override (issue #2686), else
+    ``{}``.
+
+    Omitted entirely (not ``null``) when no override was applied, so every
+    report from a request without the field -- and every report committed
+    before it existed -- stays byte-identical, and ``--check --rerun`` of
+    such a report cannot see the field as drift. The value shape is ``klt
+    extract``'s own ``label_layers`` echo (sorted by role, a cleared role kept
+    as ``null``); :func:`_label_layers_replay` reads it back.
+    """
+    if not label_layers:
+        return {}
+    return {
+        "label_layers": {
+            role: (None if layer is None else [layer[0], layer[1]])
+            for role, layer in sorted(label_layers.items())
+        }
+    }
+
+
+def _label_layers_replay(committed: dict[str, Any]) -> dict[str, Any]:
+    """The ``request.layout`` key that rebuilds a committed report's
+    ``label_layers`` echo (issue #2686), or ``{}`` for a report without one
+    (every run that applied no override, and every report committed before
+    the field existed -- those replay exactly as they used to).
+
+    Passed through verbatim, ``null`` roles included: a malformed recorded
+    value stays malformed, so :func:`_parse_layout_label_layers` rejects it
+    on replay rather than it silently becoming a different, valid override.
+    """
+    echoed = committed.get("label_layers")
+    if not isinstance(echoed, dict) or not echoed:
+        return {}
+    return {"label_layers": dict(echoed)}
+
+
 def _resolve_layout(
     layout_spec: dict[str, Any],
     request_dir: str,
     keep_extracted: bool,
     combine_devices: bool = False,
     deck_options: Mapping[str, str] | None = None,
+    label_layers: Mapping[str, tuple[int, int] | None] | None = None,
 ) -> tuple[kdb.Netlist, str, str, str | None, dict[int, list[dict[str, Any]]]]:
     """Resolve ``request.layout`` to ``(netlist, echo, hash_source_path,
     extracted_netlist_path_or_none, net_label_positions)``. Original drawn
@@ -3026,6 +3308,16 @@ def _resolve_layout(
     ``deck_options`` into here -- ``run_lvs`` applies it directly to its own
     ``get_extraction_deck`` call instead (for ``device_classes`` and the
     deferred resistor ``fixed_offset_ohm`` correction).
+
+    ``label_layers`` (issue #2686, ``request.layout.label_layers``): forwarded
+    to :func:`~klayout_tools.extract.extract_netlist_from_layout` for the
+    ``layout.file`` shape -- replaces, per label role, the GDS purpose inline
+    extraction reads net/pin name text from, exactly like ``klt extract
+    --label-layer``. Already validated by :func:`_parse_layout_label_layers`
+    (which also rejects a non-empty override on the ``layout.netlist``
+    shape, so it never reaches that branch); an unknown role raises
+    :class:`~klayout_tools.extract.ExtractError`, re-raised as
+    :class:`LvsError` below.
 
     ``combine_devices`` (issue #559): when ``True`` (``options.combine_devices``
     in the caller's request), inline extraction defers each opted-in
@@ -3204,6 +3496,10 @@ def _resolve_layout(
                 # --deck-option`. `None` when the field was never given,
                 # unchanged from every request that predates it.
                 deck_options=deck_options,
+                # Issue #2686: `request.layout.label_layers` -- mirrors `klt
+                # extract --label-layer`. `None` when the field was never
+                # given, unchanged from every request that predates it.
+                label_layers=label_layers,
             )
         except ExtractError as exc:
             raise LvsError(str(exc)) from exc
@@ -5332,6 +5628,53 @@ def _parse_anchor_top_level_pins(
     return value, value
 
 
+def _parse_strict_top_level_pin_count(options: Mapping[str, Any], engine: str) -> bool:
+    """Resolve ``options.strict_top_level_pin_count`` (issue #2845); default
+    ``False``. A non-boolean is a clean request error. The check compares
+    ``Circuit.pin_count()`` of the two selected circuits, which both engines
+    expose, so it is supported on every engine."""
+    value = options.get("strict_top_level_pin_count", False)
+    if not isinstance(value, bool):
+        raise LvsError(
+            "options.strict_top_level_pin_count must be a boolean -- true to "
+            "report a mismatch when the two top circuits declare a different "
+            "number of pins, false (the default) to leave pin counts "
+            "informational"
+        )
+    return value
+
+
+def _strict_pin_count_check(
+    enabled: bool,
+    status: str,
+    counts: dict[str, Any],
+    layout_circuit: Any,
+    reference_circuit: Any,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Issue #2845: when ``enabled`` and the compared circuits' pin counts
+    differ, force ``status`` to ``"mismatch"`` and return one ``pin.count``
+    error finding carrying both counts. Names/order are not compared and
+    ``counts`` is never altered. Otherwise ``(status, [])``."""
+    layout_pins = counts["pins"]["layout"]
+    reference_pins = counts["pins"]["reference"]
+    if not enabled or layout_pins == reference_pins:
+        return status, []
+    finding = _mismatch(
+        CATEGORY_PIN_COUNT,
+        "error",
+        f"top-level pin count differs: layout circuit '{layout_circuit.name}' "
+        f"declares {layout_pins} pin(s), reference circuit "
+        f"'{reference_circuit.name}' declares {reference_pins} "
+        "(options.strict_top_level_pin_count)",
+        "both",
+        details={
+            "layout_pin_count": layout_pins,
+            "reference_pin_count": reference_pins,
+        },
+    )
+    return "mismatch", [finding]
+
+
 # --------------------------------------------------------------------------- #
 # Reference-side device-class normalisation: reference.device_bulk (issue #506)
 # --------------------------------------------------------------------------- #
@@ -5830,6 +6173,9 @@ def _apply_reference_placeholder_values(
     layout_netlist: Any,
     reference_netlist: Any,
     excluded_parameters: set[tuple[str, str]] | None = None,
+    *,
+    mutate_classes: bool = True,
+    netgen_exclusions: list[tuple[str, str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Exclude a converted reference class's placeholder ``0`` value from the
     compare, so the class can still pair on topology (issue #1907).
@@ -5888,6 +6234,15 @@ def _apply_reference_placeholder_values(
     :data:`~klayout_tools.lvs_mismatch.ExcludedParameters`. Nothing
     downstream may then report that parameter as a ``device.property`` error
     in the same run that discloses it as excluded here.
+
+    ``mutate_classes=False`` (issue #2673) runs the identical eligibility
+    proof and disclosure but leaves the ``klayout.db`` device classes
+    untouched -- the ``engine: "netgen"`` branch, which has no
+    ``equal_parameters`` hook and instead carries the proven exclusions into
+    its generated setup file. ``netgen_exclusions``, when given, collects one
+    ``(layout class name, reference class name, parameter)`` triple per
+    excluded class for that purpose; nothing is ever inferred from netgen's
+    reported ``value ... 0`` text.
     """
     entries: list[dict[str, Any]] = []
     if not spec:
@@ -5930,12 +6285,17 @@ def _apply_reference_placeholder_values(
             if device.device_class().name == layout_class.name
         ]
 
-        reference_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
-            reference_parameter_id
-        )
-        layout_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
-            layout_parameter_id
-        )
+        if mutate_classes:
+            reference_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
+                reference_parameter_id
+            )
+            layout_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
+                layout_parameter_id
+            )
+        if netgen_exclusions is not None:
+            netgen_exclusions.append(
+                (layout_class.name, reference_class.name, parameter)
+            )
 
         if excluded_parameters is not None:
             # Issue #2461: record it under *both* sides' own class spelling

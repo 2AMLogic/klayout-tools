@@ -57,6 +57,7 @@ def _print_text(report: dict) -> None:
     print(f"def_path: {report['def_path']}")
     print(f"verilog_path: {report['verilog_path']}")
     print(f"geometry_source: {report['geometry_source']}")
+    print(f"clock_mode: {report['clock_mode']}")
     if report["geometry_source"] == "netlist_estimate":
         print(f"wire_load_model: {report['wire_load_model']}")
         print(f"wire_load_mode: {report['wire_load_mode']}")
@@ -77,8 +78,56 @@ def _print_slack_fields(fields: dict, *, indent: str) -> None:
     print(f"{indent}fmax_mhz: {fields['fmax_mhz']}")
     print(f"{indent}setup_violation_count: {fields['setup_violation_count']}")
     print(f"{indent}hold_violation_count: {fields['hold_violation_count']}")
+    _print_constraint_completeness(fields.get("constraint_completeness"), indent=indent)
+    for key in ("worst_setup_path", "worst_hold_path"):
+        path = fields.get(key)
+        if not path:
+            continue
+        if path.get("startpoint") is None:
+            print(f"{indent}{key}: {path.get('status')}")
+        else:
+            print(
+                f"{indent}{key}: {path['check_type']} {path['startpoint']} -> "
+                f"{path['endpoint']} slack_ns={path['slack_ns']} "
+                f"({path['status']})"
+            )
     print(f"{indent}clock_skew_ns: {fields['clock_skew_ns']}")
+    propagation = fields.get("clock_propagation")
+    if propagation is not None:
+        print(
+            f"{indent}clock_propagation: sinks={propagation['clock_sinks']} "
+            f"max_network_latency_ns={propagation['max_network_latency_ns']}"
+        )
+        if propagation["clock_sinks_sample"]:
+            print(
+                f"{indent}  sinks (sample): "
+                f"{', '.join(propagation['clock_sinks_sample'])}"
+            )
     print(f"{indent}estimated_power_mw: {fields['estimated_power_mw']}")
+
+
+def _print_constraint_completeness(block: dict | None, *, indent: str) -> None:
+    """Issue #2780: one summary line plus a sample line per check that found
+    offending pins. A check that could not run prints its status
+    (``unavailable``) in place of a count -- never ``0``."""
+    if not block:
+        return
+    keys = ("unconstrained_endpoints", "unclocked_registers")
+    summary = ", ".join(
+        f"{key}="
+        + str(
+            block[key]["count"]
+            if block[key]["status"] == "ok"
+            else block[key]["status"]
+        )
+        for key in keys
+    )
+    print(f"{indent}constraint_completeness: {block['status']} ({summary})")
+    for key in keys:
+        check = block[key]
+        if check["sample"]:
+            more = f" ... ({check['count']} total)" if check["truncated"] else ""
+            print(f"{indent}  {key} (sample): {', '.join(check['sample'])}{more}")
 
 
 def _print_spef_annotation(annotation: dict | None, *, indent: str) -> None:

@@ -48,6 +48,12 @@ SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SPAWN_CODEX="$SCRIPTS_DIR/spawn-codex.sh"
 CLASSIFY_LIB="$SCRIPTS_DIR/lib/classify-error.sh"
 
+# Every case runs spawn-codex.sh, which execs loom-daemon: pin THIS checkout's
+# build up front, before the first case, never the installed one (#10662).
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only --path "$SCRIPTS_DIR" spawn-worker session-exec private-workspace
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
@@ -99,7 +105,7 @@ assert_not_contains() {
 }
 
 TMPROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPROOT"' EXIT
+source "$SCRIPT_DIR/lib/session-lock-sandbox.sh" "$TMPROOT"
 
 # ============================================================
 # Section 0: syntax + help
@@ -840,9 +846,6 @@ assert_contains "session id: $MOCK_SESSION" "$mock_stderr" \
 echo ""
 echo "Testing LOOM_RUNTIME=codex dispatch through spawn-worker.sh..."
 
-source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
-loom_test_require_daemon_bin --self-only "$SCRIPTS_DIR" spawn-worker
-
 STAGE="$TMPROOT/stage"
 WS="$TMPROOT/ws"
 mkdir -p "$STAGE/lib" "$WS/.loom"
@@ -1380,7 +1383,7 @@ JSON
 
     rm -rf "$PROVIDER_WS"
 else
-    echo "  SKIP: jq unavailable — account-provider resolution needs it"
+    loom_test_skip "jq unavailable — account-provider resolution needs it"
 fi
 
 # ============================================================
@@ -1610,11 +1613,12 @@ assert_not_contains "MOCK-SAW-STDIN" "$session_stderr" \
     "session-exec closes the exec'd process's stdin, same as bare-metal (never a hang)"
 
 assert_contains "loom-codex-session-session-acct codex exec" "$(cat "$SESSION_DOCKER_EXEC_ARGV")" "docker exec targets the account's own session container with the codex exec argv"
+# The real `session-exec host` took this container's dispatch lock, in the
+# sandbox, not under the real ~/.loom (lib/session-lock-sandbox.sh, #10661).
+lss_expect_lock loom-codex-session-session-acct
 
-set +e
-run_session_mock MOCK_RC=42 -- -p "hi" >/dev/null 2>&1
-session_exit_rc=$?
-set -e
+session_exit_rc=0
+run_session_mock MOCK_RC=42 -- -p "hi" >/dev/null 2>&1 || session_exit_rc=$?
 assert_eq "42" "$session_exit_rc" \
     "session-exec preserves exit-code passthrough (PIPESTATUS), identical to bare-metal"
 
@@ -1649,7 +1653,7 @@ fi
 echo ""
 echo "==================================="
 echo "Tests run:    $TESTS_RUN"
-echo -e "Tests passed: ${GREEN}$TESTS_PASSED${NC}"
+echo -e "Tests passed: ${GREEN}$TESTS_PASSED${NC} (skipped: ${TESTS_SKIPPED:-0})"
 if [[ $TESTS_FAILED -gt 0 ]]; then
     echo -e "Tests failed: ${RED}$TESTS_FAILED${NC}"
     exit 1

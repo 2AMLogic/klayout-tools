@@ -677,6 +677,32 @@ above would pass just as happily if the oracle ignored the geometry it was
 handed and re-solved a cached or default spiral, making "they agree" a
 tautology rather than a falsifiable claim.
 
+#### Single-conductor series winding (issue #2729)
+
+The same two-turn spiral requested as **one** conductor (all eight tiled
+boxes on one layer, `compute_inductance: true`) now solves directly as a
+series path. Measured (`tests/test_mom_pypeec_cross_validation.py`, filament
+1 µm, PyPEEC 5.8.0, 2640 conductor voxels, `scripts/mom_pypeec_reference.py`
+run as its own subprocess; the module is asserted to run, not skip):
+
+| Quantity | klt mom, one conductor | Comparison | rel. diff | Budget |
+|---|---|---|---|---|
+| L | 0.637718 nH | signed-leg reduction 0.637886 nH | 0.026% | 2% |
+| L | 0.637718 nH | PyPEEC 0.635732 nH | 0.312% | 2% (unchanged) |
+| R | 2.8875 ohm | PyPEEC 2.865452 ohm | 0.769% | 10% (unchanged) |
+
+The one-conductor value equals the Rust-only overlapping-box fixture's
+0.637718 nH to the printed digits (centreline legs, volume-conserving
+corners); the 0.026% difference to the eight-conductor reduction is only the
+legacy legs' drawn-box lengths versus vertex-to-vertex electrical lengths.
+Native unit tests (`peec.rs`) add: analytic series resistance of an L and of
+a U with unequal widths (exact), `L(L-path) = L_a + L_b` (perpendicular legs,
+1e-12), a U with unequal leg widths equal to the signed-leg reduction
+(1e-12), invariance to box order, collinear subdivision and whole-path
+reversal (1e-12), mutual-sign agreement with the signed-leg reduction, and
+refinement convergence within 1% (1 µm -> 0.5 µm filaments). FastHenry stays
+excluded (#1886).
+
 ## Full-wave frequency sweep
 
 Phase 2a of the Method-of-Moments epic, delivered by

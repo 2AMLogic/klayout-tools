@@ -208,6 +208,47 @@ DECISIONS: Mapping[str, Mapping[str, Decision]] = MappingProxyType(
                 ),
             }
         ),
+        # Issue #2761: FinFET extraction only. Every other capability is a
+        # deliberate, separately tracked limit -- not an omission.
+        "asap7": MappingProxyType(
+            {
+                "curated_drc": Decision(
+                    "unsupported",
+                    "ASAP7 DRC ships as a KLayout DRC-DSL deck file "
+                    "(decks/asap7.drc via `klt drc --engine klayout "
+                    "--deck-file`, #2760), not as a curated rule-table "
+                    "registration.",
+                ),
+                "extraction": Decision(
+                    "supported",
+                    "Registered FinFET extraction deck (geometry-counted nfin).",
+                ),
+                "parasitics": Decision(
+                    "unsupported",
+                    "FinFET extraction does not run the --parasitics pass; no "
+                    "ASAP7 RC coefficients are curated.",
+                ),
+                "default_mos_model_binding": Decision(
+                    "unsupported",
+                    "ASAP7 devices are plain M-cards naming the BSIM-CMG models "
+                    "directly (nmos_rvt, ...); no subcircuit binding exists.",
+                ),
+                "generator_layer_roles": Decision(
+                    "unsupported",
+                    "No fin/gate-grid-aware ASAP7 generators yet (#2762).",
+                ),
+                "corner_resolution": Decision(
+                    "unsupported", "No implemented asap7 family corner resolver."
+                ),
+                "remote_ami_transport": Decision(
+                    "unsupported", "No maintained asap7 AMI transport."
+                ),
+                "mos_array_well_taps": Decision(
+                    "unsupported",
+                    "Automatic MOS-array well taps are not verified for asap7.",
+                ),
+            }
+        ),
     }
 )
 

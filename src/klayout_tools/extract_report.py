@@ -185,7 +185,11 @@ def _describe_devices(
                 params["r_ohm"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_OHM
                 )
-            elif param.name in _MOS_JUNCTION_PARAM_JSON_KEYS:
+            elif param.name in _MOS_JUNCTION_PARAM_JSON_KEYS and not (
+                # FinFET classes (issue #2761) do not measure junction
+                # geometry; omit the keys rather than report fake zeros.
+                device_class.has_parameter("NFIN")
+            ):
                 # MOS source/drain junction geometry (issue #695), all four
                 # rounded to the same micrometre-domain precision, so one
                 # name->key table replaces four identical branches:
@@ -203,6 +207,13 @@ def _describe_devices(
                 params[_MOS_JUNCTION_PARAM_JSON_KEYS[param.name]] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
+            elif param.name in ("NFIN", "FINGERS"):
+                # FinFET device classes only (issue #2761, see
+                # `extract_finfet`): `nfin` is the geometry-counted fin total
+                # over this device's merged parallel fingers -- the PDK
+                # reference netlist's own `nfin` -- and `fingers` how many
+                # gate fingers were merged. Integers, like `mmin`/`mmax`.
+                params[param.name.lower()] = int(round(device.parameter(param.id())))
             elif param.name in ("MMIN", "MMAX"):
                 # MoM-capacitor device classes only (issue #2435,
                 # `mom_capacitor_device_class` in `extract.py`): the

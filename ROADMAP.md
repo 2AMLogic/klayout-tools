@@ -59,14 +59,16 @@ bridge from layout back to the electrical world: without an extracted
 netlist there is nothing to simulate, so this phase gates the
 simulation-verified end of the loop.
 
-## Phase 5 — agent surface (partial — gallery live; MCP + reasoning module outstanding)
+## Phase 5 — agent surface (partial — gallery + MCP server live; reasoning module outstanding)
 
-MCP server exposing the toolkit; LLM reasoning module for layout decisions
+MCP server exposing the toolkit (shipped: `klt mcp serve`, a generic stdio
+bridge generated from the verb registry — `docs/guides/mcp-server.md`; per-verb
+curated tools, resources and prompts are follow-ups); LLM reasoning module for layout decisions
 (strategy in the model, geometry in the tools); worked examples designed
 end-to-end by agents, published in a gallery at klayout-tools.org — the
 kicad-tools.org pattern, one layer down. The gallery half is live
-(`blocks/` → klayout-tools.org); the MCP server and reasoning module are
-not yet started.
+(`blocks/` → klayout-tools.org); the generic MCP bridge is live; the reasoning
+module is not yet started.
 
 ## How progress is driven
 

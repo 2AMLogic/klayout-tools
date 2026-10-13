@@ -2399,6 +2399,140 @@ def test_run_pex_distributed_rc_threaded_through_to_extraction(
     assert report["status"] == "pass"
 
 
+@_SKIP_NO_NGSPICE
+def test_run_pex_parasitic_integrity_propagates_matching_payloads(
+    tmp_path, resistor_layout
+):
+    """Issue #2764: `extraction.parasitic_integrity` carries the
+    extraction's own integrity diagnostics -- summary fields verbatim, and
+    per-net entries whose `integrity` payloads are byte-identical to what
+    `klt extract --parasitics` inlines on the same layout's
+    `parasitics.nets[]` entries (same order, same content)."""
+    from klayout_tools.extract import run_extract
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    propagated = report["extraction"]["parasitic_integrity"]
+    assert propagated is not None
+    summary_keys = {
+        "short_threshold_ohm",
+        "cap_tolerance",
+        "max_detail_items",
+        "nets_checked",
+        "nets_with_findings",
+        "open_nets",
+        "island_components",
+        "orphan_nodes",
+        "suspicious_resistors",
+        "short_candidates",
+        "capacitance_mismatches",
+    }
+    assert summary_keys <= set(propagated)
+    direct = run_extract(
+        resistor_layout,
+        "sky130",
+        output=str(tmp_path / "direct.spice"),
+        parasitics=True,
+    )
+    direct_summary = direct["parasitics"]["integrity"]
+    for key in summary_keys:
+        assert propagated[key] == direct_summary[key]
+    assert len(propagated["nets"]) == len(direct["parasitics"]["nets"])
+    for pex_net, direct_net in zip(
+        propagated["nets"], direct["parasitics"]["nets"], strict=True
+    ):
+        assert pex_net["net"] == direct_net["net"]
+        assert pex_net["net_id"] == direct_net["net_id"]
+        assert pex_net["rc_model"] == direct_net["rc_model"]
+        assert pex_net["integrity"] == direct_net["integrity"]
+    # A healthy extraction trips nothing, and the pex verdict is untouched.
+    assert propagated["nets_with_findings"] == 0
+    assert report["status"] == "pass"
+
+
+def test_run_pex_parasitic_integrity_none_without_the_field(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """An extraction report predating issue #2764 (no `integrity` summary)
+    propagates `parasitic_integrity: null` instead of crashing -- the same
+    tolerance `_body_bias_report`'s callers already extend to older
+    extractions."""
+    calls = _install_two_call_fake_run_sim(monkeypatch)
+    assert calls is not None  # the fake answers both legs without ngspice
+
+    import klayout_tools.pex as pex_module
+
+    real_run_extract = pex_module.run_extract
+
+    def strip_integrity(*args, **kwargs):
+        report = real_run_extract(*args, **kwargs)
+        if report.get("parasitics"):
+            report["parasitics"].pop("integrity", None)
+            for entry in report["parasitics"]["nets"]:
+                entry.pop("integrity", None)
+        return report
+
+    monkeypatch.setattr(pex_module, "run_extract", strip_integrity)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["extraction"]["parasitic_integrity"] is None
+    assert report["status"] == "pass"
+
+
+def test_parasitic_integrity_report_unit_shapes():
+    """`_parasitic_integrity_report` itself: the summary-plus-nets assembly
+    for a well-formed `parasitics` block, and `None` for anything without
+    the summary field."""
+    from klayout_tools.pex import _parasitic_integrity_report
+
+    parasitics = {
+        "integrity": {
+            "short_threshold_ohm": 1.0,
+            "cap_tolerance": {"absolute_ff": 1e-06, "relative": 1e-09},
+            "max_detail_items": 20,
+            "nets_checked": 1,
+            "nets_with_findings": 1,
+            "open_nets": 1,
+            "island_components": 0,
+            "orphan_nodes": 0,
+            "suspicious_resistors": 0,
+            "short_candidates": 0,
+            "capacitance_mismatches": 0,
+        },
+        "nets": [
+            {
+                "net": "clk",
+                "net_id": 2,
+                "rc_model": "distributed",
+                "integrity": {"open": {"status": "open"}},
+            },
+            {"net": "old", "net_id": 3, "rc_model": "lumped"},  # pre-#2764 entry
+        ],
+    }
+    block = _parasitic_integrity_report(parasitics)
+    assert block is not None
+    assert block["short_threshold_ohm"] == 1.0
+    assert block["nets"] == [
+        {
+            "net": "clk",
+            "net_id": 2,
+            "rc_model": "distributed",
+            "integrity": {"open": {"status": "open"}},
+        }
+    ]
+    assert _parasitic_integrity_report({"nets": []}) is None
+    assert _parasitic_integrity_report({}) is None
+
+
 def test_run_pex_distributed_rc_requires_critical_net(tmp_path, resistor_layout):
     dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
     tb = _write_testbench(tmp_path / "testbench.spice", dut)
@@ -4092,3 +4226,286 @@ def test_cli_pex_unbalanced_quotes_in_measure_command_is_a_clean_error(
     assert exit_code == 1
     err = json.loads(capsys.readouterr().err)
     assert "could not be parsed" in err["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# `--label-layer` (issue #2686): `klt extract --label-layer`'s per-request
+# label-purpose override (issue #2656), passed through `klt pex`.
+# --------------------------------------------------------------------------- #
+
+#: An li1 purpose `decks.sky130` does not read (its `metal0` label layer is
+#: `li1.pin`, 67/5).
+_PEX_UNREAD_LI1_PURPOSE = (67, 10)
+
+
+@pytest.fixture
+def resistor_layout_unread_purpose(tmp_path):
+    """`resistor_layout` with its `RA`/`RB` labels moved from `li1.pin`
+    (67/5) to the unread `(67, 10)` purpose -- geometry unchanged."""
+    layout = _make_sky130_poly_resistor_layout()
+    src = layout.layer(67, 5)
+    dst = layout.layer(*_PEX_UNREAD_LI1_PURPOSE)
+    for cell in layout.each_cell():
+        cell.shapes(dst).insert(cell.shapes(src))
+        cell.shapes(src).clear()
+    return _write_gds(layout, tmp_path / "res_unread.gds")
+
+
+def _capture_run_extract_kwargs(monkeypatch) -> list[dict]:
+    """Wrap `pex.run_extract` (still calling the real one) and record every
+    call's keyword arguments."""
+    import klayout_tools.pex as pex_module
+
+    real = pex_module.run_extract
+    calls: list[dict] = []
+
+    def _recording_run_extract(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pex_module, "run_extract", _recording_run_extract)
+    return calls
+
+
+def test_run_pex_label_layers_promote_pins_from_the_alternate_purpose(
+    tmp_path, resistor_layout_unread_purpose, monkeypatch
+):
+    """Without the override the moved names are unread: extraction promotes
+    neither `RA` nor `RB`, so the extracted side cannot bind the testbench's
+    `Xres RA RB RES` line (`pin_count_mismatch`, extracted side skipped).
+    With `label_layers` pointing `metal0` at the purpose the names sit on,
+    the exact mapping reaches `run_extract`, the pins come back, both sides
+    run, and the report records the override (issue #2686)."""
+    sim_calls = _install_two_call_fake_run_sim(monkeypatch)
+    extract_calls = _capture_run_extract_kwargs(monkeypatch)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    without = run_pex(
+        resistor_layout_unread_purpose,
+        [str(request)],
+        "sky130",
+        output=str(tmp_path / "without.spice"),
+    )
+    assert extract_calls[-1]["label_layers"] is None
+    assert without["extraction"]["label_layers"] is None
+    assert without["pin_count_mismatch"] is not None
+    assert sim_calls["n"] == 1
+
+    with_override = run_pex(
+        resistor_layout_unread_purpose,
+        [str(request)],
+        "sky130",
+        output=str(tmp_path / "with.spice"),
+        label_layers={"metal0": _PEX_UNREAD_LI1_PURPOSE, "poly": None},
+    )
+    assert extract_calls[-1]["label_layers"] == {
+        "metal0": _PEX_UNREAD_LI1_PURPOSE,
+        "poly": None,
+    }
+    assert with_override["pin_count_mismatch"] is None
+    assert with_override["status"] == "pass"
+    assert sim_calls["n"] == 3
+    assert ".SUBCKT RES RA RB\n" in Path(tmp_path / "with.spice").read_text()
+    assert with_override["extraction"]["label_layers"] == {
+        "metal0": [67, 10],
+        "poly": None,
+    }
+
+
+def test_run_pex_without_label_layers_is_unchanged(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Omitting `label_layers` forwards `None` to `run_extract` and echoes
+    `extraction.label_layers: null`, with the deck's default label purposes
+    still read (the ordinary resistor run passes)."""
+    _install_two_call_fake_run_sim(monkeypatch)
+    extract_calls = _capture_run_extract_kwargs(monkeypatch)
+
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout, [str(request)], "sky130", output=str(tmp_path / "r.spice")
+    )
+
+    assert extract_calls[-1]["label_layers"] is None
+    assert report["extraction"]["label_layers"] is None
+    assert report["status"] == "pass"
+
+
+def test_run_pex_unknown_label_layer_role_is_a_pex_error(tmp_path, resistor_layout):
+    """A role the deck has no slot for fails extraction cleanly, before any
+    simulation runs."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    with pytest.raises(PexError, match="no label-layer role"):
+        run_pex(
+            resistor_layout,
+            [str(request)],
+            "sky130",
+            output=str(tmp_path / "r.spice"),
+            label_layers={"metal9": (67, 10)},
+        )
+
+
+def _fake_run_pex_capturing(monkeypatch, label_layers_echo=None) -> dict:
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    captured: dict = {}
+
+    def _fake_run_pex(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "pass",
+            "layout": {"path": "res.gds", "scope": "repo"},
+            "netlist": {"path": "res.spice", "scope": "repo"},
+            "reference_netlist": {"path": "dut.spice", "scope": "repo"},
+            "corner_count": 0,
+            "delta": [],
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "extraction": {
+                "deck": "sky130",
+                "device_count": 1,
+                "net_count": 2,
+                "label_layers": label_layers_echo,
+            },
+            "testbenches": [],
+        }
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _fake_run_pex)
+    return captured
+
+
+def test_cli_pex_label_layer_reaches_run_pex(tmp_path, resistor_layout, monkeypatch):
+    """`--label-layer` is parsed by the shared `parse_label_layers` helper:
+    repeatable, `none` clears a role, and a later entry for the same role
+    wins (issue #2686)."""
+    captured = _fake_run_pex_capturing(monkeypatch)
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "sky130",
+            "--label-layer",
+            "metal0=67/5",
+            "--label-layer",
+            "poly=NONE",
+            "--label-layer",
+            "metal0=67/10",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["label_layers"] == {"metal0": (67, 10), "poly": None}
+
+
+def test_cli_pex_omitting_label_layer_passes_none(
+    tmp_path, resistor_layout, monkeypatch
+):
+    captured = _fake_run_pex_capturing(monkeypatch)
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "sky130",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["label_layers"] is None
+
+
+def test_cli_pex_text_output_names_the_label_layer_override(
+    tmp_path, resistor_layout, monkeypatch, capsys
+):
+    _fake_run_pex_capturing(
+        monkeypatch, label_layers_echo={"metal0": [67, 10], "poly": None}
+    )
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "sky130",
+            "--label-layer",
+            "metal0=67/10",
+            "--label-layer",
+            "poly=none",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "label_layers: metal0=67/10, poly=none" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("entry", ["metal0", "=67/10", "metal0=67", "metal0=a/b"])
+def test_cli_pex_malformed_label_layer_is_a_clean_error(
+    tmp_path, resistor_layout, capsys, entry
+):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(tmp_path / "request.json"),
+            "--deck",
+            "sky130",
+            "--label-layer",
+            entry,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "pex"
+    assert "LAYER/DATATYPE" in err["error"]["message"]
+
+
+def test_cli_pex_unknown_label_layer_role_is_a_clean_error(
+    tmp_path, resistor_layout, capsys
+):
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            str(request),
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "r.spice"),
+            "--label-layer",
+            "metal9=67/10",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "pex"
+    assert "no label-layer role" in err["error"]["message"]
