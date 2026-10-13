@@ -4781,15 +4781,21 @@ def _run_pex_with_sim_reports(tmp_path, layout, monkeypatch, reports, n_testbenc
 def test_pex_neither_side_ran_carries_diagnostics_and_remote(
     tmp_path, resistor_layout, monkeypatch
 ):
-    remote = {"backend": "batch", "job_id": "job-123"}
+    remote = {"provider": "aws-batch-fleet", "job_id": "job-123"}
     corners = [("tt/1.800V/27C", None, [_BATCH_DIAG])]
     report = _run_pex_with_sim_reports(
         tmp_path,
         resistor_layout,
         monkeypatch,
         [
-            _side_report(corners, remote=remote, extra_env={"backend": "batch"}),
-            _side_report(corners, remote={"backend": "batch", "job_id": "job-456"}),
+            _side_report(
+                corners,
+                remote=remote,
+                extra_env={"ngspice_binary": "/usr/bin/ngspice"},
+            ),
+            _side_report(
+                corners, remote={"provider": "aws-batch-fleet", "job_id": "job-456"}
+            ),
         ],
     )
     tb = report["testbenches"][0]
@@ -4797,7 +4803,14 @@ def test_pex_neither_side_ran_carries_diagnostics_and_remote(
     schematic = tb["sides"]["schematic"]
     extracted = tb["sides"]["extracted"]
     assert schematic["environment"]["remote"] == remote
-    assert schematic["environment"]["backend"] == "batch"
+    assert schematic["environment"]["ngspice_binary"] == "/usr/bin/ngspice"
+    # Only real `klt sim` environment keys are projected.
+    assert set(schematic["environment"]) <= {
+        "engine",
+        "engine_version",
+        "ngspice_binary",
+        "remote",
+    }
     assert extracted["environment"]["remote"]["job_id"] == "job-456"
     corner = schematic["corners"][0]
     assert corner["corner_id"] == "tt/1.800V/27C"

@@ -1151,11 +1151,13 @@ def _pin_count_mismatch_from_report(
     )
 
 
+# Only keys `klt sim` actually emits in its `environment` (see sim.py's
+# `run_sim`): which engine/build ran, and -- for an off-host backend that
+# fills it -- the `remote` block carrying the job identity.
 _SIDE_ENVIRONMENT_KEYS = (
     "engine",
     "engine_version",
-    "backend",
-    "backend_source",
+    "ngspice_binary",
     "remote",
 )
 
