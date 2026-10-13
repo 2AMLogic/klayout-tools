@@ -105,7 +105,7 @@ _YIELD_ONLY_FIELDS = ("confidence", "target_ci_halfwidth", "min_samples")
 #: "anything besides ``min``/``max``": a genuinely unrecognised key in a
 #: campaign spec's limits is a real spec bug, and `klt sim`'s coverage skip
 #: is exactly the report that should surface it.
-_YIELD_ONLY_LIMIT_KEYS = ("target_yield",)
+_YIELD_ONLY_LIMIT_KEYS = ("target_yield", "target_sigma", "min_converged_samples")
 
 
 class CampaignError(Exception):
