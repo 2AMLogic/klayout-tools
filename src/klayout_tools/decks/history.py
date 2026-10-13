@@ -780,24 +780,30 @@ def _project_device_classes(
         )
 
     for bipolar in deck.bipolars:
+        # `substrate` (issue #2862) is reported as a fourth terminal only
+        # when the entry declares it, so every deck predating that field
+        # diffs identically.
+        terminals = [
+            _terminal_entry("base", bipolar.base, (), (), layer_names),
+            _terminal_entry(
+                "emitter",
+                bipolar.emitter,
+                bipolar.emitter_requires,
+                bipolar.emitter_excludes,
+                layer_names,
+            ),
+            _terminal_entry("collector", bipolar.collector, (), (), layer_names),
+        ]
+        if bipolar.substrate is not None:
+            terminals.append(
+                _terminal_entry("substrate", bipolar.substrate, (), (), layer_names)
+            )
         entries.append(
             _device_class_entry(
                 name=bipolar.class_name,
                 kind="bipolar",
                 marker=bipolar.marker,
-                terminals=[
-                    _terminal_entry("base", bipolar.base, (), (), layer_names),
-                    _terminal_entry(
-                        "emitter",
-                        bipolar.emitter,
-                        bipolar.emitter_requires,
-                        bipolar.emitter_excludes,
-                        layer_names,
-                    ),
-                    _terminal_entry(
-                        "collector", bipolar.collector, (), (), layer_names
-                    ),
-                ],
+                terminals=terminals,
                 layer_names=layer_names,
                 provenance=bipolar.provenance,
             )

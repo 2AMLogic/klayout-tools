@@ -658,7 +658,7 @@ def extract_netlist_tuple(
     *_a: Any,
     **_k: Any,
 ) -> tuple[Any, ...]:
-    """Drop-in for ``extract._extract_netlist``'s 13-tuple contract. Every
+    """Drop-in for ``extract._extract_netlist``'s 14-tuple contract. Every
     option it would honour was already refused by :func:`refuse_layout_options`;
     the planar-only result slots are their documented empty values."""
     from .extract import _extraction_deck_name
@@ -666,7 +666,7 @@ def extract_netlist_tuple(
     netlist, warnings = extract_finfet_netlist(
         layout, top_cell, deck, _extraction_deck_name(deck) or "finfet"
     )
-    return (netlist, warnings, None, [], 0, [], [], [], None, {}, {}, None, None)
+    return (netlist, warnings, None, [], 0, [], [], [], None, {}, {}, None, None, None)
 
 
 # --------------------------------------------------------------------------- #

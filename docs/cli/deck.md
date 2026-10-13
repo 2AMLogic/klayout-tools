@@ -462,7 +462,11 @@ field by field, which two separate passes on a real design had to do
   `{name, layer, requires, excludes}`. `layer` is `null` for a terminal
   formed by the substrate rather than by a drawn mask (gf180mcu's
   `diode_nd2ps_06v0` anode). Every layer in `requires` must **also** cover
-  the region; every layer in `excludes` is subtracted from it.
+  the region; every layer in `excludes` is subtracted from it. A bipolar
+  entry that declares the optional four-terminal `substrate` layer (issue
+  #2862) reports a fourth `substrate` terminal after `collector`; entries
+  that leave it `None` — every deck shipped today — report the
+  three-terminal shape only.
 - `required_layers` / `excluded_layers` — the flattened union in
   first-mention order (marker first, then each terminal's own layer and its
   `requires`). `required_layers` is the "what am I missing?" list — every

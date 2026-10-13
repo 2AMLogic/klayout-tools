@@ -151,6 +151,15 @@ absent (not `null`) when unmeasured and always absent on `cap_cmomf`. No
 existing member changed, so **no `schema_version` bump**. See
 `docs/cli/extract.md`'s "MoM capacitor devices" section.
 
+**A new terminal key on one device class's `nets` map is additive by the
+same per-class reasoning.** Issue #2862 added an `"s"` (substrate) key to
+`devices[].nets` for a bipolar device class of a deck entry that declares
+the optional four-terminal `substrate` layer — absent (not `null`) on every
+three-terminal entry, i.e. every deck shipped today, whose `nets` maps are
+byte-identical to before. No existing key changed, so **no
+`schema_version` bump**. See `docs/cli/extract.md`'s "Bipolar (BJT) device
+recognition" section.
+
 **A new opt-in flag adding `null`-by-default fields to an already-shipped
 per-entry shape is likewise additive** — the field exists on every entry
 regardless of whether the flag was given, but only carries a real value when
@@ -200,6 +209,26 @@ additive on both sides under the request-field rule above — a request valid
 before is still valid and still means what it meant. Neither command's
 `schema_version` moved. See `docs/cli/gen-compose.md`'s "Which hint the
 advisory reads, and the two legitimate violations (#2638)".
+
+**An opt-in flag that changes reported *values* adds its disclosure fields,
+never retypes the old ones.** `klt extract --rename-declared-pins` (issue
+#2854) renames surviving promoted pin nets to their declared names, which
+changes what `nets[].name`/`devices[].nets[...]`/the written `.SUBCKT`
+report for those nets — but only when the flag is given, and without
+touching any field's name, type, or meaning. The disclosure is additive on
+three surfaces at once: a `warnings[]` entry per aggregate (renames) and
+per finding (the `declared_pin_short`/`declared_pin_rename_collision`
+cases), the `null`-unless-given `pin_renames` block, and the
+always-present boolean `rename_declared_pins` echo (so `--check --rerun`
+can replay the rename from it plus the `pin_renames.declared_pins`/
+`pin_renames.def_pins` echoes of the two original declared sets). `klt pex`
+echoes the passthrough as `extraction.rename_declared_pins` (`false` when
+the flag was not given), and `klt lvs` gained the optional request field
+`layout.rename_declared_pins` plus one new `mismatches[].category` value
+(`pin.declared_short`) — each additive under the rules above, no
+`schema_version` bump on any of the three commands. See
+`docs/cli/extract.md`'s "Renaming promoted pins to their declared name"
+section.
 
 **Not every field a verb reports is a cross-build contract at all** — some
 are extractor/engine-internal bookkeeping with no meaning outside the one
@@ -991,7 +1020,7 @@ probing the value's Python type at runtime.
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
 | `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
-| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,schematic_netlist}` | 2 | #1261 |
+| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875) |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
@@ -1603,3 +1632,15 @@ violation (issue #2029).
 
 See `src/klayout_tools/cli/layers_cmd.py` and `docs/cli/layers.md` for a
 worked example.
+
+### `klt pex` schematic-side content digests (issue #2875)
+
+`klt pex` adds `testbenches[].{request_sha256,netlist_sha256,
+schematic_netlist_sha256}`, `testbenches[].netlist` and
+`reference_netlist_sha256` (`sha256:<64 lowercase hex>`). This is an
+**additive** change, so `SCHEMA_VERSION` stays `2`: no existing field changed
+shape, and consumers must already ignore unknown fields. These are distinct
+roles from `provenance.input.content_hash` (the layout) and must not take
+part in layout-consistency comparisons; `klt signoff` verifies them per role
+(`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
+See [`cli/pex.md`](cli/pex.md).
