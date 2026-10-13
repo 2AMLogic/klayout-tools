@@ -10230,6 +10230,31 @@ def test_compose_pins_connectivity_promotion_nests(tmp_path, pdk_root):
     )
     assert parent["generator"] == "gen-compose"
     assert (tmp_path / "parent.gds").exists()
+    # The parent actually routes to the child's promoted net by name.
+    assert parent["unrouted_nets"] == []
+    up = next(n for n in parent["nets"] if n["net"] == "UP")
+    assert up["routed"] is True
+    assert up["landed_on_block"] is True
+
+
+def test_compose_pins_connectivity_conflict_names_every_net(tmp_path, pdk_root):
+    # A port wired by two connectivity[] nets: a pins[] entry matching neither
+    # is rejected, and the message names both wiring nets (#2881 review).
+    conn = [
+        {
+            "net": "N1",
+            "pins": [{"block": "b1", "port": "P2"}, {"block": "b2", "port": "P1"}],
+        },
+        {
+            "net": "N2",
+            "pins": [{"block": "b1", "port": "P2"}, {"block": "b2", "port": "P2"}],
+        },
+    ]
+    req = _conn_pins_request(
+        tmp_path, pdk_root, [{"net": "OTHER", "block": "b1", "port": "P2"}], conn
+    )
+    with pytest.raises(GenComposeError, match="nets 'N1', 'N2'"):
+        compose(req)
 
 
 def test_compose_pins_labels_metal_port_at_its_own_position(tmp_path, pdk_root):

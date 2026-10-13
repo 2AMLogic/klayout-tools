@@ -2249,22 +2249,44 @@ def _parse_pins(
             blocks, block_id, port, f"request.pins[{index}] (net '{net}')"
         )
 
-        conn_nets = connectivity_pairs.get((block_id, port))
-        if conn_nets is not None and net not in conn_nets:
-            raise GenComposeError(
-                f"request.pins[{index}] (net '{net}') names port '{port}' on block "
-                f"'{block_id}', which is already wired by connectivity[] net "
-                f"'{conn_nets[0]}' -- a pins[] entry on a connectivity[] port must "
-                "use the same net name (it promotes that net to a composed port); "
-                "a different name would be a conflicting label"
-            )
-
         pin_entry: dict[str, Any] = {"net": net, "block": block_id, "port": port}
-        if conn_nets is not None:
+        if _check_pin_vs_connectivity(index, net, block_id, port, connectivity_pairs):
             pin_entry["router_labelled"] = True
         pins.append(pin_entry)
 
     return pins
+
+
+def _check_pin_vs_connectivity(
+    index: int,
+    net: str,
+    block_id: str,
+    port: str,
+    connectivity_pairs: dict[tuple[str, str], list[str]],
+) -> bool:
+    """Reconcile one ``pins[]`` entry with ``connectivity[]`` (#2881).
+
+    Returns ``True`` when ``(block_id, port)`` is wired by a ``connectivity[]``
+    net of the same name (the router labels it, so the pin is a promotion, not
+    a second label), ``False`` when the port is not wired by ``connectivity[]``
+    at all. Raises :class:`GenComposeError` when the port is wired by
+    ``connectivity[]`` under a different net name, naming every such net.
+    """
+    conn_nets = connectivity_pairs.get((block_id, port))
+    if conn_nets is None:
+        return False
+    if net not in conn_nets:
+        unique_nets = list(dict.fromkeys(conn_nets))
+        noun = "net" if len(unique_nets) == 1 else "nets"
+        named = ", ".join(f"'{name}'" for name in unique_nets)
+        raise GenComposeError(
+            f"request.pins[{index}] (net '{net}') names port '{port}' on block "
+            f"'{block_id}', which is already wired by connectivity[] {noun} "
+            f"{named} -- a pins[] entry on a connectivity[] port must "
+            "use the same net name (it promotes that net to a composed port); "
+            "a different name would be a conflicting label"
+        )
+    return True
 
 
 def _port_has_geometry(port: Any) -> bool:
@@ -2288,6 +2310,60 @@ def _port_has_geometry(port: Any) -> bool:
         and isinstance(layer.get("layer"), int)
         and isinstance(layer.get("datatype"), int)
     )
+
+
+def _plan_pin_label(
+    entry: dict[str, Any],
+    port: Any,
+    variant: Any,
+    offsets_um: dict[str, dict[str, float]],
+    notes: list[str],
+) -> tuple[bool, dict[str, Any] | None]:
+    """Decide how one promoted ``pins[]`` entry is labelled (#210, #2881).
+
+    Returns ``(labelled, placement)``: ``placement`` is the composed-frame
+    ``{net, x_um, y_um, layer}`` label to write as a ``kdb.Text``, or ``None``
+    when no label is written. Three cases write no label, each appending a
+    ``notes`` entry: a ``router_labelled`` pin (a connectivity[] net of the
+    same name -- the router already labels it, so ``labelled`` is ``True``), a
+    port with no reported geometry, and a port whose drawn layer has no PDK
+    label-layer convention (both ``labelled`` ``False``).
+    """
+    net_label = entry["net"]
+    where = f"pin '{net_label}' (block '{entry['block']}' port '{entry['port']}')"
+    if entry.get("router_labelled"):
+        # #2881: promotion of a connectivity[]-wired net -- the router
+        # already labels it; a second kdb.Text would be a duplicate.
+        notes.append(
+            f"{where} is also wired by a connectivity[] net of the same name -- "
+            "reported in ports[] only; its label is supplied by the router, no "
+            "duplicate label was written"
+        )
+        return True, None
+    if not _port_has_geometry(port):
+        notes.append(
+            f"{where} has no reported {{x_um, y_um, layer}} geometry -- it was "
+            "not labelled"
+        )
+        return False, None
+    draw_layer = (port["layer"]["layer"], port["layer"]["datatype"])
+    pin_label_layer = _resolve_label_layer(variant, draw_layer)
+    if pin_label_layer is None:
+        notes.append(
+            f"{where} is on layer {draw_layer[0]}/{draw_layer[1]}, which has no "
+            "PDK label-layer convention `klt extract` recognises -- the pin was "
+            "not labelled, so it will not survive as a named .SUBCKT pin "
+            "after extraction"
+        )
+        return False, None
+    offset = offsets_um[entry["block"]]
+    placement = {
+        "net": net_label,
+        "x_um": port["x_um"] + offset["x"],
+        "y_um": port["y_um"] + offset["y"],
+        "layer": pin_label_layer,
+    }
+    return True, placement
 
 
 #: Allowed keys in ``request.pdk`` (spike section 2). Any other key is an
@@ -3788,44 +3864,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         block_id = entry["block"]
         port_name = entry["port"]
         port = blocks[block_id]["ports"].get(port_name)
-        labelled = False
-        if entry.get("router_labelled"):
-            # #2881: promotion of a connectivity[]-wired net -- the router
-            # already labels it; a second kdb.Text would be a duplicate.
-            labelled = True
-            notes.append(
-                f"pin '{net_label}' (block '{block_id}' port '{port_name}') is "
-                "also wired by a connectivity[] net of the same name -- reported "
-                "in ports[] only; its label is supplied by the router, no "
-                "duplicate label was written"
-            )
-        elif not _port_has_geometry(port):
-            notes.append(
-                f"pin '{net_label}' (block '{block_id}' port '{port_name}') has no "
-                "reported {x_um, y_um, layer} geometry -- it was not labelled"
-            )
-        else:
-            draw_layer = (port["layer"]["layer"], port["layer"]["datatype"])
-            pin_label_layer = _resolve_label_layer(pdk_info["variant"], draw_layer)
-            if pin_label_layer is None:
-                notes.append(
-                    f"pin '{net_label}' (block '{block_id}' port '{port_name}') is "
-                    f"on layer {draw_layer[0]}/{draw_layer[1]}, which has no PDK "
-                    "label-layer convention `klt extract` recognises -- the pin was "
-                    "not labelled, so it will not survive as a named .SUBCKT pin "
-                    "after extraction"
-                )
-            else:
-                offset = offsets_um[block_id]
-                pin_placements.append(
-                    {
-                        "net": net_label,
-                        "x_um": port["x_um"] + offset["x"],
-                        "y_um": port["y_um"] + offset["y"],
-                        "layer": pin_label_layer,
-                    }
-                )
-                labelled = True
+        labelled, placement = _plan_pin_label(
+            entry, port, pdk_info["variant"], offsets_um, notes
+        )
+        if placement is not None:
+            pin_placements.append(placement)
         response_pins.append(
             {
                 "net": net_label,
