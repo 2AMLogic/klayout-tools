@@ -123,6 +123,12 @@ def test_find_dut_include_two_directives_raises(tmp_path):
     # can see exactly which directives were ambiguous.
     assert 'line 2: `.include "design.ngspice"`' in message
     assert 'line 3: `.include "dut.spice"`' in message
+    # Issue #2871: shared content must never be steered into the DUT file,
+    # since the DUT include is swapped out on the extracted side.
+    assert "fold any other" not in message
+    assert "into the DUT netlist itself" not in message
+    assert "schematic side only" in message
+    assert "Inline content both sides need into the testbench body" in message
 
 
 def test_find_dut_include_two_directives_mixed_spellings_raises():
