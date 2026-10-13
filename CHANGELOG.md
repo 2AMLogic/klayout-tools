@@ -111,6 +111,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   `vin`); the LDO entry's recorded `vout_v` at the 3.0 V corner is corrected
   from 1.80324 V (actually the 3.3 V nominal) to 1.80264 V.
 
+- **`klt signoff` T1 item 6 `not_applicable` outcome** (issue #2865): a
+  digital partition whose ratified spec has no statistical row can cite
+  `{"not_applicable": {"spec": ..., "statement": ...}}` (both bound by
+  `content_hash`) and grade `status: "not_applicable"`, which counts toward
+  `tier: "T1"` but never toward `t1_met_count`. New optional
+  `t1_not_applicable_count` (tier report and fleet rows, absent when zero),
+  new `reason` values `not_applicable_wrong_partition`,
+  `not_applicable_spec_unratified`, `not_applicable_statistical_row` and
+  `not_applicable_statement_incomplete`, and `not_applicable_items` in
+  `--describe-grader`. Additive: no `schema_version` bump.
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time
   from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the
