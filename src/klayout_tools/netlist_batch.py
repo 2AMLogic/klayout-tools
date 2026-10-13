@@ -473,7 +473,7 @@ def _resolve_config(pdk: str, timeout_s: float) -> sim_batch.BatchConfig:
         )
     except (SimError, sim_batch.BatchError) as exc:
         raise NetlistError(
-            f"batch backend: {exc}", code=getattr(exc, "code", None)
+            f"batch backend: {exc} {_NO_FALLBACK}", code=getattr(exc, "code", None)
         ) from exc
 
 
