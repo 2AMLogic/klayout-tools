@@ -6660,6 +6660,35 @@ def _validate_bipolar_size_filters(bipolars: tuple[BipolarDevice, ...]) -> None:
                 )
 
 
+def _narrow_bipolar_emitter_by_size(
+    bipolar: BipolarDevice,
+    emitter: kdb.Region,
+    groups: dict[tuple, list[kdb.Region]],
+    matched: dict[tuple, list[kdb.Region]],
+    dbu: float,
+) -> kdb.Region:
+    """Apply ``bipolar.emitter_size`` to ``emitter`` (issue #2861), recording
+    the pre-filter emitter in ``groups`` and the size-matched emitter in
+    ``matched`` under the entry's flavour-group key so
+    :func:`_collect_bipolar_size_warnings` can report unclaimed windows.
+    Returns ``emitter`` unchanged when the entry declares no size filter."""
+    if bipolar.emitter_size is None:
+        return emitter
+    # Measure whole windows, not fragments split by the base edge.
+    emitter = emitter.merged()
+    group_key = (
+        bipolar.base,
+        bipolar.marker,
+        bipolar.emitter,
+        bipolar.emitter_requires,
+        bipolar.emitter_excludes,
+    )
+    groups.setdefault(group_key, []).append(emitter)
+    emitter = _apply_size_filter(emitter, bipolar.emitter_size, dbu)
+    matched.setdefault(group_key, []).append(emitter)
+    return emitter
+
+
 def _collect_bipolar_size_warnings(
     groups: dict[tuple, list[kdb.Region]],
     matched: dict[tuple, list[kdb.Region]],
@@ -7532,21 +7561,9 @@ def _extract_bipolar_device(
         base, emitter, collector, dropped = _bipolar_legacy_regions(
             layout, top_cell, bipolar, dummy
         )
-    if bipolar.emitter_size is not None:
-        # Measure whole windows, not fragments split by the base edge
-        # (issue #2861); the pre-filter and size-matched regions are
-        # recorded for `_collect_bipolar_size_warnings`.
-        emitter = emitter.merged()
-        group_key = (
-            bipolar.base,
-            bipolar.marker,
-            bipolar.emitter,
-            bipolar.emitter_requires,
-            bipolar.emitter_excludes,
-        )
-        size_groups.setdefault(group_key, []).append(emitter)
-        emitter = _apply_size_filter(emitter, bipolar.emitter_size, layout.dbu)
-        size_matched.setdefault(group_key, []).append(emitter)
+    emitter = _narrow_bipolar_emitter_by_size(
+        bipolar, emitter, size_groups, size_matched, layout.dbu
+    )
     l2n.register(base, f"{bipolar.class_name}_base")
     l2n.register(emitter, f"{bipolar.class_name}_emitter")
     l2n.register(collector, f"{bipolar.class_name}_collector")
