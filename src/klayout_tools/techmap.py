@@ -45,7 +45,7 @@ import os
 import subprocess
 from typing import Any
 
-from ._native import _find_cargo_binary
+from ._native import find_cargo_binary
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from .equiv import EquivError, run_equiv
 
@@ -105,7 +105,7 @@ def _binary_path() -> str:
     convention), falling back to a debug build -- looked up in every
     target directory cargo may have built into (crate-local ``target/``,
     ``$CARGO_TARGET_DIR``, a cargo-config ``build.target-dir``; see
-    ``_native._find_cargo_binary``, issue #3189).
+    ``_native.find_cargo_binary``, issue #3189).
 
     Raises :class:`TechmapError` with a clear, actionable message (mirroring
     ``mom.py``'s/``congestion.py``'s own "extension not installed" errors)
@@ -115,7 +115,7 @@ def _binary_path() -> str:
     explicit step, same posture the `pyo3` extensions take toward
     `maturin develop`.
     """
-    found = _find_cargo_binary(_TECHMAP_CRATE_DIR, "klt-techmap")
+    found = find_cargo_binary(_TECHMAP_CRATE_DIR, "klt-techmap")
     if found is not None:
         return found
     raise TechmapError(

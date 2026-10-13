@@ -109,7 +109,7 @@ def _binary_in(target_dir: str, name: str) -> str | None:
     return None
 
 
-def _find_cargo_binary(crate_dir: str, name: str) -> str | None:
+def find_cargo_binary(crate_dir: str, name: str) -> str | None:
     """The built ``name`` binary for the cargo crate at ``crate_dir``, or
     ``None`` -- release preferred over debug in each target directory.
 
