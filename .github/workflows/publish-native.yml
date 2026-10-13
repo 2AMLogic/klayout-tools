@@ -37,7 +37,7 @@ jobs:
       crate: ${{ steps.plan.outputs.crate }}
       version: ${{ steps.plan.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: plan
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -92,14 +92,14 @@ jobs:
             runner: macos-14
             manylinux: "off"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # abi3: one wheel per platform covers every CPython >= 3.10 (the
       # project's `requires-python`), instead of a wheel per interpreter. The
       # feature is passed here, not in `[tool.maturin]`, so the checkout's
       # from-source dev build is unchanged.
       - name: Build wheel
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: native/${{ needs.plan.outputs.crate }}
           target: ${{ matrix.target == 'macos-arm64' && 'aarch64-apple-darwin' || 'x86_64-unknown-linux-gnu' }}
@@ -117,9 +117,9 @@ jobs:
     needs: plan
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           working-directory: native/${{ needs.plan.outputs.crate }}
           command: sdist
@@ -146,9 +146,9 @@ jobs:
           - { target: macos-arm64, runner: macos-14, python: "3.10" }
           - { target: macos-arm64, runner: macos-14, python: "3.13" }
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
           python-version: ${{ matrix.python }}
@@ -203,7 +203,7 @@ jobs:
           path: dist/
           merge-multiple: true
 
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
 

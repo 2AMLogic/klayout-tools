@@ -977,3 +977,79 @@ def test_cli_text_prints_block_summary_and_warning(
     assert code == 0
     assert "block: subckt_uncommented=False" in out
     assert "block: WARNING:" in out
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3010: --check is independent of the checkout path
+# --------------------------------------------------------------------------- #
+
+_PATHED_BODY = (
+    "** sch_path: {root}/a/x.sch\n"
+    "**.subckt x a b\n"
+    "* expanding   symbol:  sub.sym # of pins=2\n"
+    "** sym_path: {root}/a/sub.sym\n"
+    "** sch_path: {root}/a/sub.sch\n"
+    "R1 a b 1k\n"
+    "**.ends\n"
+    ".end"
+)
+
+
+def test_check_ignores_a_different_checkout_path(tmp_path, argv_log, monkeypatch):
+    """The issue #3010 reproduction: generated in /work/A, checked from
+    /work/B. Only xschem's path comments differ, so it is a match."""
+    monkeypatch.setenv("NETLIST_BODY", _PATHED_BODY.format(root="/work/B"))
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(_PATHED_BODY.format(root="/work/A") + "\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "match"
+    assert report["drift"]["path_comments_differ"] is True
+    assert report["drift"]["diff"] == []
+
+
+def test_check_still_reports_drift_beside_a_path_difference(
+    tmp_path, argv_log, monkeypatch
+):
+    monkeypatch.setenv("NETLIST_BODY", _PATHED_BODY.format(root="/work/B"))
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(
+        _PATHED_BODY.format(root="/work/A").replace("1k", "2k") + "\n",
+        encoding="utf-8",
+    )
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "drifted"
+    assert report["drift"]["path_comments_differ"] is False
+    assert any(line.startswith("-R1 a b 2k") for line in report["drift"]["diff"])
+
+
+def test_identical_netlist_does_not_flag_path_comments(tmp_path, argv_log):
+    schematic = _write_schematic(tmp_path)
+    binary = _write_stub(tmp_path, _STUB_NONZERO_EXIT)
+    output = tmp_path / "block.spice"
+    output.write_text(_NETLIST_BODY + "\n", encoding="utf-8")
+
+    report = run_netlist(schematic, str(output), check=True, xschem_binary=binary)
+
+    assert report["status"] == "match"
+    assert report["drift"]["path_comments_differ"] is False
+
+
+def test_path_normalization_keeps_the_file_name():
+    """Only the directory is ignored: a subcircuit taken from a different
+    schematic file still compares unequal."""
+    normalize = netlist_module._normalize_path_comments
+    a = b"** sch_path: /work/A/a/x.sch\nR1 a b 1k\n"
+    b = b"** sch_path: /other/place/a/x.sch  \nR1 a b 1k\n"
+    c = b"** sch_path: /work/A/a/y.sch\nR1 a b 1k\n"
+    assert normalize(a) == normalize(b) == b"** sch_path: x.sch\nR1 a b 1k\n"
+    assert normalize(a) != normalize(c)
+    # Not a path comment: untouched.
+    assert normalize(b"* sch_path: /x/y.sch\n") == b"* sch_path: /x/y.sch\n"

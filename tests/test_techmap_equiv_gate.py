@@ -45,6 +45,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import techmap
+from klayout_tools._native import build_cargo_binary
 from klayout_tools.techmap import TechmapError, run_techmap
 
 HAVE_CARGO = shutil.which("cargo") is not None
@@ -112,17 +113,16 @@ _BROKEN_GENERIC_NETLIST = {
 }
 
 
-def _techmap_binary() -> str:
+def _techmap_binary(monkeypatch) -> str:
     """Build (debug profile -- functional correctness only, no lto) and
-    return the real `klt-techmap` binary path, mirroring
-    `tests/corpus/techmap/compare.py`'s own `_ensure_binary` convention
-    (kept independent here rather than imported -- that module is a
-    standalone benchmark script, not a shared test fixture)."""
-    binary = Path(techmap._TECHMAP_CRATE_DIR) / "target" / "debug" / "klt-techmap"
-    if not binary.is_file():
-        subprocess.run(["cargo", "build"], cwd=techmap._TECHMAP_CRATE_DIR, check=True)
-    assert binary.is_file(), f"cargo build did not produce {binary}"
-    return str(binary)
+    return the real `klt-techmap` binary path as cargo reports it --
+    wherever the target directory is (``CARGO_TARGET_DIR`` or a cargo-config
+    ``build.target-dir`` move it out of the crate, issue #3189) -- and point
+    `run_techmap` at exactly that build, never a stale release binary that
+    happens to share the target directory."""
+    binary = build_cargo_binary(techmap._TECHMAP_CRATE_DIR, "klt-techmap")
+    monkeypatch.setattr(techmap, "_binary_path", lambda: binary)
+    return binary
 
 
 def _write_design(design_dir: Path, netlist: dict) -> str:
@@ -140,12 +140,12 @@ def _write_design(design_dir: Path, netlist: dict) -> str:
     return str(request_path)
 
 
-def test_verify_equivalence_gate_passes_on_real_mapping(tmp_path):
+def test_verify_equivalence_gate_passes_on_real_mapping(tmp_path, monkeypatch):
     """AC #1: a technology-mapped netlist is checked against `klt equiv`
     for equivalence to its pre-mapping generic netlist before being
     accepted -- demonstrated end-to-end on a real, correctly-mapped design:
     `klt equiv` reports `"equivalent"`."""
-    _techmap_binary()  # ensure built before run_techmap resolves it
+    _techmap_binary(monkeypatch)  # build, and run exactly that binary
 
     request_path = _write_design(tmp_path / "good", _GOOD_GENERIC_NETLIST)
 
@@ -164,7 +164,7 @@ def test_verify_equivalence_gate_fails_hard_on_seeded_mismatch(tmp_path, monkeyp
     real `klt-techmap` run against a genuinely different generic netlist,
     `$or2` instead of `$and2`) substituted for the real correct one, never
     a hand-edited/hand-broken netlist."""
-    _techmap_binary()
+    _techmap_binary(monkeypatch)
 
     # Real mapping of the broken ("$or2 instead of $and2") generic netlist,
     # independent of the good design below -- a real, structurally-valid,
