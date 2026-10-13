@@ -251,6 +251,17 @@ pub struct Limits {
     /// point estimate that happened to clear the bar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_yield: Option<f64>,
+    /// Optional parametric qualification target (issue #2873): the sample
+    /// mean +/- `k` sample standard deviations must lie inside the limits,
+    /// i.e. `capability.sigma_to_spec >= k`. Gated on the **lower** bound of
+    /// `sigma_to_spec_confidence_interval`, consistent with `target_yield`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_sigma: Option<f64>,
+    /// Optional minimum number of *converged* (numeric-valued, i.e. `n`)
+    /// samples (issue #2873). A shortfall is an `insufficient_evidence`
+    /// outcome, distinct from the `min_samples` hard-error floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_converged_samples: Option<u64>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -270,8 +281,10 @@ pub struct YieldResponse {
     pub confidence: f64,
     pub target_ci_halfwidth: f64,
     pub min_samples: usize,
-    /// `"pass"` / `"fail"` / `"reported"` -- `"reported"` when no
-    /// measurement declared a `target_yield`, so nothing could pass or fail.
+    /// `"pass"` / `"fail"` / `"insufficient_evidence"` / `"reported"` --
+    /// `"reported"` when no measurement declared a `target_yield`,
+    /// `target_sigma` or `min_converged_samples`, so nothing could pass or
+    /// fail. `"insufficient_evidence"` (issue #2873) never masks a `"fail"`.
     pub status: String,
     pub measurement_count: usize,
     pub measurements: Vec<MeasurementReport>,
@@ -319,8 +332,46 @@ pub struct MeasurementReport {
     /// (if any) was computed from -- always present, even for
     /// `"plain_random"` (issue #907, Phase 2b of epic #710).
     pub sampling: SamplingReport,
+    /// Present only when the measurement declared `limits.target_sigma`
+    /// (issue #2873).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sigma_target: Option<SigmaTarget>,
+    /// Present only when the measurement declared
+    /// `limits.min_converged_samples` (issue #2873).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub converged_n: Option<ConvergedN>,
     pub status: String,
     pub warnings: Vec<String>,
+}
+
+/// The parametric sigma-multiple qualification verdict (issue #2873).
+#[derive(Debug, Serialize)]
+pub struct SigmaTarget {
+    /// The declared multiple `k`.
+    pub k: f64,
+    /// `capability.sigma_to_spec` (point estimate); `null` for a degenerate fit.
+    pub sigma_to_spec: Option<f64>,
+    /// Lower end of `capability.sigma_to_spec_confidence_interval`.
+    pub lower_bound: Option<f64>,
+    /// Which quantity `met` is judged on -- always `"lower_bound"`.
+    pub gate: String,
+    /// `lower_bound >= k`; `null` when not evaluable (see `reason`).
+    pub met: Option<bool>,
+    /// Why `met` is `null`: `"degenerate_fit"` / `"importance_sampled"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Requested-N vs converged-N (issue #2873).
+#[derive(Debug, Serialize)]
+pub struct ConvergedN {
+    /// The full draw: `n + errored + failed_unmeasurable + censored + inconclusive`.
+    pub n_requested: u64,
+    /// Numeric-valued samples -- the report's `n`.
+    pub n_converged: u64,
+    pub min_converged_samples: u64,
+    /// `"sufficient"` / `"insufficient"`.
+    pub verdict: String,
 }
 
 /// Echoes which sampling strategy produced `samples`, plus the numbers a

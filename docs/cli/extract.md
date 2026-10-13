@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--format text|json]
 klt extract <request.json>|-|'{...}' [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -119,6 +119,18 @@ two disagree, this document (and the code) win.
   documentation without blocking `klt lvs`'s `options.combine_devices` from
   folding the series chain. When unset, every named net still promotes to a
   pin, byte-for-byte unchanged. See "Declared pin set" below.
+- `--rename-declared-pins` — optional, off by default, requires `--pins` or
+  `--def-pins`. Renames each surviving promoted pin net whose comma-joined
+  component labels contain *exactly one* declared name to that name (issue
+  #2854) — so the written `.SUBCKT` header and `nets[]` carry the declared
+  name (`vss`) instead of KLayout's joined multi-label form
+  (`VGND|g_vss_m1|...|vss`), which is what lets `klt lvs`'s
+  `options.anchor_top_level_pins` pair the pin with a same-named reference
+  pin. A net matching 2+ declared names is reported (a short between two
+  interface pins), never renamed; a rename colliding with an existing net
+  name is skipped and reported. Off (or without a declared set: a clean
+  error) the output is byte-for-byte unchanged. See "Renaming promoted pins
+  to their declared name" below.
 - `--deck-option` — optional, unset by default, repeatable. `<key>=<value>`
   selects which caller-visible flavour of a deck's shared-geometry device
   family this run wires (issue #595) — the recognised keys are gf180mcu's
@@ -266,6 +278,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `top_cell_pins` | bool | `--top-cell-pins` |
 | `pins` | array\<string\> \| string | `--pins` (an array is joined with commas; an entry containing a comma is rejected, since the flag encoding cannot represent it) |
 | `def_pins` | string | `--def-pins` |
+| `rename_declared_pins` | bool | `--rename-declared-pins` (issue #2854) |
 | `pin_source_cells` | array\<string\> \| string | `--pin-source-cells` (same comma-joining rule as `pins`) |
 | `hierarchical_cells` | array\<string\> \| string | `--hierarchical-cells` (same comma-joining rule as `pins`) |
 | `deck_options` | object\<string, string\|number\|bool\> | repeatable `--deck-option KEY=VALUE`. A key containing `=` is rejected. |
@@ -1111,7 +1124,6 @@ Both curated decks additionally declare one vertical-BJT device-recognition
 entry (`ExtractionDeck.bipolars`, a tuple of `BipolarDevice` — see its
 docstring in `src/klayout_tools/decks/__init__.py`), run through KLayout's
 native `DeviceExtractorBJT3Transistor`:
-
 - **sky130**: one `pnp` entry — base = `nwell.drawing` (64/20), emitter =
   `diff.drawing` (65/20), marker = `pnp.drawing` (82/44, the layer
   `sky130_fd_pr__pnp_05v5`-style device-cell instances draw over themselves
@@ -1168,10 +1180,36 @@ metal stack directly — is a **possible follow-up but is out of scope for
 this issue**, pending confirmation that the gf180mcu DRM defines a legal
 base-tie via/metal stack. File it separately if that confirmation lands.
 
+**Optional fourth (substrate) terminal — issue #2862.** A `BipolarDevice`
+entry may declare a `substrate` layer, for a PDK whose bipolar has a drawn
+substrate contact distinct from the collector (SG13G2's four-terminal NPN
+flavours are the motivating case; neither curated deck declares one). An
+entry that does extracts through KLayout's `DeviceExtractorBJT4Transistor`
+(terminals C/B/E/S) instead of the three-terminal one; an entry that leaves
+the field `None` — every deck shipped today — extracts exactly as it did
+before the field existed. The `S` region is `substrate & base` (the same
+marker-scoped-subset idiom as a drawn `collector`: the substrate mask has to
+be drawn inside the marked base footprint), it joins the contact/metal
+stack like any drawn diffusion — never the deck's `substrate_net` global,
+which stays the collector-less collector's net — and the same dummy-marker
+cut the base takes drops the whole four-terminal unit (#295/#462). One
+extractor quirk is worth knowing when reading the wiring in `extract.py`:
+verified against `klayout==0.30.12`, `DeviceExtractorBJT4Transistor` merges
+two same-device terminals' nets that both `connect()` into one shared layer,
+so the substrate terminal wires through its own raw layer (`substrate` →
+contact) rather than straight into `contact` like the emitter and a drawn
+collector — three-terminal entries are untouched, `DeviceExtractorBJT3Transistor`
+does not exhibit the merge. A four-terminal entry may combine with
+`collector=None` (collector formed by the substrate, substrate contact
+drawn): the empty `C` input keeps the three-terminal collector semantics,
+staying tied to `substrate_net`.
+
 `devices[].nets` for a bipolar device uses `"c"`/`"b"`/`"e"` terminal keys
-(collector/base/emitter) instead of MOS's `"s"`/`"g"`/`"d"`/`"b"`, and
+(collector/base/emitter) instead of MOS's `"s"`/`"g"`/`"d"`/`"b"` — plus
+`"s"` (substrate) for a deck entry that declares the optional `substrate`
+layer, see above — and
 `devices[].params` is empty (KLayout's `DeviceClassBJT3Transistor` reports
-area/perimeter parameters named `AE`/`AB`/`AC`/`PE`/`PB`/`PC`/`NE`, none of
+area/perimeter parameters named `AE`/`AB`/`AC`/`PE`/`PB`/`PC`/NE, none of
 which match the `W`/`L` parameter names `devices[].params` extracts — see
 "JSON response" below).
 
@@ -2538,9 +2576,9 @@ micrometres.
 naming the option.
 None of them has a FinFET implementation. ASAP7 DRC is the separate
 DRC-DSL deck `src/klayout_tools/decks/asap7.drc` (issue #2760; see
-[`docs/cli/drc.md`](drc.md)), and `klt lvs` refuses a FinFET deck (see
-[`docs/cli/lvs.md`](lvs.md)) until its reference reader preserves `nfin`
-(issue #2813).
+[`docs/cli/drc.md`](drc.md)), and `klt lvs` compares a FinFET deck with an
+`nfin`-preserving reference reader (issue #2813; see
+[`docs/cli/lvs.md`](lvs.md), "FinFET decks").
 
 ### Verification status
 
@@ -2557,7 +2595,11 @@ DRC-DSL deck `src/klayout_tools/decks/asap7.drc` (issue #2760; see
   net to `VDD` and `vsubs` to `VSS` by name, which is a comparison-side
   assumption. 11 cells draw parallel series stacks the CDL folds into one
   wider stack. 6 differ from their CDL only in series order. Both groups are
-  LVS-comparison questions, tracked in #2813.
+  LVS-comparison questions, resolved in #2813: `klt lvs` passes 191 cells with
+  an explicit, disclosed bulk policy; the 11 folded-stack cells are listed as
+  unsupported and the 6 series-order cells are adjudicated as a
+  reference-vs-layout topology difference (see `docs/cli/lvs.md`, "Pinned
+  ASAP7 RVT corpus").
 - **Simulation is not verified.** The fleet host's ngspice-46 build rejects
   the ASAP7 `level = 72` BSIM-CMG cards, and no OSDI BSIM-CMG module is
   available. Simulating extracted ASAP7 netlists is tracked in #2814.
@@ -3163,6 +3205,68 @@ asked for its restriction to apply, and silently skipping it would demote
 them is harmless (the below-top-label pass is a structural no-op on a
 DEF-merged layout, see above) but does not need to be done, since
 `--def-pins` alone already covers the DEF-merge case fully.
+
+## Renaming promoted pins to their declared name (`--rename-declared-pins`, issue #2854)
+
+`--pins`/`--def-pins` reconciliation (above) only *demotes*: a promoted pin
+net whose conductor carries several drawn labels — typical when a macro
+labels its internal nodes and the parent adds its own boundary label on the
+same conductor — keeps KLayout's comma-joined `Net.name`, written `VGND|g_vss_m1|...|vss`.
+The declared name is only one component of that string, and every pin-name
+consumer matches names exactly — `klt lvs`'s `options.anchor_top_level_pins`
+(#2692) in particular — so such a pin can never pair with a reference pin
+named `vss`. Callers had to rewrite the netlist text after extraction
+(split on `|`, rename when exactly one component is a declared pin, refuse
+when zero or several are). `--rename-declared-pins` moves that rule into
+extraction itself:
+
+- **Exactly one declared component** and the name differs: the net is
+  renamed to the declared name (the pin's cosmetic name follows). The
+  written `.SUBCKT` header, `nets[]`, `devices[].nets[...]`, the
+  parasitics passes and every downstream consumer all see the declared
+  spelling — the rename runs after the purge and before anything reads a
+  net name, the same window the dotted-name rewrite (issue #2145) uses.
+- **Two or more declared components**: *reported, never repaired* — one
+  conductor carrying two declared interface pins is a **short between
+  interface pins**, a layout defect rather than a naming artifact. The net
+  keeps its joined name and an `error`-severity
+  `declared_pin_short` finding is emitted in the `pin_renames` block,
+  mirrored into `warnings` with the `ERROR:` prefix. `klt lvs` surfaces
+  the same condition as a `pin.declared_short` `mismatches[]` entry.
+- **A rename whose target name another net in the same circuit already
+  carries**: skipped and reported (`declared_pin_rename_collision`,
+  `warning` severity) — never a silent merge and never two same-named
+  nets. A second net squatting on a declared name is itself a finding (a
+  demoted internal net, or a physically disconnected island carrying the
+  same label).
+
+Every rename performed is disclosed twice: an aggregate `warnings` entry
+listing each `'joined name' -> 'declared name'` pair, and the additive
+`pin_renames` response field — `null` unless the flag was given, otherwise
+`{"declared": [...], "declared_pins": [...] | null, "def_pins": [...] | null,
+"renamed": [{"from", "to"}, ...], "findings": [...]}`. `declared_pins` and
+`def_pins` echo each original argument on its own (`null` for "flag not
+given", a list — `[]` included — for "flag given"), and are what
+`--check --rerun` replays both demotion passes from, together with the
+always-present `rename_declared_pins` boolean echo; `declared` is the union
+of `--pins`/`--def-pins` — the rename pass's own matching set, retained for
+readers (the two sets are not interchangeable: `--def-pins`'s demotion only
+further restricts what `--pins` kept, and it alone runs the
+`def_pin_promotion` report).
+
+The pass applies after every promotion/demotion reconciliation
+(`--top-cell-pins`, `--pins`, `--def-pins`, `--pin-source-cells`) and after
+the purge, so it only ever renames a net that survived as a promoted pin on
+a net a caller actually sees. A pin net already carrying exactly its
+declared name (the common single-label case) is a no-op, reported nowhere.
+Omitting the flag (the default) is byte-identical to extraction before this
+flag existed; passing it with neither `--pins` nor `--def-pins` is a clean
+error (exit 1), not a silent no-op — there is no declared set to rename to.
+
+`klt pex --rename-declared-pins` passes the flag straight through (its
+effective value is echoed as `extraction.rename_declared_pins`), and
+`klt lvs` exposes it as `layout.rename_declared_pins` (a boolean, alongside
+`layout.declared_pins`) — see [`docs/cli/lvs.md`](lvs.md).
 
 ### `def_pin_promotion`: how the declared port set actually landed (issue #2473)
 
@@ -5661,7 +5765,7 @@ device with a `"g"` terminal (the one terminal name no other recognised
 device class in this repo's decks uses) is treated as MOS-like, and its
 `"g"`/`"s"`/`"d"`/`"b"` terminals map to `"gate"`/`"source"`/`"drain"`/
 `"body"`; every other device (drawn resistor/capacitor `"a"`/`"b"`/`"w"`,
-diode `"a"`/`"c"`, bipolar `"c"`/`"b"`/`"e"`) reports the literal terminal
+diode `"a"`/`"c"`, bipolar `"c"`/`"b"`/`"e"`/`"s"`) reports the literal terminal
 key verbatim.
 
 **Known non-detection**: this only flags a net with **exactly one** device
@@ -6966,6 +7070,8 @@ exit codes).
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |
 | `matched_device_groups` | array\<object\>       | One entry per `--matched-group` declaration, in the order given (issue #1018 — see "Matched-device geometry check" above), each `{ "name": string, "instances": [string, ...], "unresolved_instances": [string, ...], "mismatched_fields": [{"field": string, "values": {"<instance name>": number, ...}}, ...] }`. `instances` echoes the declared member list verbatim; `unresolved_instances` (sorted) is the subset matching no extracted device; `mismatched_fields` lists every parameter that diverges across the group's resolved members (post-rounding equality — no numeric tolerance). A matching prose entry is also appended to `warnings[]` for a group with unresolved members and/or mismatched fields. Always present, empty (`[]`) when `--matched-group` was never given. |
+| `pin_renames` | object \| `null`           | Additive field (issue #2854). `null` unless `--rename-declared-pins` was given, otherwise the declared-name rename report: `{ "declared": [string, ...], "declared_pins": [string, ...] \| null, "def_pins": [string, ...] \| null, "renamed": [{"from": string, "to": string}, ...], "findings": [{"severity", "code", "net", "message", ...}, ...] }`. `declared_pins`/`def_pins` echo each original argument separately (`null` for "flag not given", a list — `[]` included — for "flag given"; the echoes `--check --rerun` replays both demotion passes from, since the two sets are not interchangeable); `declared` is the union of `--pins`/`--def-pins` the renames resolved against — the rename pass's own matching set, retained for readers; `renamed` lists every `'joined name' -> 'declared name'` rename performed (sorted by `from`, names in the same `\|`-joined spelling `nets[].name` uses); `findings` carries the `error`-severity `declared_pin_short` (a net matching 2+ declared names — a short between interface pins, reported and never repaired) and the `warning`-severity `declared_pin_rename_collision` (a rename skipped because another net already carries the target name) entries, each mirrored into `warnings[]`. See "Renaming promoted pins to their declared name" above. |
+| `rename_declared_pins` | boolean                | Additive field (issue #2854). The effective `--rename-declared-pins` value — always present (`false` when the flag was not given), unlike `pin_renames`' null-unless-given convention, so `--check --rerun` replays the rename from it plus the `pin_renames.declared_pins`/`pin_renames.def_pins` echoes. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise. `root` is `{"path", "scope"}` (issue #1376, schema_version 3) -- not the raw `--pdk-root` argument -- via the same `{path, scope}` shape `klt env-provenance` and `klt pex`/`klt sim`/`klt size` use: `scope: "repo"` with a repo-relative `path` when the PDK install lives inside the invoking repo, `scope: "external"` with `path: null` otherwise (a PDK install almost always is). Committing this response as evidence (the normal use of `--format json`) no longer bakes the resolving machine's absolute PDK install path (and possibly a username) into the record; `provenance.pdk` below already carries the same PDK's reproducible identity (name/source/version) without a path. |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `label_layers`     | object \| `null`           | Additive field (issue #2656). The `--label-layer` override this run read net/pin names through — `{"<role>": [layer, datatype] \| null, ...}`, keys sorted — or `null` when the flag was never given. The record of *which GDS purpose a run read names from*, which the `deck` name alone no longer answers once it can be overridden; `klt extract --check <report> --rerun` reads it back and replays the same purposes. See "Overriding a deck's label layers". |
@@ -7035,7 +7141,7 @@ scope (see [`../design/metric-namespace.md`](../design/metric-namespace.md)'s
 | -------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line). **This field is deliberately NOT backslash-escaped** (contrast `nets[].name` below): a KLayout-synthesized `$<n>` anonymous-device name is never the first token on an instance line — always preceded by a class-letter prefix (`M$1774`, `R$22`, etc.) — so the leading-`$` ngspice inline-comment hazard that `spice_safe_net_name()` guards against in net-name fields does not apply to device names. See "Anonymous nets are backslash-escaped" for the full rationale. |
 | `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors" — or a declared junction-diode class like `"diode_nd2ps_06v0"` on gf180mcu, see "Junction diodes"). |
-| `nets`   | object\<string, string\|null\> | Terminal → net-name map (same `\|`-joined spelling as `nets[].name` for a label-merged net, issue #696). MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"a"`, `"b"`, declared **equivalent** (order is arbitrary — see "MoM capacitor devices" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
+| `nets`   | object\<string, string\|null\> | Terminal → net-name map (same `\|`-joined spelling as `nets[].name` for a label-merged net, issue #696). MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above), plus `"s"` (substrate) only for a deck entry declaring the optional four-terminal `substrate` layer, same section. MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"a"`, `"b"`, declared **equivalent** (order is arbitrary — see "MoM capacitor devices" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
 | `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres, plus `"as_um2"` / `"ad_um2"` (source/drain junction area, square micrometres) and `"ps_um"` / `"pd_um"` (source/drain junction perimeter, micrometres) — the same measured junction geometry a `--pdk`-bound `X` card's own `AS`/`AD`/`PS`/`PD` carry (issue #695), present here regardless of `--pdk` since `devices[]` is built from the extracted device objects before the netlist is written. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract — see "SPICE model binding" above for how those measured values are still surfaced, via a `warnings[]` entry, when `--pdk` binds a `pnp` device onto a fixed-geometry target subcircuit). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"w_um"` / `"l_um"` — the marker's own bounding-box height/width — plus `"mmin"` / `"mmax"` (issue #2435), the **inclusive, 1-based metal-index range** the device's fingers are drawn on (`1` = `Metal1`), measured from the drawn per-metal conductor geometry enclosed by the recognition marker and emitted as integers (dimensionless layer indices, hence no `_um`-style suffix); and deliberately **no** `"c_f"`/`"area_um2"`/`"perimeter_um"` key at all, since the real device's capacitance is supplied by the SPICE/Verilog-A model from `density[N]*active_area + Cfeed`, not computed by LVS extraction; see "MoM capacitor devices" above for the full JSON-contract decision. Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
 | `instance_path` | array\<object\> | Additive field (issue #1666). The chain of GDS-level cell placements this device's recognition geometry sits inside, **outermost first**: `[{"cell": str, "array_index": [ia, ib] \| null}, ...]`. `array_index` is the element's 0-based position within its `CellInstArray` for a regular array, `null` for a plain single placement. `[]` means the geometry was drawn directly in the top cell, inside no placed sub-cell — the normal result for a flat design. This is the device-level counterpart to `nets[].label_positions_um`/`pin_index`: the only thing in the report that tells otherwise-identical devices from repeated copies of the same leaf cell apart. Resolved positionally after extraction (see "Per-device GDS instance attribution" above for why, and for the caveat that `[ia, ib]`'s axis is the GDS file's rather than your authoring order). |
 
@@ -7193,16 +7299,23 @@ diff computation itself uses the normalized view. Response shape:
 complete report `--rerun` just produced, so a consumer can inspect the
 current state without a second invocation.
 
-**Known limitation**: only `file`/`deck`/`top` and the caller-pinned subset
-of `provenance.deck.options` are reconstructed from the committed report. Every other optional flag
+**Known limitation**: only `file`/`deck`/`top`, the caller-pinned subset
+of `provenance.deck.options`, the `label_layers` echo (issue #2656), and —
+for a report that carries a `pin_renames` block — the declared-pin sets
+(issue #2854: `rename_declared_pins` replayed together with the
+`--pins`/`--def-pins` sets the `pin_renames.declared_pins`/`def_pins`
+echoes record; a block without the separate echoes — an earlier build of
+this unreleased feature, or a hand-edited report — replays its
+`pin_renames.declared` union as `--pins` alone) are reconstructed from the
+committed report. Every other optional flag
 (`--parasitics`, `--mom-net`, `--spef`, `--critical-net`,
 `--distributed-rc`, `--def-net-names`, `--def-net-connections`,
-`--mom-rlc-*`, `--top-cell-pins`, `--pins`,
-`--defer-resistor-fixed-offset`, `--abstract-cells`, `--abstract-cell-lef`,
-`--matched-group`, `--pdk`/`--pdk-root`) is never echoed anywhere in the
-response, so a report produced with any of them will legitimately (and
-unhelpfully) show drift in the corresponding fields under `--rerun`. Use
-cheap mode instead when any of these apply.
+`--mom-rlc-*`, `--top-cell-pins`, `--pins`/`--def-pins` (outside the
+rename echo above), `--defer-resistor-fixed-offset`, `--abstract-cells`,
+`--abstract-cell-lef`, `--matched-group`, `--pdk`/`--pdk-root`) is never
+echoed anywhere in the response, so a report produced with any of them will
+legitimately (and unhelpfully) show drift in the corresponding fields under
+`--rerun`. Use cheap mode instead when any of these apply.
 
 ### Exit codes for `--check` / `--rerun`
 

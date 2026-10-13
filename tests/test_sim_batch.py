@@ -2846,6 +2846,10 @@ def _run_job_cmd_with_fake_klt(tmp_path, spec, klt_script):
             "EDA_INPUT_DIR": str(tmp_path),
             "PATH": f"{bin_dir}:/usr/bin:/bin",
         },
+        # Anything the job (or a payload it wrongly evaluates) writes with a
+        # relative path lands in the test's own directory, never the
+        # checkout pytest runs from (issue #3153).
+        cwd=tmp_path,
         capture_output=True,
         text=True,
     )
@@ -2853,9 +2857,19 @@ def _run_job_cmd_with_fake_klt(tmp_path, spec, klt_script):
 
 
 def _fake_klt(version_line: str) -> str:
+    """A fake runner `klt` whose `--version` prints ``version_line``
+    verbatim. The line goes through a quoted heredoc, so shell
+    metacharacters in it reach the job command's preflight as data instead
+    of running inside this fixture's own shell (issue #3153)."""
+    assert "KLT_VERSION_EOF" not in version_line
     return (
         "#!/bin/bash\n"
-        f'if [ "$1" = "--version" ]; then echo "{version_line}"; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then\n'
+        "cat <<'KLT_VERSION_EOF'\n"
+        f"{version_line}\n"
+        "KLT_VERSION_EOF\n"
+        "exit 0\n"
+        "fi\n"
         'touch "@MARKER@"; echo \'{"corners": []}\'; exit 0\n'
     )
 
@@ -2932,12 +2946,252 @@ def test_warn_mode_runs_the_simulation_despite_skew(tmp_path):
 
 
 def test_hostile_runner_version_output_cannot_break_the_envelope(tmp_path):
+    hostile = 'klt 1.0" ; touch x ; "'
     proc, out_dir, marker = _run_job_cmd_with_fake_klt(
-        tmp_path, _init_spec(tmp_path), _fake_klt('klt 1.0" ; touch x ; "')
+        tmp_path, _init_spec(tmp_path), _fake_klt(hostile)
     )
     assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
     json.loads((out_dir / "report.json").read_text())  # still valid JSON
-    json.loads((out_dir / "runner_identity.json").read_text())
+    identity = json.loads((out_dir / "runner_identity.json").read_text())
+    # The fixture delivered the hostile text to the preflight (which strips
+    # the quoting characters) rather than running it itself.
+    assert "touch x" in identity["runner_klt_version"]
+    # The payload reached the preflight as data and was never evaluated:
+    # no `x` in the job's working directory, nor in the checkout.
+    assert not (tmp_path / "x").exists()
+    assert not (REPO_ROOT / "x").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Major.minor version gate (issue #3184)
+# --------------------------------------------------------------------------- #
+
+_SHA = "99b4efb148bb23b5e9206680c43ea7a5fab7a3f1"
+
+
+@pytest.mark.parametrize(
+    ("version", "release"),
+    [
+        ("0.7.0", "0.7.0"),
+        ("0.7.0+gabc123", "0.7.0"),
+        ("0.7.0+gabc123.dirty", "0.7.0"),
+        ("0.7.0+unknown", "0.7.0"),
+        ("0.7.1.dev3+gabc123", "0.7.1"),
+        ("0.7.0rc1", "0.7.0"),
+        ("10.20", "10.20"),
+        ("7", "7"),
+        ("", None),
+        ("+gabc123", None),
+        ("dirty", None),
+        (".7.0", None),
+        ("0..7", None),
+    ],
+)
+def test_release_segment(version, release):
+    assert sb._release_segment(version) == release
+
+
+@pytest.mark.parametrize(
+    ("version", "gate"),
+    [
+        ("0.7.0", "0.7"),
+        ("0.7.3", "0.7"),
+        ("0.7.0+gabc123.dirty", "0.7"),
+        ("0.7.1.dev212+gabc123", "0.7"),
+        ("0.7.0.dev0+unknown", "0.7"),
+        ("0.8.0.dev5+gabc123", "0.8"),
+        ("10.20", "10.20"),
+        ("1.2.3.4", "1.2"),
+        ("7", None),
+        ("7+gabc123", None),
+        ("", None),
+        ("dirty", None),
+        ("0..7", None),
+    ],
+)
+def test_runner_gate_release_is_major_minor(version, gate):
+    assert sb._runner_gate_release(version) == gate
+
+
+def _gate_spec(tmp_path, client_version, **kwargs):
+    return sb._build_batch_job_spec(
+        {"models": {}, "options": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=True,
+        client_version=client_version,
+        **kwargs,
+    )
+
+
+#: (runner, client) pairs the gate must let through: same major.minor.
+_GATE_MATCHES = [
+    ("0.7.0", "0.7.0"),
+    ("0.7.0", "0.7.0+gabc123"),
+    ("0.7.0+gabc123", "0.7.0"),
+    ("0.7.0", "0.7.1.dev212+gabc123"),
+    ("0.7.0", "0.7.0+gabc123.dirty"),
+    ("0.7.0", "0.7.0.dev0+unknown"),
+    ("0.7.0", "0.7.3"),
+    ("0.7.3", "0.7.0"),
+    ("0.7.0rc1", "0.7.0"),
+]
+
+#: (runner, client) pairs the gate must reject with exit 87.
+_GATE_MISMATCHES = [
+    ("0.7.0", "0.8.0"),
+    ("0.8.0", "0.7.0"),
+    ("0.7.0", "0.8.0.dev5+gabc123"),
+    ("0.7.3", "0.8.0.dev5+gabc123"),
+    ("0.8.0+gdef456", "0.7.0+gabc123"),
+    ("1.7.0", "0.7.0"),
+]
+
+
+@pytest.mark.parametrize(("runner", "client"), _GATE_MATCHES)
+def test_same_major_minor_passes_the_preflight(tmp_path, runner, client):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+    identity = json.loads((out_dir / "runner_identity.json").read_text())
+    assert identity == {"runner_klt_version": runner, "client_klt_version": client}
+
+
+@pytest.mark.parametrize(("runner", "client"), _GATE_MISMATCHES)
+def test_different_major_minor_is_rejected_with_both_full_strings(
+    tmp_path, runner, client
+):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+    assert runner in error["message"] and client in error["message"]
+
+
+@pytest.mark.parametrize("runner", ["dirty", "+gabc123", "v", "..1", "7", "7+gabc"])
+def test_runner_version_without_major_minor_is_unknown(tmp_path, runner):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, "0.7.0"), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_UNKNOWN_CODE
+    assert (
+        json.loads((out_dir / "runner_identity.json").read_text())["runner_klt_version"]
+        == runner
+    )
+
+
+@pytest.mark.parametrize("version", ["+gabc123", "dirty", "v1.0", "7", "7+gabc123"])
+def test_client_version_without_major_minor_cannot_be_pinned(tmp_path, version):
+    with pytest.raises(sim.SimError, match="cannot be pinned"):
+        _gate_spec(tmp_path, version)
+
+
+@pytest.mark.parametrize(
+    ("runner", "client", "status"),
+    [
+        *((runner, client, "match") for runner, client in _GATE_MATCHES),
+        *((runner, client, "mismatch") for runner, client in _GATE_MISMATCHES),
+        ("dirty", "0.7.0", "unknown"),
+        ("7", "0.7.0", "unknown"),
+        ("0.7.0", "7", "unknown"),
+    ],
+)
+def test_runner_identity_compares_major_minor(
+    tmp_path, monkeypatch, runner, client, status
+):
+    _pin_client_version(monkeypatch, client)
+    (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+        json.dumps({"runner_klt_version": runner, "client_klt_version": client})
+    )
+    fields = sb._read_runner_identity(str(tmp_path))
+    assert fields["runner_klt_version"] == runner
+    assert fields["client_klt_version"] == client
+    assert fields["runner_compatibility"] == status
+    assert ("runner_compatibility_warning" in fields) == (status != "match")
+
+
+# The version strings klt actually produces come from _version_scheme.render;
+# these tests pin the gate to that scheme, so a change to either is visible.
+_RENDERED_MATCHES_070 = [
+    # post-tag git checkout: the next patch's dev build
+    dict(commit=_SHA, tag=None, dirty=False, released=True, distance=212),
+    # dirty tree sitting on v0.7.0
+    dict(commit=_SHA, tag="v0.7.0", dirty=True, released=True, distance=0),
+    # clean tree on v0.7.0 (the bare release)
+    dict(commit=_SHA, tag="v0.7.0", dirty=False, released=True, distance=0),
+    # no git facts
+    dict(commit=None, tag=None, dirty=None, released=None, distance=None),
+]
+
+
+@pytest.mark.parametrize("facts", _RENDERED_MATCHES_070)
+def test_rendered_0_7_builds_match_a_0_7_0_runner(tmp_path, monkeypatch, facts):
+    from klayout_tools import _version_scheme
+
+    client = _version_scheme.render("0.7.0", **facts)
+    assert sb._runner_gate_release(client) == "0.7"
+    proc, _out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+    _pin_client_version(monkeypatch, client)
+    (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+        json.dumps({"runner_klt_version": "0.7.0", "client_klt_version": client})
+    )
+    assert sb._read_runner_identity(str(tmp_path))["runner_compatibility"] == "match"
+
+
+def test_rendered_post_tag_dev_build_is_0_7_1_dev_and_matches(tmp_path):
+    from klayout_tools import _version_scheme
+
+    client = _version_scheme.render("0.7.0", _SHA, None, False, True, 212)
+    assert client == f"0.7.1.dev212+g{_SHA[:12]}"
+    proc, _out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        # dev build of the untagged next minor
+        dict(commit=_SHA, tag=None, dirty=False, released=False, distance=5),
+        # the next minor's release
+        dict(commit=_SHA, tag="v0.8.0", dirty=False, released=True, distance=0),
+    ],
+)
+def test_rendered_next_minor_build_mismatches_a_0_7_0_runner(
+    tmp_path, monkeypatch, facts
+):
+    from klayout_tools import _version_scheme
+
+    client = _version_scheme.render("0.8.0", **facts)
+    assert sb._runner_gate_release(client) == "0.8"
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+    _pin_client_version(monkeypatch, client)
+    (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+        json.dumps({"runner_klt_version": "0.7.0", "client_klt_version": client})
+    )
+    fields = sb._read_runner_identity(str(tmp_path))
+    assert fields["runner_compatibility"] == "mismatch"
 
 
 # --------------------------------------------------------------------------- #

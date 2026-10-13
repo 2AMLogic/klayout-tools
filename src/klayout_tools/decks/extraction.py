@@ -774,8 +774,10 @@ class ExtractionDeck:
             layers.add(bipolar.marker)
             layers.update(bipolar.emitter_requires)
             layers.update(bipolar.emitter_excludes)
-            if bipolar.collector is not None:
-                layers.add(bipolar.collector)
+            # `filter(None, ...)` rather than two `is not None` branches so
+            # this ratcheted function's complexity stays put (issue #2862
+            # added the second optional layer).
+            layers.update(filter(None, (bipolar.collector, bipolar.substrate)))
         for capacitor in self.capacitors:
             layers.add(capacitor.top_plate)
             layers.add(capacitor.bottom_plate)
@@ -1108,6 +1110,31 @@ class BipolarDevice:
     :attr:`ExtractionDeck.device_classes` reports for a deck that declares
     this entry).
 
+    ``substrate`` (issue #2862) is the optional fourth terminal's drawn
+    layer, for a PDK's bipolar whose substrate contact is a mask of its own,
+    distinct from the collector (SG13G2's four-terminal NPN flavours are the
+    motivating case). ``None`` (the default) keeps the entry a
+    three-terminal device exactly as before this field existed --
+    ``extract.py`` runs it through ``DeviceExtractorBJT3Transistor``
+    unchanged, so every deck declared before this field extracts
+    byte-identically. A deck that declares the layer instead gets KLayout's
+    four-terminal ``DeviceExtractorBJT4Transistor`` (terminals ``C``/``B``/
+    ``E``/``S``): the ``S`` region is ``substrate & base`` (the same
+    marker-scoped-subset idiom the drawn ``collector`` uses -- the substrate
+    mask has to be drawn inside the marked base footprint, a substrate ring
+    *outside* it is not recognised as the terminal), the same dummy-marker
+    cut the base already took propagates to it for free, and its connectivity
+    is a drawn diffusion's -- it joins ``contact`` and picks its net up from
+    ordinary contact/metal routing, never the ``substrate_net`` global (that
+    global stays the collector-less collector's net). The JSON report's
+    ``devices[].nets`` grows an ``"s"`` key for such devices only; a
+    three-terminal entry's report is unchanged. ``substrate`` and a
+    collector-less ``collector=None`` may be combined (KLayout's BJT4
+    extractor handles an empty ``C`` input the way the three-terminal one
+    does -- it outputs the base footprint onto it, which stays tied to
+    ``substrate_net``) for a device whose collector is the substrate while
+    its substrate contact is drawn.
+
     ``provenance`` (issue #868) is a machine-readable citation of the exact
     upstream PDK-LVS-deck source this entry's recognition geometry was
     transcribed from -- the device-recognition analogue of
@@ -1126,6 +1153,7 @@ class BipolarDevice:
     emitter_excludes: tuple[tuple[int, int], ...] = ()
     class_name: str = "bjt"
     provenance: RuleProvenance | None = None
+    substrate: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)

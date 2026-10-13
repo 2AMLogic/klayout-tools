@@ -1713,6 +1713,74 @@ def test_classify_diagnostics_does_not_false_positive_on_title_text():
 
 
 # --------------------------------------------------------------------------- #
+# BSIM-CMG / OSDI prerequisite diagnostics (issue #2814)
+# --------------------------------------------------------------------------- #
+
+_NO_LEVEL72_LOG = (
+    "Only MOS device levels 1-6,8-10,14,49,54-58,60,68,73 are supported in "
+    "this binary\nError: could not find a valid modelname\n"
+)
+
+
+def test_unsupported_model_level_names_the_missing_capability():
+    diagnostics = sim._classify_diagnostics(_NO_LEVEL72_LOG)
+    codes = [d["code"] for d in diagnostics]
+    # The follow-on modelname error is a consequence, not a bin range.
+    assert codes == ["unsupported_model_level"]
+    (diag,) = diagnostics
+    assert diag["severity"] == "error"
+    assert "prerequisite missing" in diag["message"]
+    assert "BSIM-CMG" in diag["message"] and "osdi_preload" in diag["message"]
+    assert "Only MOS device levels" in diag["message"]
+
+
+def test_osdi_abi_mismatch_names_the_missing_capability():
+    log = 'NGSPICE only supports OSDI v0.3 but "bsimcmg.osdi" targets v0.4!\n'
+    (diag,) = sim._classify_diagnostics(log)
+    assert diag["code"] == "osdi_abi_mismatch"
+    assert diag["severity"] == "error"
+    assert "prerequisite missing" in diag["message"]
+    assert "ngspice >= 44" in diag["message"]
+
+
+def test_osdi_load_failure_names_the_missing_capability():
+    log = (
+        'Error opening osdi lib "x.osdi": no such file\n'
+        "Error: Library x.osdi couldn't be loaded!\n"
+    )
+    (diag,) = sim._classify_diagnostics(log)
+    assert diag["code"] == "osdi_load_failed"
+    assert "prerequisite missing" in diag["message"]
+
+
+def test_unsupported_model_level_corner_is_an_error_never_a_pass(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(_NO_LEVEL72_LOG)
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    report = sim.run_sim(str(request))
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    assert report["status"] != "pass"
+    assert any(d["code"] == "unsupported_model_level" for d in corner["diagnostics"])
+
+
+# --------------------------------------------------------------------------- #
 # Model bin-range diagnostic (`model_bin_range`, issue #1214)
 # --------------------------------------------------------------------------- #
 

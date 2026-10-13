@@ -8,7 +8,7 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 import sys
 
-from .. import arith_gen, netlist, pdk_stackup, pex
+from .. import arith_gen, netlist, netlist_batch, pdk_stackup, pex
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
@@ -2176,6 +2176,29 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--rename-declared-pins",
+        dest="rename_declared_pins",
+        action="store_true",
+        default=False,
+        help=(
+            "rename each surviving promoted pin net to its declared name "
+            "(issue #2854): a net whose comma-joined component labels "
+            "contain exactly one --pins/--def-pins name is renamed to it, "
+            "so the written .SUBCKT header and nets[] carry the declared "
+            "name (e.g. 'vss') instead of KLayout's joined multi-label "
+            "form (e.g. 'VGND|g_vss_m1|vss') -- which is what lets `klt "
+            "lvs`'s options.anchor_top_level_pins pair it with a "
+            "same-named reference pin. A net matching 2+ declared names is "
+            "reported (a short between interface pins), never renamed; a "
+            "rename colliding with an existing net name is skipped and "
+            "reported. Every rename is disclosed in a warnings entry and "
+            "the additive pin_renames response field. Requires --pins or "
+            "--def-pins. Off by default -- byte-identical to today's "
+            "behavior. See docs/cli/extract.md's 'Renaming promoted pins "
+            "to their declared name' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--pin-source-cells",
         dest="pin_source_cells",
         default=None,
@@ -2829,6 +2852,24 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--rename-declared-pins",
+        dest="rename_declared_pins",
+        action="store_true",
+        default=False,
+        help=(
+            "passed through to `klt extract --rename-declared-pins` (issue "
+            "#2854): each surviving promoted pin net whose component "
+            "labels contain exactly one --pins name is renamed to it, so "
+            "the extracted DUT's .SUBCKT header carries the declared names "
+            "the schematic DUT declares (required whenever a boundary net "
+            "carries extra drawn labels and its declared name is only one "
+            "component of KLayout's joined net name). Requires --pins. Off "
+            "by default -- byte-identical to today's behavior. The "
+            "effective value is echoed in the JSON response's "
+            "`extraction.rename_declared_pins`."
+        ),
+    )
+    pex_parser.add_argument(
         "--label-layer",
         dest="label_layers",
         action="append",
@@ -3007,6 +3048,19 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "<file> arguments and with --manifest). See "
             "docs/cli/signoff.md's 'Fleet roll-up' section for the fleet "
             "manifest shape."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--repo-root",
+        metavar="DIR",
+        help=(
+            'directory that `scope: "repo"` input paths resolve against, '
+            "instead of the nearest `.git` ancestor of the evidence file -- "
+            "for grading evidence copied outside any git checkout (a source "
+            "archive, a vendored copy, an unpacked CI artifact). Must be an "
+            "existing directory. Only meaningful with --manifest/--fleet. "
+            "See docs/cli/signoff.md's 'Grading outside a git checkout' "
+            "section."
         ),
     )
     signoff_parser.add_argument(
@@ -5347,6 +5401,30 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
             "without a duplicate .end terminating it early (issue #2680, "
             "edge 1). Off by default -- xschem's unmodified export is "
             "correct for a testbench top sheet"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--backend",
+        choices=netlist_batch.SUPPORTED_BACKENDS,
+        default=None,
+        help=(
+            "where xschem runs: 'local' (this host) or 'batch' (the batch "
+            "runner, through the same S3 job contract as `klt sim --backend "
+            "batch`). Default: $KLT_NETLIST_BACKEND, else 'local'. A batch "
+            "failure is an error (exit 1), never a fallback to a local run. "
+            "See docs/cli/netlist.md's 'Batch backend'"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-root",
+        dest="batch_root",
+        default=None,
+        help=(
+            "--backend batch only: the directory whose git-tracked files are "
+            "uploaded as the job's input tree (default: the schematic's git "
+            "checkout). The schematic and a project --rcfile must be tracked "
+            "files under it; the uncompressed total is capped at "
+            f"{netlist_batch.MAX_BATCH_TREE_BYTES // (1024 * 1024)} MiB"
         ),
     )
     netlist_parser.add_argument(
