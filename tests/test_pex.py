@@ -4732,3 +4732,148 @@ def test_run_pex_external_paths_still_carry_digests(
     assert entry["schematic_netlist"]["path"] is None
     assert entry["schematic_netlist_sha256"].startswith("sha256:")
     assert len(entry["schematic_netlist_sha256"]) == len("sha256:") + 64
+
+
+# --- Issue #2872 / #2876: per-side execution evidence ------------------------
+
+_BATCH_DIAG = {
+    "severity": "error",
+    "code": "batch_job_failed",
+    "runner_code": "batch_runner_version_mismatch",
+    "message": "the fleet runner runs klt 0.5.0 -- the request was not run",
+    "future_unknown_key": {"nested": [1, 2]},
+}
+
+
+def _side_report(corners, *, remote=None, extra_env=None):
+    """A minimal `klt sim` response. `corners` is a list of
+    `(corner_id, value_or_None, diagnostics)`."""
+    environment = {"engine": "ngspice", "engine_version": "45", **(extra_env or {})}
+    if remote is not None:
+        environment["remote"] = remote
+    return {
+        "corners": [
+            {
+                "corner_id": cid,
+                "status": "pass" if value is not None else "error",
+                "diagnostics": diags,
+                "measurements": [
+                    _measurement(value, "pass" if value is not None else "error")
+                ],
+            }
+            for cid, value, diags in corners
+        ],
+        "corner_count": len(corners),
+        "measurements": [{"name": "vout"}],
+        "environment": environment,
+    }
+
+
+def _run_pex_with_sim_reports(tmp_path, layout, monkeypatch, reports, n_testbenches=1):
+    """`reports` is the ordered list of `run_sim` responses (schematic,
+    extracted, schematic, extracted, ...)."""
+    import klayout_tools.pex as pex_module
+
+    queue = list(reports)
+    monkeypatch.setattr(pex_module, "run_sim", lambda *_a, **_k: queue.pop(0))
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    requests = []
+    for i in range(n_testbenches):
+        tb = _write_testbench(tmp_path / f"tb{i}.spice", dut)
+        requests.append(str(_write_request(tmp_path / f"request{i}.json", tb)))
+    return run_pex(layout, requests, "sky130")
+
+
+def test_pex_neither_side_ran_carries_diagnostics_and_remote(
+    tmp_path, resistor_layout, monkeypatch
+):
+    remote = {"provider": "aws-batch-fleet", "job_id": "job-123"}
+    corners = [("tt/1.800V/27C", None, [_BATCH_DIAG])]
+    report = _run_pex_with_sim_reports(
+        tmp_path,
+        resistor_layout,
+        monkeypatch,
+        [
+            _side_report(
+                corners,
+                remote=remote,
+                extra_env={"ngspice_binary": "/usr/bin/ngspice"},
+            ),
+            _side_report(
+                corners, remote={"provider": "aws-batch-fleet", "job_id": "job-456"}
+            ),
+        ],
+    )
+    tb = report["testbenches"][0]
+    assert tb["nothing_simulated_corners"] == ["tt/1.800V/27C"]
+    schematic = tb["sides"]["schematic"]
+    extracted = tb["sides"]["extracted"]
+    assert schematic["environment"]["remote"] == remote
+    assert schematic["environment"]["ngspice_binary"] == "/usr/bin/ngspice"
+    # Only real `klt sim` environment keys are projected.
+    assert set(schematic["environment"]) <= {
+        "engine",
+        "engine_version",
+        "ngspice_binary",
+        "remote",
+    }
+    assert extracted["environment"]["remote"]["job_id"] == "job-456"
+    corner = schematic["corners"][0]
+    assert corner["corner_id"] == "tt/1.800V/27C"
+    assert corner["status"] == "error"
+    assert corner["produced_value"] is False
+    # Passed through unchanged, optional/unknown keys included.
+    assert corner["diagnostics"] == [_BATCH_DIAG]
+    # Existing behavior untouched.
+    assert report["status"] == "error"
+    assert report["delta"][0]["status"] == "error"
+
+
+def test_pex_one_sided_failure_is_not_nothing_simulated(
+    tmp_path, resistor_layout, monkeypatch
+):
+    report = _run_pex_with_sim_reports(
+        tmp_path,
+        resistor_layout,
+        monkeypatch,
+        [
+            _side_report([("tt/1.800V/27C", 1.4, [])]),
+            _side_report([("tt/1.800V/27C", None, [_BATCH_DIAG])]),
+        ],
+    )
+    tb = report["testbenches"][0]
+    assert tb["nothing_simulated_corners"] == []
+    assert tb["sides"]["schematic"]["corners"][0]["produced_value"] is True
+    assert tb["sides"]["extracted"]["corners"][0]["produced_value"] is False
+    assert tb["sides"]["extracted"]["corners"][0]["diagnostics"] == [_BATCH_DIAG]
+    # Local run: no remote key is fabricated.
+    assert "remote" not in tb["sides"]["schematic"]["environment"]
+    assert report["delta"][0]["status"] == "error"
+    assert report["delta"][0]["schematic_value"] == 1.4
+
+
+def test_pex_side_evidence_stays_with_its_testbench_and_corner(
+    tmp_path, resistor_layout, monkeypatch
+):
+    c1, c2 = "tt/1.800V/27C", "ss/1.620V/-40C"
+    report = _run_pex_with_sim_reports(
+        tmp_path,
+        resistor_layout,
+        monkeypatch,
+        [
+            _side_report([(c1, 1.0, []), (c2, 1.1, [])], remote={"job_id": "s0"}),
+            _side_report([(c1, 1.0, []), (c2, None, [_BATCH_DIAG])]),
+            _side_report([(c1, None, [_BATCH_DIAG]), (c2, None, [])]),
+            _side_report([(c1, None, []), (c2, None, [])], remote={"job_id": "e1"}),
+        ],
+        n_testbenches=2,
+    )
+    first, second = report["testbenches"]
+    assert first["nothing_simulated_corners"] == []
+    assert [c["corner_id"] for c in first["sides"]["extracted"]["corners"]] == [c1, c2]
+    assert first["sides"]["extracted"]["corners"][1]["diagnostics"] == [_BATCH_DIAG]
+    assert first["sides"]["schematic"]["environment"]["remote"]["job_id"] == "s0"
+    assert second["nothing_simulated_corners"] == [c1, c2]
+    assert second["sides"]["schematic"]["corners"][0]["diagnostics"] == [_BATCH_DIAG]
+    assert second["sides"]["extracted"]["environment"]["remote"]["job_id"] == "e1"
+    assert second["sides"]["schematic"]["environment"].get("remote") is None

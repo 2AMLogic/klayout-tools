@@ -12163,6 +12163,355 @@ def test_sim_citation_external_scope_is_not_verifiable(tmp_path):
     assert item_5["citation"]["input_verified"] is None
 
 
+# --------------------------------------------------------------------------- #
+# Grading outside a git checkout: the explicit `repo_root` (issue #2878)
+# --------------------------------------------------------------------------- #
+
+
+def test_repo_scoped_input_unresolvable_outside_a_git_checkout(tmp_path):
+    """Issue #2878, the reported downgrade, stated as a test: byte-identical
+    evidence outside any `.git` tree loses repo-scoped resolution
+    (`find_repo_root` finds nothing above the copy), so `input_verified`
+    drops to `None`. The item stays `met` -- this is disclosure, never a
+    guessed answer -- but the anchor is gone."""
+    netlist_path = tmp_path / "netlists" / "design.spice"
+    netlist_path.parent.mkdir()
+    netlist_path.write_bytes(b"* schematic netlist\n")
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": "netlists/design.spice", "scope": "repo"},
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(netlist_path), "role": "netlist"},
+        },
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"5": sim_path}))
+
+    item_5 = _item(result, 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["input_verified"] is None
+
+
+def test_repo_root_kwarg_resolves_repo_scoped_inputs_outside_a_git_checkout(
+    tmp_path,
+):
+    """The same `.git`-less copy as above, graded with the root named
+    explicitly, resolves the citation and re-hashes it like its checkout
+    twin -- grading stops depending on VCS metadata."""
+    netlist_path = tmp_path / "netlists" / "design.spice"
+    netlist_path.parent.mkdir()
+    netlist_path.write_bytes(b"* schematic netlist\n")
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": "netlists/design.spice", "scope": "repo"},
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(netlist_path), "role": "netlist"},
+        },
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(
+        _manifest(evidence={"5": sim_path}), repo_root=str(tmp_path)
+    )
+
+    item_5 = _item(result, 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["input_verified"] is True
+
+
+def _repo_scoped_anchored_generic(tmp_path, item_id: int) -> tuple[str, str]:
+    """An artifact-anchored `generic` envelope for ``item_id`` whose input
+    path is the `{path, scope: "repo"}` shape, with the artifact actually
+    present at that repo-relative path -- but no `.git` anywhere above.
+    Returns `(envelope path, artifact hash)`."""
+    artifact_name, content = _ANCHORED_ARTIFACTS[item_id]
+    artifact = tmp_path / "audited" / artifact_name
+    artifact.parent.mkdir()
+    artifact.write_text(content)
+    digest = _hash_of(artifact)
+    envelope = {
+        "schema_version": 1,
+        "kind": "generic",
+        "status": "pass",
+        "summary": f"audited artifact for T1 item {item_id}",
+        "source": f"audited/{artifact_name}",
+        "t1_item": item_id,
+        "provenance": {
+            "klt_version": "0.5.0",
+            "klayout_version": "0.30.10",
+            "pdk": None,
+            "deck": None,
+            "input": {
+                "content_hash": digest,
+                "path": {"path": f"audited/{artifact_name}", "scope": "repo"},
+            },
+        },
+    }
+    return _write(tmp_path, f"item{item_id}.json", envelope), digest
+
+
+def test_repo_scoped_anchored_generic_unmet_outside_a_git_checkout(tmp_path):
+    """Issue #2878's exact downgrade, for the artifact-bound generic items
+    (T1 1/2/9/10): with no `.git` above the evidence, the `{path, scope:
+    "repo"}` artifact cannot be resolved, so the item -- which #2718 makes
+    *require* a resolvable artifact -- drops from `met` to
+    `unverifiable_provenance` though the bytes are identical to the
+    checkout where it grades `met`."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unverifiable_provenance"
+
+
+def test_repo_scoped_anchored_generic_met_inside_a_git_checkout(tmp_path):
+    """The control for the downgrade above: the same bytes with a `.git`
+    entry above them grade `met` without any flag -- discovery is the
+    nearest `.git` ancestor of the evidence file."""
+    (tmp_path / ".git").mkdir()
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is True
+
+
+def test_explicit_repo_root_replaces_git_discovery(tmp_path):
+    """An explicit root is the root, full stop: with a `.git` present but
+    `repo_root` pointing somewhere the artifact does not live, the citation
+    is unresolvable -- no fallback to the discovered checkout."""
+    (tmp_path / ".git").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}}),
+        repo_root=str(elsewhere),
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unverifiable_provenance"
+
+
+def test_repo_root_does_not_make_external_scope_verifiable(tmp_path):
+    """`scope: "external"` carries no path by design; naming a root does
+    not change that."""
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": None, "scope": "external"},
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {"content_hash": "0" * 64, "role": "netlist"},
+        },
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(
+        _manifest(evidence={"5": sim_path}), repo_root=str(tmp_path)
+    )
+
+    assert _item(result, 5)["citation"]["input_verified"] is None
+
+
+def test_repo_root_kwarg_recovers_the_anchored_generic_outside_a_git_checkout(
+    tmp_path,
+):
+    """The remedy: naming the root explicitly restores the `met` grade the
+    same bytes earn inside their checkout."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}}),
+        repo_root=str(tmp_path),
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is True
+
+
+def test_fleet_report_forwards_repo_root_to_every_block(tmp_path):
+    """`--fleet` grades each block through `build_tier_report`, so the
+    explicit root reaches every block the same way `tiers_doc` does."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+    evidence = {"1": {"file": envelope_path, "content_hash": digest}}
+    fleet = {
+        "blocks": [
+            _fleet_block_manifest("outside-checkout", evidence=evidence),
+        ]
+    }
+
+    without_root = build_fleet_report(fleet)
+    with_root = build_fleet_report(fleet, repo_root=str(tmp_path))
+
+    # Item 1 is deliberately demoted in the blocking-item reduction (issue
+    # #2178), so the met count is what shows the root reached the block:
+    # without it the citation is unverifiable (0 met); with it the same
+    # bytes grade `met` (1 met).
+    assert without_root["blocks"][0]["t1_met_count"] == 0
+    assert with_root["blocks"][0]["t1_met_count"] == 1
+
+
+def test_cli_manifest_repo_root_recovers_the_grade_outside_a_git_checkout(
+    tmp_path, capsys
+):
+    """End to end: `klt signoff --manifest M --repo-root DIR` grades the
+    `.git`-less copy exactly as its checkout twin."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}}),
+    )
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--repo-root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 3  # only item 1 is cited, so the tier is not T1
+    out = json.loads(capsys.readouterr().out)
+    item_1 = next(item for item in out["items"] if item["id"] == 1)
+    assert item_1["status"] == "met"
+    assert item_1["citation"]["input_verified"] is True
+
+
+@pytest.mark.parametrize(
+    "bad_root", ["a-file-not-a-dir", "missing-dir"], ids=["file", "missing"]
+)
+def test_cli_repo_root_rejects_a_non_directory(tmp_path, capsys, bad_root):
+    """An explicit root that is not an existing directory is refused
+    through the standard JSON error envelope (exit 1, the missing-file
+    class), never silently ignored."""
+    root = tmp_path / bad_root
+    if bad_root == "a-file-not-a-dir":
+        root.write_text("not a directory")
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--repo-root",
+            str(root),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["error"]["command"] == "signoff"
+    assert "--repo-root" in payload["error"]["message"]
+    assert str(root) in payload["error"]["message"]
+
+
+def test_cli_relative_repo_root_resolves_against_cwd(tmp_path, capsys, monkeypatch):
+    """A relative `--repo-root` resolves against the working directory,
+    like any other path argument."""
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    envelope_path, digest = _repo_scoped_anchored_generic(copy, 1)
+    manifest_path = _write(
+        copy,
+        "manifest.json",
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}}),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--repo-root",
+            "copy",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 3
+    out = json.loads(capsys.readouterr().out)
+    item_1 = next(item for item in out["items"] if item["id"] == 1)
+    assert item_1["status"] == "met"
+
+
+def test_cli_repo_root_refused_with_describe_grader(tmp_path, capsys):
+    """`--describe-grader` grades no evidence, so `--repo-root` is refused
+    there like `--tiers-doc`/`--check`."""
+    exit_code = main(
+        [
+            "signoff",
+            "--describe-grader",
+            "--repo-root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["error"]["command"] == "signoff"
+    assert "--repo-root" in payload["error"]["message"]
+
+
+def test_cli_signoff_help_documents_repo_root(capsys):
+    with pytest.raises(SystemExit):
+        main(["signoff", "--help"])
+    out = capsys.readouterr().out
+    assert "--repo-root" in out
+    assert ".git" in out
+
+
+def test_cli_repo_root_requires_manifest_or_fleet(tmp_path, capsys):
+    """Envelope aggregation re-hashes no input artifacts (input-artifact
+    verification is a tier-report feature), so `--repo-root` is refused
+    there -- the same "only applies to" guard `--tiers-doc` and `--check`
+    use."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    exit_code = main(
+        [
+            "signoff",
+            drc_path,
+            "--repo-root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["error"]["command"] == "signoff"
+    assert (
+        "--repo-root only applies to --manifest/--fleet" in payload["error"]["message"]
+    )
+
+
 def test_command_backed_entry_verifies_against_the_command_cwd(tmp_path, monkeypatch):
     """A command-backed entry has no evidence file to resolve beside, so the
     envelope's relative path resolves against the `cwd` the command ran in
