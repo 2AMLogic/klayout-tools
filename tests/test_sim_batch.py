@@ -1989,8 +1989,13 @@ def test_run_sim_waits_out_a_capacity_refusal(tmp_path, monkeypatch):
     # The job contract was uploaded once and reused by the re-launch.
     assert len(runner.argvs_matching("job.json")) == 1
     # One backoff sleep (through the patched `time.sleep`), within [15, 30].
-    assert len(runner.sleeps) >= 1
-    assert 15.0 <= runner.sleeps[0] <= 30.0
+    # The patch is the global `time.sleep`, so it also records CPython's
+    # sub-second `Popen._wait` polls (e.g. the `git rev-list` the version
+    # scheme runs inside a git checkout, issue #3173); only >= 1 s sleeps
+    # are this module's own.
+    own_sleeps = [s for s in runner.sleeps if s >= 1.0]
+    assert len(own_sleeps) >= 1
+    assert 15.0 <= own_sleeps[0] <= 30.0
 
 
 def _error_envelope(stderr: str) -> dict:
@@ -2266,6 +2271,11 @@ def test_a_lost_shard_never_aborts_its_siblings(tmp_path, monkeypatch):
     ]
     assert "lost_shard" in codes
     assert None in codes  # the healthy shard still reported its own corner
+    lost = [c for c in corners if c["diagnostics"]]
+    assert lost and all(
+        c["engine_exit_code"] is None and c["engine_killed_by_signal"] is None
+        for c in lost
+    )
     assert None in environment["fleet"]
 
 

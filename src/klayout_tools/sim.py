@@ -80,13 +80,14 @@ import json
 import math
 import os
 import re
+import signal
 import statistics
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import env_provenance, output_lock, sim_steps
 
@@ -223,6 +224,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "no_such_vector",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
+        "engine_killed",
         "measurement",
         "unknown",
         # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
@@ -4160,17 +4162,189 @@ def _top_level_waveform_sources(netlist_text: str) -> dict[str, str]:
     return found
 
 
+#: ``.param`` assignment names: ``name=`` (not ``==``), once ``{...}`` and
+#: quoted expressions have been blanked out of the line.
+_PARAM_DECL_NAME_RE = re.compile(r"(?:^|[\s,])([a-z_][a-z0-9_]*)\s*=(?!=)")
+_PARAM_DECL_EXPR_RE = re.compile(r"\{[^{}]*\}|'[^']*'|\"[^\"]*\"")
+
+#: Bound on the ``.include``/``.lib`` files followed while looking for an
+#: element a ``.param``-only target might really name. Past it the
+#: declaration counts as unresolved (never rejected).
+_MAX_DECLARATION_FILES = 256
+
+
+class _NetlistDeclarations(NamedTuple):
+    """Lexical top-level declarations of one netlist file (#2867)."""
+
+    #: Lower-cased names assigned by a top-level ``.param`` card.
+    params: set[str]
+    #: Lower-cased names of top-level elements (first token of a card).
+    elements: set[str]
+    #: Top-level ``V`` source name -> its value/waveform specification.
+    voltage_specs: dict[str, str]
+    #: Raw file references of ``.include``/``.inc``/``.lib <file> <sect>``.
+    includes: list[str]
+
+
+def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
+    """Scan a netlist's top level for ``.param`` names, element names and
+    include references. ``.subckt`` bodies and ``.control`` blocks are
+    skipped; ``.lib`` *section* bodies (``.lib tt`` ... ``.endl``) count as
+    top level, since a loaded section is."""
+    decl = _NetlistDeclarations(set(), set(), {}, [])
+    depth = 0
+    for line in _top_level_cards(_logical_netlist_lines(netlist_text)):
+        word = line.split(None, 1)[0].lower()
+        if word == ".subckt":
+            depth += 1
+        elif word == ".ends":
+            depth = max(0, depth - 1)
+        elif not depth:
+            _record_declaration(decl, line)
+    return decl
+
+
+def _top_level_cards(lines: list[str]) -> list[str]:
+    """``lines`` without ``.control`` ... ``.endc`` blocks."""
+    kept: list[str] = []
+    in_control = False
+    for line in lines:
+        word = line.split(None, 1)[0].lower()
+        if word == ".control":
+            in_control = True
+        elif word == ".endc":
+            in_control = False
+        elif not in_control:
+            kept.append(line)
+    return kept
+
+
+def _record_declaration(decl: _NetlistDeclarations, line: str) -> None:
+    """Record one top-level card (outside any ``.subckt``) into ``decl``."""
+    lowered = line.lower()
+    parts = line.split()
+    word = parts[0].lower()
+    if word in (".include", ".inc") and len(parts) >= 2:
+        decl.includes.append(line.split(None, 1)[1].strip())
+    elif word == ".lib" and len(parts) >= 3:
+        decl.includes.append(" ".join(parts[1:-1]))
+    elif word == ".param" and len(parts) > 1:
+        body = _PARAM_DECL_EXPR_RE.sub(" 0 ", lowered.split(None, 1)[1])
+        decl.params.update(_PARAM_DECL_NAME_RE.findall(body))
+    elif not word.startswith("."):
+        decl.elements.add(word)
+        if word.startswith("v") and len(parts) >= 4:
+            decl.voltage_specs[word] = " ".join(lowered.split()[3:])
+
+
+def _resolve_netlist_include(reference: str, base_dir: str) -> str | None:
+    path = os.path.expanduser(reference.strip().strip("\"'"))
+    if not os.path.isabs(path):
+        path = os.path.join(base_dir, path)
+    return path if os.path.isfile(path) else None
+
+
+def _included_elements(netlist_path: str, includes: list[str]) -> set[str] | None:
+    """Element names declared at the top level of every file the netlist
+    pulls in through ``.include``/``.lib`` (recursively), or ``None`` when
+    any reference cannot be resolved and read -- an unresolved declaration
+    is never assumed absent."""
+    elements: set[str] = set()
+    seen: set[str] = set()
+    pending = [
+        (ref, os.path.dirname(os.path.abspath(netlist_path))) for ref in includes
+    ]
+    while pending:
+        reference, base_dir = pending.pop()
+        path = _resolve_netlist_include(reference, base_dir)
+        if path is None:
+            return None
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        if len(seen) > _MAX_DECLARATION_FILES:
+            return None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                decl = _netlist_declarations(handle.read())
+        except OSError:
+            return None
+        elements |= decl.elements
+        pending.extend((ref, os.path.dirname(path)) for ref in decl.includes)
+    return elements
+
+
+def _param_only_targets(netlist_path: str, targets: list[str]) -> dict[str, list[str]]:
+    """The ``alter`` targets that name a top-level ``.param`` and no element
+    (#2867), each mapped to the top-level voltage sources whose value
+    references that parameter (a hint for the error message).
+
+    ngspice evaluates ``.param`` expressions when it parses the deck, and
+    ``alter <param>=<value>`` addresses no device: ngspice logs ``no such
+    device or model name`` and simulates the nominal value, so a sweep over
+    such a key reports N identical ``pass`` corners. A target is only
+    reported when the lexical scan is conclusive: a name declared as an
+    element anywhere the scan can see is not a ``.param``-only name, and when
+    an ``.include``/``.lib`` reference cannot be resolved nothing is
+    reported. Hierarchical names never match (a ``.param`` name has no dot).
+    """
+    try:
+        with open(netlist_path, encoding="utf-8") as handle:
+            decl = _netlist_declarations(handle.read())
+    except (OSError, UnicodeDecodeError):
+        return {}
+    candidates = [
+        t
+        for t in targets
+        if t.strip().lower() in decl.params and t.strip().lower() not in decl.elements
+    ]
+    if not candidates:
+        return {}
+    if decl.includes:
+        included = _included_elements(netlist_path, decl.includes)
+        if included is None:
+            return {}
+        candidates = [t for t in candidates if t.strip().lower() not in included]
+    found: dict[str, list[str]] = {}
+    for target in candidates:
+        name = re.escape(target.strip().lower())
+        pattern = re.compile(rf"(?<![a-z0-9_]){name}(?![a-z0-9_])")
+        found[target] = sorted(
+            source
+            for source, spec in decl.voltage_specs.items()
+            if pattern.search(spec)
+        )
+    return found
+
+
+def _param_target_hint(param: str, sources: list[str]) -> str:
+    if sources:
+        names = ", ".join(repr(s) for s in sources)
+        return (
+            f"To sweep the supply, key corners.supply_v by the source itself "
+            f"({names} reads {param!r}); to sweep the parameter, use a "
+            "parameter axis (corners.params, issue #3035) instead"
+        )
+    return (
+        "Key corners.supply_v by the name of a DC voltage source, or sweep the "
+        "parameter with a parameter axis (corners.params, issue #3035) instead"
+    )
+
+
 def _validate_supply_override_targets(
     netlist_path: str, corner_points: list[CornerPoint]
 ) -> None:
-    """Reject a ``supply_v`` override aimed at a waveform source (#2706).
+    """Reject a ``supply_v`` override that ngspice's ``alter`` cannot apply.
 
-    ngspice's ``alter name=value`` silently has no effect on a
-    PWL/PULSE/SIN source, so the request fails as a whole rather than
-    simulating the wrong voltage. Validates the actual expanded points
-    (including worker ``_explicit_points``). Inspection is lexical over the
-    top-level netlist file only: included files and hierarchical targets are
-    not resolved, and an unresolved declaration is never assumed DC."""
+    Two silent no-ops fail the request as a whole rather than simulating
+    the wrong voltage: a source with an explicit PWL/PULSE/SIN/... waveform
+    (#2706), and a name that is only a top-level ``.param`` with no element
+    of that name (#2867). Validates the actual expanded points (including
+    worker ``_explicit_points``). Inspection is lexical: the waveform rule
+    reads the top-level netlist file only, the ``.param`` rule additionally
+    follows ``.include``/``.lib`` references to look for an element of that
+    name, and an unresolved declaration is never assumed DC or absent."""
     targets = sorted({key for point in corner_points for key in point.supply_v})
     if not targets:
         return
@@ -4192,6 +4366,16 @@ def _validate_supply_override_targets(
                 "source as a plain DC value, or remove it from "
                 "corners.supply_v"
             )
+    for target, sources in _param_only_targets(netlist_path, targets).items():
+        raise SimError(
+            f"corners.supply_v key {target!r} names a .param, not a source: "
+            f"the netlist declares `.param {target}=...` and no element "
+            f"{target!r}, and ngspice's `alter {target}=<value>` cannot change "
+            "a .param (expressions that read it -- a source value, a SIN() "
+            "amplitude -- were evaluated when the deck was parsed, so every "
+            "corner would silently simulate the nominal value). "
+            + _param_target_hint(target, sources)
+        )
 
 
 def _prepare_corner_run(
@@ -4438,6 +4622,8 @@ def _run_corner(
     timed_out = False
     engine_version: str | None = None
     stdout_text = ""
+    engine_exit_code: int | None = None
+    engine_killed_by_signal: str | None = None
     try:
         completed = subprocess.run(
             command,
@@ -4447,6 +4633,9 @@ def _run_corner(
             cwd=corner_dir,
         )
         stdout_text = completed.stdout or ""
+        engine_exit_code, engine_killed_by_signal = _split_returncode(
+            completed.returncode
+        )
     except subprocess.TimeoutExpired:
         timed_out = True
     except FileNotFoundError as exc:
@@ -4479,6 +4668,18 @@ def _run_corner(
             }
         )
     else:
+        if engine_killed_by_signal is not None:
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "engine_killed",
+                    "message": (
+                        f"{engine_name} was killed by {engine_killed_by_signal} "
+                        "(not by the harness timeout) -- e.g. the OOM killer, "
+                        "a host reaper, or a reclaimed worker"
+                    ),
+                }
+            )
         diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
 
     # Both engines fold a `.meas`/`.measure` card's name to lower-case in
@@ -4598,6 +4799,11 @@ def _run_corner(
         "temperature_c": point.temperature_c,
         "status": status,
         "runtime_s": runtime_s,
+        # Additive (issue #2848): the engine process's raw outcome. Both are
+        # null when the harness itself ended the run (timeout) or the engine
+        # never launched.
+        "engine_exit_code": engine_exit_code,
+        "engine_killed_by_signal": engine_killed_by_signal,
         "measurements": measurement_results,
         "diagnostics": diagnostics,
         "artifacts": artifacts,
@@ -4607,6 +4813,20 @@ def _run_corner(
         **step_fields,
     }
     return corner, engine_version
+
+
+def _split_returncode(returncode: int) -> tuple[int | None, str | None]:
+    """``(engine_exit_code, engine_killed_by_signal)`` from a POSIX
+    ``subprocess`` return code (issue #2848): a negative code is the killing
+    signal's number (``None`` exit code, signal name), anything else a plain
+    exit code. An unnamed signal number falls back to ``SIG<n>``.
+    """
+    if returncode >= 0:
+        return returncode, None
+    try:
+        return None, signal.Signals(-returncode).name
+    except ValueError:
+        return None, f"SIG{-returncode}"
 
 
 def _corner_measurement_results(
