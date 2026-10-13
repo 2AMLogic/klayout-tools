@@ -40,12 +40,14 @@ see ``docs/cli/sim.md``'s "Operating-point lint" section.
 """
 
 import argparse
+import sys
 
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
 from ..sim import SimError, run_sim
-from .output import emit_error, emit_success
+from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success
 
 EXIT_PASS = 0
 EXIT_MEASUREMENT_FAILED = 3
@@ -53,6 +55,23 @@ EXIT_CORNER_ERRORED = 4
 
 
 def run(args: argparse.Namespace) -> int:
+    if getattr(args, "batch_set", None) is not None:
+        return _run_batch_set(args)
+    if args.request is None:
+        # Keep the pre---batch-set contract: a bare ``klt sim`` is an
+        # argparse-style usage failure (stderr message, SystemExit(2)).
+        sys.stderr.write(
+            "klt sim: error: the following arguments are required: "
+            "request (or --batch-set REQUEST...)\n"
+        )
+        raise SystemExit(2)
+    if getattr(args, "max_in_flight", None) is not None:
+        return emit_error(
+            "sim",
+            "--max-in-flight only applies with --batch-set",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     if getattr(args, "op_lint", False):
         return _run_op_lint(args)
 
@@ -86,6 +105,77 @@ def run(args: argparse.Namespace) -> int:
     if report["status"] == "fail":
         return EXIT_MEASUREMENT_FAILED
     return EXIT_PASS
+
+
+def _run_batch_set(args: argparse.Namespace) -> int:
+    """``klt sim --batch-set``: submit a set of requests (issue #2869).
+
+    Exit codes: ``1`` only when the set could not start (validation); ``2``
+    for a usage conflict; otherwise the aggregate envelope is emitted and the
+    code is the worst per-request code -- ``0`` all passed, ``3`` a
+    measurement failed, ``4`` at least one request errored or was refused
+    (a partial set included).
+    """
+    conflicts = [
+        flag
+        for flag, value in (
+            ("a positional request", args.request),
+            ("--resume", args.resume),
+            ("--plot", args.plot),
+            ("--op-lint", getattr(args, "op_lint", False)),
+        )
+        if value
+    ]
+    if conflicts:
+        return emit_error(
+            "sim",
+            f"--batch-set cannot be combined with {conflicts[0]}",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
+    if args.backend not in (None, "batch"):
+        return emit_error(
+            "sim",
+            f"--batch-set always uses the batch backend (got --backend {args.backend})",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
+    try:
+        report = run_sim_set(
+            args.batch_set,
+            outdir=args.outdir,
+            max_in_flight=(
+                args.max_in_flight
+                if args.max_in_flight is not None
+                else DEFAULT_MAX_IN_FLIGHT
+            ),
+            max_workers=args.max_workers,
+            hosts=args.hosts,
+            budget_s=args.budget_s,
+            fail_fast_probe=args.fail_fast_probe,
+            fail_on_diagnostic=args.fail_on_diagnostic,
+        )
+    except SimError as exc:
+        return emit_error("sim", str(exc), args.format, code=exc.code)
+
+    emit_success(report, args.format, _print_set_text)
+    return max((r["exit_code"] for r in report["requests"]), default=EXIT_PASS)
+
+
+def _print_set_text(report: dict) -> None:
+    print(
+        f"status: {report['status']}  requests: {report['request_count']}  "
+        f"submitted: {report['submitted']}  refused: {report['refused']}  "
+        f"max_in_flight: {report['max_in_flight']}"
+    )
+    for entry in report["requests"]:
+        line = f"  {entry['request']}  [{entry['status']}]"
+        if entry["job_ids"]:
+            line += f"  job={','.join(entry['job_ids'])}"
+        error = entry["error"]
+        if error:
+            line += f"  {error['code'] or 'error'}: {error['message']}"
+        print(line)
 
 
 def _run_op_lint(args: argparse.Namespace) -> int:

@@ -11557,7 +11557,7 @@ def test_normalize_bipolar_mult_carried_onto_ne():
 
 
 def test_normalize_bipolar_wrong_terminal_count_fails():
-    with pytest.raises(NormalizeError, match="expected 3 terminals"):
+    with pytest.raises(NormalizeError, match="expected 3 or 4 terminals"):
         normalize_reference_netlist(
             "XQ1 c b sky130_fd_pr__pnp_05v5_W0p68L0p68\n", deck="sky130"
         )
@@ -12147,6 +12147,108 @@ def test_run_lvs_subckt_call_sky130_pnp_wrong_variant_still_mismatches(tmp_path)
     )
     report = run_lvs(json.dumps(request))
     assert report["status"] != "match"
+
+
+# --------------------------------------------------------------------------- #
+# Four-terminal bipolar (substrate terminal, issue #2862)
+# --------------------------------------------------------------------------- #
+
+#: Exactly what `klt extract` writes for the synthetic four-terminal NPN
+#: fixture in `tests/test_extract.py` (`_make_bjt4_layout`/`_bjt4_deck`):
+#: KLayout's `NetlistSpiceWriter` emits the four terminals in the
+#: `DeviceClassBJT4Transistor` order (C, B, E, S) ahead of the model token.
+_BJT4_LAYOUT_DEVICE = "npn4 AE=0.64P PE=3.2U AB=16P PB=16U AC=1.76P PC=17.6U NE=1"
+
+
+def test_run_lvs_four_terminal_bipolar_matches(tmp_path):
+    """A four-terminal layout device (``Q c b e s npn4 ...``) pairs against a
+    plain-element four-terminal reference instance (``Q1 c b e s npn4 ...``)
+    when every substrate tie agrees -- issue #2862's core LVS acceptance
+    criterion. Both cards read back as `DeviceClassBJT4Transistor` devices
+    (the reference through `NetlistSpiceReader`'s native four-node ``Q``
+    card), and the comparer pairs them like the three-terminal flavour."""
+    request = {
+        "layout": {
+            "netlist": _write(
+                tmp_path / "layout.spice",
+                ".SUBCKT top COLL BASE EMIT SUBS\n"
+                f"Q$1 COLL BASE EMIT SUBS {_BJT4_LAYOUT_DEVICE}\n"
+                ".ENDS top\n",
+            ),
+            "top": "top",
+        },
+        "reference": {
+            "netlist": _write(
+                tmp_path / "ref.spice",
+                ".SUBCKT top COLL BASE EMIT SUBS\n"
+                "Q1 COLL BASE EMIT SUBS npn4 AE=0.64P NE=1\n"
+                ".ENDS top\n",
+            ),
+            "top": "top",
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
+def test_run_lvs_four_terminal_bipolar_substrate_mistie_mismatches(tmp_path):
+    """A substrate mis-tie -- the reference's ``S`` tied to the base's net
+    where the layout separates them -- is reported as a mismatch, never
+    silently accepted: the fourth terminal is a real compared net, which is
+    the whole reason the model field exists (a three-terminal approximation
+    would pair a self-consistent golden pair with the wrong connectivity).
+    The tie is pinned ``device.unmatched``/``net.unmatched`` -- the substrate
+    short changes the netlist's graph shape, not just a label."""
+    request = {
+        "layout": {
+            "netlist": _write(
+                tmp_path / "layout.spice",
+                ".SUBCKT top COLL BASE EMIT SUBS\n"
+                f"Q$1 COLL BASE EMIT SUBS {_BJT4_LAYOUT_DEVICE}\n"
+                ".ENDS top\n",
+            ),
+            "top": "top",
+        },
+        "reference": {
+            "netlist": _write(
+                tmp_path / "ref.spice",
+                ".SUBCKT top COLL BASE EMIT SUBS\n"
+                "Q1 COLL BASE EMIT BASE npn4 AE=0.64P NE=1\n"
+                ".ENDS top\n",
+            ),
+            "top": "top",
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "mismatch"
+    categories = {finding["category"] for finding in report["mismatches"]}
+    assert "device.unmatched" in categories
+    assert "net.unmatched" in categories
+
+
+def test_normalize_device_map_object_bipolar_four_terminal_override():
+    """A four-terminal (``c b e s``) subcircuit call bound through an
+    object-form `device_map` entry converts to the identically-shaped
+    four-node plain-element ``Q`` card -- issue #2862's reference-reader
+    path for a substrate-terminal device a curated deck table does not
+    know."""
+    out = normalize_reference_netlist(
+        "XQ1 c b e s my_custom_npn4 mult=2\n",
+        device_map={"my_custom_npn4": {"kind": "bipolar", "class": "npn4"}},
+    )
+    assert out.strip() == "Q1 c b e s npn4 NE=2"
+
+
+def test_normalize_device_map_object_bipolar_four_terminal_auto_carries_no_ae():
+    """A four-terminal device_map binding carries no nominal ``AE`` (the
+    curated `_BIPOLAR_MODEL_TABLE` is three-terminal sky130-only, and an
+    invented area would be a silent fabrication): the converted card states
+    only what the call itself carries."""
+    out = normalize_reference_netlist(
+        "XQ1 c b e s my_custom_npn4\n",
+        device_map={"my_custom_npn4": {"kind": "bipolar", "class": "npn4"}},
+    )
+    assert out.strip() == "Q1 c b e s npn4"
 
 
 # --------------------------------------------------------------------------- #
