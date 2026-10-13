@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "klt sim --batch-set aggregate report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "request_count",
+    "max_in_flight",
+    "submitted",
+    "refused",
+    "refused_codes",
+    "requests"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "status": { "enum": ["pass", "fail", "error"] },
+    "request_count": { "type": "integer", "minimum": 1 },
+    "max_in_flight": { "type": "integer", "minimum": 1 },
+    "submitted": { "type": "integer", "minimum": 0 },
+    "refused": { "type": "integer", "minimum": 0 },
+    "refused_codes": { "type": "array", "items": { "type": "string" } },
+    "requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "request", "status", "exit_code", "job_id", "job_ids", "report", "error"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "request": { "type": "string" },
+          "status": { "type": "string" },
+          "exit_code": { "enum": [0, 1, 3, 4] },
+          "job_id": { "type": ["string", "null"] },
+          "job_ids": { "type": "array", "items": { "type": "string" } },
+          "report": { "type": ["string", "null"] },
+          "error": {
+            "type": ["object", "null"],
+            "required": ["message", "code"],
+            "properties": {
+              "message": { "type": "string" },
+              "code": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

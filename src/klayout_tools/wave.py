@@ -54,6 +54,7 @@ import os
 import subprocess
 from typing import Any
 
+from ._native import find_cargo_binary
 from ._provenance import _klt_version
 
 #: `native/wave/`'s crate directory, relative to this file -- two levels up
@@ -96,7 +97,8 @@ class WaveError(Exception):
 
 def _binary_path() -> str:
     """The compiled `klt-wave` binary path -- release build preferred,
-    falling back to a debug build -- mirroring
+    falling back to a debug build, in every target directory cargo may
+    have built into (``_native.find_cargo_binary``, issue #3189) -- mirroring
     `techmap.py::_binary_path()`'s exact convention (itself matching
     `tests/corpus/techmap/compare.py`'s `_ensure_binary`).
 
@@ -106,12 +108,9 @@ def _binary_path() -> str:
     `run_wave_build`/`run_wave_query` would not expect); building is a
     deliberate, explicit step.
     """
-    release = os.path.join(_WAVE_CRATE_DIR, "target", "release", "klt-wave")
-    if os.path.isfile(release):
-        return release
-    debug = os.path.join(_WAVE_CRATE_DIR, "target", "debug", "klt-wave")
-    if os.path.isfile(debug):
-        return debug
+    found = find_cargo_binary(_WAVE_CRATE_DIR, "klt-wave")
+    if found is not None:
+        return found
     raise WaveError(
         "the klt-wave binary is not built -- from a repo checkout, run "
         "`cargo build --release` inside native/wave/ (or `cargo build` "

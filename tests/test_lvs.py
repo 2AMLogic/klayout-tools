@@ -11528,7 +11528,7 @@ def test_normalize_bipolar_mult_carried_onto_ne():
 
 
 def test_normalize_bipolar_wrong_terminal_count_fails():
-    with pytest.raises(NormalizeError, match="expected 3 terminals"):
+    with pytest.raises(NormalizeError, match="expected 3 or 4 terminals"):
         normalize_reference_netlist(
             "XQ1 c b sky130_fd_pr__pnp_05v5_W0p68L0p68\n", deck="sky130"
         )
@@ -12118,6 +12118,108 @@ def test_run_lvs_subckt_call_sky130_pnp_wrong_variant_still_mismatches(tmp_path)
     )
     report = run_lvs(json.dumps(request))
     assert report["status"] != "match"
+
+
+# --------------------------------------------------------------------------- #
+# Four-terminal bipolar (substrate terminal, issue #2862)
+# --------------------------------------------------------------------------- #
+
+#: Exactly what `klt extract` writes for the synthetic four-terminal NPN
+#: fixture in `tests/test_extract.py` (`_make_bjt4_layout`/`_bjt4_deck`):
+#: KLayout's `NetlistSpiceWriter` emits the four terminals in the
+#: `DeviceClassBJT4Transistor` order (C, B, E, S) ahead of the model token.
+_BJT4_LAYOUT_DEVICE = "npn4 AE=0.64P PE=3.2U AB=16P PB=16U AC=1.76P PC=17.6U NE=1"
+
+
+def test_run_lvs_four_terminal_bipolar_matches(tmp_path):
+    """A four-terminal layout device (``Q c b e s npn4 ...``) pairs against a
+    plain-element four-terminal reference instance (``Q1 c b e s npn4 ...``)
+    when every substrate tie agrees -- issue #2862's core LVS acceptance
+    criterion. Both cards read back as `DeviceClassBJT4Transistor` devices
+    (the reference through `NetlistSpiceReader`'s native four-node ``Q``
+    card), and the comparer pairs them like the three-terminal flavour."""
+    request = {
+        "layout": {
+            "netlist": _write(
+                tmp_path / "layout.spice",
+                ".SUBCKT top COLL BASE EMIT SUBS\n"
+                f"Q$1 COLL BASE EMIT SUBS {_BJT4_LAYOUT_DEVICE}\n"
+                ".ENDS top\n",
+            ),
+            "top": "top",
+        },
+        "reference": {
+            "netlist": _write(
+                tmp_path / "ref.spice",
+                ".SUBCKT top COLL BASE EMIT SUBS\n"
+                "Q1 COLL BASE EMIT SUBS npn4 AE=0.64P NE=1\n"
+                ".ENDS top\n",
+            ),
+            "top": "top",
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
+def test_run_lvs_four_terminal_bipolar_substrate_mistie_mismatches(tmp_path):
+    """A substrate mis-tie -- the reference's ``S`` tied to the base's net
+    where the layout separates them -- is reported as a mismatch, never
+    silently accepted: the fourth terminal is a real compared net, which is
+    the whole reason the model field exists (a three-terminal approximation
+    would pair a self-consistent golden pair with the wrong connectivity).
+    The tie is pinned ``device.unmatched``/``net.unmatched`` -- the substrate
+    short changes the netlist's graph shape, not just a label."""
+    request = {
+        "layout": {
+            "netlist": _write(
+                tmp_path / "layout.spice",
+                ".SUBCKT top COLL BASE EMIT SUBS\n"
+                f"Q$1 COLL BASE EMIT SUBS {_BJT4_LAYOUT_DEVICE}\n"
+                ".ENDS top\n",
+            ),
+            "top": "top",
+        },
+        "reference": {
+            "netlist": _write(
+                tmp_path / "ref.spice",
+                ".SUBCKT top COLL BASE EMIT SUBS\n"
+                "Q1 COLL BASE EMIT BASE npn4 AE=0.64P NE=1\n"
+                ".ENDS top\n",
+            ),
+            "top": "top",
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "mismatch"
+    categories = {finding["category"] for finding in report["mismatches"]}
+    assert "device.unmatched" in categories
+    assert "net.unmatched" in categories
+
+
+def test_normalize_device_map_object_bipolar_four_terminal_override():
+    """A four-terminal (``c b e s``) subcircuit call bound through an
+    object-form `device_map` entry converts to the identically-shaped
+    four-node plain-element ``Q`` card -- issue #2862's reference-reader
+    path for a substrate-terminal device a curated deck table does not
+    know."""
+    out = normalize_reference_netlist(
+        "XQ1 c b e s my_custom_npn4 mult=2\n",
+        device_map={"my_custom_npn4": {"kind": "bipolar", "class": "npn4"}},
+    )
+    assert out.strip() == "Q1 c b e s npn4 NE=2"
+
+
+def test_normalize_device_map_object_bipolar_four_terminal_auto_carries_no_ae():
+    """A four-terminal device_map binding carries no nominal ``AE`` (the
+    curated `_BIPOLAR_MODEL_TABLE` is three-terminal sky130-only, and an
+    invented area would be a silent fabrication): the converted card states
+    only what the call itself carries."""
+    out = normalize_reference_netlist(
+        "XQ1 c b e s my_custom_npn4\n",
+        device_map={"my_custom_npn4": {"kind": "bipolar", "class": "npn4"}},
+    )
+    assert out.strip() == "Q1 c b e s npn4"
 
 
 # --------------------------------------------------------------------------- #
@@ -15232,6 +15334,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "anchor_top_level_pins": None,
         "strict_top_level_pin_count": False,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
+        "finfet_bulk": None,
     }
     # The pre-#1205 fields are untouched -- this is an additive change, so no
     # `schema_version` bump (docs/json-contract.md, "additive envelope").
@@ -17522,6 +17625,193 @@ def test_run_lvs_anchoring_is_off_by_default_for_a_plain_element_reference(tmp_p
         if m["category"] == "topology.top_level_pins_anchored"
     ]
     assert entry["details"]["pins"] == ["A", "VGND", "VPWR", "Y"]
+
+
+# --------------------------------------------------------------------------- #
+# layout.rename_declared_pins (issue #2854): canonical interface-pin names
+# for options.anchor_top_level_pins to pair against
+# --------------------------------------------------------------------------- #
+
+
+def _renamed_interface_request(
+    tmp_path,
+    *,
+    layout_spec_extra: dict,
+    reference_options: dict | None = None,
+    options: dict | None = None,
+) -> str:
+    """The issue #2854 request shape: an inline-extraction layout whose
+    drain pad carries a boundary label (`dout`) *and* the macro's own
+    internal label (`Y`), compared against a reference netlist extracted
+    from the same geometry whose drain pin carries only the declared name
+    (`klt extract --pins A,VGND,dout --rename-declared-pins` output) -- the
+    exact "reference that uses the declared names" pairing the issue asks
+    for."""
+    from klayout_tools.extract import run_extract
+
+    layout = _make_single_nmos_layout(extra_drain_label="dout")
+    gds_path = tmp_path / "nmos.gds"
+    layout.write(str(gds_path))
+
+    reference_path = str(tmp_path / "ref.spice")
+    run_extract(
+        str(gds_path),
+        "sky130",
+        output=reference_path,
+        declared_pins=frozenset({"A", "VGND", "dout"}),
+        rename_declared_pins=True,
+    )
+
+    request = {
+        "layout": {
+            "file": str(gds_path),
+            "deck": "sky130",
+            "declared_pins": ["A", "VGND", "dout"],
+            **layout_spec_extra,
+        },
+        "reference": {"netlist": reference_path},
+    }
+    if reference_options is not None:
+        request["reference"].update(reference_options)
+    if options is not None:
+        request["options"] = options
+    return json.dumps(request)
+
+
+def test_rename_declared_pins_lets_anchoring_pair_a_renamed_pin(tmp_path):
+    """Issue #2854's acceptance criterion: with `layout.rename_declared_pins`
+    on, `options.anchor_top_level_pins` pairs the layout's renamed pin with
+    the same-named reference pin -- the layout's drain conductor carries
+    `Y` (the macro's own label) *and* `dout` (the boundary label), so
+    without the rename its pin name is the joined `Y|DOUT` and no shared
+    name exists to anchor."""
+    report = run_lvs(
+        _renamed_interface_request(
+            tmp_path,
+            layout_spec_extra={"rename_declared_pins": True},
+            options={"anchor_top_level_pins": True},
+        )
+    )
+
+    assert report["status"] == "match"
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    # `A`/`VGND` anchor on either run; `DOUT` only exists as a layout pin
+    # name once the rename has collapsed `Y|DOUT` onto the declared name.
+    assert entry["details"]["pins"] == ["A", "DOUT", "VGND"]
+
+
+def test_without_the_rename_no_shared_pin_name_exists_to_anchor(tmp_path):
+    """The negative control for the test above: same layout, same reference,
+    anchoring still on -- but no `rename_declared_pins`, so the layout's
+    drain pin keeps the joined `Y|DOUT` spelling and `DOUT` cannot be
+    anchored. The compare itself still matches (topology only), which is
+    exactly why the missing pairing was silent before issue #2854."""
+    report = run_lvs(
+        _renamed_interface_request(
+            tmp_path,
+            layout_spec_extra={},
+            options={"anchor_top_level_pins": True},
+        )
+    )
+
+    assert report["status"] == "match"
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    assert entry["details"]["pins"] == ["A", "VGND"]
+
+
+def test_rename_declared_pins_rejects_a_non_boolean(tmp_path):
+    layout = _make_single_nmos_layout()
+    gds_path = tmp_path / "nmos.gds"
+    layout.write(str(gds_path))
+    request = json.dumps(
+        {
+            "layout": {
+                "file": str(gds_path),
+                "deck": "sky130",
+                "declared_pins": ["A", "VGND"],
+                "rename_declared_pins": "yes",
+            },
+            "reference": {"netlist": str(tmp_path / "ref.spice")},
+        }
+    )
+    with pytest.raises(LvsError, match="rename_declared_pins must be a boolean"):
+        run_lvs(request)
+
+
+def test_rename_declared_pins_requires_declared_pins(tmp_path):
+    layout = _make_single_nmos_layout()
+    gds_path = tmp_path / "nmos.gds"
+    layout.write(str(gds_path))
+    request = json.dumps(
+        {
+            "layout": {
+                "file": str(gds_path),
+                "deck": "sky130",
+                "rename_declared_pins": True,
+            },
+            "reference": {"netlist": str(tmp_path / "ref.spice")},
+        }
+    )
+    with pytest.raises(LvsError, match="rename_declared_pins requires"):
+        run_lvs(request)
+
+
+def test_declared_pin_short_surfaces_as_a_lvs_mismatch_entry(tmp_path):
+    """A promoted pin net carrying 2+ declared names (one conductor shorting
+    two declared interface pins) is surfaced as its own `pin.declared_short`
+    `mismatches[]` entry -- diagnostic only, never moving `status` on its
+    own: the compare that ran reports whatever topology mismatch the short
+    explains, this entry names the cause."""
+    from klayout_tools.extract import run_extract
+
+    # Drain pad carries {Y, A} while the gate keeps its own separate "A"
+    # net: the drain net's component set intersects {A, Y} twice.
+    layout = _make_single_nmos_layout(extra_drain_label="A")
+    gds_path = tmp_path / "short.gds"
+    layout.write(str(gds_path))
+
+    reference_path = str(tmp_path / "ref.spice")
+    run_extract(
+        str(gds_path),
+        "sky130",
+        output=reference_path,
+        declared_pins=frozenset({"A", "Y", "VGND"}),
+        rename_declared_pins=True,
+    )
+
+    report = run_lvs(
+        json.dumps(
+            {
+                "layout": {
+                    "file": str(gds_path),
+                    "deck": "sky130",
+                    "declared_pins": ["A", "Y", "VGND"],
+                    "rename_declared_pins": True,
+                },
+                "reference": {"netlist": reference_path},
+            }
+        )
+    )
+
+    (entry,) = [
+        m for m in report["mismatches"] if m["category"] == "pin.declared_short"
+    ]
+    assert entry["severity"] == "error"
+    assert entry["side"] == "layout"
+    assert entry["details"]["net"] == "A|Y"
+    assert entry["details"]["declared_pins"] == ["A", "Y"]
+    # Diagnostic-only: the two sides are topologically identical here (the
+    # reference was extracted from the same shorted geometry), so `status`
+    # is untouched by the entry.
+    assert report["status"] == "match"
 
 
 def test_run_lvs_anchoring_skips_a_pin_a_hand_written_hint_already_names(tmp_path):

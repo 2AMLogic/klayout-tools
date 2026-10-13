@@ -1830,6 +1830,17 @@ def test_yield_fail_check_fails(tmp_path):
     assert result["checks"][0]["passed"] is False
 
 
+def test_yield_insufficient_evidence_check_fails(tmp_path):
+    """Issue #2873: `status: "insufficient_evidence"` is not a pass."""
+    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
+    path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    assert result["checks"][0]["passed"] is False
+
+
 def test_extract_check_always_passes(tmp_path):
     path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
 
@@ -4691,6 +4702,17 @@ def test_yield_fail_status_renders_unmet_check_failed(tmp_path):
     assert item_6["status"] == "unmet"
     assert item_6["reason"] == "check_failed"
     assert item_6["citation"] is None
+
+
+def test_yield_insufficient_evidence_renders_unmet_undersized_sample(tmp_path):
+    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "undersized_sample"
 
 
 # --------------------------------------------------------------------------- #
@@ -12141,6 +12163,355 @@ def test_sim_citation_external_scope_is_not_verifiable(tmp_path):
     assert item_5["citation"]["input_verified"] is None
 
 
+# --------------------------------------------------------------------------- #
+# Grading outside a git checkout: the explicit `repo_root` (issue #2878)
+# --------------------------------------------------------------------------- #
+
+
+def test_repo_scoped_input_unresolvable_outside_a_git_checkout(tmp_path):
+    """Issue #2878, the reported downgrade, stated as a test: byte-identical
+    evidence outside any `.git` tree loses repo-scoped resolution
+    (`find_repo_root` finds nothing above the copy), so `input_verified`
+    drops to `None`. The item stays `met` -- this is disclosure, never a
+    guessed answer -- but the anchor is gone."""
+    netlist_path = tmp_path / "netlists" / "design.spice"
+    netlist_path.parent.mkdir()
+    netlist_path.write_bytes(b"* schematic netlist\n")
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": "netlists/design.spice", "scope": "repo"},
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(netlist_path), "role": "netlist"},
+        },
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"5": sim_path}))
+
+    item_5 = _item(result, 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["input_verified"] is None
+
+
+def test_repo_root_kwarg_resolves_repo_scoped_inputs_outside_a_git_checkout(
+    tmp_path,
+):
+    """The same `.git`-less copy as above, graded with the root named
+    explicitly, resolves the citation and re-hashes it like its checkout
+    twin -- grading stops depending on VCS metadata."""
+    netlist_path = tmp_path / "netlists" / "design.spice"
+    netlist_path.parent.mkdir()
+    netlist_path.write_bytes(b"* schematic netlist\n")
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": "netlists/design.spice", "scope": "repo"},
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(netlist_path), "role": "netlist"},
+        },
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(
+        _manifest(evidence={"5": sim_path}), repo_root=str(tmp_path)
+    )
+
+    item_5 = _item(result, 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["input_verified"] is True
+
+
+def _repo_scoped_anchored_generic(tmp_path, item_id: int) -> tuple[str, str]:
+    """An artifact-anchored `generic` envelope for ``item_id`` whose input
+    path is the `{path, scope: "repo"}` shape, with the artifact actually
+    present at that repo-relative path -- but no `.git` anywhere above.
+    Returns `(envelope path, artifact hash)`."""
+    artifact_name, content = _ANCHORED_ARTIFACTS[item_id]
+    artifact = tmp_path / "audited" / artifact_name
+    artifact.parent.mkdir()
+    artifact.write_text(content)
+    digest = _hash_of(artifact)
+    envelope = {
+        "schema_version": 1,
+        "kind": "generic",
+        "status": "pass",
+        "summary": f"audited artifact for T1 item {item_id}",
+        "source": f"audited/{artifact_name}",
+        "t1_item": item_id,
+        "provenance": {
+            "klt_version": "0.5.0",
+            "klayout_version": "0.30.10",
+            "pdk": None,
+            "deck": None,
+            "input": {
+                "content_hash": digest,
+                "path": {"path": f"audited/{artifact_name}", "scope": "repo"},
+            },
+        },
+    }
+    return _write(tmp_path, f"item{item_id}.json", envelope), digest
+
+
+def test_repo_scoped_anchored_generic_unmet_outside_a_git_checkout(tmp_path):
+    """Issue #2878's exact downgrade, for the artifact-bound generic items
+    (T1 1/2/9/10): with no `.git` above the evidence, the `{path, scope:
+    "repo"}` artifact cannot be resolved, so the item -- which #2718 makes
+    *require* a resolvable artifact -- drops from `met` to
+    `unverifiable_provenance` though the bytes are identical to the
+    checkout where it grades `met`."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unverifiable_provenance"
+
+
+def test_repo_scoped_anchored_generic_met_inside_a_git_checkout(tmp_path):
+    """The control for the downgrade above: the same bytes with a `.git`
+    entry above them grade `met` without any flag -- discovery is the
+    nearest `.git` ancestor of the evidence file."""
+    (tmp_path / ".git").mkdir()
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}})
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is True
+
+
+def test_explicit_repo_root_replaces_git_discovery(tmp_path):
+    """An explicit root is the root, full stop: with a `.git` present but
+    `repo_root` pointing somewhere the artifact does not live, the citation
+    is unresolvable -- no fallback to the discovered checkout."""
+    (tmp_path / ".git").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}}),
+        repo_root=str(elsewhere),
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unverifiable_provenance"
+
+
+def test_repo_root_does_not_make_external_scope_verifiable(tmp_path):
+    """`scope: "external"` carries no path by design; naming a root does
+    not change that."""
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": None, "scope": "external"},
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {"content_hash": "0" * 64, "role": "netlist"},
+        },
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(
+        _manifest(evidence={"5": sim_path}), repo_root=str(tmp_path)
+    )
+
+    assert _item(result, 5)["citation"]["input_verified"] is None
+
+
+def test_repo_root_kwarg_recovers_the_anchored_generic_outside_a_git_checkout(
+    tmp_path,
+):
+    """The remedy: naming the root explicitly restores the `met` grade the
+    same bytes earn inside their checkout."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}}),
+        repo_root=str(tmp_path),
+    )
+
+    item = _item(result, 1)
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is True
+
+
+def test_fleet_report_forwards_repo_root_to_every_block(tmp_path):
+    """`--fleet` grades each block through `build_tier_report`, so the
+    explicit root reaches every block the same way `tiers_doc` does."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+    evidence = {"1": {"file": envelope_path, "content_hash": digest}}
+    fleet = {
+        "blocks": [
+            _fleet_block_manifest("outside-checkout", evidence=evidence),
+        ]
+    }
+
+    without_root = build_fleet_report(fleet)
+    with_root = build_fleet_report(fleet, repo_root=str(tmp_path))
+
+    # Item 1 is deliberately demoted in the blocking-item reduction (issue
+    # #2178), so the met count is what shows the root reached the block:
+    # without it the citation is unverifiable (0 met); with it the same
+    # bytes grade `met` (1 met).
+    assert without_root["blocks"][0]["t1_met_count"] == 0
+    assert with_root["blocks"][0]["t1_met_count"] == 1
+
+
+def test_cli_manifest_repo_root_recovers_the_grade_outside_a_git_checkout(
+    tmp_path, capsys
+):
+    """End to end: `klt signoff --manifest M --repo-root DIR` grades the
+    `.git`-less copy exactly as its checkout twin."""
+    envelope_path, digest = _repo_scoped_anchored_generic(tmp_path, 1)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}}),
+    )
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--repo-root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 3  # only item 1 is cited, so the tier is not T1
+    out = json.loads(capsys.readouterr().out)
+    item_1 = next(item for item in out["items"] if item["id"] == 1)
+    assert item_1["status"] == "met"
+    assert item_1["citation"]["input_verified"] is True
+
+
+@pytest.mark.parametrize(
+    "bad_root", ["a-file-not-a-dir", "missing-dir"], ids=["file", "missing"]
+)
+def test_cli_repo_root_rejects_a_non_directory(tmp_path, capsys, bad_root):
+    """An explicit root that is not an existing directory is refused
+    through the standard JSON error envelope (exit 1, the missing-file
+    class), never silently ignored."""
+    root = tmp_path / bad_root
+    if bad_root == "a-file-not-a-dir":
+        root.write_text("not a directory")
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--repo-root",
+            str(root),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["error"]["command"] == "signoff"
+    assert "--repo-root" in payload["error"]["message"]
+    assert str(root) in payload["error"]["message"]
+
+
+def test_cli_relative_repo_root_resolves_against_cwd(tmp_path, capsys, monkeypatch):
+    """A relative `--repo-root` resolves against the working directory,
+    like any other path argument."""
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    envelope_path, digest = _repo_scoped_anchored_generic(copy, 1)
+    manifest_path = _write(
+        copy,
+        "manifest.json",
+        _manifest(evidence={"1": {"file": envelope_path, "content_hash": digest}}),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--repo-root",
+            "copy",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 3
+    out = json.loads(capsys.readouterr().out)
+    item_1 = next(item for item in out["items"] if item["id"] == 1)
+    assert item_1["status"] == "met"
+
+
+def test_cli_repo_root_refused_with_describe_grader(tmp_path, capsys):
+    """`--describe-grader` grades no evidence, so `--repo-root` is refused
+    there like `--tiers-doc`/`--check`."""
+    exit_code = main(
+        [
+            "signoff",
+            "--describe-grader",
+            "--repo-root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["error"]["command"] == "signoff"
+    assert "--repo-root" in payload["error"]["message"]
+
+
+def test_cli_signoff_help_documents_repo_root(capsys):
+    with pytest.raises(SystemExit):
+        main(["signoff", "--help"])
+    out = capsys.readouterr().out
+    assert "--repo-root" in out
+    assert ".git" in out
+
+
+def test_cli_repo_root_requires_manifest_or_fleet(tmp_path, capsys):
+    """Envelope aggregation re-hashes no input artifacts (input-artifact
+    verification is a tier-report feature), so `--repo-root` is refused
+    there -- the same "only applies to" guard `--tiers-doc` and `--check`
+    use."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    exit_code = main(
+        [
+            "signoff",
+            drc_path,
+            "--repo-root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["error"]["command"] == "signoff"
+    assert (
+        "--repo-root only applies to --manifest/--fleet" in payload["error"]["message"]
+    )
+
+
 def test_command_backed_entry_verifies_against_the_command_cwd(tmp_path, monkeypatch):
     """A command-backed entry has no evidence file to resolve beside, so the
     envelope's relative path resolves against the `cwd` the command ran in
@@ -13978,3 +14349,237 @@ def test_build_signoff_classifies_port_evidence(tmp_path):
         ("socket-check", True),
         ("lef-abstract", True),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2875: `klt pex` schematic-side input verification (item 7)
+# --------------------------------------------------------------------------- #
+
+
+def _sha_of(path) -> str:
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _pex_with_inputs(tmp_path, *, external=False):
+    """A pex envelope beside real request/body/DUT files, recording their
+    digests the way `klt pex` does."""
+    files = {}
+    for name in ("req.json", "body.spice", "dut.spice"):
+        files[name] = tmp_path / name
+        files[name].write_text(f"original {name}\n")
+
+    def ref(name):
+        if external:
+            return {"path": None, "scope": "external"}
+        return str(files[name])
+
+    envelope = {
+        **PEX_PASS_ENVELOPE,
+        "reference_netlist": ref("dut.spice"),
+        "reference_netlist_sha256": _sha_of(files["dut.spice"]),
+        "testbenches": [
+            {
+                "request": ref("req.json"),
+                "request_sha256": _sha_of(files["req.json"]),
+                "netlist": ref("body.spice"),
+                "netlist_sha256": _sha_of(files["body.spice"]),
+                "schematic_netlist": ref("dut.spice"),
+                "schematic_netlist_sha256": _sha_of(files["dut.spice"]),
+            }
+        ],
+    }
+    return _write(tmp_path, "pex.json", envelope), files
+
+
+def _item7_citation(pex_path):
+    result = build_tier_report(_manifest(evidence={"7": pex_path}))
+    return next(item for item in result["items"] if item["id"] == 7)["citation"]
+
+
+def test_pex_schematic_inputs_unchanged_are_reported_verified(tmp_path):
+    pex_path, _files = _pex_with_inputs(tmp_path)
+    citation = _item7_citation(pex_path)
+    assert {i["status"] for i in citation["pex_inputs"]} == {"verified"}
+    assert {i["role"] for i in citation["pex_inputs"]} == {
+        "testbenches[0].request",
+        "testbenches[0].netlist",
+        "testbenches[0].schematic_netlist",
+        "reference_netlist",
+    }
+
+
+@pytest.mark.parametrize("changed", ["req.json", "body.spice", "dut.spice"])
+def test_pex_changed_schematic_side_input_is_stale(tmp_path, changed):
+    pex_path, files = _pex_with_inputs(tmp_path)
+    files[changed].write_text("edited\n")
+    citation = _item7_citation(pex_path)
+    assert citation["input_verified"] is False
+    stale = {i["role"] for i in citation["pex_inputs"] if i["status"] == "stale"}
+    assert stale
+
+
+def test_pex_external_schematic_inputs_are_unverifiable_not_verified(tmp_path):
+    pex_path, _files = _pex_with_inputs(tmp_path, external=True)
+    citation = _item7_citation(pex_path)
+    assert {i["status"] for i in citation["pex_inputs"]} == {"unverifiable"}
+    assert citation["input_verified"] is None
+
+
+def test_pex_missing_schematic_input_is_unverifiable(tmp_path):
+    pex_path, files = _pex_with_inputs(tmp_path)
+    files["body.spice"].unlink()
+    citation = _item7_citation(pex_path)
+    by_role = {i["role"]: i["status"] for i in citation["pex_inputs"]}
+    assert by_role["testbenches[0].netlist"] == "unverifiable"
+    assert by_role["testbenches[0].request"] == "verified"
+    assert citation["input_verified"] is None
+
+
+def test_legacy_pex_envelope_has_no_pex_inputs(tmp_path):
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+    citation = _item7_citation(pex_path)
+    assert "pex_inputs" not in citation
+    assert citation["input_verified"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2879: `klt sta` input paths are portable `{path, scope}` envelopes
+# (schema 2), so `input_verified` does not depend on the checkout root.
+# --------------------------------------------------------------------------- #
+
+
+def _sta_checkout(root: Path, *, verilog: bool = False) -> Path:
+    """A checkout holding one committed STA input plus `klt sta` evidence for
+    it, written exactly as `post_route_sta` derives its persisted fields
+    from the absolute engine path. Returns the evidence file."""
+    from klayout_tools import post_route_sta
+    from klayout_tools.env_provenance import find_repo_root
+
+    (root / ".git").mkdir(parents=True)
+    flows = root / "flows"
+    flows.mkdir()
+    name = "top.v" if verilog else "top.def"
+    input_path = flows / name
+    input_path.write_bytes(b"module top; endmodule\n" if verilog else b"DESIGN top ;\n")
+    report_paths = post_route_sta._ReportPaths.build(
+        def_path=None if verilog else os.path.abspath(input_path),
+        verilog_path=os.path.abspath(input_path) if verilog else None,
+        spef_path=None,
+        repo_root=find_repo_root(str(flows)),
+    )
+    envelope = {
+        **STA_SINGLE_CORNER_CLEAN_ENVELOPE,
+        "schema_version": post_route_sta.SCHEMA_VERSION,
+        "def_path": report_paths.def_path,
+        "verilog_path": report_paths.verilog_path,
+        "spef_path": report_paths.spef_path,
+        "geometry_source": "netlist_estimate" if verilog else "routed",
+        "provenance": {
+            **STA_SINGLE_CORNER_CLEAN_ENVELOPE["provenance"],
+            "input": {
+                "content_hash": _hash_of(input_path),
+                "role": "netlist" if verilog else "layout",
+            },
+        },
+    }
+    evidence_dir = root / "evidence"
+    evidence_dir.mkdir()
+    return Path(_write(evidence_dir, "sta.json", envelope))
+
+
+def _sta_item_5(evidence: Path) -> dict:
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": str(evidence)}))
+    return next(item for item in result["items"] if item["id"] == 5)
+
+
+@pytest.mark.parametrize("verilog", [False, True], ids=["def", "verilog"])
+def test_sta_input_verified_is_identical_across_two_checkouts(
+    tmp_path, monkeypatch, verilog
+):
+    """The issue's reproduction: STA evidence produced in checkout A, then
+    graded from checkout B (A gone) -- identical bytes, identical answer."""
+    monkeypatch.chdir(tmp_path)
+    checkout_a = tmp_path / "a" / "repo"
+    evidence_a = _sta_checkout(checkout_a, verilog=verilog)
+    envelope = json.loads(evidence_a.read_text())
+    field = "verilog_path" if verilog else "def_path"
+    assert envelope[field] == {
+        "path": f"flows/top.{'v' if verilog else 'def'}",
+        "scope": "repo",
+    }
+    assert str(checkout_a) not in evidence_a.read_text()
+    assert os.path.realpath(checkout_a) not in evidence_a.read_text()
+
+    item_a = _sta_item_5(evidence_a)
+    assert item_a["status"] == "met"
+    assert item_a["citation"]["input_verified"] is True
+
+    checkout_b = tmp_path / "b" / "elsewhere" / "repo"
+    shutil.copytree(checkout_a, checkout_b)
+    shutil.rmtree(tmp_path / "a")
+
+    item_b = _sta_item_5(checkout_b / "evidence" / "sta.json")
+    assert item_b["status"] == "met"
+    assert item_b["citation"]["input_verified"] is True
+    assert item_b["citation"]["input_verified"] == item_a["citation"]["input_verified"]
+
+
+def test_sta_repo_scoped_input_that_changed_reports_false(tmp_path):
+    evidence = _sta_checkout(tmp_path / "repo")
+    (tmp_path / "repo" / "flows" / "top.def").write_bytes(b"DESIGN edited ;\n")
+
+    item = _sta_item_5(evidence)
+
+    assert item["citation"]["input_verified"] is False
+
+
+def test_sta_external_scope_input_is_not_verifiable(tmp_path):
+    """An input outside every repository carries no path by design, so it
+    is reported unverifiable rather than guessed at."""
+    envelope = {
+        **STA_SINGLE_CORNER_CLEAN_ENVELOPE,
+        "schema_version": 2,
+        "def_path": {"path": None, "scope": "external"},
+    }
+    item = _sta_item_5(Path(_write(tmp_path, "sta.json", envelope)))
+
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is None
+
+
+def test_sta_schema_v1_absolute_string_path_still_verifies_in_place(tmp_path):
+    """Legacy schema-1 evidence (plain absolute strings) stays readable and
+    verifies wherever that absolute path still exists."""
+    def_path = tmp_path / "gcd.def"
+    def_path.write_bytes(b"DESIGN gcd ;\n")
+    envelope = {
+        **STA_SINGLE_CORNER_CLEAN_ENVELOPE,
+        "def_path": str(def_path),
+        "provenance": {
+            **STA_SINGLE_CORNER_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(def_path), "role": "layout"},
+        },
+    }
+    assert envelope["schema_version"] == 1
+
+    item = _sta_item_5(Path(_write(tmp_path, "sta.json", envelope)))
+
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is True
+    assert item["citation"]["kind"] == "sta"
+
+
+def test_sta_schema_v1_foreign_absolute_path_is_not_re_rooted(tmp_path):
+    """A schema-1 absolute path from another host is *not* rescued by
+    stripping a guessed prefix: even with the same repo-relative file
+    present in this checkout, the answer stays `null` (unverifiable)."""
+    evidence = _sta_checkout(tmp_path / "repo")
+    envelope = json.loads(evidence.read_text())
+    envelope["schema_version"] = 1
+    envelope["def_path"] = "/nonexistent-producing-host/repo/flows/top.def"
+    evidence.write_text(json.dumps(envelope))
+
+    item = _sta_item_5(evidence)
+
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is None

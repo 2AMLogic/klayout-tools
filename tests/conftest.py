@@ -36,3 +36,7 @@ def _no_host_sim_backend_default(monkeypatch):
     it themselves.
     """
     monkeypatch.delenv("KLT_SIM_BACKEND", raising=False)
+    # The same for `klt netlist`'s host default (issue #3182): a host that
+    # keeps xschem off itself sets KLT_NETLIST_BACKEND=batch, and a local
+    # netlist test must never submit a real batch job.
+    monkeypatch.delenv("KLT_NETLIST_BACKEND", raising=False)

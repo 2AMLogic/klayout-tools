@@ -21,7 +21,9 @@ Exit codes mirror `klt yield`'s own (see ``docs/cli/yield.md``):
         sim` failed to start, no spec limits, native extension not built) --
         returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
     3 - the campaign ran; at least one measurement's yield claim was not met
-        at the stated confidence
+        at the stated confidence (status "fail")
+    4 - the campaign ran; nothing failed but the evidence is insufficient
+        (status "insufficient_evidence", issue #2873)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand.)
 """
@@ -34,6 +36,7 @@ from .yield_cmd import _print_text as _print_yield_report
 
 EXIT_PASS = 0
 EXIT_TARGET_MISSED = 3
+EXIT_INSUFFICIENT_EVIDENCE = 4
 
 
 def run(args: argparse.Namespace) -> int:
@@ -65,6 +68,8 @@ def run(args: argparse.Namespace) -> int:
 
     if report["status"] == "fail":
         return EXIT_TARGET_MISSED
+    if report["status"] == "insufficient_evidence":
+        return EXIT_INSUFFICIENT_EVIDENCE
     return EXIT_PASS
 
 
