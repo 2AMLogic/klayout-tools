@@ -2,8 +2,162 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-13
+
+- **PR #3236**: feat(signoff): add --repo-root and document the .git-ancestor rule for scope:"repo" inputs
+- **PR #3231**: feat(pex): carry per-side sim diagnostics and remote env into testbenches[] (#2872)
+- **PR #3229**: fix(pex): stop recommending folding shared includes into the DUT
+- **PR #3226**: fix(pex): quote-aware tokenizing in model_mismatch (#2866)
+- **PR #3225**: feat(pex): content-address schematic-side inputs; verify in signoff item 7 (#2875)
+- **PR #3224**: feat(extract): rename promoted pin nets to their declared names (#2854)
+- **PR #3219**: feat(yield): target_sigma qualification gate + min_converged_samples (#2873)
+- **PR #3218**: feat(extract): optional four-terminal bipolar substrate terminal
+- **PR #3216**: feat(sim): measurements[].crossings — threshold-crossing time series from one declaration (#2868)
+- **PR #3215**: feat(sim): --batch-set to submit a set of batch requests with bounded concurrency
+- **PR #3214**: feat(extract): add --no-netlist census-only flag
+- **PR #3213**: feat(sim): per-corner engine_exit_code / engine_killed_by_signal
+- **PR #3210**: fix(sim): reject a corners.supply_v key that names a .param (#2867)
+- **PR #3203**: fix(native): locate klt-techmap/klt-wave wherever cargo built them
+- **PR #3202**: fix(sim batch): compare release segments in the runner version gate
+- **PR #3201**: klt netlist --backend batch + KLT_NETLIST_BACKEND; path-independent --check (#3182, #3010)
+- **PR #3197**: chore(loom): disable buildGate for now (pre-PR preflight off)
+- **PR #3195**: test(sim-batch): deliver hostile runner version as data, run in tmp_path (#3153)
+- **PR #3176**: feat(sim): ngspice BSIM-CMG OSDI toolchain + card adaptation for extracted ASAP7 netlists (#2814)
+- **PR #3175**: feat(sim): worker-observed environment capture for batch jobs
+- **PR #3157**: feat(lvs): ASAP7 FinFET LVS with exact NFIN and disclosed bulk policy (#2813)
+- **PR #3148**: chore(deps): pin dependencies
+- **PR #3144**: fix(deps): update rust crate sha2 to 0.11
+- **PR #2801**: feat(drc): opt-in required containment for cuts; sg13cmos5l via-stack coverage
+- **PR #2627**: fix(loom): trust the repo admin's review markers (forge.trustedCommenters)
+- **Issue #3217** (closed): Auditor Capability Request: Python and uv runtime for klayout-tools validation
+- **Issue #3192** (closed): Build/runtime failure on main: test_exact_pin_selects_only_the_tagged_release fails in CI (git_commit mismatch)
+- **Issue #3191** (closed): Build/runtime failure on main: distribution artifact reports wrong release commit
+- **Issue #3189** (closed): techmap/wave: native binary lookup hardcodes native/<crate>/target, so CARGO_TARGET_DIR or cargo target-dir hosts fail the gate
+- **Issue #3184** (closed): Batch runner version gate: compare release segments so git-installed clients (0.7.0+g<sha>) match a 0.7.0 runner
+- **Issue #3182** (closed): klt netlist: batch backend (--backend batch / KLT_NETLIST_BACKEND) so fleet hosts send xschem netlisting to the Spot fleet
+- **Issue #3173** (closed): Flaky: test_run_sim_waits_out_a_capacity_refusal fails on Python 3.14 (sleeps[0] == 0.001)
+- **Issue #3153** (closed): test_sim_batch: hostile-version fixture writes stray empty file `x` into the repo root
+- **Issue #3113** (closed): klt sim batch: fleet runner/client version mismatch surfaces only as generic batch_job_failed
+- **Issue #3040** (closed): test_asap7_finfet: test_fin_count_and_gate_length_recovered_exactly fails on macOS (S/D net assignment swapped)
+- **Issue #3015** (closed): klt sim --backend batch: runner/client version skew marks every corner 'error' with only a generic batch_job_failed diagnostic
+- **Issue #3010** (closed): klt netlist --check: reports drifted from any checkout path other than the generating one (xschem '** sch_path:' absolute path)
+- **Issue #2878** (closed): klt signoff: repo-scoped input paths only resolve inside a git checkout (undocumented; no way to set the root)
+- **Issue #2876** (closed): klt pex: each side's klt sim environment (backend, remote/batch job id, engine version) is dropped from the response
+- **Issue #2875** (closed): klt pex: the response fingerprints the layout but not the schematic side of the comparison (request, testbench body, schematic DUT)
+- **Issue #2873** (closed): klt yield: support a sigma-based qualification target (mean ± k·σ inside limits) and a converged-N requirement
+- **Issue #2872** (closed): klt pex: report drops klt sim's per-corner diagnostics (e.g. batch_job_failed)
+- **Issue #2871** (closed): klt pex: multi-.include error tells callers to fold a PDK switch-parameter file into the DUT, which drops it from the extracted-side
+- **Issue #2869** (closed): klt sim batch: concurrent multi-request submissions are mostly refused with batch_no_capacity; no client-side queue/backoff
+- **Issue #2868** (closed): klt sim: no way to get a signal's threshold-crossing time series (edge list) in a transient result, especially on the batch backend
+- **Issue #2867** (closed): klt sim: cannot sweep time-varying source parameters (SIN amplitude/frequency); alter of a .param is a silent no-op
+- **Issue #2866** (closed): Friction: klt pex model_mismatch mis-reads the model name when a device parameter is a quoted expression containing spaces
+- **Issue #2862** (closed): BipolarDevice: no fourth (substrate) terminal distinct from the collector (bipolar gap 3 of 4 from #1232)
+- **Issue #2854** (closed): Friction: extract names a promoted pin net by joining all its labels, so a declared pin set cannot yield canonical pin names
+- **Issue #2850** (closed): extract: default netlist output is written next to the input stream, so a read-only census run drops <block>.spice into the source tree
+- **Issue #2848** (closed): klt sim: per-corner report omits the engine's exit code and killing signal (cannot distinguish exit / timeout / external kill)
+- **Issue #2834** (closed): Batch simulation reports should record the executing tool version and PDK revision
+- **Issue #2813** (closed): ASAP7 FinFET LVS: nfin-preserving reference compare and std-cell corpus via klt lvs
+- **Issue #2726** (closed): klt drc: a via with zero lower-metal overlap passes clean -- no required-coverage check for single-population cut layers (sg13cmos5l)
+- **Issue #2620** (closed): Stale-verdict reconciliation cleared a fresh approval whose head SHA had not moved (PR #2571)
+
+### 2026-10-12
+
+- **PR #3172**: feat(spec): accept inert _comment annotation in erc/power/mom specs
+- **PR #3171**: feat(sim-batch): pre-submit whole-job ceiling check for one-job batch requests
+- **PR #3170**: feat(signoff): grade T1 item 11 edge power ports + LEF abstract (provisional)
+- **PR #3169**: feat(lvs): opt-in strict top-level pin count check (#2845)
+- **PR #3166**: feat(scripts): bootstrap-auditor-python.sh for Python-less Linux audit hosts
+- **PR #3165**: Output-directory lock for pex/sim/place-and-route (#2770)
+- **PR #3164**: fix(build): give post-tag builds a distinct distribution version
+- **PR #3163**: klt sim: document expr/.meas limits and attribute .meas errors (#2826)
+- **PR #3162**: feat(asap7-drc): BEOL M1-M9 / V0-V9 rules for the ASAP7 deck (#2810)
+- **PR #3146**: feat(sta): report per-corner constraint completeness and unclocked registers
+- **PR #3145**: ci: enforce verb-module import boundaries statically
+- **PR #3142**: docs: P&R iteration-cost design spike and checkpoint-reuse spec (#2783)
+- **PR #3141**: docs: verify corner-aware slew/cap repair behavior (design spike)
+- **PR #3140**: feat(place-and-route): declare metal density coverage as unsupported (#2781)
+- **PR #3136**: feat(lef-abstract): structural self-check of emitted LEF (#2769)
+- **PR #3135**: docs(sim): clarify monte_carlo.seed reproducibility is per engine build (#2490)
+- **PR #3130**: feat(extract): --resistance-path shortest series path resistance query
+- **PR #3129**: feat(drc): list deck rules and run a selected rule subset (#2768)
+- **PR #3128**: feat(sta): opt-in propagated_clock for DEF mode + clock_mode response field
+- **PR #3127**: pex: per-net parasitic RC network integrity report
+- **PR #3126**: Document and regression-test the --repeat 0 attribution-only ERC profile recipe
+- **PR #3121**: perf(erc): bound active_layer gate-area intersection to per-net window (#2751)
+- **PR #3119**: feat(pdk): repoint SG13CMOS5L fetch to IHP-Open-PDK dev (#2720)
+- **PR #3118**: synthesize: report memory-mapping evidence (#2745)
+- **PR #2749**: chore(deps): lock file maintenance
+- **Issue #3150** (closed): Auditor Capability Request: Python and uv on klayout-tools audit host
+- **Issue #3131** (closed): Guard decision review: keep redirected stash creation flagged
+- **Issue #3120** (closed): Auditor Capability Request: provide a runnable Python environment for CLI smoke validation
+- **Issue #3105** (closed): signoff: no verb produces the artifact-anchored generic envelopes for T1 items 1, 9, 10
+- **Issue #2845** (closed): klt lvs reports status=match when the layout netlist has a top-level pin with no reference counterpart
+- **Issue #2839** (closed): T1 item 11: require edge-accessible power ports and LEF abstracts in klt signoff
+- **Issue #2837** (closed): klt pex --measure-command is unreleased, and extraction model differs between release 0.6.0 and main under the same version string
+- **Issue #2833** (closed): klt sim --backend batch: a 3600 s whole-job timeout discards every corner's results, and no per-job runtime estimate or auto-split
+- **Issue #2829** (closed): Auditor Capability Request: portable Python runtime on Linux audit host
+- **Issue #2826** (closed): klt sim: expr cannot reference .meas results; .meas WHEN expression failure surfaces only as 'produced no value'
+- **Issue #2823** (closed): Dev builds report version '<tag>+g<sha>', which satisfies '==<tag>' pins and silently replaces the tagged release
+- **Issue #2822** (closed): Spec-file verbs (klt erc etc.): strict unknown-key rejection breaks inline annotation keys like _comment
+- **Issue #2810** (closed): ASAP7 DRC deck phase 2: BEOL M1-M9 / V1-V9 and remaining V0 rules
+- **Issue #2783** (closed): Design spike: measure P&R iteration cost and specify safe checkpoint reuse
+- **Issue #2782** (closed): Design spike: verify corner-aware slew and capacitance repair behavior
+- **Issue #2781** (closed): place-and-route: declare metal-fill and density-check coverage
+- **Issue #2780** (closed): sta: report per-corner constraint completeness and unclocked registers
+- **Issue #2770** (closed): Output-directory lock so concurrent agent runs can't interleave
+- **Issue #2769** (closed): lef-abstract: structural self-check of emitted LEF
+- **Issue #2768** (closed): drc: list deck rules and run a selected rule subset
+- **Issue #2767** (closed): ci: enforce verb-module import boundaries statically
+- **Issue #2765** (closed): pex: point-to-point resistance query over a net's RC network
+- **Issue #2764** (closed): pex: per-net parasitic RC network integrity report (opens, islands, short candidates, bad R, C delta)
+- **Issue #2753** (closed): Allow sampled ERC walk attribution without a full profiling run
+- **Issue #2751** (closed): klt erc: active_layer gate-area intersection is O(nets x active polygons) and dominates runtime on dense layouts
+- **Issue #2745** (closed): synthesize: report memory-mapping evidence
+- **Issue #2739** (closed): klt sta times a routed post-CTS DEF with an ideal clock, so boundary hold checks miss the clock-tree insertion delay
+- **Issue #2736** (closed): design-agent: add an unscored sky130 analog charge-pump PLL alongside the behavioral reference
+- **Issue #2720** (closed): Repoint SG13CMOS5L PDK fetch to IHP-Open-PDK (the ihp-sg13cmos5l repo is archived)
+- **Issue #2490** (closed): sim: document that monte_carlo.seed is reproducible per engine build, not across them
+- **Issue #1779** (closed): Epic: ship unscored sky130 VCO/PLL variants alongside behavioral benchmark references
+
+### 2026-10-11
+
+- **PR #3116**: docs(synthesize): observability negative-control design spike (#2746)
+- **PR #3114**: feat(design-agent): unscored sky130 device-level charge-pump PLL (#2744)
+- **PR #3098**: feat(yield): klt yield-samples -- derive negative-control sample set from two sim reports
+- **PR #3096**: feat(extract): opt-in hierarchical .SUBCKT extraction (--hierarchical-cells)
+- **Issue #3112** (closed): Auditor Capability Request: provision runnable Python and uv on audit host
+- **Issue #3104** (closed): klt functional-verification fails from a pinned tool install unless cocotb is already installed
+- **Issue #3080** (closed): test_asap7_finfet fin_count_and_gate_length_recovered_exactly fails on main (blocks pre-PR gate)
+- **Issue #3058** (closed): Auditor Capability Request: Python runtime for klt CLI smoke validation
+- **Issue #3047** (closed): Guard decision review: keep main-checkout stash operations flagged
+- **Issue #2888** (closed): Same version specifier can resolve to builds with different klt --version / build identity
+- **Issue #2746** (closed): Design spike: define a reproducible synthesis observability negative control
+- **Issue #2744** (closed): design-agent: assemble and validate the unscored sky130 device charge-pump PLL
+- **Issue #2722** (closed): Friction: klt extract has no hierarchical (per-cell subcircuit) output, so per-circuit LVS options cannot scope a composed layout
+- **Issue #2563** (closed): Friction: klt yield grades a negative_control, but klt sim cannot express one
+
+### 2026-10-10
+
+- **PR #3075**: refactor(extract): split passive-device geometry and MoM extraction into extract_passive_regions.py
+- **PR #3068**: renovate: move onto the 2AMLogic org preset
+- **PR #3066**: lvs: paired-instance pin anchoring design spike (disposition c)
+- **PR #3048**: feat(sta): per-port min/max I/O delays and worst setup/hold path identity
+- **PR #3007**: docs(loom): document champion-epic pin drift and upstream handoff
+- **Issue #3046** (closed): Auditor Capability Request: Python runtime for klt CLI smoke validation
+- **Issue #2955** (closed): Auditor Capability Request: usable Python runtime for klayout-tools CLI smoke tests
+- **Issue #2740** (closed): Friction: klt sta I/O delays are one scalar for all ports (no per-port, no min/max) and no worst-path identity
+- **Issue #2704** (closed): Design spike: establish sound paired-instance pin anchoring for black-box LVS
+- **Issue #2501** (closed): Document champion-epic pin drift and prepare the upstream resync handoff
+- **Issue #2419** (closed): Split extract.py passive-device geometry and MoM extraction (~988 lines)
+
 ### 2026-10-09
 
+- **PR #2991**: test(yield-campaign): stub ngspice discovery, run campaign tests in native CI leg
+- **PR #2988**: feat(sim): ordered analysis_steps[] -- several named solves per corner
+- **PR #2987**: fix: route cross-repo owner/repo#N named dependencies to their own repo
+- **Issue #2675** (closed): yield-campaign: exercise native pipeline in CI and stub ngspice discovery
+- **Issue #2482** (closed): Friction: a klt sim request runs one analysis per corner, so a figure defined across several solves in one corner cannot reach any b
+- **Issue #2437** (closed): Update pinned dependency fingerprint tooling from Loom upstream while preserving local guards
 - **PR #2950**: feat(mcp): klt mcp serve, a generic MCP server derived from the verb registry
 - **PR #2949**: gen: sky130 precision-poly res_array 0.19x2.0um contacts + TopVia1 audit (#2449)
 - **Issue #2830** (closed): Agent surface: ship a generic MCP server (klt mcp serve) derived from the verb registry
