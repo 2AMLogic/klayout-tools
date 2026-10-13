@@ -1805,6 +1805,22 @@ _DUPLICATE_CATEGORIES_RDB = _CLEAN_WITH_CATEGORIES_RDB.replace(
 
 
 def _assert_setup(tmp_path):
+    """The engine tests' standard gds+deck pair.
+
+    Seeds a `.git` marker so `tmp_path` resolves as this run's own repo root
+    (`env_provenance.find_repo_root` only checks for a `.git` entry): since
+    issue #2659 the echoed `file` is the committable `{path, scope}` envelope,
+    and `klt drc --check`/`--rerun` can only re-verify a `scope: "repo"`
+    report. A bare `tmp_path` records the degenerate external branch -- no
+    locatable input -- which makes every rerun test below fail with
+    "committed report has no 'file' field to rerun". Seeding the marker puts
+    these tests in the realistic position of a design inside a repo (the
+    convention `tests/test_drc.py` applies module-wide via its `tmp_path`
+    override); the external branch stays pinned by
+    `test_klayout_engine_file_is_external_outside_any_repo`, which works on
+    plain `tmp_path` without this helper.
+    """
+    (tmp_path / ".git").mkdir(exist_ok=True)
     return (
         _write_gds(tmp_path / "test.gds"),
         _write_deck_file(tmp_path / "deck.lydrc"),
