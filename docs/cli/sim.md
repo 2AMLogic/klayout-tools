@@ -872,11 +872,31 @@ report a pass. Policy: **reject before simulating**.
   and compares it with the client's `klt --version` by **release segment**
   ([#3184](https://github.com/2AMLogic/klayout-tools/issues/3184)): the
   version with its PEP 440 local part (`+...`) and any pre/dev/post suffix
-  removed. So a git-installed client (`0.7.0+g<sha>`, `0.7.0+g<sha>.dirty`,
-  `0.7.0+unknown`) matches a `0.7.0` runner, in either direction, while
-  `0.7.0` against `0.7.1` or `0.8.0` is a mismatch. A numerically newer or
-  older runner is never treated as compatible. Both full build strings are
-  kept in `runner_identity.json`, the mismatch message and
+  removed. `0.7.0` against `0.7.1` or `0.8.0` is a mismatch; a numerically
+  newer or older runner is never treated as compatible. What a `klt` build
+  actually reports depends on the version scheme
+  ([#2823](https://github.com/2AMLogic/klayout-tools/issues/2823),
+  [#3164](https://github.com/2AMLogic/klayout-tools/pull/3164)): only a
+  clean checkout exactly at the release tag prints the bare `X.Y.Z`, so
+  which clients match an `X.Y.Z` runner is:
+
+  | client checkout | `klt --version` | release segment | vs `X.Y.Z` runner |
+  |---|---|---|---|
+  | clean tree exactly at the release tag | `X.Y.Z` | `X.Y.Z` | match |
+  | any commit after the tag | `X.Y.(Z+1).devN+g<sha>` | `X.Y.(Z+1)` | **mismatch** |
+  | after the tag, or dirty at the tag, with uncommitted changes | `X.Y.(Z+1).devN+g<sha>.dirty` | `X.Y.(Z+1)` | **mismatch** |
+  | checkout before the base's release tag exists | `X.Y.Z.devN+g<sha>` | `X.Y.Z` | match |
+  | no recoverable git facts | `X.Y.Z.dev0+unknown` | `X.Y.Z` | match |
+
+  A **git checkout after the release tag is therefore still rejected**
+  against a released runner image: it prints the *next* release as a
+  `.devN` build, and the string alone cannot distinguish "after `vX.Y.Z`"
+  from "before an untagged `X.Y.(Z+1)`". Whether the gate should treat a
+  `.devN` build as matching the release before it is an open ruling on
+  [#3184](https://github.com/2AMLogic/klayout-tools/issues/3184); today it
+  does not. Until then, submit from a release-tagged client (or one with no
+  git facts), or set `batch.runner_version_check: "warn"`. Both full build
+  strings are kept in `runner_identity.json`, the mismatch message and
   `environment.remote`.
 - On a mismatch (`batch_runner_version_mismatch`) or a runner version that is
   absent or has no release segment (`batch_runner_version_unknown`) the
@@ -913,8 +933,9 @@ report a pass. Policy: **reject before simulating**.
 ```
 
 Limits: version identity does not prove equivalent behavior between two
-differently built copies that share one release (a `+g<sha>` client can carry
-unreleased changes the `0.7.0` runner lacks). **Remediation:**
+differently built copies that share one release (a no-git-facts client
+`0.7.0.dev0+unknown` matches the `0.7.0` segment yet can carry different
+code than the runner). **Remediation:**
 update the runner image to the client's `klt` build, or submit from a client
 matching the image. Jobs that never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.

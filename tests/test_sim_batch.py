@@ -25,8 +25,8 @@ import jsonschema
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from klayout_tools import _version_scheme, sim
 from klayout_tools import remote_launcher as rl
-from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -3046,6 +3046,37 @@ def test_runner_identity_compares_release_segments(
     assert fields["client_klt_version"] == client
     assert fields["runner_compatibility"] == status
     assert ("runner_compatibility_warning" in fields) == (status != "match")
+
+
+_GATE_SHA = "99b4efb148bb23b5e9206680c43ea7a5fab7a3f1"
+
+
+def test_post_tag_dev_client_from_the_version_scheme_is_a_mismatch(tmp_path):
+    """The gate's inputs are what ``_version_scheme.render`` (issues
+    #2823/#3164) actually produces, not hand-written ``0.7.0+g<sha>``
+    strings: a post-tag git client reports the *next* release as a
+    ``.devN`` build and is still rejected against a released runner."""
+    post_tag = _version_scheme.render("0.7.0", _GATE_SHA, None, False, True, 212)
+    assert post_tag == f"0.7.1.dev212+g{_GATE_SHA[:12]}"
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, post_tag), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+
+
+def test_no_git_facts_client_from_the_version_scheme_matches(tmp_path):
+    """A no-git-facts build keeps the base's release segment, so it passes
+    the gate against a runner at that release."""
+    no_facts = _version_scheme.render("0.7.0", None, None, None, None, None)
+    assert no_facts == "0.7.0.dev0+unknown"
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, no_facts), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
 
 
 # --------------------------------------------------------------------------- #

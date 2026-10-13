@@ -437,16 +437,28 @@ def _release_segment(version: str) -> str | None:
     """The release segment of a ``klt --version`` build string, or ``None``
     when it has none (issue #3184).
 
-    The runner version gate compares release segments only, so a
-    git-installed client (``0.7.0+g<sha>``, ``0.7.0+g<sha>.dirty``,
-    ``0.7.0+unknown``) matches a ``0.7.0`` release runner while ``0.7.0``
-    against ``0.7.1`` still differs. Steps: drop the PEP 440 local part
-    (``+...``), keep the leading ``[0-9.]`` run, drop one trailing ``.``, and
-    accept the result only if it is ``N(.N)*``. This equals
+    The runner version gate compares release segments only -- the version
+    with its PEP 440 local part (``+...``) and any pre/dev/post suffix
+    removed -- so ``0.7.0`` matches ``0.7.0rc1``, ``0.7.0.dev0+unknown`` or
+    a bare ``0.7.0`` in either direction, while ``0.7.0`` against ``0.7.1``
+    or ``0.8.0`` still differs. Steps: drop the PEP 440 local part
+    (``+...``), keep the leading ``[0-9.]`` run, drop one trailing ``.``,
+    and accept the result only if it is ``N(.N)*``. This equals
     ``packaging.version.Version(v).release`` for the strings klt produces,
     without importing ``packaging`` (not a runtime dependency).
-    :func:`_runner_preflight_script` repeats the same steps in POSIX shell on
-    the runner, so both sides of the gate use one rule.
+    :func:`_runner_preflight_script` repeats the same steps in POSIX shell
+    on the runner, so both sides of the gate use one rule.
+
+    What klt itself produces since the version scheme of #2823/#3164: only
+    a clean checkout exactly at the release tag prints the bare ``X.Y.Z``.
+    Any commit after the tag -- the normal git-installed client -- prints
+    the **next** release as a dev build (``X.Y.(Z+1).devN+g<sha>``, with
+    ``.dirty`` appended for uncommitted changes), so its release segment is
+    ``X.Y.(Z+1)`` and it is **still a mismatch** against an ``X.Y.Z``
+    runner. A build with no git facts prints ``X.Y.Z.dev0+unknown``, whose
+    release segment ``X.Y.Z`` does match. Whether a ``.devN`` build should
+    count as the release before it is an open ruling on issue #3184;
+    today it does not.
     """
     head = version.strip().split("+", 1)[0]
     prefix = re.match(r"[0-9.]*", head).group(0)  # always matches
@@ -613,7 +625,13 @@ def _runner_preflight_script(
     unless the runner's release segment equals the client's
     (:func:`_release_segment`, issue #3184; the mismatch message keeps both
     full build strings). A runner version that is empty or has no release
-    segment is ``batch_runner_version_unknown``. The runner string is reduced
+    segment is ``batch_runner_version_unknown``. Note that under the
+    version scheme of #2823/#3164 a client checked out after the release
+    tag prints ``X.Y.(Z+1).devN+g<sha>`` -- the *next* release -- so it is
+    still rejected against an ``X.Y.Z`` runner; only a clean tag checkout
+    (``X.Y.Z``) or a no-git-facts build (``X.Y.Z.dev0+unknown``) shares
+    the runner's release segment (see :func:`_release_segment`). The
+    runner string is reduced
     to ``[A-Za-z0-9._+ -]`` so it is safe inside the JSON the script prints.
 
     Redirects here deliberately have no space before ``>`` so the
@@ -1833,11 +1851,13 @@ def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
     ``runner_compatibility`` is then ``"unknown"``; so it is when either
     version has no release segment. Otherwise the two release segments are
     compared (:func:`_release_segment`, issue #3184 -- ``0.7.0`` matches
-    ``0.7.0+g<sha>``), giving ``"match"`` / ``"mismatch"``; both fields keep
-    the full build strings. The comparison is done here, not trusted from the
-    file. A non-match carries ``runner_compatibility_warning``. A match does
-    not prove identical code (two builds can share one release); see
-    docs/cli/sim.md.
+    ``0.7.0rc1`` or ``0.7.0.dev0+unknown``, while a post-tag git build
+    ``0.7.1.devN+g<sha>`` carries the next release and mismatches a
+    ``0.7.0`` runner), giving ``"match"`` / ``"mismatch"``; both fields
+    keep the full build strings. The comparison is done here, not trusted
+    from the file. A non-match carries ``runner_compatibility_warning``. A
+    match does not prove identical code (two builds can share one
+    release); see docs/cli/sim.md.
     """
     client = _provenance._klt_version()
     runner: str | None = None
