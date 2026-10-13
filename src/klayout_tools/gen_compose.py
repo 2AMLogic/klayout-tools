@@ -2193,7 +2193,7 @@ def _parse_pins(
     raw_pins: Any,
     blocks: dict[str, dict[str, Any]],
     connectivity: list[dict[str, Any]],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Parse and validate the ``pins[]`` request field (#210).
 
     Each entry -- ``{"net": <string>, "block": <string>, "port": <string>}``
@@ -2204,12 +2204,16 @@ def _parse_pins(
     ``connectivity[]`` is (:func:`_validate_block_port`): an unknown
     ``block``/``port`` is an application error (exit 1).
 
-    A ``(block, port)`` pair that also appears in any ``connectivity[]`` entry
-    is rejected: that shape is already labelled by the router, so a second,
-    possibly inconsistent ``pins[]`` label on it is ambiguous rather than
-    additive.
+    A ``(block, port)`` pair that also appears in a ``connectivity[]`` entry is
+    accepted only when the pin's ``net`` equals that entry's ``net`` (#2881):
+    that is a *promotion* of the internally wired net to a reported composed
+    port, not a second label. Such an entry is returned with
+    ``router_labelled: True`` so the label loop writes no duplicate
+    ``kdb.Text`` (the router already labels the net). A different ``net`` is
+    an ambiguous, conflicting label and is rejected (exit 1), naming both nets.
 
-    Returns a list of ``{net, block, port}`` dicts. ``None``/absent yields an
+    Returns a list of ``{net, block, port}`` dicts (plus ``router_labelled``
+    for agreeing connectivity pins). ``None``/absent yields an
     empty list (omitting ``pins[]`` entirely must not change any behavior).
     """
     if raw_pins is None:
@@ -2217,11 +2221,14 @@ def _parse_pins(
     if not isinstance(raw_pins, list):
         raise GenComposeError("request.pins must be an array")
 
-    connectivity_pairs = {
-        (pin["block"], pin["port"]) for entry in connectivity for pin in entry["pins"]
-    }
+    connectivity_pairs: dict[tuple[str, str], list[str]] = {}
+    for conn_entry in connectivity:
+        for conn_pin in conn_entry["pins"]:
+            connectivity_pairs.setdefault(
+                (conn_pin["block"], conn_pin["port"]), []
+            ).append(conn_entry["net"])
 
-    pins: list[dict[str, str]] = []
+    pins: list[dict[str, Any]] = []
     for index, entry in enumerate(raw_pins):
         if not isinstance(entry, dict):
             raise GenComposeError(f"request.pins[{index}] must be a JSON object")
@@ -2242,15 +2249,20 @@ def _parse_pins(
             blocks, block_id, port, f"request.pins[{index}] (net '{net}')"
         )
 
-        if (block_id, port) in connectivity_pairs:
+        conn_nets = connectivity_pairs.get((block_id, port))
+        if conn_nets is not None and net not in conn_nets:
             raise GenComposeError(
                 f"request.pins[{index}] (net '{net}') names port '{port}' on block "
-                f"'{block_id}', which is already labelled by a connectivity[] net "
-                "-- a port may be promoted by pins[] or wired by connectivity[], "
-                "not both"
+                f"'{block_id}', which is already wired by connectivity[] net "
+                f"'{conn_nets[0]}' -- a pins[] entry on a connectivity[] port must "
+                "use the same net name (it promotes that net to a composed port); "
+                "a different name would be a conflicting label"
             )
 
-        pins.append({"net": net, "block": block_id, "port": port})
+        pin_entry: dict[str, Any] = {"net": net, "block": block_id, "port": port}
+        if conn_nets is not None:
+            pin_entry["router_labelled"] = True
+        pins.append(pin_entry)
 
     return pins
 
@@ -2295,7 +2307,7 @@ COMPOSE_GENERATOR = "gen-compose"
 
 
 def promote_composed_ports(
-    promoted_pins: list[dict[str, str]],
+    promoted_pins: list[dict[str, Any]],
     blocks: dict[str, dict[str, Any]],
     offsets_um: dict[str, dict[str, float]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -3777,7 +3789,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         port_name = entry["port"]
         port = blocks[block_id]["ports"].get(port_name)
         labelled = False
-        if not _port_has_geometry(port):
+        if entry.get("router_labelled"):
+            # #2881: promotion of a connectivity[]-wired net -- the router
+            # already labels it; a second kdb.Text would be a duplicate.
+            labelled = True
+            notes.append(
+                f"pin '{net_label}' (block '{block_id}' port '{port_name}') is "
+                "also wired by a connectivity[] net of the same name -- reported "
+                "in ports[] only; its label is supplied by the router, no "
+                "duplicate label was written"
+            )
+        elif not _port_has_geometry(port):
             notes.append(
                 f"pin '{net_label}' (block '{block_id}' port '{port_name}') has no "
                 "reported {x_um, y_um, layer} geometry -- it was not labelled"
