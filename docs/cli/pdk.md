@@ -232,6 +232,12 @@ terminal pins distinguished by drawn bounding-box/area filters — that this
 engine's `BipolarDevice`/stock-`DeviceExtractorBJT3Transistor` model cannot
 faithfully express. See `src/klayout_tools/decks/sg13g2.py`'s "SiGe HBTs —
 investigated, declined" docstring section for the full finding.
+Operator ruling 2026-10-08 (#2864): the PDK's own KLayout LVS runset (#2849)
+is the accepted route for SG13G2 bipolars — runset-backed LVS recognises
+them, the curated deck still does not. The four native gaps are tracked as
+#2860–#2863 (#2860/#2861 open as general improvements; #2862/#2863 deferred
+until something the runset path cannot serve needs them); evidence acceptance
+conditions live in #2870.
 
 ² The remaining metal resistors (`res_metal3` and up) are a different kind
 of gap from the rest of this row: their own recognition (populating
