@@ -850,3 +850,39 @@ def test_rewrite_leaves_paths_outside_the_runner_tree_alone():
         "** sym_path: /opt/pdk/sky130A/libs.tech/xschem/nfet.sym",
         "** sym_path: /work/here/design/sub.sym",
     ]
+
+
+def test_manifest_published_runner_mismatch_is_refused_before_upload(
+    repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys
+):
+    """Issue #2851: `klt netlist`'s batch path resolves its config through
+    the same `sim_batch._resolve_batch_config`, so a runner version the AMI
+    manifest already publishes as incompatible is refused before any upload,
+    with the same code the runner-side gate uses."""
+    manifest = tmp_path / "ami-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "images": [
+                    {
+                        "pdk": "sky130A",
+                        "region": "us-east-1",
+                        "ami_id": "ami-0123456789abcdef0",
+                        "pdk_snapshot": "sky130A-2026.10.01",
+                        "ngspice_version": "46",
+                        "built_at": "2026-10-01T00:00:00Z",
+                        "klt_version": "0.1.0",
+                        "klt_ref": "v0.1.0",
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setenv("KLT_AMI_MANIFEST", str(manifest))
+    code, error = _run_failing(repo, tmp_path, capsys)
+    assert code == 1
+    assert error["code"] == sim_batch.BATCH_RUNNER_MISMATCH_CODE
+    assert "0.1.0" in error["message"]
+    assert fake.calls == []
+    assert no_local_xschem == []
