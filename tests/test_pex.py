@@ -3404,6 +3404,57 @@ def test_cli_pex_deck_option_and_pins_reach_run_pex(tmp_path, monkeypatch):
     assert captured["declared_pins"] == frozenset({"RA", "RB"})
 
 
+def test_cli_pex_rename_declared_pins_reaches_run_pex(tmp_path, monkeypatch):
+    """Issue #2854's CLI half: `klt pex --rename-declared-pins` parses as a
+    plain boolean flag and forwards `False` when omitted -- the exact
+    `run_pex` call every site that predates it makes."""
+    import klayout_tools.cli.pex_cmd as pex_cmd
+
+    captured: dict = {}
+
+    def _fake_run_pex(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "pass",
+            "layout": {"path": "mim.gds", "scope": "repo"},
+            "netlist": {"path": "mim.spice", "scope": "repo"},
+            "reference_netlist": {"path": "dut.spice", "scope": "repo"},
+            "corner_count": 0,
+            "delta": [],
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "extraction": {"deck": "gf180mcu", "device_count": 1, "net_count": 2},
+            "testbenches": [],
+        }
+
+    monkeypatch.setattr(pex_cmd, "run_pex", _fake_run_pex)
+
+    layout, request = _mim_pex_inputs(tmp_path)
+    exit_code = main(
+        ["pex", str(layout), str(request), "--deck", "gf180mcu", "--format", "json"]
+    )
+    assert exit_code == 0
+    assert captured["rename_declared_pins"] is False
+
+    exit_code = main(
+        [
+            "pex",
+            str(layout),
+            str(request),
+            "--deck",
+            "gf180mcu",
+            "--pins",
+            "RA,RB",
+            "--rename-declared-pins",
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 0
+    assert captured["rename_declared_pins"] is True
+
+
 def test_cli_pex_omitting_the_new_flags_passes_none(tmp_path, monkeypatch):
     """Omitting both flags forwards `None` for both -- the exact `run_pex`
     call every caller made before issue #1558."""

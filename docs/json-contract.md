@@ -201,6 +201,25 @@ before is still valid and still means what it meant. Neither command's
 `schema_version` moved. See `docs/cli/gen-compose.md`'s "Which hint the
 advisory reads, and the two legitimate violations (#2638)".
 
+**An opt-in flag that changes reported *values* adds its disclosure fields,
+never retypes the old ones.** `klt extract --rename-declared-pins` (issue
+#2854) renames surviving promoted pin nets to their declared names, which
+changes what `nets[].name`/`devices[].nets[...]`/the written `.SUBCKT`
+report for those nets — but only when the flag is given, and without
+touching any field's name, type, or meaning. The disclosure is additive on
+three surfaces at once: a `warnings[]` entry per aggregate (renames) and
+per finding (the `declared_pin_short`/`declared_pin_rename_collision`
+cases), the `null`-unless-given `pin_renames` block, and the
+always-present boolean `rename_declared_pins` echo (so `--check --rerun`
+can replay the rename from it plus `pin_renames.declared`). `klt pex`
+echoes the passthrough as `extraction.rename_declared_pins` (`false` when
+the flag was not given), and `klt lvs` gained the optional request field
+`layout.rename_declared_pins` plus one new `mismatches[].category` value
+(`pin.declared_short`) — each additive under the rules above, no
+`schema_version` bump on any of the three commands. See
+`docs/cli/extract.md`'s "Renaming promoted pins to their declared name"
+section.
+
 **Not every field a verb reports is a cross-build contract at all** — some
 are extractor/engine-internal bookkeeping with no meaning outside the one
 run that produced them (e.g. `klt extract`'s `net_id`/anonymous `$N`

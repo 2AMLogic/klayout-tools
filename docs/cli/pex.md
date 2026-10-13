@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -83,6 +83,17 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   promoting more top-level pins — a body/substrate tap, say — than the
   schematic DUT declares. Off by default — every named net still promotes
   to a pin, byte-identical to before this flag existed.
+- `--rename-declared-pins` — passed through to `klt extract
+  --rename-declared-pins` (issue #2854); see
+  [`extract.md`](extract.md)'s "Renaming promoted pins to their declared
+  name" section. Renames each surviving promoted pin net whose component
+  labels contain exactly one `--pins` name to that name, so the extracted
+  DUT's `.SUBCKT` header carries the canonical interface names the
+  schematic DUT declares — required whenever a boundary net carries extra
+  drawn labels and its declared name is only one component of KLayout's
+  joined net name. Requires `--pins`. Off by default — byte-identical to
+  before this flag existed. The effective value is echoed as
+  `extraction.rename_declared_pins`.
 - `--label-layer` — repeatable `<role>=<layer>/<datatype>`, passed through
   to `klt extract --label-layer` (issue #2686); see
   [`extract.md`](extract.md)'s "Overriding a deck's label layers" section.

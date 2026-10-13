@@ -17524,6 +17524,193 @@ def test_run_lvs_anchoring_is_off_by_default_for_a_plain_element_reference(tmp_p
     assert entry["details"]["pins"] == ["A", "VGND", "VPWR", "Y"]
 
 
+# --------------------------------------------------------------------------- #
+# layout.rename_declared_pins (issue #2854): canonical interface-pin names
+# for options.anchor_top_level_pins to pair against
+# --------------------------------------------------------------------------- #
+
+
+def _renamed_interface_request(
+    tmp_path,
+    *,
+    layout_spec_extra: dict,
+    reference_options: dict | None = None,
+    options: dict | None = None,
+) -> str:
+    """The issue #2854 request shape: an inline-extraction layout whose
+    drain pad carries a boundary label (`dout`) *and* the macro's own
+    internal label (`Y`), compared against a reference netlist extracted
+    from the same geometry whose drain pin carries only the declared name
+    (`klt extract --pins A,VGND,dout --rename-declared-pins` output) -- the
+    exact "reference that uses the declared names" pairing the issue asks
+    for."""
+    from klayout_tools.extract import run_extract
+
+    layout = _make_single_nmos_layout(extra_drain_label="dout")
+    gds_path = tmp_path / "nmos.gds"
+    layout.write(str(gds_path))
+
+    reference_path = str(tmp_path / "ref.spice")
+    run_extract(
+        str(gds_path),
+        "sky130",
+        output=reference_path,
+        declared_pins=frozenset({"A", "VGND", "dout"}),
+        rename_declared_pins=True,
+    )
+
+    request = {
+        "layout": {
+            "file": str(gds_path),
+            "deck": "sky130",
+            "declared_pins": ["A", "VGND", "dout"],
+            **layout_spec_extra,
+        },
+        "reference": {"netlist": reference_path},
+    }
+    if reference_options is not None:
+        request["reference"].update(reference_options)
+    if options is not None:
+        request["options"] = options
+    return json.dumps(request)
+
+
+def test_rename_declared_pins_lets_anchoring_pair_a_renamed_pin(tmp_path):
+    """Issue #2854's acceptance criterion: with `layout.rename_declared_pins`
+    on, `options.anchor_top_level_pins` pairs the layout's renamed pin with
+    the same-named reference pin -- the layout's drain conductor carries
+    `Y` (the macro's own label) *and* `dout` (the boundary label), so
+    without the rename its pin name is the joined `Y|DOUT` and no shared
+    name exists to anchor."""
+    report = run_lvs(
+        _renamed_interface_request(
+            tmp_path,
+            layout_spec_extra={"rename_declared_pins": True},
+            options={"anchor_top_level_pins": True},
+        )
+    )
+
+    assert report["status"] == "match"
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    # `A`/`VGND` anchor on either run; `DOUT` only exists as a layout pin
+    # name once the rename has collapsed `Y|DOUT` onto the declared name.
+    assert entry["details"]["pins"] == ["A", "DOUT", "VGND"]
+
+
+def test_without_the_rename_no_shared_pin_name_exists_to_anchor(tmp_path):
+    """The negative control for the test above: same layout, same reference,
+    anchoring still on -- but no `rename_declared_pins`, so the layout's
+    drain pin keeps the joined `Y|DOUT` spelling and `DOUT` cannot be
+    anchored. The compare itself still matches (topology only), which is
+    exactly why the missing pairing was silent before issue #2854."""
+    report = run_lvs(
+        _renamed_interface_request(
+            tmp_path,
+            layout_spec_extra={},
+            options={"anchor_top_level_pins": True},
+        )
+    )
+
+    assert report["status"] == "match"
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "topology.top_level_pins_anchored"
+    ]
+    assert entry["details"]["pins"] == ["A", "VGND"]
+
+
+def test_rename_declared_pins_rejects_a_non_boolean(tmp_path):
+    layout = _make_single_nmos_layout()
+    gds_path = tmp_path / "nmos.gds"
+    layout.write(str(gds_path))
+    request = json.dumps(
+        {
+            "layout": {
+                "file": str(gds_path),
+                "deck": "sky130",
+                "declared_pins": ["A", "VGND"],
+                "rename_declared_pins": "yes",
+            },
+            "reference": {"netlist": str(tmp_path / "ref.spice")},
+        }
+    )
+    with pytest.raises(LvsError, match="rename_declared_pins must be a boolean"):
+        run_lvs(request)
+
+
+def test_rename_declared_pins_requires_declared_pins(tmp_path):
+    layout = _make_single_nmos_layout()
+    gds_path = tmp_path / "nmos.gds"
+    layout.write(str(gds_path))
+    request = json.dumps(
+        {
+            "layout": {
+                "file": str(gds_path),
+                "deck": "sky130",
+                "rename_declared_pins": True,
+            },
+            "reference": {"netlist": str(tmp_path / "ref.spice")},
+        }
+    )
+    with pytest.raises(LvsError, match="rename_declared_pins requires"):
+        run_lvs(request)
+
+
+def test_declared_pin_short_surfaces_as_a_lvs_mismatch_entry(tmp_path):
+    """A promoted pin net carrying 2+ declared names (one conductor shorting
+    two declared interface pins) is surfaced as its own `pin.declared_short`
+    `mismatches[]` entry -- diagnostic only, never moving `status` on its
+    own: the compare that ran reports whatever topology mismatch the short
+    explains, this entry names the cause."""
+    from klayout_tools.extract import run_extract
+
+    # Drain pad carries {Y, A} while the gate keeps its own separate "A"
+    # net: the drain net's component set intersects {A, Y} twice.
+    layout = _make_single_nmos_layout(extra_drain_label="A")
+    gds_path = tmp_path / "short.gds"
+    layout.write(str(gds_path))
+
+    reference_path = str(tmp_path / "ref.spice")
+    run_extract(
+        str(gds_path),
+        "sky130",
+        output=reference_path,
+        declared_pins=frozenset({"A", "Y", "VGND"}),
+        rename_declared_pins=True,
+    )
+
+    report = run_lvs(
+        json.dumps(
+            {
+                "layout": {
+                    "file": str(gds_path),
+                    "deck": "sky130",
+                    "declared_pins": ["A", "Y", "VGND"],
+                    "rename_declared_pins": True,
+                },
+                "reference": {"netlist": reference_path},
+            }
+        )
+    )
+
+    (entry,) = [
+        m for m in report["mismatches"] if m["category"] == "pin.declared_short"
+    ]
+    assert entry["severity"] == "error"
+    assert entry["side"] == "layout"
+    assert entry["details"]["net"] == "A|Y"
+    assert entry["details"]["declared_pins"] == ["A", "Y"]
+    # Diagnostic-only: the two sides are topologically identical here (the
+    # reference was extracted from the same shorted geometry), so `status`
+    # is untouched by the entry.
+    assert report["status"] == "match"
+
+
 def test_run_lvs_anchoring_skips_a_pin_a_hand_written_hint_already_names(tmp_path):
     """Issue #2692: a `hints.same_nets` entry is the caller's own explicit
     declaration about the nets it names, so anchoring leaves them alone --
