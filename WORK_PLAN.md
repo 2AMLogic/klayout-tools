@@ -25,7 +25,13 @@ Human-approved issues ready for implementation (`loom:issue`).
 
 - **#1966**: Re-evaluate the .loom/resync-ignore pin on curator.md (#668) — it may be freezing this repo against upstream Curator fixes
 - **#2340**: signoff: input_verified is always null for drc/extract envelopes that recorded an absolute host path
+- **#2437**: Update pinned dependency fingerprint tooling from Loom upstream while preserving local guards
+- **#2482**: Friction: a klt sim request runs one analysis per corner, so a figure defined across several solves in one corner cannot reach any backend
 - **#2620**: Stale-verdict reconciliation cleared a fresh approval whose head SHA had not moved (PR #2571)
+- **#2675**: yield-campaign: exercise native pipeline in CI and stub ngspice discovery
+- **#2704**: Design spike: establish sound paired-instance pin anchoring for black-box LVS
+- **#2753**: Allow sampled ERC walk attribution without a full profiling run
+- **#2780**: sta: report per-corner constraint completeness and unclocked registers
 
 ## In Progress
 
@@ -43,7 +49,6 @@ _None._
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#2627**: fix(loom): trust the repo admin's review markers (forge.trustedCommenters)
 - **#2645**: feat(synthesize,sta,place-and-route): shared request.macros hard-macro declaration
 - **#2701**: feat(drc,extract,lvs): emit echoed input paths as the portable {path, scope} envelope
 - **#2711**: feat(loom): frozen-timeline guard in claim-staleness.sh + pin (#1966, PR 1 of 2)
@@ -61,7 +66,6 @@ Issues carrying `loom:curated`.
 - **#2281**: Track synthesis memory-mapping reporting and the observability design spike *(curated)*
 - **#2340**: signoff: input_verified is always null for drc/extract envelopes that recorded an absolute host path *(curated)*
 - **#2437**: Update pinned dependency fingerprint tooling from Loom upstream while preserving local guards *(curated)*
-- **#2449**: gen: finish context-dependent precision-poly contacts and audit TopVia1 sizing *(curated)*
 - **#2458**: klt extract --parasitics sums a net's per-level lumped R in series, so via-stitched strapping raises the reported resistance instead of lowering it *(curated)*
 - **#2482**: Friction: a klt sim request runs one analysis per corner, so a figure defined across several solves in one corner cannot reach any backend *(curated)*
 - **#2490**: sim: document that monte_carlo.seed is reproducible per engine build, not across them -- ngspice 42 vs 46 draw differently from the same seed *(curated)*
@@ -70,8 +74,13 @@ Issues carrying `loom:curated`.
 - **#2620**: Stale-verdict reconciliation cleared a fresh approval whose head SHA had not moved (PR #2571) *(curated)*
 - **#2635**: synthesize / sta / place-and-route: no way to declare a hard macro (LEF + liberty + GDS) in any request schema *(curated)*
 - **#2659**: drc/extract responses embed the producing host's absolute input path; signoff's input_verified gate cannot re-verify them from another checkout *(curated)*
+- **#2675**: yield-campaign: exercise native pipeline in CI and stub ngspice discovery *(curated)*
+- **#2679**: decks/sg13g2: poly-resistor body/marker are inverted vs the PDK's own PCell convention, so no drawn rsil/rppd/rhigh is ever recognized *(curated)*
 - **#2688**: drc: curated sg13g2 Cnt.c drops the activ_mask join, so every HBT contact false-positives *(curated)*
+- **#2704**: Design spike: establish sound paired-instance pin anchoring for black-box LVS *(curated)*
 - **#2720**: Repoint SG13CMOS5L PDK fetch to IHP-Open-PDK (the ihp-sg13cmos5l repo is archived) *(curated)*
+- **#2722**: Friction: klt extract has no hierarchical (per-cell subcircuit) output, so per-circuit LVS options cannot scope a composed layout *(curated)*
+- **#2724**: klt sim: no AC measurement over a two-node complex ratio (loop gain / phase margin) *(curated)*
 - **#2725**: klt sim: no first-class design-parameter axis (and no per-unit .nodeset); supply_v alter is the only hook *(curated)*
 - **#2726**: klt drc: a via with zero lower-metal overlap passes clean -- no required-coverage check for single-population cut layers (sg13cmos5l Via1/Metal1) *(curated)*
 - **#2730**: Extend retarded MoM impedance to oriented winding segments *(curated)*
@@ -105,7 +114,6 @@ Issues carrying `loom:curated`.
 - **#520**: Epic: the Tiny Tapeout corpus as a regression and optimization benchmark *(architect)*
 - **#708**: Epic: finite-element full-field solver for klt (Rust) — volumetric fields, electrothermal, MoM cross-validation *(architect)*
 - **#2252**: Epic: layout-tier flow-comparison benchmark — draw-only vs generator-first vs generator+refine (AHRR, ICCAD'26) *(architect)*
-- **#2830**: Agent surface: ship a generic MCP server (klt mcp serve) derived from the verb registry *(architect)*
 - **#2831**: Contracts: ship JSON response schemas for the core verbs (layers, cells, stats, drc, lvs) with conformance tests *(architect)*
 - **#2419**: Split extract.py's passive-device region-resolution subsystem (~615 lines) into extract_passive_regions.py *(hermit)*
 - **#2842**: Remove or wire up digital_fleet.py: ~1,850 LOC with no production caller *(hermit)*
@@ -117,6 +125,7 @@ Issues carrying `loom:curated`.
 - **#2281**: Track synthesis memory-mapping reporting and the observability design spike
 - **#2351**: gf180mcu curated DRC deck checks no implant or tap rule (NP/PP, DF.12, DF.13/14) and CO.1 only as a minimum, and --engine klayout cannot resolve the gf180mcu split-table runset
 - **#2570**: Friction: no ihp-sg13g2 remote-sim AMI, so klt sim's batch backend cannot run a PDK klt fully supports locally
+- **#2724**: klt sim: no AC measurement over a two-node complex ratio (loop gain / phase margin)
 - **#2734**: Epic: STA completeness, P&R density coverage, repair validation and iteration cost
 - **#2736**: design-agent: add an unscored sky130 analog charge-pump PLL alongside the behavioral reference
 
@@ -126,11 +135,11 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 5 |
 | Operator priority | 0 |
-| Ready (`loom:issue`) | 3 |
+| Ready (`loom:issue`) | 9 |
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 6 |
-| Curated | 44 |
-| Architect / Hermit proposals | 8 |
-| Active epics | 7 |
+| Approved PRs awaiting merge | 5 |
+| Curated | 48 |
+| Architect / Hermit proposals | 7 |
+| Active epics | 8 |
 <!-- guide:plan-body:end -->

@@ -218,6 +218,7 @@ from typing import Any
 
 from . import env_provenance, output_lock
 from ._paths import _fold_spice_continuations, _resolve_relative
+from ._provenance import sha256_file
 from .coverage import (
     REASON_NO_DELTA_ROWS,
     build_check_coverage,
@@ -442,6 +443,15 @@ def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
     return env_provenance.repo_relative_path(path, repo_root=repo_root)
 
 
+def _content_id(path: str | None) -> str | None:
+    """``sha256:<64 lowercase hex>`` of the exact bytes of ``path`` (issue
+    #2875), or ``None`` when it is not a readable file. The same digest
+    convention ``provenance.input.content_hash`` uses, so ``klt signoff``
+    re-hashes the cited file with the identical function."""
+    digest = sha256_file(path)
+    return None if digest is None else f"sha256:{digest}"
+
+
 def _strip_quotes(token: str) -> str:
     if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
         return token[1:-1]
@@ -475,8 +485,12 @@ def _find_dut_include(body_text: str, body_dir: str) -> tuple[int, str]:
     leaving the real DUT in place and reporting the wrong
     ``reference_netlist``. A hard error naming every matched line is the
     documented behaviour instead; the fix is to leave exactly one
-    `.include`/`.inc` line in the testbench body (fold the others into the
-    DUT file, or inline them).
+    `.include`/`.inc` line in the testbench body. Content both simulation
+    legs need (a PDK switch-parameter file, shared ``.param`` cards) must
+    NOT be folded into the DUT file: the selected line is replaced by the
+    extracted netlist for the extracted-side run, so anything folded into
+    the schematic DUT is present on the schematic side only. Inline it
+    into the testbench body instead.
     """
     matches: list[tuple[int, str, str]] = []
     for index, line in enumerate(body_text.splitlines()):
@@ -494,10 +508,14 @@ def _find_dut_include(body_text: str, body_dir: str) -> tuple[int, str]:
             "(before this was an error it silently swapped the first one, "
             "which re-pointed the wrong file and reported the wrong "
             "reference_netlist -- issue #1030). Leave exactly one "
-            "`.include`/`.inc` line in the testbench body: fold any other "
-            "included file (a PDK switch-parameter file, shared `.param` "
-            "cards) into the DUT netlist itself or inline it into the "
-            "testbench"
+            "`.include`/`.inc` line in the testbench body, the DUT. Do not "
+            "fold another included file (a PDK switch-parameter file, shared "
+            "`.param` cards) into that DUT file: the DUT include is replaced "
+            "by the extracted netlist on the extracted side, so folded "
+            "content would exist on the schematic side only. Inline content "
+            "both sides need into the testbench body instead; if that is "
+            "not possible, this testbench cannot be represented by the "
+            "current request shape"
         )
     if matches:
         index, _text, target = matches[0]
@@ -836,6 +854,39 @@ def _flat_dut_mismatch(
 _DEVICE_MODEL_CARD_PREFIXES = "MXQD"
 
 
+def _split_spice_tokens(line: str) -> list[str]:
+    """Split a SPICE card on whitespace, keeping a quoted ``'...'``/``"..."``
+    or braced ``{...}`` expression (which may contain spaces, e.g.
+    ``ad='int((nf+1)/2) * W/nf * 0.18u'``) inside its ``name=value`` token."""
+    tokens: list[str] = []
+    current: list[str] = []
+    quote = ""
+    depth = 0
+    for ch in line:
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+            current.append(ch)
+        elif ch == "{":
+            depth += 1
+            current.append(ch)
+        elif ch == "}":
+            depth = max(depth - 1, 0)
+            current.append(ch)
+        elif ch.isspace() and depth == 0:
+            if current:
+                tokens.append("".join(current))
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
 def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
     """``{lowercased model/subcircuit name: (name as written, instance
     count)}`` for every `M` (raw MOSFET)/`X` (subcircuit call, `klt
@@ -864,7 +915,7 @@ def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
         stripped = line.strip()
         if not stripped or stripped[0].upper() not in _DEVICE_MODEL_CARD_PREFIXES:
             continue
-        parts = [token for token in stripped.split() if "=" not in token]
+        parts = [token for token in _split_spice_tokens(stripped) if "=" not in token]
         if len(parts) < 2:
             continue  # no nodes/model at all -- not a real device instance
         name = parts[-1]
@@ -900,7 +951,7 @@ def _reference_is_hierarchical(netlist_text: str) -> bool:
         stripped = line.strip()
         if not stripped or stripped[0].upper() != "X":
             continue
-        parts = [token for token in stripped.split() if "=" not in token]
+        parts = [token for token in _split_spice_tokens(stripped) if "=" not in token]
         if len(parts) < 2:
             continue
         if parts[-1].lower() in local_subckts:
@@ -1106,6 +1157,73 @@ def _pin_count_mismatch_from_report(
         reference_netlist=reference_netlist,
         extracted_netlist=extracted_netlist,
     )
+
+
+# Only keys `klt sim` actually emits in its `environment` (see sim.py's
+# `run_sim`): which engine/build ran, and -- for an off-host backend that
+# fills it -- the `remote` block carrying the job identity.
+_SIDE_ENVIRONMENT_KEYS = (
+    "engine",
+    "engine_version",
+    "ngspice_binary",
+    "remote",
+)
+
+
+def _project_side_evidence(
+    sim_report: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Issue #2872 / #2876: the per-side execution evidence of one `klt sim`
+    response, transported unchanged (diagnostics are never re-classified or
+    filtered here -- `sim.py` owns that vocabulary). ``None`` when that side
+    was never simulated. ``produced_value`` is derived from the source
+    corner's own measurements (any non-null ``value``), never from
+    ``delta[]``. Keyed by ``corner_id`` within its testbench entry."""
+    if sim_report is None:
+        return None
+    environment = sim_report.get("environment") or {}
+    corners = []
+    for corner in sim_report.get("corners", []):
+        corners.append(
+            {
+                "corner_id": corner["corner_id"],
+                "status": corner.get("status"),
+                "diagnostics": copy.deepcopy(corner.get("diagnostics") or []),
+                "produced_value": any(
+                    m.get("value") is not None for m in corner.get("measurements", [])
+                ),
+            }
+        )
+    return {
+        "environment": {
+            key: copy.deepcopy(environment[key])
+            for key in _SIDE_ENVIRONMENT_KEYS
+            if key in environment
+        },
+        "corners": corners,
+    }
+
+
+def _project_testbench_sides(
+    schematic_report: Mapping[str, Any], extracted_report: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """``sides`` block of one ``testbenches[]`` entry, plus
+    ``nothing_simulated_corners``: corner ids where *neither* side produced
+    any non-null measurement (an execution failure), as opposed to a
+    one-sided failure (a real pex finding). Requires both sides to have run."""
+    schematic = _project_side_evidence(schematic_report)
+    extracted = _project_side_evidence(extracted_report)
+    nothing: list[str] = []
+    if schematic is not None and extracted is not None:
+        produced = {c["corner_id"]: c["produced_value"] for c in schematic["corners"]}
+        for corner in extracted["corners"]:
+            cid = corner["corner_id"]
+            if not corner["produced_value"] and not produced.get(cid, False):
+                nothing.append(cid)
+    return {
+        "sides": {"schematic": schematic, "extracted": extracted},
+        "nothing_simulated_corners": nothing,
+    }
 
 
 def _index_corner_measurements(
@@ -1793,6 +1911,28 @@ def _prepare_extracted_request(
     return extracted_request_path
 
 
+def _testbench_inputs(
+    testbench_path: str,
+    dut_path: str,
+    identity: Mapping[str, Any],
+    *,
+    repo_root: str | None,
+) -> dict[str, Any]:
+    """The path + content-identity fields of one ``testbenches[]`` entry
+    (issue #2875). Shared by both summary-construction branches so a
+    diagnostic/partial run (extracted side skipped) carries exactly the same
+    keys as a full one. Digests are present even when a path is redacted as
+    ``scope: external``."""
+    return {
+        "request": _report_path(testbench_path, repo_root=repo_root),
+        "request_sha256": identity["request_sha256"],
+        "netlist": _report_path(identity["netlist"], repo_root=repo_root),
+        "netlist_sha256": identity["netlist_sha256"],
+        "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
+        "schematic_netlist_sha256": identity["schematic_netlist_sha256"],
+    }
+
+
 def _own_pex_root(
     ownership: contextlib.ExitStack, artifacts_dir: str | None, layout_path: str
 ) -> None:
@@ -1822,6 +1962,7 @@ def run_pex(
     backend: str | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
+    rename_declared_pins: bool = False,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     critical_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
@@ -1856,7 +1997,18 @@ def run_pex(
     caller resolves a ``pin_count_mismatch`` caused by flat extraction
     promoting more top-level pins than the schematic DUT declares. ``None``
     for both (the default) resolves the deck and promotes pins exactly as
-    before this feature existed. ``label_layers`` (``klt pex --label-layer
+    before this feature existed. ``rename_declared_pins`` (``klt pex
+    --rename-declared-pins``, issue #2854) is likewise passed straight
+    through to :func:`~klayout_tools.extract.run_extract` -- it renames each
+    surviving promoted pin net whose component labels contain exactly one
+    ``declared_pins`` name to that name, so the extracted DUT's ``.SUBCKT``
+    header carries the canonical interface names the schematic DUT declares
+    even when a boundary net carries extra drawn labels (the same rename
+    ``klt extract --rename-declared-pins`` performs; see ``run_extract``'s
+    own ``rename_declared_pins`` docstring paragraph). The effective value
+    is echoed as ``extraction.rename_declared_pins`` (``False`` when the
+    flag was never given -- the extraction is then byte-identical to before
+    this parameter existed). ``label_layers`` (``klt pex --label-layer
     <role>=<layer>/<datatype>``, repeatable, issue #2686) is likewise passed
     straight through to :func:`~klayout_tools.extract.run_extract` -- it
     redirects which GDS purpose extraction reads net/pin name text from, per
@@ -2034,6 +2186,10 @@ def run_pex(
             # `run_extract` call this module made before they existed.
             deck_options=deck_options,
             declared_pins=declared_pins,
+            # Issue #2854: `--rename-declared-pins` passthrough. `False`
+            # whenever the flag was never given, which is the exact
+            # `run_extract` call this module made before it existed.
+            rename_declared_pins=rename_declared_pins,
             # Issue #2686: `--label-layer` passthrough. `None` when the flag
             # was never given -- the exact `run_extract` call made before it.
             label_layers=label_layers,
@@ -2088,6 +2244,10 @@ def run_pex(
     single_testbench = len(testbench_paths) == 1
     labels: list[str] = []
     dut_paths: list[str] = []
+    # Issue #2875: per-testbench content identities of the schematic-side
+    # inputs, taken at the resolution points below -- before either side
+    # simulates -- so the digests describe the files this run used.
+    input_identity: list[dict[str, Any]] = []
 
     # Issue #2478: in `--measure-command` mode there is no testbench at all,
     # so the loop below is a no-op (`testbench_paths` is validated empty
@@ -2130,6 +2290,13 @@ def run_pex(
             )
         with open(schematic_body_path, encoding="utf-8") as handle:
             body_text = handle.read()
+        input_identity.append(
+            {
+                "request_sha256": _content_id(testbench_path),
+                "netlist": schematic_body_path,
+                "netlist_sha256": _content_id(schematic_body_path),
+            }
+        )
         _include_line, dut_path = _find_dut_include(
             body_text, os.path.dirname(schematic_body_path)
         )
@@ -2139,6 +2306,7 @@ def run_pex(
         # if it were the DUT.
         _check_dut_declares_a_circuit(testbench_path, dut_path)
         dut_paths.append(dut_path)
+        input_identity[-1]["schematic_netlist_sha256"] = _content_id(dut_path)
 
     if len(set(dut_paths)) > 1:
         raise PexError(
@@ -2155,6 +2323,9 @@ def run_pex(
         if measured_reference_netlist is not None
         else dut_paths[0]
     )
+
+    # Issue #2875: hashed at the resolution point, before either side runs.
+    reference_netlist_sha256 = _content_id(reference_netlist_path)
 
     # Gap 2 (issue #1255): a schematic DUT netlisted flat (no `.SUBCKT`
     # wrapper at all) against `klt extract`'s always-`.SUBCKT`-wrapped
@@ -2339,12 +2510,17 @@ def run_pex(
             )
             testbenches_summary.append(
                 {
-                    "request": _report_path(testbench_path, repo_root=repo_root),
-                    "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
+                    **_testbench_inputs(
+                        testbench_path,
+                        dut_path,
+                        input_identity[index],
+                        repo_root=repo_root,
+                    ),
                     "corner_count": schematic_report["corner_count"],
                     "measurement_names": [
                         m["name"] for m in schematic_report["measurements"]
                     ],
+                    **_project_testbench_sides(schematic_report, None),
                 }
             )
             continue
@@ -2374,12 +2550,17 @@ def run_pex(
         delta.extend(rows)
         testbenches_summary.append(
             {
-                "request": _report_path(testbench_path, repo_root=repo_root),
-                "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
+                **_testbench_inputs(
+                    testbench_path,
+                    dut_path,
+                    input_identity[index],
+                    repo_root=repo_root,
+                ),
                 "corner_count": extracted_report["corner_count"],
                 "measurement_names": [
                     m["name"] for m in extracted_report["measurements"]
                 ],
+                **_project_testbench_sides(schematic_report, extracted_report),
             }
         )
 
@@ -2402,6 +2583,9 @@ def run_pex(
         "layout": _report_path(layout_path, repo_root=repo_root),
         "netlist": _report_path(extracted_netlist_path, repo_root=repo_root),
         "reference_netlist": _report_path(reference_netlist_path, repo_root=repo_root),
+        # Additive field (issue #2875): content identity of the schematic
+        # DUT / `--reference-netlist` the schematic leg used.
+        "reference_netlist_sha256": reference_netlist_sha256,
         "extraction": {
             "deck": deck_name,
             "device_count": extract_report["device_count"],
@@ -2427,6 +2611,13 @@ def run_pex(
             # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
             # or `None` when the flag was never given.
             "label_layers": extract_report.get("label_layers"),
+            # Additive field (issue #2854): echoes the effective
+            # `--rename-declared-pins` value back -- `False` when the flag
+            # was never given, byte-identical to before this feature
+            # existed. The renames themselves are `klt extract`'s own
+            # `pin_renames` report, visible here through the extraction's
+            # written netlist (`.SUBCKT` header) rather than re-embedded.
+            "rename_declared_pins": bool(extract_report.get("rename_declared_pins")),
             # Additive field (issue #2764): the extraction's own
             # per-net parasitic RC network integrity diagnostics --
             # threshold/tolerances, aggregate counts, and one entry per net

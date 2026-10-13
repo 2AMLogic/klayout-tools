@@ -932,12 +932,36 @@ report a pass. Policy: **reject before simulating**.
 - Every job command starts with a client-generated shell preflight that uses
   only `klt --version` (so it works on images that predate any new request
   key). It records the runner's build string in `outputs/runner_identity.json`
-  and compares it with the client's `klt --version` by **exact string
-  equality**. Anything else is not treated as compatible: a numerically newer
-  runner, a development build (`+g<sha>`, `.dirty`, `+unknown`) against a
-  release, or an unparseable/absent version.
-- On a mismatch (`batch_runner_version_mismatch`) or an unreadable runner
-  version (`batch_runner_version_unknown`) the preflight writes a klt error
+  and compares it with the client's `klt --version` by **major.minor**
+  ([#3184](https://github.com/2AMLogic/klayout-tools/issues/3184)): the
+  first two components of the release segment, which is the version with its
+  PEP 440 local part (`+...`) and any pre/dev/post suffix removed. Patch
+  releases, `.devN` builds and `+g<sha>` local builds all count as the same
+  version as their major.minor. The strings klt produces are:
+
+  | build | `klt --version` | major.minor | against a `0.7.0` runner |
+  |---|---|---|---|
+  | clean tree on the `v0.7.0` tag | `0.7.0` | `0.7` | match |
+  | any commit after `v0.7.0` | `0.7.1.devN+g<sha>` | `0.7` | match |
+  | either of the above, uncommitted changes | `...+g<sha>.dirty` | `0.7` | match |
+  | no git facts | `0.7.0.dev0+unknown` | `0.7` | match |
+  | patch release | `0.7.3` | `0.7` | match (either direction) |
+  | next minor, released or in development | `0.8.0`, `0.8.0.devN+g<sha>` | `0.8` | **mismatch, exit 87** |
+
+  A version whose release segment has fewer than two components (for
+  example `7`) has no major.minor and counts as unknown. Both full build
+  strings are kept in `runner_identity.json`, the mismatch message and
+  `environment.remote`.
+
+  The rule depends on a release discipline: **a change that breaks the
+  runner contract ships in a minor release, never a patch, and every minor
+  release is published to PyPI and gets a rebaked runner image.** The
+  accepted cost is that a dev client can send request keys that the runner's
+  release of the same minor does not have; such changes belong in the next
+  minor.
+- On a mismatch (`batch_runner_version_mismatch`) or a runner version that is
+  absent or has no major.minor (`batch_runner_version_unknown`) the
+  preflight writes a klt error
   envelope to `report.json` and exits `87` **without running `klt sim`**. The
   client recovers it through the normal failed-job path, so every unit gets a
   `batch_job_failed` diagnostic with `runner_code` set to the code above, the
@@ -946,13 +970,14 @@ report a pass. Policy: **reject before simulating**.
   `hosts > 1`, so mixed-version shards stay distinguishable) always carries
   `runner_klt_version` (the runner's own version, or `null` when it could not
   be established -- never the client's), `client_klt_version`, and
-  `runner_compatibility` (`match` / `mismatch` / `unknown`). A non-`match`
+  `runner_compatibility` (`match` / `mismatch` / `unknown`; `unknown` also
+  when either version has no major.minor). A non-`match`
   value also carries `runner_compatibility_warning`. The report's
   `provenance.klt_version` stays the client's.
 - `batch.runner_version_check` (`"enforce"`, default, or `"warn"`) selects the
   behavior. `warn` runs the simulation anyway and only reports the skew in
-  `environment.remote`; use it deliberately (for example a development client
-  against a release image), because it is detection after execution and does
+  `environment.remote`; use it deliberately (for example a client on a newer
+  release than the image), because it is detection after execution and does
   not guarantee request options were honored.
 
 ```json
@@ -968,10 +993,12 @@ report a pass. Policy: **reject before simulating**.
 }
 ```
 
-Limits: version identity does not prove equivalent behavior between two
-differently built copies that share one version string. **Remediation:**
-update the runner image to the client's `klt` build, or submit from a client
-matching the image. Jobs that never reach a terminal state (`batch_poll_timeout`)
+Limits: a major.minor match does not prove equivalent behavior between two
+builds of one minor (a `0.7.1.devN+g<sha>` client or a `0.7.3` release can
+carry changes the `0.7.0` runner lacks; by the release discipline above, none
+of them may break the runner contract). **Remediation** on a mismatch:
+update the runner image to the client's minor, or submit from a client of the
+image's minor. Jobs that never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.
 
 ### Worker-observed environment (`worker_environment`, [#2834](https://github.com/2AMLogic/klayout-tools/issues/2834))
@@ -2407,6 +2434,103 @@ fails with `Unable to find definition of model …` and every corner errors.
 `klt characterize` forwards its own `options.osdi_preload` to this option
 (see [`characterize.md`](characterize.md)).
 
+## ASAP7 FinFET (BSIM-CMG) simulation
+
+Netlists from `klt extract --deck asap7` (FinFET, geometry-counted `NFIN`)
+simulate in ngspice with the ASAP7 BSIM-CMG models once ngspice has a
+BSIM-CMG OSDI module
+([#2814](https://github.com/2AMLogic/klayout-tools/issues/2814)). Stock
+ngspice has no BSIM-CMG: the pinned PDK's `level = 72` cards fail with
+`Only MOS device levels ... are supported in this binary`.
+
+**Provisioning.** `scripts/fetch-asap7-sim-toolchain.sh` (see
+[`pdks/README.md`](../../pdks/README.md)) fetches the CMC BSIM-CMG 111.0.0
+Verilog-A source (dwarning/VA-Models commit `6099b4e1...`, tarball sha256
+`357d6956...`), compiles it with the same pinned OpenVAF-Reloaded
+(`osdi_0.4-153-g2e066436`) as the SG13G2 flow, and load-verifies the module
+in the `ngspice` on `PATH` (`pre_osdi` + `devhelp` must list `bsimcmg_va`).
+It needs ngspice >= 44 built with OSDI and, for the pinned compiler, Linux
+x86-64 (elsewhere set `OPENVAF_R_BIN`). The `.osdi` lands in the ignored
+`pdks/asap7-sim/osdi/`; nothing fetched or built is tracked.
+
+**Card adaptation** (`klayout_tools.asap7_bsimcmg`, pure text-to-text):
+
+- `adapt_model_cards` rewrites `.model nmos_rvt nmos level = 72 ...` as
+  `.model nmos_rvt bsimcmg_va type=1 ...` (`type=-1` for pmos) and drops
+  `level` and `version` (the Verilog-A module has neither; the cards say
+  `version = 107`, the module is 111.0.0). All other parameters are carried
+  over verbatim. The module does not know `coremod`, `capmod` and `nseg`;
+  ngspice reports them as `unrecognized parameter ... - ignored`, so those
+  three have no effect. `corner_library` wraps the TT/FF/SS cards as
+  `.lib tt|ff|ss` sections, so `models.lib` plus `corners.process` makes a
+  multi-corner run an ordinary `klt sim` sweep.
+- `adapt_extracted_netlist` turns `M<name> d g s b <model> L=.. W=.. NFIN=..`
+  into the OSDI element `N<name> d g s b <model> L=.. NFIN=..`. BSIM-CMG has
+  no `W` (width is quantised by the fin count), so it is dropped; `NFIN` is
+  the **total** fin count and is passed through unchanged (an `NF=`/`FINGERS=`/
+  `AS`/`AD`/`PS`/`PD` on the card is refused, since BSIM-CMG's `NF` would
+  multiply `NFIN`). KLayout's `\$11` / `VDD$1` names become `11` / `VDD_1`.
+  The extractor's `M` card (`finfet_card`) is unchanged: it stays the
+  CDL-shaped card LVS compares. Measured: `NFIN=6` draws exactly twice the
+  drain current of `NFIN=3`.
+- The extracted cell's separate `VDD`/`VDD$1` (tap vs. source) and
+  `vsubs`/`VSS` pins are distinct nets; the testbench ties them.
+
+**Request.**
+
+```json
+"models": {"lib": "asap7_bsimcmg.lib"},
+"corners": {"process": ["tt", "ff", "ss"], "supply_v": {"vdd": [0.7]}, "temperature_c": [25]},
+"options": {"osdi_preload": ["pdks/asap7-sim/osdi/bsimcmg.osdi"]}
+```
+
+**Prerequisite failures are errors, never passes.** Without the module (or
+with an ngspice that cannot load it) every corner is `status: "error"` with
+a `prerequisite missing: ...` diagnostic naming the capability:
+`unsupported_model_level` (the `level = 72` line above),
+`osdi_abi_mismatch` (`NGSPICE only supports OSDI v0.3 but ...`, ngspice <
+44) or `osdi_load_failed` (`Library x.osdi couldn't be loaded`). A missing
+`.osdi` file is refused up front (`osdi_preload file not found`). The
+`unsupported_model_level` diagnostic suppresses the follow-on
+`model_bin_range` code, which would misattribute the failure to a width bin.
+`tests/test_asap7_bsimcmg_sim.py` skips with the missing capability named
+when the corpus, the module or a loading ngspice is absent.
+
+**Verification status (2026-10-13).** Verified end to end on a Linux x86-64
+host with ngspice-46 (KLU, OSDI ABI 0.4) after `scripts/fetch-pdks.sh` and
+`scripts/fetch-asap7-sim-toolchain.sh`; Xyce was not used. Provenance:
+
+| Item | Value |
+|------|-------|
+| Simulator | ngspice-46, `pre_osdi` + `devhelp` load of `bsimcmg_va` verified by the fetch script |
+| Compiler | OpenVAF-Reloaded `osdi_0.4-153-g2e066436` (sha256 `9c570bf8...`) |
+| Model source | BSIM-CMG 111.0.0, dwarning/VA-Models `6099b4e1`, tarball sha256 `357d6956...` |
+| Compiled module | `pdks/asap7-sim/osdi/bsimcmg.osdi`, sha256 `4e755d14e901a84600124be5cb73e36302117b6cfc694e52ffc17640945cd9e3` (also in `environment.osdi_preload`) |
+| Model cards | lambdapdk 0.2.17 `7nm_{TT,FF,SS}_160803.pm`, TT sha256 `684708eec0f7d5960be1df6a045de811c8dd2d6b0e1ed7d0f805a3f697f262fc` |
+
+Command: `pytest tests/test_asap7_bsimcmg_sim.py` (the extracted
+`INVx1_ASAP7_75t_R` / `NAND2xp5_ASAP7_75t_R` from `asap7sc7p5t_28_R.gds.gz`
+via `klt extract --deck asap7`, adapted, then `klt sim` transient with
+`options.osdi_preload`; Vdd = 0.7 V, 25 C, 1 fF load, input rising edge at
+~110 ps). Both extracted `M` cards (`L`, total `NFIN`, no `AS/AD/PS/PD`/`NF`)
+were accepted by the BSIM-CMG instance parameter set without changing
+`finfet_card`. Observed results (`tpd_fall` is input 50% to output 50% falling):
+
+| Cell | Corner | `vout_low` (V) | `vout_high` (V) | `tpd_fall` (ps) |
+|------|--------|----------------|-----------------|-----------------|
+| INVx1 | TT | 1.06e-7 | 0.7000 | 9.18 |
+| INVx1 | FF | 1.18e-7 | 0.7000 | 8.06 |
+| INVx1 | SS | 9.30e-8 | 0.7000 | 10.45 |
+| NAND2xp5 | TT | 2.84e-7 | 0.69996 | 11.82 |
+| NAND2xp5 | FF | 3.17e-7 | 0.69996 | 10.18 |
+| NAND2xp5 | SS | 2.51e-7 | 0.69995 | 13.93 |
+
+Rail-to-rail swing and the FF < TT < SS delay ordering hold for both
+topologies. This run executed locally through `klt sim` (the report's
+`environment.remote` was null); it is a six-simulation functional check, not
+a corner grid. A stock ngspice without the module still produces the
+`unsupported_model_level` diagnostic above.
+
 ## Corner axes
 
 - **`corners.process`** (`array<string | {"name": string, "sections":
@@ -3106,6 +3230,9 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
+| `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
+| `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
+| `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
 | `engine_killed`    | The engine process died from a signal the harness did not send (OOM killer, host reaper, reclaimed worker). `corners[].engine_killed_by_signal` names it (issue #2848). Always `error`; accepted by `options.fail_on_diagnostic`. A harness `timeout` is never reported this way. |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |

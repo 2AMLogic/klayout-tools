@@ -4076,7 +4076,10 @@ def _check_deck_hashes(
 
 
 def build_tier_report(
-    manifest: dict[str, Any], *, tiers_doc: str | Path | None = None
+    manifest: dict[str, Any],
+    *,
+    tiers_doc: str | Path | None = None,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Grade a block manifest against the T1-T4 evidence-tier item skeleton
     mechanically parsed from ``docs/design-evidence-tiers.md``
@@ -4104,6 +4107,14 @@ def build_tier_report(
     can compare it against the checklist it currently ships to catch a stale
     read, entirely as its own policy (this function only emits the hash, it
     never fails a report for a mismatch).
+
+    ``repo_root`` (``klt signoff --repo-root``, issue #2878) names the repo
+    root ``scope: "repo"`` input echoes resolve against, replacing the
+    default -- the nearest ``.git`` ancestor of the evidence file. Grading
+    evidence outside any git checkout (a source archive, a vendored copy, an
+    unpacked CI artifact) needs this to resolve repo-scoped citations at
+    all; with it absent, behaviour is exactly as before this parameter
+    existed. The caller validates the directory exists.
 
     ``manifest`` (JSON in)::
 
@@ -4671,6 +4682,7 @@ def build_tier_report(
                     evidence=evidence,
                     graded_by_build=graded_by_build,
                     power_port_policy=power_port_policy,
+                    repo_root=repo_root,
                 )
             else:
                 entry = _build_tier_item(
@@ -4688,6 +4700,7 @@ def build_tier_report(
                         t1_item["id"] in _ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE
                     ),
                     graded_by_build=graded_by_build,
+                    repo_root=repo_root,
                 )
             total += 1
             if entry["status"] == "met":
@@ -5304,7 +5317,10 @@ _INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
 
 
 def _resolve_input_artifact_value(
-    value: Any, spec: Mapping[str, Any], evidence_dir: str | None
+    value: Any,
+    spec: Mapping[str, Any],
+    evidence_dir: str | None,
+    repo_root: str | Path | None = None,
 ) -> list[str]:
     """Every filesystem path one input-artifact field's raw envelope
     ``value`` could mean **from this grading context** -- ``[]`` when the
@@ -5332,13 +5348,25 @@ def _resolve_input_artifact_value(
       ``layout.spice``) is only resolvable this way.
 
     The ``{path, scope}`` shape (issue #1261 -- `klt sim`'s ``netlist``,
-    `klt pex`'s ``layout``; issue #2403 -- a ``generic`` envelope's opt-in
-    ``provenance.input.path``) is resolved against the repo root discovered
+    `klt pex`'s ``layout``; issue #2879 -- `klt sta` schema 2's
+    ``def_path``/``verilog_path``; issue #2403 -- a ``generic`` envelope's
+    opt-in ``provenance.input.path``) is resolved against the repo root discovered
     from the evidence file's own location, which is what ``scope: "repo"``
     means by construction. ``scope: "external"`` carries no path at all (it
     is ``null`` on purpose, so a host-specific absolute path never lands in
     committed evidence) and is therefore unresolvable here -- correctly
     reported as "not verified" rather than guessed at.
+
+    ``repo_root`` (``klt signoff --repo-root``, issue #2878) names that root
+    explicitly and replaces the discovery: evidence graded outside any git
+    checkout (a source archive, a vendored copy, an unpacked CI artifact)
+    has no ``.git`` ancestor to find, so every repo-scoped path would be
+    unresolvable without it. The caller validates the directory exists --
+    an explicit root is never second-guessed by a ``.git`` walk here.
+
+    A plain absolute string (schema-1 `klt sta` evidence, issue #2879) is
+    tried only as written: it is never re-rooted by stripping a guessed host
+    prefix, so it verifies only where that exact path still exists.
     """
     candidates: list[str] = []
     if isinstance(value, str) and value:
@@ -5348,7 +5376,11 @@ def _resolve_input_artifact_value(
     elif isinstance(value, Mapping) and value.get("scope") == "repo":
         repo_relative = value.get("path")
         if isinstance(repo_relative, str) and repo_relative:
-            root = find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
+            root = (
+                repo_root
+                if repo_root is not None
+                else find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
+            )
             if root is not None:
                 candidates.append(os.path.join(root, repo_relative))
     return list(dict.fromkeys(candidates))
@@ -5359,6 +5391,7 @@ def _input_artifact_candidates(
     envelope: Mapping[str, Any],
     spec: Mapping[str, Any],
     evidence_file: str | None,
+    repo_root: str | Path | None = None,
 ) -> list[str]:
     """Every filesystem path the cited envelope's own input-artifact field
     (:data:`_INPUT_ARTIFACT_FIELDS`, or ``generic``'s opt-in
@@ -5379,7 +5412,7 @@ def _input_artifact_candidates(
         # The first *present* field decides: it is the one the producing run
         # hashed, so falling through to another on a failed resolution would
         # verify the wrong artifact.
-        return _resolve_input_artifact_value(value, spec, evidence_dir)
+        return _resolve_input_artifact_value(value, spec, evidence_dir, repo_root)
     if kind == "generic":
         # Issue #2403: a `generic` envelope names its own fields by
         # definition (`_INPUT_ARTIFACT_FIELDS` above has no entry for it),
@@ -5396,7 +5429,7 @@ def _input_artifact_candidates(
         )
         if isinstance(input_block, Mapping) and "path" in input_block:
             return _resolve_input_artifact_value(
-                input_block.get("path"), spec, evidence_dir
+                input_block.get("path"), spec, evidence_dir, repo_root
             )
     return []
 
@@ -5407,6 +5440,7 @@ def _verify_input_artifact(
     spec: Mapping[str, Any],
     recorded_hash: Any,
     evidence_file: str | None,
+    repo_root: str | Path | None = None,
 ) -> bool | None:
     """Whether the envelope's self-reported ``recorded_hash`` still matches
     the **input artifact it names** -- ``True``/``False``/``None``, the
@@ -5430,7 +5464,9 @@ def _verify_input_artifact(
     if not isinstance(recorded_hash, str) or not recorded_hash:
         return None
     read_any = False
-    for candidate in _input_artifact_candidates(kind, envelope, spec, evidence_file):
+    for candidate in _input_artifact_candidates(
+        kind, envelope, spec, evidence_file, repo_root
+    ):
         digest = sha256_file(candidate)
         if digest is None:
             continue
@@ -5440,18 +5476,97 @@ def _verify_input_artifact(
     return False if read_any else None
 
 
+def _pex_schematic_inputs(envelope: Mapping[str, Any]) -> list[tuple[str, Any, Any]]:
+    """``(role, path_value, recorded_digest)`` for every schematic-side
+    content identity a ``klt pex`` envelope records (issue #2875): per
+    testbench the request JSON, its simulation body and the schematic DUT,
+    plus the run's ``reference_netlist``. A digest the envelope does not
+    carry (every pre-#2875 envelope) yields no entry -- legacy envelopes keep
+    their layout-only verification, visibly lacking this one."""
+    found: list[tuple[str, Any, Any]] = []
+    testbenches = envelope.get("testbenches")
+    if isinstance(testbenches, list):
+        for index, entry in enumerate(testbenches):
+            if not isinstance(entry, Mapping):
+                continue
+            for role, path_key in (
+                ("request", "request"),
+                ("netlist", "netlist"),
+                ("schematic_netlist", "schematic_netlist"),
+            ):
+                digest = entry.get(f"{path_key}_sha256")
+                if isinstance(digest, str) and digest:
+                    found.append(
+                        (f"testbenches[{index}].{role}", entry.get(path_key), digest)
+                    )
+    digest = envelope.get("reference_netlist_sha256")
+    if isinstance(digest, str) and digest:
+        found.append(("reference_netlist", envelope.get("reference_netlist"), digest))
+    return found
+
+
+def _verify_pex_schematic_inputs(
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    evidence_file: str | None,
+    repo_root: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Re-hash each schematic-side input of a ``klt pex`` envelope (issue
+    #2875). One ``{role, path, sha256, status}`` per recorded digest, where
+    ``status`` is ``"verified"`` (a resolvable candidate re-hashed to the
+    recorded digest), ``"stale"`` (candidates were read and none matched) or
+    ``"unverifiable"`` (external/redacted path, or nothing readable from the
+    grading context). These roles are distinct from the layout's
+    ``content_hash`` and never feed layout-consistency comparisons."""
+    evidence_dir = (
+        os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
+    )
+    results: list[dict[str, Any]] = []
+    for role, path_value, recorded in _pex_schematic_inputs(envelope):
+        read_any = False
+        matched = False
+        for candidate in _resolve_input_artifact_value(
+            path_value, spec, evidence_dir, repo_root
+        ):
+            digest = sha256_file(candidate)
+            if digest is None:
+                continue
+            read_any = True
+            if f"sha256:{digest}" == recorded:
+                matched = True
+                break
+        results.append(
+            {
+                "role": role,
+                "path": path_value.get("path")
+                if isinstance(path_value, Mapping)
+                else path_value,
+                "sha256": recorded,
+                "status": "verified"
+                if matched
+                else ("stale" if read_any else "unverifiable"),
+            }
+        )
+    return results
+
+
 def _grade_evidence(
     spec: dict[str, Any],
     *,
     require_post_layout: bool = False,
     allowed_kinds: set[str] | None = None,
     item_id: int | None = None,
+    repo_root: str | Path | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
     and return ``(status, reason, citation, failure_detail)``.
 
     ``failure_detail`` names any critical metrics that invalidated evidence;
     the citation remains absent for every unmet item.
+
+    ``repo_root`` (``klt signoff --repo-root``, issue #2878) is forwarded to
+    :func:`_resolve_evidence` -- an explicitly named repo root replaces the
+    ``.git``-ancestor discovery for ``scope: "repo"`` input echoes.
 
     ``status`` is ``"met"`` or ``"unmet"``. ``reason`` is ``None`` when
     ``status == "met"``, otherwise one of the ``_REASON_*`` constants
@@ -5539,7 +5654,7 @@ def _grade_evidence(
     artifact-anchored (:data:`_REASON_UNANCHORED_EVIDENCE` otherwise) and its
     named artifact must re-hash to the pinned hash -- see that constant.
     """
-    resolution, reason = _resolve_evidence(spec)
+    resolution, reason = _resolve_evidence(spec, repo_root)
     if resolution is None:
         return "unmet", reason, None, {}
 
@@ -5728,8 +5843,33 @@ def _generic_artifact_binding(
     return binding
 
 
+def _fold_pex_schematic_inputs(
+    envelope: dict[str, Any],
+    spec: dict[str, Any],
+    file_label: str | None,
+    input_verified: bool | None,
+    repo_root: str | Path | None = None,
+) -> tuple[list[dict[str, Any]] | None, bool | None]:
+    """Verify a ``pex`` envelope's schematic-side inputs (issue #2875) and
+    fold the per-role statuses into ``input_verified``.
+
+    Returns ``(pex_inputs, input_verified)``; ``pex_inputs`` is ``None`` when
+    there is nothing to report and ``input_verified`` is then unchanged.
+    """
+    checked_inputs = _verify_pex_schematic_inputs(envelope, spec, file_label, repo_root)
+    if not checked_inputs:
+        return None, input_verified
+    statuses = {item["status"] for item in checked_inputs}
+    if input_verified is False or "stale" in statuses:
+        return checked_inputs, False
+    if input_verified is True and statuses == {"verified"}:
+        return checked_inputs, True
+    return checked_inputs, None
+
+
 def _resolve_evidence(
     spec: dict[str, Any],
+    repo_root: str | Path | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve one normalized evidence ``spec`` to the envelope it names,
     without grading it -- returns ``(resolution, None)`` on success, or
@@ -5742,6 +5882,11 @@ def _resolve_evidence(
     item's single citation goes through -- rather than a parallel
     reimplementation that could drift from it -- while still applying its
     own, item-specific pass rules to the resolved envelopes.
+
+    ``repo_root`` (``klt signoff --repo-root``, issue #2878) is forwarded to
+    the input-artifact resolution: an explicitly named repo root replaces
+    the ``.git``-ancestor discovery for every ``scope: "repo"`` input echo
+    this resolution verifies.
 
     The ``resolution`` dict carries everything a caller needs to both grade
     and cite the evidence: ``envelope`` (the parsed JSON object), ``kind``
@@ -5862,7 +6007,16 @@ def _resolve_evidence(
         # against the artifact the envelope names. Disclosure only -- see
         # this module's "Input-artifact verification" docstring section.
         input_verified = _verify_input_artifact(
-            check_kind, envelope, spec, actual_hash, file_label
+            check_kind, envelope, spec, actual_hash, file_label, repo_root
+        )
+
+    # Issue #2875: a `pex` envelope also pins the schematic side of its
+    # comparison. Verified per role and folded into `input_verified` so a
+    # changed resolvable input can never keep a fully verified citation.
+    pex_inputs: list[dict[str, Any]] | None = None
+    if check_kind == "pex":
+        pex_inputs, input_verified = _fold_pex_schematic_inputs(
+            envelope, spec, file_label, input_verified, repo_root
         )
 
     return (
@@ -5876,6 +6030,7 @@ def _resolve_evidence(
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
             "input_verified": input_verified,
+            "pex_inputs": pex_inputs,
         },
         None,
     )
@@ -5900,6 +6055,11 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
+    # Issue #2875: per-role verification of a `pex` envelope's schematic-side
+    # inputs (request, body, DUT, reference netlist). Present only when the
+    # cited envelope records those digests; legacy envelopes omit it.
+    if resolution.get("pex_inputs"):
+        citation["pex_inputs"] = resolution["pex_inputs"]
     # Issue #2002: a `drc` citation also carries the three `coverage` fields
     # item 3's doc text requires the claim to disclose -- so the disclosure a
     # claim owes and the numbers it owes it about are in the same artifact.
@@ -5992,6 +6152,7 @@ def _build_tier_item(
     allowed_kinds: set[str] | None = None,
     require_post_layout: bool = False,
     graded_by_build: bool = True,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
     :func:`build_tier_report`'s docstring for the full met/unmet rule and
@@ -6086,6 +6247,7 @@ def _build_tier_item(
                 require_post_layout=require_post_layout,
                 allowed_kinds=allowed_kinds,
                 item_id=item_id,
+                repo_root=repo_root,
             )
             opt_in_items = (
                 _OPT_IN_KIND_ITEMS.get(citation["kind"]) if status == "met" else None
@@ -6129,7 +6291,10 @@ def _build_tier_item(
 
 
 def build_fleet_report(
-    fleet: dict[str, Any], *, tiers_doc: str | Path | None = None
+    fleet: dict[str, Any],
+    *,
+    tiers_doc: str | Path | None = None,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Grade every block in a **fleet manifest** against the T1-T4 item
     skeleton (:func:`build_tier_report`, called once per block) and reduce
@@ -6140,7 +6305,10 @@ def build_fleet_report(
 
     ``tiers_doc`` is forwarded verbatim to every per-block
     :func:`build_tier_report` call, so one roll-up always grades every block
-    against the same doc.
+    against the same doc. ``repo_root`` (``klt signoff --repo-root``,
+    issue #2878) is forwarded the same way: one roll-up resolves every
+    block's ``scope: "repo"`` citations against the same explicitly named
+    root.
 
     ``fleet`` (JSON in)::
 
@@ -6354,7 +6522,9 @@ def build_fleet_report(
                 "canary in the roll-up"
             )
 
-        tier_report = build_tier_report(manifest, tiers_doc=tiers_doc)
+        tier_report = build_tier_report(
+            manifest, tiers_doc=tiers_doc, repo_root=repo_root
+        )
         blocking_item = _blocking_t1_item(tier_report["items"])
         if tier_report["tier"] == "T1":
             t1_count += 1
@@ -6564,7 +6734,11 @@ def _check_signoff_report(
 
 
 def check_tier_report(
-    report_path: str, manifest: dict[str, Any], *, tiers_doc: str | None = None
+    report_path: str,
+    manifest: dict[str, Any],
+    *,
+    tiers_doc: str | None = None,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --manifest M --check REPORT`` (issue #2249): verify that
     a previously committed tier report at ``report_path`` still reproduces
@@ -6596,12 +6770,16 @@ def check_tier_report(
     or one that is not a tier report at all -- never a traceback.
     """
     committed = _load_committed_signoff_report(report_path, "items", "--manifest")
-    fresh = build_tier_report(manifest, tiers_doc=tiers_doc)
+    fresh = build_tier_report(manifest, tiers_doc=tiers_doc, repo_root=repo_root)
     return _check_signoff_report(report_path, committed, fresh)
 
 
 def check_fleet_report(
-    report_path: str, fleet: dict[str, Any], *, tiers_doc: str | None = None
+    report_path: str,
+    fleet: dict[str, Any],
+    *,
+    tiers_doc: str | None = None,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --fleet F --check REPORT`` (issue #2249): the
     :func:`check_tier_report` contract, one level up -- verify a committed
@@ -6618,7 +6796,7 @@ def check_fleet_report(
     as at the top level, and the ``title`` its reduced item views carry.
     """
     committed = _load_committed_signoff_report(report_path, "blocks", "--fleet")
-    fresh = build_fleet_report(fleet, tiers_doc=tiers_doc)
+    fresh = build_fleet_report(fleet, tiers_doc=tiers_doc, repo_root=repo_root)
     return _check_signoff_report(report_path, committed, fresh)
 
 

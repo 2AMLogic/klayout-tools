@@ -210,6 +210,26 @@ before is still valid and still means what it meant. Neither command's
 `schema_version` moved. See `docs/cli/gen-compose.md`'s "Which hint the
 advisory reads, and the two legitimate violations (#2638)".
 
+**An opt-in flag that changes reported *values* adds its disclosure fields,
+never retypes the old ones.** `klt extract --rename-declared-pins` (issue
+#2854) renames surviving promoted pin nets to their declared names, which
+changes what `nets[].name`/`devices[].nets[...]`/the written `.SUBCKT`
+report for those nets — but only when the flag is given, and without
+touching any field's name, type, or meaning. The disclosure is additive on
+three surfaces at once: a `warnings[]` entry per aggregate (renames) and
+per finding (the `declared_pin_short`/`declared_pin_rename_collision`
+cases), the `null`-unless-given `pin_renames` block, and the
+always-present boolean `rename_declared_pins` echo (so `--check --rerun`
+can replay the rename from it plus the `pin_renames.declared_pins`/
+`pin_renames.def_pins` echoes of the two original declared sets). `klt pex`
+echoes the passthrough as `extraction.rename_declared_pins` (`false` when
+the flag was not given), and `klt lvs` gained the optional request field
+`layout.rename_declared_pins` plus one new `mismatches[].category` value
+(`pin.declared_short`) — each additive under the rules above, no
+`schema_version` bump on any of the three commands. See
+`docs/cli/extract.md`'s "Renaming promoted pins to their declared name"
+section.
+
 **Not every field a verb reports is a cross-build contract at all** — some
 are extractor/engine-internal bookkeeping with no meaning outside the one
 run that produced them (e.g. `klt extract`'s `net_id`/anonymous `$N`
@@ -1040,7 +1060,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
 | `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
-| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,schematic_netlist}` | 2 | #1261 |
+| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875) |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
@@ -1048,13 +1068,13 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `drc` | `file` (the hashed input layout; both engines) | 3 | #2659 |
 | `extract` | `file` (the hashed input layout; both response builders) | 4 (`run_extract_klayout_engine`: 2) | #2659 |
 | `lvs` | `layout` (the hashed layout side — **not** `reference`) | 2 | #2659 |
+| `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 
 **Plain-string fields** — intentionally unchanged:
 
 | Command | Field(s) | `SCHEMA_VERSION` |
 |---|---|---|
 | `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` | 1 |
-| `sta` | `def_path`, `verilog_path`, `spef_path` | 1 |
 | `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
 | `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 4 |
 | `lvs` | `reference` (pinned by `environment.reference_sha256`, not `provenance.input` — see issue #2659 above) | 2 |
@@ -1502,6 +1522,13 @@ the exit code alone is authoritative.
   | Command | `error.code` | Meaning |
   |---------|--------------|---------|
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_runner_version_unknown` | `--backend batch`: the runner's `klt` version could not be read; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_poll_timeout` | `--backend batch`: the job did not finish within the client's poll budget. It may still finish on the runner; nothing was collected. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_job_failed` | `--backend batch`: the job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted and, if that error carried an `error.code`, the runner's code is passed through in place of `batch_job_failed`. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_job_timeout` | `--backend batch`: the fleet harness stopped the job at its `timeout_seconds` (`--timeout-s` plus headroom). See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_input_too_large` | `--backend batch`: the input tree's uncompressed size is above the batch cap. Raised before any archive is built or anything is uploaded. Not retryable without shrinking the tree. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `extract` | `finfet_malformed_geometry` | A FinFET deck (`--deck asap7`) found device geometry it refuses to approximate (no crossing fin, clipped fin, wrong gate length, missing select, VT conflict, ...). `error.message` lists each finding with its bounding box. Not retryable: the layout must change. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `extract` | `finfet_dbu_mismatch` | A FinFET deck was run on a layout whose database unit differs from the deck's; it is refused rather than rescaled. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `pex`, `sim`, `place-and-route` | `outdir_locked` | Another cooperating `klt` run owns this run's persistent output directory (or an ancestor/descendant of it). Exit `1`, empty stdout. Transient: retry after the owner finishes. See "Output-directory ownership" below. |
@@ -1669,3 +1696,15 @@ violation (issue #2029).
 
 See `src/klayout_tools/cli/layers_cmd.py` and `docs/cli/layers.md` for a
 worked example.
+
+### `klt pex` schematic-side content digests (issue #2875)
+
+`klt pex` adds `testbenches[].{request_sha256,netlist_sha256,
+schematic_netlist_sha256}`, `testbenches[].netlist` and
+`reference_netlist_sha256` (`sha256:<64 lowercase hex>`). This is an
+**additive** change, so `SCHEMA_VERSION` stays `2`: no existing field changed
+shape, and consumers must already ignore unknown fields. These are distinct
+roles from `provenance.input.content_hash` (the layout) and must not take
+part in layout-consistency comparisons; `klt signoff` verifies them per role
+(`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
+See [`cli/pex.md`](cli/pex.md).

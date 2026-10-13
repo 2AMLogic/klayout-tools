@@ -14,6 +14,45 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
+  extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in
+  ngspice-46 with the pinned OpenVAF-Reloaded-compiled BSIM-CMG 111.0.0 OSDI
+  module; simulator build, hashes and results are documented in
+  `docs/cli/sim.md`. Docs only; no code change.
+
+- **`klt techmap` / `klt wave` find their native binary under a redirected
+  cargo target dir** (issue #3189): the `klt-techmap` / `klt-wave` lookup
+  only checked `native/<crate>/target/`, so a binary built with
+  `CARGO_TARGET_DIR` set, or under a cargo-config `build.target-dir`, was
+  reported as "not built". The lookup now also checks `$CARGO_TARGET_DIR`
+  and the target directory `cargo metadata` reports. It still never builds.
+- **`klt extract --rename-declared-pins`** (issue #2854): opt-in rename of
+  surviving promoted pin nets to their declared names. `--pins`/`--def-pins`
+  reconciliation only *demotes* — a surviving pin net whose conductor carries
+  several drawn labels (a macro's internal node label plus the parent's
+  boundary label) keeps KLayout's joined name (`VGND|g_vss_m1|...|vss`), the
+  declared name being only one component, so `klt lvs`'s
+  `options.anchor_top_level_pins` (which matches pin names exactly) could
+  never pair it with a reference pin named `vss`. With the flag, a pin net
+  whose component labels contain exactly one declared name is renamed to it
+  (`.SUBCKT` header, `nets[]`, and every downstream consumer carry the
+  declared spelling); a net matching 2+ declared names is reported — a short
+  between interface pins — never repaired (`error`-severity
+  `declared_pin_short` finding, mirrored as `ERROR:` in `warnings`, and as a
+  `pin.declared_short` `mismatches[]` entry in `klt lvs`); a rename colliding
+  with an existing net name is skipped and reported
+  (`declared_pin_rename_collision`). Disclosed via `warnings` plus the
+  additive `pin_renames` response field; the always-present
+  `rename_declared_pins` echo plus the `pin_renames.declared_pins`/
+  `def_pins` echoes of the two original declared sets let
+  `--check --rerun` replay the rename *and* both demotion passes (the sets
+  are not interchangeable — `--def-pins`'s demotion only further restricts
+  what `--pins` kept, and it alone runs the `def_pin_promotion` report).
+  Plumbed through `klt pex
+  --rename-declared-pins` (echoed as `extraction.rename_declared_pins`) and
+  `klt lvs`'s `layout.rename_declared_pins` (a boolean; requires
+  `layout.declared_pins`). Default off — byte-identical output; the flag
+  without `--pins`/`--def-pins` is a clean error. No `schema_version` bump.
 - **`klt sim --batch-set a.json b.json ...`** (issue #2869): submit a set of
   independent `backend: batch` requests in one invocation, with at most
   `--max-in-flight` (default 4) in flight and the rest queued. Reuses
@@ -88,6 +127,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   instead of the static base. Field names and types are unchanged, so no
   `schema_version` bump; see `docs/cli/version.md`. Release managers now bump
   `base-version` instead of `[project] version` (`RELEASING.md`).
+
+- **`klt netlist --backend batch` and `$KLT_NETLIST_BACKEND`** (issue #3182):
+  the xschem export can run on the batch runner, through `klt sim`'s S3 job
+  transport and runner-version preflight. Precedence is `--backend` >
+  `$KLT_NETLIST_BACKEND` > `local`, with no step back to local for a single
+  unit. The client uploads only the git-tracked files under the schematic's
+  checkout (or `--batch-root`), capped at 64 MiB uncompressed. A PDK-relative
+  `--rcfile '$PDK_ROOT/...'` resolves on the runner. `--check` compares on
+  the client. Every batch failure is exit 1 with the job id and an
+  `error.code` (`batch_no_capacity`, `batch_runner_version_mismatch`,
+  `batch_poll_timeout`, `batch_job_failed`, `batch_job_timeout`,
+  `batch_input_too_large`), never a local fallback. Additive: a new
+  `environment.remote` object on batch runs only. See `docs/cli/netlist.md`
+  "Batch backend".
+- **`klt netlist --check` no longer reports `drifted` for a different
+  checkout path** (issue #3010). The comparison ignores the directories in
+  xschem's `** sch_path:` / `** sym_path:` comments (file names still
+  compare). New additive `drift.path_comments_differ` field. Generation is
+  unchanged.
+
 - **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
   unequal top-circuit pin counts yield `status: mismatch` with a new
   `pin.count` error finding (both counts in `details`). Default unchanged;
@@ -131,6 +190,19 @@ not `klt --version`, if you need to detect this kind of drift. See
   reasons in `asap7_rules.NOT_IMPLEMENTED` and `docs/cli/drc.md` (#3147,
   #3155, #3156). Additive: no existing rule id changes.
 
+- **`klt sim`: ASAP7 BSIM-CMG OSDI simulation of extracted netlists, and
+  missing-capability diagnostics** (issue #2814, part of #2761): new
+  `scripts/fetch-asap7-sim-toolchain.sh` compiles a commit- and
+  checksum-pinned CMC BSIM-CMG Verilog-A source to an OSDI module in the
+  ignored `pdks/asap7-sim/` store and load-verifies it in the ngspice on
+  `PATH`. `klayout_tools.asap7_bsimcmg` adapts the lambdapdk `level = 72`
+  cards and the extracted `M` cards (`L`, total `NFIN`, no `W`/`NF`) to the
+  module. `klt sim` gains three additive diagnostic codes,
+  `unsupported_model_level`, `osdi_abi_mismatch` and `osdi_load_failed`
+  (selectable in `options.fail_on_diagnostic`), each worded `prerequisite
+  missing: ...`; the first suppresses the misleading follow-on
+  `model_bin_range`. No `schema_version` bump.
+
 - **`klt sta`: per-corner constraint completeness** (issue #2780): every
   response and every `corners[]` entry carries an additive
   `constraint_completeness` block. It reports `unconstrained_endpoints` and
@@ -143,6 +215,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   output, reports `unavailable` with `count: null`, never `0`. Samples are
   capped at 20 pins with explicit truncation. Slack fields, `timing_status` and
   violation counts are unchanged. No `schema_version` bump.
+
+- **`klt lvs`: ASAP7 FinFET compare** (issue #2813, part of #2761): a
+  `layout.deck` of `asap7` is no longer refused. The reference reader
+  preserves and validates `nfin=` on `M` cards, `NFIN` is compared exactly
+  (and `L` to 1e-5 um) on both sides, and options that could relax the
+  compare (`parameter_tolerance`, `compare_parameters`, `combine_devices*`,
+  non-`plain-element` reference forms, the netgen engine, pre-extracted
+  layout netlists) are refused. Additive: opt-in `options.finfet_bulk`
+  (`{"nmos": <net>, "pmos": <net>}`, echoed under `options.finfet_bulk`,
+  `null` when omitted) and the new `device.finfet_bulk_tied` warning
+  category disclosing every applied bulk tie. The pinned RVT corpus passes
+  191 cells; 11 folded-stack cells are listed as unsupported and 6
+  series-order cells are adjudicated as reference-vs-layout topology
+  differences (see `docs/cli/lvs.md`, "FinFET decks"). The shared JSON
+  envelope is unchanged.
 
 - **`klt lef-abstract`: structural self-check of the emitted LEF** (issue
   #2769): after writing, the command reads the file back from disk and
