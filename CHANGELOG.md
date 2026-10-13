@@ -55,6 +55,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   `vin`); the LDO entry's recorded `vout_v` at the 3.0 V corner is corrected
   from 1.80324 V (actually the 3.3 V nominal) to 1.80264 V.
 
+- **ASAP7 FinFET extraction assigns source/drain deterministically**
+  (issue #3154): a channel's two S/D neighbours used to be taken in a
+  merged KLayout region's iteration order, which differs between the macOS
+  and Linux `klayout` wheels, so the same GDS could extract with `s`/`d`
+  (and the SPICE card's D/S pins) exchanged depending on the host. The
+  neighbour whose bbox sorts first by `(left, bottom, right, top)` is now
+  always the source. S/D interchange stays electrically legal for LVS; only
+  the reported orientation changes, and only on hosts that were iterating in
+  the other order.
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time
   from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the

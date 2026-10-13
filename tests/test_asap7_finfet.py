@@ -36,6 +36,7 @@ from klayout_tools.extract_finfet import (
     CODE_DBU_MISMATCH,
     CODE_MALFORMED,
     FinFETGeometryError,
+    _ordered_source_drain,
     extract_finfet_netlist,
     finfet_device_class,
 )
@@ -231,6 +232,21 @@ def test_fin_count_and_gate_length_recovered_exactly(tmp_path, polarity, fins):
         "d": "D",
         "b": "vsubs" if polarity == "n" else "VB",
     }
+
+
+def test_source_drain_order_is_geometric_not_iteration_order():
+    """Issue #3154: S/D used to follow a merged Region's iteration order,
+    which differs between the macOS and Linux klayout wheels. The
+    assignment must be the same whichever order the neighbours arrive in."""
+    left = kdb.Polygon(kdb.Box(0, 0, 50, 100))
+    right = kdb.Polygon(kdb.Box(100, 0, 150, 100))
+    assert _ordered_source_drain([left, right]) == (left, right)
+    assert _ordered_source_drain([right, left]) == (left, right)
+    # Vertically stacked neighbours (a rotated device) tie on `left`; the
+    # lower one is the source.
+    low = kdb.Polygon(kdb.Box(0, 0, 100, 50))
+    high = kdb.Polygon(kdb.Box(0, 100, 100, 150))
+    assert _ordered_source_drain([high, low]) == (low, high)
 
 
 def test_parallel_fingers_merge_with_nfin_summed(tmp_path):
