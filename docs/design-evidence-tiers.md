@@ -668,6 +668,33 @@ written to every block.
       `provenance.devices` before treating a clean `erc.supply_short` read
       as covered by auto-detection rather than a hand-declaration that
       happens to be present.
+    - **Port accessibility — PROVISIONAL, not yet in force** (issue #2839;
+      operator ruling 2AMLogic/product#134, amendment text drafted in
+      2AMLogic/product PR #168 and awaiting the two-key ratification). Every
+      supply the cited `klt erc` spec declares must be published as an
+      **edge-accessible boundary port** and named in a **machine-readable
+      abstract**: (1) a `klt socket-check` envelope whose `power_ports`
+      facts show, for each declared supply, a `POWER`/`GROUND` pin of that
+      name with drawn conductor under its label lying within the edge band
+      of a counted outline edge with a clear approach channel (no other
+      conductor on its layer between it and the edge), on an allowed layer;
+      and (2) a `klt lef-abstract` envelope whose LEF carries a `PIN` of the
+      same name with `USE POWER`/`USE GROUND` matching the port, a drawn
+      `PORT` on the same layer touching the port, and a `SIZE` equal to the
+      outline. Parameters, with their provisional defaults, are set per
+      block in the `klt signoff` manifest's `power_ports` object: the edge
+      band (`edge_band_um`, default `0` — the port must touch the outline;
+      the draft proposes one minimum metal pitch), the counted edges (all
+      four), and the allowed layers (default: any layer that resolves to a
+      LEF routing layer, the draft's recommendation). Until ratification
+      `klt signoff` grades this clause only for a block that opts in
+      (`power_ports.required: true`, or port evidence cited in item 11's
+      list), after the ERC/LVS rules above are proven, rendering
+      `power_port_unproven`, `no_edge_power_port`,
+      `power_port_interior_only`, `power_port_layer_disallowed`,
+      `lef_power_pin_missing` or `lef_power_pin_mismatch` when it fails —
+      see `docs/cli/signoff.md` → "Item 11 port accessibility". Not graded
+      yet: one port per declared island of a multi-island supply.
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 

@@ -1900,7 +1900,7 @@ in the 990-999 range — see [`docs/cli/layers.md`](layers.md) → "Semantics
 and guarantees" and [`docs/cli/stats.md`](stats.md) → "Semantics and
 guarantees".
 
-## ASAP7 deck (`--engine klayout`, issue #2760)
+## ASAP7 deck (`--engine klayout`, issues #2760, #2810)
 
 klt ships its own KLayout DRC-DSL deck for the open ASAP7 7 nm predictive
 FinFET PDK, because the pinned lambdapdk (v0.2.17) ships the ASAP7 Design
@@ -1913,18 +1913,26 @@ it is installed with the package, next to its declared rule-id list
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file src/klayout_tools/decks/asap7.drc \
-    --expect-rule-categories 106 --format json
+    --expect-rule-categories 232 --format json
 ```
 
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
 tree (#2759) but not a deck inside it, so pass `--deck-file`. The output is
 the standard `--engine klayout` envelope described in "Engine" above.
 
-**Phase 1 (this deck today): FEOL and MOL.** It checks DRM Tables 3.1.1
-(geometry) to 3.10.3 (LIG) and V0 width/connectivity from Tables 3.11.1-2.
-BEOL (M1-M9, V1-V9 and the remaining V0 rules) is #2810; density checks and
-the full shipped-cell clean-run gate are #2811; the FEOL/MOL rules listed
-under "Not implemented" below are #2812.
+**Scope today: FEOL, MOL and BEOL M1-M9 / V0-V9.** Phase 1 (#2760) checks
+DRM Tables 3.1.1 (geometry) to 3.10.3 (LIG) and V0 width/connectivity from
+Tables 3.11.1-2. Phase 2 (#2810) adds the BEOL stack: `V0.LIG.A.1`, M1-M3
+(Table 3.12.1), V1-V3 (Table 3.13.1), M4-M7 (Tables 3.14.1-3.14.2 and
+3.16.1-3.16.2), V4-V7 (Tables 3.15.1 and 3.17.1), M8-M9 (Tables
+3.18.1-3.18.2) and V8-V9 (Table 3.19.1), and applies
+`GEOMETRY.NONORTHOGONAL` to every BEOL drawing layer. Every other rule in
+Tables 3.1-3.19 is listed under "Not implemented" below with its reason and
+tracking issue: the track- and enclosure-relative V0-V3 rules are #3147,
+the track-, net- and M8-direction-dependent M4-M7 / V4-V7 rules are #3155,
+the ambiguous M8-M9 wide-metal spacings and the PAD-dependent V9 rules are
+#3156, and the FEOL/MOL gaps are #2812. Density checks and the full
+shipped-cell clean-run gate are #2811.
 
 **Source.** Every rule is transcribed from the ASAP7 PDK Design Rule Manual,
 PDK Release 1p7 (`asap7_drm_201207a.pdf`, under
@@ -1949,10 +1957,12 @@ test cross-checks the deck against the fetched `.lyp`.
 
 Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
-well" (section 3.7), the mirrored rule substitutes the layer name. These
-106 ids are declared once, in `asap7_rules.RULES`; renaming or dropping one
-is a breaking change, and a test fails if the deck, that list, the fixtures
-or this table drift apart. Pass `--expect-rule-categories 106` so that a deck
+well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
+rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
+substitutes the layer name. These 232 ids are declared once, in
+`asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
+test fails if the deck, that list, the fixtures or this table drift apart.
+Pass `--expect-rule-categories 232` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
 
@@ -1972,19 +1982,76 @@ which silently drops a category fails the run (exit 1) instead of reporting
 | Table 3.10.2 | `LIG.GATE.S.9A`, `LIG.GATE.S.9B`, `LIG.GATE.S.10`, `LIG.GCUT.S.11`, `LIG.A.1`, `LIG.LISD.A.2`, `LIG.GATE.A.3`, `LIG.GATE.AUX.1` |
 | Table 3.10.3 | `LIG.LISD.OV.1`, `LIG.GATE.EX.1` |
 | Table 3.11.1 | `V0.W.1` |
-| Table 3.11.2 | `V0.AUX.1` |
+| Table 3.11.2 | `V0.AUX.1`, `V0.LIG.A.1` |
+| Table 3.12.1 | `M1.W.1`, `M1.S.1`, `M1.S.2`, `M1.S.3`, `M1.S.4`, `M1.S.5`, `M1.S.6`, `M1.A.1`, `M2.W.1`, `M2.S.1`, `M2.S.2`, `M2.S.3`, `M2.S.4`, `M2.S.5`, `M2.S.6`, `M2.A.1`, `M3.W.1`, `M3.S.1`, `M3.S.2`, `M3.S.3`, `M3.S.4`, `M3.S.5`, `M3.S.6`, `M3.A.1` |
+| Table 3.13.1 | `V1.W.1`, `V1.AUX.1`, `V2.W.1`, `V2.AUX.1`, `V3.W.1`, `V3.AUX.1`, `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2` |
+| Table 3.14.1 | `M4.W.1`, `M4.W.2`, `M4.W.3`, `M4.W.5`, `M4.S.1`, `M4.S.2`, `M5.W.1`, `M5.W.2`, `M5.W.3`, `M5.W.5`, `M5.S.1`, `M5.S.2` |
+| Table 3.14.2 | `M4.AUX.1`, `M4.AUX.2`, `M4.AUX.3`, `M5.AUX.1`, `M5.AUX.2`, `M5.AUX.3` |
+| Table 3.15.1 | `V4.S.1`, `V4.S.3`, `V4.AUX.1`, `V5.S.1`, `V5.S.3`, `V5.AUX.1`, `V4.W.1`, `V5.W.1`, `V4.M5.AUX.2`, `V5.M6.AUX.2`, `V4.M4.EN.1`, `V4.M5.EN.2`, `V5.M5.EN.1`, `V5.M6.EN.2` |
+| Table 3.16.1 | `M6.W.1`, `M6.W.2`, `M6.W.3`, `M6.W.5`, `M6.S.1`, `M6.S.2`, `M7.W.1`, `M7.W.2`, `M7.W.3`, `M7.W.5`, `M7.S.1`, `M7.S.2` |
+| Table 3.16.2 | `M6.AUX.1`, `M6.AUX.2`, `M6.AUX.3`, `M7.AUX.1`, `M7.AUX.2`, `M7.AUX.3` |
+| Table 3.17.1 | `V6.S.1`, `V6.S.3`, `V6.AUX.1`, `V7.S.1`, `V7.S.3`, `V7.AUX.1`, `V6.W.1`, `V6.M7.AUX.2`, `V6.M6.EN.1`, `V6.M7.EN.2`, `V7.M7.EN.1`, `V7.M8.EN.2` |
+| Table 3.18.1 | `M8.W.1`, `M8.W.2`, `M8.W.3`, `M8.W.4`, `M8.W.5`, `M8.S.1`, `M8.S.2`, `M8.S.3`, `M9.W.1`, `M9.W.2`, `M9.W.3`, `M9.W.4`, `M9.W.5`, `M9.S.1`, `M9.S.2`, `M9.S.3` |
+| Table 3.18.2 | `M8.A.1`, `M8.L.1`, `M9.A.1`, `M9.L.1` |
+| Table 3.19.1 | `V8.W.1`, `V8.S.1`, `V8.S.2`, `V9.W.1`, `V9.S.1`, `V9.S.2`, `V8.M8.EN.1`, `V8.M9.EN.2`, `V9.M9.EN.1`, `V8.AUX.1` |
 
 ### Approximations
 
 | Rule id | DRM table | How it differs from the DRM text |
 | --- | --- | --- |
-| `GEOMETRY.NONORTHOGONAL` | Table 3.1.1 | applied to the FEOL/MOL layers only until the BEOL phase (#2810) |
+| `GEOMETRY.NONORTHOGONAL` | Table 3.1.1 | applied to every drawing layer the deck reads (FEOL, MOL, M1-M9, V0-V9); the PAD layer is not read |
 | `FIN.S.1` | Table 3.3.1 | exact pitch checked edge-to-edge for minimum-width shapes: neighbours closer than two pitches must sit exactly one pitch apart; alignment of shapes two or more pitches apart is not checked |
 | `GATE.S.1` | Table 3.4.1 | exact pitch checked edge-to-edge for minimum-width shapes: neighbours closer than two pitches must sit exactly one pitch apart; alignment of shapes two or more pitches apart is not checked |
 | `GATE.S.3` | Table 3.4.1 | centre-to-centre distance checked as edge-to-edge spacing <= 34 nm, exact for 20 nm GATE (GATE.W.1) |
 | `SDT.ACTIVE.AUX.2` | Table 3.8.1 | 'coincide' read as 'lies on and overlaps an ACTIVE horizontal edge', per Fig. 3.8.1(d), which accepts SDT overhanging ACTIVE horizontally |
 | `LIG.LISD.OV.1` | Table 3.10.3 | any LIG/LISD overlap is treated as 'connected together' |
 | `V0.W.1` | Table 3.11.1 | stated along the M1 length; checked in both directions (V0 is as wide as M1 across the track per V0.M1.AUX.3) |
+| `M1.S.6` | Table 3.12.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
+| `M2.S.6` | Table 3.12.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
+| `M3.S.6` | Table 3.12.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
+| `V1.W.1` | Table 3.13.1 | stated along the M2 length; checked in both directions (the via is as wide as M2 across the track per V1.M2.AUX.2) |
+| `V2.W.1` | Table 3.13.1 | stated along the M3 length; checked in both directions (the via is as wide as M3 across the track per V2.M3.AUX.2) |
+| `V3.W.1` | Table 3.13.1 | stated along the M4 length; checked in both directions (the via is as wide as M4 across the track per V3.M4.AUX.2) |
+| `V3.M3.EN.1` | Table 3.13.1 | stated by Table 3.13.1 note 2 |
+| `M4.W.3` | Table 3.14.1 | even multiples are enumerated up to the W.2 maximum; wider shapes are reported by M4.W.2 only |
+| `M4.AUX.1` | Table 3.14.2 | uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
+| `M4.AUX.2` | Table 3.14.2 | applied to rectangles exactly W.1 wide across the track; uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
+| `M5.W.3` | Table 3.14.1 | even multiples are enumerated up to the W.2 maximum; wider shapes are reported by M5.W.2 only |
+| `M5.AUX.1` | Table 3.14.2 | uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
+| `M5.AUX.2` | Table 3.14.2 | applied to rectangles exactly W.1 wide across the track; uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
+| `M6.W.3` | Table 3.16.1 | even multiples are enumerated up to the W.2 maximum; wider shapes are reported by M6.W.2 only |
+| `M6.AUX.1` | Table 3.16.2 | uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
+| `M6.AUX.2` | Table 3.16.2 | applied to rectangles exactly W.1 wide across the track; uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
+| `M7.W.3` | Table 3.16.1 | even multiples are enumerated up to the W.2 maximum; wider shapes are reported by M7.W.2 only |
+| `M7.AUX.1` | Table 3.16.2 | uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
+| `M7.AUX.2` | Table 3.16.2 | applied to rectangles exactly W.1 wide across the track; uses the DRM's default metal-grid offset of 0 nm (note 1); a layout built with a non-zero offset is not supported |
+| `V4.S.1` | Table 3.15.1 | checked between any two vias whatever their nets: the same-net (S.1) and different-net (V4.S.2) thresholds are equal, so different-net pairs are reported under S.1 |
+| `V4.S.3` | Table 3.15.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
+| `V5.S.1` | Table 3.15.1 | checked between any two vias whatever their nets: the same-net (S.1) and different-net (V5.S.2) thresholds are equal, so different-net pairs are reported under S.1 |
+| `V5.S.3` | Table 3.15.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
+| `V6.S.1` | Table 3.17.1 | checked between any two vias whatever their nets: the same-net (S.1) and different-net (V6.S.2) thresholds are equal, so different-net pairs are reported under S.1 |
+| `V6.S.3` | Table 3.17.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
+| `V7.S.1` | Table 3.17.1 | checked between any two vias whatever their nets: the same-net (S.1) and different-net (V7.S.2) thresholds are equal, so different-net pairs are reported under S.1 |
+| `V7.S.3` | Table 3.17.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
+| `V4.W.1` | Table 3.15.1 | checked on the via's bounding box |
+| `V5.W.1` | Table 3.15.1 | checked on the via's bounding box |
+| `V6.W.1` | Table 3.17.1 | the DRM says 'along the length of M5'; read as M7, the metal V6 lands on (V6.M7.AUX.2); checked on the via's bounding box |
+| `V4.M4.EN.1` | Table 3.15.1 | the DRM says 'on two opposite sides'; read like 'at least two opposite sides' (Fig. 3.15.1(b)): either opposite pair may meet the minimum |
+| `V5.M5.EN.1` | Table 3.15.1 | the DRM says 'on two opposite sides'; read like 'at least two opposite sides' (Fig. 3.15.1(b)): either opposite pair may meet the minimum |
+| `V6.M7.EN.2` | Table 3.17.1 | the DRM says 'on two opposite sides'; read like 'at least two opposite sides' (Fig. 3.15.1(b)): either opposite pair may meet the minimum |
+| `V7.M8.EN.2` | Table 3.17.1 | the DRM says 'on two opposite sides'; read like 'at least two opposite sides' (Fig. 3.15.1(b)): either opposite pair may meet the minimum |
+| `M8.W.2` | Table 3.18.1 | a shape's length is the longer side of its bounding box |
+| `M8.W.3` | Table 3.18.1 | a shape's length is the longer side of its bounding box |
+| `M8.W.4` | Table 3.18.1 | a shape's length is the longer side of its bounding box |
+| `M8.W.5` | Table 3.18.1 | the DRM prints the operator of this maximum as '>='; read as '<=' |
+| `M8.L.1` | Table 3.18.2 | feature length read as polygon edge length (no definition in the DRM) |
+| `M9.W.2` | Table 3.18.1 | a shape's length is the longer side of its bounding box |
+| `M9.W.3` | Table 3.18.1 | a shape's length is the longer side of its bounding box |
+| `M9.W.4` | Table 3.18.1 | a shape's length is the longer side of its bounding box |
+| `M9.W.5` | Table 3.18.1 | the DRM prints the operator of this maximum as '>='; read as '<=' |
+| `M9.L.1` | Table 3.18.2 | feature length read as polygon edge length (no definition in the DRM) |
+| `V8.S.2` | Table 3.19.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
+| `V9.S.2` | Table 3.19.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
 
 Related notes:
 
@@ -1998,49 +2065,99 @@ Related notes:
   neighbouring shapes, not against an absolute grid origin.
 - **Multi-patterning.** FIN (SAQP) and GATE (SADP) are multi-patterned
   (Table 2.1.1), but their tables state no same-mask/different-mask spacing,
-  so phase 1 needs no colouring. The SADP/LELE BEOL layers are #2810.
+  so they need no colouring. M1-M3 and V0-V3 are single-exposure EUV (Table
+  2.3.1). M4-M7 (SADP) and V4-V7 (LELE) are multi-patterned, but the DRM
+  tables do not split any threshold by mask either: `M4.S.1` / `M4.S.2`
+  (and their M5-M7 counterparts) hold "regardless of the edge lengths and
+  mask colors", and the V4-V7 spacings are stated per net, not per mask. So
+  no rule here is approximated for want of colouring; what M4-M7 do need is
+  routing-track assignment (W.4, S.3-S.5), listed under "Not implemented".
+- **Routing direction and grid (M4-M7).** The DRM fixes the routing
+  direction per layer (M4 and M6 horizontal, M5 and M7 vertical; sections
+  3.14 and 3.16), so "vertical" / "horizontal" widths and spacings are
+  checked as stated, swapped for M5 / M7. `AUX.1` (edges on the 24 / 32 nm
+  grid) and `AUX.2` (minimum-width shapes on the 2N x W.1 tracks) use the
+  DRM's default grid offset of 0 nm (note 1); a layout built with a
+  non-zero offset is not supported. Because every edge across the track
+  sits on that grid, a width or spacing one dbu below its minimum also
+  trips `AUX.1`; the fixtures expect both ids for those cases.
+- **M8-M9 wide-metal spacing.** `M8.S.4`-`M8.S.8` (and M9) condition the
+  spacing on "one of the edges" being 60-80, 80-120, ... 1000+ nm. Read as
+  edge lengths, `M8.S.5`-`M8.S.8` would override `M8.S.1` (two edges >= 80
+  nm need 40 nm) for every edge it covers, and `M8.S.4` (60 nm for a 60-80
+  nm edge) would override `M8.S.2` (43 nm) and `M8.S.3` (46 nm) for every
+  such edge. The intended reading is a width class the DRM does not state;
+  they are not checked (#3156).
+- **Via enclosure.** `V2.M2.EN.1`, `V3.M3.EN.1`, `V3.M4.EN.2` and the
+  V4-V9 enclosure rules ("on (at least) two opposite sides") flag a via only
+  when its enclosure is short on the left/right pair *and* on the top/bottom
+  pair, so they need no routing direction; a coincident edge is a 0 nm
+  enclosure. `V1.M1.EN.1` ("5 & 2")
+  and `V(x).M(x+1).EN.2` ("(5 & 5) | (5 & 0)") pair a threshold with a
+  specific side and are not checked yet (#3147).
+- **Shipped-cell BEOL.** The pinned standard cells draw M1, V1 and M2 (and
+  V0), so the M1/M2/V1 rules run against them; they are clean under every
+  BEOL rule here. They draw nothing on M3-M9 or V2-V9, so those rules are
+  exercised by the generated fixtures only.
 
 ### Not implemented
 
-DRM rules in the phase-1 tables that the deck does not check yet:
+DRM rules in Tables 3.1-3.19 that the deck does not check yet. Rows group
+ids that share a table, reason and tracking issue. Section 3.13 extends the
+V1 rules to V2 and V3 (and note 2 adds `V3.M3.EN.1`); sections 3.14-3.19 do
+the same for M5, V5, M7, V7, M9 and V9, whose V9 enclosure is by PAD.
+Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 
-| Rule id | DRM table | Reason | Tracked by |
+| Rule ids | DRM table | Reason | Tracked by |
 | --- | --- | --- | --- |
 | `GATE.AUX.2` | Table 3.4.1 | the DRM gives no distance bound to check against | #2812 |
 | `ACTIVE.W.2` | Table 3.5.1 | integer-multiple width has no modulo predicate in the DRC DSL | #2812 |
 | `ACTIVE.S.2A` | Table 3.5.1 | needs net connectivity (different-net spacing) | #2812 |
-| `SRAM.ACTIVE.WELL.S.5` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.ACTIVE.WELL.EN.2` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.ACTIVE.A.2A` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.ACTIVE.A.2B` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.ACTIVE.AUX.2` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.ACTIVE.WELL.S.5`, `SRAM.ACTIVE.WELL.EN.2` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.ACTIVE.A.2A`, `SRAM.ACTIVE.A.2B`, `SRAM.ACTIVE.AUX.2` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `ACTIVE.AUX.3` | Table 3.5.2 | the DRM gives no distance bound to check against | #2812 |
 | `ACTIVE.LUP.1` | Table 3.5.2 | latch-up distance (30 um) needs tap/device classification | #2812 |
-| `SRAM.NSELECT.ACTIVE.EN.3` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.NSELECT.ACTIVE.EN.4` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.NSELECT.ACTIVE.EN.3`, `SRAM.NSELECT.ACTIVE.EN.4` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SDT.W.3` | Table 3.8.1 | integer-multiple width has no modulo predicate in the DRC DSL | #2812 |
-| `SRAM.SDT.W.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.SDT.ACTIVE.OV.3` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.SDT.LISD.OV.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.LISD.S.4` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.LISD.AUX.1` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `LIG.LISD.S.6` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
-| `LIG.LISD.S.7` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
-| `LIG.SDT.S.8` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
+| `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `LIG.LISD.S.6`, `LIG.LISD.S.7`, `LIG.SDT.S.8` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
 | `SRAM.LIG.GATE.A.4` | Table 3.10.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.LIG.AUX.2` | Table 3.10.3 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.LIG.GATE.OV.2` | Table 3.10.3 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `V0.S.1` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.S.2` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.S.3` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.S.4` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.M1.EN.1` | Table 3.11.1 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.LISD.EN.2` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.LISD.EN.3` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.LIG.EN.4` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.LIG.A.1` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.LIG.AUX.2` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
-| `V0.M1.AUX.3` | Table 3.11.2 | defined against M1 tracks or as an exact enclosure; lands with the M1 rules | #2810 |
+| `SRAM.LIG.AUX.2`, `SRAM.LIG.GATE.OV.2` | Table 3.10.3 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
+| `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
+| `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
+| `V0.M1.EN.1` | Table 3.11.1 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
+| `V0.LISD.EN.2`, `V0.LISD.EN.3` | Table 3.11.2 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
+| `V0.LIG.EN.4` | Table 3.11.2 | 'on two opposite sides' with a per-side minimum (V0.LIG.EN.4 1 nm of LIG past V0) needs the LIG routing direction to pick the side pair | #3147 |
+| `V0.LIG.AUX.2` | Table 3.11.2 | edge parallel to the LIG length needs the LIG routing direction | #3147 |
+| `V0.M1.AUX.3` | Table 3.11.2 | exact width across the metal track needs the metal routing direction | #3147 |
+| `V1.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
+| `V1.S.2`, `V1.S.3`, `V1.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
+| `V1.M2.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
+| `V1.M1.EN.1`, `V1.M2.EN.2` | Table 3.13.1 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
+| `V2.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
+| `V2.S.2`, `V2.S.3`, `V2.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
+| `V2.M3.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
+| `V2.M3.EN.2` | Table 3.13.1 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
+| `V3.S.1` | Table 3.13.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
+| `V3.S.2`, `V3.S.3`, `V3.S.4` | Table 3.13.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
+| `V3.M4.AUX.2` | Table 3.13.1 | exact width across the metal track needs the metal routing direction | #3147 |
+| `M4.W.4`, `M4.S.3`, `M4.S.4`, `M4.S.5` | Table 3.14.1 | defined against the routing tracks (adjacent tracks, number of tracks spanned); the deck has no per-shape track assignment | #3155 |
+| `M4.AUX.4` | Table 3.14.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
+| `M5.W.4`, `M5.S.3`, `M5.S.4`, `M5.S.5` | Table 3.14.1 | defined against the routing tracks (adjacent tracks, number of tracks spanned); the deck has no per-shape track assignment | #3155 |
+| `M5.AUX.4` | Table 3.14.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
+| `M6.W.4`, `M6.S.3`, `M6.S.4`, `M6.S.5` | Table 3.16.1 | defined against the routing tracks (adjacent tracks, number of tracks spanned); the deck has no per-shape track assignment | #3155 |
+| `M6.AUX.4` | Table 3.16.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
+| `M7.W.4`, `M7.S.3`, `M7.S.4`, `M7.S.5` | Table 3.16.1 | defined against the routing tracks (adjacent tracks, number of tracks spanned); the deck has no per-shape track assignment | #3155 |
+| `M7.AUX.4` | Table 3.16.2 | 'wide' is not defined, and with the default 0 nm offset every multiple of the AUX.1 grid is a track edge, so the rule has no checkable reading | #3155 |
+| `V4.S.2`, `V5.S.2` | Table 3.15.1 | needs net connectivity to tell different-net pairs from same-net ones; the threshold equals S.1's, and the deck's net-independent S.1 check reports these pairs | #3155 |
+| `V6.S.2`, `V7.S.2` | Table 3.17.1 | needs net connectivity to tell different-net pairs from same-net ones; the threshold equals S.1's, and the deck's net-independent S.1 check reports these pairs | #3155 |
+| `V7.W.1`, `V7.M8.AUX.2` | Table 3.17.1 | stated along / across the M8 length, but the DRM gives no M8 routing direction (Table 3.18.1 is direction-free) | #3155 |
+| `M8.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
+| `M8.S.5`, `M8.S.6`, `M8.S.7`, `M8.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
+| `M9.S.4` | Table 3.18.1 | read literally (edge length) it overrides M8.S.2-S.3: an edge of 60-80 nm would need 60 nm, so S.2's 43 nm and S.3's 46 nm could never apply to it; the intended width-class reading is not stated | #3156 |
+| `M9.S.5`, `M9.S.6`, `M9.S.7`, `M9.S.8` | Table 3.18.2 | read literally (edge length) they override M8.S.1-S.3: every edge of 80 nm or more would need 80-1000 nm, so S.1's 40 nm could never apply; the intended width-class reading is not stated | #3156 |
+| `V9.PAD.EN.2`, `V9.AUX.1` | Table 3.19.1 | PAD (DRM mask 96) is not a layer of the pinned asap7.lyp, so the deck does not read it | #3156 |
 
 ### Shipped standard cells
 
@@ -2066,8 +2183,12 @@ set changes:
 
 `tests/helpers/asap7_drc_fixtures.py` generates, for every rule id, at
 least one failing layout that trips that id and one passing layout drawn at
-the threshold boundary (one 0.25 nm dbu away from the failing one). All
-cases share one GDS, one 5 um slot each, written to a temp directory, so one
+the threshold boundary (one 0.25 nm dbu away from the failing one; where
+the threshold is a Euclidean distance with no point on the 0.25 nm grid,
+the two cases straddle it by one dbu). All cases share one GDS, one
+5.376 um slot each (a multiple of the M4-M7 grids, so the absolute-grid
+rules see the same coordinates in every slot), written to a temp
+directory, so one
 `klayout` run checks them all. CI runs them in the `asap7-drc-deck` job of
 `.github/workflows/ci.yml`, which installs the `klayout` binary the `test`
 job does not have. A case expects exactly `{rule}` (fail) or
@@ -2079,7 +2200,10 @@ cases list the extra ids and say why, for example:
 - a GCUT within 4 nm of the channel shortens the cut gate's extension past
   ACTIVE (`GATE.ACTIVE.EX.1`);
 - SDT edges lie on ACTIVE edges and SDT lies inside LISD, so a short SDT also
-  breaks `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2` and `ACTIVE.W.1`.
+  breaks `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2` and `ACTIVE.W.1`;
+- an M4-M7 width or spacing one dbu below its minimum puts an edge off the
+  `AUX.1` grid, and the W.2 maximum (20 x W.1) is itself an even multiple
+  that `W.3` forbids.
 
 ## Limitation: whole-layout, flattened
 

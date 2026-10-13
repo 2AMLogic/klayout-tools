@@ -74,6 +74,7 @@ real failure.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -87,7 +88,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any
 
-from . import env_provenance, sim_steps
+from . import env_provenance, output_lock, sim_steps
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -1191,6 +1192,27 @@ def _validate_save_mode(options: dict[str, Any]) -> tuple[str, bool]:
     return value, True
 
 
+def _own_persistent_roots(
+    ownership: contextlib.ExitStack,
+    artifacts_dir: str,
+    plot_dir: str | None,
+    *,
+    persistent: bool,
+) -> None:
+    """Enter the output-directory lock for each persistent root (#2770).
+
+    Roots are taken outermost first (shortest canonical path), so a
+    ``plot_dir`` that contains ``artifacts_dir`` (or vice versa) is owned
+    once and the inner one re-enters for free instead of self-contending.
+    """
+    roots = ([artifacts_dir] if persistent else []) + (
+        [plot_dir] if plot_dir is not None else []
+    )
+    for root in sorted(map(output_lock.canonical_dir, roots), key=len):
+        ownership.enter_context(output_lock.hold_output_dir(root))
+
+
+@output_lock.owns_run
 def run_sim(
     request_path: str,
     *,
@@ -1203,6 +1225,7 @@ def run_sim(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the PVT corner matrix declared by the request at ``request_path``.
 
@@ -1392,6 +1415,17 @@ def run_sim(
     the sweep from starting at all (bad request, unresolvable netlist/model
     library, unsupported engine, unknown backend) -- once the sweep starts,
     every corner is reported in the response, including ones that error.
+
+    **Output-directory ownership (issue #2770).** A run that writes
+    persistent artifacts -- ``options.keep_artifacts``, ``resume``, a
+    ``plot_dir``, or an off-host (``remote``/``batch``) backend that collects
+    results locally -- owns ``artifacts_dir`` (and ``plot_dir``) for its
+    lifetime through :func:`klayout_tools.output_lock.hold_output_dir`; a
+    competing cooperating run raises
+    :class:`~klayout_tools.output_lock.OutputDirLockedError`. A run that
+    only uses temporary directories takes no lock. Ownership of an ancestor
+    (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
+    internal: the exit stack that releases the lock when the run ends.
     """
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
@@ -1738,6 +1772,15 @@ def run_sim(
     # incrementally -- if this run is itself interrupted, only the corners
     # actually completed here are lost from the next resume, not the whole
     # sweep.
+    # Issue #2770: own every persistent artifact root before the first write
+    # to it. Temporary-only runs (no keep_artifacts/resume/plots, local
+    # backends) never touch `artifacts_dir`, so they take no lock.
+    _own_persistent_roots(
+        _ownership,
+        artifacts_dir,
+        plot_dir,
+        persistent=bool(keep_artifacts or resume or backend in _OFFHOST_BACKENDS),
+    )
     checkpoint_path = _checkpoint_path(artifacts_dir)
     pre_completed: dict[str, dict[str, Any]] = {}
     loaded_engine_version: str | None = None
@@ -4595,6 +4638,8 @@ def _corner_measurement_results(
         )
     measurement_results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
+    meas_errors = {} if is_xyce else _parse_meas_errors(log_text)
+    attributed: set[str] = set()
     for spec in measurements_spec:
         name = spec["name"]
         value = _harvest_measurement_value(measurement_values, spec, is_xyce=is_xyce)
@@ -4609,12 +4654,13 @@ def _corner_measurement_results(
                     "margin": None,
                 }
             )
+            message = _no_value_message(spec, save_mode=save_mode)
+            cause = meas_errors.get(str(name).lower()) if spec.get("spice") else None
+            if cause is not None:
+                attributed.add(str(name).lower())
+                message += f" -- ngspice reported: {cause}"
             diagnostics.append(
-                {
-                    "severity": "error",
-                    "code": "measurement",
-                    "message": _no_value_message(spec, save_mode=save_mode),
-                }
+                {"severity": "error", "code": "measurement", "message": message}
             )
             continue
         # `_grade_measurement_value` owns the plausibility-pre-check ->
@@ -4631,7 +4677,51 @@ def _corner_measurement_results(
             }
         )
         diagnostics.extend(grading_diagnostics)
+    # Corner-level fallback (issue #2826): engine `.meas` errors that could
+    # not be tied to a missing result by name are still surfaced, as a
+    # warning so grading is unchanged, but only when something is missing.
+    if diagnostics and any(d["code"] == "measurement" for d in diagnostics):
+        unattributed = [
+            f"{n}: {t}" for n, t in meas_errors.items() if n not in attributed
+        ]
+        if unattributed:
+            diagnostics.append(
+                {
+                    "severity": "warning",
+                    "code": "measurement",
+                    "message": "ngspice reported .meas errors not matched to a "
+                    "missing measurement: "
+                    + "; ".join(unattributed[:_MEAS_ERROR_MAX_ENTRIES]),
+                }
+            )
     return measurement_results, diagnostics, {}
+
+
+#: ngspice's own ``.meas`` failure line, e.g.
+#: ``Error: measure  bad  when(WHEN) : Expressions like 0.5*1.62 are not
+#: supported.`` (verified on ngspice-46). Group 1 is the card's (lower-cased)
+#: name, group 2 the engine's reason.
+_MEAS_ERROR_RE = re.compile(
+    r"^\s*Error:\s*measure\s+(\S+)\s+\S+\s*:\s*(.+?)\s*$", re.MULTILINE
+)
+_MEAS_ERROR_MAX_ENTRIES = 5
+_MEAS_ERROR_MAX_CHARS = 200
+
+
+def _parse_meas_errors(log_text: str) -> dict[str, str]:
+    """``{lower-cased measurement name: bounded ngspice error text}`` for the
+    ``.meas`` failures the ngspice log names (first one per name wins; at
+    most :data:`_MEAS_ERROR_MAX_ENTRIES` entries, each truncated). An unknown
+    log format simply yields an empty map -- the generic message stands."""
+    errors: dict[str, str] = {}
+    for match in _MEAS_ERROR_RE.finditer(log_text or ""):
+        if len(errors) >= _MEAS_ERROR_MAX_ENTRIES:
+            break
+        text = match.group(2)
+        if len(text) > _MEAS_ERROR_MAX_CHARS:
+            text = text[: _MEAS_ERROR_MAX_CHARS - 3] + "..."
+        errors.setdefault(match.group(1).lower(), text)
+    return errors
 
 
 def _harvest_measurement_value(

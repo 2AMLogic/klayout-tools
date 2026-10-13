@@ -382,12 +382,14 @@
         "klayout_tools._text",
         "klayout_tools._vendor",
         "klayout_tools._vendor.mutation_variants",
+        "klayout_tools._version_scheme",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.design_evidence_tiers",
         "klayout_tools.lef_header",
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
+        "klayout_tools.output_lock",
         "klayout_tools.verilog_netlist"
       ]
     },
@@ -935,6 +937,11 @@
       "consumer": "signoff",
       "exporter": "env_provenance",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "socket_check",
+      "reason": "Issue #2839: T1 item 11 re-grades a cited klt socket-check envelope's power_ports facts with the verb's own public grading function (grade_power_ports/assess_power_port), so the verb and signoff can never disagree about edge accessibility."
     },
     {
       "consumer": "sim",
