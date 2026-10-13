@@ -932,12 +932,36 @@ report a pass. Policy: **reject before simulating**.
 - Every job command starts with a client-generated shell preflight that uses
   only `klt --version` (so it works on images that predate any new request
   key). It records the runner's build string in `outputs/runner_identity.json`
-  and compares it with the client's `klt --version` by **exact string
-  equality**. Anything else is not treated as compatible: a numerically newer
-  runner, a development build (`+g<sha>`, `.dirty`, `+unknown`) against a
-  release, or an unparseable/absent version.
-- On a mismatch (`batch_runner_version_mismatch`) or an unreadable runner
-  version (`batch_runner_version_unknown`) the preflight writes a klt error
+  and compares it with the client's `klt --version` by **major.minor**
+  ([#3184](https://github.com/2AMLogic/klayout-tools/issues/3184)): the
+  first two components of the release segment, which is the version with its
+  PEP 440 local part (`+...`) and any pre/dev/post suffix removed. Patch
+  releases, `.devN` builds and `+g<sha>` local builds all count as the same
+  version as their major.minor. The strings klt produces are:
+
+  | build | `klt --version` | major.minor | against a `0.7.0` runner |
+  |---|---|---|---|
+  | clean tree on the `v0.7.0` tag | `0.7.0` | `0.7` | match |
+  | any commit after `v0.7.0` | `0.7.1.devN+g<sha>` | `0.7` | match |
+  | either of the above, uncommitted changes | `...+g<sha>.dirty` | `0.7` | match |
+  | no git facts | `0.7.0.dev0+unknown` | `0.7` | match |
+  | patch release | `0.7.3` | `0.7` | match (either direction) |
+  | next minor, released or in development | `0.8.0`, `0.8.0.devN+g<sha>` | `0.8` | **mismatch, exit 87** |
+
+  A version whose release segment has fewer than two components (for
+  example `7`) has no major.minor and counts as unknown. Both full build
+  strings are kept in `runner_identity.json`, the mismatch message and
+  `environment.remote`.
+
+  The rule depends on a release discipline: **a change that breaks the
+  runner contract ships in a minor release, never a patch, and every minor
+  release is published to PyPI and gets a rebaked runner image.** The
+  accepted cost is that a dev client can send request keys that the runner's
+  release of the same minor does not have; such changes belong in the next
+  minor.
+- On a mismatch (`batch_runner_version_mismatch`) or a runner version that is
+  absent or has no major.minor (`batch_runner_version_unknown`) the
+  preflight writes a klt error
   envelope to `report.json` and exits `87` **without running `klt sim`**. The
   client recovers it through the normal failed-job path, so every unit gets a
   `batch_job_failed` diagnostic with `runner_code` set to the code above, the
@@ -946,13 +970,14 @@ report a pass. Policy: **reject before simulating**.
   `hosts > 1`, so mixed-version shards stay distinguishable) always carries
   `runner_klt_version` (the runner's own version, or `null` when it could not
   be established -- never the client's), `client_klt_version`, and
-  `runner_compatibility` (`match` / `mismatch` / `unknown`). A non-`match`
+  `runner_compatibility` (`match` / `mismatch` / `unknown`; `unknown` also
+  when either version has no major.minor). A non-`match`
   value also carries `runner_compatibility_warning`. The report's
   `provenance.klt_version` stays the client's.
 - `batch.runner_version_check` (`"enforce"`, default, or `"warn"`) selects the
   behavior. `warn` runs the simulation anyway and only reports the skew in
-  `environment.remote`; use it deliberately (for example a development client
-  against a release image), because it is detection after execution and does
+  `environment.remote`; use it deliberately (for example a client on a newer
+  release than the image), because it is detection after execution and does
   not guarantee request options were honored.
 
 ```json
@@ -968,10 +993,12 @@ report a pass. Policy: **reject before simulating**.
 }
 ```
 
-Limits: version identity does not prove equivalent behavior between two
-differently built copies that share one version string. **Remediation:**
-update the runner image to the client's `klt` build, or submit from a client
-matching the image. Jobs that never reach a terminal state (`batch_poll_timeout`)
+Limits: a major.minor match does not prove equivalent behavior between two
+builds of one minor (a `0.7.1.devN+g<sha>` client or a `0.7.3` release can
+carry changes the `0.7.0` runner lacks; by the release discipline above, none
+of them may break the runner contract). **Remediation** on a mismatch:
+update the runner image to the client's minor, or submit from a client of the
+image's minor. Jobs that never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.
 
 ### Worker-observed environment (`worker_environment`, [#2834](https://github.com/2AMLogic/klayout-tools/issues/2834))
