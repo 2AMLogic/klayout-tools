@@ -25,7 +25,8 @@ provenance fields:
   :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`TerminalRelation`,
   :class:`CapacitorDevice`,
   :class:`CapacitorFlavour`, :class:`MomCapacitorDevice`,
-  :class:`DiodeDevice`, :class:`LayerExpr`, :class:`InvalidLabelLayerError`).
+  :class:`DiodeDevice`, :class:`LayerExpr`, :class:`SizeFilter`,
+  :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
   (:class:`LayerRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
@@ -54,6 +55,7 @@ from .extraction import (
     ResistorDevice,
     ResistorFlavour,
     TerminalRelation,
+    SizeFilter,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
@@ -85,6 +87,7 @@ __all__ = [
     "ResistorFlavour",
     "RuleProvenance",
     "TerminalRelation",
+    "SizeFilter",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
     "deck_names",

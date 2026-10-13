@@ -166,6 +166,7 @@ from .decks import (
     InvalidDeckOptionError,
     InvalidLabelLayerError,
     ParasiticsDeck,
+    SizeFilter,
     UnknownExtractionDeckError,
     deck_source_path,
     get_extraction_deck,
@@ -6612,6 +6613,82 @@ def _diode_near_miss_warning(
     )
 
 
+def _size_bounds_dbu(rng: tuple[float, float], unit: float) -> tuple[int, int]:
+    """Convert an inclusive ``(lo, hi)`` range in ``unit``-sized steps into
+    KLayout's half-open integer ``[lo, hi + 1)`` bounds (round to nearest)."""
+    return round(rng[0] / unit), round(rng[1] / unit) + 1
+
+
+def _apply_size_filter(region: kdb.Region, size: SizeFilter, dbu: float) -> kdb.Region:
+    """Keep the polygons of ``region`` satisfying every dimension of ``size``
+    (issue #2861). Bounds are rounded to the nearest dbu (area: dbu^2) and
+    are inclusive at both ends -- see :class:`SizeFilter`."""
+    out = region
+    if size.bbox_min_um is not None:
+        lo, hi = _size_bounds_dbu(size.bbox_min_um, dbu)
+        out = out.with_bbox_min(lo, hi, False)
+    if size.bbox_max_um is not None:
+        lo, hi = _size_bounds_dbu(size.bbox_max_um, dbu)
+        out = out.with_bbox_max(lo, hi, False)
+    if size.area_um2 is not None:
+        lo, hi = _size_bounds_dbu(size.area_um2, dbu * dbu)
+        out = out.with_area(lo, hi, False)
+    return out
+
+
+def _validate_bipolar_size_filters(bipolars: tuple[BipolarDevice, ...]) -> None:
+    """Reject two ``BipolarDevice`` entries that share ``base``/``marker``/
+    ``emitter`` and narrowing but whose ``emitter_size`` ranges overlap: a
+    window matching both flavours would be ambiguous (issue #2861)."""
+    sized = [b for b in bipolars if b.emitter_size is not None]
+    for i, a in enumerate(sized):
+        for b in sized[i + 1 :]:
+            if (
+                a.base,
+                a.marker,
+                a.emitter,
+                a.emitter_requires,
+                a.emitter_excludes,
+            ) != (b.base, b.marker, b.emitter, b.emitter_requires, b.emitter_excludes):
+                continue
+            assert a.emitter_size is not None and b.emitter_size is not None
+            if a.emitter_size.overlaps(b.emitter_size):
+                raise ExtractError(
+                    f"bipolar entries '{a.class_name}' and '{b.class_name}' "
+                    "share base/marker/emitter and have overlapping "
+                    "emitter_size ranges -- a window matching both is ambiguous"
+                )
+
+
+def _collect_bipolar_size_warnings(
+    groups: dict[tuple, list[kdb.Region]],
+    matched: dict[tuple, list[kdb.Region]],
+    dbu: float,
+) -> list[str]:
+    """One ``warnings[]`` line per marked emitter window that no
+    ``emitter_size``-bearing entry of its flavour group matched (issue
+    #2861). Such a window produced no device."""
+    import klayout.db as kdb
+
+    warnings: list[str] = []
+    for key, pre_regions in groups.items():
+        candidates = pre_regions[0]
+        claimed = kdb.Region()
+        for region in matched[key]:
+            claimed = claimed + region
+        for poly in candidates.not_interacting(claimed).each():
+            box = poly.bbox()
+            warnings.append(
+                "bipolar emitter window matches no emitter_size flavour "
+                f"(bbox {box.left * dbu:g},{box.bottom * dbu:g} "
+                f"{box.right * dbu:g},{box.top * dbu:g} um; "
+                f"{box.width() * dbu:g} x {box.height() * dbu:g} um, "
+                f"area {poly.area() * dbu * dbu:g} um^2) -- no device "
+                "extracted"
+            )
+    return warnings
+
+
 def _collect_diode_near_miss_warnings(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -7406,6 +7483,8 @@ def _extract_bipolar_device(
     top_cell: kdb.Cell,
     bipolar: BipolarDevice,
     dummy: kdb.Region,
+    size_groups: dict[tuple, list[kdb.Region]],
+    size_matched: dict[tuple, list[kdb.Region]],
 ) -> tuple[
     tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region, kdb.Region | None],
     int,
@@ -7413,7 +7492,8 @@ def _extract_bipolar_device(
     """Resolve, register and extract one ``deck.bipolars`` entry; returns its
     ``(base, emitter, collector, substrate, substrate_layer)`` regions (for
     the connectivity wiring in :func:`_extract_netlist`) and its
-    dummy-dropped count.
+    dummy-dropped count. ``size_groups``/``size_matched`` are caller-owned
+    bookkeeping for ``emitter_size`` entries (issue #2861).
 
     An entry with no terminal relation takes :func:`_bipolar_legacy_regions`
     and is handed to ``DeviceExtractorBJT3Transistor`` exactly as before
@@ -7452,6 +7532,21 @@ def _extract_bipolar_device(
         base, emitter, collector, dropped = _bipolar_legacy_regions(
             layout, top_cell, bipolar, dummy
         )
+    if bipolar.emitter_size is not None:
+        # Measure whole windows, not fragments split by the base edge
+        # (issue #2861); the pre-filter and size-matched regions are
+        # recorded for `_collect_bipolar_size_warnings`.
+        emitter = emitter.merged()
+        group_key = (
+            bipolar.base,
+            bipolar.marker,
+            bipolar.emitter,
+            bipolar.emitter_requires,
+            bipolar.emitter_excludes,
+        )
+        size_groups.setdefault(group_key, []).append(emitter)
+        emitter = _apply_size_filter(emitter, bipolar.emitter_size, layout.dbu)
+        size_matched.setdefault(group_key, []).append(emitter)
     l2n.register(base, f"{bipolar.class_name}_base")
     l2n.register(emitter, f"{bipolar.class_name}_emitter")
     l2n.register(collector, f"{bipolar.class_name}_collector")
@@ -8415,12 +8510,26 @@ def _extract_netlist(
             kdb.Region | None,
         ]
     ] = []
+    _validate_bipolar_size_filters(deck.bipolars)
+    # Size-filter bookkeeping (issue #2861): per flavour group, the narrowed
+    # pre-filter emitter and each entry's size-matched emitter.
+    bipolar_size_groups: dict[tuple, list[kdb.Region]] = {}
+    bipolar_size_matched: dict[tuple, list[kdb.Region]] = {}
     for bipolar in deck.bipolars:
         regions, dropped = _extract_bipolar_device(
-            l2n, layout, top_cell, bipolar, dummy
+            l2n,
+            layout,
+            top_cell,
+            bipolar,
+            dummy,
+            bipolar_size_groups,
+            bipolar_size_matched,
         )
         dummy_devices_dropped += dropped
         bipolar_regions.append((bipolar, *regions))
+    bipolar_size_warnings = _collect_bipolar_size_warnings(
+        bipolar_size_groups, bipolar_size_matched, layout.dbu
+    )
 
     # Junction-diode device recognition (issue #542): each of the deck's
     # optional `diodes` entries (see `DiodeDevice` in `decks/__init__.py`)
@@ -8783,6 +8892,7 @@ def _extract_netlist(
         # recognition block above, where the per-entry terminal regions and
         # the MOS/tap geometry the filter needs are both still in scope.
         + diode_near_miss_warnings
+        + bipolar_size_warnings
     )
 
     # Connectivity. Deliberately does *not* connect `nwell`/`tap` to
