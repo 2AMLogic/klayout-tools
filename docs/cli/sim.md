@@ -869,17 +869,35 @@ report a pass. Policy: **reject before simulating**.
 - Every job command starts with a client-generated shell preflight that uses
   only `klt --version` (so it works on images that predate any new request
   key). It records the runner's build string in `outputs/runner_identity.json`
-  and compares it with the client's `klt --version` by **release segment**
+  and compares it with the client's `klt --version` by **major.minor**
   ([#3184](https://github.com/2AMLogic/klayout-tools/issues/3184)): the
-  version with its PEP 440 local part (`+...`) and any pre/dev/post suffix
-  removed. So a git-installed client (`0.7.0+g<sha>`, `0.7.0+g<sha>.dirty`,
-  `0.7.0+unknown`) matches a `0.7.0` runner, in either direction, while
-  `0.7.0` against `0.7.1` or `0.8.0` is a mismatch. A numerically newer or
-  older runner is never treated as compatible. Both full build strings are
-  kept in `runner_identity.json`, the mismatch message and
+  first two components of the release segment, which is the version with its
+  PEP 440 local part (`+...`) and any pre/dev/post suffix removed. Patch
+  releases, `.devN` builds and `+g<sha>` local builds all count as the same
+  version as their major.minor. The strings klt produces are:
+
+  | build | `klt --version` | major.minor | against a `0.7.0` runner |
+  |---|---|---|---|
+  | clean tree on the `v0.7.0` tag | `0.7.0` | `0.7` | match |
+  | any commit after `v0.7.0` | `0.7.1.devN+g<sha>` | `0.7` | match |
+  | either of the above, uncommitted changes | `...+g<sha>.dirty` | `0.7` | match |
+  | no git facts | `0.7.0.dev0+unknown` | `0.7` | match |
+  | patch release | `0.7.3` | `0.7` | match (either direction) |
+  | next minor, released or in development | `0.8.0`, `0.8.0.devN+g<sha>` | `0.8` | **mismatch, exit 87** |
+
+  A version whose release segment has fewer than two components (for
+  example `7`) has no major.minor and counts as unknown. Both full build
+  strings are kept in `runner_identity.json`, the mismatch message and
   `environment.remote`.
+
+  The rule depends on a release discipline: **a change that breaks the
+  runner contract ships in a minor release, never a patch, and every minor
+  release is published to PyPI and gets a rebaked runner image.** The
+  accepted cost is that a dev client can send request keys that the runner's
+  release of the same minor does not have; such changes belong in the next
+  minor.
 - On a mismatch (`batch_runner_version_mismatch`) or a runner version that is
-  absent or has no release segment (`batch_runner_version_unknown`) the
+  absent or has no major.minor (`batch_runner_version_unknown`) the
   preflight writes a klt error
   envelope to `report.json` and exits `87` **without running `klt sim`**. The
   client recovers it through the normal failed-job path, so every unit gets a
@@ -890,7 +908,7 @@ report a pass. Policy: **reject before simulating**.
   `runner_klt_version` (the runner's own version, or `null` when it could not
   be established -- never the client's), `client_klt_version`, and
   `runner_compatibility` (`match` / `mismatch` / `unknown`; `unknown` also
-  when either version has no release segment). A non-`match`
+  when either version has no major.minor). A non-`match`
   value also carries `runner_compatibility_warning`. The report's
   `provenance.klt_version` stays the client's.
 - `batch.runner_version_check` (`"enforce"`, default, or `"warn"`) selects the

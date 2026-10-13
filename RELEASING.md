@@ -59,6 +59,13 @@ one-time trusted-publisher registration below — it only states *when* to run
 the mechanical sequence that section and the rest of this doc already
 describe.
 
+**Versioning rule for the batch runner:** a change that breaks the batch
+runner contract (a request key, report field or job-command shape the fleet
+runner must understand) ships in a minor release (`vX.Y.0`), never a patch,
+and every minor release is published to PyPI and gets a rebaked runner
+image -- the runner version gate compares major.minor only (#3184, see
+`docs/cli/sim.md` "Runner/client `klt` version skew").
+
 **Interim answer, between releases**: `CHANGELOG.md`'s `## Unreleased` →
 `### Fixed since release` section is the source of truth for "is fix X
 installable yet" — every dated, issue-numbered entry there has landed on

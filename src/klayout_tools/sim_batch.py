@@ -434,25 +434,54 @@ class BatchJobSpec:
 
 
 def _release_segment(version: str) -> str | None:
-    """The release segment of a ``klt --version`` build string, or ``None``
-    when it has none (issue #3184).
+    """The PEP 440 release segment of a ``klt --version`` build string, or
+    ``None`` when it has none (issue #3184).
 
-    The runner version gate compares release segments only, so a
-    git-installed client (``0.7.0+g<sha>``, ``0.7.0+g<sha>.dirty``,
-    ``0.7.0+unknown``) matches a ``0.7.0`` release runner while ``0.7.0``
-    against ``0.7.1`` still differs. Steps: drop the PEP 440 local part
-    (``+...``), keep the leading ``[0-9.]`` run, drop one trailing ``.``, and
-    accept the result only if it is ``N(.N)*``. This equals
-    ``packaging.version.Version(v).release`` for the strings klt produces,
-    without importing ``packaging`` (not a runtime dependency).
-    :func:`_runner_preflight_script` repeats the same steps in POSIX shell on
-    the runner, so both sides of the gate use one rule.
+    Steps: drop the PEP 440 local part (``+...``), keep the leading
+    ``[0-9.]`` run, drop one trailing ``.``, and accept the result only if it
+    is ``N(.N)*``. This equals ``packaging.version.Version(v).release`` for
+    the strings klt produces, without importing ``packaging`` (not a runtime
+    dependency). The strings klt produces (``_version_scheme.render``) are
+    ``X.Y.Z`` for a clean build on a release tag, ``X.Y.(Z+1).devN+g<sha>``
+    for any commit after the released base's tag (so ``0.7.1.dev212+g<sha>``
+    on a checkout past ``v0.7.0``), ``X.Y.Z.devN+g<sha>`` before the base is
+    tagged, either with ``.dirty`` appended to the local part, and
+    ``X.Y.Z.dev0+unknown`` with no git facts. Their release segments are
+    ``X.Y.Z``, ``X.Y.(Z+1)``, ``X.Y.Z`` and ``X.Y.Z``.
+
+    The gate does not compare this whole segment: it compares
+    :func:`_runner_gate_release`, its first two components.
     """
     head = version.strip().split("+", 1)[0]
     prefix = re.match(r"[0-9.]*", head).group(0)  # always matches
     if prefix.endswith("."):
         prefix = prefix[:-1]
     return prefix if re.fullmatch(r"\d+(?:\.\d+)*", prefix) else None
+
+
+def _runner_gate_release(version: str) -> str | None:
+    """The ``major.minor`` the runner version gate compares, or ``None``
+    (issue #3184).
+
+    The gate compares major.minor only: patch releases, ``.devN`` builds and
+    ``+g<sha>`` local builds count as the same version as their major.minor.
+    So a post-tag git client ``0.7.1.dev212+g<sha>`` matches a ``0.7.0``
+    runner, ``0.7.3`` matches ``0.7.0`` in either direction, and
+    ``0.8.0.devN`` or ``0.8.0`` against any ``0.7.x`` is a mismatch. A
+    version whose release segment (:func:`_release_segment`) has fewer than
+    two components (``7``) has no gate release and counts as unknown.
+
+    This rests on a release discipline: a change that breaks the runner
+    contract ships in a minor release, never a patch, and every minor
+    release is published to PyPI and gets a rebaked runner image.
+    :func:`_runner_preflight_script` repeats the same steps in POSIX shell on
+    the runner, so both sides of the gate use one rule.
+    """
+    release = _release_segment(version)
+    if release is None:
+        return None
+    parts = release.split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else None
 
 
 #: Filename the worker capture writes under ``$EDA_OUTPUT_DIR`` (issue #2834):
@@ -610,34 +639,40 @@ def _runner_preflight_script(
     :data:`BATCH_RUNNER_IDENTITY_FILENAME` (``null`` when it cannot be read),
     and (2) under ``enforce`` writes a klt error envelope to ``report.json``
     and exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` *before* ``klt sim`` runs
-    unless the runner's release segment equals the client's
-    (:func:`_release_segment`, issue #3184; the mismatch message keeps both
-    full build strings). A runner version that is empty or has no release
-    segment is ``batch_runner_version_unknown``. The runner string is reduced
-    to ``[A-Za-z0-9._+ -]`` so it is safe inside the JSON the script prints.
+    unless the runner's major.minor equals the client's
+    (:func:`_runner_gate_release`, issue #3184; the mismatch message keeps
+    both full build strings). So a post-tag git client
+    ``0.7.1.dev212+g<sha>`` runs on a ``0.7.0`` runner, ``0.7.3`` and
+    ``0.7.0`` run on each other, and ``0.8.0.devN`` or ``0.8.0`` against a
+    ``0.7.x`` runner exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT`. A runner
+    version that is empty, or whose release segment has fewer than two
+    components, is ``batch_runner_version_unknown``. The runner string is
+    reduced to ``[A-Za-z0-9._+ -]`` so it is safe inside the JSON the script
+    prints.
 
     Redirects here deliberately have no space before ``>`` so the
     ``> "$EDA_OUTPUT_DIR/report.json"`` marker of the main command stays the
     first such occurrence.
 
     A client version string outside ``[A-Za-z0-9._+-]``, or one with no
-    release segment, cannot be pinned and raises
+    major.minor release segment, cannot be pinned and raises
     :class:`~klayout_tools.sim.SimError` (a structured CLI error, never a
     traceback) before any S3 write.
     """
     client_release = (
-        _release_segment(client_version)
+        _runner_gate_release(client_version)
         if re.fullmatch(r"[A-Za-z0-9._+-]+", client_version)
         else None
     )
-    if client_release is None:
+    # Only a validated N.N is ever embedded in the shell below.
+    if client_release is None or not re.fullmatch(r"\d+\.\d+", client_release):
         from .sim import SimError
 
         raise SimError(
             f"the submitting client's klt version {client_version!r} cannot be "
             "pinned against the fleet runner (expected only [A-Za-z0-9._+-] "
-            "and a release segment such as 0.7.0) -- submit from a klt install "
-            "with a well-formed version"
+            "and a major.minor release segment such as 0.7.0) -- submit from a "
+            "klt install with a well-formed version"
         )
     out = '"$EDA_OUTPUT_DIR/{}"'
     identity_path = out.format(BATCH_RUNNER_IDENTITY_FILENAME)
@@ -645,15 +680,18 @@ def _runner_preflight_script(
     lines = [
         "rv=$(klt --version 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._+ -'"
         " | cut -c1-80); rv=${rv#klt }; rv=${rv# }",
-        # _release_segment in shell: drop +local, keep the leading [0-9.]
-        # run, drop one trailing dot, require N(.N)*.
+        # _runner_gate_release in shell: drop +local, keep the leading
+        # [0-9.] run, drop one trailing dot, require N(.N)* (that is
+        # _release_segment), then require a second component and keep only
+        # the first two (major.minor).
         "rr=${rv%%+*}; rr=${rr%%[!0-9.]*}; rr=${rr%.}",
-        'case "$rr" in ""|.*|*.|*..*) rr= ;; esac',
+        'case "$rr" in ""|.*|*.|*..*) rr= ;; *.*) ;; *) rr= ;; esac',
+        'if [ -n "$rr" ]; then rmn=${rr#*.}; rr=${rr%%.*}.${rmn%%.*}; fi',
         'if [ -z "$rv" ]; then rj=null; rcode=' + BATCH_RUNNER_UNKNOWN_CODE + "; "
         'rmsg="the fleet runner klt version could not be established"; '
         'elif [ -z "$rr" ]; then rj="\\"$rv\\""; '
         "rcode=" + BATCH_RUNNER_UNKNOWN_CODE + "; "
-        'rmsg="the fleet runner klt version $rv has no release segment"; '
+        'rmsg="the fleet runner klt version $rv has no major.minor release segment"; '
         'elif [ "$rr" = "' + client_release + '" ]; then rj="\\"$rv\\""; rcode=; '
         "rmsg=; "
         'else rj="\\"$rv\\""; rcode=' + BATCH_RUNNER_MISMATCH_CODE + "; "
@@ -1831,12 +1869,14 @@ def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
     printed -- never the client's. It is ``None`` when the identity file is
     absent, malformed, or the preflight could not read a version, and
     ``runner_compatibility`` is then ``"unknown"``; so it is when either
-    version has no release segment. Otherwise the two release segments are
-    compared (:func:`_release_segment`, issue #3184 -- ``0.7.0`` matches
-    ``0.7.0+g<sha>``), giving ``"match"`` / ``"mismatch"``; both fields keep
-    the full build strings. The comparison is done here, not trusted from the
-    file. A non-match carries ``runner_compatibility_warning``. A match does
-    not prove identical code (two builds can share one release); see
+    version has no major.minor release segment. Otherwise the two
+    major.minor values are compared (:func:`_runner_gate_release`, issue
+    #3184 -- a post-tag git client ``0.7.1.dev212+g<sha>`` and a ``0.7.3``
+    release both match a ``0.7.0`` runner, while ``0.8.0.devN`` does not),
+    giving ``"match"`` / ``"mismatch"``; both fields keep the full build
+    strings. The comparison is done here, not trusted from the file. A
+    non-match carries ``runner_compatibility_warning``. A match does not
+    prove identical code (every build of one minor matches); see
     docs/cli/sim.md.
     """
     client = _provenance._klt_version()
@@ -1853,8 +1893,8 @@ def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
                 runner = value.strip()
         except (OSError, ValueError, AttributeError):
             runner = None
-    runner_release = _release_segment(runner) if runner is not None else None
-    client_release = _release_segment(client)
+    runner_release = _runner_gate_release(runner) if runner is not None else None
+    client_release = _runner_gate_release(client)
     if runner_release is None or client_release is None:
         status = "unknown"
         warning = (
