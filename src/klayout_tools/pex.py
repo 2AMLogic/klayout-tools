@@ -897,9 +897,7 @@ def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
         stripped = line.strip()
         if not stripped or stripped[0].upper() not in _DEVICE_MODEL_CARD_PREFIXES:
             continue
-        parts = [
-            token for token in _split_spice_tokens(stripped) if "=" not in token
-        ]
+        parts = [token for token in _split_spice_tokens(stripped) if "=" not in token]
         if len(parts) < 2:
             continue  # no nodes/model at all -- not a real device instance
         name = parts[-1]
@@ -935,9 +933,7 @@ def _reference_is_hierarchical(netlist_text: str) -> bool:
         stripped = line.strip()
         if not stripped or stripped[0].upper() != "X":
             continue
-        parts = [
-            token for token in _split_spice_tokens(stripped) if "=" not in token
-        ]
+        parts = [token for token in _split_spice_tokens(stripped) if "=" not in token]
         if len(parts) < 2:
             continue
         if parts[-1].lower() in local_subckts:
