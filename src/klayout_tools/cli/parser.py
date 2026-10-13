@@ -1763,7 +1763,19 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "path to write the extracted SPICE netlist "
-            "(default: <file> with its extension replaced by .spice)"
+            "(default: <file> with its extension replaced by .spice; "
+            "see --no-netlist)"
+        ),
+    )
+    extract_parser.add_argument(
+        "--no-netlist",
+        action="store_true",
+        default=False,
+        help=(
+            "census-only run: write no netlist anywhere (nothing lands next "
+            "to the input) and report netlist_path/netlist_sha256 as null. "
+            "Counts and status are identical to a normal run. Cannot be "
+            "combined with -o/--output or --subcircuit/--subcircuit-output"
         ),
     )
     extract_parser.add_argument(
