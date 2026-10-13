@@ -485,8 +485,12 @@ def _find_dut_include(body_text: str, body_dir: str) -> tuple[int, str]:
     leaving the real DUT in place and reporting the wrong
     ``reference_netlist``. A hard error naming every matched line is the
     documented behaviour instead; the fix is to leave exactly one
-    `.include`/`.inc` line in the testbench body (fold the others into the
-    DUT file, or inline them).
+    `.include`/`.inc` line in the testbench body. Content both simulation
+    legs need (a PDK switch-parameter file, shared ``.param`` cards) must
+    NOT be folded into the DUT file: the selected line is replaced by the
+    extracted netlist for the extracted-side run, so anything folded into
+    the schematic DUT is present on the schematic side only. Inline it
+    into the testbench body instead.
     """
     matches: list[tuple[int, str, str]] = []
     for index, line in enumerate(body_text.splitlines()):
@@ -504,10 +508,14 @@ def _find_dut_include(body_text: str, body_dir: str) -> tuple[int, str]:
             "(before this was an error it silently swapped the first one, "
             "which re-pointed the wrong file and reported the wrong "
             "reference_netlist -- issue #1030). Leave exactly one "
-            "`.include`/`.inc` line in the testbench body: fold any other "
-            "included file (a PDK switch-parameter file, shared `.param` "
-            "cards) into the DUT netlist itself or inline it into the "
-            "testbench"
+            "`.include`/`.inc` line in the testbench body, the DUT. Do not "
+            "fold another included file (a PDK switch-parameter file, shared "
+            "`.param` cards) into that DUT file: the DUT include is replaced "
+            "by the extracted netlist on the extracted side, so folded "
+            "content would exist on the schematic side only. Inline content "
+            "both sides need into the testbench body instead; if that is "
+            "not possible, this testbench cannot be represented by the "
+            "current request shape"
         )
     if matches:
         index, _text, target = matches[0]
