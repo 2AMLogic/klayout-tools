@@ -116,6 +116,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   instead of the static base. Field names and types are unchanged, so no
   `schema_version` bump; see `docs/cli/version.md`. Release managers now bump
   `base-version` instead of `[project] version` (`RELEASING.md`).
+
+- **`klt netlist --backend batch` and `$KLT_NETLIST_BACKEND`** (issue #3182):
+  the xschem export can run on the batch runner, through `klt sim`'s S3 job
+  transport and runner-version preflight. Precedence is `--backend` >
+  `$KLT_NETLIST_BACKEND` > `local`, with no step back to local for a single
+  unit. The client uploads only the git-tracked files under the schematic's
+  checkout (or `--batch-root`), capped at 64 MiB uncompressed. A PDK-relative
+  `--rcfile '$PDK_ROOT/...'` resolves on the runner. `--check` compares on
+  the client. Every batch failure is exit 1 with the job id and an
+  `error.code` (`batch_no_capacity`, `batch_runner_version_mismatch`,
+  `batch_poll_timeout`, `batch_job_failed`, `batch_job_timeout`,
+  `batch_input_too_large`), never a local fallback. Additive: a new
+  `environment.remote` object on batch runs only. See `docs/cli/netlist.md`
+  "Batch backend".
+- **`klt netlist --check` no longer reports `drifted` for a different
+  checkout path** (issue #3010). The comparison ignores the directories in
+  xschem's `** sch_path:` / `** sym_path:` comments (file names still
+  compare). New additive `drift.path_comments_differ` field. Generation is
+  unchanged.
+
 - **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
   unequal top-circuit pin counts yield `status: mismatch` with a new
   `pin.count` error finding (both counts in `details`). Default unchanged;
