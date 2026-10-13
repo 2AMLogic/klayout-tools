@@ -455,9 +455,13 @@ field by field, which two separate passes on a real design had to do
   `{name, layer, requires, excludes, relation}`. `layer` is `null` for a
   terminal formed by the substrate rather than by a drawn mask (gf180mcu's
   `diode_nd2ps_06v0` anode). Every layer in `requires` must **also** cover
-  the region; every layer in `excludes` is subtracted from it. `relation`
-  (issue #2863) is `null` for a terminal defined by those static layer sets
-  alone — every terminal of every shipped class today — and otherwise
+  the region; every layer in `excludes` is subtracted from it. A bipolar
+  entry that declares the optional four-terminal `substrate` layer (issue
+  #2862) reports a fourth `substrate` terminal after `collector`; entries
+  that leave it `None` — every deck shipped today — report the
+  three-terminal shape only. `relation` (issue #2863) is `null` for a
+  terminal defined by those static layer sets alone — every terminal of
+  every shipped class today — and otherwise
   `{"source": <terminal>, "op": "interacting", "extents": <bool>}`: the
   terminal is only the part of its layer that interacts with the same
   device's already-resolved `source` terminal (with `extents: true`, the

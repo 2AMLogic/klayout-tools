@@ -1124,6 +1124,7 @@ def run_extract(
     matched_device_groups: Mapping[str, Sequence[str]] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
+    rename_declared_pins: bool = False,
     subcircuit_cell: str | None = None,
     subcircuit_output: str | None = None,
     substrate_spreading_net: str | None = None,
@@ -1327,6 +1328,32 @@ def run_extract(
     internal. ``None`` (the default) skips this reconciliation entirely --
     byte-identical to today's behavior. See ``docs/cli/extract.md``'s
     "Pin-source cells" section for the full mechanism and a worked example.
+
+    ``rename_declared_pins`` (the ``--rename-declared-pins`` flag, issue
+    #2854): when ``True``, after every reconciliation pass above (and after
+    the purge), each surviving promoted pin net whose comma-joined component
+    labels contain **exactly one** declared name (from ``declared_pins``
+    and/or ``def_pins``) is renamed to that declared name -- the fix for the
+    ``--pins``-only shortcoming the issue reports: reconciliation *demotes*
+    but never renames, so a net carrying several drawn labels (a macro's
+    internal node label plus the parent's boundary label on the same
+    conductor) kept KLayout's joined name (``VGND|g_vss_m1|...|vss``), the
+    declared name being only one component of it -- and ``klt lvs``'s
+    ``options.anchor_top_level_pins`` (#2692) matches pin names exactly, so
+    such a pin could never pair with a reference pin named ``vss``. With the
+    rename on, the written ``.SUBCKT`` header, ``nets[]`` and ``pin_renames``
+    all carry the declared name. A net matching **2+** declared names is
+    *reported, never repaired* (one conductor shorting two declared
+    interface pins is a layout defect): the net keeps its joined name and an
+    ``error``-severity ``declared_pin_short`` finding is emitted in the
+    ``pin_renames`` block (mirrored into ``warnings`` with the ``ERROR:``
+    prefix). A rename that would collide with an existing net name in the
+    same circuit is skipped and reported (``declared_pin_rename_collision``,
+    ``warning`` severity) -- never a silent merge and never two same-named
+    nets. ``True`` with neither ``declared_pins`` nor ``def_pins`` given is
+    a clean :class:`ExtractError`. ``False`` (the default) is
+    byte-identical to today's behavior. See ``docs/cli/extract.md``'s
+    "Renaming promoted pins to their declared name" section.
 
     Two additional cause-agnostic ``warnings`` entries (issue #1385) fire
     independent of any flag above: one when the layout carries zero text on
@@ -1687,7 +1714,10 @@ def run_extract(
                 {
                     "name": str, "class": str,
                     # MOS: {"s", "g", "d", "b"}; drawn resistor: {"a", "b"}
-                    # (plus "w" for a bulk-terminal resistor).
+                    # (plus "w" for a bulk-terminal resistor); bipolar:
+                    # {"c", "b", "e"}, plus "s" for a deck entry declaring
+                    # the optional four-terminal substrate layer (issue
+                    # #2862).
                     "nets": {<terminal>: str | None, ...},
                     # MOS: {"w_um", "l_um"}; drawn resistor adds "r_ohm".
                     "params": {<name>: float, ...},
@@ -2508,6 +2538,7 @@ def run_extract(
         device_instance_paths,
         def_pin_promotion,
         substrate_spreading,
+        pin_renames,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -2528,6 +2559,10 @@ def run_extract(
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
+        # Issue #2854: rename each surviving promoted pin net to its
+        # declared name. `False` (the default) is the exact call every
+        # site that predates this flag makes.
+        rename_declared_pins=rename_declared_pins,
         subcircuit_cell=subcircuit_cell,
         subcircuit_info=subcircuit_info,
         hierarchical_cells=hierarchical_names,
@@ -3343,6 +3378,20 @@ def run_extract(
         # reconciliation summary otherwise -- see run_extract's docstring and
         # `_unpromoted_def_pin_geometry` for the field's full meaning.
         "def_pin_promotion": def_pin_promotion,
+        # Additive field (issue #2854): `null` unless `rename_declared_pins`
+        # (--rename-declared-pins) was given, the declared-name rename report
+        # otherwise -- every rename performed (joined name -> declared name),
+        # plus the `declared_pin_short` / `declared_pin_rename_collision`
+        # findings for the nets the pass deliberately did *not* touch. See
+        # run_extract's docstring and `_rename_declared_pin_nets` for the
+        # field's full meaning.
+        "pin_renames": pin_renames,
+        # Additive field (issue #2854): the effective `--rename-declared-pins`
+        # value, always present (`false` when the flag was not given) so
+        # `--check --rerun` can replay the rename alongside the declared
+        # sets `pin_renames.declared_pins`/`pin_renames.def_pins` echo --
+        # see `rerun_extract_report`.
+        "rename_declared_pins": rename_declared_pins,
         # Additive field (issue #2656): `null` unless `label_layers`
         # (--label-layer) was given, otherwise the caller's own role ->
         # [layer, datatype] (or `null`) mapping echoed verbatim -- the record
@@ -4067,15 +4116,30 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
 
     Re-runs :func:`run_extract` against the ``file``/``deck``/``top`` the
     committed report itself names, plus ``provenance.deck.options`` (issue
-    #595's ``--deck-option`` selections) when present, writing the fresh
-    netlist back to the same ``netlist_path`` the committed report recorded
+    #595's ``--deck-option`` selections) when present, ``label_layers``
+    (issue #2656's ``--label-layer`` override) when present, and the
+    declared-pin sets (issue #2854) -- ``rename_declared_pins`` replayed
+    together with the ``--pins``/``--def-pins`` sets the ``pin_renames``
+    block's own ``declared_pins``/``def_pins`` echoes record (each ``null``
+    for "flag not given" versus a list, ``[]`` included, for "flag given";
+    the two sets are replayed separately because they are not
+    interchangeable -- ``def_pins``'s demotion only further restricts what
+    ``declared_pins``'s kept, and it alone runs the ``def_pin_promotion``
+    report -- while a block without the separate echoes, i.e. one produced
+    by an earlier build of this unreleased feature or hand-edited, replays
+    its ``declared`` union as ``--pins`` alone) -- when the committed report
+    carries a ``pin_renames`` block,
+    writing the fresh netlist back to the same ``netlist_path`` the
+    committed report recorded
     (so that field, too, is a meaningful comparison rather than an
     incidental path difference). **Known limitation**, mirroring ``klt lvs
     --check``'s ``rerun_lvs_report()`` (``lvs.py``): every *other* optional
     ``klt extract`` flag (``--parasitics``, ``--mom-net``, ``--spef``,
     ``--critical-net``, ``--distributed-rc``, ``--def-net-names``,
     ``--def-net-connections``, ``--mom-rlc-*``, ``--top-cell-pins``,
-    ``--pins``, ``--defer-resistor-fixed-offset``, ``--abstract-cells``,
+    ``--pins``/``--def-pins`` -- except through the ``pin_renames`` echoes
+    a run that also used ``--rename-declared-pins`` carries, see above --,
+    ``--defer-resistor-fixed-offset``, ``--abstract-cells``,
     ``--abstract-cell-lef``, ``--matched-group``, ``--subcircuit``/
     ``--subcircuit-output``, ``--pdk``/``--pdk-root``)
     is never echoed anywhere in the response, so none of them can be
@@ -4140,6 +4204,57 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     # -- the drift this mode exists to surface.
     label_layers = _label_layers_from_report(committed)
 
+    # Issue #2854: replay the declared-pin rename, and the declared sets it
+    # resolved against. `--pins`/`--def-pins` themselves are not echoed
+    # anywhere -- but the `pin_renames` block (always emitted when the flag
+    # was on) is: it echoes each original argument separately
+    # (`declared_pins`/`def_pins`, `null` for "flag not given" versus a
+    # list -- `[]` included -- for "flag given"), so the rerun reconstructs
+    # both demotion passes exactly. The two sets are *not* interchangeable:
+    # the original run applies `declared_pins`'s filter and then
+    # `def_pins`'s own, which can only further restrict the survivors (and
+    # alone runs the `def_pin_promotion` report), so replaying their union
+    # as `--pins` alone would re-promote nets the original demoted and skip
+    # the DEF report (PR #3224 review). The union itself stays in the block
+    # as `declared` -- the rename pass's own matching set, and the fallback
+    # a block without the separate echoes replays. A report without the
+    # block -- or one whose echoes lost their shape -- replays without the
+    # flag and legitimately drifts on the pin fields, the same documented
+    # limitation every other unechoed flag has.
+    rename_declared_pins = committed.get("rename_declared_pins") is True
+    pin_renames_echo = committed.get("pin_renames")
+    rerun_declared_pins: frozenset[str] | None = None
+    rerun_def_pins: frozenset[str] | None = None
+    if rename_declared_pins and isinstance(pin_renames_echo, dict):
+        if "declared_pins" in pin_renames_echo or "def_pins" in pin_renames_echo:
+            valid_pins, rerun_declared_pins = _parse_declared_set_echo(
+                pin_renames_echo.get("declared_pins")
+            )
+            valid_def, rerun_def_pins = _parse_declared_set_echo(
+                pin_renames_echo.get("def_pins")
+            )
+            if not (valid_pins and valid_def):
+                rename_declared_pins = False
+                rerun_declared_pins = None
+                rerun_def_pins = None
+        else:
+            # A block without the separate echoes (an earlier build of this
+            # unreleased feature, or a hand-edited report): the union
+            # `declared` is the only echo -- replay it as `--pins` alone
+            # (the previous behavior; imperfect when the original run's
+            # `--def-pins` further restricted the surviving set, but
+            # strictly better than discarding the rename the block does
+            # carry).
+            union_echo = pin_renames_echo.get("declared")
+            if isinstance(union_echo, list) and all(
+                isinstance(name, str) for name in union_echo
+            ):
+                rerun_declared_pins = frozenset(union_echo) if union_echo else None
+            else:
+                rename_declared_pins = False
+    else:
+        rename_declared_pins = False
+
     fresh = run_extract(
         file_path,
         deck_name,
@@ -4150,6 +4265,9 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
         top=committed.get("top"),
         deck_options=deck_options,
         label_layers=label_layers,
+        declared_pins=rerun_declared_pins,
+        def_pins=rerun_def_pins,
+        rename_declared_pins=rename_declared_pins,
     )
     return build_rerun_result(
         report_path=report_path,
@@ -4158,6 +4276,23 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
         committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
         fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
     )
+
+
+def _parse_declared_set_echo(value: Any) -> tuple[bool, frozenset[str] | None]:
+    """Parse one ``pin_renames`` declared-set echo (PR #3224 review) into
+    the replay argument :func:`rerun_extract_report` feeds back to
+    :func:`run_extract`: ``(True, None)`` for ``null`` ("flag not given"),
+    ``(True, frozenset(...))`` for a list of names ("flag given", an empty
+    list preserved as an empty set -- absent versus empty are deliberately
+    distinct, the demotion passes treat them differently), and
+    ``(False, None)`` for any other shape (malformed -- the caller disables
+    the rename replay and lets the drift surface, mirroring how the
+    union-only echo that predates this helper was validated)."""
+    if value is None:
+        return True, None
+    if isinstance(value, list) and all(isinstance(name, str) for name in value):
+        return True, frozenset(value)
+    return False, None
 
 
 def extract_netlist_from_layout(
@@ -4180,6 +4315,7 @@ def extract_netlist_from_layout(
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
+    rename_declared_pins: bool = False,
     subcircuit_cell: str | None = None,
     subcircuit_info: dict[str, Any] | None = None,
     hierarchical_cells: tuple[str, ...] = (),
@@ -4204,6 +4340,7 @@ def extract_netlist_from_layout(
     dict[int, list[dict[str, Any]]],
     dict[str, Any] | None,
     dict[str, Any] | None,
+    dict[str, Any] | None,
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
@@ -4211,11 +4348,12 @@ def extract_netlist_from_layout(
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
     voltage_domain_warnings, abstracted_cells, dead_metal, mom_crosscheck,
     net_label_positions, device_instance_paths, def_pin_promotion,
-    substrate_spreading)`` -- see
+    substrate_spreading, pin_renames)`` -- see
     :func:`_extract_netlist`'s own docstring for ``net_label_positions``
-    (issue #1540), ``device_instance_paths`` (issue #1666) and
+    (issue #1540), ``device_instance_paths`` (issue #1666),
     ``def_pin_promotion`` (issue #2473, ``None`` unless ``def_pins`` was
-    given).
+    given) and ``pin_renames`` (issue #2854, ``None`` unless
+    ``rename_declared_pins`` was given).
 
     ``substrate_spreading`` (``--substrate-spreading <net>``, issue #2561) is
     ``None`` unless ``substrate_spreading_net`` is given, in which case it is
@@ -4343,6 +4481,16 @@ def extract_netlist_from_layout(
     shape drawn inside one of these named cells. ``None`` skips this
     reconciliation. See :func:`run_extract` for the full rationale.
 
+    ``rename_declared_pins`` (issue #2854): forwarded to
+    :func:`_extract_netlist`, which renames each surviving promoted pin net
+    to its declared name (from ``declared_pins`` ∪ ``def_pins``) when
+    exactly one component label matches -- see
+    :func:`_rename_declared_pin_nets`. ``True`` with neither declared set
+    given is a clean :class:`ExtractError` here (the one entrypoint both
+    `klt extract` and `klt lvs`'s inline extraction go through): the caller
+    asked for a rename with nothing to rename *to*, and silently extracting
+    an unrenameable netlist would defeat the flag's whole purpose.
+
     ``parasitics_deck`` is optional: when ``None`` (the default, and what
     ``klt lvs``'s inline-extraction path always passes -- LVS is topological
     and takes no parasitics), no per-net RC geometry is computed and the
@@ -4434,6 +4582,7 @@ def extract_netlist_from_layout(
             "--parasitics-net": bool(parasitics_nets),
             "--def-pins": bool(def_pins),
             "--pin-source-cells": bool(pin_source_cells),
+            "--rename-declared-pins": rename_declared_pins,
             "--subcircuit": subcircuit_cell is not None,
             "--hierarchical-cells": bool(hierarchical_cells),
             "--substrate-spreading": substrate_spreading_net is not None,
@@ -4445,6 +4594,12 @@ def extract_netlist_from_layout(
     # live hierarchy (absent / top / unreachable / nested) before any
     # extraction work or output.
     _validate_hierarchical_selection(layout, top_cell, hierarchical_cells)
+
+    # `--rename-declared-pins` (issue #2854) needs a declared set to rename
+    # to -- validated before any extraction work, the same window every
+    # other request-shape check above uses (see the helper for why this is
+    # an error rather than a silent no-op).
+    _require_declared_set_for_rename(rename_declared_pins, declared_pins, def_pins)
 
     # `--subcircuit` (issue #2245): the one fact about the slice that needs the
     # live layout hierarchy, reported back through the out-parameter (see this
@@ -4572,6 +4727,7 @@ def extract_netlist_from_layout(
         device_instance_paths,
         def_pin_promotion,
         substrate_taps,
+        pin_renames,
     ) = _netlist_extractor(deck)(
         layout,
         top_cell,
@@ -4597,6 +4753,7 @@ def extract_netlist_from_layout(
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
+        rename_declared_pins=rename_declared_pins,
         substrate_spreading_net=substrate_spreading_net,
     )
 
@@ -4663,7 +4820,26 @@ def extract_netlist_from_layout(
         device_instance_paths,
         def_pin_promotion,
         substrate_spreading,
+        pin_renames,
     )
+
+
+def _require_declared_set_for_rename(
+    rename_declared_pins: bool,
+    declared_pins: frozenset[str] | None,
+    def_pins: frozenset[str] | None,
+) -> None:
+    """Issue #2854: ``--rename-declared-pins`` with neither ``--pins`` nor
+    ``--def-pins`` is a clean :class:`ExtractError`, not a silent no-op --
+    there is no declared set to rename *to*, and silently extracting an
+    unrenameable netlist would defeat the flag's whole purpose (canonical
+    pin names for ``klt lvs``'s ``options.anchor_top_level_pins``)."""
+    if rename_declared_pins and declared_pins is None and def_pins is None:
+        raise ExtractError(
+            "--rename-declared-pins requires a declared pin set to rename "
+            "to -- pass --pins <A,B,...> (or --def-pins <def>), the same "
+            "set whose reconciliation survives the pins it names"
+        )
 
 
 def _default_output_path(path: str) -> str:
@@ -5092,6 +5268,219 @@ def _duplicated_declared_pin_names(
                 name_net_ids.setdefault(component, set()).add(net.cluster_id)
 
     return sorted(name for name, ids in name_net_ids.items() if len(ids) > 1)
+
+
+def _promoted_pin_nets_by_cluster(circuit: Any) -> dict[int, tuple[Any, list[int]]]:
+    """Every promoted pin's net of ``circuit`` exactly once, keyed by
+    ``Net.cluster_id`` and in ``each_pin()`` order (deterministic for a given
+    netlist): two pins can resolve to one net object, and the rename pass
+    (issue #2854) must process -- and rename -- that net once. Values are
+    ``(net, [pin_id, ...])``.
+
+    A pin with no net, or whose net carries no name, is skipped: there is
+    nothing to match a declared name against.
+    """
+    pin_nets: dict[int, tuple[Any, list[int]]] = {}
+    for pin in circuit.each_pin():
+        net = circuit.net_for_pin(pin.id())
+        if net is None or not net.expanded_name():
+            continue
+        entry = pin_nets.setdefault(net.cluster_id, (net, []))
+        entry[1].append(pin.id())
+    return pin_nets
+
+
+def _declared_pin_short_finding(before: str, hit: list[str]) -> dict[str, Any]:
+    """The ``error``-severity ``declared_pin_short`` finding (issue #2854):
+    one promoted pin net carrying 2+ declared pin names -- a short between
+    interface pins, reported and never repaired."""
+    message = (
+        f"promoted pin net '{before}' carries 2+ declared pin names "
+        f"({', '.join(hit)}) -- not renamed (--rename-declared-pins reports "
+        "this, never repairs it): one conductor carrying two declared "
+        "interface pins is a short between interface pins, a layout defect "
+        "rather than a naming artifact -- issue #2854"
+    )
+    return {
+        "severity": "error",
+        "code": "declared_pin_short",
+        "net": before,
+        "declared_pins": hit,
+        "message": message,
+    }
+
+
+def _declared_pin_rename_collision_finding(before: str, target: str) -> dict[str, Any]:
+    """The ``warning``-severity ``declared_pin_rename_collision`` finding
+    (issue #2854): a rename whose target name another net in the same
+    circuit already carries, skipped rather than silently merging or
+    duplicating names."""
+    message = (
+        f"promoted pin net '{before}' would rename to declared name "
+        f"'{target}' but another net in this circuit already carries that "
+        "name -- rename skipped, the net keeps its joined name (a second "
+        "net squatting on a declared name is itself a finding: a demoted "
+        "internal net or a physically disconnected island carrying the "
+        "same label) -- issue #2854"
+    )
+    return {
+        "severity": "warning",
+        "code": "declared_pin_rename_collision",
+        "net": before,
+        "declared_pin": target,
+        "message": message,
+    }
+
+
+def _rename_disclosure_prose(renamed: list[dict[str, str]]) -> list[str]:
+    """The single aggregate `warnings[]` entry listing every rename the
+    declared-pin pass performed (issue #2854) -- a disclosure, not a
+    defect, so no ``ERROR:`` prefix and one line for the whole run."""
+    if not renamed:
+        return []
+    joined = ", ".join(f"'{entry['from']}' -> '{entry['to']}'" for entry in renamed)
+    return [
+        f"renamed {len(renamed)} promoted pin net(s) to their declared name "
+        f"(--rename-declared-pins): {joined} -- the written `.SUBCKT` "
+        "header and `nets[]` now carry the declared name -- issue #2854"
+    ]
+
+
+def _rename_declared_pin_nets(
+    netlist: kdb.Netlist,
+    top_name: str,
+    declared_pins: frozenset[str] | None,
+    def_pins: frozenset[str] | None,
+    *,
+    enabled: bool,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Rename each surviving promoted pin net to its declared name when
+    exactly one component label matches (issue #2854), returning
+    ``(report_block, prose_warnings)``.
+
+    ``--pins``/``--def-pins`` reconciliation (issues #514/#1390/#1687) only
+    *demotes*: a surviving pin net whose conductor carries several drawn
+    labels keeps KLayout's comma-joined ``Net.name`` (``VGND,vss``, written
+    ``VGND|vss``), so the declared name is just one component of the string.
+    ``options.anchor_top_level_pins`` (``lvs.py``, issue #2692) and every
+    other pin-name consumer match names exactly, so such a pin can never pair
+    with a reference pin named ``vss`` -- a caller had to rewrite the netlist
+    text after extraction. This pass closes that: for every promoted top
+    circuit pin net, ``hit = set(name.split(",")) & declared`` (the union of
+    ``declared_pins`` and ``def_pins``, the same any-component match the
+    demotion passes use) --
+
+    - exactly one hit, and the name differs: rename the net to it (and the
+      pin's own cosmetic name, exactly as ``_rewrite_dotted_net_names``
+      does -- ``NetlistSpiceWriter`` writes the *net* name in the
+      ``.SUBCKT`` header under ``use_net_names``, so the net rename is the
+      load-bearing half);
+    - exactly one hit that already *is* the name: nothing to do, reported
+      nowhere;
+    - two or more hits: **report, never repair** -- one conductor carrying
+      two declared interface pins is a short between interface pins, a
+      layout defect, not a naming artifact. The net keeps its joined name
+      and an ``error``-severity finding is emitted
+      (:func:`_declared_pin_short_finding`);
+    - a rename whose target name another net in the same circuit already
+      carries: skipped and reported
+      (:func:`_declared_pin_rename_collision_finding`) -- silently
+      producing two same-named nets (or merging them) would hide exactly
+      the split-net/squatting condition the collision reveals.
+
+    Called from :func:`_extract_netlist` after the purge and before anything
+    reads a net name (see the call site), so the ``devices[]``/``nets[]``
+    report, the parasitics passes, ``klt lvs``, and the written netlist all
+    see the declared spelling. ``enabled=False`` (or no declared set at all
+    -- rejected earlier by :func:`extract_netlist_from_layout`, treated
+    defensively here) returns ``(None, [])`` and touches nothing:
+    byte-identical to a run predating this pass.
+
+    The returned block echoes the two *original* arguments separately, as
+    ``declared_pins``/``def_pins`` (``null`` for "flag not given", a list --
+    ``[]`` included -- for "flag given"), preserving absent versus empty:
+    the union ``declared`` is this pass's own matching set, but it is *not*
+    enough to replay the run -- ``declared_pins``'s and ``def_pins``'s
+    demotion passes are not interchangeable (``def_pins``'s can only further
+    restrict what ``declared_pins``'s kept, and it alone runs the
+    ``def_pin_promotion`` report), so :func:`rerun_extract_report` replays
+    both arguments from these echoes, not the union.
+    """
+    if not enabled:
+        return None, []
+    declared = set(declared_pins or ()) | set(def_pins or ())
+    if not declared:
+        return None, []
+    declared_pin_echoes: dict[str, Any] = {
+        # Each original argument on its own (PR #3224 review): `null` versus
+        # a list keeps "flag not given" distinguishable from "flag given
+        # with an empty set" -- the two replay as `None` and `frozenset()`
+        # respectively, which the demotion passes treat differently.
+        "declared_pins": sorted(declared_pins) if declared_pins is not None else None,
+        "def_pins": sorted(def_pins) if def_pins is not None else None,
+    }
+
+    circuit = netlist.circuit_by_name(top_name)
+    if circuit is None:
+        return (
+            {
+                "declared": sorted(declared),
+                **declared_pin_echoes,
+                "renamed": [],
+                "findings": [],
+            },
+            [],
+        )
+
+    pin_nets = _promoted_pin_nets_by_cluster(circuit)
+    taken = {net.expanded_name() for net in circuit.each_net()}
+    renamed: list[dict[str, str]] = []
+    findings: list[dict[str, Any]] = []
+    prose: list[str] = []
+
+    for _cluster_id, (net, pin_ids) in pin_nets.items():
+        before = spice_safe_net_name(net.expanded_name())
+        hit = sorted(set(net.expanded_name().split(",")) & declared)
+        if not hit:
+            continue
+        if len(hit) > 1:
+            short = _declared_pin_short_finding(before, hit)
+            findings.append(short)
+            # Mirrored with the `ERROR:` prefix, the same way
+            # `def_pin_promotion`'s error-severity findings are, so a caller
+            # checking only `warnings[]` (and `--format text`) still sees it.
+            prose.append("ERROR: " + short["message"])
+            continue
+        target = hit[0]
+        raw_name = net.expanded_name()
+        if raw_name == target:
+            continue
+        if target in taken:
+            collision = _declared_pin_rename_collision_finding(before, target)
+            findings.append(collision)
+            prose.append(collision["message"])
+            continue
+        taken.discard(raw_name)
+        taken.add(target)
+        net.name = target
+        # Pin names are cosmetic under `use_net_names` (the writer emits the
+        # *net* name), but `make_top_level_pins()` named each pin after its
+        # net, so leaving them behind would print a joined `* pin` comment
+        # above a renamed `.SUBCKT` line -- `_rewrite_dotted_net_names`'s
+        # own trailing pass, mirrored here.
+        for pin_id in pin_ids:
+            circuit.rename_pin(pin_id, target)
+        renamed.append({"from": before, "to": target})
+
+    return (
+        {
+            "declared": sorted(declared),
+            **declared_pin_echoes,
+            "renamed": sorted(renamed, key=lambda entry: entry["from"]),
+            "findings": findings,
+        },
+        prose + _rename_disclosure_prose(renamed),
+    )
 
 
 def _unpromoted_def_pin_geometry(
@@ -6861,7 +7250,7 @@ def _netlist_extractor(deck: ExtractionDeck) -> Callable[..., Any]:
     """The netlist-extraction function for ``deck``: the FinFET recogniser
     (:func:`klayout_tools.extract_finfet.extract_netlist_tuple`, issue #2761)
     for a :class:`~klayout_tools.decks.FinFETExtractionDeck`, else the planar
-    :func:`_extract_netlist` -- both honour the same 13-tuple contract."""
+    :func:`_extract_netlist` -- both honour the same 14-tuple contract."""
     from .extract_finfet import extract_netlist_tuple, is_finfet_deck
 
     return extract_netlist_tuple if is_finfet_deck(deck) else _extract_netlist
@@ -7014,10 +7403,14 @@ def _extract_bipolar_device(
     top_cell: kdb.Cell,
     bipolar: BipolarDevice,
     dummy: kdb.Region,
-) -> tuple[tuple[kdb.Region, kdb.Region, kdb.Region], int]:
+) -> tuple[
+    tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region, kdb.Region | None],
+    int,
+]:
     """Resolve, register and extract one ``deck.bipolars`` entry; returns its
-    ``(base, emitter, collector)`` terminal regions (for the connectivity
-    wiring in :func:`_extract_netlist`) and its dummy-dropped count.
+    ``(base, emitter, collector, substrate, substrate_layer)`` regions (for
+    the connectivity wiring in :func:`_extract_netlist`) and its
+    dummy-dropped count.
 
     An entry with no terminal relation takes :func:`_bipolar_legacy_regions`
     and is handed to ``DeviceExtractorBJT3Transistor`` exactly as before
@@ -7028,6 +7421,23 @@ def _extract_bipolar_device(
     base polygon -- is given each selected base polygon's bounding box as the
     device body (``"B"``) while the base terminal is written onto the ring's
     own registered region (``"tB"``), which is the region wired to ``nwell``.
+
+    Four-terminal substrate terminal (issue #2862): an entry that declares
+    ``substrate`` extracts through ``DeviceExtractorBJT4Transistor``
+    (terminals C/B/E/S) instead of the three-terminal one; its ``S`` region
+    is ``substrate & base`` -- the same marker-scoped-subset idiom the drawn
+    collector uses, so the dummy cut propagates to it for free too -- and a
+    ``substrate``-free entry keeps the three-terminal extractor
+    byte-identically. The substrate *raw layer* rides along in the returned
+    tuple (``None`` for a three-terminal entry): the ``S`` terminal must not
+    share a ``connect()`` target layer with the emitter/collector terminals
+    -- verified against ``klayout==0.30.12`` that the BJT4 extractor merges
+    two same-device terminals' nets that both ``connect()`` into one shared
+    layer (e.g. both into ``contact``), so the substrate wires through its
+    own raw layer instead and that raw layer joins ``contact`` (see the
+    connectivity section of ``_extract_netlist``). A three-terminal entry's
+    wiring (emitter and drawn collector straight into ``contact``) is
+    untouched -- the BJT3 extractor does not exhibit the merge.
     """
     import klayout.db as kdb
 
@@ -7042,13 +7452,33 @@ def _extract_bipolar_device(
     l2n.register(base, f"{bipolar.class_name}_base")
     l2n.register(emitter, f"{bipolar.class_name}_emitter")
     l2n.register(collector, f"{bipolar.class_name}_collector")
+    if bipolar.substrate is not None:
+        substrate_layer = _region(layout, top_cell, bipolar.substrate)
+        substrate = substrate_layer & base
+        l2n.register(substrate_layer, f"{bipolar.class_name}_substrate_layer")
+    else:
+        # Three-terminal entry: the `S` input below is only ever read by
+        # `DeviceExtractorBJT4Transistor`, which a `substrate`-free entry
+        # never reaches -- an empty placeholder keeps the returned tuple's
+        # shape uniform.
+        substrate = kdb.Region()
+        substrate_layer = None
+    l2n.register(substrate, f"{bipolar.class_name}_substrate")
     inputs = {"B": base, "E": emitter, "C": collector}
     if bipolar.base_relation is not None and bipolar.base_relation.extents:
         body = base.extents()
         l2n.register(body, f"{bipolar.class_name}_base_body")
         inputs = {**inputs, "B": body, "tB": base}
-    l2n.extract_devices(kdb.DeviceExtractorBJT3Transistor(bipolar.class_name), inputs)
-    return (base, emitter, collector), dropped
+    if bipolar.substrate is not None:
+        l2n.extract_devices(
+            kdb.DeviceExtractorBJT4Transistor(bipolar.class_name),
+            {**inputs, "S": substrate},
+        )
+    else:
+        l2n.extract_devices(
+            kdb.DeviceExtractorBJT3Transistor(bipolar.class_name), inputs
+        )
+    return (base, emitter, collector, substrate, substrate_layer), dropped
 
 
 def _extract_netlist(
@@ -7078,6 +7508,7 @@ def _extract_netlist(
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
+    rename_declared_pins: bool = False,
     substrate_spreading_net: str | None = None,
 ) -> tuple[
     kdb.Netlist,
@@ -7091,6 +7522,7 @@ def _extract_netlist(
     dict[str, Any] | None,
     dict[int, list[dict[str, Any]]],
     dict[int, list[dict[str, Any]]],
+    dict[str, Any] | None,
     dict[str, Any] | None,
     dict[str, Any] | None,
 ]:
@@ -7228,6 +7660,19 @@ def _extract_netlist(
     (:func:`_pin_source_cell_net_names`), demoting every promoted pin not
     reached this way. ``None`` skips this entirely. See
     :func:`run_extract`'s own docstring for the full rationale.
+
+    ``rename_declared_pins`` (issue #2854): when ``True``, after every
+    promotion/demotion pass above (and after the purge), each surviving
+    promoted pin net whose comma-joined component labels contain exactly one
+    declared name (from ``declared_pins`` ∪ ``def_pins``) is renamed to it,
+    so the written ``.SUBCKT`` header, ``nets[]`` and every downstream
+    pin-name consumer (``klt lvs``'s ``options.anchor_top_level_pins`` in
+    particular) see the declared spelling instead of KLayout's joined
+    multi-label one. A net matching 2+ declared names is reported, never
+    repaired (a short between interface pins); a rename colliding with an
+    existing net name is skipped and reported -- see
+    :func:`_rename_declared_pin_nets`. ``False`` (the default) is
+    byte-identical to before this parameter existed.
 
     ``abstract_cell_patterns``/``abstract_instances``/``lef_macros`` (issue
     #620): ``abstract_instances`` is the already-collected
@@ -7928,11 +8373,15 @@ def _extract_netlist(
     # scopes recognition to genuine device-cell instances by intersecting the
     # deck's own MOS-recognition `base`/`emitter` layers with the PDK's
     # bipolar device-mark `marker` layer *before* handing them to KLayout's
-    # `DeviceExtractorBJT3Transistor` -- without that intersection, every
-    # ordinary PMOS nwell in the layout would be misrecognised as a bipolar
-    # base. `bipolar_regions` carries the built regions through to the
-    # connectivity section below (registration/extraction must happen once
-    # per entry, before any layer can be used in a `connect()` call).
+    # BJT extractor -- without that intersection, every ordinary PMOS nwell
+    # in the layout would be misrecognised as a bipolar base. Registration
+    # and extraction happen once per entry, inside `_extract_bipolar_device`
+    # (split out under the complexity ratchet, the same precedent as
+    # `_resolve_resistors`), before any layer can be used in a `connect()`
+    # call; `bipolar_regions` carries every entry's terminal regions through
+    # to the connectivity section below, which is where their `connect()`
+    # wiring lives (including the four-terminal substrate wiring,
+    # issue #2862).
     #
     # Dummy-device suppression (issue #295, extended to bipolars in #462):
     # `dummy` (resolved above, before `_resolve_resistors`) is subtracted
@@ -7953,7 +8402,16 @@ def _extract_netlist(
     # the same device); an entry declaring none takes the unchanged fixed
     # base-first path in `_bipolar_legacy_regions`. See
     # `_extract_bipolar_device`.
-    bipolar_regions: list[tuple[BipolarDevice, kdb.Region, kdb.Region, kdb.Region]] = []
+    bipolar_regions: list[
+        tuple[
+            BipolarDevice,
+            kdb.Region,
+            kdb.Region,
+            kdb.Region,
+            kdb.Region,
+            kdb.Region | None,
+        ]
+    ] = []
     for bipolar in deck.bipolars:
         regions, dropped = _extract_bipolar_device(
             l2n, layout, top_cell, bipolar, dummy
@@ -8460,7 +8918,14 @@ def _extract_netlist(
         l2n.connect_global(island_body, island_net)
         l2n.connect_global(tap_substrate_isolated[index], island_net)
 
-    for bipolar, bipolar_base, bipolar_emitter, bipolar_collector in bipolar_regions:
+    for (
+        bipolar,
+        bipolar_base,
+        bipolar_emitter,
+        bipolar_collector,
+        bipolar_substrate,
+        bipolar_substrate_layer,
+    ) in bipolar_regions:
         # Base shares net identity with the deck's own `nwell` (`bipolar_base`
         # is always a geometric subset of it, further restricted by the
         # marker), so a base contact/pin already wired to `nwell` elsewhere in
@@ -8472,6 +8937,20 @@ def _extract_netlist(
             l2n.connect(bipolar_collector, contact)
         else:
             l2n.connect_global(bipolar_collector, deck.substrate_net)
+        # Four-terminal substrate terminal (issue #2862): a drawn diffusion
+        # like any other, but wired through its own raw layer rather than
+        # straight into `contact` -- the BJT4 extractor merges two
+        # same-device terminals' nets that both `connect()` into one shared
+        # layer (see the `bipolar_regions` block above), so the terminal
+        # joins `bipolar_substrate_layer` and that layer joins `contact`,
+        # picking the substrate's net up from ordinary contact/metal routing
+        # exactly as the straight-in wiring would. Never the `substrate_net`
+        # global: that stays the collector-less collector's net (see
+        # `BipolarDevice.substrate`'s docstring). `None`/empty for every
+        # three-terminal entry, so this is a no-op there.
+        if bipolar.substrate is not None:
+            l2n.connect(bipolar_substrate, bipolar_substrate_layer)
+            l2n.connect(bipolar_substrate_layer, contact)
 
     # Diode terminal connectivity (issue #542), derived from each terminal's
     # declared layer rather than configured separately per entry -- see
@@ -9029,6 +9508,25 @@ def _extract_netlist(
     else:
         _purge_preserving_named_nets(netlist)
 
+    # Issue #2854: rename each surviving promoted pin net to its declared
+    # name -- *here*, alongside the dotted-name rewrite immediately below,
+    # for the same two reasons that pass documents: after the purge (so a
+    # net that is about to be dropped is never renamed, and the collision
+    # namespace only contains nets a caller actually sees) and before
+    # anything reads a net name (the `devices[]`/`nets[]` report, the
+    # parasitics passes, `klt lvs`, and the written netlist all then see
+    # one spelling). The call is unconditional -- the pass itself is a
+    # `(None, [])` no-op unless `--rename-declared-pins` opted in -- so it
+    # adds no branch to this already-complexity-baselined function.
+    pin_renames, declared_pin_rename_prose = _rename_declared_pin_nets(
+        netlist,
+        top_cell.name,
+        declared_pins,
+        def_pins,
+        enabled=rename_declared_pins,
+    )
+    warnings.extend(declared_pin_rename_prose)
+
     # Hierarchical net names (issue #2145): a net whose name carries an
     # instance path joined with `.` -- what `klt place-and-route`'s DEF net
     # names (`--def-net-names`) and hierarchy-qualified drawn labels both
@@ -9244,6 +9742,7 @@ def _extract_netlist(
         device_instance_paths,
         def_pin_promotion,
         substrate_taps,
+        pin_renames,
     )
 
 
