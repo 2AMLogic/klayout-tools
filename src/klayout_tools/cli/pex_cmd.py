@@ -81,6 +81,12 @@ def run(args: argparse.Namespace) -> int:
             # was never given, unchanged from every call site that predates
             # it.
             declared_pins=declared_pins,
+            # `--rename-declared-pins` (issue #2854): renames each surviving
+            # promoted pin net to its declared name, passed straight through
+            # to `klt extract --rename-declared-pins`. `False` when the flag
+            # was never given, unchanged from every call site that predates
+            # it.
+            rename_declared_pins=args.rename_declared_pins,
             # `--label-layer` (issue #2686): which GDS purpose extraction
             # reads net/pin name text from, per label role, passed straight
             # through to `klt extract --label-layer`. `None` when the flag

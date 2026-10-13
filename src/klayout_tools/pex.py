@@ -1822,6 +1822,7 @@ def run_pex(
     backend: str | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
+    rename_declared_pins: bool = False,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     critical_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
@@ -1856,7 +1857,18 @@ def run_pex(
     caller resolves a ``pin_count_mismatch`` caused by flat extraction
     promoting more top-level pins than the schematic DUT declares. ``None``
     for both (the default) resolves the deck and promotes pins exactly as
-    before this feature existed. ``label_layers`` (``klt pex --label-layer
+    before this feature existed. ``rename_declared_pins`` (``klt pex
+    --rename-declared-pins``, issue #2854) is likewise passed straight
+    through to :func:`~klayout_tools.extract.run_extract` -- it renames each
+    surviving promoted pin net whose component labels contain exactly one
+    ``declared_pins`` name to that name, so the extracted DUT's ``.SUBCKT``
+    header carries the canonical interface names the schematic DUT declares
+    even when a boundary net carries extra drawn labels (the same rename
+    ``klt extract --rename-declared-pins`` performs; see ``run_extract``'s
+    own ``rename_declared_pins`` docstring paragraph). The effective value
+    is echoed as ``extraction.rename_declared_pins`` (``False`` when the
+    flag was never given -- the extraction is then byte-identical to before
+    this parameter existed). ``label_layers`` (``klt pex --label-layer
     <role>=<layer>/<datatype>``, repeatable, issue #2686) is likewise passed
     straight through to :func:`~klayout_tools.extract.run_extract` -- it
     redirects which GDS purpose extraction reads net/pin name text from, per
@@ -2034,6 +2046,10 @@ def run_pex(
             # `run_extract` call this module made before they existed.
             deck_options=deck_options,
             declared_pins=declared_pins,
+            # Issue #2854: `--rename-declared-pins` passthrough. `False`
+            # whenever the flag was never given, which is the exact
+            # `run_extract` call this module made before it existed.
+            rename_declared_pins=rename_declared_pins,
             # Issue #2686: `--label-layer` passthrough. `None` when the flag
             # was never given -- the exact `run_extract` call made before it.
             label_layers=label_layers,
@@ -2427,6 +2443,13 @@ def run_pex(
             # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
             # or `None` when the flag was never given.
             "label_layers": extract_report.get("label_layers"),
+            # Additive field (issue #2854): echoes the effective
+            # `--rename-declared-pins` value back -- `False` when the flag
+            # was never given, byte-identical to before this feature
+            # existed. The renames themselves are `klt extract`'s own
+            # `pin_renames` report, visible here through the extraction's
+            # written netlist (`.SUBCKT` header) rather than re-embedded.
+            "rename_declared_pins": bool(extract_report.get("rename_declared_pins")),
             # Additive field (issue #2764): the extraction's own
             # per-net parasitic RC network integrity diagnostics --
             # threshold/tolerances, aggregate counts, and one entry per net

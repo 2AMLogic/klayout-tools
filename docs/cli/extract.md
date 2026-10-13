@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--format text|json]
 klt extract <request.json>|-|'{...}' [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -119,6 +119,18 @@ two disagree, this document (and the code) win.
   documentation without blocking `klt lvs`'s `options.combine_devices` from
   folding the series chain. When unset, every named net still promotes to a
   pin, byte-for-byte unchanged. See "Declared pin set" below.
+- `--rename-declared-pins` — optional, off by default, requires `--pins` or
+  `--def-pins`. Renames each surviving promoted pin net whose comma-joined
+  component labels contain *exactly one* declared name to that name (issue
+  #2854) — so the written `.SUBCKT` header and `nets[]` carry the declared
+  name (`vss`) instead of KLayout's joined multi-label form
+  (`VGND|g_vss_m1|...|vss`), which is what lets `klt lvs`'s
+  `options.anchor_top_level_pins` pair the pin with a same-named reference
+  pin. A net matching 2+ declared names is reported (a short between two
+  interface pins), never renamed; a rename colliding with an existing net
+  name is skipped and reported. Off (or without a declared set: a clean
+  error) the output is byte-for-byte unchanged. See "Renaming promoted pins
+  to their declared name" below.
 - `--deck-option` — optional, unset by default, repeatable. `<key>=<value>`
   selects which caller-visible flavour of a deck's shared-geometry device
   family this run wires (issue #595) — the recognised keys are gf180mcu's
@@ -266,6 +278,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `top_cell_pins` | bool | `--top-cell-pins` |
 | `pins` | array\<string\> \| string | `--pins` (an array is joined with commas; an entry containing a comma is rejected, since the flag encoding cannot represent it) |
 | `def_pins` | string | `--def-pins` |
+| `rename_declared_pins` | bool | `--rename-declared-pins` (issue #2854) |
 | `pin_source_cells` | array\<string\> \| string | `--pin-source-cells` (same comma-joining rule as `pins`) |
 | `hierarchical_cells` | array\<string\> \| string | `--hierarchical-cells` (same comma-joining rule as `pins`) |
 | `deck_options` | object\<string, string\|number\|bool\> | repeatable `--deck-option KEY=VALUE`. A key containing `=` is rejected. |
@@ -3188,6 +3201,68 @@ asked for its restriction to apply, and silently skipping it would demote
 them is harmless (the below-top-label pass is a structural no-op on a
 DEF-merged layout, see above) but does not need to be done, since
 `--def-pins` alone already covers the DEF-merge case fully.
+
+## Renaming promoted pins to their declared name (`--rename-declared-pins`, issue #2854)
+
+`--pins`/`--def-pins` reconciliation (above) only *demotes*: a promoted pin
+net whose conductor carries several drawn labels — typical when a macro
+labels its internal nodes and the parent adds its own boundary label on the
+same conductor — keeps KLayout's comma-joined `Net.name`, written `VGND|g_vss_m1|...|vss`.
+The declared name is only one component of that string, and every pin-name
+consumer matches names exactly — `klt lvs`'s `options.anchor_top_level_pins`
+(#2692) in particular — so such a pin can never pair with a reference pin
+named `vss`. Callers had to rewrite the netlist text after extraction
+(split on `|`, rename when exactly one component is a declared pin, refuse
+when zero or several are). `--rename-declared-pins` moves that rule into
+extraction itself:
+
+- **Exactly one declared component** and the name differs: the net is
+  renamed to the declared name (the pin's cosmetic name follows). The
+  written `.SUBCKT` header, `nets[]`, `devices[].nets[...]`, the
+  parasitics passes and every downstream consumer all see the declared
+  spelling — the rename runs after the purge and before anything reads a
+  net name, the same window the dotted-name rewrite (issue #2145) uses.
+- **Two or more declared components**: *reported, never repaired* — one
+  conductor carrying two declared interface pins is a **short between
+  interface pins**, a layout defect rather than a naming artifact. The net
+  keeps its joined name and an `error`-severity
+  `declared_pin_short` finding is emitted in the `pin_renames` block,
+  mirrored into `warnings` with the `ERROR:` prefix. `klt lvs` surfaces
+  the same condition as a `pin.declared_short` `mismatches[]` entry.
+- **A rename whose target name another net in the same circuit already
+  carries**: skipped and reported (`declared_pin_rename_collision`,
+  `warning` severity) — never a silent merge and never two same-named
+  nets. A second net squatting on a declared name is itself a finding (a
+  demoted internal net, or a physically disconnected island carrying the
+  same label).
+
+Every rename performed is disclosed twice: an aggregate `warnings` entry
+listing each `'joined name' -> 'declared name'` pair, and the additive
+`pin_renames` response field — `null` unless the flag was given, otherwise
+`{"declared": [...], "declared_pins": [...] | null, "def_pins": [...] | null,
+"renamed": [{"from", "to"}, ...], "findings": [...]}`. `declared_pins` and
+`def_pins` echo each original argument on its own (`null` for "flag not
+given", a list — `[]` included — for "flag given"), and are what
+`--check --rerun` replays both demotion passes from, together with the
+always-present `rename_declared_pins` boolean echo; `declared` is the union
+of `--pins`/`--def-pins` — the rename pass's own matching set, retained for
+readers (the two sets are not interchangeable: `--def-pins`'s demotion only
+further restricts what `--pins` kept, and it alone runs the
+`def_pin_promotion` report).
+
+The pass applies after every promotion/demotion reconciliation
+(`--top-cell-pins`, `--pins`, `--def-pins`, `--pin-source-cells`) and after
+the purge, so it only ever renames a net that survived as a promoted pin on
+a net a caller actually sees. A pin net already carrying exactly its
+declared name (the common single-label case) is a no-op, reported nowhere.
+Omitting the flag (the default) is byte-identical to extraction before this
+flag existed; passing it with neither `--pins` nor `--def-pins` is a clean
+error (exit 1), not a silent no-op — there is no declared set to rename to.
+
+`klt pex --rename-declared-pins` passes the flag straight through (its
+effective value is echoed as `extraction.rename_declared_pins`), and
+`klt lvs` exposes it as `layout.rename_declared_pins` (a boolean, alongside
+`layout.declared_pins`) — see [`docs/cli/lvs.md`](lvs.md).
 
 ### `def_pin_promotion`: how the declared port set actually landed (issue #2473)
 
@@ -6991,6 +7066,8 @@ exit codes).
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |
 | `matched_device_groups` | array\<object\>       | One entry per `--matched-group` declaration, in the order given (issue #1018 — see "Matched-device geometry check" above), each `{ "name": string, "instances": [string, ...], "unresolved_instances": [string, ...], "mismatched_fields": [{"field": string, "values": {"<instance name>": number, ...}}, ...] }`. `instances` echoes the declared member list verbatim; `unresolved_instances` (sorted) is the subset matching no extracted device; `mismatched_fields` lists every parameter that diverges across the group's resolved members (post-rounding equality — no numeric tolerance). A matching prose entry is also appended to `warnings[]` for a group with unresolved members and/or mismatched fields. Always present, empty (`[]`) when `--matched-group` was never given. |
+| `pin_renames` | object \| `null`           | Additive field (issue #2854). `null` unless `--rename-declared-pins` was given, otherwise the declared-name rename report: `{ "declared": [string, ...], "declared_pins": [string, ...] \| null, "def_pins": [string, ...] \| null, "renamed": [{"from": string, "to": string}, ...], "findings": [{"severity", "code", "net", "message", ...}, ...] }`. `declared_pins`/`def_pins` echo each original argument separately (`null` for "flag not given", a list — `[]` included — for "flag given"; the echoes `--check --rerun` replays both demotion passes from, since the two sets are not interchangeable); `declared` is the union of `--pins`/`--def-pins` the renames resolved against — the rename pass's own matching set, retained for readers; `renamed` lists every `'joined name' -> 'declared name'` rename performed (sorted by `from`, names in the same `\|`-joined spelling `nets[].name` uses); `findings` carries the `error`-severity `declared_pin_short` (a net matching 2+ declared names — a short between interface pins, reported and never repaired) and the `warning`-severity `declared_pin_rename_collision` (a rename skipped because another net already carries the target name) entries, each mirrored into `warnings[]`. See "Renaming promoted pins to their declared name" above. |
+| `rename_declared_pins` | boolean                | Additive field (issue #2854). The effective `--rename-declared-pins` value — always present (`false` when the flag was not given), unlike `pin_renames`' null-unless-given convention, so `--check --rerun` replays the rename from it plus the `pin_renames.declared_pins`/`pin_renames.def_pins` echoes. |
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise. `root` is `{"path", "scope"}` (issue #1376, schema_version 3) -- not the raw `--pdk-root` argument -- via the same `{path, scope}` shape `klt env-provenance` and `klt pex`/`klt sim`/`klt size` use: `scope: "repo"` with a repo-relative `path` when the PDK install lives inside the invoking repo, `scope: "external"` with `path: null` otherwise (a PDK install almost always is). Committing this response as evidence (the normal use of `--format json`) no longer bakes the resolving machine's absolute PDK install path (and possibly a username) into the record; `provenance.pdk` below already carries the same PDK's reproducible identity (name/source/version) without a path. |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `label_layers`     | object \| `null`           | Additive field (issue #2656). The `--label-layer` override this run read net/pin names through — `{"<role>": [layer, datatype] \| null, ...}`, keys sorted — or `null` when the flag was never given. The record of *which GDS purpose a run read names from*, which the `deck` name alone no longer answers once it can be overridden; `klt extract --check <report> --rerun` reads it back and replays the same purposes. See "Overriding a deck's label layers". |
@@ -7218,16 +7295,23 @@ diff computation itself uses the normalized view. Response shape:
 complete report `--rerun` just produced, so a consumer can inspect the
 current state without a second invocation.
 
-**Known limitation**: only `file`/`deck`/`top` and the caller-pinned subset
-of `provenance.deck.options` are reconstructed from the committed report. Every other optional flag
+**Known limitation**: only `file`/`deck`/`top`, the caller-pinned subset
+of `provenance.deck.options`, the `label_layers` echo (issue #2656), and —
+for a report that carries a `pin_renames` block — the declared-pin sets
+(issue #2854: `rename_declared_pins` replayed together with the
+`--pins`/`--def-pins` sets the `pin_renames.declared_pins`/`def_pins`
+echoes record; a block without the separate echoes — an earlier build of
+this unreleased feature, or a hand-edited report — replays its
+`pin_renames.declared` union as `--pins` alone) are reconstructed from the
+committed report. Every other optional flag
 (`--parasitics`, `--mom-net`, `--spef`, `--critical-net`,
 `--distributed-rc`, `--def-net-names`, `--def-net-connections`,
-`--mom-rlc-*`, `--top-cell-pins`, `--pins`,
-`--defer-resistor-fixed-offset`, `--abstract-cells`, `--abstract-cell-lef`,
-`--matched-group`, `--pdk`/`--pdk-root`) is never echoed anywhere in the
-response, so a report produced with any of them will legitimately (and
-unhelpfully) show drift in the corresponding fields under `--rerun`. Use
-cheap mode instead when any of these apply.
+`--mom-rlc-*`, `--top-cell-pins`, `--pins`/`--def-pins` (outside the
+rename echo above), `--defer-resistor-fixed-offset`, `--abstract-cells`,
+`--abstract-cell-lef`, `--matched-group`, `--pdk`/`--pdk-root`) is never
+echoed anywhere in the response, so a report produced with any of them will
+legitimately (and unhelpfully) show drift in the corresponding fields under
+`--rerun`. Use cheap mode instead when any of these apply.
 
 ### Exit codes for `--check` / `--rerun`
 

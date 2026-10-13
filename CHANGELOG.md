@@ -14,6 +14,34 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --rename-declared-pins`** (issue #2854): opt-in rename of
+  surviving promoted pin nets to their declared names. `--pins`/`--def-pins`
+  reconciliation only *demotes* — a surviving pin net whose conductor carries
+  several drawn labels (a macro's internal node label plus the parent's
+  boundary label) keeps KLayout's joined name (`VGND|g_vss_m1|...|vss`), the
+  declared name being only one component, so `klt lvs`'s
+  `options.anchor_top_level_pins` (which matches pin names exactly) could
+  never pair it with a reference pin named `vss`. With the flag, a pin net
+  whose component labels contain exactly one declared name is renamed to it
+  (`.SUBCKT` header, `nets[]`, and every downstream consumer carry the
+  declared spelling); a net matching 2+ declared names is reported — a short
+  between interface pins — never repaired (`error`-severity
+  `declared_pin_short` finding, mirrored as `ERROR:` in `warnings`, and as a
+  `pin.declared_short` `mismatches[]` entry in `klt lvs`); a rename colliding
+  with an existing net name is skipped and reported
+  (`declared_pin_rename_collision`). Disclosed via `warnings` plus the
+  additive `pin_renames` response field; the always-present
+  `rename_declared_pins` echo plus the `pin_renames.declared_pins`/
+  `def_pins` echoes of the two original declared sets let
+  `--check --rerun` replay the rename *and* both demotion passes (the sets
+  are not interchangeable — `--def-pins`'s demotion only further restricts
+  what `--pins` kept, and it alone runs the `def_pin_promotion` report).
+  Plumbed through `klt pex
+  --rename-declared-pins` (echoed as `extraction.rename_declared_pins`) and
+  `klt lvs`'s `layout.rename_declared_pins` (a boolean; requires
+  `layout.declared_pins`). Default off — byte-identical output; the flag
+  without `--pins`/`--def-pins` is a clean error. No `schema_version` bump.
+
 - **`klt sim --batch-set a.json b.json ...`** (issue #2869): submit a set of
   independent `backend: batch` requests in one invocation, with at most
   `--max-in-flight` (default 4) in flight and the rest queued. Reuses
