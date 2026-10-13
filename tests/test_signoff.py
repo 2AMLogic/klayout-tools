@@ -1830,6 +1830,17 @@ def test_yield_fail_check_fails(tmp_path):
     assert result["checks"][0]["passed"] is False
 
 
+def test_yield_insufficient_evidence_check_fails(tmp_path):
+    """Issue #2873: `status: "insufficient_evidence"` is not a pass."""
+    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
+    path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    assert result["checks"][0]["passed"] is False
+
+
 def test_extract_check_always_passes(tmp_path):
     path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
 
@@ -4691,6 +4702,17 @@ def test_yield_fail_status_renders_unmet_check_failed(tmp_path):
     assert item_6["status"] == "unmet"
     assert item_6["reason"] == "check_failed"
     assert item_6["citation"] is None
+
+
+def test_yield_insufficient_evidence_renders_unmet_undersized_sample(tmp_path):
+    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "undersized_sample"
 
 
 # --------------------------------------------------------------------------- #
