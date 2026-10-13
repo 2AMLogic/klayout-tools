@@ -3761,3 +3761,126 @@ def test_cli_batch_set_all_pass_exits_zero_and_refuses_other_backend(
     with pytest.raises(SystemExit) as exc:
         main(["sim"])
     assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# measurements[].crossings through the batch fleet (issue #2868)
+# --------------------------------------------------------------------------- #
+
+_CROSSINGS_DECL = {
+    "name": "t_out",
+    "crossings": {"signal": "v(out)", "level": 0.5, "edge": "rise", "max": 2},
+}
+
+
+def _crossings_entry() -> dict:
+    """What the job instance's own `klt sim` reports for `_CROSSINGS_DECL`:
+    the count as `value`, the series inline beside it."""
+    return {
+        "name": "t_out",
+        "value": 3,
+        "unit": None,
+        "status": "pass",
+        "margin": None,
+        "crossings": {
+            "times": [1.25e-07, 3.25e-07],
+            "edges": ["rise", "rise"],
+            "truncated": True,
+        },
+    }
+
+
+def _crossings_report(corner_ids=("tt_1.800_27",)) -> str:
+    document = json.loads(_sim_report(corner_ids=corner_ids))
+    for corner in document["corners"]:
+        corner["measurements"] = [_crossings_entry()]
+    return json.dumps(document)
+
+
+def test_run_sim_batch_carries_a_crossings_series_inline(tmp_path, monkeypatch):
+    """The series is computed on the job instance and comes back inside the
+    collected report, with `keep_artifacts: false` -- no waveform artifact
+    and no per-edge `.meas` card is involved -- and a crossings-only request
+    counts as checked (it does not degrade to `not_checked`, cf. #3158)."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _crossings_report()}
+    uploaded: dict[str, str] = {}
+    real_open = open
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            with real_open(argv[-3], encoding="utf-8") as handle:
+                uploaded["request"] = handle.read()
+        return runner(argv, timeout_s)
+
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+
+    _write_body(tmp_path)
+    request = _batch_request(
+        tmp_path,
+        measurements=[_CROSSINGS_DECL],
+        options={"keep_artifacts": False},
+    )
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+
+    # The declaration reaches the worker verbatim (it regenerates the deck).
+    document = json.loads(uploaded["request"])
+    assert document["measurements"] == [_CROSSINGS_DECL]
+    (corner,) = report["corners"]
+    assert corner["measurements"] == [_crossings_entry()]
+    assert report["status"] == "pass"
+    assert report["coverage"]["nothing_checked"] is False
+
+
+def test_sharded_batch_run_merges_each_shards_crossings_series(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    def _register_shard_report(argv, timeout_s):
+        joined = " ".join(argv)
+        if "inputs/request.json" in joined:
+            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
+            document = json.loads(Path(source).read_text())
+            assert document["measurements"] == [_CROSSINGS_DECL]
+            runner.outputs_by_job[job_id_of(destination)] = {
+                "report.json": _crossings_report(
+                    corner_ids=tuple(
+                        f"tt_1.800_{int(point['temperature_c'])}"
+                        for point in document["_explicit_points"]
+                    )
+                )
+            }
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _register_shard_report)
+
+    corners, _, environment = sb._run_batch_fleet(
+        corner_points=_corner_points(3),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={
+            "netlist": "body.spice",
+            "measurements": [_CROSSINGS_DECL],
+            "batch": {
+                "bucket": FAKE_BUCKET,
+                "provision_script_path": str(_provision_script(tmp_path)),
+                "poll_interval_s": 0.0,
+            },
+        },
+        hosts=2,
+        measurements_spec=[_CROSSINGS_DECL],
+    )
+
+    assert len(environment["fleet"]) == 2
+    assert [corner["corner_id"] for corner in corners] == [
+        "tt_1.800_0",
+        "tt_1.800_1",
+        "tt_1.800_2",
+    ]
+    assert all(corner["measurements"] == [_crossings_entry()] for corner in corners)
