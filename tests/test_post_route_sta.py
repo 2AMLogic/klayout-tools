@@ -1137,6 +1137,10 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
     assert report["geometry_source"] == "routed"
     assert report["spef_path"] is None
     assert report["spef_annotation"] is None
+    # Issue #2739: the ideal clock is the default and the response says so
+    # explicitly -- with no evidence block, because none was requested.
+    assert report["clock_mode"] == "ideal"
+    assert report["clock_propagation"] is None
 
     provenance = report["provenance"]
     assert provenance["pdk"]["name"] == "sky130A"
@@ -1282,6 +1286,13 @@ def test_run_sta_corners_produces_per_corner_array(tmp_path, monkeypatch):
     assert report["verilog_path"] is None
     assert report["geometry_source"] == "routed"
     assert report["spef_path"] is None
+    # Issue #2739: one clock mode for the whole characterization (hoisted,
+    # like the other corner-invariant request echoes); each corner entry
+    # carries that session's own evidence block.
+    assert report["clock_mode"] == "ideal"
+    for entry in corners:
+        assert entry["clock_propagation"] is None
+        assert "clock_mode" not in entry
     for entry in corners:
         assert "def_path" not in entry
         assert "provenance" not in entry
@@ -3143,7 +3154,535 @@ def test_run_sta_without_worst_path_block_preserves_aggregates(tmp_path, monkeyp
     assert report["worst_hold_path"]["status"] == "unavailable"
 
 
-# -- live engine ------------------------------------------------------------ #
+# --------------------------------------------------------------------------- #
+# Propagated-clock timing (issue #2739).
+#
+# `tests/fixtures/sta_clock_propagation/captures.json` is real engine output
+# (openroad 26Q3-1510-g6cb3f2b704, sky130A volare open_pdks c6d73a35) from
+# this module's own `_sta_script_lines` sessions on a two-flop buffered
+# clock tree DEF (written by the engine itself from the embedded netlist):
+# a long branch (ff1, 3 buffers) and a short branch (ff2, 2 buffers), input
+# ports d1/d2 at `set_input_delay 0`, so the worst hold check is the async-
+# reset removal path the issue's own table measures. The `propagated_spef`
+# scenario adds a hand-written SPEF with 60kOhm on ff1's clock net, so
+# ff1's propagated insertion delay moves far beyond ff2's. `notree` is a
+# DEF whose clock port reaches no clock pin at all.
+# --------------------------------------------------------------------------- #
+
+_CLOCK_CAPTURES = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "sta_clock_propagation" / "captures.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+def _clock_capture_scenario(tag: str) -> dict:
+    return _CLOCK_CAPTURES["scenarios"][tag]
+
+
+def _stub_openroad_clock_capture(
+    monkeypatch, scenario_by_corner: dict[str | None, str]
+) -> list[str]:
+    """Replay a captured #2739 scenario per corner (`None` key for every
+    run in the request); returns the generated scripts."""
+    scripts: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout=f"{_CLOCK_CAPTURES['engine_version']} \n")
+        assert cmd[0] == "openroad"
+        metrics_path, script_path = cmd[4], cmd[5]
+        script_text = Path(script_path).read_text(encoding="utf-8")
+        scripts.append(script_text)
+        corner = next(
+            (c for c in scenario_by_corner if c and f"__{c}.lib" in script_text),
+            None,
+        )
+        captured = _clock_capture_scenario(scenario_by_corner[corner])
+        with open(metrics_path, "w", encoding="utf-8") as handle:
+            json.dump(captured["metrics"], handle)
+        return fake_completed(returncode=0, stdout=captured["stdout"])
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    return scripts
+
+
+def _propagated_constraints(**overrides) -> dict:
+    constraints = {
+        "clock_port": "clk",
+        "clock_period_ns": 2.0,
+        "input_delay_ns": 0.0,
+    }
+    constraints.update(overrides)
+    return constraints
+
+
+# -- fixture drift guard -----------------------------------------------------#
+
+
+def test_clock_capture_fixture_matches_module_tcl():
+    """Fixture drift guard: the captures must come from the Tcl this module
+    emits today -- the stored fragments byte-for-byte, and the stored full
+    propagated+SPEF script equal to a fresh `_sta_script_lines` build with
+    the same placeholder paths re-substituted."""
+    assert _CLOCK_CAPTURES["tcl_fragments"][
+        "propagated_clock_lines"
+    ] == post_route_sta._propagated_clock_lines("clk")
+    assert (
+        _CLOCK_CAPTURES["tcl_fragments"]["clock_latency_lines"]
+        == post_route_sta._clock_latency_lines()
+    )
+    placeholders = {
+        "<TLEF>": "/t/tech.lef",
+        "<CLEF>": "/t/cells.lef",
+        "<LIB>": "/t/lib.lib",
+        "<WORK>": "/w",
+    }
+    stored = _CLOCK_CAPTURES["scripts"]["propagated_spef_buffered"]
+    for host, dummy in placeholders.items():
+        stored = [line.replace(host, dummy) for line in stored]
+    fresh = post_route_sta._sta_script_lines(
+        tech_lef="/t/tech.lef",
+        cell_lef="/t/cells.lef",
+        def_path="/w/buffered.def",
+        liberty_path="/t/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.0,
+        spef_path="/w/buffered.spef",
+        spef_net_names=["c3"],
+        input_delay_ns=0.0,
+        propagated_clock=True,
+    )
+    # Issue #2780 appends the read-only constraint-completeness query as the
+    # script's last block -- after every metric/report this capture replays
+    # -- so the pre-#2780 capture still matches everything before it.
+    completeness = post_route_sta._constraint_completeness_lines()
+    assert fresh[-len(completeness) :] == completeness
+    assert stored == fresh[: -len(completeness)]
+
+
+# -- request validation ------------------------------------------------------#
+
+
+@pytest.mark.parametrize("value", [None, False])
+def test_validate_propagated_clock_omitted_and_false_ideal(value):
+    assert (
+        post_route_sta._validate_propagated_clock(
+            {"propagated_clock": value} if value is not None else {}, True
+        )
+        is False
+    )
+
+
+def test_validate_propagated_clock_true_in_def_mode():
+    assert (
+        post_route_sta._validate_propagated_clock({"propagated_clock": True}, True)
+        is True
+    )
+
+
+@pytest.mark.parametrize("value", ["yes", 1, 0.0, [], {}])
+def test_validate_propagated_clock_non_boolean_rejected(value):
+    with pytest.raises(PostRouteStaError, match="must be a boolean"):
+        post_route_sta._validate_propagated_clock({"propagated_clock": value}, True)
+
+
+def test_run_sta_propagated_clock_true_rejected_in_verilog_mode(tmp_path):
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "verilog": _write(tmp_path / "top.v", "module top(); endmodule\n"),
+            "hdl_toplevel": "top",
+            "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+            "constraints": _propagated_constraints(propagated_clock=True),
+        },
+    )
+    with pytest.raises(PostRouteStaError, match="only valid in def mode"):
+        run_sta(request_path)
+
+
+def test_run_sta_propagated_clock_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(propagated_clock="yes"),
+    )
+    calls: list = []
+    monkeypatch.setattr(
+        post_route_sta.subprocess, "run", lambda *a, **k: calls.append(a)
+    )
+    with pytest.raises(PostRouteStaError, match="must be a boolean"):
+        run_sta(request_path)
+    assert calls == []
+
+
+# -- script assembly ---------------------------------------------------------#
+
+
+def test_sta_script_lines_propagated_marks_clock_right_after_create_clock():
+    """`set_propagated_clock` names exactly the clock `create_clock` made
+    (`[get_clocks clk]`), immediately after it -- after the design and the
+    timing constraint are loaded, before any I/O delay / SPEF / metric
+    collection, so every report the session produces is the propagated
+    analysis (live-verified against openroad 26Q3-1510: metrics collected
+    after this line carry the clock-tree insertion delay)."""
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        def_path="/design/top.def",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+        input_delay_ns=0.0,
+        propagated_clock=True,
+    )
+
+    create_idx = lines.index("create_clock -name clk -period 2.5 [get_ports clk]")
+    prop_idx = lines.index("set_propagated_clock [get_clocks clk]")
+    io_idx = next(i for i, ln in enumerate(lines) if ln.startswith("set_input_delay"))
+    first_report_idx = lines.index("report_worst_slack_metric -setup")
+    assert create_idx < prop_idx < io_idx < first_report_idx
+    # The evidence dump is bracketed and `catch`-wrapped.
+    latency_begin = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"')
+    assert any(ln.startswith("catch {report_clock_latency -digits 6}") for ln in lines)
+    latency_end = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_END}"')
+    assert prop_idx < latency_begin < latency_end < first_report_idx
+
+
+def test_sta_script_lines_propagated_with_spef_reports_after_read_spef():
+    """The latency evidence runs after `read_spef` so its network latencies
+    reflect the same parasitics the timing numbers do (live-verified: a
+    SPEF's clock-net RC shows up in `report_clock_latency` and in the
+    propagated hold slack alike)."""
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        def_path="/design/top.def",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+        spef_path="/design/top.spef",
+        spef_net_names=["c3"],
+        propagated_clock=True,
+    )
+
+    read_spef_idx = lines.index("read_spef /design/top.spef")
+    parasitic_end = lines.index(f'puts "{post_route_sta._PARASITIC_ANNOTATION_END}"')
+    latency_begin = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"')
+    latency_end = lines.index(f'puts "{post_route_sta._CLOCK_LATENCY_END}"')
+    first_report_idx = lines.index("report_worst_slack_metric -setup")
+    assert (
+        read_spef_idx < parasitic_end < latency_begin < latency_end < first_report_idx
+    )
+
+
+def test_sta_script_lines_ideal_has_no_propagation_tcl():
+    """Default request: byte-identical pre-#2739 Tcl -- no
+    `set_propagated_clock`, no latency evidence dump."""
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        def_path="/design/top.def",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+    )
+
+    script = "\n".join(lines)
+    assert "set_propagated_clock" not in script
+    assert "report_clock_latency" not in script
+    assert post_route_sta._CLOCK_LATENCY_BEGIN not in script
+
+
+def test_sta_netlist_script_lines_never_propagates():
+    lines = post_route_sta._sta_netlist_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        verilog_path="/design/top.v",
+        liberty_path="/pdk/lib.lib",
+        hdl_toplevel="top",
+        clock_port="clk",
+        clock_period_ns=2.5,
+    )
+
+    script = "\n".join(lines)
+    assert "set_propagated_clock" not in script
+    assert "report_clock_latency" not in script
+
+
+# -- evidence parsing --------------------------------------------------------#
+
+
+def test_parse_clock_latency_sinks_max_and_sample():
+    stdout = "\n".join(
+        [
+            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
+            "Clock clk",
+            "rise -> rise",
+            "    min     max",
+            "0.000000 0.000000 source latency",
+            "0.302855         network latency ff/CLK",
+            "        0.302855 network latency ff/CLK",
+            "---------------",
+            "0.302855 0.302855 latency",
+            "        0.000000 skew",
+            "",
+            "fall -> fall",
+            "    min     max",
+            "0.000000 0.000000 source latency",
+            "0.335104         network latency ff/CLK",
+            "        0.335104 network latency ff/CLK",
+            "---------------",
+            "0.335104 0.335104 latency",
+            "        0.000000 skew",
+            "",
+            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+        ]
+    )
+
+    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
+
+    assert evidence == {
+        "clock_sinks": 1,
+        "max_network_latency_ns": 0.335104,
+        "clock_sinks_sample": ["ff/CLK"],
+    }
+
+
+def test_parse_clock_latency_dedupes_sinks_and_caps_sample():
+    lines = [f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"', "Clock clk"]
+    for i in range(post_route_sta._CLOCK_SINK_SAMPLE_LIMIT + 5):
+        lines.append(f"0.0{i}         network latency ff{i}/CLK")
+    lines += [
+        "        0.990000 network latency ff1/CLK",  # max col of an early sink
+        f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+    ]
+
+    evidence = post_route_sta._parse_clock_latency("\n".join(lines), "clk")
+
+    assert evidence["clock_sinks"] == post_route_sta._CLOCK_SINK_SAMPLE_LIMIT + 5
+    assert len(evidence["clock_sinks_sample"]) == (
+        post_route_sta._CLOCK_SINK_SAMPLE_LIMIT
+    )
+    assert evidence["clock_sinks_sample"][0] == "ff0/CLK"
+    assert evidence["max_network_latency_ns"] == 0.99
+
+
+def test_parse_clock_latency_ignores_other_clock_sections():
+    stdout = "\n".join(
+        [
+            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
+            "Clock other",
+            "1.000000         network latency x/CLK",
+            "Clock clk",
+            "0.200000         network latency ff/CLK",
+            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+        ]
+    )
+
+    evidence = post_route_sta._parse_clock_latency(stdout, "clk")
+
+    assert evidence == {
+        "clock_sinks": 1,
+        "max_network_latency_ns": 0.2,
+        "clock_sinks_sample": ["ff/CLK"],
+    }
+
+
+def test_parse_clock_latency_empty_section_is_zero_sinks():
+    """The tree-less contract: the clock's section printed with no rows --
+    the explicit machine-readable "propagation could not be established"
+    signal. This is the real captured output of the fixture's `notree`
+    scenario."""
+    evidence = post_route_sta._parse_clock_latency(
+        _clock_capture_scenario("propagated_notree")["stdout"], "clk"
+    )
+
+    assert evidence == {
+        "clock_sinks": 0,
+        "max_network_latency_ns": None,
+        "clock_sinks_sample": [],
+    }
+
+
+def test_parse_clock_latency_missing_block_is_unknown():
+    evidence = post_route_sta._parse_clock_latency("no markers here", "clk")
+
+    assert evidence == {
+        "clock_sinks": None,
+        "max_network_latency_ns": None,
+        "clock_sinks_sample": [],
+    }
+
+
+def test_parse_clock_latency_error_text_is_unknown():
+    """A `catch`-swallowed command failure (e.g. an OpenSTA build without
+    `report_clock_latency`) leaves the command's error text inside the
+    markers and no `Clock <name>` section -- unknown, never a fabricated
+    sink count."""
+    stdout = "\n".join(
+        [
+            f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"',
+            "invalid command name report_clock_latency",
+            f'puts "{post_route_sta._CLOCK_LATENCY_END}"',
+        ]
+    )
+
+    assert post_route_sta._parse_clock_latency(stdout, "clk") == {
+        "clock_sinks": None,
+        "max_network_latency_ns": None,
+        "clock_sinks_sample": [],
+    }
+
+
+# -- response serialization (real captured stdout/metrics replayed) ----------#
+
+
+def test_run_sta_propagated_response_replays_captured_tree(tmp_path, monkeypatch):
+    """End-to-end on the captured two-flop tree: `clock_mode` +
+    `clock_propagation` carry what the pinned engine reported, and the
+    timing fields are that session's propagated numbers -- the worst hold
+    check (the async-reset removal path) moves *further negative* than the
+    same design timed ideally, exactly the issue's premise."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(propagated_clock=True),
+    )
+    _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+
+    report = run_sta(request_path)
+
+    assert report["clock_mode"] == "propagated"
+    assert report["clock_propagation"] == {
+        "clock_sinks": 2,
+        "max_network_latency_ns": 0.34271,
+        "clock_sinks_sample": ["ff2/CLK", "ff1/CLK"],
+    }
+    captured = _clock_capture_scenario("propagated_buffered")["metrics"]
+    assert report["worst_hold_slack_ns"] == round(captured["timing__hold__ws"], 5)
+    # Independence from `clock_skew_ns`: the evidence block is parsed from
+    # the latency dump, the skew from `report_clock_skew_metric` -- the
+    # latter is non-zero here and is not what the former is derived from.
+    assert report["clock_skew_ns"] is not None
+    assert (
+        report["clock_skew_ns"] != report["clock_propagation"]["max_network_latency_ns"]
+    )
+
+
+def test_run_sta_propagated_spef_tree_latency_grows(tmp_path, monkeypatch):
+    """The SPEF-backed regression: same design, propagation on, plus a SPEF
+    with heavy RC on ff1's clock net -- the reported max network latency
+    grows well beyond the unannotated tree's, i.e. the propagated analysis
+    uses the loaded SPEF delays (read_spef comes *after*
+    set_propagated_clock in the generated script; live-verified that the
+    annotation still reaches the propagated arrivals)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(propagated_clock=True),
+        spef="top.spef",
+    )
+    _write(
+        tmp_path / "top.spef",
+        "*SPEF placeholder -- stubbed run never reads this\n",
+    )
+    _stub_openroad_clock_capture(monkeypatch, {None: "propagated_spef_buffered"})
+
+    report = run_sta(request_path)
+
+    plain = _clock_capture_scenario("propagated_buffered")["metrics"][
+        "timing__hold__ws"
+    ]
+    annotated = _clock_capture_scenario("propagated_spef_buffered")["metrics"][
+        "timing__hold__ws"
+    ]
+    assert report["clock_mode"] == "propagated"
+    assert report["clock_propagation"]["max_network_latency_ns"] == 0.847361
+    assert annotated < plain  # annotated hold is further violated
+
+
+def test_run_sta_propagated_treeless_def_reports_zero_sinks(tmp_path, monkeypatch):
+    """The documented tree-less contract: a DEF whose clock reaches no
+    clock pin yields `clock_sinks: 0` / `max_network_latency_ns: null` --
+    explicit machine-readable evidence propagation could not be established,
+    next to whatever timing the engine produced. Never a silent claim that
+    insertion delay was included."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(propagated_clock=True),
+    )
+    _stub_openroad_clock_capture(monkeypatch, {None: "propagated_notree"})
+
+    report = run_sta(request_path)
+
+    assert report["clock_mode"] == "propagated"
+    assert report["clock_propagation"] == {
+        "clock_sinks": 0,
+        "max_network_latency_ns": None,
+        "clock_sinks_sample": [],
+    }
+
+
+def test_run_sta_propagated_multi_corner_mode_on_every_entry(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(propagated_clock=True),
+    )
+    _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+
+    report = run_sta(request_path)
+
+    assert report["clock_mode"] == "propagated"
+    assert [e["corner"] for e in report["corners"]] == [
+        "tt_025C_1v80",
+        "ss_100C_1v60",
+    ]
+    for entry in report["corners"]:
+        assert entry["clock_propagation"]["clock_sinks"] == 2
+        assert "clock_mode" not in entry
+
+
+def test_run_sta_propagated_script_emits_set_propagated_clock_per_corner(
+    tmp_path, monkeypatch
+):
+    """The generated session scripts carry the propagation command and the
+    evidence dump -- the engine-facing half of the contract (verified
+    against the captured real-engine scripts by the drift guard above)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_propagated_constraints(propagated_clock=True),
+    )
+    scripts = _stub_openroad_clock_capture(monkeypatch, {None: "propagated_buffered"})
+
+    run_sta(request_path)
+
+    assert len(scripts) == 1
+    create_idx = scripts[0].index("create_clock -name clk -period 2.0 [get_ports clk]")
+    prop_idx = scripts[0].index("set_propagated_clock [get_clocks clk]")
+    latency_idx = scripts[0].index(f'puts "{post_route_sta._CLOCK_LATENCY_BEGIN}"')
+    metrics_idx = scripts[0].index("report_worst_slack_metric -setup")
+    assert create_idx < prop_idx < latency_idx < metrics_idx
+
+
+def test_run_sta_verilog_mode_response_is_always_ideal(tmp_path, monkeypatch):
+    """A verilog-mode request cannot ask for propagation (rejected at
+    validation) -- its response states `clock_mode: "ideal"` and carries no
+    evidence block, so the field is present on every response shape."""
+    request_path = _setup_verilog_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["clock_mode"] == "ideal"
+    assert report["clock_propagation"] is None
+
+
+# -- live engine (openroad on PATH + PDK_ROOT with sky130A): see the
+#    `test_live_engine_*` tests below `_live_sky130_env`. -------------------- #
 
 
 def _live_sky130_env() -> str | None:
@@ -3199,3 +3738,615 @@ def test_live_engine_boundary_paths(tmp_path):
     )
     assert hold["consistent_with_aggregate"] is True
     assert setup["consistent_with_aggregate"] is True
+
+
+def _write_clock_fixtures(tmp_path) -> dict[str, str]:
+    """Materialize the captured design files for a live engine run."""
+    paths = {
+        "buffered.def": _CLOCK_CAPTURES["defs"]["buffered"],
+        "notree.def": _CLOCK_CAPTURES["defs"]["notree"],
+        "buffered.spef": _CLOCK_CAPTURES["spef"],
+    }
+    return {name: _write(tmp_path / name, text) for name, text in paths.items()}
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_propagated_boundary_timing(tmp_path):
+    """Engine integration (issue #2739 test plan): the same small post-CTS
+    tree DEF timed ideal vs propagated vs propagated+SPEF on the real
+    engine -- the boundary hold/removal result must move in the expected
+    direction, and the evidence block must report what propagation reached
+    (including the tree-less DEF's explicit zero-sink contract)."""
+    paths = _write_clock_fixtures(tmp_path)
+
+    def run(constraints: dict, *, spef: str | None = None) -> dict:
+        request = {
+            "def": paths["buffered.def"],
+            "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+            "constraints": constraints,
+        }
+        if spef is not None:
+            request["spef"] = spef
+        return run_sta(
+            _write_request(tmp_path / "request.json", request),
+            pdk_variant="sky130A",
+        )
+
+    ideal = run(_propagated_constraints())
+    prop = run(_propagated_constraints(propagated_clock=True))
+    prop_spef = run(
+        _propagated_constraints(propagated_clock=True),
+        spef=paths["buffered.spef"],
+    )
+    notree = run_sta(
+        _write_request(
+            tmp_path / "notree.json",
+            {
+                "def": paths["notree.def"],
+                "pdk": {
+                    "cell_library": "sky130_fd_sc_hd",
+                    "corner": "tt_025C_1v80",
+                },
+                "constraints": _propagated_constraints(propagated_clock=True),
+            },
+        ),
+        pdk_variant="sky130A",
+    )
+
+    # Ideal vs propagated on the same DEF: the worst hold-side check (the
+    # async-reset removal path) moves further negative once the capture
+    # flop's clock arrives late by the tree's insertion delay.
+    assert ideal["clock_mode"] == "ideal"
+    assert ideal["clock_propagation"] is None
+    assert prop["clock_mode"] == "propagated"
+    assert prop["worst_hold_slack_ns"] < ideal["worst_hold_slack_ns"]
+    assert prop["clock_propagation"]["clock_sinks"] == 2
+    assert prop["clock_propagation"]["max_network_latency_ns"] > 0
+
+    # SPEF-backed: the clock-net RC must reach the propagated arrival --
+    # a larger max latency and a deeper hold violation than unannotated.
+    assert (
+        prop_spef["clock_propagation"]["max_network_latency_ns"]
+        > prop["clock_propagation"]["max_network_latency_ns"]
+    )
+    assert prop_spef["worst_hold_slack_ns"] < prop["worst_hold_slack_ns"]
+
+    # Tree-less DEF + propagation requested: explicit zero-sink evidence,
+    # not a silent claim of insertion delay.
+    assert notree["clock_mode"] == "propagated"
+    assert notree["clock_propagation"] == {
+        "clock_sinks": 0,
+        "max_network_latency_ns": None,
+        "clock_sinks_sample": [],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Constraint completeness: unconstrained endpoints + unclocked registers
+# (issue #2780).
+#
+# `tests/fixtures/sta_constraint_completeness/openroad_26Q3-1510_captures.json`
+# is real OpenROAD `26Q3-1510-g6cb3f2b704` stdout (sky130A via volare,
+# sky130_fd_sc_hd tt_025C_1v80) from `run_sta` verilog-mode sessions on small
+# netlists: a single clocked flop, a "mixed" design (one clocked flop, one
+# flop clocked from a non-clock input, one AND gate), a combinational-only
+# design and 25 flops on a non-clock input. The two exception scenarios add
+# `set_false_path` lines (plus a `find_timing_paths -to [get_ports y]` probe
+# printing `KLT_PROBE_PATHS_TO_Y <n>`) to the generated script right after
+# the I/O delays -- `klt sta` requests have no exception field, so those two
+# record engine semantics, not a request shape.
+# --------------------------------------------------------------------------- #
+
+_COMPLETENESS_CAPTURES = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "sta_constraint_completeness"
+        / "openroad_26Q3-1510_captures.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+def _completeness_scenario(name: str) -> dict:
+    return _COMPLETENESS_CAPTURES["scenarios"][name]
+
+
+def _completeness_block(*rows: str) -> str:
+    return "\n".join(
+        [post_route_sta._COMPLETENESS_BEGIN, *rows, post_route_sta._COMPLETENESS_END]
+    )
+
+
+def _setup_completeness_env(tmp_path, monkeypatch, scenario: str, **overrides) -> str:
+    """A verilog-mode request carrying the captured scenario's own netlist
+    and I/O-delay constraints (the replay below supplies the engine side)."""
+    captured = _completeness_scenario(scenario)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    for corner in ("tt_025C_1v80", "ss_100C_1v60"):
+        _make_pdk_install(install_root, "sky130A", corner=corner)
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "top.v", _COMPLETENESS_CAPTURES["netlists"][captured["netlist"]])
+    request = _verilog_base_request(
+        constraints={**_COMPLETENESS_CAPTURES["clock"], **captured["constraints"]},
+        **overrides,
+    )
+    return _write_request(tmp_path / "request.json", request)
+
+
+def _stub_openroad_completeness_capture(
+    monkeypatch, scenario_by_corner: dict[str | None, str]
+) -> list[str]:
+    """Replay captured completeness scenarios per corner (`None` key for a
+    single-corner run); returns the generated scripts."""
+    scripts: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(
+                stdout=f"{_COMPLETENESS_CAPTURES['engine_version']} \n"
+            )
+        metrics_path, script_path = cmd[4], cmd[5]
+        script_text = Path(script_path).read_text(encoding="utf-8")
+        scripts.append(script_text)
+        corner = next(
+            (c for c in scenario_by_corner if c and f"__{c}.lib" in script_text),
+            None,
+        )
+        captured = _completeness_scenario(scenario_by_corner[corner])
+        with open(metrics_path, "w", encoding="utf-8") as handle:
+            json.dump(captured["metrics"], handle)
+        return fake_completed(returncode=0, stdout=captured["stdout"])
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    return scripts
+
+
+def _run_completeness_scenario(tmp_path, monkeypatch, scenario: str) -> dict:
+    request_path = _setup_completeness_env(tmp_path, monkeypatch, scenario)
+    _stub_openroad_completeness_capture(monkeypatch, {None: scenario})
+    return run_sta(request_path)
+
+
+# -- fixture drift guard / script assembly -----------------------------------#
+
+
+def test_completeness_capture_used_the_shipped_tcl():
+    assert (
+        _COMPLETENESS_CAPTURES["completeness_tcl"]
+        == post_route_sta._constraint_completeness_lines()
+    )
+    assert _COMPLETENESS_CAPTURES["engine_version"] == "26Q3-1510-g6cb3f2b704"
+
+
+def test_completeness_lines_query_each_check_via_structured_engine_command():
+    """One `sta::check_timing_cmd` call per check with exactly one flag set
+    (so every record belongs to that check), pin names taken from the
+    record list after the message, each check `catch`-wrapped on its own,
+    and the sample capped in Tcl rather than after the fact."""
+    lines = post_route_sta._constraint_completeness_lines()
+    text = "\n".join(lines)
+    assert lines[0] == f'puts "{post_route_sta._COMPLETENESS_BEGIN}"'
+    assert lines[-1] == f'puts "{post_route_sta._COMPLETENESS_END}"'
+    assert "unconstrained_endpoints {0 0 0 0 1 0 0}" in text
+    assert "unclocked_registers {0 0 0 1 0 0 0}" in text
+    assert "sta::check_timing_cmd {*}$klt_cc_flags" in text
+    assert "[lrange $klt_cc_record 1 end]" in text
+    assert (
+        f"[lrange $klt_cc_pins 0 {post_route_sta._COMPLETENESS_SAMPLE_LIMIT - 1}]"
+        in text
+    )
+    assert "} klt_cc_error]} {" in text
+    # Never the human-readable warning command.
+    assert "check_setup" not in text
+
+
+@pytest.mark.parametrize("mode", ["def", "verilog"])
+def test_run_sta_both_modes_emit_completeness_query_last(tmp_path, monkeypatch, mode):
+    if mode == "def":
+        request_path = _setup_success_env(tmp_path, monkeypatch)
+    else:
+        request_path = _setup_verilog_success_env(tmp_path, monkeypatch)
+    scripts = _stub_openroad_completeness_capture(monkeypatch, {None: "mixed"})
+
+    run_sta(request_path)
+
+    lines = scripts[0].splitlines()
+    completeness = post_route_sta._constraint_completeness_lines()
+    assert lines[-len(completeness) :] == completeness
+    assert lines.index(f'puts "{post_route_sta._WORST_PATHS_END}"') < len(lines) - len(
+        completeness
+    )
+
+
+# -- real-engine scenarios ---------------------------------------------------#
+
+
+def test_run_sta_mixed_design_finite_wns_is_not_complete(tmp_path, monkeypatch):
+    """The issue's own symptom: a design with a measured, finite WNS
+    (`timing_status: "constrained"`) still has an unclocked register and
+    unconstrained endpoints -- and the response says so."""
+    report = _run_completeness_scenario(tmp_path, monkeypatch, "mixed")
+
+    assert report["timing_status"] == "constrained"
+    assert report["worst_slack_ns"] == pytest.approx(1.63849)
+    completeness = report["constraint_completeness"]
+    assert completeness["status"] == "incomplete"
+    assert completeness["unconstrained_endpoints"] == {
+        "status": "ok",
+        "count": 2,
+        "sample": ["q2", "ff_unclk/D"],
+        "truncated": False,
+        "reason": None,
+    }
+    assert completeness["unclocked_registers"] == {
+        "status": "ok",
+        "count": 1,
+        "sample": ["ff_unclk/CLK"],
+        "truncated": False,
+        "reason": None,
+    }
+    assert completeness["sample_limit"] == post_route_sta._COMPLETENESS_SAMPLE_LIMIT
+    # Existing slack-field semantics are untouched.
+    assert report["setup_violation_count"] == 0
+    assert report["worst_setup_path"]["endpoint"] == "q"
+
+
+def test_run_sta_fully_constrained_reports_zero_counts(tmp_path, monkeypatch):
+    report = _run_completeness_scenario(tmp_path, monkeypatch, "fully_constrained")
+
+    completeness = report["constraint_completeness"]
+    assert report["timing_status"] == "constrained"
+    assert completeness["status"] == "complete"
+    for key in ("unconstrained_endpoints", "unclocked_registers"):
+        assert completeness[key] == {
+            "status": "ok",
+            "count": 0,
+            "sample": [],
+            "truncated": False,
+            "reason": None,
+        }
+
+
+def test_run_sta_unconstrained_design_lists_every_endpoint(tmp_path, monkeypatch):
+    """No I/O delays: the sentinel WNS (`timing_status: "unconstrained"`) and
+    every endpoint -- including the clocked flop's `D` -- unconstrained."""
+    report = _run_completeness_scenario(tmp_path, monkeypatch, "mixed_no_io_delays")
+
+    completeness = report["constraint_completeness"]
+    assert report["timing_status"] == "unconstrained"
+    assert completeness["status"] == "incomplete"
+    assert completeness["unconstrained_endpoints"]["count"] == 5
+    assert completeness["unconstrained_endpoints"]["sample"] == [
+        "q",
+        "q2",
+        "y",
+        "ff/D",
+        "ff_unclk/D",
+    ]
+    assert completeness["unclocked_registers"]["sample"] == ["ff_unclk/CLK"]
+
+
+def test_run_sta_combinational_only_design(tmp_path, monkeypatch):
+    """A design with no registers has zero unclocked registers (a measured
+    zero, not unknown); its output is an endpoint like any other --
+    constrained by an output delay against the virtual-boundary clock,
+    unconstrained without one."""
+    constrained = _run_completeness_scenario(
+        tmp_path / "a", monkeypatch, "combinational_constrained"
+    )
+    bare = _run_completeness_scenario(
+        tmp_path / "b", monkeypatch, "combinational_no_io_delays"
+    )
+
+    assert constrained["constraint_completeness"]["status"] == "complete"
+    assert constrained["constraint_completeness"]["unclocked_registers"]["count"] == 0
+    assert bare["timing_status"] == "unconstrained"
+    assert bare["constraint_completeness"]["status"] == "incomplete"
+    assert bare["constraint_completeness"]["unconstrained_endpoints"]["sample"] == ["y"]
+    assert bare["constraint_completeness"]["unclocked_registers"]["count"] == 0
+
+
+def test_run_sta_large_population_is_a_bounded_sample(tmp_path, monkeypatch):
+    report = _run_completeness_scenario(tmp_path, monkeypatch, "many_unclocked")
+
+    completeness = report["constraint_completeness"]
+    limit = post_route_sta._COMPLETENESS_SAMPLE_LIMIT
+    unclocked = completeness["unclocked_registers"]
+    assert unclocked["count"] == 25
+    assert unclocked["truncated"] is True
+    assert unclocked["sample"] == [f"u{i:02d}/CLK" for i in range(limit)]
+    unconstrained = completeness["unconstrained_endpoints"]
+    assert unconstrained["count"] == 50
+    assert unconstrained["truncated"] is True
+    assert len(unconstrained["sample"]) == limit
+
+
+def test_engine_exception_semantics_on_captured_sessions():
+    """Documents how timing exceptions interact with the query on the pinned
+    engine: a `set_false_path` removes every timed path to `y` (probe 1 ->
+    0) yet `y` -- which has an output delay -- is still *not* reported as
+    unconstrained (an intentionally excepted endpoint is not a constraint
+    gap), and a false path never hides an endpoint that has no constraint
+    at all."""
+    parse = post_route_sta._parse_constraint_completeness
+
+    def probe(name: str) -> list[str]:
+        return [
+            line
+            for line in _completeness_scenario(name)["stdout"].splitlines()
+            if line.startswith("KLT_PROBE_PATHS_TO_Y")
+        ]
+
+    assert probe("mixed_exception_probe_control") == ["KLT_PROBE_PATHS_TO_Y 1"]
+    assert probe("mixed_false_path_on_constrained_endpoint") == [
+        "KLT_PROBE_PATHS_TO_Y 0"
+    ]
+    baseline = parse(_completeness_scenario("mixed")["stdout"])
+    excepted = parse(
+        _completeness_scenario("mixed_false_path_on_constrained_endpoint")["stdout"]
+    )
+    assert excepted == baseline
+    assert "y" not in excepted["unconstrained_endpoints"]["sample"]
+
+    bare = parse(_completeness_scenario("mixed_no_io_delays")["stdout"])
+    bare_excepted = parse(
+        _completeness_scenario("mixed_no_io_false_path_on_unconstrained_endpoints")[
+            "stdout"
+        ]
+    )
+    assert bare_excepted == bare
+    assert {"y", "ff_unclk/D"} <= set(
+        bare_excepted["unconstrained_endpoints"]["sample"]
+    )
+
+
+def test_run_sta_multi_corner_completeness_is_per_corner(tmp_path, monkeypatch):
+    """Each `corners[]` entry carries its own session's block -- one corner
+    replays the mixed design, the other the fully constrained one -- and
+    nothing is hoisted to the top level."""
+    request_path = _setup_completeness_env(
+        tmp_path,
+        monkeypatch,
+        "mixed",
+        pdk={
+            "cell_library": "sky130_fd_sc_hd",
+            "corners": ["tt_025C_1v80", "ss_100C_1v60"],
+        },
+    )
+    _stub_openroad_completeness_capture(
+        monkeypatch, {"tt_025C_1v80": "mixed", "ss_100C_1v60": "fully_constrained"}
+    )
+
+    report = run_sta(request_path)
+
+    assert "constraint_completeness" not in report
+    tt_entry, ss_entry = report["corners"]
+    assert tt_entry["constraint_completeness"]["status"] == "incomplete"
+    assert tt_entry["constraint_completeness"]["unclocked_registers"]["sample"] == [
+        "ff_unclk/CLK"
+    ]
+    assert ss_entry["constraint_completeness"]["status"] == "complete"
+    assert ss_entry["constraint_completeness"]["unconstrained_endpoints"]["count"] == 0
+
+
+# -- unavailable / malformed: explicit unknown, never a fabricated zero ------#
+
+
+def test_run_sta_without_completeness_block_is_unknown_not_zero(tmp_path, monkeypatch):
+    """An engine output with no completeness block (the generic stub never
+    prints one) yields `unknown`/`unavailable` with null counts -- slack
+    fields and `timing_status` unchanged."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    report = run_sta(request_path)
+
+    completeness = report["constraint_completeness"]
+    assert completeness["status"] == "unknown"
+    for key in ("unconstrained_endpoints", "unclocked_registers"):
+        check = completeness[key]
+        assert check["status"] == "unavailable"
+        assert check["count"] is None
+        assert check["truncated"] is None
+        assert check["sample"] == []
+        assert "absent" in check["reason"]
+    assert report["timing_status"] == "constrained"
+    assert report["worst_slack_ns"] == -0.15
+
+
+def test_completeness_engine_error_is_unavailable_per_check():
+    stdout = _completeness_block(
+        "ERROR\tunconstrained_endpoints\tWrong number of arguments :check_timing_cmd",
+        "CHECK\tunclocked_registers\t0",
+    )
+    result = post_route_sta._parse_constraint_completeness(stdout)
+
+    assert result["status"] == "unknown"
+    assert result["unconstrained_endpoints"]["status"] == "unavailable"
+    assert result["unconstrained_endpoints"]["count"] is None
+    assert "Wrong number of arguments" in result["unconstrained_endpoints"]["reason"]
+    assert result["unclocked_registers"]["status"] == "ok"
+    assert result["unclocked_registers"]["count"] == 0
+
+
+def test_completeness_known_gap_wins_over_unavailable_check():
+    """One check unavailable, the other finds a gap: the design is known to
+    be incomplete regardless of the check that could not run."""
+    stdout = _completeness_block(
+        "ERROR\tunconstrained_endpoints\tboom",
+        "CHECK\tunclocked_registers\t1",
+        "ITEM\tunclocked_registers\tff/CLK",
+    )
+    result = post_route_sta._parse_constraint_completeness(stdout)
+
+    assert result["status"] == "incomplete"
+    assert result["unconstrained_endpoints"]["status"] == "unavailable"
+
+
+def test_completeness_ignores_stray_engine_lines():
+    """Warnings interleaved in the block are never counted as identities."""
+    stdout = _completeness_block(
+        "Warning: There are 2 unconstrained endpoints.",
+        "CHECK\tunconstrained_endpoints\t1",
+        "[WARNING STA-0441] something",
+        "ITEM\tunconstrained_endpoints\tq2",
+        "CHECK\tunclocked_registers\t0",
+    )
+    result = post_route_sta._parse_constraint_completeness(stdout)
+
+    assert result["status"] == "incomplete"
+    assert result["unconstrained_endpoints"]["count"] == 1
+    assert result["unconstrained_endpoints"]["sample"] == ["q2"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "reason_fragment"),
+    [
+        ([], "no unconstrained_endpoints total"),
+        (
+            ["CHECK\tunconstrained_endpoints\tmany"],
+            "malformed unconstrained_endpoints total",
+        ),
+        (
+            ["CHECK\tunconstrained_endpoints\t-1"],
+            "malformed unconstrained_endpoints total",
+        ),
+        (
+            ["CHECK\tunconstrained_endpoints\t²"],
+            "malformed unconstrained_endpoints total",
+        ),
+        (
+            ["CHECK\tunconstrained_endpoints\t0", "CHECK\tunconstrained_endpoints\t0"],
+            "duplicate",
+        ),
+        (
+            ["CHECK\tunconstrained_endpoints\t2", "ITEM\tunconstrained_endpoints\tq"],
+            "sample has 1",
+        ),
+        (
+            ["CHECK\tunconstrained_endpoints\t0", "ITEM\tunconstrained_endpoints\tq"],
+            "sample has 1",
+        ),
+        (
+            ["CHECK\tunconstrained_endpoints\t1", "ITEM\tunconstrained_endpoints\t"],
+            "malformed",
+        ),
+        (["CHECK\tunconstrained_endpoints"], "malformed"),
+    ],
+)
+def test_completeness_malformed_output_is_unavailable(rows, reason_fragment):
+    stdout = _completeness_block(*rows, "CHECK\tunclocked_registers\t0")
+    result = post_route_sta._parse_constraint_completeness(stdout)
+
+    check = result["unconstrained_endpoints"]
+    assert check["status"] == "unavailable"
+    assert check["count"] is None
+    assert reason_fragment in check["reason"]
+    assert result["status"] == "unknown"
+
+
+def test_completeness_sample_over_limit_is_malformed():
+    limit = post_route_sta._COMPLETENESS_SAMPLE_LIMIT
+    rows = [f"CHECK\tunclocked_registers\t{limit + 5}"] + [
+        f"ITEM\tunclocked_registers\tu{i}/CLK" for i in range(limit + 1)
+    ]
+    result = post_route_sta._parse_constraint_completeness(
+        _completeness_block("CHECK\tunconstrained_endpoints\t0", *rows)
+    )
+    assert result["unclocked_registers"]["status"] == "unavailable"
+
+
+# -- CLI text ----------------------------------------------------------------#
+
+
+def test_cli_text_prints_constraint_completeness(tmp_path, monkeypatch, capsys):
+    request_path = _setup_completeness_env(tmp_path, monkeypatch, "many_unclocked")
+    _stub_openroad_completeness_capture(monkeypatch, {None: "many_unclocked"})
+
+    assert main(["sta", request_path]) == 0
+
+    out = capsys.readouterr().out
+    assert (
+        "constraint_completeness: incomplete "
+        "(unconstrained_endpoints=50, unclocked_registers=25)"
+    ) in out
+    assert "unclocked_registers (sample): u00/CLK, u01/CLK" in out
+    assert "... (25 total)" in out
+
+
+def test_cli_text_prints_unavailable_not_zero(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+
+    assert main(["sta", request_path]) == 0
+
+    out = capsys.readouterr().out
+    assert (
+        "constraint_completeness: unknown "
+        "(unconstrained_endpoints=unavailable, unclocked_registers=unavailable)"
+    ) in out
+
+
+# -- live engine -------------------------------------------------------------#
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_completeness_matches_check_setup(tmp_path):
+    """Engine integration (issue #2780 test plan): `run_sta` on the mixed
+    design reproduces the captured identities, and they equal what the
+    engine's own `check_setup -verbose` lists for the same constraints."""
+    import subprocess
+
+    netlist = _COMPLETENESS_CAPTURES["netlists"]["mixed"]
+    _write(tmp_path / "top.v", netlist)
+    constraints = {
+        **_COMPLETENESS_CAPTURES["clock"],
+        **_completeness_scenario("mixed")["constraints"],
+    }
+    request = _verilog_base_request(constraints=constraints)
+    report = run_sta(
+        _write_request(tmp_path / "request.json", request), pdk_variant="sky130A"
+    )
+
+    completeness = report["constraint_completeness"]
+    assert completeness["status"] == "incomplete"
+    assert completeness["unconstrained_endpoints"]["sample"] == ["q2", "ff_unclk/D"]
+    assert completeness["unclocked_registers"]["sample"] == ["ff_unclk/CLK"]
+
+    # Cross-check against the engine's user-facing command, in a session
+    # built from the exact script `run_sta` generated (minus its own query).
+    script = (tmp_path / ".klt" / "sta" / "sta_top.tcl").read_text(encoding="utf-8")
+    lines = script.splitlines()
+    lines = lines[: -len(post_route_sta._constraint_completeness_lines())]
+    probes = {
+        "unconstrained_endpoints": "-unconstrained_endpoints",
+        "unclocked_registers": "-no_clock",
+    }
+    for key, flag in probes.items():
+        lines += [f'puts "==={key}==="', f"check_setup -verbose {flag}"]
+    check_script = tmp_path / "check_setup.tcl"
+    check_script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    completed = subprocess.run(
+        ["openroad", "-no_init", "-exit", str(check_script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tail = completed.stdout.split("===unconstrained_endpoints===", 1)[1]
+    unconstrained_text, unclocked_text = tail.split("===unclocked_registers===", 1)
+
+    def listed(text: str) -> list[str]:
+        return [line.strip() for line in text.splitlines() if line.startswith("  ")]
+
+    assert listed(unconstrained_text) == ["q2", "ff_unclk/D"]
+    assert listed(unclocked_text) == ["ff_unclk/CLK"]

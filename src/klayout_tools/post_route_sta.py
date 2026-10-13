@@ -28,9 +28,11 @@ This module is a small, self-contained standalone-analysis verb: given a
 routed DEF, a resolved PDK/corner, and a clock constraint, it runs a single
 fresh OpenSTA session (``read_lef`` x2, ``read_def`` -- no
 ``-floorplan_initialize``, unlike ``place_and_route.py``'s own floorplan-
-stage load -- ``read_liberty``, ``create_clock``, optionally ``read_spef``)
-and reports the same timing/power fields ``place-and-route``'s response
-already carries. It never places, routes, or runs CTS -- there is no
+stage load -- ``read_liberty``, ``create_clock``, optionally
+``set_propagated_clock`` + a latency evidence dump (issue #2739),
+optionally ``read_spef``) and reports the same timing/power fields
+``place-and-route``'s response already carries. It never places, routes,
+or runs CTS -- there is no
 ``target_stage``, no netlist, no ``link_design``; the DEF handed in is the
 one and only geometry analysed.
 
@@ -62,11 +64,59 @@ drift silently between verb modules, since a resolution bug in one copy
 (issue #1790's missed ``post_route_sta.py`` fallback) is a live correctness
 bug, not just duplicated code.
 
-Scope deliberately excluded from this first version (tracked as follow-up,
-not required for this issue): a ``propagated_clock`` request option (the
-in-flow STA -- and this module -- both time an ideal SDC-only clock even
-once a real clock tree exists) and a bisected (rather than
+Scope deliberately excluded from the first version and landed since: a
+``propagated_clock`` request option (issue #2739, below). Still excluded
+(not required for this issue): a bisected (rather than
 ``report_fmax_metric``'s ``1/(T-WNS)`` extrapolated) ``fmax_mhz``.
+
+**Propagated-clock timing (issue #2739).** By default every analyzed corner
+is timed with an **ideal** clock: ``create_clock`` alone, no
+``set_propagated_clock`` -- the clock source's arrival is zero at every
+clocked pin, so a real clock tree's insertion delay and skew (loaded from a
+post-CTS DEF, or annotated from a SPEF) never reach the timing numbers.
+``constraints.propagated_clock: true`` opts a ``def``-mode request into
+propagated-clock timing: after the design and the created clock are loaded,
+the script marks exactly that clock propagated
+(``set_propagated_clock [get_clocks <clock_port>]`` -- the clock object
+``_clock_lines`` itself created) and then, after any SPEF annotation and
+before any timing/power metric is collected, dumps
+``report_clock_latency`` so the response carries machine-readable evidence
+of what propagation actually reached: the clock pins the clock network
+reaches (``clock_propagation.clock_sinks``) and the worst network latency
+among them. On a pinned-build session a routed tree moves a boundary hold
+check from met to violated exactly as the issue describes -- which is the
+point: ideal timing can call an input hold check MET that the propagated
+analysis calls VIOLATED.
+
+The option is **opt-in, and ``"ideal"`` remains the default and the
+backward-compatible behavior byte-for-byte**, because a bare DEF carries no
+metadata declaring it post-CTS: defaulting to propagated would silently
+change every existing timing result, and propagating a pre-CTS DEF is
+honest but near-zero-delay (the clock reaches the flops through plain
+wires). The response always says which mode ran -- ``clock_mode``:
+``"ideal"`` | ``"propagated"`` -- so a consumer never has to guess from
+``clock_skew_ns`` (a measured metric that is nonzero under ideal timing
+too, and therefore *not* evidence of propagation). The option is rejected
+for ``verilog`` mode outright: a linked netlist has no placed clock tree to
+propagate through. There is no engine query for the propagated flag itself
+on the pinned build (verified: no ``get_property`` clock attribute and no
+``is_propagated_clock`` Tcl command), so "propagation could not be
+established" is reported as explicit machine-readable evidence rather than
+an error: a DEF whose clock reaches no clock pin yields
+``clock_propagation.clock_sinks: 0`` / ``max_network_latency_ns: null``
+next to whatever timing the engine produced (which, for such a design, is
+indistinguishable from ideal -- exactly the not-silently-claimed signal a
+consumer needs).
+
+**Constraint completeness (issue #2780).** ``timing_status`` only says
+whether the slack fields are measurements; a design whose WNS is finite can
+still leave endpoints unconstrained and registers unclocked. Every session
+therefore ends with :func:`_constraint_completeness_lines` -- OpenSTA's
+structured ``sta::check_timing_cmd`` query, one check per call -- and every
+response/``corners[]`` entry carries the parsed ``constraint_completeness``
+block (:func:`_parse_constraint_completeness`): counts, a bounded identity
+sample with explicit truncation, and ``unavailable``/``unknown`` (never a
+fabricated zero) when the query could not run.
 
 **Pre-route DEFs (issue #1826).** Nothing about this module's OpenSTA session
 construction (``read_lef`` x2, ``read_def`` -- no ``-floorplan_initialize``,
@@ -323,6 +373,52 @@ _PORT_CHECK_EXIT_CODE = 3
 _WORST_PATHS_BEGIN = "===KLT_STA_WORST_PATHS_BEGIN==="
 _WORST_PATHS_END = "===KLT_STA_WORST_PATHS_END==="
 
+#: Issue #2739: brackets the ``report_clock_latency -digits 6`` dump a
+#: ``propagated_clock`` request emits after ``set_propagated_clock`` (and,
+#: when present, after ``read_spef``) -- the machine-readable evidence of
+#: what propagation actually reached. Per clock: a ``Clock <name>`` header
+#: line, then one (min-column) and one continuation (max-column)
+#: ``network latency <pin>`` row per clock sink per transition pair. A clock
+#: whose network reaches no clock pin prints the header and nothing else --
+#: the explicit "propagation could not be established" signal
+#: :func:`_parse_clock_latency` turns into ``clock_sinks: 0``.
+_CLOCK_LATENCY_BEGIN = "===KLT_STA_CLOCK_LATENCY_BEGIN==="
+_CLOCK_LATENCY_END = "===KLT_STA_CLOCK_LATENCY_END==="
+#: ``report_clock_latency``'s per-clock section header (``Clock clk``).
+_CLOCK_SECTION_RE = re.compile(r"^Clock (\S+)$")
+#: One ``network latency <pin>`` row: the min-column value on the row
+#: OpenSTA prints for the sink, and the max-column value on the continuation
+#: line it indents under the same pin -- one regex captures both.
+_NETWORK_LATENCY_RE = re.compile(r"^\s*([-+0-9.eE]+)\s+network latency (.+?)\s*$")
+#: Upper bound on how many clock-sink pin names the parsed evidence echoes
+#: into ``clock_propagation.clock_sinks_sample`` -- a diagnostic sample, not
+#: an exhaustive list (a real CTS tree reaches thousands of clock pins).
+_CLOCK_SINK_SAMPLE_LIMIT = 20
+
+#: Issue #2780: brackets the per-session constraint-completeness query
+#: (:func:`_constraint_completeness_lines`). One ``CHECK\t<check>\t<total>``
+#: row per check, followed by at most :data:`_COMPLETENESS_SAMPLE_LIMIT`
+#: ``ITEM\t<check>\t<pin>`` rows naming that check's offending pins, or a
+#: single ``ERROR\t<check>\t<message>`` row when the engine query itself
+#: failed. Parsed by :func:`_parse_constraint_completeness`.
+_COMPLETENESS_BEGIN = "===KLT_STA_CONSTRAINT_COMPLETENESS_BEGIN==="
+_COMPLETENESS_END = "===KLT_STA_CONSTRAINT_COMPLETENESS_END==="
+#: Upper bound on how many offending pin names each completeness check
+#: echoes into its ``sample`` -- the ``count`` is always the engine's full
+#: total, and ``truncated`` says when the sample is shorter than it.
+_COMPLETENESS_SAMPLE_LIMIT = 20
+#: ``check name -> sta::check_timing_cmd`` positional flags, in the engine's
+#: own argument order (``no_input_delay no_output_delay reg_multiple_clks
+#: reg_no_clks unconstrained_endpoints loops generated_clks``, verified on
+#: OpenROAD ``26Q3-1510-g6cb3f2b704``). Exactly one flag is set per call so
+#: every returned record belongs to that one check -- the engine's
+#: human-readable message (the record's first element) is never parsed;
+#: only the pin names after it are used.
+_COMPLETENESS_CHECKS = (
+    ("unconstrained_endpoints", "0 0 0 0 1 0 0"),
+    ("unclocked_registers", "0 0 0 1 0 0 0"),
+)
+
 #: OpenSTA ``PathEnd::checkRole()`` names -> this command's ``check_type``
 #: values. Verified live (OpenROAD ``openroad/orfs:latest`` image, 2026-10-10)
 #: for ``setup``, ``hold``, ``recovery``, ``removal``, ``clock gating
@@ -502,6 +598,7 @@ def run_sta(
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
         request["constraints"], has_verilog
     )
+    propagated_clock = _validate_propagated_clock(request["constraints"], has_def)
 
     if has_verilog:
         if request.get("spef") is not None:
@@ -559,6 +656,7 @@ def run_sta(
             spef_path=spef_path,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
+            propagated_clock=propagated_clock,
             output_dir=output_dir,
             input_path=input_path,
             basename=basename,
@@ -582,6 +680,7 @@ def run_sta(
         spef_path=spef_path,
         wire_load_model=wire_load_model,
         wire_load_mode=wire_load_mode,
+        propagated_clock=propagated_clock,
         output_dir=output_dir,
         script_tag=basename,
     )
@@ -627,6 +726,12 @@ def run_sta(
         # model.
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
+        # Additive field (issue #2739): which clock mode every analyzed
+        # corner was timed with -- "ideal" (the default, this command's
+        # pre-#2739 behaviour) or "propagated". Present on both response
+        # shapes; never infer it from clock_skew_ns, which is a measured
+        # metric that is non-zero under ideal timing too.
+        "clock_mode": "propagated" if propagated_clock else "ideal",
         "spef_path": spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
         "total_negative_slack_ns": corner_fields["total_negative_slack_ns"],
@@ -644,6 +749,11 @@ def run_sta(
         # never timed. Check this field before trusting any slack number in
         # this response.
         "timing_status": corner_fields["timing_status"],
+        # Additive field (issue #2780): constraint completeness -- unconstrained
+        # endpoints and unclocked registers, with counts and identities. A
+        # finite WNS (`timing_status: "constrained"`) only says *some* path
+        # was timed; this says whether any endpoint/register was left out.
+        "constraint_completeness": corner_fields["constraint_completeness"],
         "setup_violation_count": corner_fields["setup_violation_count"],
         "hold_violation_count": corner_fields["hold_violation_count"],
         "worst_setup_path": corner_fields["worst_setup_path"],
@@ -654,6 +764,10 @@ def run_sta(
     }
 
     response["spef_annotation"] = corner_fields["spef_annotation"]
+    # Additive field (issue #2739): the propagated-clock evidence block --
+    # what propagation actually reached -- `null` unless the request asked
+    # for propagated-clock timing (see `_parse_clock_latency`).
+    response["clock_propagation"] = corner_fields["clock_propagation"]
     response["engine_log"] = corner_fields["engine_log"]
 
     return response
@@ -678,6 +792,7 @@ def _run_corner_session(
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
+    propagated_clock: bool,
     output_dir: str,
     script_tag: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -685,6 +800,15 @@ def _run_corner_session(
     or ``read_verilog``/``link_design``, ``read_liberty``, ``create_clock``,
     optionally ``read_spef``) at ``corner_name`` (the nominal corner when
     ``None``), exactly like :func:`run_sta`'s single-corner path always has.
+
+    ``propagated_clock`` (issue #2739) marks the request's created clock
+    propagated in this session (:func:`_sta_script_lines` emits
+    ``set_propagated_clock`` for a ``def``-mode request; it is always
+    ``False`` for ``verilog`` mode -- :func:`_validate_propagated_clock`
+    rejects the option there) and adds the parsed ``clock_propagation``
+    evidence block to ``corner_fields``; ``False`` leaves the emitted Tcl
+    and every derived field byte-identical to the pre-#2739 session, with
+    ``clock_propagation: None``.
 
     Both the original scalar (``request.pdk.corner``) path and issue #1871's
     additive multi-corner (``request.pdk.corners``) path call this once per
@@ -733,6 +857,7 @@ def _run_corner_session(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            propagated_clock=propagated_clock,
         )
     else:
         spef_net_names = None
@@ -796,6 +921,13 @@ def _run_corner_session(
         ),
         "fmax_mhz": round(fmax_hz / 1e6, 4) if fmax_hz is not None else None,
         "timing_status": _timing_status((worst_slack, worst_hold_slack)),
+        # Additive field (issue #2780): whether every endpoint is constrained
+        # and every register is clocked in this session -- independent of
+        # `timing_status`, which only says whether the slack numbers are
+        # measurements. See `_parse_constraint_completeness`.
+        "constraint_completeness": _parse_constraint_completeness(
+            completed.stdout or ""
+        ),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         # Additive fields (issue #2740): identity of the worst setup-side /
@@ -813,6 +945,15 @@ def _run_corner_session(
         )
     else:
         corner_fields["spef_annotation"] = None
+    # Issue #2739: the propagated-clock evidence block -- what propagation
+    # actually reached -- parsed from this session's `report_clock_latency`
+    # dump; `null` unless the request asked for propagated-clock timing.
+    if propagated_clock and has_def:
+        corner_fields["clock_propagation"] = _parse_clock_latency(
+            completed.stdout or "", clock_port
+        )
+    else:
+        corner_fields["clock_propagation"] = None
 
     resolution = {"corner": corner, "liberty_path": liberty_path, "pdk_info": pdk_info}
     return corner_fields, resolution
@@ -838,6 +979,7 @@ def _run_multi_corner(
     spef_path: str | None,
     wire_load_model: str | None,
     wire_load_mode: str | None,
+    propagated_clock: bool,
     output_dir: str,
     input_path: str,
     basename: str,
@@ -897,6 +1039,7 @@ def _run_multi_corner(
             spef_path=spef_path,
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
+            propagated_clock=propagated_clock,
             output_dir=output_dir,
             script_tag=f"{basename}__{corner_name}",
         )
@@ -946,6 +1089,13 @@ def _run_multi_corner(
         "geometry_source": geometry_source,
         "wire_load_model": wire_load_model,
         "wire_load_mode": wire_load_mode,
+        # Additive field (issue #2739): one clock mode for the whole
+        # characterization -- every per-corner session runs the same
+        # request-level `constraints.propagated_clock`, so this is hoisted
+        # like the other corner-invariant request echoes. Each `corners[]`
+        # entry carries that session's own `clock_propagation` evidence
+        # block (the network latencies it reports *do* vary per corner).
+        "clock_mode": "propagated" if propagated_clock else "ideal",
         "spef_path": spef_path,
         "provenance": provenance,
         # Additive field (issue #1871): one entry per requested
@@ -1372,6 +1522,46 @@ def _validate_geometry_source(geometry_source: Any) -> str:
     return geometry_source
 
 
+def _validate_propagated_clock(constraints: dict[str, Any], has_def: bool) -> bool:
+    """Validate ``constraints.propagated_clock`` (issue #2739), returning the
+    validated boolean (``False`` when omitted or ``null`` -- the ideal-clock
+    default this command has always run, byte-for-byte).
+
+    Only a JSON boolean is accepted; every other non-null value is a request
+    error. ``True`` is **def-mode only**: a ``verilog``-mode request links a
+    structural netlist with no placement at all, so there is no placed clock
+    tree to propagate through and the option is rejected with an actionable
+    error rather than silently ignored.
+
+    Meaningful is not the same as *correct* for a ``def``-mode request: the
+    option is only worth what the DEF's clock tree is worth (a pre-CTS DEF
+    propagates through plain wires, arriving with ~no insertion delay), and
+    this module cannot infer tree presence from ``geometry_source`` or from
+    a non-null ``clock_skew_ns`` -- the response's ``clock_propagation``
+    evidence block is what says what propagation actually reached.
+
+    ``constraints`` is already known to be a JSON object by the time this is
+    called -- :func:`_validate_constraints` (always called first) raises
+    otherwise.
+    """
+    value = constraints.get("propagated_clock")
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise PostRouteStaError(
+            "constraints.propagated_clock must be a boolean (true enables "
+            "propagated-clock timing in def mode; omit or false keeps the "
+            "ideal-clock default)"
+        )
+    if value and not has_def:
+        raise PostRouteStaError(
+            "constraints.propagated_clock is only valid in def mode -- a "
+            "verilog-mode request links a netlist with no placed clock tree "
+            "to propagate through"
+        )
+    return value
+
+
 def _validate_wire_load_estimate(
     constraints: dict[str, Any], has_verilog: bool
 ) -> tuple[str | None, str | None]:
@@ -1482,6 +1672,37 @@ def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
     return [
         f"create_clock -name {clock_port} -period {clock_period_ns} "
         f"[get_ports {clock_port}]"
+    ]
+
+
+def _propagated_clock_lines(clock_port: str) -> list[str]:
+    """``set_propagated_clock`` (issue #2739) on exactly the clock object
+    :func:`_clock_lines` created -- ``[get_clocks <clock_port>]``, not
+    ``[all_clocks]``: this session has exactly one clock (the one this
+    command itself defines), and naming it keeps the command honest if a
+    future session shape ever loads more than one. Emitted immediately
+    after ``create_clock`` and before any I/O delay / SPEF / metric
+    collection, so every report the session produces is the propagated
+    analysis. The clock-port spelling matches :func:`_clock_lines`'s own
+    (plain interpolation -- the same string ``create_clock -name`` used)."""
+    return [f"set_propagated_clock [get_clocks {clock_port}]"]
+
+
+def _clock_latency_lines() -> list[str]:
+    """Marker-delimited ``report_clock_latency -digits 6`` (issue #2739) --
+    the machine-readable evidence of what propagation actually reached: one
+    ``Clock <name>`` section per clock, ``network latency <pin>`` rows per
+    clock sink. Emitted after any ``read_spef`` and before the timing
+    metrics, so the latencies it reports reflect the same parasitics the
+    timing numbers do. A clock whose network reaches no clock pin prints
+    the header and nothing else (:func:`_parse_clock_latency` -> ``sinks:
+    0``). Wrapped in ``catch`` so an OpenSTA build without the command
+    degrades the evidence to ``unknown`` rather than aborting the run (the
+    same degradation :func:`_parasitic_annotation_lines` established)."""
+    return [
+        f'puts "{_CLOCK_LATENCY_BEGIN}"',
+        "catch {report_clock_latency -digits 6} klt_clock_latency_msg",
+        f'puts "{_CLOCK_LATENCY_END}"',
     ]
 
 
@@ -1700,6 +1921,49 @@ def _worst_path_lines() -> list[str]:
     ]
 
 
+def _constraint_completeness_lines() -> list[str]:
+    """Per-session constraint-completeness query, marker-delimited (issue
+    #2780).
+
+    Calls OpenSTA's own ``sta::check_timing_cmd`` -- the structured engine
+    query behind ``check_setup`` -- once per check in
+    :data:`_COMPLETENESS_CHECKS`, with exactly that one check enabled. The
+    command returns a list of records, each ``{message pin pin ...}``; this
+    script discards the message and emits the pin names, so identities come
+    from the engine's own object list, never from scraping a warning line.
+    ``count`` is the full number of pins the engine returned; only the
+    sample is capped at :data:`_COMPLETENESS_SAMPLE_LIMIT`.
+
+    Each check is ``catch``-wrapped on its own: an engine whose
+    ``check_timing_cmd`` is missing or takes a different argument list
+    yields an ``ERROR`` row for that check (reported as ``status:
+    "unavailable"``), never a fabricated zero. Tabs/newlines inside a pin
+    name or an error message are flattened to spaces so every row stays one
+    tab-separated line."""
+    checks = " ".join(f"{name} {{{flags}}}" for name, flags in _COMPLETENESS_CHECKS)
+    last = _COMPLETENESS_SAMPLE_LIMIT - 1
+    return [
+        f'puts "{_COMPLETENESS_BEGIN}"',
+        f"foreach {{klt_cc_check klt_cc_flags}} {{{checks}}} {{",
+        "    if {[catch {",
+        "        set klt_cc_pins {}",
+        "        foreach klt_cc_record [sta::check_timing_cmd {*}$klt_cc_flags] {",
+        "            lappend klt_cc_pins {*}[lrange $klt_cc_record 1 end]",
+        "        }",
+        '        puts "CHECK\\t$klt_cc_check\\t[llength $klt_cc_pins]"',
+        f"        foreach klt_cc_pin [lrange $klt_cc_pins 0 {last}] {{",
+        '            puts "ITEM\\t$klt_cc_check\\t'
+        '[string map [list \\n { } \\t { }] $klt_cc_pin]"',
+        "        }",
+        "    } klt_cc_error]} {",
+        '        puts "ERROR\\t$klt_cc_check\\t'
+        '[string map [list \\n { } \\t { }] $klt_cc_error]"',
+        "    }",
+        "}",
+        f'puts "{_COMPLETENESS_END}"',
+    ]
+
+
 def _spef_net_check_lines(net_names: list[str]) -> list[str]:
     """The net-name-correlation sanity check (``place_and_route.py``'s
     ``_spef_sta_script_lines`` docstring explains the rationale in full):
@@ -1831,6 +2095,7 @@ def _sta_script_lines(
     output_delay_ns: float | None = None,
     input_delays: dict[str, dict[str, float]] | None = None,
     output_delays: dict[str, dict[str, float]] | None = None,
+    propagated_clock: bool = False,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
     this verb runs: load the LEF/DEF pair directly (no netlist, no
@@ -1849,6 +2114,15 @@ def _sta_script_lines(
     own warnings land in one delimited stdout region), and a closing
     ``report_parasitic_annotation``. See :func:`_spef_annotation_block` for
     what each piece proves.
+
+    ``propagated_clock`` (issue #2739) emits ``set_propagated_clock`` on the
+    clock ``_clock_lines`` just created -- after the design and the timing
+    constraint are loaded, before any I/O delay / SPEF / metric collection,
+    so every report this session produces (including the SPEF delay
+    fingerprints and the timing metrics) is the propagated analysis. The
+    evidence dump (:func:`_clock_latency_lines`) runs *after* ``read_spef``
+    so its network latencies reflect the same parasitics the timing
+    numbers do.
     """
     lines = [
         f"read_lef {tech_lef}",
@@ -1857,6 +2131,8 @@ def _sta_script_lines(
         f"read_liberty {liberty_path}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    if propagated_clock:
+        lines += _propagated_clock_lines(clock_port)
     lines += _request_io_delay_lines(
         clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
     )
@@ -1868,6 +2144,8 @@ def _sta_script_lines(
         lines.append(f'puts "{_SPEF_READ_END}"')
         lines += _delay_fingerprint_lines(_DELAY_POST_BEGIN, _DELAY_POST_END)
         lines += _parasitic_annotation_lines()
+    if propagated_clock:
+        lines += _clock_latency_lines()
     lines += [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
@@ -1879,6 +2157,7 @@ def _sta_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _constraint_completeness_lines()
     return lines
 
 
@@ -1958,6 +2237,7 @@ def _sta_netlist_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _constraint_completeness_lines()
     return lines
 
 
@@ -2179,6 +2459,90 @@ def _normalize_delay_block(block: str) -> list[str]:
     return [line.rstrip() for line in block.splitlines() if line.strip()]
 
 
+def _parse_clock_latency(stdout: str, clock_name: str) -> dict[str, Any]:
+    """The ``clock_propagation`` evidence block (issue #2739), parsed from
+    one session's :data:`_CLOCK_LATENCY_BEGIN`/:data:`_CLOCK_LATENCY_END`
+    ``report_clock_latency`` dump for the request's clock:
+
+    - ``clock_sinks`` -- distinct clock pins the clock network reaches
+      (deduplicated across the per-transition rise/fall tables OpenSTA
+      prints). ``0`` is the explicit "propagation could not be established"
+      signal: the section header printed but no ``network latency`` row
+      under it. ``None`` means unknown -- the clock's section never appeared
+      (an OpenSTA build whose ``catch``-wrapped ``report_clock_latency``
+      produced nothing, or a marker-less stdout from an older stub/capture).
+    - ``max_network_latency_ns`` -- the worst ``network latency`` value the
+      section reports (the max-column continuation values included);
+      ``None`` when there are no sinks (or the section is absent).
+    - ``clock_sinks_sample`` -- the sink names in report order, capped at
+      :data:`_CLOCK_SINK_SAMPLE_LIMIT` (a diagnostic sample, mirroring the
+      SPEF missing-nets sample, not an exhaustive list).
+
+    A request clock whose section is absent is ``unknown``, never ``0``:
+    ``create_clock`` already failed the session for a missing clock port,
+    so absence here means the evidence command itself did not run -- not
+    that the tree is empty.
+    """
+    block = _extract_block(stdout, _CLOCK_LATENCY_BEGIN, _CLOCK_LATENCY_END)
+    section_seen, rows = (
+        _clock_latency_rows(block, clock_name) if block is not None else (False, [])
+    )
+    seen: set[str] = set()
+    sample: list[str] = []
+    for _latency_s, pin in rows:
+        if pin not in seen:
+            seen.add(pin)
+            if len(sample) < _CLOCK_SINK_SAMPLE_LIMIT:
+                sample.append(pin)
+    max_latency = _max_network_latency(rows)
+    return {
+        "clock_sinks": len(seen) if section_seen else None,
+        "max_network_latency_ns": (
+            round(max_latency, 6) if max_latency is not None else None
+        ),
+        "clock_sinks_sample": sample,
+    }
+
+
+def _clock_latency_rows(
+    block: str, clock_name: str
+) -> tuple[bool, list[tuple[str, str]]]:
+    """``(section_seen, rows)`` for *clock_name* in a ``report_clock_latency``
+    block: whether the clock's section header appeared at all, and the
+    ``(latency, pin)`` string pairs of every ``network latency`` row under
+    it, in report order (duplicates across rise/fall tables kept)."""
+    rows: list[tuple[str, str]] = []
+    section_seen = False
+    current_section: str | None = None
+    for line in block.splitlines():
+        header = _CLOCK_SECTION_RE.match(line.rstrip())
+        if header:
+            current_section = header.group(1)
+            section_seen = section_seen or current_section == clock_name
+            continue
+        if current_section != clock_name:
+            continue
+        row = _NETWORK_LATENCY_RE.match(line.rstrip())
+        if row is not None:
+            latency_s, pin = row.groups()
+            rows.append((latency_s, pin))
+    return section_seen, rows
+
+
+def _max_network_latency(rows: list[tuple[str, str]]) -> float | None:
+    """The largest parseable latency among *rows* (see
+    :func:`_clock_latency_rows`), or ``None`` when none parses."""
+    max_latency: float | None = None
+    for latency_s, _pin in rows:
+        try:
+            latency = float(latency_s)
+        except ValueError:
+            continue
+        if max_latency is None or latency > max_latency:
+            max_latency = latency
+    return max_latency
+
+
 def _parse_parasitic_annotation(stdout: str) -> tuple[int | None, int | None]:
     """``(unannotated_drivers, partially_unannotated_drivers)`` parsed from
     ``report_parasitic_annotation``'s own two summary lines
@@ -2365,3 +2729,120 @@ def _worst_paths(
         _worst_path_record(rows["max"], setup_ws),
         _worst_path_record(rows["min"], hold_ws),
     )
+
+
+def _unavailable_completeness_check(reason: str) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "count": None,
+        "sample": [],
+        "truncated": None,
+        "reason": reason,
+    }
+
+
+def _parse_constraint_completeness(stdout: str) -> dict[str, Any]:
+    """The ``constraint_completeness`` block for one session (issue #2780),
+    parsed from :func:`_constraint_completeness_lines`' marker-delimited
+    output.
+
+    Each check in :data:`_COMPLETENESS_CHECKS` becomes
+    ``{status, count, sample, truncated, reason}``:
+
+    - ``"ok"`` -- the engine query ran: ``count`` is the engine's full
+      total (``0`` only when the engine returned no offending pin),
+      ``sample`` the first :data:`_COMPLETENESS_SAMPLE_LIMIT` pin names in
+      engine order, ``truncated`` whether ``sample`` is shorter than
+      ``count``.
+    - ``"unavailable"`` -- the block is absent, the engine query failed
+      (``ERROR`` row), or the rows are malformed (missing/duplicate
+      ``CHECK`` row, non-integer count, an ``ITEM`` count that disagrees
+      with the total and the sample cap). ``count``/``truncated`` are
+      ``null`` and ``reason`` says why -- a check that did not run never
+      reports ``0``.
+
+    Lines that are not ``CHECK``/``ITEM``/``ERROR`` rows (stray engine
+    warnings interleaved in stdout) are ignored; they can never become an
+    identity.
+
+    The roll-up ``status`` is ``"incomplete"`` when any check that ran
+    reported at least one offending pin, ``"complete"`` when every check ran
+    and reported none, and ``"unknown"`` otherwise (no check found a gap
+    but at least one could not run)."""
+    names = [name for name, _flags in _COMPLETENESS_CHECKS]
+    block = _extract_block(stdout, _COMPLETENESS_BEGIN, _COMPLETENESS_END)
+    checks: dict[str, dict[str, Any]]
+    if block is None:
+        reason = "constraint-completeness records absent from engine output"
+        checks = {name: _unavailable_completeness_check(reason) for name in names}
+    else:
+        checks = {name: _parse_completeness_check(block, name) for name in names}
+
+    statuses = [check["status"] for check in checks.values()]
+    if any(check["status"] == "ok" and check["count"] > 0 for check in checks.values()):
+        overall = "incomplete"
+    elif all(status == "ok" for status in statuses):
+        overall = "complete"
+    else:
+        overall = "unknown"
+    return {
+        "status": overall,
+        **checks,
+        "sample_limit": _COMPLETENESS_SAMPLE_LIMIT,
+    }
+
+
+def _completeness_rows(
+    block: str, name: str
+) -> tuple[list[str], list[str], str | None]:
+    """``(totals, items, error)`` -- the ``CHECK`` totals and ``ITEM`` pin
+    names the completeness block carries for check ``name``, or a non-null
+    ``error`` reason on an engine ``ERROR`` row or a malformed row. Rows of
+    any other kind or check are ignored."""
+    totals: list[str] = []
+    items: list[str] = []
+    for line in block.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2 or parts[1] != name:
+            continue
+        if parts[0] == "ERROR":
+            message = "\t".join(parts[2:]).strip()
+            return totals, items, f"engine {name} query failed: {message}"
+        if parts[0] not in ("CHECK", "ITEM"):
+            continue
+        if len(parts) != 3 or not parts[2]:
+            return totals, items, f"malformed {name} record: {line!r}"
+        (totals if parts[0] == "CHECK" else items).append(parts[2])
+    return totals, items, None
+
+
+def _parse_completeness_check(block: str, name: str) -> dict[str, Any]:
+    """One check's record from the completeness block -- see
+    :func:`_parse_constraint_completeness`."""
+    totals, items, error = _completeness_rows(block, name)
+    if error is not None:
+        return _unavailable_completeness_check(error)
+    if not totals:
+        return _unavailable_completeness_check(f"no {name} total in engine output")
+    if len(totals) > 1:
+        return _unavailable_completeness_check(
+            f"duplicate {name} totals in engine output: {totals!r}"
+        )
+    total_text = totals[0]
+    if re.fullmatch(r"[0-9]+", total_text) is None:
+        return _unavailable_completeness_check(
+            f"malformed {name} total: {total_text!r}"
+        )
+    count = int(total_text)
+    if len(items) != min(count, _COMPLETENESS_SAMPLE_LIMIT):
+        return _unavailable_completeness_check(
+            f"{name} sample has {len(items)} pin(s) for a total of {count} "
+            f"(sample limit {_COMPLETENESS_SAMPLE_LIMIT})"
+        )
+    return {
+        "status": "ok",
+        "count": count,
+        "sample": items,
+        "truncated": count > len(items),
+        "reason": None,
+    }

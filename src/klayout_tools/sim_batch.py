@@ -82,13 +82,16 @@ recorded-call-log discipline on the other side of the same seam.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -232,6 +235,34 @@ DEFAULT_POLL_INTERVAL_S = 30.0
 #: job command starts. Overridable wholesale via ``request.batch.poll_timeout_s``.
 _BATCH_PROVISION_SLACK_S = 1800.0
 
+#: Fixed per-job slack :func:`_default_batch_job_timeout_s` adds to the
+#: fully-serial unit budget for `klt` startup on the job instance.
+_BATCH_JOB_OVERHEAD_S = 120.0
+
+#: The fleet's whole-job ceiling when no named setting supplies one (issue
+#: #2833). This is not a client-side guess: it is the value 2am's
+#: ``batch-fleet-harness.sh`` itself falls back to when the instance's
+#: ``MaxJobSeconds`` tag (written from ``BATCH_MAX_JOB_SECONDS``) is absent
+#: or malformed. A report that used it says so
+#: (``max_job_seconds_source: "default"``).
+DEFAULT_BATCH_MAX_JOB_SECONDS = 3600.0
+
+#: 2am's ``batch-fleet.env`` key for the whole-job ceiling -- the value its
+#: ``launch`` tags the instance with and its harness kills the job at.
+FLEET_MAX_JOB_SECONDS_KEY = "BATCH_MAX_JOB_SECONDS"
+
+#: ``request.batch.job_ceiling_check`` values (issue #2833): ``"warn"``
+#: (default) submits and reports a structured warning; ``"enforce"`` refuses
+#: before any S3 write.
+JOB_CEILING_CHECK_MODES = ("warn", "enforce")
+
+#: Machine-readable ``error.code`` of an ``"enforce"`` refusal.
+BATCH_JOB_CEILING_CODE = "batch_job_ceiling_exceeded"
+
+#: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
+#: request-derived fully-serial upper bound, never a measured runtime.
+JOB_CEILING_BASIS = "conservative_serial_bound"
+
 #: Per-invocation timeout for one `aws` CLI call (upload/poll/collect).
 _BATCH_AWS_TIMEOUT_S = 900.0
 
@@ -276,6 +307,7 @@ PROVISION_SCRIPT_ENV = "KLT_BATCH_PROVISION_SCRIPT"
 BUCKET_ENV = "KLT_BATCH_JOB_BUCKET"
 REGION_ENV = "KLT_BATCH_REGION"
 PROFILE_ENV = "KLT_BATCH_PROFILE"
+MAX_JOB_SECONDS_ENV = "KLT_BATCH_MAX_JOB_SECONDS"
 
 #: 2am's own fleet config, read (never written) from beside the resolved
 #: provision script -- the file whose ``BATCH_JOB_BUCKET``/``BATCH_JOBS_PREFIX``
@@ -401,7 +433,151 @@ class BatchJobSpec:
         return document
 
 
-def _runner_preflight_script(client_version: str, *, enforce: bool) -> str:
+#: Filename the worker capture writes under ``$EDA_OUTPUT_DIR`` (issue #2834):
+#: what the *job instance* actually resolved -- simulator binary and banner,
+#: PDK variant revision stamp, CPU model, ``OMP_NUM_THREADS``, a worker-local
+#: image manifest when present. Written by the same runner preflight that
+#: writes :data:`BATCH_RUNNER_IDENTITY_FILENAME`; absent on older workers.
+BATCH_WORKER_ENVIRONMENT_FILENAME = "worker_environment.json"
+
+#: Bounds shared by the worker-side capture and the client-side re-validation.
+WORKER_CAPTURE_BANNER_MAX = 2000
+WORKER_CAPTURE_STR_MAX = 300
+WORKER_CAPTURE_FILE_MAX = 65536
+WORKER_CAPTURE_PROBE_TIMEOUT_S = 10
+
+#: The worker-side capture program. It is passed to ``python3 -I -c`` as one
+#: shell-quoted argument (never interpolated with untrusted text); request
+#: values arrive as ``sys.argv`` and everything it observes is serialised with
+#: :mod:`json`. Stdlib only, every probe individually guarded and bounded, and
+#: it always exits 0 -- a failed capture is a ``diagnostics`` entry, never a
+#: job failure. Only allowlisted environment variables are read.
+_WORKER_CAPTURE_PROGRAM = r"""
+import hashlib, json, os, shutil, sys
+import subprocess as sp
+BAN, STR, T = @BAN@, @STR@, @TIMEOUT@
+out, req_bin, variant, staged = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+diag = []
+def clip(v, n=STR):
+    if not isinstance(v, str):
+        return None
+    v = "".join(c if (c >= " " or c in "\n\t") else "?" for c in v)
+    return v[:n]
+def guard(label, fn, default=None):
+    try:
+        return fn()
+    except BaseException as exc:
+        diag.append(label + ": " + clip(type(exc).__name__ + " " + str(exc), 160))
+        return default
+def read(path, n):
+    with open(path, "rb") as h:
+        return h.read(n + 1)[:n].decode("utf-8", "replace")
+doc = {"schema": 1}
+def sim():
+    sel = req_bin or os.environ.get("KLT_NGSPICE_BINARY") or "ngspice"
+    src = "request" if req_bin else ("KLT_NGSPICE_BINARY" if os.environ.get("KLT_NGSPICE_BINARY") else "PATH")
+    path = shutil.which(sel)
+    s = {"requested_binary": clip(sel), "binary_source": src,
+         "selected_path": clip(path) if path else None, "version_banner": None,
+         "version_probe": "unavailable"}
+    if path:
+        try:
+            r = sp.run([path, "--version"], stdin=sp.DEVNULL,
+                               stdout=sp.PIPE, stderr=sp.STDOUT,
+                               timeout=T)
+            s["version_banner"] = clip(r.stdout[:BAN * 4].decode("utf-8", "replace"), BAN)
+            s["version_probe"] = "ok" if r.returncode == 0 else "exit_%d" % r.returncode
+        except sp.TimeoutExpired:
+            s["version_probe"] = "timeout"
+        except BaseException as exc:
+            s["version_probe"] = "error"
+            diag.append("simulator probe: " + clip(type(exc).__name__, 80))
+    else:
+        diag.append("simulator binary not found on worker")
+    return s
+doc["simulator"] = guard("simulator", sim, {"selected_path": None, "version_banner": None})
+def pdk():
+    root = os.environ.get("PDK_ROOT")
+    p = {"variant": clip(variant) or None, "root": clip(root), "stamp_scheme": None,
+         "stamp_sha256": None, "stamp_text": None, "models_staged": staged == "1"}
+    if not (root and variant):
+        diag.append("pdk root or variant unknown on worker")
+        return p
+    stamp = os.path.join(root, variant, "SOURCES")
+    try:
+        text = read(stamp, 16384)
+    except OSError as exc:
+        diag.append("pdk stamp unreadable: " + clip(type(exc).__name__, 80))
+        return p
+    norm = "\n".join(l.rstrip() for l in text.replace("\r\n", "\n").strip().split("\n"))
+    p["stamp_scheme"] = "sources-sha256"
+    p["stamp_sha256"] = hashlib.sha256(norm.encode("utf-8")).hexdigest()
+    p["stamp_text"] = clip(norm, 1000)
+    return p
+doc["pdk"] = guard("pdk", pdk, {"variant": clip(variant) or None})
+def cpu():
+    for line in read("/proc/cpuinfo", 1 << 18).split("\n"):
+        if line.lower().startswith("model name") and ":" in line:
+            return clip(line.split(":", 1)[1].strip())
+    diag.append("cpu model not reported")
+doc["cpu_model"] = guard("cpu", cpu)
+doc["omp_num_threads"] = clip(os.environ.get("OMP_NUM_THREADS"), 40)
+def manifest():
+    path = os.environ.get("KLT_IMAGE_MANIFEST")
+    for cand in ([path] if path else []) + ["/etc/klt-image-manifest.json", "/opt/klt/image-manifest.json"]:
+        if not os.path.isfile(cand):
+            continue
+        data = json.loads(read(cand, 65536))
+        if not isinstance(data, dict):
+            raise ValueError("manifest is not an object")
+        keep = ("pdk", "pdk_snapshot", "pdk_ref", "pdk_pinned", "ngspice_version",
+                "klt_ref", "built_at", "image_id")
+        m = {k: (data[k] if isinstance(data[k], (bool, int)) else clip(data[k]))
+             for k in keep if k in data and isinstance(data[k], (str, bool, int))}
+        m["path"] = clip(cand)
+        return m
+    return None
+doc["image_manifest"] = guard("image manifest", manifest)
+doc["diagnostics"] = diag[:20]
+body = json.dumps(doc, ensure_ascii=True)
+tmp = out + ".tmp"
+with open(tmp, "w") as h:
+    h.write(body)
+os.replace(tmp, out)
+"""  # noqa: E501
+_WORKER_CAPTURE_PROGRAM = (
+    _WORKER_CAPTURE_PROGRAM.replace("@BAN@", str(WORKER_CAPTURE_BANNER_MAX))
+    .replace("@STR@", str(WORKER_CAPTURE_STR_MAX))
+    .replace("@TIMEOUT@", str(WORKER_CAPTURE_PROBE_TIMEOUT_S))
+)
+
+
+def _worker_capture_command(remote_request: dict[str, Any]) -> str:
+    """The best-effort worker capture invocation (issue #2834), run from the
+    runner preflight. Bounded by ``timeout`` when present, stderr discarded,
+    ``|| true`` so it can never fail or alter the job."""
+    options = remote_request.get("options") or {}
+    models = remote_request.get("models") or {}
+    binary = options.get("ngspice_binary")
+    variant = models.get("pdk")
+    staged = "1" if options.get("stage_model_inputs") else "0"
+    args = [
+        shlex.quote(str(binary) if isinstance(binary, str) else ""),
+        shlex.quote(str(variant) if isinstance(variant, str) else ""),
+        staged,
+    ]
+    target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
+    return (
+        'wt=; command -v timeout >/dev/null 2>&1 && wt="timeout 30"; '
+        "{ command -v python3 >/dev/null 2>&1 && "
+        f"$wt python3 -I -c {shlex.quote(_WORKER_CAPTURE_PROGRAM)} "
+        f"{target} {' '.join(args)} 2>/dev/null; true; }}"
+    )
+
+
+def _runner_preflight_script(
+    client_version: str, *, enforce: bool, capture: str = ""
+) -> str:
     """The shell prefix of the job command that pins the runner's ``klt``
     identity (issue #2719).
 
@@ -451,6 +627,10 @@ def _runner_preflight_script(client_version: str, *, enforce: bool) -> str:
         + '"}\\n\' "$rj" >'
         + identity_path,
     ]
+    if capture:
+        # Issue #2834: the worker capture rides the same preflight, *before*
+        # the enforce gate so a rejected job still leaves it collectable.
+        lines.append(capture)
     if enforce:
         lines.append(
             'if [ -n "$rcode" ]; then '
@@ -527,6 +707,7 @@ def _build_batch_job_spec(
     command = _runner_preflight_script(
         client_version if client_version is not None else _provenance._klt_version(),
         enforce=version_check == "enforce",
+        capture=_worker_capture_command(remote_request),
     ) + (
         f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
         "--backend local-parallel --format json"
@@ -594,9 +775,11 @@ def _default_batch_job_timeout_s(
     finishes far inside this bound -- it exists only so a wedged job is
     killed by the harness rather than billing until the instance watchdog
     fires. The harness clamps it down to its own ``MAX_JOB_SECONDS``, never
-    up, so an over-large value here is safe.
+    up, so an over-large value here is safe *for the harness* -- but the job
+    is then killed at that ceiling, which is what
+    :func:`_assess_job_ceiling` warns about before submission (issue #2833).
     """
-    return per_corner_timeout_s * max(1, corner_count) + 120.0
+    return per_corner_timeout_s * max(1, corner_count) + _BATCH_JOB_OVERHEAD_S
 
 
 def _default_batch_poll_timeout_s(
@@ -637,6 +820,13 @@ class BatchConfig:
     capacity_wait_s: float = 0.0
     #: ``request.batch.runner_version_check`` (issue #2719).
     runner_version_check: str = "enforce"
+    #: The fleet's whole-job ceiling in seconds and where it came from
+    #: (``"request"``, ``"env"``, ``"fleet_config"`` or ``"default"``) --
+    #: see :func:`_resolve_max_job_seconds` (issue #2833).
+    max_job_seconds: float = DEFAULT_BATCH_MAX_JOB_SECONDS
+    max_job_seconds_source: str = "default"
+    #: ``request.batch.job_ceiling_check`` (issue #2833).
+    job_ceiling_check: str = "warn"
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -775,6 +965,10 @@ def _resolve_batch_config(
         )
     capacity_wait_s = _resolve_capacity_wait_s(batch_spec)
     runner_version_check = _resolve_runner_version_check(batch_spec)
+    max_job_seconds, max_job_seconds_source = _resolve_max_job_seconds(
+        batch_spec, fleet
+    )
+    job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
     return BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -806,7 +1000,174 @@ def _resolve_batch_config(
         ),
         capacity_wait_s=capacity_wait_s,
         runner_version_check=runner_version_check,
+        max_job_seconds=max_job_seconds,
+        max_job_seconds_source=max_job_seconds_source,
+        job_ceiling_check=job_ceiling_check,
     )
+
+
+def _resolve_max_job_seconds(
+    batch_spec: dict[str, Any], fleet: dict[str, str]
+) -> tuple[float, str]:
+    """The fleet's whole-job ceiling and its provenance (issue #2833).
+
+    Resolution order: ``request.batch.max_job_seconds`` (``"request"``),
+    ``$KLT_BATCH_MAX_JOB_SECONDS`` (``"env"``), ``BATCH_MAX_JOB_SECONDS`` in
+    the ``batch-fleet.env`` beside the provision script (``"fleet_config"``,
+    the value 2am's ``launch`` tags the instance with), else
+    :data:`DEFAULT_BATCH_MAX_JOB_SECONDS` (``"default"``, the harness's own
+    fallback). A value that is present but not a positive, finite number is
+    a :class:`~klayout_tools.sim.SimError` naming its source -- raised
+    before any S3 write -- rather than silently falling through to a less
+    specific source.
+    """
+    from .sim import SimError
+
+    candidates: tuple[tuple[str, str, Any], ...] = (
+        ("request", "request.batch.max_job_seconds", batch_spec.get("max_job_seconds")),
+        ("env", f"${MAX_JOB_SECONDS_ENV}", os.environ.get(MAX_JOB_SECONDS_ENV)),
+        (
+            "fleet_config",
+            f"{FLEET_MAX_JOB_SECONDS_KEY} in {FLEET_CONFIG_FILENAME}",
+            fleet.get(FLEET_MAX_JOB_SECONDS_KEY),
+        ),
+    )
+    for source, label, raw in candidates:
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        value: Any = raw
+        if isinstance(raw, str):
+            try:
+                value = float(raw.strip())
+            except ValueError:
+                value = None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise SimError(
+                f"{label} must be a positive number of seconds (got {raw!r})"
+            )
+        return float(value), source
+    return DEFAULT_BATCH_MAX_JOB_SECONDS, "default"
+
+
+def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
+    """``request.batch.job_ceiling_check``: ``"warn"`` (default) or
+    ``"enforce"``, else :class:`~klayout_tools.sim.SimError` before any S3
+    write (issue #2833)."""
+    from .sim import SimError
+
+    value = batch_spec.get("job_ceiling_check", "warn")
+    if value not in JOB_CEILING_CHECK_MODES:
+        raise SimError(
+            "request.batch.job_ceiling_check must be one of "
+            f"{', '.join(repr(m) for m in JOB_CEILING_CHECK_MODES)} "
+            f"(got {value!r})"
+        )
+    return value
+
+
+def _assess_job_ceiling(
+    *, unit_count: int, per_unit_timeout_s: float, config: BatchConfig
+) -> dict[str, Any]:
+    """Deterministic pre-submit runtime-risk assessment of **one** batch job
+    against the fleet's whole-job ceiling (issue #2833).
+
+    The bound is :func:`_default_batch_job_timeout_s` -- every unit burning
+    its full ``options.timeout_s`` one after another, plus
+    :data:`_BATCH_JOB_OVERHEAD_S`. It is derived from the request alone and
+    is a conservative *upper bound*, never a measured or predicted ngspice
+    runtime (``basis`` says so); a job whose units finish well inside their
+    ``timeout_s`` can run far below it. It is compared with
+    ``config.max_job_seconds``: a bound *equal* to the ceiling does not
+    exceed it.
+
+    ``max_units_per_job`` is the largest shard whose own bound stays within
+    the ceiling (``0`` when even one unit's bound exceeds it), and
+    ``recommended_hosts`` the smallest ``remote.hosts`` whose largest shard
+    -- :func:`sim_remote._shard_corner_points` balances shards to at most
+    ``ceil(units / hosts)`` -- fits it, or ``None`` when no ``hosts`` value
+    can (lower ``options.timeout_s`` instead). When the bound exceeds the
+    ceiling the result carries a human-readable ``warning``.
+    """
+    units = max(1, unit_count)
+    ceiling = config.max_job_seconds
+    bound = _default_batch_job_timeout_s(units, per_unit_timeout_s)
+    if per_unit_timeout_s > 0:
+        per_job = max(0, int((ceiling - _BATCH_JOB_OVERHEAD_S) // per_unit_timeout_s))
+        # Settle float rounding against the bound function itself, so the
+        # recommendation and the comparison can never disagree.
+        while per_job > 0 and (
+            _default_batch_job_timeout_s(per_job, per_unit_timeout_s) > ceiling
+        ):
+            per_job -= 1
+        while _default_batch_job_timeout_s(per_job + 1, per_unit_timeout_s) <= ceiling:
+            per_job += 1
+    else:
+        per_job = units if bound <= ceiling else 0
+    recommended = math.ceil(units / per_job) if per_job > 0 else None
+    exceeds = bound > ceiling
+    assessment: dict[str, Any] = {
+        "basis": JOB_CEILING_BASIS,
+        "unit_count": units,
+        "per_unit_timeout_s": per_unit_timeout_s,
+        "overhead_s": _BATCH_JOB_OVERHEAD_S,
+        "job_bound_s": bound,
+        "max_job_seconds": ceiling,
+        "max_job_seconds_source": config.max_job_seconds_source,
+        "exceeds_ceiling": exceeds,
+        "check": config.job_ceiling_check,
+        "max_units_per_job": per_job,
+        "recommended_hosts": recommended,
+    }
+    if exceeds:
+        message = (
+            f"batch job bound {bound:g}s (options.timeout_s {per_unit_timeout_s:g}s "
+            f"x {units} units + {_BATCH_JOB_OVERHEAD_S:g}s; a conservative "
+            "fully-serial upper bound, not a runtime estimate) exceeds the "
+            f"fleet's whole-job ceiling of {ceiling:g}s (max_job_seconds from "
+            f"{config.max_job_seconds_source}); a job still running at the "
+            "ceiling is killed and every unit is reported batch_job_timeout. "
+        )
+        if recommended is not None:
+            message += (
+                f"Set request.remote.hosts to at least {recommended} to run one "
+                f"job per shard of at most {per_job} units, each within the "
+                "ceiling"
+            )
+        else:
+            message += (
+                "No remote.hosts value fits: a single unit's bound exceeds the "
+                "ceiling -- lower options.timeout_s to at most "
+                f"{ceiling - _BATCH_JOB_OVERHEAD_S:g}s"
+            )
+        assessment["warning"] = message
+    return assessment
+
+
+def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
+    """Act on :func:`_assess_job_ceiling`'s result before any S3 write:
+    under ``"enforce"`` an exceeded ceiling is a
+    :class:`~klayout_tools.sim.SimError` with code
+    :data:`BATCH_JOB_CEILING_CODE`; under ``"warn"`` the same message is
+    printed to stderr (so a caller piping ``--format json`` to a file still
+    sees it before the job launches) and the assessment is reported in
+    ``environment.remote.job_ceiling``."""
+    from .sim import SimError
+
+    warning = assessment.get("warning")
+    if warning is None:
+        return
+    if assessment["check"] == "enforce":
+        raise SimError(
+            f"backend 'batch' refused before submission: {warning} (or set "
+            'request.batch.job_ceiling_check to "warn" to submit anyway)',
+            code=BATCH_JOB_CEILING_CODE,
+        )
+    print(f"klt sim: warning: {warning}", file=sys.stderr)
 
 
 def _resolve_runner_version_check(batch_spec: dict[str, Any]) -> str:
@@ -1275,6 +1636,156 @@ def _batch_environment(
     }
 
 
+def _bounded_str(value: Any, limit: int = WORKER_CAPTURE_STR_MAX) -> str | None:
+    """A JSON-safe, bounded, control-character-free copy of a captured string
+    (``None`` for anything that is not a string)."""
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in value)
+    return cleaned[:limit]
+
+
+def _client_pdk_stamp(request: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The submitter's own local view of the requested PDK variant's
+    ``SOURCES`` stamp, in the same ``sources-sha256`` scheme the worker
+    capture uses. ``None`` when nothing comparable can be read locally."""
+    models = (request or {}).get("models") or {}
+    variant = models.get("pdk")
+    root = models.get("pdk_root") or os.environ.get("PDK_ROOT")
+    if not (isinstance(variant, str) and variant and isinstance(root, str) and root):
+        return None
+    try:
+        with open(os.path.join(root, variant, "SOURCES"), "rb") as handle:
+            text = handle.read(16385)[:16384].decode("utf-8", "replace")
+    except OSError:
+        return None
+    normalized = "\n".join(
+        line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")
+    )
+    return {
+        "variant": variant,
+        "stamp_scheme": "sources-sha256",
+        "stamp_sha256": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+    }
+
+
+def _compare_pdk_stamps(
+    worker_pdk: dict[str, Any], client: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Compare worker and client PDK stamps -- only when both provide the
+    same variant under the same stamp scheme. Anything else is
+    ``not_comparable``, never a proven mismatch. A match is not model-closure
+    equality (see docs/cli/sim.md)."""
+    worker_ok = (
+        worker_pdk.get("variant")
+        and worker_pdk.get("stamp_scheme")
+        and worker_pdk.get("stamp_sha256")
+    )
+    if (
+        not worker_ok
+        or client is None
+        or client.get("variant") != worker_pdk.get("variant")
+        or client.get("stamp_scheme") != worker_pdk.get("stamp_scheme")
+    ):
+        return {"status": "not_comparable"}
+    if client.get("stamp_sha256") == worker_pdk.get("stamp_sha256"):
+        return {"status": "match"}
+    return {
+        "status": "mismatch",
+        "warning": (
+            f"the worker's PDK revision stamp for {worker_pdk['variant']} differs "
+            "from the one the submitter resolved locally; results may differ "
+            "from a local run (a matching stamp would not prove identical models)"
+        ),
+    }
+
+
+def _read_worker_environment(
+    local_dir: str | None, request: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """The ``worker_environment`` block of ``environment.remote`` (issue #2834).
+
+    Worker-observed: it describes what the job instance resolved, never the
+    submitter's values. Always present; ``capture`` is ``"ok"``, ``"absent"``
+    (legacy worker or no collected artifact) or ``"malformed"``, and a
+    non-ok capture carries ``None`` observations. Every field is
+    re-validated and bounded here -- the file is untrusted input.
+    """
+    unknown: dict[str, Any] = {
+        "capture": "absent",
+        "simulator": None,
+        "pdk": None,
+        "cpu_model": None,
+        "omp_num_threads": None,
+        "image_manifest": None,
+        "diagnostics": [],
+        "pdk_stamp_comparison": {"status": "not_comparable"},
+    }
+    if local_dir is None:
+        return unknown
+    path = os.path.join(local_dir, BATCH_WORKER_ENVIRONMENT_FILENAME)
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(WORKER_CAPTURE_FILE_MAX + 1)
+    except OSError:
+        return unknown
+    try:
+        if len(raw) > WORKER_CAPTURE_FILE_MAX:
+            raise ValueError("oversized")
+        doc = json.loads(raw.decode("utf-8"))
+        if not isinstance(doc, dict):
+            raise ValueError("not an object")
+        sim_in = doc.get("simulator")
+        sim_in = sim_in if isinstance(sim_in, dict) else {}
+        simulator = {
+            "requested_binary": _bounded_str(sim_in.get("requested_binary")),
+            "binary_source": _bounded_str(sim_in.get("binary_source"), 40),
+            "selected_path": _bounded_str(sim_in.get("selected_path")),
+            "version_banner": _bounded_str(
+                sim_in.get("version_banner"), WORKER_CAPTURE_BANNER_MAX
+            ),
+            "version_probe": _bounded_str(sim_in.get("version_probe"), 40),
+        }
+        pdk_in = doc.get("pdk")
+        pdk_in = pdk_in if isinstance(pdk_in, dict) else {}
+        pdk = {
+            "variant": _bounded_str(pdk_in.get("variant")),
+            "root": _bounded_str(pdk_in.get("root")),
+            "stamp_scheme": _bounded_str(pdk_in.get("stamp_scheme"), 40),
+            "stamp_sha256": _bounded_str(pdk_in.get("stamp_sha256"), 64),
+            "stamp_text": _bounded_str(pdk_in.get("stamp_text"), 1000),
+            "models_staged": pdk_in.get("models_staged") is True,
+        }
+        manifest_in = doc.get("image_manifest")
+        manifest: dict[str, Any] | None = None
+        if isinstance(manifest_in, dict):
+            manifest = {}
+            for key, value in list(manifest_in.items())[:16]:
+                if isinstance(value, bool | int):
+                    manifest[_bounded_str(key, 40) or "?"] = value
+                elif isinstance(value, str):
+                    manifest[_bounded_str(key, 40) or "?"] = _bounded_str(value)
+        diagnostics = [
+            _bounded_str(item, 200)
+            for item in (doc.get("diagnostics") or [])[:20]
+            if isinstance(item, str)
+        ]
+        return {
+            "capture": "ok",
+            "simulator": simulator,
+            "pdk": pdk,
+            "cpu_model": _bounded_str(doc.get("cpu_model")),
+            "omp_num_threads": _bounded_str(doc.get("omp_num_threads"), 40),
+            "image_manifest": manifest,
+            "diagnostics": diagnostics,
+            "pdk_stamp_comparison": _compare_pdk_stamps(
+                pdk, _client_pdk_stamp(request)
+            ),
+        }
+    except (ValueError, TypeError, AttributeError, UnicodeDecodeError):
+        return {**unknown, "capture": "malformed"}
+
+
 def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
     """The ``environment.remote`` runner-identity fields (issue #2719).
 
@@ -1325,6 +1836,17 @@ def _read_runner_identity(local_dir: str | None) -> dict[str, Any]:
     if warning is not None:
         fields["runner_compatibility_warning"] = warning
     return fields
+
+
+def _read_job_identity(
+    local_dir: str | None, request: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Runner identity plus the worker-observed environment capture, merged
+    into ``environment.remote``. Neither reader can raise."""
+    return {
+        **_read_runner_identity(local_dir),
+        "worker_environment": _read_worker_environment(local_dir, request),
+    }
 
 
 def _status_exit_code(status: dict[str, Any]) -> int | None:
@@ -1460,6 +1982,7 @@ def _recover_failed_job_corners(
     measurements_spec: list[dict[str, Any]],
     status: dict[str, Any],
     runner: remote_transport.CommandRunner | None,
+    request: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Bounded, collection-only recovery after a terminal job failure: one
     outputs download, one read of ``report.json`` and, when that holds no
@@ -1471,11 +1994,11 @@ def _recover_failed_job_corners(
     raw stderr text never does."""
     runner_error: dict[str, Any] | None = None
     note: str | None = None
-    identity = _read_runner_identity(None)
+    identity = _read_job_identity(None)
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             collect_outputs(config, job_id, collected, runner=runner)
-            identity = _read_runner_identity(collected)
+            identity = _read_job_identity(collected, request)
             try:
                 kind, runner_error = _classify_collected_report(
                     read_collected_report(collected)
@@ -1616,7 +2139,7 @@ def _run_batch_job(
                 "bucket": config.bucket,
                 "region": config.region,
                 "state": exc.last_state,
-                **_read_runner_identity(None),
+                **_read_job_identity(None),
             },
         )
 
@@ -1631,13 +2154,14 @@ def _run_batch_job(
             measurements_spec=measurements_spec,
             status=status,
             runner=runner,
+            request=request,
         )
         return failed_corners, None, {**environment, **identity}
 
     with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
         collect_outputs(config, job_id, collected, runner=runner)
         report = read_collected_report(collected)
-        environment = {**environment, **_read_runner_identity(collected)}
+        environment = {**environment, **_read_job_identity(collected, request)}
         corners = report.get("corners") or []
         if keep_artifacts:
             _install_batch_artifacts(
@@ -1698,6 +2222,13 @@ def _run_batch(
     reason). The batch path's own wall-clock bound is
     ``request.batch.poll_timeout_s``, whose overrun reports every unit
     through the same unrun-corner shape.
+
+    Before submitting, the job's conservative bound is checked against the
+    fleet's whole-job ceiling (:func:`_assess_job_ceiling`, issue #2833):
+    ``request.batch.job_ceiling_check: "enforce"`` refuses an overlong job,
+    the default ``"warn"`` submits it with a stderr warning, and either way
+    the assessment is reported as ``environment.remote.job_ceiling``. The
+    ``hosts > 1`` path (:func:`_run_batch_fleet`) is unchanged.
     """
     from .sim import SimError
 
@@ -1707,8 +2238,15 @@ def _run_batch(
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
+    # Issue #2833: assess the one job against the fleet's whole-job ceiling
+    # before `submit_job`'s first S3 write, so an "enforce" refusal can never
+    # leave a partial contract or launch a billable job.
+    job_ceiling = _assess_job_ceiling(
+        unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
+    )
+    _enforce_job_ceiling(job_ceiling)
     try:
-        return _run_batch_job(
+        corners, engine_version, environment = _run_batch_job(
             config=config,
             job_id=new_job_id(),
             corner_points=corner_points,
@@ -1723,6 +2261,11 @@ def _run_batch(
         )
     except BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+    if environment is not None:
+        # Additive (issue #2833): the assessment and the ceiling's provenance
+        # ride every one-job batch report, exceeded or not.
+        environment = {**environment, "job_ceiling": job_ceiling}
+    return corners, engine_version, environment
 
 
 def _run_batch_fleet(
@@ -1819,6 +2362,7 @@ def _run_batch_fleet(
 #: the `remote` backend established -- see that module's import block.
 __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
+    "BATCH_JOB_CEILING_CODE",
     "BATCH_JOB_TOOL",
     "BATCH_NO_CAPACITY_CODE",
     "BATCH_NETLIST_FILENAME",

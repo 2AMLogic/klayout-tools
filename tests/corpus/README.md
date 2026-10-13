@@ -399,6 +399,18 @@ see [`statime/README.md`](statime/README.md) for what they are and
 `native/statime/README.md` for the go/no-go result they back (**Go**,
 documented there).
 
+## Observability-spike fixtures — `tests/corpus/synth_observability/`
+
+A small original RTL state/probe design (`obs_core.v`, MIT, this repo), its
+explicit observation-free wrapper (`obs_core_func.v`), and the reproduction
+driver (`run_experiments.py`) backing issue #2746's synthesis
+observability negative-control design spike — see
+[`synth_observability/README.md`](synth_observability/README.md) for how to
+rerun it and
+[`docs/design/synthesize-observability-spike.md`](../../docs/design/synthesize-observability-spike.md)
+for the recorded results and recommendation. No test collects these files;
+the driver writes only to a caller-supplied scratch directory.
+
 ## Adding a new corpus file
 
 1. Download the file into `tests/corpus/<pdk>/`, verifying the upstream

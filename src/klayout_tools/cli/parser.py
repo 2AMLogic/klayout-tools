@@ -59,6 +59,7 @@ from . import (
     wave_cmd,
     yield_campaign_cmd,
     yield_cmd,
+    yield_samples_cmd,
     yield_sensitivity_cmd,
 )
 from .color import add_color_args
@@ -196,8 +197,9 @@ def create_parser() -> argparse.ArgumentParser:
         action=_BuildVersionAction,
         help=(
             "print the running build's identity and exit -- bare `klt X.Y.Z` "
-            "for a tagged release, `klt X.Y.Z+g<sha>` otherwise (see `klt "
-            "version --format json`)"
+            "for a tagged release, a dev version such as "
+            "`klt X.Y.(Z+1).devN+g<sha>` otherwise (see `klt version "
+            "--format json`)"
         ),
     )
     # No default handler: absence of a subcommand is handled by main().
@@ -285,6 +287,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_power_parser(subparsers)
 
     _add_yield_parser(subparsers)
+
+    _add_yield_samples_parser(subparsers)
 
     _add_yield_campaign_parser(subparsers)
 
@@ -1063,6 +1067,76 @@ def _add_yield_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(yield_parser)
     yield_parser.set_defaults(func=yield_cmd.run)
+
+
+def _add_yield_samples_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-samples`` verb (issue #2563).
+
+    Derives a `klt yield` sample-set document from two `klt sim` Monte Carlo
+    reports -- the nominal campaign and a seeded known-bad variant that
+    becomes each measurement's ``negative_control`` -- so a negative control
+    can be graded without hand-editing a committed sim response. Pure JSON
+    transformation; needs no native extension.
+    """
+    parser = subparsers.add_parser(
+        "yield-samples",
+        help=(
+            "two `klt sim` MC reports (nominal + known-bad) -> a `klt yield` "
+            "sample-set document carrying a negative control"
+        ),
+        description=(
+            "Derive a `klt yield` sample-set document from two unedited `klt "
+            "sim --format json` Monte Carlo reports: the nominal campaign and a "
+            "seeded known-bad variant whose draw becomes each matched "
+            "measurement's negative_control (issue #2563). Both reports are "
+            "read with `klt yield`'s own sim-report reader; measurements match "
+            "by exact name and unit; the control is graded against the nominal "
+            "limits. The --format json output is the sample-set document "
+            "itself (plus schema_version and a `derivation` block recording "
+            "both source paths and SHA-256 hashes) -- redirect it to a file "
+            "and pass that to `klt yield`. Does not run simulations or grade "
+            "yield. See docs/cli/yield.md's 'Deriving a sample set from two "
+            "`klt sim` reports'."
+        ),
+    )
+    parser.add_argument(
+        "nominal",
+        help=(
+            "path to the nominal campaign's `klt sim --format json` Monte Carlo report"
+        ),
+    )
+    parser.add_argument(
+        "--negative-control",
+        dest="negative_control",
+        required=True,
+        metavar="REPORT",
+        help=(
+            "path to the seeded known-bad variant's own `klt sim --format "
+            "json` Monte Carlo report; its draw becomes each matched "
+            "measurement's negative_control"
+        ),
+    )
+    parser.add_argument(
+        "--description",
+        default=None,
+        help=(
+            "optional description of the deliberate defect, recorded as every "
+            "derived negative_control's description"
+        ),
+    )
+    parser.add_argument(
+        "--measurement",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "derive only this nominal measurement; repeatable, and "
+            "comma-separated names are accepted (default: every measurement "
+            "in the nominal report's rollup)"
+        ),
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=yield_samples_cmd.run)
 
 
 def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -1859,6 +1933,51 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--resistance-path",
+        dest="resistance_paths",
+        action="append",
+        nargs=3,
+        default=None,
+        metavar=("NET_ID", "FROM", "TO"),
+        help=(
+            "report the shortest SERIES path resistance between two emitted "
+            "node IDs (`terminals[].leg_net` values) of one --distributed-rc "
+            "ladder, selected by its `parasitics.nets[].net_id` (issue "
+            "#2765). Repeatable; results land in `parasitics."
+            "resistance_paths[]` with status ok/limit_exceeded/"
+            "node_not_found/no_path. Not an effective two-port resistance "
+            "(parallel paths are not combined) and not a physical-route "
+            "resistance -- the ladder is the terminal-ordered approximation "
+            "--distributed-rc builds. Requires --parasitics and "
+            "--distributed-rc. See docs/cli/extract.md's "
+            "'--resistance-path' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--resistance-path-max-nodes",
+        dest="resistance_path_max_nodes",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "--resistance-path node cap (positive integer, default 10000): a "
+            "selected net with more ladder nodes is answered "
+            "`limit_exceeded` before any search. Requires --resistance-path."
+        ),
+    )
+    extract_parser.add_argument(
+        "--resistance-path-max-resistors",
+        dest="resistance_path_max_resistors",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "--resistance-path resistor cap (positive integer, default "
+            "10000): a selected net with more ladder segments is answered "
+            "`limit_exceeded` before any search. Requires --resistance-path."
+        ),
+    )
+    extract_parser.add_argument(
         "--mom-rlc-net",
         dest="mom_rlc_net",
         default=None,
@@ -2195,6 +2314,28 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "build/gcd.spice -> build/gcd.delaywin_hv.spice). Requires "
             "--subcircuit. See docs/cli/extract.md's 'Sub-circuit isolation' "
             "section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--hierarchical-cells",
+        dest="hierarchical_cells",
+        default=None,
+        metavar="CELL[,CELL...]",
+        help=(
+            "comma-separated cell name(s) to emit as their own '.SUBCKT' in "
+            "the written SPICE instead of flattening them into the top "
+            "circuit (issue #2722): one definition per named cell, one X "
+            "instance per placement, so per-circuit klt lvs options such as "
+            "options.combine_devices_per_circuit can scope the layout side. "
+            "Increment 1: the cells must be non-nested, reachable, "
+            "non-top cells, and every placement of one cell must be "
+            "electrically identical; nesting, absent/top/unreachable names "
+            "and combination with --parasitics, --subcircuit or "
+            "--abstract-cells are errors (deferred to #2916). devices[]/"
+            "nets[] keep describing the flat extraction and a 'hierarchy' "
+            "block is added to the JSON response. Off by default -- the "
+            "flat bytes and JSON are unchanged. See docs/cli/extract.md's "
+            "'Hierarchical output' section."
         ),
     )
     extract_parser.add_argument(
@@ -3111,6 +3252,16 @@ def _add_lef_abstract_parser(subparsers: argparse._SubParsersAction) -> None:
         "--output",
         default=None,
         help="output LEF path (default: <macro-name>.lef)",
+    )
+    lef_abstract_parser.add_argument(
+        "--require-power-pins",
+        action="store_true",
+        help=(
+            "exit 3 when the supply-pin verdict (power_pins, issue #2839) "
+            "fails: no USE POWER or no USE GROUND pin, a supply pin whose "
+            "written USE differs, or a supply PORT that is not drawn layout "
+            "geometry. Without it the verdict is reported only."
+        ),
     )
     _add_format_arg(lef_abstract_parser)
     lef_abstract_parser.set_defaults(func=lef_abstract_cmd.run)
@@ -4142,13 +4293,13 @@ def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Report which klayout-tools build is running: its version, the "
             "git commit it was built from, and whether that commit is this "
-            "version's release tag. The package version alone cannot answer "
-            "the last question -- a source build made after a release tag "
-            "declares the same version the release does -- so `version` "
-            "reports a PEP 440 local-version form (`X.Y.Z+g<sha>`) for any "
-            "build that is not a confirmed release, and a bare `X.Y.Z` for "
-            "one that is. Identifying the build never fails: an "
-            "unrecoverable identity is reported as `X.Y.Z+unknown` with "
+            "version's release tag. Only a clean build made exactly at the "
+            "release tag carries the bare `X.Y.Z`; any other build's "
+            "distribution version is a distinct PEP 440 dev version "
+            "(`X.Y.(Z+1).devN+g<sha>`, plus `.dirty` for uncommitted "
+            "changes), so it can never satisfy a `klayout-tools==X.Y.Z` "
+            "pin. Identifying the build never fails: an unrecoverable "
+            "identity is reported as `X.Y.Z.dev0+unknown` with "
             "`is_release: null`, not as an error."
         ),
     )
@@ -4612,10 +4763,11 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "first non-whitespace byte is '{' is a request document; "
             "anything else is a layout path. A request document is mutually "
             "exclusive with this command's own flags (--deck/--top/--engine/"
-            "--deck-file/--deck-var/--pdk/--pdk-root/--timeout-s), which it "
-            "carries as fields instead -- see docs/cli/drc.md, 'Request "
-            "document'. Omit when using --check (the input path is read "
-            "from the committed report instead)"
+            "--deck-file/--deck-var/--pdk/--pdk-root/--timeout-s/--rules), "
+            "which it carries as fields instead -- see docs/cli/drc.md, "
+            "'Request document'. Omit when using --check (the input path is "
+            "read from the committed report instead) or --list-rules (no "
+            "layout is read)"
         ),
     )
     drc_parser.add_argument(
@@ -4816,8 +4968,40 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "error (exit 1) otherwise"
         ),
     )
+    # Issue #2768: a third input mode beside `file` and `--check` -- listing
+    # reads no layout, so argparse itself rejects combining it with either.
+    drc_input_group.add_argument(
+        "--list-rules",
+        dest="list_rules",
+        action="store_true",
+        help=(
+            "list the curated --deck's registered rules (id, description, "
+            "check kind, layers, scope) and their total count instead of "
+            "running DRC: no layout is read and the output is not a DRC "
+            "verdict. Requires --deck; not supported with --engine klayout "
+            "(see #2806). See docs/cli/drc.md, 'Rule listing and selection'"
+        ),
+    )
+    drc_parser.add_argument(
+        "--rules",
+        default=None,
+        metavar="ID[,ID...]",
+        help=(
+            "run only these curated deck rules (issue #2768): comma-separated "
+            "exact rule ids and/or case-sensitive shell-style globs over ids "
+            "-- quote globs, e.g. --rules 'met1.*,via.width.1'. Whitespace is "
+            "trimmed; empty or unmatched tokens are an error. Unselected "
+            "rules are not executed; a proper subset is reported as partial "
+            "(status clean_partial when clean) and recorded in the report's "
+            "rule_selection block, so it never counts as full DRC signoff. "
+            "Not supported with --engine klayout or --check (--check --rerun "
+            "replays a report's recorded selection)"
+        ),
+    )
     _add_format_arg(drc_parser)
-    _record_request_argv_flags(drc_parser)
+    _record_request_argv_flags(
+        drc_parser, exclude=(*_REQUEST_ARGV_FLAG_EXCLUDE, "list_rules")
+    )
     drc_parser.set_defaults(func=drc_cmd.run)
 
 
@@ -4921,6 +5105,27 @@ def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "top cell to check when the stream has more than one; omit to "
             "check every top cell"
+        ),
+    )
+    socket_check_parser.add_argument(
+        "--require-power-ports",
+        action="store_true",
+        help=(
+            "run the power_ports check (issue #2839) even when the descriptor "
+            "declares no 'power_ports' object: every POWER/GROUND pin name "
+            "needs an edge-accessible port, and at least one POWER and one "
+            "GROUND pin must be declared. See docs/cli/socket-check.md."
+        ),
+    )
+    socket_check_parser.add_argument(
+        "--edge-band-um",
+        type=float,
+        default=None,
+        metavar="UM",
+        help=(
+            "power_ports edge band in micrometres, overriding the "
+            "descriptor's power_ports.edge_band_um (default 0: the port must "
+            "touch the outline; provisional, see docs/cli/socket-check.md)"
         ),
     )
     _add_format_arg(socket_check_parser)

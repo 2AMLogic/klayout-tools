@@ -72,6 +72,13 @@
             "description": "Informational: the pin's LEF PIN USE classification (LEF 5.7 section 5.6.2). Same scope note as direction -- consumed by `klt lef-abstract`, not checked by `klt socket-check`. Optional: omit or null when not specified.",
             "type": ["string", "null"],
             "enum": ["SIGNAL", "ANALOG", "POWER", "GROUND", "CLOCK", null]
+          },
+          "metal_layer": {
+            "description": "The `[layer, datatype]` pair carrying the pin's drawn conductor, when it differs from the label `layer` (e.g. sky130 draws met1 on 68/20 but labels it on 68/5). Used only by the `power_ports` check (issue #2839) to find the port's drawn geometry under the label. Optional: omit or null to use `layer`.",
+            "type": ["array", "null"],
+            "items": { "type": "integer" },
+            "minItems": 2,
+            "maxItems": 2
           }
         }
       }
@@ -84,6 +91,34 @@
         "items": { "type": "integer" },
         "minItems": 2,
         "maxItems": 2
+      }
+    },
+    "power_ports": {
+      "description": "Requests the `power_ports` check (issue #2839: T1 item 11 port accessibility, PROVISIONAL until 2AMLogic/product#134 ratifies the amendment) and sets its parameters. When present (even `{}`), every POWER/GROUND pin name must have at least one edge-accessible port, and at least one POWER and one GROUND pin must be declared. Optional: omit or null to leave the check skipped. See docs/cli/socket-check.md.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "edge_band_um": {
+          "description": "Maximum distance, in micrometres, from a port's drawn shape to an outline edge for it to count as edge-accessible. Optional: default 0 (the shape must touch the outline). Provisional.",
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "edges": {
+          "description": "Which outline edges count. Optional: default all four.",
+          "type": ["array", "null"],
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["left", "bottom", "right", "top"] }
+        },
+        "allowed_layers": {
+          "description": "`[layer, datatype]` pairs a port may be drawn on (matched against the pin's `metal_layer` or `layer`). Optional: omit or null to allow any layer.",
+          "type": ["array", "null"],
+          "items": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
       }
     },
     "budgets": {

@@ -290,6 +290,7 @@ from .extract_spef import ExtractError as ExtractError
 from .extract_spef import _write_spef
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
 from .metrics import is_registered
+from .parasitic_integrity import empty_integrity_summary
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import (
     MOS_FLAVOUR_PROPERTY,
@@ -942,6 +943,101 @@ def _require_parasitics(flag: str, value: Any, parasitics: bool) -> None:
         raise ExtractError(f"{flag} requires --parasitics")
 
 
+def _validate_resistance_path_args(
+    resistance_paths: Sequence[tuple[int, str, str]] | None,
+    max_nodes: int | None,
+    max_resistors: int | None,
+    *,
+    parasitics: bool,
+    distributed_rc: bool,
+) -> None:
+    """Up-front validation of ``--resistance-path`` and its limits (issue
+    #2765) -- every violation is an :class:`ExtractError`, the same "a flag
+    naming something invalid is an error, not a silent no-op" convention
+    the other opt-in parasitics flags follow."""
+    from .resistance_path import validate_limits
+
+    if not resistance_paths:
+        if max_nodes is not None or max_resistors is not None:
+            raise ExtractError(
+                "--resistance-path-max-nodes/--resistance-path-max-resistors "
+                "require --resistance-path"
+            )
+        return
+    if not parasitics:
+        raise ExtractError("--resistance-path requires --parasitics")
+    if not distributed_rc:
+        raise ExtractError("--resistance-path requires --distributed-rc")
+    for query in resistance_paths:
+        net_id = query[0]
+        if isinstance(net_id, bool) or not isinstance(net_id, int):
+            raise ExtractError(
+                f"--resistance-path NET_ID must be an integer "
+                f"parasitics.nets[].net_id (got {net_id!r})"
+            )
+    try:
+        validate_limits(
+            _resistance_path_limit(max_nodes, "nodes"),
+            _resistance_path_limit(max_resistors, "resistors"),
+        )
+    except ValueError as exc:
+        raise ExtractError(
+            f"--resistance-path limits: {exc} "
+            "(--resistance-path-max-nodes/--resistance-path-max-resistors)"
+        ) from exc
+
+
+def _resistance_path_limit(value: int | None, kind: str) -> int:
+    """``value``, or the module default for ``kind`` (``"nodes"``/
+    ``"resistors"``) when ``None``."""
+    from .resistance_path import DEFAULT_MAX_NODES, DEFAULT_MAX_RESISTORS
+
+    if value is not None:
+        return value
+    return DEFAULT_MAX_NODES if kind == "nodes" else DEFAULT_MAX_RESISTORS
+
+
+def _attach_resistance_paths(
+    parasitics_report: dict[str, Any],
+    resistance_paths: Sequence[tuple[int, str, str]] | None,
+    max_nodes: int | None,
+    max_resistors: int | None,
+) -> None:
+    """Answer every ``--resistance-path`` query (issue #2765) over the
+    finished ``parasitics_report["nets"]`` and store the results, in request
+    order, as ``parasitics_report["resistance_paths"]``. A no-op (the key
+    stays absent) when no query was given, so default output is unchanged.
+
+    A malformed emitted ladder would be an internal inconsistency, not a
+    caller error -- surfaced as an :class:`ExtractError` rather than an
+    answer computed over silently dropped segments.
+    """
+    if not resistance_paths:
+        return
+    from .resistance_path import ResistanceGraphError, query_parasitic_net
+
+    nets = parasitics_report["nets"]
+    results = []
+    for net_id, source, target in resistance_paths:
+        try:
+            results.append(
+                query_parasitic_net(
+                    nets,
+                    net_id,
+                    source,
+                    target,
+                    max_nodes=_resistance_path_limit(max_nodes, "nodes"),
+                    max_resistors=_resistance_path_limit(max_resistors, "resistors"),
+                )
+            )
+        except ResistanceGraphError as exc:
+            raise ExtractError(
+                f"--resistance-path: net_id {net_id}'s emitted ladder is "
+                f"malformed: {exc}"
+            ) from exc
+    parasitics_report["resistance_paths"] = results
+
+
 def _describe_label_layers(
     label_layers: Mapping[str, tuple[int, int] | None] | None,
 ) -> dict[str, list[int] | None] | None:
@@ -1017,6 +1113,9 @@ def run_extract(
     parasitics_nets: Sequence[str] | None = None,
     parasitics_top_cell_only: bool = False,
     distributed_rc: bool = False,
+    resistance_paths: Sequence[tuple[int, str, str]] | None = None,
+    resistance_path_max_nodes: int | None = None,
+    resistance_path_max_resistors: int | None = None,
     def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None = None,
     mom_rlc_net: str | None = None,
     mom_rlc_resistance_ohm: float | None = None,
@@ -1028,6 +1127,7 @@ def run_extract(
     subcircuit_cell: str | None = None,
     subcircuit_output: str | None = None,
     substrate_spreading_net: str | None = None,
+    hierarchical_cells: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -1425,6 +1525,22 @@ def run_extract(
     which end up with 2+ terminals in a given layout. ``False`` (the
     default) skips this entirely -- byte-identical to before this feature
     existed.
+
+    ``resistance_paths`` (``klt extract --resistance-path NET_ID FROM TO``,
+    repeatable, issue #2765) asks, per ``(net_id, from, to)`` triple, for the
+    **shortest series path resistance** between two emitted node IDs of one
+    ``distributed_rc`` ladder -- not an effective two-port resistance, not a
+    physical-route resistance. Answered by
+    :func:`klayout_tools.resistance_path.query_parasitic_net` over the
+    finished ``parasitics.nets[]`` report and returned, one result per
+    query in request order, as the additive ``parasitics.resistance_paths``
+    list (absent when no query was given). ``resistance_path_max_nodes``/
+    ``resistance_path_max_resistors`` cap the selected net's graph size
+    (``None`` -> :data:`~klayout_tools.resistance_path.DEFAULT_MAX_NODES`/
+    :data:`~klayout_tools.resistance_path.DEFAULT_MAX_RESISTORS`). Requires
+    ``parasitics=True`` and ``distributed_rc=True``; a limit given without a
+    query, a non-positive limit, or a non-integer ``net_id`` is an
+    :class:`ExtractError`. See :func:`_validate_resistance_path_args`.
 
     ``def_net_connections`` (issue #961, Epic #700 Phase 3) is
     :func:`def_net_instance_pins`'s own ``{net_name: ((inst, pin), ...)}``
@@ -1916,6 +2032,25 @@ def run_extract(
     ``excluded_parasitics`` counts every element the boundary rule attributed
     to the parent deck instead, so nothing is dropped silently.
 
+    ``hierarchical_cells`` (``klt extract --hierarchical-cells CELL[,CELL...]``,
+    issue #2722, increment 1) opts into **hierarchical SPICE emission**: one
+    ``.SUBCKT <cell>`` per named (non-nested) cell definition, holding that
+    cell's own devices, plus the top ``.SUBCKT`` carrying the remaining
+    devices and one ``X`` card per *placement* of each named cell. It exists
+    so per-circuit ``klt lvs`` options (``options.combine_devices_per_circuit``)
+    have layout-side circuits to key on. Unlike ``subcircuit_cell`` this is
+    the primary deck, not a second artifact; ``devices[]``/``nets[]``/
+    ``device_count`` keep describing the *flat* extraction (so they are
+    unchanged by the option) and a ``hierarchy`` block is added to the
+    response *only* when the option was given. Omitted/empty (the default),
+    the flat bytes and JSON are unchanged. Errors (all before any output is
+    written): an absent, top, or unreachable cell; a selection where one
+    cell contains another; placements of one cell that are not electrically
+    identical; and any combination with ``parasitics``, ``subcircuit_cell``
+    or ``abstract_cell_patterns`` (deferred to issue #2916). See
+    :mod:`klayout_tools.extract_hierarchy` and ``docs/cli/extract.md``'s
+    "Hierarchical output" section.
+
     The written SPICE gains one ``.SUBCKT <cell type> <pins...> ... .ENDS``
     block per distinct matched cell type (empty body -- a black box declares
     no devices) and one ``X<instance>`` card per matched instance in the top
@@ -2260,6 +2395,16 @@ def run_extract(
     if distributed_rc and not critical_nets_set:
         raise ExtractError("--distributed-rc requires --critical-net")
 
+    # `--resistance-path` (issue #2765): validated up front, in a helper so
+    # this function's own (baselined) complexity does not grow.
+    _validate_resistance_path_args(
+        resistance_paths,
+        resistance_path_max_nodes,
+        resistance_path_max_resistors,
+        parasitics=parasitics,
+        distributed_rc=distributed_rc,
+    )
+
     # `--mom-rlc-net` (issue #988, Epic #709 Phase 3a): substitutes a
     # caller-supplied R/L/C for one named net's Phase 1/2 lumped-RC model --
     # see `run_extract`'s own `mom_rlc_net` docstring paragraph. Validated up
@@ -2325,6 +2470,14 @@ def run_extract(
     _validate_subcircuit_flags(
         subcircuit_cell, subcircuit_output, abstract_cell_patterns
     )
+    hierarchical_names = _normalize_hierarchical_cells(
+        hierarchical_cells,
+        parasitics=parasitics,
+        subcircuit_cell=subcircuit_cell,
+        abstract_cell_patterns=abstract_cell_patterns,
+        abstract_cell_lef_paths=abstract_cell_lef_paths,
+    )
+    hierarchy_placements: dict[int, Any] = {}
     subcircuit_info: dict[str, Any] = {}
     missing_flavour_markers: list[dict[str, Any]] = []
 
@@ -2367,6 +2520,8 @@ def run_extract(
         pin_source_cells=pin_source_cells,
         subcircuit_cell=subcircuit_cell,
         subcircuit_info=subcircuit_info,
+        hierarchical_cells=hierarchical_names,
+        hierarchy_placements=hierarchy_placements,
         substrate_spreading_net=substrate_spreading_net,
         # Issue #2658: only consumed by the `--abstract-cell-lef` pin-layer
         # lookup (see that function's docstring); `None` unless `--pdk`/
@@ -2805,6 +2960,11 @@ def run_extract(
                     "resistance_ohm": SUBSTRATE_DC_TIE_RESISTANCE_OHM,
                     "nets": [],
                 },
+                # Additive field (issue #2764): no nets injected, so the
+                # integrity summary reports an all-zero check -- same shape
+                # as the checked branch's summary, per the schema-stability
+                # convention above.
+                "integrity": empty_integrity_summary(),
             }
         # `parasitics_deck` is only non-None when `--parasitics` was given
         # (see above), which is exactly when `parasitic_nets is not None`.
@@ -2951,6 +3111,14 @@ def run_extract(
                     "distributed ladder (nothing to chain). See "
                     "docs/cli/extract.md's '--distributed-rc' section."
                 )
+        # Additive field (issue #2765): present only when --resistance-path
+        # was given; a no-op otherwise.
+        _attach_resistance_paths(
+            parasitics_report,
+            resistance_paths,
+            resistance_path_max_nodes,
+            resistance_path_max_resistors,
+        )
         # Additive field (issue #1704): `True` only when
         # `--parasitics-top-cell-only` was given -- distinguishes a run whose
         # `nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` are
@@ -3028,6 +3196,16 @@ def run_extract(
         substrate_global_nets = [
             entry["net"] for entry in parasitics_report["substrate_dc_tie"]["nets"]
         ]
+    # `--hierarchical-cells` (issue #2722): rebuild hierarchy in the live
+    # netlist now -- after every flat-view field above (devices[], nets[],
+    # counts) was computed and before the writer runs -- so the ordinary
+    # writer, model bindings and digest path stay authoritative. Every
+    # validation (placement identity, conservation) raises here, before any
+    # output file exists.
+    hierarchy_report = _apply_hierarchical_cells(
+        netlist, circuit, hierarchical_names, hierarchy_placements
+    )
+
     # Issue #2761: a FinFET deck gets its own card writer (`L`/`W`/`NFIN`,
     # the PDK reference CDL's parameter set); every other deck keeps the
     # model-binding delegate exactly as before.
@@ -3212,6 +3390,10 @@ def run_extract(
     # `docs/cli/extract.md`'s "Sub-circuit isolation" section.
     result["subcircuit"] = subcircuit_report
 
+    # Additive field (issue #2722): present *only* when
+    # `--hierarchical-cells` was given, so a flat run's JSON is unchanged.
+    result.update(_hierarchy_fields(hierarchy_report))
+
     # Additive `metrics` block (issue #1848, adopting the declared metric
     # namespace registry from #247 beyond its `layout-metrics`/`klt drc`
     # (#1847) adopters) -- see `run_extract`'s docstring "metrics" paragraph
@@ -3238,6 +3420,119 @@ def run_extract(
 # --------------------------------------------------------------------------- #
 # --check / --rerun: verify a previously committed report (issue #1149)
 # --------------------------------------------------------------------------- #
+
+
+def _normalize_hierarchical_cells(
+    hierarchical_cells: Sequence[str],
+    *,
+    parasitics: bool,
+    subcircuit_cell: str | None,
+    abstract_cell_patterns: tuple[str, ...],
+    abstract_cell_lef_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Normalize ``--hierarchical-cells`` (issue #2722) to a sorted, de-duped
+    tuple (``()`` when omitted) and reject the option combinations increment 1
+    does not support -- before the extraction engine runs."""
+    names = tuple(sorted({name.strip() for name in hierarchical_cells}))
+    if not hierarchical_cells:
+        return ()
+    if not all(names) or not names:
+        raise ExtractError("--hierarchical-cells was given an empty cell name")
+    from .extract_hierarchy import HierarchyError, reject_unsupported_combinations
+
+    try:
+        reject_unsupported_combinations(
+            parasitics=parasitics,
+            subcircuit_cell=subcircuit_cell,
+            abstract_cell_patterns=abstract_cell_patterns,
+            abstract_cell_lef_paths=abstract_cell_lef_paths,
+        )
+    except HierarchyError as exc:
+        raise ExtractError(str(exc)) from exc
+    return names
+
+
+def _validate_hierarchical_selection(
+    layout: Any, top_cell: Any, names: tuple[str, ...]
+) -> None:
+    """Validate ``--hierarchical-cells`` against the live hierarchy (absent /
+    top / unreachable / nested) before any extraction work (issue #2722).
+    No-op when the option was omitted."""
+    if not names:
+        return
+    from .extract_hierarchy import HierarchyError, validate_selection
+
+    try:
+        validate_selection(layout, top_cell, names)
+    except HierarchyError as exc:
+        raise ExtractError(str(exc)) from exc
+
+
+def _collect_hierarchy_placements(
+    netlist: Any,
+    top_cell: Any,
+    dbu: float,
+    names: tuple[str, ...],
+    out: dict[int, Any] | None,
+) -> None:
+    """Fill ``out`` with the per-device placement attribution
+    ``--hierarchical-cells`` needs (issue #2722); no-op when omitted."""
+    if not names or out is None:
+        return
+    final_top = netlist.circuit_by_name(top_cell.name)
+    if final_top is None:
+        return
+    from .extract_hierarchy import device_placements
+
+    out.update(device_placements(top_cell, final_top, frozenset(names), dbu))
+
+
+def _apply_hierarchical_cells(
+    netlist: Any,
+    circuit: Any | None,
+    names: tuple[str, ...],
+    placements: dict[int, Any],
+) -> dict[str, Any] | None:
+    """Rebuild hierarchy in the live netlist (issue #2722) and return the
+    response's ``hierarchy`` block, ``None`` when the option was omitted. Every
+    refusal raises here, before the writer runs."""
+    if not names:
+        return None
+    from .extract_hierarchy import HierarchyError, build_hierarchy
+
+    if circuit is None:
+        raise ExtractError(
+            "--hierarchical-cells matched no extracted device -- this deck "
+            "recognized no device anywhere in the layout"
+        )
+    try:
+        report = build_hierarchy(netlist, circuit, placements)
+    except HierarchyError as exc:
+        raise ExtractError(str(exc)) from exc
+    _require_hierarchy_cells_populated(report, names)
+    return report
+
+
+def _hierarchy_fields(report: dict[str, Any] | None) -> dict[str, Any]:
+    """The additive ``hierarchy`` response field: present only when
+    ``--hierarchical-cells`` was given, so a flat run's JSON is unchanged."""
+    return {} if report is None else {"hierarchy": report}
+
+
+def _require_hierarchy_cells_populated(
+    report: dict[str, Any], names: tuple[str, ...]
+) -> None:
+    """A selected cell that contributed no recognized device would silently
+    produce no ``.SUBCKT`` -- the "silently flat" outcome the option must not
+    have (issue #2722)."""
+    emitted = {entry["cell"] for entry in report["cells"]}
+    missing = [name for name in names if name not in emitted]
+    if missing:
+        raise ExtractError(
+            f"--hierarchical-cells {missing[0]!r} matched no extracted device "
+            "-- the cell is placed in the layout hierarchy but none of the "
+            "devices this deck recognized resolve to a placement of it"
+        )
 
 
 def _validate_subcircuit_flags(
@@ -3822,6 +4117,8 @@ def extract_netlist_from_layout(
     pin_source_cells: frozenset[str] | None = None,
     subcircuit_cell: str | None = None,
     subcircuit_info: dict[str, Any] | None = None,
+    hierarchical_cells: tuple[str, ...] = (),
+    hierarchy_placements: dict[int, Any] | None = None,
     substrate_spreading_net: str | None = None,
     pdk_info: dict[str, Any] | None = None,
     missing_flavour_markers: list[dict[str, Any]] | None = None,
@@ -4073,10 +4370,16 @@ def extract_netlist_from_layout(
             "--def-pins": bool(def_pins),
             "--pin-source-cells": bool(pin_source_cells),
             "--subcircuit": subcircuit_cell is not None,
+            "--hierarchical-cells": bool(hierarchical_cells),
             "--substrate-spreading": substrate_spreading_net is not None,
             "--pdk": pdk_info is not None,
         },
     )
+
+    # `--hierarchical-cells` (issue #2722): selection validated against the
+    # live hierarchy (absent / top / unreachable / nested) before any
+    # extraction work or output.
+    _validate_hierarchical_selection(layout, top_cell, hierarchical_cells)
 
     # `--subcircuit` (issue #2245): the one fact about the slice that needs the
     # live layout hierarchy, reported back through the out-parameter (see this
@@ -4269,6 +4572,14 @@ def extract_netlist_from_layout(
     warnings = warnings + missing_marker_prose_warnings
     if missing_flavour_markers is not None:
         missing_flavour_markers.extend(missing_marker_entries)
+
+    # Issue #2722: per-device placement attribution for
+    # `--hierarchical-cells`, keyed by `Device.id()`, filled into the
+    # out-parameter (same idiom as `subcircuit_info`). Read from the final
+    # top circuit, exactly as `run_extract` later reads it.
+    _collect_hierarchy_placements(
+        netlist, top_cell, layout.dbu, hierarchical_cells, hierarchy_placements
+    )
 
     return (
         netlist,

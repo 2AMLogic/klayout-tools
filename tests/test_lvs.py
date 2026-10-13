@@ -15230,6 +15230,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         # form-dependent default applies (off for this `plain-element`
         # reference, on for `gate-level-verilog`).
         "anchor_top_level_pins": None,
+        "strict_top_level_pin_count": False,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
     }
     # The pre-#1205 fields are untouched -- this is an additive change, so no
@@ -21879,3 +21880,355 @@ def test_label_layers_genuine_drift_is_still_detected(tmp_path):
     drifted = {entry["field"] for entry in result["drift"]}
     assert "counts.pins.layout" in drifted
     assert "label_layers" not in result["fresh"]
+
+
+# --------------------------------------------------------------------------- #
+# `klt extract --hierarchical-cells` x options.combine_devices_per_circuit
+# (issue #2722): layout-side per-circuit scoping needs layout-side circuits.
+# --------------------------------------------------------------------------- #
+
+# `stage_a` is a single lumped resistor in the reference (the layout's two
+# series 289.2-ohm segments must be folded: combine = true); `stage_b` keeps
+# its two series resistors device-for-device (combine = false).
+_HIER_EXTRACT_REFERENCE_SPICE = """
+.subckt stage_a IN_A OUT_A
+R1 IN_A OUT_A 578.4 res_generic_po L=12U W=1U
+.ends
+.subckt stage_b IN_B OUT_B
+R1 IN_B MID 289.2 res_generic_po L=6U W=1U
+R2 MID OUT_B 289.2 res_generic_po L=6U W=1U
+.ends
+.subckt top IN_A OUT_A IN_B OUT_B
+XSTAGE_A IN_A OUT_A stage_a
+XSTAGE_B IN_B OUT_B stage_b
+.ends
+"""
+
+
+def _hier_extract_lvs(tmp_path, layout_spice, options, reference_spice):
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+    request = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_spice, "top": "TOP"},
+            "reference": {"netlist": reference_path, "top": "top"},
+            "options": options,
+        },
+    )
+    return run_lvs(request)
+
+
+def test_extract_hierarchical_cells_scopes_combine_devices_per_layout_circuit(
+    tmp_path,
+):
+    """`klt extract --hierarchical-cells` gives the layout side one circuit per
+    selected cell, so `combine_devices_per_circuit` can fold `STAGE_A`'s
+    series pair while leaving `STAGE_B`'s untouched -- opposite settings on
+    two layout-side children, honoured simultaneously."""
+    from klayout_tools.extract import run_extract
+    from test_extract import _make_hier_two_children_layout, _write_gds
+
+    gds = _write_gds(_make_hier_two_children_layout(), tmp_path / "block.gds")
+    hier_spice = tmp_path / "hier.spice"
+    run_extract(
+        gds,
+        "sky130",
+        output=str(hier_spice),
+        top_cell_pins_only=True,
+        hierarchical_cells=("STAGE_A", "STAGE_B"),
+    )
+    per_circuit = {"combine_devices_per_circuit": {"STAGE_A": True, "STAGE_B": False}}
+
+    report = _hier_extract_lvs(
+        tmp_path, str(hier_spice), per_circuit, _HIER_EXTRACT_REFERENCE_SPICE
+    )
+    assert report["status"] == "match"
+    # 1 (STAGE_A folded) + 2 (STAGE_B untouched) device pairs.
+    assert report["counts"]["devices"]["matched"] == 3
+
+    # Neither whole-netlist setting reproduces that: `true` also folds
+    # STAGE_B (only 2 pairs left, its own device-for-device reference lost);
+    # `false` never folds STAGE_A and mismatches.
+    folded_everywhere = _hier_extract_lvs(
+        tmp_path,
+        str(hier_spice),
+        {"combine_devices": True},
+        _HIER_EXTRACT_REFERENCE_SPICE,
+    )
+    assert folded_everywhere["counts"]["devices"]["matched"] == 2
+    never_folded = _hier_extract_lvs(
+        tmp_path, str(hier_spice), {}, _HIER_EXTRACT_REFERENCE_SPICE
+    )
+    assert never_folded["status"] == "mismatch"
+
+
+def test_extract_flat_output_has_no_layout_circuits_for_per_circuit_options(
+    tmp_path,
+):
+    """Negative control: without the hierarchical option the layout side is
+    one flat circuit, so the same per-circuit request cannot match."""
+    from klayout_tools.extract import run_extract
+    from test_extract import _make_hier_two_children_layout, _write_gds
+
+    gds = _write_gds(_make_hier_two_children_layout(), tmp_path / "block.gds")
+    flat_spice = tmp_path / "flat.spice"
+    run_extract(gds, "sky130", output=str(flat_spice), top_cell_pins_only=True)
+
+    report = _hier_extract_lvs(
+        tmp_path,
+        str(flat_spice),
+        {"combine_devices_per_circuit": {"STAGE_A": True, "STAGE_B": False}},
+        _HIER_EXTRACT_REFERENCE_SPICE,
+    )
+    assert report["status"] == "mismatch"
+    unmatched = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "combine_devices_per_circuit.unmatched"
+    ]
+    assert {m["side"] for m in unmatched} == {"layout"}
+
+
+# --------------------------------------------------------------------------- #
+# options.strict_top_level_pin_count (issue #2845)
+# --------------------------------------------------------------------------- #
+
+_PIN_REF = ".SUBCKT top a b\nR1 a b 1k\n.ENDS top\n"
+
+
+def _pin_count_run(tmp_path, lay_text, ref_text=_PIN_REF, **options):
+    request = {
+        "layout": {"netlist": _write(tmp_path / "lay.spice", lay_text), "top": "top"},
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", ref_text),
+            "top": "top",
+        },
+    }
+    if options:
+        request["options"] = options
+    return run_lvs(_write_request(tmp_path / "req.json", request))
+
+
+def _pin_count_findings(report):
+    return [m for m in report["mismatches"] if m["category"] == "pin.count"]
+
+
+_EXTRA_LAYOUT_PIN = ".SUBCKT top a b a$1\nR1 a b 1k\n.ENDS top\n"
+
+
+def test_strict_pin_count_default_unchanged(tmp_path):
+    for opts in ({}, {"strict_top_level_pin_count": False}):
+        report = _pin_count_run(tmp_path, _EXTRA_LAYOUT_PIN, **opts)
+        assert report["status"] == "match"
+        assert _pin_count_findings(report) == []
+        assert report["options"]["strict_top_level_pin_count"] is False
+        assert report["counts"]["pins"]["layout"] == 3
+        assert report["counts"]["pins"]["reference"] == 2
+
+
+def test_strict_pin_count_extra_layout_pin(tmp_path):
+    report = _pin_count_run(
+        tmp_path, _EXTRA_LAYOUT_PIN, strict_top_level_pin_count=True
+    )
+    assert report["status"] == "mismatch"
+    (finding,) = _pin_count_findings(report)
+    assert finding["severity"] == "error"
+    assert finding["details"] == {"layout_pin_count": 3, "reference_pin_count": 2}
+    assert report["category_error_counts"]["pin.count"] == 1
+    assert report["options"]["strict_top_level_pin_count"] is True
+    assert report["counts"]["pins"]["layout"] == 3
+
+
+def test_strict_pin_count_extra_reference_pin(tmp_path):
+    report = _pin_count_run(
+        tmp_path,
+        _PIN_REF,
+        ref_text=_EXTRA_LAYOUT_PIN,
+        strict_top_level_pin_count=True,
+    )
+    assert report["status"] == "mismatch"
+    (finding,) = _pin_count_findings(report)
+    assert finding["details"] == {"layout_pin_count": 2, "reference_pin_count": 3}
+
+
+def test_strict_pin_count_equal_counts_renamed_reordered(tmp_path):
+    report = _pin_count_run(
+        tmp_path,
+        ".SUBCKT top y x\nR1 x y 1k\n.ENDS top\n",
+        strict_top_level_pin_count=True,
+    )
+    assert report["status"] == "match"
+    assert _pin_count_findings(report) == []
+
+
+def test_strict_pin_count_coexists_with_topology_mismatch(tmp_path):
+    report = _pin_count_run(
+        tmp_path,
+        ".SUBCKT top a b c\nR1 a b 2k\n.ENDS top\n",
+        strict_top_level_pin_count=True,
+    )
+    assert report["status"] == "mismatch"
+    assert len(_pin_count_findings(report)) == 1
+    others = [
+        m
+        for m in report["mismatches"]
+        if m["severity"] == "error" and m["category"] != "pin.count"
+    ]
+    assert others
+
+
+@pytest.mark.parametrize("bad", ["true", 1, None, []])
+def test_strict_pin_count_rejects_non_boolean(tmp_path, bad):
+    with pytest.raises(LvsError, match="strict_top_level_pin_count must be a boolean"):
+        _pin_count_run(tmp_path, _PIN_REF, strict_top_level_pin_count=bad)
+
+
+def test_strict_pin_count_not_downgraded_by_combine_incomplete(tmp_path, monkeypatch):
+    """An exhausted `combine_devices` retry downgrades a `"mismatch"` to
+    `"inconclusive"` (issue #1370), but never one carrying a strict
+    `pin.count` error: combining cannot change declared pins, so that
+    mismatch is real and must not be hidden."""
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    report = _pin_count_run(
+        tmp_path,
+        _EXTRA_LAYOUT_PIN,
+        combine_devices=True,
+        strict_top_level_pin_count=True,
+    )
+    assert report["status"] == "mismatch"
+    assert len(_pin_count_findings(report)) == 1
+    assert report["category_counts"]["device.combine_incomplete"] == 2
+
+    # Control: the same exhausted combine without the strict option keeps
+    # the existing semantics (the compare still matches, so no downgrade).
+    report = _pin_count_run(tmp_path, _EXTRA_LAYOUT_PIN, combine_devices=True)
+    assert report["status"] == "match"
+    assert _pin_count_findings(report) == []
+
+
+def test_strict_pin_count_combine_incomplete_topology_mismatch_still_inconclusive(
+    tmp_path, monkeypatch
+):
+    """With equal pin counts, strict mode adds no finding, so an exhausted
+    combine plus an engine mismatch is still downgraded to `"inconclusive"`
+    exactly as without the option."""
+    import klayout.db as kdb
+
+    def _raise(self):
+        raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _raise)
+
+    report = _pin_count_run(
+        tmp_path,
+        ".SUBCKT top a b\nR1 a b 2k\n.ENDS top\n",
+        combine_devices=True,
+        strict_top_level_pin_count=True,
+    )
+    assert report["status"] == lvs.STATUS_INCONCLUSIVE
+    assert _pin_count_findings(report) == []
+
+
+def _gate_level_supply_pin_request(tmp_path, **options):
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    request = {
+        "layout": {
+            "netlist": _write(
+                tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER
+            ),
+            "top": "top",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG),
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    if options:
+        request["options"] = options
+    return json.dumps(request)
+
+
+def test_strict_pin_count_gate_level_supply_pins(tmp_path):
+    """The motivating case: layout-only `VPWR`/`VGND` pins against a
+    gate-level-Verilog reference. Default stays `match`; strict reports the
+    5-vs-3 pin-count difference as a `pin.count` error."""
+    report = run_lvs(_gate_level_supply_pin_request(tmp_path))
+    assert report["status"] == "match"
+    assert _pin_count_findings(report) == []
+    assert report["counts"]["pins"]["layout"] == 5
+    assert report["counts"]["pins"]["reference"] == 3
+
+    report = run_lvs(
+        _gate_level_supply_pin_request(tmp_path, strict_top_level_pin_count=True)
+    )
+    assert report["status"] == "mismatch"
+    (finding,) = _pin_count_findings(report)
+    assert finding["details"] == {"layout_pin_count": 5, "reference_pin_count": 3}
+    # The power/ground half of the verdict is reported independently and is
+    # unaffected by the strict pin-count check.
+    assert report["power_connectivity"]["status"] == "match"
+
+
+def _netgen_pin_count_request(tmp_path, lay_text, **options):
+    request = {
+        "engine": "netgen",
+        "layout": {"netlist": _write(tmp_path / "lay.spice", lay_text), "top": "top"},
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", _PIN_REF),
+            "top": "top",
+        },
+    }
+    if options:
+        request["options"] = options
+    return _write_request(tmp_path / "req.json", request)
+
+
+def test_strict_pin_count_netgen_engine_stubbed(tmp_path, monkeypatch):
+    """Strict mode on the netgen engine (subprocess stubbed, so this runs
+    without the binary): a netgen match verdict with unequal declared pin
+    counts becomes a `pin.count` mismatch; the default leaves it a match."""
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+
+    report = run_lvs(_netgen_pin_count_request(tmp_path, _EXTRA_LAYOUT_PIN))
+    assert report["engine"] == "netgen"
+    assert report["status"] == "match"
+    assert _pin_count_findings(report) == []
+
+    report = run_lvs(
+        _netgen_pin_count_request(
+            tmp_path, _EXTRA_LAYOUT_PIN, strict_top_level_pin_count=True
+        )
+    )
+    assert report["engine"] == "netgen"
+    assert report["status"] == "mismatch"
+    (finding,) = _pin_count_findings(report)
+    assert finding["details"] == {"layout_pin_count": 3, "reference_pin_count": 2}
+    assert report["options"]["strict_top_level_pin_count"] is True
+
+
+@_SKIP_NO_NETGEN
+def test_strict_pin_count_netgen_engine_real_binary(tmp_path):
+    """Strict mode against a real netgen binary: whatever netgen itself
+    concludes about the extra layout pin, the strict check reports the
+    declared-count difference as one `pin.count` error."""
+    report = run_lvs(
+        _netgen_pin_count_request(
+            tmp_path, _EXTRA_LAYOUT_PIN, strict_top_level_pin_count=True
+        )
+    )
+    assert report["engine"] == "netgen"
+    assert report["status"] == "mismatch"
+    (finding,) = _pin_count_findings(report)
+    assert finding["details"] == {"layout_pin_count": 3, "reference_pin_count": 2}

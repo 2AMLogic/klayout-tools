@@ -165,8 +165,8 @@ runs:
         klt --help > /dev/null
         # `klt --version` (not `klayout_tools.__version__`) so the log
         # distinguishes a real PyPI release from a build of this action's own
-        # source checkout, which declares the same package version: a
-        # non-release build reports `klt X.Y.Z+g<sha>` (issue #1202).
+        # source checkout: a non-release build reports a dev version such as
+        # `klt X.Y.(Z+1).devN+g<sha>` (issues #1202, #2823).
         echo "klt installed: $(klt --version 2>/dev/null || echo unknown)"
 
     - name: Determine pinned lambdapdk version

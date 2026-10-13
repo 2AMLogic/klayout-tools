@@ -23,6 +23,211 @@ not `klt --version`, if you need to detect this kind of drift. See
   convention, and `klt erc --deck sg13g2`'s auto-detected device cuts agree
   with extraction. `klt deck devices` gains an additive `topology` field on
   `resistor` entries.
+- **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
+  absorbing #2888): the distribution version is now computed at build time
+  from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the
+  checkout's git facts. A clean build exactly at tag `vX.Y.Z` still declares
+  bare `X.Y.Z`. A post-tag build now declares `X.Y.(Z+1).devN+g<sha>` in its
+  wheel/sdist metadata (a commit before the base is tagged declares
+  `X.Y.Z.devN+g<sha>`, uncommitted changes add `.dirty`, no git facts gives
+  `X.Y.Z.dev0+unknown`). Previously only `klt`'s output carried `+g<sha>`, so
+  a cached or tool-installed dev build silently satisfied an exact pin. A
+  wheel rebuilt from the sdist keeps the originating version. **Contract
+  change:** `klt version --format json`'s `package_version` (and `klt
+  signoff`'s `build.package_version`) is the distribution's own version, so
+  on non-release builds it now carries the same dev form as `version`
+  instead of the static base. Field names and types are unchanged, so no
+  `schema_version` bump; see `docs/cli/version.md`. Release managers now bump
+  `base-version` instead of `[project] version` (`RELEASING.md`).
+- **`klt lvs` opt-in `options.strict_top_level_pin_count`** (issue #2845):
+  unequal top-circuit pin counts yield `status: mismatch` with a new
+  `pin.count` error finding (both counts in `details`). Default unchanged;
+  additive `options` echo key, no `schema_version` bump. A `pin.count` error
+  is never downgraded to `inconclusive` by an exhausted `combine_devices`.
+- **T1 item 11 port accessibility: edge power ports + LEF abstract
+  (provisional)** (issue #2839, operator ruling 2AMLogic/product#134, not yet
+  ratified). `klt signoff --manifest` grades a new item-11 sub-check for a
+  block that opts in (manifest `power_ports.required: true`, or a
+  `socket-check`/`lef-abstract` part cited in item 11's list): every declared
+  supply needs an edge-accessible port and a matching LEF `PIN` with
+  `USE POWER`/`USE GROUND`. New unmet reasons `power_port_unproven`,
+  `no_edge_power_port`, `power_port_interior_only`,
+  `power_port_layer_disallowed`, `lef_power_pin_missing`,
+  `lef_power_pin_mismatch`; met citations gain
+  `power_delivery.power_ports`. Defaults (edge band `0` um, all four edges,
+  any LEF routing layer) are provisional and overridable per block. A block
+  that does not opt in grades exactly as before. Additive verb changes:
+  `klt socket-check` gains a fourth check `power_ports` (skipped unless
+  requested via descriptor `power_ports` or `--require-power-ports`;
+  `--edge-band-um`), a top-level `power_ports` fact block, and an optional
+  descriptor `pins[].metal_layer`; `klt lef-abstract` gains `pins[].gds_layer`,
+  a read-back `power_pins` verdict and `--require-power-pins`; `klt signoff`
+  recognises both envelopes as opt-in kinds scoped to item 11.
+
+- **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
+  (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
+  persistent artifact root; a competing cooperating run fails fast with the
+  additive `error.code` `outdir_locked` (exit `1`, empty stdout, existing
+  error envelope) instead of interleaving artifacts. Ancestor/descendant
+  roots exclude each other, aliases contend, dead owners release
+  automatically. See `docs/json-contract.md` "Output-directory ownership".
+
+- **ASAP7 KLayout DRC deck: BEOL M1-M9 / V0-V9** (issue #2810): the in-repo
+  deck (`src/klayout_tools/decks/asap7.drc`) grows from 106 to 232 rule
+  categories, adding `V0.LIG.A.1` and the M1-M9 / V1-V9 width, spacing,
+  area, grid/track and enclosure rules from DRM Tables 3.11.2-3.19.1, and
+  applies `GEOMETRY.NONORTHOGONAL` to every BEOL layer. Pass
+  `--expect-rule-categories 232`. Rules that need routing-track assignment,
+  net connectivity, an M8 routing direction or the PAD layer are listed with
+  reasons in `asap7_rules.NOT_IMPLEMENTED` and `docs/cli/drc.md` (#3147,
+  #3155, #3156). Additive: no existing rule id changes.
+
+- **`klt sta`: per-corner constraint completeness** (issue #2780): every
+  response and every `corners[]` entry carries an additive
+  `constraint_completeness` block. It reports `unconstrained_endpoints` and
+  `unclocked_registers`, each as `{status, count, sample, truncated, reason}`,
+  plus a roll-up `status` of `complete`/`incomplete`/`unknown`. The data comes
+  from OpenSTA's structured `sta::check_timing_cmd`, one check per call, and
+  identities come from the engine's pin list, not from warning text. A finite
+  WNS (`timing_status: "constrained"`) can now come with `status:
+  "incomplete"`. A check that could not run, or that returned malformed
+  output, reports `unavailable` with `count: null`, never `0`. Samples are
+  capped at 20 pins with explicit truncation. Slack fields, `timing_status` and
+  violation counts are unchanged. No `schema_version` bump.
+
+- **`klt lef-abstract`: structural self-check of the emitted LEF** (issue
+  #2769): after writing, the command reads the file back from disk and
+  validates the emitted subset -- a library-level `VERSION`, properly nested
+  `MACRO`/`PIN` blocks with matching named `END`s, anonymous `PORT`/`OBS`
+  `END`s, `END LIBRARY`, no truncation, no duplicate macros/pins, exactly the
+  expected macro name, and every descriptor-declared pin inside its own
+  macro. Results land in the additive `self_check` object (`status`
+  `pass`/`fail`, `findings[]` of `{code, message, line, macro, pin}`, sorted
+  `missing_macros`/`unexpected_macros`). A structural failure still emits the
+  report, leaves the file on disk, and exits **`3`** (new for this verb);
+  failing to read the file back is exit `1`. Synthesized and `PORT`-less pins
+  are not structural failures; a pass does not prove routability. The pure
+  validator is `klayout_tools.lef_abstract.check_lef_structure`. No
+  `schema_version` bump.
+
+- **`klt extract --resistance-path NET_ID FROM TO`: point-to-point shortest
+  series path resistance over a `--distributed-rc` ladder** (issue #2765):
+  a repeatable, opt-in query (requires `--parasitics --distributed-rc`)
+  selecting a net by `parasitics.nets[].net_id` and two exact
+  `terminals[].leg_net` node IDs. Results land in the additive
+  `parasitics.resistance_paths[]` (absent unless requested) with status
+  `ok`/`limit_exceeded`/`node_not_found`/`no_path`, `resistance_ohm`, and
+  ordered `path_nodes`/`path_resistors` (`seg<i>`, query-local indices into
+  that net's `segments[]`). Bounded by `--resistance-path-max-nodes`/
+  `--resistance-path-max-resistors` (default 10000 each). Reports the
+  shortest **series** path resistance -- not an effective two-port
+  resistance, not a physical-route resistance. The pure helper is
+  `klayout_tools.resistance_path`. No `schema_version` bump.
+
+- **`klt drc --list-rules` / `--rules`** (issue #2768): `--deck <name>
+  --list-rules` lists a curated deck's registered rules (id, description,
+  check kind, layers, scope, per-kind/per-scope counts) without reading a
+  layout; the listing is not a DRC verdict. `--rules '<id|glob>,...'` (and
+  the request-document field `rules`) runs only the selected rules -- exact
+  ids or case-sensitive quoted globs, validated before any geometry is read;
+  unselected rules are never dispatched. A `--rules` report gains an additive
+  top-level `rule_selection` block, and each omitted rule is a
+  `coverage.skipped` record with the new reason `not_selected`, so a proper
+  subset rolls up `clean_partial` and `klt signoff` never grants it full DRC
+  credit. `--check --rerun` replays the recorded selection. Curated engine
+  only; rejected with `--engine klayout`. `schema_version` stays 2.
+
+- **`klt extract --parasitics` / `klt pex`: per-net parasitic RC network
+  integrity report** (issue #2764): every `--parasitics` extraction now
+  validates the RC network it just emitted and reports the result as
+  additive, always-present status values an agent branches on — never
+  exceptions, never a changed verdict, never a repair. Each
+  `parasitics.nets[]` entry gains an `integrity` block (`open` —
+  `pass`/`open`/`not_applicable`, with `not_applicable` for lumped nets
+  whose star carries no measurable terminal-connectivity evidence;
+  `islands`; `orphan_nodes`; `suspicious_resistors` — negative, zero,
+  non-finite, self-loop; `short_candidates` — cross-net resistors at or
+  below the inclusive `1.0` Ω threshold; `capacitance` — declared total
+  vs. the sum of emitted ground capacitors (each read back from the
+  created device), pass/mismatch/not_applicable
+  at `1e-6` fF absolute + `1e-9` relative tolerance), and the `parasitics`
+  block gains a net-name-free `integrity` summary (check settings and
+  aggregate counts). Connectivity is judged over the emitted DC-conducting
+  elements (resistors/inductors — capacitors never join), by circuit-scoped
+  `net_id` owners rather than display names, so same-named nets stay
+  distinct. The checks validate the *generated RC model*, not geometric
+  opens/shorts. `klt pex` propagates the same diagnostics verbatim as
+  `extraction.parasitic_integrity` (summary + one entry per net,
+  `parasitics.nets[]` order). Non-finite input values are diagnosed and
+  serialize as `null` — the blocks are strict finite JSON; detail lists cap
+  at 20 entries with complete counts. The checker indexes the network by
+  owning net once, so it runs in time linear in the network size. No
+  existing field changes; `schema_version` stays 3 (extract) / 2 (pex).
+
+- **Added** (#2739, `klt sta`; additive JSON only): opt-in propagated-clock
+  timing for `def`-mode requests. `constraints.propagated_clock: true`
+  emits `set_propagated_clock [get_clocks <clock_port>]` immediately after
+  `create_clock` in every analyzed corner (and a `report_clock_latency`
+  evidence dump after any `read_spef`, before the metrics), so hold/removal
+  checks include a real clock tree's insertion delay and skew — the
+  boundary hold check ideal timing can call MET that the propagated
+  analysis calls VIOLATED (reproduced on OpenROAD `26Q3-1510-g6cb3f2b704`;
+  captures in `tests/fixtures/sta_clock_propagation/`). Every response
+  gains two additive fields: `clock_mode` (`"ideal"`/`"propagated"`,
+  hoisted on `corners` responses) and `clock_propagation` (what
+  propagation actually reached: `clock_sinks`, `max_network_latency_ns`,
+  `clock_sinks_sample`; a tree-less DEF reports `clock_sinks: 0` — explicit
+  evidence propagation could not be established, never a silent claim of
+  insertion delay). Omitted/`false` keeps the ideal-clock default
+  byte-for-byte (no `schema_version` bump); `true` is rejected with
+  `verilog` (no placed clock tree there) and for non-boolean values.
+  Documented in `docs/cli/sta.md` ("Propagated-clock timing").
+
+- **`klt synthesize` memory-mapping evidence** (issue #2745, part of #2281):
+  the response gains two additive, always-present fields. `memory_mapping`
+  reports per module definition whether inferred memories were
+  `lowered_to_logic`, `optimized_away` before lowering, `surviving`, `mixed`
+  or `indeterminate`. It is derived from `stat` counts at elaboration and
+  before `memory_map`, captured by a separate side Yosys invocation
+  (`<top>_memory_evidence.ys`), plus the production final stats.
+  `blackbox_modules` lists surviving `blackbox`/`whitebox` modules, whose area
+  is not in `area_um2`. The production script, netlist and metrics are
+  unchanged. An evidence failure yields `indeterminate`, never a failed run.
+  `schema_version` stays 2.
+
+- **`scripts/fetch-ihp-sg13cmos5l.sh` repointed to IHP-Open-PDK** (issue
+  #2720): the standalone `IHP-GmbH/ihp-sg13cmos5l` repo was archived on
+  2026-09-23, so the script now fetches the `ihp-sg13cmos5l/` subtree of
+  `IHP-GmbH/IHP-Open-PDK` `dev`, pinned to commit `f7bca326` (after
+  `e8fba183`, which removed the prebuilt x86-64 `cap_cmom{i,f}.osdi`) with a
+  new fail-closed tarball sha256. The whole-repo tarball is ~400 MB (about
+  96 MB is extracted). The deck's own rule-provenance pin
+  (`_IHP_SG13CMOS5L_COMMIT`) is deliberately unchanged.
+
+- **`klt extract --hierarchical-cells`** (issue #2722, increment 1): an
+  opt-in, additive hierarchical SPICE mode. Named non-nested cells are written
+  as their own `.SUBCKT` (one definition per cell, one `X` per placement) with
+  the top circuit instantiating them, so `klt lvs`
+  `options.combine_devices_per_circuit` can scope the layout side. Request
+  field `hierarchical_cells`; additive `hierarchy` response block, present
+  only when the option is given. Flat output and JSON are unchanged when it is
+  omitted; `devices[]`/`nets[]` keep describing the flat extraction. Nesting
+  and combination with `--parasitics`/`--subcircuit`/`--abstract-cells` are
+  refused before any output is written (deferred to #2916).
+- **`klt yield-samples`** (issue #2563): a new verb that derives a `klt yield`
+  sample-set document from two unedited `klt sim --format json` Monte Carlo
+  reports — the nominal campaign and a seeded known-bad variant whose draw
+  becomes each matched measurement's `negative_control`. Both reports are
+  read with `klt yield`'s own sim-report reader; measurements match by exact
+  name and unit; the control is graded against the nominal limits, and its
+  screened `inconclusive` draws are folded into its `errored` count (same
+  denominator treatment), with the original counts disclosed. The flat
+  `--format json` payload (`schema_version: 1`, `measurements`, and an
+  additive `derivation` block carrying both source paths and SHA-256 hashes)
+  is consumed by `klt yield` unchanged. `klt signoff` hashing is unchanged:
+  a yield citation's pin is the derived document, and signoff does not
+  recursively re-hash the source campaigns — re-derive when either changes.
+  `klt yield`'s own inputs and outputs are unchanged.
 - **`klt sim` `analysis_steps[]`** (issue #2482): an additive, ngspice-only
   alternative to the scalar `analysis` that runs several named solves in order
   inside each corner's single deck. Each step has optional `alter` source

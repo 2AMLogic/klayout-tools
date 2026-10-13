@@ -590,12 +590,14 @@ the full request/response contract.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
 from typing import Any
 
+from . import output_lock
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -1703,6 +1705,34 @@ _SPEF_NET_CHECK_BEGIN = "===KLT_SPEF_NET_CHECK_BEGIN==="
 _SPEF_NET_CHECK_END = "===KLT_SPEF_NET_CHECK_END==="
 _SPEF_NET_CHECK_RE = re.compile(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)")
 
+
+def _coverage_declaration():
+    """Issue #2781: fixed declaration of metal-density coverage.
+
+    Standard-cell gap fillers (`filler_placement`) are not metal density
+    fill, and a zero routing-DRC count is not density compliance.
+    """
+    return {
+        "metal_density_fill": {
+            "status": "unsupported",
+            "inserted": False,
+            "reason": (
+                "no metal density fill is inserted at any stage; "
+                "standard-cell gap fillers are not metal fill"
+            ),
+        },
+        "density_compliance": {
+            "status": "unsupported",
+            "evaluated": False,
+            "reason": (
+                "metal density rules are not evaluated by place-and-route; "
+                "a zero route_drc_violation_count does not imply density "
+                "compliance"
+            ),
+        },
+    }
+
+
 #: Response fields whose value is always "the last completed stage's own
 #: value, restated at top level" -- see the contract spike section 5's
 #: `stages` field description. Built once via `dict.get` so a field a stage
@@ -1888,11 +1918,26 @@ def _response_warnings(
     return warnings
 
 
+def _own_stage_root(ownership: contextlib.ExitStack, request_path: str) -> None:
+    """Own the fixed ``.klt/place-and-route/`` stage root (#2770)."""
+    ownership.enter_context(
+        output_lock.hold_output_dir(
+            os.path.join(
+                os.path.dirname(os.path.abspath(request_path)),
+                ".klt",
+                "place-and-route",
+            )
+        )
+    )
+
+
+@output_lock.owns_run
 def run_place_and_route(
     request_path: str,
     *,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the OpenROAD place-and-route flow declared by the request at
     ``request_path``, through the requested (or default, ``"route"``)
@@ -1918,7 +1963,16 @@ def run_place_and_route(
     ``.klt/place-and-route/`` next to the request file (the same
     "next to the input" convention ``klt synthesize``'s ``.klt/synthesize/``
     already uses) and kept as debuggable artifacts, never deleted.
+
+    **Output-directory ownership (issue #2770).** That fixed
+    ``.klt/place-and-route/`` directory is owned for the whole run through
+    :func:`klayout_tools.output_lock.hold_output_dir`: a competing cooperating
+    run on the same request directory (or any alias of it) raises
+    :class:`~klayout_tools.output_lock.OutputDirLockedError` instead of
+    interleaving stage artifacts. ``_ownership`` is internal: the exit stack
+    that releases the lock when the run ends.
     """
+    _own_stage_root(_ownership, request_path)
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
 
@@ -2585,6 +2639,8 @@ def run_place_and_route(
         "status": "ok",
         "stage_reached": target_stage,
         "seed": seed,
+        # Additive field (issue #2781): see `_coverage_declaration`.
+        "coverage": _coverage_declaration(),
         # Additive field (issue #1100): the tech-LEF parasitic-extraction
         # corner actually resolved (`"min"`/`"nom"`/`"max"`,
         # `request.pdk.interconnect_corner`, default `"nom"`) -- distinct

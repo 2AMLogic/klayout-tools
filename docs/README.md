@@ -75,6 +75,7 @@ docs/
     version.md
     wave.md
     yield-campaign.md
+    yield-samples.md
     yield-sensitivity.md
     yield.md
   design/                # design notes, spikes, and upstream surveys
