@@ -65,6 +65,26 @@ def _fmt(value, spec: str = ".6g") -> str:
     return "-" if value is None else format(value, spec)
 
 
+def _print_qualification(m: dict) -> None:
+    """Print the issue-#2873 ``sigma_target`` / ``converged_n`` lines for one
+    measurement (each only when present)."""
+    st = m.get("sigma_target")
+    if st is not None:
+        met = {True: "met", False: "NOT met", None: "not evaluable"}[st["met"]]
+        print(
+            f"  sigma target: k={_fmt(st['k'])} "
+            f"sigma_to_spec={_fmt(st['sigma_to_spec'], '.4f')} "
+            f"lower_bound={_fmt(st['lower_bound'], '.4f')} -> {met}"
+            + (f" ({st['reason']})" if st.get("reason") else "")
+        )
+    cn = m.get("converged_n")
+    if cn is not None:
+        print(
+            f"  converged N: {cn['n_converged']} of {cn['n_requested']} "
+            f"requested (min {cn['min_converged_samples']}) -> {cn['verdict']}"
+        )
+
+
 def _print_text(report: dict) -> None:
     print(f"samples: {report['samples']}")
     if report.get("limits"):
@@ -142,21 +162,7 @@ def _print_text(report: dict) -> None:
             f"sigma_to_spec={_fmt(cap['sigma_to_spec'], '.4f')} "
             f"limiting={cap['limiting_side'] or '-'}"
         )
-        st = m.get("sigma_target")
-        if st is not None:
-            met = {True: "met", False: "NOT met", None: "not evaluable"}[st["met"]]
-            print(
-                f"  sigma target: k={_fmt(st['k'])} "
-                f"sigma_to_spec={_fmt(st['sigma_to_spec'], '.4f')} "
-                f"lower_bound={_fmt(st['lower_bound'], '.4f')} -> {met}"
-                + (f" ({st['reason']})" if st.get("reason") else "")
-            )
-        cn = m.get("converged_n")
-        if cn is not None:
-            print(
-                f"  converged N: {cn['n_converged']} of {cn['n_requested']} "
-                f"requested (min {cn['min_converged_samples']}) -> {cn['verdict']}"
-            )
+        _print_qualification(m)
         ss = m["sample_size"]
         print(
             f"  sample size: {ss['verdict']} (N={ss['n']}, "

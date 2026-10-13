@@ -166,6 +166,17 @@ def _read_qualification_keys(
         out["min_converged_samples"] = n
 
 
+def _apply_qualification_defaults(
+    limits: dict[str, Any], spec_defaults: dict[str, Any]
+) -> None:
+    """Fill run-level defaults for the issue-#2873 qualification keys into one
+    measurement's ``limits``; a per-measurement value wins, exactly like
+    ``target_yield``."""
+    for key in ("target_sigma", "min_converged_samples"):
+        if key in spec_defaults and key not in limits:
+            limits[key] = spec_defaults[key]
+
+
 def _failed_unmeasurable_from(raw: Any, name: str, where: str) -> int:
     """Normalise a ``failed_unmeasurable`` count -- draws that left the
     regime a measurement is only defined in and produced no value (issue
@@ -758,11 +769,7 @@ def run_yield(
         limits.update(spec_limits.get(name, {}))
         if run_target_yield is not None and "target_yield" not in limits:
             limits["target_yield"] = run_target_yield
-        # issue #2873: run-level defaults for the qualification keys; a
-        # per-measurement value wins, exactly like `target_yield`.
-        for key in ("target_sigma", "min_converged_samples"):
-            if key in spec_defaults and key not in limits:
-                limits[key] = spec_defaults[key]
+        _apply_qualification_defaults(limits, spec_defaults)
         if limits.get("min") is None and limits.get("max") is None:
             if measurements is not None:
                 raise YieldError(
