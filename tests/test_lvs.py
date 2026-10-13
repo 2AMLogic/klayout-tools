@@ -15334,6 +15334,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "anchor_top_level_pins": None,
         "strict_top_level_pin_count": False,
         "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
+        "finfet_bulk": None,
     }
     # The pre-#1205 fields are untouched -- this is an additive change, so no
     # `schema_version` bump (docs/json-contract.md, "additive envelope").

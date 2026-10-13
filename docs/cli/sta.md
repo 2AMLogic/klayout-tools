@@ -149,12 +149,12 @@ A request naming both, or neither, is a request error.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "openroad",
   "engine_version": "26Q3-771-g7cfb2105c9",
   "hdl_toplevel": "gcd",
   "status": "ok",
-  "def_path": "/abs/path/gcd.def",
+  "def_path": { "path": "flows/gcd/gcd.def", "scope": "repo" },
   "verilog_path": null,
   "geometry_source": "routed",
   "wire_load_model": null,
@@ -198,14 +198,41 @@ A request naming both, or neither, is a request error.
 }
 ```
 
-**Path field shape (issue #2073).** `def_path`/`verilog_path`/`spef_path`
-below are plain absolute-path strings, not the `{path, scope}` envelope
-`klt synthesize`/`klt pex`/`klt sim`/`klt size` report their own output
-paths as — including `klt place-and-route`'s `def_path` that this command's
-own `def` field typically consumes as input (see "Response" above). This is
-a deliberate, documented split, not an oversight — see
-`docs/json-contract.md`'s "Output-artifact path fields: envelope vs. plain
-string" for the full enumeration and rationale.
+**Path field shape (issue #2879, schema 2).** `def_path`/`verilog_path`/
+`spef_path` are the `{path, scope}` envelope `klt sim`/`klt pex` report
+their inputs as (issue #1261; built by `env_provenance.repo_relative_path`),
+never an absolute host path:
+
+- `{"path": "<repo-relative POSIX path>", "scope": "repo"}` — the input lives
+  inside the repository that contains the request file. `path` is relative
+  to that repository's root, so committed evidence names the same file from
+  every checkout.
+- `{"path": null, "scope": "external"}` — the input lives outside any
+  repository. The location is deliberately withheld (no false portable
+  claim); `provenance.input.content_hash` still pins *which* bytes ran.
+- `null` — this request does not use that input: `def_path` in `verilog`
+  mode, `verilog_path` in `def` mode, `spef_path` when `request.spef` was
+  not given. (Not `scope: "absent"`: `null` is the schema-1 "not
+  applicable" value, and `klt signoff` relies on it to fall through from
+  `def_path` to `verilog_path`.)
+
+Only the persisted response changes: OpenSTA is still handed the resolved
+absolute local paths (`read_def`/`read_verilog`/`read_spef` in the generated
+`.klt/sta/*.tcl`), and the request's `def`/`verilog`/`spef` fields are still
+resolved relative to the request file's own directory.
+
+**Migration from schema 1.** A schema-1 response (`klt sta` before issue
+#2879) carries these three fields as plain absolute-path strings. Consumers
+should branch on `schema_version` (or on the value's type): a string is a
+schema-1 host path; an object is the envelope above, resolved by joining a
+`scope: "repo"` path to the root of the repository the evidence lives in.
+`klt signoff --manifest` reads both shapes when it re-hashes an `sta`
+citation's input (`input_verified`): a schema-1 absolute path verifies only
+where that exact path still exists, and is never re-rooted by stripping a
+guessed host prefix — regenerate the evidence with schema-2 `klt sta` to make
+it verifiable from other checkouts. The text format renders a repo path as
+the path itself, an external one as `<outside repo>`, and an unused input as
+`None`.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -213,13 +240,13 @@ string" for the full enumeration and rationale.
 | `engine` / `engine_version` | string | Always `"openroad"`, plus the resolved OpenROAD build string (`openroad -version`'s own token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string \| null | Echo of the request; `null` when omitted. |
 | `status` | string | Always `"ok"` — like `klt place-and-route`, this command has no pass/fail concept of its own; a failed run never emits this envelope. |
-| `def_path` | string \| null | The resolved, absolute path to the analysed DEF; `null` in `verilog` mode (issue #1825). |
-| `verilog_path` | string \| null | Additive field (issue #1825). The resolved, absolute path to the analysed netlist; `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
+| `def_path` | object \| null | `{path, scope}` identity of the analysed DEF (issue #2879; a plain absolute string in schema 1) — see "Path field shape" above; `null` in `verilog` mode (issue #1825). |
+| `verilog_path` | object \| null | Additive field (issue #1825). `{path, scope}` identity of the analysed netlist (issue #2879; a plain absolute string in schema 1); `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
 | `geometry_source` | string | Additive field (issue #1826), extended by issue #1825. Echo of `request.geometry_source` in `def` mode — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. Forced to `"netlist_estimate"` whenever `request.verilog` was given, regardless of what (if anything) the request supplied. See "Pre-route DEFs" and "From-scratch netlist input" below. |
 | `wire_load_model` / `wire_load_mode` | string \| null | Additive fields (issue #1825). Echo of `request.constraints.wire_load_model`/`.wire_load_mode` — the parasitics-estimate knob actually used, for provenance. Always `null`/`null` on a `def`-mode response (that mode's parasitics never come from a liberty wire-load model); on a `verilog`-mode response, `null`/`null` means no `set_wire_load*` command was issued at all (the resolved liberty's own default wire load, if any, was left in effect). See "From-scratch netlist input" below. |
 | `clock_mode` | string | Additive field (issue #2739). Exactly `"ideal"` or `"propagated"` — which clock mode **every analyzed corner** was timed with. `"ideal"` (the default) is the pre-#2739 behavior; `"propagated"` when the request set `constraints.propagated_clock: true`. Present on both response shapes (hoisted to the top level on a `corners` response) and identical across every per-corner session. **Never infer it from `clock_skew_ns`** — that is a measured skew metric the clock tree carries under ideal timing too. See "Propagated-clock timing" below. |
 | `clock_propagation` | object \| null | Additive field (issue #2739). `null` unless the request asked for propagated-clock timing. On a `corners` response the field is not hoisted — one block per `corners[]` entry instead (the latencies it reports *do* vary per corner). See "Propagated-clock timing" below for the field shapes. |
-| `spef_path` | string \| null | The resolved, absolute path to the caller-supplied SPEF; `null` unless `request.spef` was given (never given together with `request.verilog`). |
+| `spef_path` | object \| null | `{path, scope}` identity of the caller-supplied SPEF (issue #2879; a plain absolute string in schema 1); `null` unless `request.spef` was given (never given together with `request.verilog`). |
 | `worst_slack_ns` / `total_negative_slack_ns` | number \| null | Setup WNS/TNS from `report_worst_slack_metric -setup`/`report_tns_metric -setup`. Negative values are expected, not an error. A design with **no constrained path at all** reports OpenSTA's own unconstrained sentinel (`1e+39`/`0`) here rather than a real number — check `timing_status` below before treating this as a measurement. |
 | `worst_hold_slack_ns` / `total_negative_hold_slack_ns` | number \| null | Hold WNS/TNS from `report_worst_slack_metric -hold`/`report_tns_metric -hold` — the same field name/pairing convention `klt place-and-route`'s own `worst_hold_slack_ns` uses, so a caller correlating the two commands' output does not hit a naming mismatch on the one field they share. A hold-clean design still reports a real (positive) margin here, not `null` — `null` only when OpenSTA has no hold path to measure at all (e.g. a purely combinational design with no register-to-register path). |
 | `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the four slack fields above are measurements at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever either setup or hold WNS carries the sentinel; `null` when the run reported no slack metric at all. **Require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so a `worst_slack_ns >= 0` gate otherwise reports "timing closed" on a design that was never timed. The slack fields themselves are unchanged and still report exactly what OpenSTA reported — this field is additive and retypes nothing. Computed identically to `klt place-and-route`'s field of the same name, so the two commands' responses can be correlated directly. See "I/O timing constraints" below. |
@@ -418,12 +445,12 @@ closes that gap natively:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "engine": "openroad",
   "engine_version": "26Q3-771-g7cfb2105c9",
   "hdl_toplevel": "gcd",
   "status": "ok",
-  "def_path": "/abs/path/gcd.def",
+  "def_path": { "path": "flows/gcd/gcd.def", "scope": "repo" },
   "verilog_path": null,
   "geometry_source": "routed",
   "wire_load_model": null,
@@ -574,7 +601,14 @@ reader's own. It answers "does the SPEF name the nets this design has", not
   <name>:<pin> not found.`). Any non-zero value forces
   `annotation_complete: false`: those parasitics are not in the timing.
 - `reader_warning_sample` — up to 5 of those warning lines verbatim, so the
-  offending name spelling is visible without re-running by hand.
+  offending name spelling is visible without re-running by hand. The one
+  exception (issue #2879): where a line quotes one of this run's three
+  resolved input files (DEF, Verilog, SPEF) by its absolute path, that path
+  is replaced with the input's report identity — its repo-relative path, or
+  `<outside repo>` — so committed evidence does not embed the producing
+  checkout's root. Nothing else in the line is rewritten; any other
+  absolute-looking text stays exactly as OpenSTA printed it. The same
+  bounded replacement applies to an engine error's `error.message`.
 
 ### 3. Delay fingerprint (before vs. after `read_spef`)
 
@@ -1057,7 +1091,7 @@ no PDN, no placement, no routing.
 ```bash
 klt sta netlist_sta_request.json --format json
 # -> geometry_source: "netlist_estimate", def_path: null,
-#    verilog_path: "/abs/path/gcd_netlist.v"
+#    verilog_path: {"path": "flows/gcd/gcd_netlist.v", "scope": "repo"}
 ```
 
 With no DEF at all, this command runs `read_liberty` -> `read_lef` x2 ->
@@ -1171,9 +1205,10 @@ add `corners[].engine_log` for each actual session.
 The entry has the same [fields and retention semantics as P&R](place-and-route.md#retained-openroad-logs):
 invocation ID, script filename/hash, normalized script/metrics/log paths,
 process outcome/return code, and `retention_errors`. New paths use
-`{path, scope}` envelopes; existing `def_path`, `verilog_path`, and
-`spef_path` fields retain their original shapes. `repo` paths resolve from
-the invoking repository root. For withheld `external` paths, find
+`{path, scope}` envelopes (as, since schema 2 / issue #2879, are
+`def_path`, `verilog_path`, and `spef_path`). Log `repo` paths resolve from
+the invoking repository root; the input-path fields resolve from the root of
+the repository containing the request file. For withheld `external` paths, find
 `openroad-logs/<invocation_id>/` beside the generated script in the request's
 `.klt/sta/` directory.
 

@@ -68,7 +68,15 @@ fn build_from_fst_with_clock_and_reset() {
     assert_eq!(release.cycle, Some(0));
 
     assert!(response.store.size_bytes > 0);
-    assert!(response.store.content_hash.starts_with("sha256:"));
+    let digest = response
+        .store
+        .content_hash
+        .strip_prefix("sha256:")
+        .expect("content_hash must start with sha256:");
+    assert_eq!(digest.len(), 64);
+    assert!(digest
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
 
     // The store round-trips through fst-reader independently.
     let store_path = tmp.path().join(".klt/wave/counter_from_fst.klwave");

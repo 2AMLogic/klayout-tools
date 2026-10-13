@@ -17,6 +17,7 @@ are data, not a built-in gate.)
 
 import argparse
 
+from ..env_provenance import render_path_field
 from ..post_route_sta import PostRouteStaError, run_sta
 from .output import emit_error, emit_success
 
@@ -54,17 +55,30 @@ def _print_text(report: dict) -> None:
 
     if "corners" not in report:
         print()
-    print(f"def_path: {report['def_path']}")
-    print(f"verilog_path: {report['verilog_path']}")
+    print(f"def_path: {_render_input_path(report['def_path'])}")
+    print(f"verilog_path: {_render_input_path(report['verilog_path'])}")
     print(f"geometry_source: {report['geometry_source']}")
     print(f"clock_mode: {report['clock_mode']}")
     if report["geometry_source"] == "netlist_estimate":
         print(f"wire_load_model: {report['wire_load_model']}")
         print(f"wire_load_mode: {report['wire_load_mode']}")
-    print(f"spef_path: {report['spef_path']}")
+    print(f"spef_path: {_render_input_path(report['spef_path'])}")
 
     if "corners" not in report:
         _print_spef_annotation(report.get("spef_annotation"), indent="  ")
+
+
+def _render_input_path(value) -> str:
+    """Issue #2879: `def_path`/`verilog_path`/`spef_path` are `{path, scope}`
+    envelopes (schema 2) -- rendered through the same `render_path_field`
+    helper `klt sim`/`klt pex` use, so an input outside the repository
+    prints `<outside repo>`, never an absolute host path. `None` (the input
+    is not used by this request) keeps its pre-#2879 `None` rendering."""
+    if value is None:
+        return "None"
+    if isinstance(value, str):
+        return value
+    return render_path_field(value)
 
 
 def _print_slack_fields(fields: dict, *, indent: str) -> None:

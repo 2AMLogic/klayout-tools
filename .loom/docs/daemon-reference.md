@@ -77,6 +77,10 @@ auto-dispatches sweeps, and the [epic supervisor](#epic-supervisor-3842)
 drives `loom:epic` fork-joins. See [Operability](#operability--config-startstop-e2e-phase-d-3813)
 for enabling and tuning them.
 
+Every listener and every outbound client whose response can change daemon
+behavior, classified as config, forge, wake-only webhook or removed, is
+audited in [`network-inputs.md`](network-inputs.md) (#11711).
+
 ## The `LOOM_ROLE` env-var contract (#6507)
 
 `LOOM_ROLE` is a **public, stable session-identity contract**: repo-level
@@ -4124,9 +4128,7 @@ its re-dates on its own branch. Everything is read from local git: nothing is
 fetched and no forge call is made. A PR is therefore seen as of the clone's last
 fetch. A remote branch whose PR closed unmerged reads as not landed until it is
 pruned, and the window bounds that error. Landing lookups are capped at 64 PRs
-per pass, most re-dated first. Telemetry only observes the livelock. The
-daemon-enforced chain-head merge lock that would prevent it is a separate
-follow-up.
+per pass, most re-dated first. Telemetry only observes the livelock.
 
 #### Anchoring an unmarked verdict (#6319)
 
