@@ -132,7 +132,22 @@ STATUS_DRIFTED = "drifted"
 
 class NetlistError(Exception):
     """A netlist export could not be completed (bad input, xschem missing,
-    xschem hung, or no fresh output file produced)."""
+    xschem hung, or no fresh output file produced).
+
+    ``code`` is an optional machine-readable classification the CLI emits as
+    the error envelope's ``error.code`` (``docs/json-contract.md``). It is
+    ``None`` for every local failure; the ``batch`` backend sets it so a
+    caller can tell a retryable capacity refusal or a runner-version mismatch
+    from a bad schematic (see :mod:`klayout_tools.netlist_batch`).
+    ``job_id`` names the batch job, when one was allocated.
+    """
+
+    def __init__(
+        self, *args: object, code: str | None = None, job_id: str | None = None
+    ) -> None:
+        super().__init__(*args)
+        self.code = code
+        self.job_id = job_id
 
 
 def _sha256_file_hash(data: bytes) -> str:
@@ -416,6 +431,37 @@ def _unified_diff(
     return lines, False
 
 
+#: xschem writes the absolute path of every schematic and symbol it expands
+#: into a SPICE export as a comment line (``** sch_path: /abs/x.sch``,
+#: ``** sym_path: /abs/x.sym``). Those lines name the *checkout*, not the
+#: circuit, so they differ between any two checkouts of the same schematic
+#: (issue #3010). Group 1 is the line up to the path, group 2 the path.
+_PATH_COMMENT_RE = re.compile(
+    rb"^(\*\*[ \t]*(?:sch_path|sym_path):[ \t]*)(.*?)[ \t]*\r?$", re.MULTILINE
+)
+
+
+def _normalize_path_comments(data: bytes) -> bytes:
+    """``data`` with every xschem ``** sch_path:`` / ``** sym_path:`` comment
+    reduced to the file's basename (issue #3010).
+
+    This is the comparison form ``--check`` uses, so a committed netlist
+    generated in one checkout still matches the same schematic regenerated
+    in another. The basename is kept, rather than the whole line being
+    dropped, so the comparison stays sensitive to *which* file a subcircuit
+    came from; only the directory part, which is host-specific, is ignored.
+    The lines are comments, so ignoring their directories cannot hide an
+    electrical change.
+    """
+
+    def _basename(match: re.Match[bytes]) -> bytes:
+        path = match.group(2).rstrip(b"/\\")
+        base = re.split(rb"[/\\]", path)[-1] if path else path
+        return match.group(1) + base
+
+    return _PATH_COMMENT_RE.sub(_basename, data)
+
+
 def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
     """``check=True``'s verdict: does the committed netlist at ``output``
     still match what the schematics produce?
@@ -424,12 +470,20 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
     artifact is not what the schematics produce" is exactly true of a netlist
     that was never committed, and a CI gate wants the same non-zero exit for
     both rather than having to distinguish them.
+
+    The comparison ignores the directory part of xschem's ``** sch_path:`` /
+    ``** sym_path:`` comment lines (:func:`_normalize_path_comments`, issue
+    #3010): those name the checkout the netlist was generated in, so without
+    this a committed netlist would report ``"drifted"`` from every checkout
+    path but the one that produced it -- including a batch runner's.
+    ``path_comments_differ`` says when the two files differ *only* there.
     """
     if not os.path.isfile(output):
         return STATUS_DRIFTED, {
             "committed_present": False,
             "committed_bytes": None,
             "committed_content_hash": None,
+            "path_comments_differ": False,
             "diff": [],
             "diff_truncated": False,
             "reason": "no committed netlist at the output path",
@@ -437,11 +491,12 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
 
     with open(output, "rb") as handle:
         committed = handle.read()
-    if committed == fresh_data:
+    if _normalize_path_comments(committed) == _normalize_path_comments(fresh_data):
         return STATUS_MATCH, {
             "committed_present": True,
             "committed_bytes": len(committed),
             "committed_content_hash": _sha256_file_hash(committed),
+            "path_comments_differ": committed != fresh_data,
             "diff": [],
             "diff_truncated": False,
             "reason": None,
@@ -452,6 +507,7 @@ def _check_result(output: str, fresh_data: bytes) -> tuple[str, dict[str, Any]]:
         "committed_present": True,
         "committed_bytes": len(committed),
         "committed_content_hash": _sha256_file_hash(committed),
+        "path_comments_differ": False,
         "diff": diff,
         "diff_truncated": truncated,
         "reason": (

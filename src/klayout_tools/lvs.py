@@ -158,6 +158,14 @@ from .extract import (
     extract_netlist_from_layout,
     spice_safe_net_name,
 )
+from .lvs_finfet import (
+    bulk_disclosures,
+    finfet_bulk_replay_options,
+    prepare_finfet_comparison,
+    prepare_finfet_request,
+    reference_reader,
+    sliced_reference_file,
+)
 from .lvs_mismatch import (
     _apply_tolerance_snaps,
     _body_net_warnings,
@@ -252,6 +260,9 @@ CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE = "device.class_family_unsatisfiable"
 #: connectivity read from the reference netlist (see
 #: `_apply_reference_device_bulk`).
 CATEGORY_DEVICE_BULK_RECONCILED = "device.bulk_reconciled"
+#: Issue #2813: `options.finfet_bulk` tied a FinFET layout's bulk net to a named
+#: net before comparing (always a warning; see `lvs_finfet.apply_finfet_bulk`).
+CATEGORY_DEVICE_FINFET_BULK_TIED = "device.finfet_bulk_tied"
 #: Issue #1907: `reference.form: "subckt-call"` converted a resistor/capacitor
 #: class whose plain-element value token is the literal `0` *placeholder*
 #: (`netlist_normalize.py` has no PDK sheet-resistance/capacitance-per-area
@@ -628,25 +639,6 @@ class _ReferenceNetlistParseError(LvsError):
 _REQUIRED_REQUEST_FIELDS = ("layout", "reference")
 
 
-def _refuse_finfet_layout_deck(deck_name: object) -> None:
-    """Raise :class:`LvsError` when ``deck_name`` names a FinFET extraction
-    deck (issue #2761). Comparing one would read the reference CDL's
-    ``nfin`` away and fall back to a planar ``W``/``L`` compare -- exactly
-    the silent approximation the FinFET extractor exists to avoid. LVS
-    integration (nfin-preserving reference reader, exact ``NFIN`` compare,
-    the ASAP7 corpus) is tracked by #2813."""
-    from .extract_finfet import is_finfet_deck_name
-
-    if is_finfet_deck_name(deck_name):
-        raise LvsError(
-            f"layout.deck '{deck_name}' is a FinFET extraction deck; klt lvs "
-            "does not yet compare FinFET devices (the reference reader would "
-            "drop nfin and compare planar W/L only) -- use `klt extract "
-            f"--deck {deck_name}` for nfin-carrying netlists; FinFET LVS is "
-            "tracked in issue #2813"
-        )
-
-
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt lvs`` request JSON file.
 
@@ -993,12 +985,14 @@ def run_lvs(request: str) -> dict[str, Any]:
     # extraction-only rule. `None` when omitted/`null`.
     label_layers = _parse_layout_label_layers(layout_spec)
 
-    # Issue #2761: a FinFET extraction deck's devices are only correct with
-    # their geometry-counted `nfin` compared, which the reference reader does
-    # not yet preserve -- refuse rather than silently compare planar W/L.
-    _refuse_finfet_layout_deck(layout_spec.get("deck"))
-
     options = request.get("options") or {}
+    # Issue #2813: a FinFET extraction deck's devices are only correct with
+    # their geometry-counted `nfin` compared exactly -- every request shape or
+    # option that would drop or relax it is refused up front, and the
+    # nfin-preserving reference reader is selected below.
+    finfet_layout, finfet_bulk = prepare_finfet_request(
+        layout_spec, reference_spec, options, engine
+    )
     keep_extracted = bool(options.get("keep_extracted", False))
     # Issue #1370: `true`/`false` (the original shape) or a list of
     # device-class names restricting which classes are combined at all --
@@ -1317,6 +1311,8 @@ def run_lvs(request: str) -> dict[str, Any]:
         pin_orders=reference_pin_orders,
         placeholder_value_classes=reference_placeholder_classes,
         gate_level_port_aliases=reference_gate_level_port_aliases,
+        finfet=finfet_layout,
+        finfet_top=reference_spec.get("top"),
     )
 
     if reference_form == "gate-level-verilog":
@@ -1447,6 +1443,13 @@ def run_lvs(request: str) -> dict[str, Any]:
 
     _prune_extra_top_circuits(layout_netlist, layout_circuit)
     _prune_extra_top_circuits(reference_netlist, reference_circuit)
+
+    # Issue #2813: FinFET comparison setup -- reference fingers merged with the
+    # extractor's combiner, the opt-in bulk policy applied (and disclosed),
+    # NFIN compared exactly on both sides.
+    finfet_bulk_records = prepare_finfet_comparison(
+        finfet_layout, layout_netlist, layout_circuit, reference_netlist, finfet_bulk
+    )
 
     # What the layout-side deck can structurally recognise
     # (`ExtractionDeck.device_classes`, issue #221) -- `null` when no
@@ -2192,6 +2195,10 @@ def run_lvs(request: str) -> dict[str, Any]:
     # no-op) for the same `run_lvs`-complexity reason, see
     # `scripts/check_complexity_baseline.py`.
     mismatches.extend(anchor_warnings)
+    # Issue #2813: `options.finfet_bulk` disclosure (empty list is a no-op).
+    mismatches.extend(
+        bulk_disclosures(finfet_bulk_records, CATEGORY_DEVICE_FINFET_BULK_TIED)
+    )
 
     if bulk_warnings:
         # Issue #506: same rationale again -- a `reference.device_bulk`
@@ -2501,6 +2508,10 @@ def run_lvs(request: str) -> dict[str, Any]:
             # Issue #2845: the effective boolean (`false` when omitted).
             "strict_top_level_pin_count": strict_top_level_pin_count,
             "supply_nets": supply_nets,
+            # Issue #2813: `null` when omitted, else the resolved
+            # `{"nmos": <net>, "pmos": <net>}` bulk-tie policy (opt-in; the
+            # applied ties are disclosed in `mismatches[]`).
+            "finfet_bulk": finfet_bulk,
         },
         # Issue #1998: every `hints.equivalent_pins` grouping actually passed
         # to `NetlistComparer.equivalent_pins()` for this run, keyed by
@@ -2934,6 +2945,7 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     options.update(_combine_devices_max_attempts_replay_options(echoed))
     # Includes []: explicitly disabling the finding must survive a replay.
     options.update(_supply_nets_replay_options(echoed))
+    options.update(finfet_bulk_replay_options(echoed))
     if options:
         request["options"] = options
     return request
@@ -3666,6 +3678,8 @@ def _read_reference_netlist(
     pin_orders: dict[str, list[str]] | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
     gate_level_port_aliases: dict[str, dict[str, str]] | None = None,
+    finfet: bool = False,
+    finfet_top: str | None = None,
 ) -> kdb.Netlist:
     """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
     declared ``form`` (issue #280, extended by issue #1336).
@@ -3860,10 +3874,18 @@ def _read_reference_netlist(
             # `X`-card recovery the layout side wired above -- a bare-mode
             # extract output is a legitimate reference netlist too.
             resistor_classes = resistor_classes_for_deck(reference_deck_for_recovery)
-    reader = make_capacitor_class_recovery_reader(
-        recovered_capacitor_classes,
-        custom_device_classes=custom_device_classes,
-        resistor_classes=resistor_classes,
+    # Issue #2813: a FinFET layout deck reads `M` cards through the
+    # nfin-preserving reader (the planar reader would drop `nfin`).
+    read_path, read_text, tmp_path = sliced_reference_file(
+        finfet, finfet_top, read_path, read_text, tmp_path
+    )
+    reader = reference_reader(
+        finfet,
+        lambda: make_capacitor_class_recovery_reader(
+            recovered_capacitor_classes,
+            custom_device_classes=custom_device_classes,
+            resistor_classes=resistor_classes,
+        ),
     )
     try:
         netlist.read(read_path, reader)

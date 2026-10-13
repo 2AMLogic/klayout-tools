@@ -1035,13 +1035,13 @@ probing the value's Python type at runtime.
 | `size` | `models_lib` | 2 | #1274 |
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
 | `characterize` | `cell.netlist`, `cells[].cell.netlist` | 1 | #2502 (`cells[]` #2503) |
+| `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 
 **Plain-string fields** — intentionally unchanged by this issue:
 
 | Command | Field(s) | `SCHEMA_VERSION` |
 |---|---|---|
 | `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` | 1 |
-| `sta` | `def_path`, `verilog_path`, `spef_path` | 1 |
 | `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
 | `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 3 |
 | `equiv` | `artifacts.{script_path,netlist_path,log_path}`, `artifacts.stage2_{script_path,log_path}` | 1 |
@@ -1504,6 +1504,13 @@ the exit code alone is authoritative.
   | Command | `error.code` | Meaning |
   |---------|--------------|---------|
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_runner_version_unknown` | `--backend batch`: the runner's `klt` version could not be read; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_poll_timeout` | `--backend batch`: the job did not finish within the client's poll budget. It may still finish on the runner; nothing was collected. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_job_failed` | `--backend batch`: the job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted and, if that error carried an `error.code`, the runner's code is passed through in place of `batch_job_failed`. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_job_timeout` | `--backend batch`: the fleet harness stopped the job at its `timeout_seconds` (`--timeout-s` plus headroom). See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_input_too_large` | `--backend batch`: the input tree's uncompressed size is above the batch cap. Raised before any archive is built or anything is uploaded. Not retryable without shrinking the tree. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `extract` | `finfet_malformed_geometry` | A FinFET deck (`--deck asap7`) found device geometry it refuses to approximate (no crossing fin, clipped fin, wrong gate length, missing select, VT conflict, ...). `error.message` lists each finding with its bounding box. Not retryable: the layout must change. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `extract` | `finfet_dbu_mismatch` | A FinFET deck was run on a layout whose database unit differs from the deck's; it is refused rather than rescaled. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `pex`, `sim`, `place-and-route` | `outdir_locked` | Another cooperating `klt` run owns this run's persistent output directory (or an ancestor/descendant of it). Exit `1`, empty stdout. Transient: retry after the owner finishes. See "Output-directory ownership" below. |

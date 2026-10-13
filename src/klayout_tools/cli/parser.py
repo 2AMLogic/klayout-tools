@@ -8,7 +8,7 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 import sys
 
-from .. import arith_gen, netlist, pdk_stackup, pex
+from .. import arith_gen, netlist, netlist_batch, pdk_stackup, pex
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
@@ -3051,6 +3051,19 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     signoff_parser.add_argument(
+        "--repo-root",
+        metavar="DIR",
+        help=(
+            'directory that `scope: "repo"` input paths resolve against, '
+            "instead of the nearest `.git` ancestor of the evidence file -- "
+            "for grading evidence copied outside any git checkout (a source "
+            "archive, a vendored copy, an unpacked CI artifact). Must be an "
+            "existing directory. Only meaningful with --manifest/--fleet. "
+            "See docs/cli/signoff.md's 'Grading outside a git checkout' "
+            "section."
+        ),
+    )
+    signoff_parser.add_argument(
         "--tiers-doc",
         metavar="PATH",
         help=(
@@ -5427,6 +5440,30 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
             "without a duplicate .end terminating it early (issue #2680, "
             "edge 1). Off by default -- xschem's unmodified export is "
             "correct for a testbench top sheet"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--backend",
+        choices=netlist_batch.SUPPORTED_BACKENDS,
+        default=None,
+        help=(
+            "where xschem runs: 'local' (this host) or 'batch' (the batch "
+            "runner, through the same S3 job contract as `klt sim --backend "
+            "batch`). Default: $KLT_NETLIST_BACKEND, else 'local'. A batch "
+            "failure is an error (exit 1), never a fallback to a local run. "
+            "See docs/cli/netlist.md's 'Batch backend'"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-root",
+        dest="batch_root",
+        default=None,
+        help=(
+            "--backend batch only: the directory whose git-tracked files are "
+            "uploaded as the job's input tree (default: the schematic's git "
+            "checkout). The schematic and a project --rcfile must be tracked "
+            "files under it; the uncompressed total is capped at "
+            f"{netlist_batch.MAX_BATCH_TREE_BYTES // (1024 * 1024)} MiB"
         ),
     )
     netlist_parser.add_argument(
