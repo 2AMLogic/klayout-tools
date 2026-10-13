@@ -14440,3 +14440,146 @@ def test_legacy_pex_envelope_has_no_pex_inputs(tmp_path):
     citation = _item7_citation(pex_path)
     assert "pex_inputs" not in citation
     assert citation["input_verified"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2879: `klt sta` input paths are portable `{path, scope}` envelopes
+# (schema 2), so `input_verified` does not depend on the checkout root.
+# --------------------------------------------------------------------------- #
+
+
+def _sta_checkout(root: Path, *, verilog: bool = False) -> Path:
+    """A checkout holding one committed STA input plus `klt sta` evidence for
+    it, written exactly as `post_route_sta` derives its persisted fields
+    from the absolute engine path. Returns the evidence file."""
+    from klayout_tools import post_route_sta
+    from klayout_tools.env_provenance import find_repo_root
+
+    (root / ".git").mkdir(parents=True)
+    flows = root / "flows"
+    flows.mkdir()
+    name = "top.v" if verilog else "top.def"
+    input_path = flows / name
+    input_path.write_bytes(b"module top; endmodule\n" if verilog else b"DESIGN top ;\n")
+    report_paths = post_route_sta._ReportPaths.build(
+        def_path=None if verilog else os.path.abspath(input_path),
+        verilog_path=os.path.abspath(input_path) if verilog else None,
+        spef_path=None,
+        repo_root=find_repo_root(str(flows)),
+    )
+    envelope = {
+        **STA_SINGLE_CORNER_CLEAN_ENVELOPE,
+        "schema_version": post_route_sta.SCHEMA_VERSION,
+        "def_path": report_paths.def_path,
+        "verilog_path": report_paths.verilog_path,
+        "spef_path": report_paths.spef_path,
+        "geometry_source": "netlist_estimate" if verilog else "routed",
+        "provenance": {
+            **STA_SINGLE_CORNER_CLEAN_ENVELOPE["provenance"],
+            "input": {
+                "content_hash": _hash_of(input_path),
+                "role": "netlist" if verilog else "layout",
+            },
+        },
+    }
+    evidence_dir = root / "evidence"
+    evidence_dir.mkdir()
+    return Path(_write(evidence_dir, "sta.json", envelope))
+
+
+def _sta_item_5(evidence: Path) -> dict:
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": str(evidence)}))
+    return next(item for item in result["items"] if item["id"] == 5)
+
+
+@pytest.mark.parametrize("verilog", [False, True], ids=["def", "verilog"])
+def test_sta_input_verified_is_identical_across_two_checkouts(
+    tmp_path, monkeypatch, verilog
+):
+    """The issue's reproduction: STA evidence produced in checkout A, then
+    graded from checkout B (A gone) -- identical bytes, identical answer."""
+    monkeypatch.chdir(tmp_path)
+    checkout_a = tmp_path / "a" / "repo"
+    evidence_a = _sta_checkout(checkout_a, verilog=verilog)
+    envelope = json.loads(evidence_a.read_text())
+    field = "verilog_path" if verilog else "def_path"
+    assert envelope[field] == {
+        "path": f"flows/top.{'v' if verilog else 'def'}",
+        "scope": "repo",
+    }
+    assert str(checkout_a) not in evidence_a.read_text()
+    assert os.path.realpath(checkout_a) not in evidence_a.read_text()
+
+    item_a = _sta_item_5(evidence_a)
+    assert item_a["status"] == "met"
+    assert item_a["citation"]["input_verified"] is True
+
+    checkout_b = tmp_path / "b" / "elsewhere" / "repo"
+    shutil.copytree(checkout_a, checkout_b)
+    shutil.rmtree(tmp_path / "a")
+
+    item_b = _sta_item_5(checkout_b / "evidence" / "sta.json")
+    assert item_b["status"] == "met"
+    assert item_b["citation"]["input_verified"] is True
+    assert item_b["citation"]["input_verified"] == item_a["citation"]["input_verified"]
+
+
+def test_sta_repo_scoped_input_that_changed_reports_false(tmp_path):
+    evidence = _sta_checkout(tmp_path / "repo")
+    (tmp_path / "repo" / "flows" / "top.def").write_bytes(b"DESIGN edited ;\n")
+
+    item = _sta_item_5(evidence)
+
+    assert item["citation"]["input_verified"] is False
+
+
+def test_sta_external_scope_input_is_not_verifiable(tmp_path):
+    """An input outside every repository carries no path by design, so it
+    is reported unverifiable rather than guessed at."""
+    envelope = {
+        **STA_SINGLE_CORNER_CLEAN_ENVELOPE,
+        "schema_version": 2,
+        "def_path": {"path": None, "scope": "external"},
+    }
+    item = _sta_item_5(Path(_write(tmp_path, "sta.json", envelope)))
+
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is None
+
+
+def test_sta_schema_v1_absolute_string_path_still_verifies_in_place(tmp_path):
+    """Legacy schema-1 evidence (plain absolute strings) stays readable and
+    verifies wherever that absolute path still exists."""
+    def_path = tmp_path / "gcd.def"
+    def_path.write_bytes(b"DESIGN gcd ;\n")
+    envelope = {
+        **STA_SINGLE_CORNER_CLEAN_ENVELOPE,
+        "def_path": str(def_path),
+        "provenance": {
+            **STA_SINGLE_CORNER_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(def_path), "role": "layout"},
+        },
+    }
+    assert envelope["schema_version"] == 1
+
+    item = _sta_item_5(Path(_write(tmp_path, "sta.json", envelope)))
+
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is True
+    assert item["citation"]["kind"] == "sta"
+
+
+def test_sta_schema_v1_foreign_absolute_path_is_not_re_rooted(tmp_path):
+    """A schema-1 absolute path from another host is *not* rescued by
+    stripping a guessed prefix: even with the same repo-relative file
+    present in this checkout, the answer stays `null` (unverifiable)."""
+    evidence = _sta_checkout(tmp_path / "repo")
+    envelope = json.loads(evidence.read_text())
+    envelope["schema_version"] = 1
+    envelope["def_path"] = "/nonexistent-producing-host/repo/flows/top.def"
+    evidence.write_text(json.dumps(envelope))
+
+    item = _sta_item_5(evidence)
+
+    assert item["status"] == "met"
+    assert item["citation"]["input_verified"] is None
