@@ -24364,6 +24364,31 @@ def test_emitter_size_overlapping_ranges_rejected():
         _sized_bjt_run(deck, [(70, 900)])
 
 
+def test_emitter_size_quantized_overlap_rejected():
+    """Physically distinct ranges that round to the same integer dbu bounds
+    (0.0701 um and 0.0702 um both round to 70 dbu at dbu=0.001) are rejected:
+    without this, one 70 x 900 dbu window extracted as both devices."""
+    quantized_a = SizeFilter(
+        bbox_min_um=(0.0701, 0.0701), bbox_max_um=(0.9, 0.9), area_um2=(0.063, 0.063)
+    )
+    quantized_b = SizeFilter(
+        bbox_min_um=(0.0702, 0.0702), bbox_max_um=(0.9, 0.9), area_um2=(0.063, 0.063)
+    )
+    assert not quantized_a.overlaps(quantized_b)  # disjoint in physical um
+    deck = _sized_bjt_deck(("npn_a", quantized_a), ("npn_b", quantized_b))
+    with pytest.raises(ExtractError, match="overlapping emitter_size"):
+        _sized_bjt_run(deck, [(70, 900)])
+
+
+def test_emitter_size_unsized_sibling_rejected():
+    """An emitter_size=None entry sharing base/marker/emitter with a sized
+    one matches every window the sized one claims: it would extract the same
+    window twice and suppress/misreport the unclaimed-window warning."""
+    deck = _sized_bjt_deck(("npn_a", _SIZED_NPN), ("npn_fallback", None))
+    with pytest.raises(ExtractError, match="no emitter_size"):
+        _sized_bjt_run(deck, [(70, 900), (300, 300)])
+
+
 def test_emitter_size_disjoint_ranges_not_rejected_and_overlap_logic():
     assert not _SIZED_NPN.overlaps(_SIZED_NPN_L)
     assert SizeFilter(area_um2=(0, 1)).overlaps(SizeFilter(bbox_min_um=(5, 6)))

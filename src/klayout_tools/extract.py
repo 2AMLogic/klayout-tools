@@ -6636,28 +6636,75 @@ def _apply_size_filter(region: kdb.Region, size: SizeFilter, dbu: float) -> kdb.
     return out
 
 
-def _validate_bipolar_size_filters(bipolars: tuple[BipolarDevice, ...]) -> None:
+def _size_filters_overlap_dbu(a: SizeFilter, b: SizeFilter, dbu: float) -> bool:
+    """True when some whole-dbupolygon could satisfy both filters once
+    :func:`_apply_size_filter`'s rounding is applied: every dimension
+    constrained by *both* has intersecting **integer** ranges. Physical
+    disjointness is not enough -- at dbu=0.001 the distinct ranges 0.0701 um
+    and 0.0702 um both round to 70 dbu, so a 70-dbu-side window matches
+    either flavour (area compares in dbu^2)."""
+
+    for name, unit in (
+        ("bbox_min_um", dbu),
+        ("bbox_max_um", dbu),
+        ("area_um2", dbu * dbu),
+    ):
+        ra, rb = getattr(a, name), getattr(b, name)
+        if ra is None or rb is None:
+            continue
+        a_lo, a_hi = round(ra[0] / unit), round(ra[1] / unit)
+        b_lo, b_hi = round(rb[0] / unit), round(rb[1] / unit)
+        if a_hi < b_lo or b_hi < a_lo:
+            return False
+    return True
+
+
+def _validate_bipolar_size_filters(
+    bipolars: tuple[BipolarDevice, ...], dbu: float
+) -> None:
     """Reject two ``BipolarDevice`` entries that share ``base``/``marker``/
-    ``emitter`` and narrowing but whose ``emitter_size`` ranges overlap: a
-    window matching both flavours would be ambiguous (issue #2861)."""
+    ``emitter`` and narrowing but whose ``emitter_size`` windows overlap
+    *after dbu rounding*: a window matching both flavours would be ambiguous
+    (issue #2861). An ``emitter_size=None`` entry in the same flavour group
+    as a sized one is rejected too -- ``None`` matches every window, so it
+    claims whatever the sized entry claims and no unclaimed-window warning
+    can ever be right."""
+
+    def same_group(a: BipolarDevice, b: BipolarDevice) -> bool:
+        a_key = (a.base, a.marker, a.emitter, a.emitter_requires, a.emitter_excludes)
+        return a_key == (
+            b.base,
+            b.marker,
+            b.emitter,
+            b.emitter_requires,
+            b.emitter_excludes,
+        )
+
     sized = [b for b in bipolars if b.emitter_size is not None]
     for i, a in enumerate(sized):
         for b in sized[i + 1 :]:
-            if (
-                a.base,
-                a.marker,
-                a.emitter,
-                a.emitter_requires,
-                a.emitter_excludes,
-            ) != (b.base, b.marker, b.emitter, b.emitter_requires, b.emitter_excludes):
+            if not same_group(a, b):
                 continue
             assert a.emitter_size is not None and b.emitter_size is not None
-            if a.emitter_size.overlaps(b.emitter_size):
+            if _size_filters_overlap_dbu(a.emitter_size, b.emitter_size, dbu):
                 raise ExtractError(
                     f"bipolar entries '{a.class_name}' and '{b.class_name}' "
                     "share base/marker/emitter and have overlapping "
-                    "emitter_size ranges -- a window matching both is ambiguous"
+                    "emitter_size ranges once rounded to the layout dbu "
+                    f"({dbu:g} um) -- a window matching both is ambiguous"
                 )
+    unsized = [b for b in bipolars if b.emitter_size is None]
+    for a in unsized:
+        for b in sized:
+            if not same_group(a, b):
+                continue
+            raise ExtractError(
+                f"bipolar entries '{a.class_name}' (no emitter_size) and "
+                f"'{b.class_name}' share base/marker/emitter -- the unsized "
+                "entry matches every window the sized one claims, so a "
+                "window would extract as both devices; give the fallback "
+                "an explicit disjoint emitter_size or a distinct marker"
+            )
 
 
 def _narrow_bipolar_emitter_by_size(
@@ -8527,7 +8574,7 @@ def _extract_netlist(
             kdb.Region | None,
         ]
     ] = []
-    _validate_bipolar_size_filters(deck.bipolars)
+    _validate_bipolar_size_filters(deck.bipolars, layout.dbu)
     # Size-filter bookkeeping (issue #2861): per flavour group, the narrowed
     # pre-filter emitter and each entry's size-matched emitter.
     bipolar_size_groups: dict[tuple, list[kdb.Region]] = {}
