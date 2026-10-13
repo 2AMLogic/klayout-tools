@@ -88,6 +88,17 @@ request is unchanged — byte-identical deck, byte-identical response — and th
 `corners[].measurements[]` entry. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Measurements that are not `.meas` cards (`measurements[].expr`)".
 
+`measurements[].crossings` (issue #2868) is the third form and the first
+whose result is a **series**, not a scalar. It does *not* retype `value`:
+`value` stays a number (the count of crossings found), so every consumer that
+reads `corners[].measurements[].value` as a number — the rollup, Monte Carlo
+statistics, coverage, `limits` grading — is unaffected. The ordered crossing
+times ride a new optional `crossings` object on that entry only, present only
+when the series was extracted (absent on every other entry and on an errored
+one) — the "new optional member, absent when not applicable" rule above.
+No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
+"Threshold-crossing time series (`measurements[].crossings`)".
+
 This caveat is narrow: it covers a field's *value set* growing (a new enum
 member appearing), not what an existing, unchanged-type field's value
 *means*. Redefining the semantics of an already-shipped field — e.g. `klt
@@ -140,6 +151,15 @@ absent (not `null`) when unmeasured and always absent on `cap_cmomf`. No
 existing member changed, so **no `schema_version` bump**. See
 `docs/cli/extract.md`'s "MoM capacitor devices" section.
 
+**A new terminal key on one device class's `nets` map is additive by the
+same per-class reasoning.** Issue #2862 added an `"s"` (substrate) key to
+`devices[].nets` for a bipolar device class of a deck entry that declares
+the optional four-terminal `substrate` layer — absent (not `null`) on every
+three-terminal entry, i.e. every deck shipped today, whose `nets` maps are
+byte-identical to before. No existing key changed, so **no
+`schema_version` bump**. See `docs/cli/extract.md`'s "Bipolar (BJT) device
+recognition" section.
+
 **A new opt-in flag adding `null`-by-default fields to an already-shipped
 per-entry shape is likewise additive** — the field exists on every entry
 regardless of whether the flag was given, but only carries a real value when
@@ -189,6 +209,26 @@ additive on both sides under the request-field rule above — a request valid
 before is still valid and still means what it meant. Neither command's
 `schema_version` moved. See `docs/cli/gen-compose.md`'s "Which hint the
 advisory reads, and the two legitimate violations (#2638)".
+
+**An opt-in flag that changes reported *values* adds its disclosure fields,
+never retypes the old ones.** `klt extract --rename-declared-pins` (issue
+#2854) renames surviving promoted pin nets to their declared names, which
+changes what `nets[].name`/`devices[].nets[...]`/the written `.SUBCKT`
+report for those nets — but only when the flag is given, and without
+touching any field's name, type, or meaning. The disclosure is additive on
+three surfaces at once: a `warnings[]` entry per aggregate (renames) and
+per finding (the `declared_pin_short`/`declared_pin_rename_collision`
+cases), the `null`-unless-given `pin_renames` block, and the
+always-present boolean `rename_declared_pins` echo (so `--check --rerun`
+can replay the rename from it plus the `pin_renames.declared_pins`/
+`pin_renames.def_pins` echoes of the two original declared sets). `klt pex`
+echoes the passthrough as `extraction.rename_declared_pins` (`false` when
+the flag was not given), and `klt lvs` gained the optional request field
+`layout.rename_declared_pins` plus one new `mismatches[].category` value
+(`pin.declared_short`) — each additive under the rules above, no
+`schema_version` bump on any of the three commands. See
+`docs/cli/extract.md`'s "Renaming promoted pins to their declared name"
+section.
 
 **Not every field a verb reports is a cross-build contract at all** — some
 are extractor/engine-internal bookkeeping with no meaning outside the one
@@ -314,6 +354,17 @@ made against different deck revisions or PDK releases are otherwise
 indistinguishable in the output, so a signoff claim can't be checked or
 reproduced. This block is **additive** (see above): adopting it required no
 `schema_version` bump on any verb.
+
+**Client vs. worker scope (issue #2834).** `provenance` (and
+`environment.client_klt_version`) describes the *submitting client*. For
+`klt sim --backend batch`, what the executing worker actually resolved --
+simulator binary and full version banner, PDK `SOURCES` stamp, CPU model,
+`OMP_NUM_THREADS`, a worker-local image manifest -- is reported separately and
+additively as `environment.remote.worker_environment` (and in each
+`environment.remote.fleet[]` member), never merged into `provenance`. Missing
+observations are `null` (never the client's values) and `capture` is `ok`,
+`absent` or `malformed`. See [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
+environment" for the field names and limits.
 
 `klt erc` (issue #1968) is a partial exception on `pdk`: its `--pdk` selects
 a built-in antenna-ratio limit table baked into `erc.py` itself (see
@@ -522,14 +573,21 @@ stability statement, concrete precedents, and drift-detection guidance, and
 - `klt_version` — the running `klt` build identity (issue #2090), resolved by
   `build_identity.build_version()` exactly like `klt --version` and
   `klt version --format json`'s `version`: `X.Y.Z` for a confirmed clean
-  release, `X.Y.Z+g<12-char sha>` for a post-tag build, an additional
-  `.dirty` for uncommitted changes, or `X.Y.Z+unknown` when no git provenance
-  can be recovered. Packaged builds use their build-time record; source
-  installs probe their checkout. Reports now carry the build identity
-  themselves. Reports from before this fix carry only the static package
-  version and cannot distinguish releases from post-tag builds.
-  `klayout_tools.__version__` and the version command's `package_version`
-  remain the plain package version. See `docs/cli/version.md`.
+  release, `X.Y.(Z+1).devN+g<12-char sha>` for a post-tag build (or
+  `X.Y.Z.devN+g<sha>` before the base version is tagged), an additional
+  `.dirty` for uncommitted changes, or `X.Y.Z.dev0+unknown` when no git
+  provenance can be recovered. Since issue #2823 this is the built
+  distribution's own metadata version, so it equals
+  `klayout_tools.__version__` and `klt version`'s `package_version` for every
+  built distribution; editable installs recompute it live from their
+  checkout. Reports from before #2090 carry only the static package version
+  and cannot distinguish releases from post-tag builds; reports from builds
+  between #2090 and #2823 carry the older `X.Y.Z+g<sha>` / `X.Y.Z+unknown`
+  forms. **Contract change (issue #2823):** `package_version` (in `klt
+  version` and `klt signoff`'s `build` block) is no longer the static base
+  version on non-release builds — it carries the same dev form as `version`.
+  Field names, types, and the definition (`klayout_tools.__version__`) are
+  unchanged, so no `schema_version` bump; see `docs/cli/version.md`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
   or `null` if unresolvable.
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
@@ -962,7 +1020,7 @@ probing the value's Python type at runtime.
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
 | `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
-| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,schematic_netlist}` | 2 | #1261 |
+| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875) |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
@@ -1083,7 +1141,7 @@ any list index.
 |---|---|---|
 | `drc` | `file` | input layout, as provided by the caller |
 | `extract` | `file` | input layout, as provided by the caller |
-| `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`) |
+| `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`); `null` only under `--no-netlist` (issue #2850), where `netlist_sha256` is `null` too |
 | `extract` | `spef_path` | written SPEF (`--spef`), else `null` |
 | `extract` | `subcircuit.path` | written sub-circuit netlist (`--subcircuit`) |
 | `extract` | `abstracted_cells.*.lef_path` | LEF file an abstracted cell's pins came from |
@@ -1175,10 +1233,10 @@ block (and `provenance.klt_version` elsewhere) records the state of the tree
 the running install was *built from*, at build time — not a property of the
 commit. Two byte-legitimate installs of the **same pinned commit** can
 therefore emit different bytes for identical evidence: a
-`git+https://…@<sha>` install records real git facts (`+g<sha>`), while a
+`git+https://…@<sha>` install records real git facts (`.devN+g<sha>`), while a
 `pip install` of a source tarball of that same `<sha>` has no `.git` at build
-time and honestly records none (`+unknown`, `git_commit: null`, `is_release:
-null`). The second case cannot be fixed by tightening `dirty` (issue #2248) —
+time and honestly records none (`.dev0+unknown`, `git_commit: null`,
+`is_release: null`). The second case cannot be fixed by tightening `dirty` (issue #2248) —
 the facts were never present to record. So "does this committed evidence
 still hold" is answered by `--check`, which excludes exactly the identity
 surface, **not** by `diff`-ing a committed report against a fresh render. See
@@ -1476,6 +1534,18 @@ artifacts:
   unprotected. A `fork()` without `exec` shares the lock descriptor; such
   workers outliving a killed owner keep the lock until they exit.
 
+### Aggregate (set) envelopes: `klt sim --batch-set` (issue #2869)
+
+A verb that submits several independent requests in one invocation emits one
+aggregate payload with its own `schema_version` (versioned like any command
+payload), a rollup `status`, and a `requests[]` array of per-request entries
+(`status`, `exit_code`, `job_id`, `error.{message,code}`). A request-level
+failure is an entry, not a command error: the command exits with the **worst
+per-request code** (a partial set exits `4` for `klt sim`), which is `>= 3`,
+so the "a report was emitted" rule below holds. See
+[`docs/cli/sim.md`](cli/sim.md) "Submitting a set of requests" and
+`docs/schemas/sim-set-report.schema.json`.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                     |
@@ -1562,3 +1632,15 @@ violation (issue #2029).
 
 See `src/klayout_tools/cli/layers_cmd.py` and `docs/cli/layers.md` for a
 worked example.
+
+### `klt pex` schematic-side content digests (issue #2875)
+
+`klt pex` adds `testbenches[].{request_sha256,netlist_sha256,
+schematic_netlist_sha256}`, `testbenches[].netlist` and
+`reference_netlist_sha256` (`sha256:<64 lowercase hex>`). This is an
+**additive** change, so `SCHEMA_VERSION` stays `2`: no existing field changed
+shape, and consumers must already ignore unknown fields. These are distinct
+roles from `provenance.input.content_hash` (the layout) and must not take
+part in layout-consistency comparisons; `klt signoff` verifies them per role
+(`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
+See [`cli/pex.md`](cli/pex.md).

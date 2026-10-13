@@ -376,6 +376,18 @@ CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED = "topology.top_level_pins_anchored"
 #: `_apply_short_nets_hint`.
 CATEGORY_HINTS_SHORT_NETS_APPLIED = "hints.short_nets_applied"
 
+#: Issue #2854: `layout.rename_declared_pins` found a promoted pin net
+#: carrying 2+ declared pin names -- one conductor shorting two declared
+#: interface pins, a layout defect the rename pass reports and never
+#: repairs (the net keeps its joined name). One entry per offending net,
+#: `severity: "error"` but diagnostic-only (it never moves `status` on its
+#: own): the compare that already ran reports the mismatch this entry
+#: *explains* -- the layout's joined interface net against the reference's
+#: two separate pins. Mirrored from `klt extract`'s own
+#: `pin_renames.findings[]` (`code: "declared_pin_short"`). See
+#: `_declared_pin_short_mismatches`.
+CATEGORY_PIN_DECLARED_SHORT = "pin.declared_short"
+
 #: Issue #1952: ``power_connectivity.status`` values. Deliberately a
 #: *separate* verdict from the report's top-level ``status``, which stays
 #: exactly what it has always been -- ``NetlistComparer.compare()``'s own
@@ -1082,6 +1094,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         layout_hash_source,
         extracted_netlist_path,
         layout_net_label_positions,
+        layout_pin_renames,
     ) = _resolve_layout(
         layout_spec,
         request_dir,
@@ -2273,6 +2286,19 @@ def run_lvs(request: str) -> dict[str, Any]:
         # is appended here rather than folded into `_build_mismatches`.
         mismatches.extend(gate_level_port_alias_warnings)
 
+    # Issue #2854: same append-here rationale as `family_findings` above --
+    # a promoted pin net carrying 2+ declared pin names is a pre-compare
+    # determination the inline extraction's rename pass made about the
+    # layout's declared interface, not a `NetlistComparer` event. Like
+    # `device.class_family_unsatisfiable` it is `severity: "error"` but
+    # diagnostic only: it never moves `status` on its own -- the compare
+    # that already ran reports the mismatch this entry explains (the
+    # layout's one joined boundary net against the reference's two separate
+    # pins). Extended unconditionally (an empty list is a no-op when no
+    # rename ran or no short was found) so this hook adds no branch to this
+    # already-complexity-baselined function.
+    mismatches.extend(_declared_pin_short_mismatches(layout_pin_renames))
+
     mismatches.extend(supply_findings)
     mismatches.sort(key=_sort_key)
 
@@ -2790,7 +2816,8 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     committed before it existed stays best-effort), but a
     ``"gate-level-verilog"`` ``reference.form``,
     ``reference.device_bulk``
-    and ``layout.top_cell_pins``/``declared_pins``/``pin_source_cells`` are
+    and ``layout.top_cell_pins``/``declared_pins``/``pin_source_cells``/
+    ``rename_declared_pins`` are
     never echoed anywhere in the response and are always omitted
     (reconstructed as each option's own default). Use ``--check`` (cheap
     mode) instead when any of these apply. When the omitted form makes the
@@ -3284,11 +3311,25 @@ def _resolve_layout(
     combine_devices: bool = False,
     deck_options: Mapping[str, str] | None = None,
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
-) -> tuple[kdb.Netlist, str, str, str | None, dict[int, list[dict[str, Any]]]]:
+) -> tuple[
+    kdb.Netlist,
+    str,
+    str,
+    str | None,
+    dict[int, list[dict[str, Any]]],
+    dict[str, Any] | None,
+]:
     """Resolve ``request.layout`` to ``(netlist, echo, hash_source_path,
-    extracted_netlist_path_or_none, net_label_positions)``. Original drawn
-    labels are keyed by layout cluster for the supply-fragmentation check;
-    pre-extracted SPICE has no such label map and returns an empty mapping.
+    extracted_netlist_path_or_none, net_label_positions, pin_renames)``.
+    Original drawn labels are keyed by layout cluster for the
+    supply-fragmentation check; pre-extracted SPICE has no such label map
+    and returns an empty mapping. ``pin_renames`` (issue #2854) is `klt
+    extract`'s own ``pin_renames`` block -- ``None`` unless
+    ``layout.rename_declared_pins`` opted in (and always ``None`` for the
+    pre-extracted ``layout.netlist`` shape, where no extraction ran); its
+    ``error``-severity findings become ``pin.declared_short``
+    ``mismatches[]`` entries (see :func:`_declared_pin_short_mismatches`),
+    the rename/collision disclosures stay extract-report-only.
 
     Two supported shapes (spike section 2b): ``{"file", "deck", "top"}`` runs
     inline extraction (composing ``extract.py``'s core function); ``{"netlist",
@@ -3417,6 +3458,15 @@ def _resolve_layout(
                     "given -- omit the field entirely to skip this "
                     "reconciliation"
                 )
+
+        # Issue #2854: `request.layout.rename_declared_pins`
+        # renames each surviving promoted pin net to its declared name, so
+        # `options.anchor_top_level_pins` (#2692) can pair it with a
+        # same-named reference pin even when the boundary conductor carries
+        # extra drawn labels. Validated by its own helper (bool shape,
+        # requires `declared_pins`) to keep this function's
+        # complexity-baselined branch count unchanged.
+        rename_declared_pins = _parse_layout_rename_declared_pins(layout_spec)
         try:
             # LVS is topological -- no parasitics_deck, so the 5th return
             # (parasitic_nets) is always None here and is ignored. The 6th
@@ -3452,7 +3502,10 @@ def _resolve_layout(
             # instance, so it has no use here either. The 15th return
             # (def_pin_promotion, #2473) reports how a `def_pins` declared
             # port set landed; `klt lvs` has no `--def-pins` equivalent
-            # request field, so it is always `None` here.
+            # request field, so it is always `None` here. The 17th return
+            # (pin_renames, #2854) carries `layout.rename_declared_pins`'s
+            # own report; its error-severity findings become
+            # `pin.declared_short` mismatches[] entries in `run_lvs`.
             (
                 netlist,
                 top_cell_name,
@@ -3470,6 +3523,7 @@ def _resolve_layout(
                 _device_instance_paths,
                 _def_pin_promotion,
                 _substrate_spreading,
+                _pin_renames,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,
@@ -3481,6 +3535,11 @@ def _resolve_layout(
                 # when the field was never given, unchanged from every
                 # request that predates it.
                 pin_source_cells=pin_source_cells,
+                # Issue #2854: `request.layout.rename_declared_pins` --
+                # validated by `_parse_layout_rename_declared_pins` above;
+                # `False` when the field was never given, unchanged from
+                # every request that predates it.
+                rename_declared_pins=rename_declared_pins,
                 # Issue #559: defer the resistor `fixed_offset_ohm`
                 # correction when `combine_devices` will run -- applying it
                 # here, before the fold, would have KLayout's native series
@@ -3530,6 +3589,7 @@ def _resolve_layout(
             layout_file,
             extracted_netlist_path,
             _net_label_positions,
+            _pin_renames,
         )
 
     layout_netlist_path = _require_path(layout_spec, "netlist", "layout", request_dir)
@@ -3588,7 +3648,9 @@ def _resolve_layout(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
 
-    return netlist, layout_spec["netlist"], layout_netlist_path, None, {}
+    # Issue #2854: no inline extraction ran for the pre-extracted
+    # `layout.netlist` shape, so there is no `pin_renames` block to report.
+    return netlist, layout_spec["netlist"], layout_netlist_path, None, {}, None
 
 
 def _read_reference_netlist(
@@ -5691,6 +5753,89 @@ def _strict_pin_count_check(
         },
     )
     return "mismatch", [finding]
+
+
+def _parse_layout_rename_declared_pins(layout_spec: Mapping[str, Any]) -> bool:
+    """Resolve ``request.layout.rename_declared_pins`` (issue #2854);
+    default ``False``.
+
+    A non-boolean is a clean request error, the same convention
+    ``layout.top_cell_pins``'s bool coercion and every option parser in this
+    module follow. An explicit ``true`` with no ``layout.declared_pins`` is
+    rejected rather than silently ignored: there is no declared set to
+    rename *to* (this request shape has no ``--def-pins`` equivalent), and
+    silently extracting an unrenameable netlist would defeat the option's
+    whole purpose -- canonical pin names for
+    ``options.anchor_top_level_pins`` to anchor against a reference.
+
+    Called only for the inline-extraction (``layout.file``) shape; a
+    pre-extracted ``layout.netlist``'s pins are already fixed, so the field
+    is silently ignored there exactly as ``top_cell_pins``/
+    ``declared_pins`` are.
+    """
+    value = layout_spec.get("rename_declared_pins", False)
+    if not isinstance(value, bool):
+        raise LvsError(
+            "request.layout.rename_declared_pins must be a boolean -- true "
+            "to rename each promoted pin net whose component labels contain "
+            "exactly one declared_pins name to that name, false (the "
+            "default) to keep KLayout's joined multi-label net names"
+        )
+    if value and "declared_pins" not in layout_spec:
+        raise LvsError(
+            "request.layout.rename_declared_pins requires "
+            "request.layout.declared_pins -- there is no declared pin set "
+            "to rename to"
+        )
+    return value
+
+
+def _declared_pin_short_mismatches(
+    pin_renames: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """One :data:`CATEGORY_PIN_DECLARED_SHORT` ``mismatches[]`` entry per
+    ``error``-severity finding in the ``pin_renames`` block inline
+    extraction returned (issue #2854), or ``[]``.
+
+    ``klt lvs`` otherwise discards the extraction's own warnings
+    (``_resolve_layout`` drops them -- LVS is topological), but a conductor
+    shorting two declared interface pins is a *finding about the layout's
+    declared interface*, not extraction prose: it explains the mismatch the
+    compare already reports (the layout's one joined boundary net against
+    the reference's two separate pins), so it is surfaced here as its own
+    named entry -- the same append-here, diagnostic-only rationale
+    ``device.class_family_unsatisfiable`` follows. The ``warning``-severity
+    rename/collision disclosures stay extract-report-only: they cannot
+    change what the compare pairs.
+    """
+    if not pin_renames:
+        return []
+    entries: list[dict[str, Any]] = []
+    findings = pin_renames.get("findings")
+    for finding in findings if isinstance(findings, list) else []:
+        if not isinstance(finding, dict) or finding.get("severity") != "error":
+            continue
+        declared_pins = finding.get("declared_pins")
+        entries.append(
+            _mismatch(
+                CATEGORY_PIN_DECLARED_SHORT,
+                "error",
+                str(
+                    finding.get("message")
+                    or "a promoted pin net carries 2+ declared pin names "
+                    "(layout.rename_declared_pins) -- one conductor "
+                    "shorting two declared interface pins"
+                ),
+                "layout",
+                details={
+                    "net": finding.get("net"),
+                    "declared_pins": declared_pins
+                    if isinstance(declared_pins, list)
+                    else [],
+                },
+            )
+        )
+    return entries
 
 
 # --------------------------------------------------------------------------- #

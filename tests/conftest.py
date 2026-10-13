@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from klayout_tools import build_identity
+from klayout_tools import _version_scheme, build_identity
 
 
 @pytest.fixture
@@ -16,11 +16,13 @@ def real_build_identity_git(monkeypatch):
     Provenance now resolves the live build too, so preserve its real runner
     before those patches rather than treating Git as ngspice/Yosys/etc.
     """
-    monkeypatch.setattr(
-        build_identity,
-        "subprocess",
-        SimpleNamespace(run=subprocess.run, SubprocessError=subprocess.SubprocessError),
+    real = SimpleNamespace(
+        run=subprocess.run, SubprocessError=subprocess.SubprocessError
     )
+    # ``_version_scheme`` runs the live-checkout version probe for an
+    # editable install (issue #2823), so it needs the same protection.
+    for module in (build_identity, _version_scheme):
+        monkeypatch.setattr(module, "subprocess", real)
 
 
 @pytest.fixture(autouse=True)

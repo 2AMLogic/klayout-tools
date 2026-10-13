@@ -1830,6 +1830,17 @@ def test_yield_fail_check_fails(tmp_path):
     assert result["checks"][0]["passed"] is False
 
 
+def test_yield_insufficient_evidence_check_fails(tmp_path):
+    """Issue #2873: `status: "insufficient_evidence"` is not a pass."""
+    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
+    path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    assert result["checks"][0]["passed"] is False
+
+
 def test_extract_check_always_passes(tmp_path):
     path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
 
@@ -4691,6 +4702,17 @@ def test_yield_fail_status_renders_unmet_check_failed(tmp_path):
     assert item_6["status"] == "unmet"
     assert item_6["reason"] == "check_failed"
     assert item_6["citation"] is None
+
+
+def test_yield_insufficient_evidence_renders_unmet_undersized_sample(tmp_path):
+    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "undersized_sample"
 
 
 # --------------------------------------------------------------------------- #
@@ -13978,3 +14000,94 @@ def test_build_signoff_classifies_port_evidence(tmp_path):
         ("socket-check", True),
         ("lef-abstract", True),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2875: `klt pex` schematic-side input verification (item 7)
+# --------------------------------------------------------------------------- #
+
+
+def _sha_of(path) -> str:
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _pex_with_inputs(tmp_path, *, external=False):
+    """A pex envelope beside real request/body/DUT files, recording their
+    digests the way `klt pex` does."""
+    files = {}
+    for name in ("req.json", "body.spice", "dut.spice"):
+        files[name] = tmp_path / name
+        files[name].write_text(f"original {name}\n")
+
+    def ref(name):
+        if external:
+            return {"path": None, "scope": "external"}
+        return str(files[name])
+
+    envelope = {
+        **PEX_PASS_ENVELOPE,
+        "reference_netlist": ref("dut.spice"),
+        "reference_netlist_sha256": _sha_of(files["dut.spice"]),
+        "testbenches": [
+            {
+                "request": ref("req.json"),
+                "request_sha256": _sha_of(files["req.json"]),
+                "netlist": ref("body.spice"),
+                "netlist_sha256": _sha_of(files["body.spice"]),
+                "schematic_netlist": ref("dut.spice"),
+                "schematic_netlist_sha256": _sha_of(files["dut.spice"]),
+            }
+        ],
+    }
+    return _write(tmp_path, "pex.json", envelope), files
+
+
+def _item7_citation(pex_path):
+    result = build_tier_report(_manifest(evidence={"7": pex_path}))
+    return next(item for item in result["items"] if item["id"] == 7)["citation"]
+
+
+def test_pex_schematic_inputs_unchanged_are_reported_verified(tmp_path):
+    pex_path, _files = _pex_with_inputs(tmp_path)
+    citation = _item7_citation(pex_path)
+    assert {i["status"] for i in citation["pex_inputs"]} == {"verified"}
+    assert {i["role"] for i in citation["pex_inputs"]} == {
+        "testbenches[0].request",
+        "testbenches[0].netlist",
+        "testbenches[0].schematic_netlist",
+        "reference_netlist",
+    }
+
+
+@pytest.mark.parametrize("changed", ["req.json", "body.spice", "dut.spice"])
+def test_pex_changed_schematic_side_input_is_stale(tmp_path, changed):
+    pex_path, files = _pex_with_inputs(tmp_path)
+    files[changed].write_text("edited\n")
+    citation = _item7_citation(pex_path)
+    assert citation["input_verified"] is False
+    stale = {i["role"] for i in citation["pex_inputs"] if i["status"] == "stale"}
+    assert stale
+
+
+def test_pex_external_schematic_inputs_are_unverifiable_not_verified(tmp_path):
+    pex_path, _files = _pex_with_inputs(tmp_path, external=True)
+    citation = _item7_citation(pex_path)
+    assert {i["status"] for i in citation["pex_inputs"]} == {"unverifiable"}
+    assert citation["input_verified"] is None
+
+
+def test_pex_missing_schematic_input_is_unverifiable(tmp_path):
+    pex_path, files = _pex_with_inputs(tmp_path)
+    files["body.spice"].unlink()
+    citation = _item7_citation(pex_path)
+    by_role = {i["role"]: i["status"] for i in citation["pex_inputs"]}
+    assert by_role["testbenches[0].netlist"] == "unverifiable"
+    assert by_role["testbenches[0].request"] == "verified"
+    assert citation["input_verified"] is None
+
+
+def test_legacy_pex_envelope_has_no_pex_inputs(tmp_path):
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+    citation = _item7_citation(pex_path)
+    assert "pex_inputs" not in citation
+    assert citation["input_verified"] is None
