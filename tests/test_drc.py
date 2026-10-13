@@ -9114,6 +9114,9 @@ def test_drc_text_output_renders_the_file_envelope_not_a_dict_repr(
 
     assert inside.splitlines()[0] == "file: violation.gds"
     assert outside_text.splitlines()[0] == "file: <outside repo>"
+
+
+# --------------------------------------------------------------------------- #
 # Required containment for single-population cuts (issue #2726)
 # --------------------------------------------------------------------------- #
 
