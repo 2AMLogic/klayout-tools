@@ -1020,7 +1020,7 @@ probing the value's Python type at runtime.
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
 | `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
-| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,schematic_netlist}` | 2 | #1261 |
+| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875) |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
 | `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
@@ -1632,3 +1632,15 @@ violation (issue #2029).
 
 See `src/klayout_tools/cli/layers_cmd.py` and `docs/cli/layers.md` for a
 worked example.
+
+### `klt pex` schematic-side content digests (issue #2875)
+
+`klt pex` adds `testbenches[].{request_sha256,netlist_sha256,
+schematic_netlist_sha256}`, `testbenches[].netlist` and
+`reference_netlist_sha256` (`sha256:<64 lowercase hex>`). This is an
+**additive** change, so `SCHEMA_VERSION` stays `2`: no existing field changed
+shape, and consumers must already ignore unknown fields. These are distinct
+roles from `provenance.input.content_hash` (the layout) and must not take
+part in layout-consistency comparisons; `klt signoff` verifies them per role
+(`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
+See [`cli/pex.md`](cli/pex.md).

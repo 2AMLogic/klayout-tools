@@ -522,6 +522,20 @@ a second input the envelope happens to mention:
 | `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. |
 | `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` by construction. |
 
+**`klt pex` schematic-side inputs (issue #2875).** A `pex` envelope that
+records `testbenches[].{request,netlist,schematic_netlist}_sha256` and/or
+`reference_netlist_sha256` ([`pex.md`](pex.md)) also has each of those files
+re-hashed, and the citation gains `pex_inputs`: one `{role, path, sha256,
+status}` per digest, `status` being `verified` (a resolvable file re-hashes to
+the recorded digest), `stale` (files were read and none match) or
+`unverifiable` (`scope: "external"`/redacted path, or no readable file from
+the grading context). These roles are separate from the layout
+`content_hash` and take no part in layout-consistency comparisons. They fold
+into `input_verified`: any `stale` makes it `false`; `true` requires the
+layout and every schematic-side input to verify; otherwise (unverifiable
+input) it is `null`, never silently `true`. Legacy envelopes with no such
+digests keep layout-only verification and carry no `pex_inputs` key.
+
 Every other kind reports `null`: `functional-verification`, `power` and
 `place-and-route` either populate no `provenance.input` at all or echo only
 their outputs, and an `error` envelope carries no verdict to anchor. A

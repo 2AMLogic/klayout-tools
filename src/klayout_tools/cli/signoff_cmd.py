@@ -412,6 +412,9 @@ def _print_input_verified(citation: dict) -> None:
             "claim only -- the artifact itself was not read)"
         )
     print(f"        input: {statement}")
+    for pex_input in citation.get("pex_inputs") or []:
+        # Issue #2875: per-role schematic-side verification of a `pex` run.
+        print(f"        pex input {pex_input['role']}: {pex_input['status']}")
 
 
 def _print_artifact_binding(item: dict, citation: dict) -> None:
