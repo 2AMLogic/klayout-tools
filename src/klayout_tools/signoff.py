@@ -5797,6 +5797,29 @@ def _generic_artifact_binding(
     return binding
 
 
+def _fold_pex_schematic_inputs(
+    envelope: dict[str, Any],
+    spec: dict[str, Any],
+    file_label: str | None,
+    input_verified: bool | None,
+) -> tuple[list[dict[str, Any]] | None, bool | None]:
+    """Verify a ``pex`` envelope's schematic-side inputs (issue #2875) and
+    fold the per-role statuses into ``input_verified``.
+
+    Returns ``(pex_inputs, input_verified)``; ``pex_inputs`` is ``None`` when
+    there is nothing to report and ``input_verified`` is then unchanged.
+    """
+    checked_inputs = _verify_pex_schematic_inputs(envelope, spec, file_label)
+    if not checked_inputs:
+        return None, input_verified
+    statuses = {item["status"] for item in checked_inputs}
+    if input_verified is False or "stale" in statuses:
+        return checked_inputs, False
+    if input_verified is True and statuses == {"verified"}:
+        return checked_inputs, True
+    return checked_inputs, None
+
+
 def _resolve_evidence(
     spec: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -5939,16 +5962,9 @@ def _resolve_evidence(
     # changed resolvable input can never keep a fully verified citation.
     pex_inputs: list[dict[str, Any]] | None = None
     if check_kind == "pex":
-        checked_inputs = _verify_pex_schematic_inputs(envelope, spec, file_label)
-        if checked_inputs:
-            pex_inputs = checked_inputs
-            statuses = {item["status"] for item in checked_inputs}
-            if input_verified is False or "stale" in statuses:
-                input_verified = False
-            elif input_verified is True and statuses == {"verified"}:
-                input_verified = True
-            else:
-                input_verified = None
+        pex_inputs, input_verified = _fold_pex_schematic_inputs(
+            envelope, spec, file_label, input_verified
+        )
 
     return (
         {
