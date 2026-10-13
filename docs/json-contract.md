@@ -1101,7 +1101,7 @@ any list index.
 |---|---|---|
 | `drc` | `file` | input layout, as provided by the caller |
 | `extract` | `file` | input layout, as provided by the caller |
-| `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`) |
+| `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`); `null` only under `--no-netlist` (issue #2850), where `netlist_sha256` is `null` too |
 | `extract` | `spef_path` | written SPEF (`--spef`), else `null` |
 | `extract` | `subcircuit.path` | written sub-circuit netlist (`--subcircuit`) |
 | `extract` | `abstracted_cells.*.lef_path` | LEF file an abstracted cell's pins came from |
