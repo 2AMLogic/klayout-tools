@@ -3139,6 +3139,18 @@ family's mismatch is structurally active in the selected PDK deck:
 }
 ```
 
+The family list is built from the netlist's whole `.include`/`.inc`
+closure (the same set recorded under `environment.netlist_closure`), not only
+the top-level file, so a wrapper testbench reports the families its included
+flat netlist instantiates (issue #2928). When the closure is more than the
+lone top-level file, or part of it could not be scanned, an additive
+`environment.monte_carlo.family_mismatch_scan` object discloses
+`scanned` (repo-relative file paths) and `not_scanned` (`{target, reason}`:
+`env_var`/`pdk_root` directives left to the executing host, `unreadable`, or
+`unresolved: ...` when the closure could not be resolved and only the
+top-level file was scanned). Families defined only behind a user `.subckt`
+call whose body is in an unscanned file are not expanded.
+
 - **`active: true`** — this family's per-instance mismatch is structurally
   live in the selected deck under the request's global mismatch
   switch/section.
