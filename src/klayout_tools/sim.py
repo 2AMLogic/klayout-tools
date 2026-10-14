@@ -575,6 +575,9 @@ def _mismatch_scan_closure(
     files: list[tuple[str, str]] = []
     for item in staged.files:
         source = item.source_path or item.local_path
+        # stage_netlist always sets one of the two (source_path whenever
+        # content rewrote the file, local_path otherwise).
+        assert source is not None
         info = env_provenance.repo_relative_path(source, repo_root=repo_root)
         files.append((_scan_label(info, source), source))
     not_scanned = [
