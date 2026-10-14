@@ -334,10 +334,10 @@ explicit operator hold:**
 ```bash
 # `--search` supports `-label:` negation (unlike `--label`, which only ANDs
 # its flags together — see CLAUDE.md's Curator Workflow note). Excludes
-# loom:blocked / loom:operator-only, mirroring the work-finder's PARK_LABELS
+# loom:blocked / loom:operator, mirroring the work-finder's PARK_LABELS
 # convention (loom-daemon/src/work_finder.rs) for the loom:issue queue —
 # these mark a PR a human has deliberately taken out of automated flow.
-gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator-only" --json number,title,labels \
+gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator" --json number,title,labels \
   | jq -r '.[] | select(.labels | all(.name != "loom:treating")) | "#\(.number): \(.title)"'
 ```
 
@@ -349,47 +349,30 @@ gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:bloc
 > "Stale `loom:treating` Claim Check" in the Work Process below.
 >
 > **Operator-hold exclusion (Priority 2 queue, #5272).** `loom:blocked` and
-> `loom:operator-only` are the same generic "a human took this out of
+> `loom:operator` are the same generic "a human took this out of
 > automated flow" signal the work-finder already honors for `loom:issue` rows
 > — the Priority 2 query above excludes both so autonomous Finding Work never
 > auto-claims a held PR. This does not change PR Fix Mode or an explicit user
 > instruction naming a PR by number — those remain a deliberate human
 > decision to work on that specific PR, same as everywhere else in this file.
 
-### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
+### Routing to a human
 
-Doctor's normal flow only **filters** on `loom:operator-only` (the queries
-above) — it does not route work to the operator on its own. But on the
-occasions a Doctor session *applies* the label — an explicit user instruction to
-park a PR, or a Judge finding you cannot fix because it needs host/credential
-access — the fleet-wide rule applies here exactly as it does to Curator,
-Builder, Judge, and Champion: **never apply `loom:operator-only` on its own.**
-Choose exactly one sub-kind and apply both labels in the **same** command. This
-is purely additive — the base label is never removed or replaced, so the
-operator-hold exclusion above and every other filter keyed on it are unaffected:
-
-| Sub-kind | Apply when |
-|---|---|
-| `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
-| `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required (the typical Doctor case: a fix that requires a secret rotation or a machine you cannot reach) |
-| `loom:operator-decision` | A genuine human ruling is needed (policy, trade-off, security/access). **Safe default whenever the kind is not obvious** |
+Doctor's normal flow only **filters** on holds. It *applies* one only for an
+explicit user instruction to park a PR, or a finding whose fix needs a
+human's hands (a secret rotation, a machine you cannot reach) — never because
+a fix is hard or two attempts failed (#10001). The rule is
+`.loom/docs/label-state-machine.md` → "Routing to a human": a human's hands →
+`loom:operator` and a comment naming the step; a ruling
+→ `loom-daemon operator-decision apply`; either can carry a `Blocked by #N`
+line; automation-resolvable waiting → `loom:blocked` with a park record. (The
+base-plus-sub-kind labels this section used to require are retired into
+`loom:operator`, 2am#4345 / rjwalters/loom#11795.)
 
 ```bash
 gh pr comment <number> --body "Routing to the operator: <what a human must do>."
-gh pr edit <number> --add-label "loom:operator-only,loom:operator-mechanical"
+gh pr edit <number> --add-label "loom:operator"
 ```
-
-Being unsure which sub-kind applies is **never** a reason to emit the bare
-label — `loom:operator-decision` is always safe to over-apply.
-
-**If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
-in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
-`Requires #N` line (the exact phrasings `detect-dependency-cycle.sh` and
-`warn-operator-gated.sh` parse by regex). A backtick-quoted reference in prose
-does not satisfy this.
-
-Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
-"`loom:operator-only` sub-kinds".
 
 ### Stale-Verdict Check (before claiming from Priority 1 or Priority 2)
 
@@ -438,7 +421,7 @@ gh pr list --state=open --json number,title,mergeable \
 ```bash
 # Check primary queues first
 PRIORITY_1=$(gh pr list --label="loom:pr" --state=open --json number,mergeable | jq '[.[] | select(.mergeable == "CONFLICTING")] | length')
-PRIORITY_2=$(gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator-only" --json number | jq 'length')
+PRIORITY_2=$(gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator" --json number | jq 'length')
 
 if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
   echo "No labeled work, checking fallback queue..."
@@ -1139,7 +1122,7 @@ purely mechanical format fix (#4882).
 
 ### Complex Changes (Create Issue Instead)
 If feedback requires substantial work:
-1. Create an issue with `loom:triage` + `loom:urgent` labels
+1. Create an issue with the `loom:triage` label
 2. Link to the original PR and quote the review comments
 3. Document what needs to be done
 4. Let Workers handle the complex refactoring
@@ -1176,7 +1159,7 @@ PR #123 review requested major changes to authentication system:
 [Link to review comment](https://github.com/owner/repo/pull/123#discussion_r123456)
 
 EOF
-)" --label "loom:triage" --label "loom:urgent"
+)" --label "loom:triage"
 ```
 
 ## Best Practices
@@ -1242,8 +1225,8 @@ pnpm test 2>&1 | grep -A 5 -B 2 "FAIL\|Error\|✗"
 
 ```bash
 # Find PRs with changes requested that aren't already claimed and are not on
-# an explicit operator hold (loom:blocked / loom:operator-only, #5272)
-gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator-only" --json number,title,labels \
+# an explicit operator hold (loom:blocked / loom:operator, #5272)
+gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator" --json number,title,labels \
   | jq -r '.[] | select(.labels | all(.name != "loom:treating")) | "#\(.number): \(.title)"'
 
 # Find PRs with merge conflicts
@@ -1461,7 +1444,7 @@ I want to make sure I address your concern correctly."
 
 ### Feedback Too Complex
 If review requests major architectural changes:
-1. Create issue with `loom:triage` + `loom:urgent`
+1. Create a `loom:triage` issue
 2. Link to PR and quote specific feedback
 3. Document what needs to be done
 4. Comment on PR: "This requires substantial refactoring - created issue #X to handle it"
@@ -1531,7 +1514,7 @@ Handle a pre-existing failure like this:
 2. Fix only what is in scope for this PR's feedback.
 3. Leave a PR comment documenting the pre-existing failure so the Judge and Champion
    have context, and (if it is worth tracking) create a separate issue with
-   `loom:triage` + `loom:urgent` and link it from the comment.
+   `loom:triage` and link it from the comment.
 
 > **Note**: there is no exit-code-5 "pre-existing" signal. That was part of the
 > Shepherd's test-fix protocol, removed in v0.10.0 — nothing downstream interprets

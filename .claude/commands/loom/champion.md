@@ -40,7 +40,7 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-pr-m
 
 If no PRs need merging, check for curated issues. Exclude `loom:evaluating` (a
 fresh claim from a concurrent Champion evaluation, #4954), as well as
-`loom:operator-only` and `loom:blocked` — both put an issue permanently outside
+`loom:operator` and `loom:blocked` — both put an issue permanently outside
 Champion's promotion authority per `champion-issue-promo.md`'s "When NOT to
 Promote", so there is no reason to hand them into the evaluation pass at all
 (#5163). Also exclude `loom:issue` and `loom:building` — promotion adds
@@ -53,15 +53,13 @@ terminal — `title`/`body` feed `champion-issue-promo.md`'s body-hash
 idempotency check (the issue's aggregate `updatedAt` is deliberately NOT used
 for it, #4966):
 
-> **`loom:operator-only` is excluded here, but not unexamined (#5664).**
-> `champion-issue-promo.md` → "Pass 0: Self-Healing Un-Escalation Re-Scan" runs
-> one bounded scan of `loom:operator-only` proposals *before* this discovery
-> query and removes the label from any whose escalation was Champion's own,
-> dependency-only, and whose recorded blocker has since closed. Those issues then
-> match the query below in the same pass. Without that scan, an escalation for an
-> open dependency — a condition that clears itself — would be permanent, because
-> the only actor that could notice the blocker closed is the one this exclusion
-> tells to ignore it.
+> **`loom:operator` is excluded and never examined (#11861).** It is a no-op
+> for every role; only a human removes it. A dependency-only finding never
+> lands there: it is a `loom:blocked` park (`park-record apply
+> --blocked-by`, #11860), which the daemon's stale-blocked release pass lifts
+> when the blocker closes, so the issue matches this query again. (Pass 0's
+> un-escalation of such holds is retired.) **Any hold you apply** follows
+> `.loom/docs/label-state-machine.md` → "Routing to a human" (#10001).
 
 ```bash
 gh issue list \
@@ -70,7 +68,7 @@ gh issue list \
   --limit=500 \
   --json number,title,body,labels,comments \
   --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
+  select([.labels[].name] | contains(["loom:operator"]) | not) |
   select([.labels[].name] | contains(["loom:blocked"]) | not) |
   select([.labels[].name] | contains(["loom:issue"]) | not) |
   select([.labels[].name] | contains(["loom:building"]) | not) |
@@ -93,7 +91,7 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 ### Priority 3: Architect/Hermit/Auditor Proposals Ready to Promote
 
 If no curated issues need promotion, check for well-formed proposals. Same
-`loom:evaluating`/`loom:operator-only`/`loom:blocked`/`loom:issue`/
+`loom:evaluating`/`loom:operator`/`loom:blocked`/`loom:issue`/
 `loom:building` exclusion (see Priority 2's note on why the latter two are
 required) and `title`/`body` fetch as Priority 2 above:
 
@@ -105,7 +103,7 @@ gh issue list \
   --limit=500 \
   --json number,title,body,labels,comments \
   --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
+  select([.labels[].name] | contains(["loom:operator"]) | not) |
   select([.labels[].name] | contains(["loom:blocked"]) | not) |
   select([.labels[].name] | contains(["loom:issue"]) | not) |
   select([.labels[].name] | contains(["loom:building"]) | not) |
@@ -118,7 +116,7 @@ gh issue list \
   --limit=500 \
   --json number,title,body,labels,comments \
   --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
+  select([.labels[].name] | contains(["loom:operator"]) | not) |
   select([.labels[].name] | contains(["loom:blocked"]) | not) |
   select([.labels[].name] | contains(["loom:issue"]) | not) |
   select([.labels[].name] | contains(["loom:building"]) | not) |
@@ -131,7 +129,7 @@ gh issue list \
   --limit=500 \
   --json number,title,body,labels,comments \
   --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
+  select([.labels[].name] | contains(["loom:operator"]) | not) |
   select([.labels[].name] | contains(["loom:blocked"]) | not) |
   select([.labels[].name] | contains(["loom:issue"]) | not) |
   select([.labels[].name] | contains(["loom:building"]) | not) |
@@ -145,7 +143,7 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 ### Priority 4: Epic Proposals Ready to Evaluate
 
 If no individual proposals need promotion, check for epic proposals. Same
-`loom:evaluating`/`loom:operator-only`/`loom:blocked`/`loom:issue`/
+`loom:evaluating`/`loom:operator`/`loom:blocked`/`loom:issue`/
 `loom:building` exclusion as Priorities 2/3 (see Priority 2's note on why the
 latter two are required):
 
@@ -157,7 +155,7 @@ gh issue list \
   --limit=500 \
   --json number,title,body,labels,comments \
   --jq '.[] | select([.labels[].name] | contains(["loom:evaluating"]) | not) |
-  select([.labels[].name] | contains(["loom:operator-only"]) | not) |
+  select([.labels[].name] | contains(["loom:operator"]) | not) |
   select([.labels[].name] | contains(["loom:blocked"]) | not) |
   select([.labels[].name] | contains(["loom:issue"]) | not) |
   select([.labels[].name] | contains(["loom:building"]) | not) |
@@ -181,7 +179,7 @@ gh pr list \
   --jq '.[] | "#\(.number) \(.title)"'
 ```
 
-Ignore any that also carry `loom:operator-only` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges and never closes.
+Ignore any that also carry `loom:operator` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges and never closes.
 
 ### No Work Available
 

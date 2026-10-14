@@ -110,11 +110,12 @@
 #     deliberately parked should not collect automated comments either.
 #
 # --clear is suppressed (DECISION stays STALE, CLEARED=0) when the PR carries
-# an explicit hold label — `loom:blocked`, `loom:operator`, or
-# `loom:operator-only`. Those mark a PR a human (or Champion's capped-PR
-# recovery pass) deliberately took out of automated flow; silently re-queueing
-# it for review would undo that decision. Callers must still treat the verdict
-# as untrustworthy: STALE is STALE whether or not it was cleared.
+# an explicit hold label — `loom:blocked` or `loom:operator` (the retired
+# `loom:operator-only` folded into `loom:operator`, 2am#4345). Those mark a
+# PR a human (or Champion's capped-PR recovery pass) deliberately took out
+# of automated flow; silently re-queueing it for review would undo that
+# decision. Callers must still treat the verdict as untrustworthy: STALE is
+# STALE whether or not it was cleared.
 #
 # Output (stdout — one KEY=VALUE per line, machine-parseable):
 #   DECISION=NOT_OPEN|NO_VERDICT|UNVERIFIABLE|ANCHORED|FRESH|STALE
@@ -257,7 +258,7 @@ has_label() { printf '%s\n' "$LABELS" | grep -qx -- "$1"; }
 # write paths can never disagree about what "parked" means.
 hold_label() {
   local held
-  for held in "loom:blocked" "loom:operator" "loom:operator-only"; do
+  for held in "loom:blocked" "loom:operator"; do
     if has_label "$held"; then echo "$held"; return 0; fi
   done
   echo ""

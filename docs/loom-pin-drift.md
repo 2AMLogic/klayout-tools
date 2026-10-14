@@ -34,6 +34,11 @@ provides:
 - **Human override detection** - a later human comment (#766) or a bare
   `loom:operator-only` label removal (#774) suppresses re-escalation.
 
+2am#4345 (2026-10-14): `loom:operator-only` is retired into `loom:operator`
+(rjwalters/loom#11795), so the pinned file now escalates to, checks for and
+watches removals of `loom:operator`. The 2026-10-09 snapshot below predates
+that rename.
+
 #2500 additionally hand-ported upstream's Step 0 / Step 0a / Step 0.5 into the
 pinned copy (#2494).
 
