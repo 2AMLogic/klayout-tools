@@ -89,7 +89,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, NamedTuple
 
-from . import env_provenance, output_lock, sim_crossings, sim_steps
+from . import env_provenance, output_lock, sim_crossings, sim_decks, sim_steps
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -134,6 +134,7 @@ from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch import _run_batch, _run_batch_fleet
+from .sim_decks import run_deck_request
 from .sim_plot import render_waveform_svg
 
 #: The remaining names below are not called directly from this module's own
@@ -875,6 +876,14 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``schema`` field (see this module's docstring).
     """
     request = _load_request_json(request_path, SimError)
+    # Deck-list requests (issue #2804) carry `decks` instead of a corner
+    # request's netlist/analysis; their shape is validated by the deck
+    # subsystem (sim_decks.plan_deck_units), so the corner request's
+    # required fields do not apply here.
+    if "decks" in request:
+        if not isinstance(request.get("decks"), list) or not request["decks"]:
+            raise SimError("request.decks must be a non-empty list of deck objects")
+        return request
     request = validate_request_shape(
         request,
         "request file",
@@ -1303,7 +1312,27 @@ def run_sim(
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
-    """Run the PVT corner matrix declared by the request at ``request_path``.
+    """Run the request at ``request_path`` and return its report.
+
+    ``run_sim`` dispatches over two request kinds (docs/cli/sim.md):
+
+    - **Corner requests** (the default): a ``netlist`` plus a
+      ``corners``/``analysis``/``measurements`` matrix -- the PVT corner
+      sweep this verb has always run. The full parameter documentation
+      below applies to these.
+    - **Deck-list requests** (issue #2804): a ``decks`` list of
+      caller-composed ngspice decks, transported -- never composed,
+      parsed, or graded -- to the selected backend. Same parameters,
+      minus the corner-only ones: ``--hosts``/``--resume``/
+      ``--budget-s``/``--plot``/``--fail-fast-probe``/
+      ``--fail-on-diagnostic`` are refused by name (see
+      :func:`klayout_tools.sim_decks.run_deck_request` and
+      docs/cli/sim.md's "Pre-composed decks" section, which also
+      documents the deck report's shape).
+
+    The corner sweep itself lives in :func:`_run_sim_corners`, unchanged
+    by the deck dispatch -- this wrapper only routes between the two
+    request kinds, so the sweep's own complexity budget is untouched.
 
     ``artifacts_dir`` overrides where per-corner logs/rawfiles are written
     when ``options.keep_artifacts`` is true; it defaults to a ``.klt/sim/``
@@ -1503,6 +1532,130 @@ def run_sim(
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
     """
+    request = load_request(request_path)
+    # Issue #2892: the engine runs with ``cwd=<corner dir>``, so a relative
+    # ``artifacts_dir`` baked into the command line would resolve against the
+    # corner dir and ngspice would never find its deck. Absolutise once here.
+    if artifacts_dir is not None:
+        artifacts_dir = os.path.abspath(artifacts_dir)
+    if sim_decks.DECKS_FIELD in request:
+        return _dispatch_deck_request(
+            request,
+            request_path=request_path,
+            backend=backend,
+            max_workers=max_workers,
+            hosts=hosts,
+            artifacts_dir=artifacts_dir,
+            resume=resume,
+            budget_s=budget_s,
+            plot_dir=plot_dir,
+            fail_fast_probe=fail_fast_probe,
+            fail_on_diagnostic=fail_on_diagnostic,
+        )
+    return _run_sim_corners(
+        request_path,
+        artifacts_dir=artifacts_dir,
+        backend=backend,
+        max_workers=max_workers,
+        hosts=hosts,
+        budget_s=budget_s,
+        resume=resume,
+        plot_dir=plot_dir,
+        fail_fast_probe=fail_fast_probe,
+        fail_on_diagnostic=fail_on_diagnostic,
+        _ownership=_ownership,
+    )
+
+
+def _dispatch_deck_request(
+    request: dict[str, Any],
+    *,
+    request_path: str,
+    backend: str | None,
+    max_workers: int | None,
+    hosts: int | None,
+    artifacts_dir: str | None,
+    resume: bool | None,
+    budget_s: float | None,
+    plot_dir: str | None,
+    fail_fast_probe: bool | None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+) -> dict[str, Any]:
+    """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
+    resolving the backend exactly as the corner path does (flag >
+    request field > ``$KLT_SIM_BACKEND``, host defaults stepping
+    aside) and refusing the corner-only flags by name: a deck request
+    has no corner machinery for them to act on, so silently ignoring
+    one would mislead the caller about what ran."""
+    resolved_backend, from_host_default = resolve_backend(backend, request)
+    if resolved_backend not in SUPPORTED_BACKENDS:
+        source = f" (from ${BACKEND_ENV})" if from_host_default else ""
+        raise SimError(
+            f"unsupported backend '{resolved_backend}'{source} "
+            f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
+        )
+    # A deck request's engine is always ngspice (plan_deck_units
+    # enforces it), so the host-default's ngspice-only condition holds.
+    resolved_backend = _yield_host_default_backend(
+        resolved_backend, from_host_default, reason_ok=True
+    )
+    if hosts is not None and hosts != 1:
+        raise SimError(
+            "--hosts/remote.hosts sharding is not supported for "
+            "deck-list requests -- one off-host job runs the whole deck "
+            "list across its own worker pool (options.max_workers)"
+        )
+    if resume:
+        raise SimError(
+            "--resume/options.resume is not supported for deck-list requests"
+        )
+    if budget_s is not None:
+        raise SimError(
+            "--budget-s/options.wall_clock_budget_s is not supported for "
+            "deck-list requests -- bound each unit with decks[].timeout_s "
+            "instead"
+        )
+    if plot_dir is not None:
+        raise SimError(
+            "--plot writes waveform artifacts, which deck-list requests do not produce"
+        )
+    if fail_fast_probe:
+        raise SimError(
+            "--fail-fast-probe calibrates the corner engine, which "
+            "deck-list requests do not run"
+        )
+    if fail_on_diagnostic:
+        raise SimError(
+            "--fail-on-diagnostic grades corner diagnostics, which "
+            "deck-list requests do not produce"
+        )
+    return run_deck_request(
+        request,
+        request_dir=os.path.dirname(os.path.abspath(request_path)),
+        backend=resolved_backend,
+        max_workers=max_workers,
+        artifacts_dir=artifacts_dir,
+    )
+
+
+def _run_sim_corners(
+    request_path: str,
+    *,
+    artifacts_dir: str | None = None,
+    backend: str | None = None,
+    max_workers: int | None = None,
+    hosts: int | None = None,
+    budget_s: float | None = None,
+    resume: bool | None = None,
+    plot_dir: str | None = None,
+    fail_fast_probe: bool | None = None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    _ownership: contextlib.ExitStack | None = None,
+) -> dict[str, Any]:
+    """The corner-sweep body of :func:`run_sim` -- every parameter, the
+    request/response contract, and the deck-list dispatch alternative
+    are documented there. Kept as its own function so the deck dispatch
+    in ``run_sim`` adds nothing to this sweep's own complexity budget."""
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
@@ -1719,6 +1872,7 @@ def run_sim(
 
     if artifacts_dir is None:
         artifacts_dir = os.path.join(request_dir, ".klt", "sim")
+    artifacts_dir = os.path.abspath(artifacts_dir)
 
     # Orphan safety (issue #473): capture the sweep's own parent PID once, up
     # front. `os.getppid()` changes the moment the launching process exits --
@@ -4783,6 +4937,17 @@ def _run_corner(
                 }
             )
         diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
+        if engine_exit_code and not log_text and not os.path.exists(log_path):
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "unknown",
+                    "message": (
+                        f"{engine_name} exited with code {engine_exit_code} "
+                        "without writing its log (deck or log path not found?)"
+                    ),
+                }
+            )
 
     # Both engines fold a `.meas`/`.measure` card's name to lower-case in
     # their own report output (Xyce actually upper-cases, but

@@ -5818,7 +5818,9 @@ def test_active_layer_conb1_like_reproduction_excluded_with_active_layer(tmp_pat
     spec = tmp_path / "spec.json"
     _write_spec(spec, _antenna_spec_variant(active_layer="8/0"))
 
-    with pytest.raises(ErcError, match="no net"):
+    # (issue #2896) No `nets[]`/`ties[]` declared, so nothing but antenna
+    # work was asked for: still exit 1, naming the passive-cell cause.
+    with pytest.raises(ErcError, match="no transistor gate in this cell"):
         run_erc(str(gds), str(spec), pdk="sky130")
 
 
@@ -7924,3 +7926,124 @@ def test_cli_json_carries_undeclared_stream_layers(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
 
     assert data["erc_coverage"]["layers_in_stream_without_declaration"] == ["5/0"]
+
+
+# --- run_erc: passive-only cell (zero gates) with nets[]/ties[] (#2896) -----
+
+
+def _passive_spec(*, nets=None, ties=None) -> dict:
+    """`_nets_spec` with `active_layer` drawn nowhere, so the poly body is
+    excluded from the gate role: a passive-only cell with zero gates."""
+    spec = _nets_spec(nets=nets, ties=ties)
+    spec["stackup"][0]["active_layer"] = "8/0"
+    if not ties:
+        spec["ties_disclosure"] = {
+            "kind": "tool_limitation",
+            "reason": "passive-only cell, no wells drawn",
+        }
+    return spec
+
+
+def _passive_gds(tmp_path, labels=("VDD",)):
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    for name in labels:
+        top.shapes(label).insert(kdb.Text(name, kdb.Trans(_um(0.5), _um(0.5))))
+    gds = tmp_path / "passive.gds"
+    layout.write(str(gds))
+    return gds
+
+
+def _assert_passive_report(report):
+    assert report["gate_count"] == 0
+    assert report["gates"] == []
+    antenna = report["coverage"]
+    assert antenna["scope"] == "antenna"
+    assert [e["reason"] for e in antenna["inapplicable"]] == ["no_gates"]
+    assert antenna["skipped"] == []
+
+
+def test_passive_only_cell_with_declared_net_returns_report(tmp_path):
+    gds = _passive_gds(tmp_path)
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, _passive_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    _assert_passive_report(report)
+    assert report["erc_findings"] == []
+    assert report["erc_status"] == "clean"
+    assert report["status"] == "not_checked"
+    assert any(
+        entry.startswith("erc.net_connectivity")
+        for entry in report["erc_coverage"]["checked"]
+    )
+
+
+def test_passive_only_cell_reports_supply_short_and_unconnected_net(tmp_path):
+    gds = _passive_gds(tmp_path, labels=("VDD", "VSS"))  # one rail, two names
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        _passive_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VSS", "kind": "supply"},
+                {"name": "VMISSING", "kind": "supply"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+
+    _assert_passive_report(report)
+    rules = {f["rule"] for f in report["erc_findings"]}
+    assert "erc.supply_short" in rules
+    assert "erc.unconnected_net" in rules
+    assert report["erc_status"] == "violations"
+    assert report["status"] == "violations"
+
+
+def test_passive_only_cell_with_ties_yields_missing_tie_coverage(tmp_path):
+    layout, top, li1, label, nwell, tap = _ties_fixture_layout()
+    top.shapes(nwell).insert(kdb.Box.new(_um(30), _um(0), _um(34), _um(4)))
+    gds = tmp_path / "passive_ties.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "spec.json"
+    ties_spec = _ties_spec()["ties"]
+    _write_spec(spec, _passive_spec(ties=ties_spec))
+
+    report = run_erc(str(gds), str(spec))
+
+    _assert_passive_report(report)
+    assert any(f["rule"] == "erc.missing_tie" for f in report["erc_findings"])
+    assert any(
+        entry.startswith("erc.missing_tie")
+        for entry in report["erc_coverage"]["checked"]
+    )
+
+
+def test_zero_gates_and_nothing_declared_is_still_an_error(tmp_path):
+    gds = _passive_gds(tmp_path)
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, _passive_spec())
+
+    with pytest.raises(
+        ErcError,
+        match=r"no transistor gate in this cell \(no gate-role geometry "
+        r"overlapping `active_layer`, after `--deck` carve-outs\)",
+    ):
+        run_erc(str(gds), str(spec))
+
+
+def test_passive_only_cell_findings_only_and_pdk(tmp_path):
+    gds = _passive_gds(tmp_path)
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, _passive_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    findings_only = run_erc(str(gds), str(spec), findings_only=True)
+    _assert_passive_report(findings_only)
+    assert findings_only["erc_status"] == "clean"
+
+    with_pdk = run_erc(str(gds), str(spec), pdk="sky130")
+    _assert_passive_report(with_pdk)
+    assert with_pdk["erc_status"] == "clean"

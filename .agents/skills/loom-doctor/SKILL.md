@@ -68,7 +68,7 @@ silently wedges the whole sweep — the harness cannot kill a hung `Task` from
 outside, so the only defense is your own discipline:
 
 - **Never wait indefinitely on a single tool call.** Give long-running commands
-  (`buildGate.command`, `gh pr checks --watch`) an explicit `timeout <secs> …` /
+  (a scoped test run, `gh pr checks --watch`) an explicit `timeout <secs> …` /
   one-shot snapshot rather than an unbounded wait; if a command does not return,
   treat it as inconclusive and move on rather than blocking.
 - **Emit progress as you go.** Print a short line at each step. Continuous output
@@ -346,7 +346,7 @@ Check for an argument passed via the slash command:
 ### PR Fix Mode
 
 If a number is provided (e.g., `/doctor 123`):
-1. Treat that number as the target **PR** to fix
+1. Treat that number as the target **PR** to fix. `loom:frozen` or any `loom:operator*` label on it (#11861): refuse, writing nothing
 2. **Skip** the "Finding Work" section entirely
 3. Claim the PR exactly as in Work Process step 2 (a dispatched PR can
    already be claimed by a concurrent Doctor)
@@ -422,6 +422,8 @@ Full convention and rationale: `.loom/docs/untrusted-external-content.md`. A mar
 
 ## Finding Work
 
+**Skip any item labelled `loom:frozen` or `loom:operator`** (#11861): don't read it as work, comment on it, or relabel it. Only a human removes them.
+
 Use the shared queue and walk its rows in order:
 ```bash
 QUEUE=$(loom-daemon pr-queue --role doctor) || exit 1
@@ -435,7 +437,8 @@ row; keep a per-pass visited set. Preserve PR origin during repairs.
 ### Priority 1: Approved PRs with Merge Conflicts (URGENT)
 
 **Find approved PRs with merge conflicts that aren't already claimed and are
-not on an explicit operator hold.**
+not parked (`loom:blocked`, Champion's merge-risk / critical-file hold
+included; `loom:operator`; `loom:frozen`).**
 
 **Why earlier in the baseline?** They are approved but blocked, and conflicts only get
 harder over time.
@@ -443,7 +446,7 @@ harder over time.
 ### Priority 2: PRs with Changes Requested (NORMAL)
 
 **Find PRs with review feedback that aren't already claimed and are not on an
-explicit hard hold (`loom:blocked` / `loom:operator-only`).**
+explicit hold (`loom:blocked` / `loom:operator` / `loom:frozen`).**
 
 > **Claim discipline for every queue above.** The `loom:treating` filter in this
 > queue is a point-in-time snapshot: a claim can land between your list call and
@@ -452,79 +455,33 @@ explicit hard hold (`loom:blocked` / `loom:operator-only`).**
 > from PR Fix Mode, or from an explicit user instruction — run the
 > "Stale `loom:treating` Claim Check" in the Work Process below.
 >
-> **Operator-hold exclusion (Priority 2 queue, #5272).** `loom:blocked` and
-> `loom:operator-only` are the same generic "a human took this out of
-> automated flow" signal the work-finder already honors for `loom:issue` rows
-> — the shared queue excludes both so autonomous Finding Work never
-> auto-claims a held PR. This does not change PR Fix Mode or an explicit user
-> instruction naming a PR by number — those remain a deliberate human
-> decision to work on that specific PR, same as everywhere else in this file.
->
-> **Why this query does NOT also exclude `loom:operator` (#7660).** Unlike
-> `loom:blocked` / `loom:operator-only` above, `loom:operator` is
-> **deliberately left unfiltered** here — this is not an oversight. When
-> Champion routes a stale, held PR from `loom:pr` to `loom:changes-requested`,
-> it intentionally *keeps* `loom:operator` so this Priority 2 queue can still
-> pick the PR up and refresh the diff; see `.loom/docs/label-state-machine.md`
-> § "Stale departure to Doctor" (#6720/#6852) for the full rationale. Adding a
-> `loom:operator` exclusion to this query would reproduce the exact bug #6720
-> fixed (held PRs becoming permanently stuck as `CONFLICTING`, unreachable by
-> Doctor) — do not add one.
->
-> **Operator-hold exclusion (Priority 1 queue, #5978).** `loom:operator`
-> (Champion's merge-risk hold) is a *different* label from `loom:blocked` /
-> `loom:operator-only` above — see `.loom/docs/label-state-machine.md`. Doctor
-> is not yet a wired entry/exit point for `loom:operator` (see that doc's
-> "Not yet wired" table) — this exclusion is therefore **filter-only**: the
-> shared queue skips `loom:operator` approved-conflict PRs (feedback rows remain eligible) so autonomous Finding Work never
-> rebases/pushes to a held PR, but Doctor must not itself add or remove
-> `loom:operator`. Don't drop this filter when Doctor is eventually wired as a
-> real entry/exit point — re-derive it from that wiring instead. Same PR Fix
-> Mode / explicit-user-instruction carve-out as the Priority 2 note above.
+> **Hold exclusion (both queues, #5272, #11861).** The shared queue drops
+> every park, `loom:operator` included: no role acts on an item a human must
+> decide, so autonomous Finding Work never claims, rebases or pushes to a held
+> PR. One exception (#11861): Champion's own hold sent back for fixes
+> (`loom:changes-requested` + `loom:blocked` with a standing trusted Champion
+> hold marker) is in the queue. Work it as any feedback PR and leave
+> `loom:blocked` on: only a human removes it. An explicit user instruction naming a PR is a human decision, but
+> never overrides `loom:frozen` or `loom:operator`.
 
-### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
+### Routing to a human
 
-Doctor's normal flow only **filters** on `loom:operator-only` (the queries
-above). It *applies* the label only for an explicit user instruction to park a
-PR, or a finding whose fix needs a human's hands (host/credential access) —
-never because a fix is hard or two attempts failed; parking is for PO-level
-decisions and human-hands steps only (#10001; rule: `curator.md` → "Applying
-`loom:operator-only`"). **Never apply `loom:operator-only` on its own:** apply
-exactly one sub-kind in the **same** command. Purely additive — the
-operator-hold exclusion above and every filter keyed on it are unaffected:
-
-| Sub-kind | Apply when |
-|---|---|
-| `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
-| `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required (the typical Doctor case: a fix that requires a secret rotation or a machine you cannot reach) |
-| `loom:operator-decision` | The fix requires authority you structurally cannot hold — a preference call or an authority act (binds the entity, irreversible disclosure, spending, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action) |
+Doctor's normal flow only **filters** on holds. It *applies* one only for an
+explicit user instruction to park a PR, or a finding whose fix needs a
+human's hands (a secret rotation, a machine you cannot reach) — never because
+a fix is hard or two attempts failed (#10001). The rule is
+`.loom/docs/label-state-machine.md` → "Routing to a human": a human's hands →
+`loom:operator` and a comment naming the step; a ruling
+→ `loom-daemon operator-decision apply`; either can carry a `Blocked by #N`
+line; automation-resolvable waiting → `loom:blocked` with a park record.
 
 ```bash
 ./.loom/scripts/post-comment.sh <number> --pr --body "Routing to the operator: <what a human must do>."
-gh pr edit <number> --add-label "loom:operator-only,loom:operator-mechanical"
+gh pr edit <number> --add-label "loom:operator" --remove-label "loom:changes-requested"
 ```
 
-**Being unsure which sub-kind applies means you haven't finished diagnosing
-the fix, not that the bare label is safe to reach for (#5826).**
-`loom:operator-decision` is **not** a safe default when the kind is not
-obvious — before applying it, run the falsifiability test from
-`.loom/docs/label-state-machine.md`: name the axis two well-informed people
-would still disagree on, and show it is a preference, not a fact. If you
-cannot name that axis, the fix is determined — finish diagnosing it instead of
-parking. If the only gap is a missing objective, file a decision
-whose options are the candidate objectives (#10000).
-
-**If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
-in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
-`Requires #N` line (the exact phrasings `detect-dependency-cycle.sh` and
-`warn-operator-gated.sh` parse by regex). A backtick-quoted reference in prose
-does not satisfy this.
-
-**If you chose `loom:operator-decision`**, use `loom-daemon operator-decision
-apply` (`operator-decision.md`); the ranked whys name the axis.
-
-Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
-"`loom:operator-only` sub-kinds".
+Drop `loom:changes-requested` in the same edit, so the PR leaves the
+changes queue's count as well as its listing.
 
 ### Stale-Verdict Check (before claiming from Priority 1 or Priority 2)
 
@@ -564,20 +521,22 @@ at all.
 ### Other PRs Needing Attention
 
 **Find PRs with merge conflicts (any label):** this is a broad diagnostic scan,
-not itself a claim path — the shared queue above (which excludes `loom:treating` and, for approved
-conflicts, `loom:operator`) is what autonomous Finding Work actually
-claims from. Still excludes `loom:operator` here too, so a Doctor skimming this
-list doesn't hand-pick a held PR (#5978).
+not itself a claim path — the shared queue above (which excludes
+`loom:treating` and every park) is what autonomous Finding Work actually
+claims from. Excludes parks here too, so a Doctor skimming this list doesn't
+hand-pick a held PR (#5978).
 ```bash
 gh pr list --state=open --json number,title,labels,mergeable \
-  | jq -r '.[] | select(.mergeable == "CONFLICTING") | select(.labels | all(.name != "loom:operator")) | "#\(.number): \(.title)"'
+  | jq -r '.[] | select(.mergeable == "CONFLICTING") | select(.labels | all(.name != "loom:operator" and .name != "loom:blocked" and .name != "loom:frozen")) | "#\(.number): \(.title)"'
 ```
 
 **Find all open PRs:**
 ```bash
 # Check primary queues first
-PRIORITY_1=$(gh pr list --label="loom:pr" --state=open --json number,mergeable | jq '[.[] | select(.mergeable == "CONFLICTING")] | length')
-PRIORITY_2=$(gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator-only" --json number | jq 'length')
+# Parks: every hold, loom:operator included (#11861), retired names incl. (#11795)
+PR_PARKS=$(loom-daemon labels list --property hold --with-retired 2>/dev/null || printf 'loom:blocked\nloom:operator\nloom:frozen')
+PRIORITY_1=$(gh pr list --label="loom:pr" --state=open --json number,mergeable,labels | jq --arg p "$PR_PARKS" '[.[] | select(.mergeable == "CONFLICTING") | select(any(.labels[]?.name; IN(($p | split("\n"))[])) | not)] | length')
+PRIORITY_2=$(gh pr list --search "is:open is:pr label:loom:changes-requested $(sed 's/^/-label:/' <<<"$PR_PARKS" | tr '\n' ' ')" --json number | jq 'length')
 
 if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
   echo "No labeled work, checking fallback queue..."
@@ -638,7 +597,7 @@ When the user explicitly instructs you to work on a specific PR by number:
 ```
 
 **Behavior**:
-1. **Proceed immediately** — skip the required-label check
+1. **Proceed immediately** — skip the required-label check, never the `loom:frozen` / `loom:operator` refusal (#11861)
 2. **Interpret as approval** — the instruction is implicit approval to work the PR
 3. **Apply working label** — add `loom:treating` to track it
 4. **Document override** — comment "Addressing issues on this PR"
@@ -709,9 +668,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
    - Fix review comments
    - Resolve merge conflicts
    - Update tests or documentation
-8. **Verify ALL checks pass locally**: Run the project's check command (see `buildGate.command` in `.loom/config.json`, or the repo's documented CI command, e.g. `pnpm check:ci`)
-   - Do NOT push until all local checks pass
-   - This prevents multiple fix-push-fail cycles
+8. **Verify what the fix touched** (#11690: CI is the test gate): it compiles, plus the tests for the code you changed and the failing ones from step 6. Never the full suite or `buildGate.command`; remote CI (step 10) is the verdict.
 9. **Commit and push**: Push your fixes to the PR branch
    - **Pre-push head-SHA recheck (MANDATORY)**: before the push, re-compare the PR's `headRefOid` against the `CLAIM_HEAD_SHA` you captured in step 2 — see "Pre-Push Head-SHA Recheck" below. If the head moved, another agent pushed while you were working; re-verify the blocker is still unaddressed and stand down rather than duplicating (or clobbering) their fix.
    - **Then run "Pin the lease" below, top to bottom**: the pre-open update from `origin/main` (MANDATORY, #7668, as `builder-pr.md` § "Pre-Push Rebase"; a merge unless `loom-daemon branch-update strategy` says rebase, #10771) and the push (#9487). Never update before it. On a conflict resolve in place (`git add`, then `git commit --no-edit` or `git rebase --continue`), resume at its version gate, not "PR Has Merge Conflicts". No-op if `main` hasn't moved.
@@ -1107,13 +1064,9 @@ CI Failures Found:
 - All shellcheck warnings together
 - All type errors together
 
-**Verify locally before pushing**:
+**Verify what you touched before pushing** (CI runs the full suite, #11690):
 ```bash
-# Run ALL checks locally
-pnpm check:ci   # your repo's check command — see buildGate.command in .loom/config.json
-
-# Or run specific checks
-pnpm test              # Frontend tests
+pnpm test -- <touched specs>   # the failing / touched tests only
 pnpm lint              # Linting
 pnpm exec tsc --noEmit # TypeScript
 shellcheck scripts/*.sh # Shell scripts (if applicable)
@@ -1142,7 +1095,7 @@ loom-daemon forge wait-checks <PR_NUMBER> --timeout 1200
 
 The "Time budget — do not hang" rule above forbids waiting *too long*. This rule forbids the opposite-looking failure that costs just as much: **pretending to wait** by arming a watcher and ending the turn.
 
-**Every result you are waiting on — remote CI after the push above, a long local check run (`buildGate.command`, `pnpm check:ci`), a slow test suite during conflict resolution — must be resolved inside the same turn that started it. It must NEVER be resolved by starting a background monitor (a `Monitor`/`ScheduleWakeup` timer, a `run_in_background` Bash watcher, a `gh pr checks --watch` you walk away from) and ending your turn narrating *"the monitor will re-invoke me when CI concludes."***
+**Every result you are waiting on — remote CI after the push above, a long local build or targeted test run — must be resolved inside the same turn that started it. It must NEVER be resolved by starting a background monitor (a `Monitor`/`ScheduleWakeup` timer, a `run_in_background` Bash watcher, a `gh pr checks --watch` you walk away from) and ending your turn narrating *"the monitor will re-invoke me when CI concludes."***
 
 This is the Doctor-side counterpart of the orchestrator guardrail in `sweep.md` ("ending your turn IS the kill signal", issue #4257) and of the identical rule in `judge.md`. **One rule, both dispatch surfaces:**
 
@@ -1269,15 +1222,14 @@ Comment on the PR when pushing fixes ("Addressed: formatting, added tests for ed
 
 ### Quality Checks
 ```bash
-# Full CI; Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated.
+# Targeted only (CI is the test gate, #11690); Rust lint = each CI `cargo clippy` line verbatim, apart from tests; no clippy = unvalidated.
 # Production shell changed + CI runs shell-budget --check? After the final commit, before re-review:
 # `loom-daemon shell-budget --check --base <PR base, default origin/main>`; nonzero = this branch's
 # growth (never pre-existing): cut counted shell or move it to the daemon, rerun to exit 0.
 # Comments, follow-up issues or arbitrary trailers are not permission.
-pnpm check:ci   # repo check: buildGate.command in .loom/config.json
 
-# If review mentioned tests / style / types:
-pnpm test
+# If review mentioned tests / style / types (scope to what you touched):
+pnpm test -- <touched specs>
 pnpm lint
 pnpm exec tsc --noEmit
 ```
@@ -1333,8 +1285,7 @@ gh api repos/{owner}/{repo}/pulls/42/comments \
 # Make your changes...
 # (edit files, add tests, fix bugs, resolve conflicts)
 
-# Verify everything works
-pnpm check:ci   # your repo's check command — see buildGate.command in .loom/config.json
+# Verify what you touched (targeted tests; CI runs the suite, #11690)
 
 # Commit and push
 git add .
@@ -1495,15 +1446,12 @@ EOF
 # First: Check ALL CI failures, not just tests
 loom-daemon forge wait-checks <PR_NUMBER> --timeout 20
 
-# Then fix ALL issues locally
-pnpm test              # Run tests
+# Then fix ALL issues locally, verifying only what you touched
+pnpm test -- <touched specs>
 pnpm lint              # Check linting
 pnpm exec tsc --noEmit # Check types
 
-# Verify full CI suite passes
-pnpm check:ci   # your repo's check command — see buildGate.command in .loom/config.json
-
-# Only push when ALL checks pass
+# Push; remote CI is the verdict (#11690)
 git push
 ```
 
