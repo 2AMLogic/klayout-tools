@@ -12188,5 +12188,10 @@ def test_local_backend_unset_env_include_is_named_not_measurement_only(
     assert corner["status"] == "error"
     codes = [d["code"] for d in corner["diagnostics"]]
     assert "missing_include" in codes
-    (inc,) = [d for d in corner["diagnostics"] if d["code"] == "missing_include"]
-    assert "INCDIR" in inc["message"] and "line 2" in inc["message"]
+    # ngspice may add its own classified missing_include too (wording varies by
+    # version), so look for the named up-front one rather than requiring one.
+    assert any(
+        "INCDIR" in d["message"] and "line 2" in d["message"]
+        for d in corner["diagnostics"]
+        if d["code"] == "missing_include"
+    )
