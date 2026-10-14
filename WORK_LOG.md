@@ -4,6 +4,10 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-14
 
+- **PR #3261**: feat(sim): surface missing_include and engine-log tail for batch jobs
+- **PR #2795**: drc: model sg13g2 Cnt.c activ_mask join and square-contact selection
+- **Issue #2882** (closed): Friction: klt sim batch jobs fail with 'Could not find include file <host PDK path>/libs.tech/ngspice/design.ngspice' on the fleet (client 0.6.0 past the version gate)
+- **Issue #2688** (closed): drc: curated sg13g2 Cnt.c drops the activ_mask join, so every HBT contact false-positives
 - **PR #3255**: feat(erc): grade nets/ties on passive-only cells with zero gates
 - **PR #3254**: fix(sim): absolutise artifacts_dir for relative -o (#2892)
 - **PR #3253**: ci: enable high-signal ruff security (S) rules (#3222)
