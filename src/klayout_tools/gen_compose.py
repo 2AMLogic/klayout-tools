@@ -243,6 +243,7 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
+from .gen_layer_params import _mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
 
 #: Contract identifier for the request envelope (spike section 2).
@@ -2494,6 +2495,92 @@ def promote_composed_ports(
 # own small functions instead of inflating an already-baselined one.
 
 
+def _snap_routed_ports_to_grid(
+    connectivity: list[dict[str, Any]],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    grid_for_layer: Callable[[tuple[int, int] | None], float],
+    route_layer: tuple[int, int] | None,
+    notes: list[str],
+) -> None:
+    """Move every routed port's attach point onto the PDK manufacturing grid
+    (issue #2932).
+
+    Generators report a terminal port at the *midpoint* of its pad, which is
+    half a manufacturing-grid step off-grid whenever the pad's extent is an
+    odd multiple of the grid (e.g. ``w_um`` 3.015 on a 0.005um grid ->
+    1.5075). Every via-drop cut/landing pad and backbone vertex is centred on
+    that point, so the composed cell failed ``*.ongrid.1`` while each block
+    was clean alone. Any on-grid point inside the pad is electrically
+    equivalent, so the port is moved (in the *composed* frame, then translated
+    back) to the nearest grid line that stays inside the pad along the port
+    edge's tangential axis (``width_um``; unknown extent is treated as
+    unconstrained). Updates ``blocks[...]["ports"]`` in place (the parsed
+    copies, never the caller's report). A move, or a port that cannot be
+    snapped (pad narrower than one grid step), is recorded in ``notes``.
+    Already-on-grid ports are untouched and add no note.
+    """
+    seen: set[tuple[str, str]] = set()
+    for entry in connectivity:
+        for pin in entry["pins"]:
+            key = (pin["block"], pin["port"])
+            if key in seen:
+                continue
+            seen.add(key)
+            block = blocks.get(pin["block"])
+            port = (block or {}).get("ports", {}).get(pin["port"])
+            if not _port_has_geometry(port):
+                continue
+            layer_info = port.get("layer")
+            port_layer = (layer_info["layer"], layer_info["datatype"])
+            grid = max(grid_for_layer(route_layer), grid_for_layer(port_layer))
+            if grid <= 0.0:
+                continue
+            offset = offsets_um[pin["block"]]
+            direction = int(port.get("direction_deg", 0)) % 360
+            tangential = "y" if direction in (0, 180) else "x"
+            width = port.get("width_um")
+            half = (
+                float(width) / 2.0
+                if isinstance(width, (int, float)) and not isinstance(width, bool)
+                else None
+            )
+            new_port = dict(port)
+            for axis in ("x", "y"):
+                local = float(port[f"{axis}_um"])
+                composed = local + offset[axis]
+                steps = composed / grid
+                if abs(steps - round(steps)) < 1e-6:
+                    continue
+                limit = half if axis == tangential else None
+                base = math.floor(steps + 0.5 + 1e-9)
+                candidates = sorted(
+                    (base, base - 1, base + 1), key=lambda c: abs(c - steps)
+                )
+                snapped = None
+                for cand in candidates:
+                    value = cand * grid
+                    if limit is None or abs(value - composed) <= limit + 1e-9:
+                        snapped = value
+                        break
+                where = f"block '{pin['block']}' port '{pin['port']}' {axis}"
+                if snapped is None:
+                    notes.append(
+                        f"{where}: attach point {composed:.6g}um is off the "
+                        f"{grid:g}um manufacturing grid and the pad "
+                        f"(width {2 * limit:g}um) holds no on-grid point -- "
+                        "drawn off-grid; expect *.ongrid.1 violations"
+                    )
+                    continue
+                new_port[f"{axis}_um"] = snapped - offset[axis]
+                notes.append(
+                    f"{where}: attach point snapped from {composed:.6g}um to "
+                    f"{snapped:.6g}um onto the {grid:g}um manufacturing grid "
+                    f"(moved {abs(snapped - composed):.4g}um, inside the pad)"
+                )
+            block["ports"][pin["port"]] = new_port
+
+
 def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
     """The port's own ``(x_um, y_um)``, or ``None`` when it declares no usable
     numeric position (the same "nothing to check" case the rest of the
@@ -3217,6 +3304,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         best = (threshold_um, rule.id)
             _min_spacing_um_cache[layer] = best
         return _min_spacing_um_cache[layer]
+
+    def _grid_for_layer(layer: tuple[int, int] | None) -> float:
+        try:
+            return _mfg_grid_um(_pdk_family(pdk_info["variant"]), layer)
+        except GenError:
+            return 0.0
+
+    if route_layer is not None:
+        _snap_routed_ports_to_grid(
+            connectivity, blocks, offsets_um, _grid_for_layer, route_layer, notes
+        )
 
     for net_index, entry in enumerate(connectivity):
         net_label = entry["net"]
