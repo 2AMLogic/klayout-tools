@@ -12045,3 +12045,42 @@ def test_parse_measurements_long_token_with_trailer():
     assert values["tphl"] == 4.020000000001e-11
     assert values["avgv"] == 6.666777774074e-01
     assert set(values) == {"tphl", "avgv"}
+
+
+def test_run_sim_relative_artifacts_dir_is_absolutised(tmp_path, monkeypatch):
+    """Issue #2892: the engine runs with cwd=<corner dir>, so a relative
+    `-o` must not leak into the command line / log path."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "options": {"keep_artifacts": True},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    seen = []
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        log_path = cmd[cmd.index("-o") + 1]
+        seen.append((cmd, cwd))
+        assert os.path.isabs(log_path)
+        # Emulate the real process: relative paths resolve against cwd.
+        assert os.path.isabs(cwd)
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        sim.run_sim(str(request), artifacts_dir="out")
+    finally:
+        os.chdir(cwd)
+
+    assert seen
+    for cmd, run_cwd in seen:
+        for arg in cmd:
+            if arg.startswith(("out", "./out")):
+                raise AssertionError(f"relative path in command: {arg}")
