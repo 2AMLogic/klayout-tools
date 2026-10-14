@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1154",
-  "loom_commit": "9086c5eb90893212b418186a85216681fe12376c",
+  "loom_version": "0.19.1155",
+  "loom_commit": "4844d0404ab018a44c679f3da55b6ff8bf61dfc3",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -480,7 +480,10 @@
     ".loom/scripts/tests/test-create-pr-review-gate.sh",
     ".loom/scripts/tests/test-guide-work-plan-operator-only-exclude.sh",
     ".loom/scripts/tests/test-hard-exclusion-labels.sh",
-    ".loom/scripts/tests/test-worktree-lease-co-occupancy.sh"
+    ".loom/scripts/tests/test-worktree-lease-co-occupancy.sh",
+    ".loom/scripts/tests/test-create-issue-refuse-labels.sh",
+    ".loom/scripts/tests/test-resync-installed-agents-hooks.sh",
+    ".loom/scripts/land-resync-commit.sh"
   ],
   "last_resync": "2026-10-14",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
