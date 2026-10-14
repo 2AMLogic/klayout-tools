@@ -4937,11 +4937,7 @@ def _run_corner(
                 }
             )
         diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
-        if (
-            engine_exit_code
-            and not log_text
-            and not os.path.exists(log_path)
-        ):
+        if engine_exit_code and not log_text and not os.path.exists(log_path):
             diagnostics.append(
                 {
                     "severity": "error",

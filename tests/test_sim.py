@@ -12080,7 +12080,7 @@ def test_run_sim_relative_artifacts_dir_is_absolutised(tmp_path, monkeypatch):
         os.chdir(cwd)
 
     assert seen
-    for cmd, run_cwd in seen:
+    for cmd, _run_cwd in seen:
         for arg in cmd:
             if arg.startswith(("out", "./out")):
                 raise AssertionError(f"relative path in command: {arg}")
