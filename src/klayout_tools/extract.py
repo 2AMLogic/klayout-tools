@@ -297,7 +297,7 @@ from .extract_report import (
 # redundant `X as X` aliases mark them explicit re-exports, so neither reads as
 # an unused import in a module that never calls them itself.
 from .extract_spef import ExtractError as ExtractError
-from .extract_spef import _write_spef
+from .extract_spef import _unescape_spice_safe_net_name, _write_spef
 from .extract_spef import def_net_instance_pins as def_net_instance_pins
 from .metrics import is_registered
 from .parasitic_integrity import empty_integrity_summary
@@ -2769,6 +2769,7 @@ def run_extract(
     subcircuit_info: dict[str, Any] = {}
     missing_flavour_markers: list[dict[str, Any]] = []
     probe_results: list[dict[str, Any]] = []
+    dotted_renames: list[tuple[str, str, str]] = []
 
     (
         netlist,
@@ -2825,6 +2826,7 @@ def run_extract(
         missing_flavour_markers=missing_flavour_markers,
         probes=probes,
         probe_results=probe_results,
+        dotted_renames_out=dotted_renames,
     )
 
     # `--critical-net-pattern`/`--parasitics-net-pattern` (issue #2974): the
@@ -3519,6 +3521,7 @@ def run_extract(
             raise ExtractError(
                 f"cannot create output directory {spef_out_dir}: {exc}"
             ) from exc
+        spef_conn_map = _remap_def_net_connections(def_net_connections, dotted_renames)
         spef_skipped_nets = _write_spef(
             spef_path,
             design_name=top_cell_name,
@@ -3528,7 +3531,12 @@ def run_extract(
             # Issue #961: real cell-instance `*CONN`/`*RES` correlation from
             # the routed DEF's own `NETS` section -- `None` (the default)
             # falls back to the pre-#961 port-only behavior.
-            net_instance_pins=def_net_connections,
+            net_instance_pins=spef_conn_map,
+        )
+        warnings.extend(
+            _spef_missing_conn_warnings(
+                parasitics_report, def_net_connections, spef_conn_map
+            )
         )
         warnings.extend(
             _spef_warnings(
@@ -4784,6 +4792,7 @@ def extract_netlist_from_layout(
     substrate_spreading_net: str | None = None,
     pdk_info: dict[str, Any] | None = None,
     missing_flavour_markers: list[dict[str, Any]] | None = None,
+    dotted_renames_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -5227,6 +5236,7 @@ def extract_netlist_from_layout(
         substrate_spreading_net=substrate_spreading_net,
         probes=probes,
         probe_results=probe_results,
+        dotted_renames_out=dotted_renames_out,
     )
 
     # `klt extract --substrate-spreading <net>` (issue #2561): the closed-form
@@ -6722,6 +6732,82 @@ def _dotted_rename_warnings(renames: list[tuple[str, str, str]]) -> list[str]:
     ]
 
 
+def _remap_def_net_connections(
+    def_net_connections: Mapping[str, Sequence[tuple[str, str]]] | None,
+    renames: list[tuple[str, str, str]],
+) -> Mapping[str, Sequence[tuple[str, str]]] | None:
+    """Re-key ``def_net_connections`` through the extractor's own dotted-net
+    rename (issue #2903).
+
+    :func:`_rewrite_dotted_net_names` renames ``a.b`` to ``a_b`` (or a
+    collision-suffixed ``a_b_1``) on the live net, so the SPEF writer sees the
+    renamed spelling while the DEF's own keys stay dotted. Using the rename's
+    actual ``before -> after`` triples (not a context-free ``.`` -> ``_``)
+    keeps collision outcomes identical. ``None`` / no renames return the
+    input unchanged, so dot-free runs are byte-identical.
+    """
+    if not def_net_connections or not renames:
+        return def_net_connections
+    after_by_before: dict[str, str] = {}
+    for _circuit, before, after in renames:
+        after_by_before.setdefault(before, after)
+    remapped: dict[str, Sequence[tuple[str, str]]] = {}
+    renamed_items: dict[str, Sequence[tuple[str, str]]] = {}
+    for key, pins in def_net_connections.items():
+        target = after_by_before.get(key)
+        if target is None:
+            remapped[key] = pins
+        else:
+            renamed_items[target] = pins
+    # The renamed net is what actually exists, so it wins any key clash.
+    remapped.update(renamed_items)
+    return remapped
+
+
+def _spef_missing_conn_warnings(
+    parasitics_report: Mapping[str, Any],
+    original: Mapping[str, Sequence[tuple[str, str]]] | None,
+    remapped: Mapping[str, Sequence[tuple[str, str]]] | None,
+) -> list[str]:
+    """Zero or one ``warnings[]`` entry naming written ``*D_NET`` blocks that
+    correspond to a ``--def-net-connections`` net yet get no instance
+    ``*CONN`` pins (issue #2903): a duplicated net name (the writer keeps
+    those port-only), or a dotted DEF net whose rewritten spelling did not
+    reach the key lookup."""
+    if not remapped:
+        return []
+    names = [
+        _unescape_spice_safe_net_name(entry["net"])
+        for entry in parasitics_report["nets"]
+    ]
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+    stale = {
+        key.replace(SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN)
+        for key in (original or {})
+        if SPICE_HIERARCHY_SEPARATOR in key and key in remapped
+    }
+    missing = sorted(
+        name
+        for name in counts
+        if (remapped.get(name) and counts[name] > 1)
+        or (name in stale and not remapped.get(name))
+    )
+    if not missing:
+        return []
+    shown = ", ".join(missing[:_DOTTED_RENAME_WARNING_EXAMPLES])
+    more = len(missing) - _DOTTED_RENAME_WARNING_EXAMPLES
+    return [
+        f"{len(missing)} *D_NET block(s) correspond to a --def-net-connections "
+        f"net but were written without instance *CONN pins ({shown}"
+        + (f", +{more} more" if more > 0 else "")
+        + ") -- duplicated net names stay port-only, and a DEF net name the "
+        "extractor did not rename cannot be matched; downstream `klt sta` "
+        "will report these nets as partially unannotated"
+    ]
+
+
 def _rewrite_dotted_net_names(netlist: kdb.Netlist) -> list[tuple[str, str, str]]:
     """Rename every net whose name contains ngspice's hierarchy separator
     (``.``) to the SPICE-addressable ``_`` spelling
@@ -8091,6 +8177,7 @@ def _extract_netlist(
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
     substrate_spreading_net: str | None = None,
+    dotted_renames_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[
     kdb.Netlist,
     list[str],
@@ -10125,7 +10212,12 @@ def _extract_netlist(
     # all then see one spelling. Unlike the `,`/leading-`$` cases,
     # `NetlistSpiceWriter` applies no escape of its own for `.`, so this has
     # to change the real net's name -- see `_rewrite_dotted_net_names`.
-    warnings.extend(_dotted_rename_warnings(_rewrite_dotted_net_names(netlist)))
+    dotted_renames = _rewrite_dotted_net_names(netlist)
+    if dotted_renames_out is not None:
+        # Issue #2903: hand the `(circuit, before, after)` triples back so
+        # `--def-net-connections` keys can follow the rename.
+        dotted_renames_out.extend(dotted_renames)
+    warnings.extend(_dotted_rename_warnings(dotted_renames))
 
     # Post-extraction device-parameter corrections (issues #512, #518, #521):
     # applied to the live `kdb.Device` objects here -- *before* the netlist is
