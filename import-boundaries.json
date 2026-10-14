@@ -419,6 +419,7 @@
         "klayout_tools.sim",
         "klayout_tools.sim_batch",
         "klayout_tools.sim_crossings",
+        "klayout_tools.sim_decks",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
@@ -1217,6 +1218,12 @@
     },
     {
       "consumer": "klayout_tools.sim_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.sim_decks",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
