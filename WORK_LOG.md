@@ -4,6 +4,15 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-14
 
+- **PR #3255**: feat(erc): grade nets/ties on passive-only cells with zero gates
+- **PR #3254**: fix(sim): absolutise artifacts_dir for relative -o (#2892)
+- **PR #3253**: ci: enable high-signal ruff security (S) rules (#3222)
+- **PR #3245**: klt sim batch: publish runner klt identity in the AMI manifest and refuse known mismatches before launch
+- **Issue #3222** (closed): ci: enable the clean high-signal ruff security (S) rules and review the 4 remaining findings
+- **Issue #2907** (closed): klt lvs --check --rerun cannot replay a report whose request used reference.form: subckt-call
+- **Issue #2896** (closed): Friction: klt erc exits 1 on a passive-only cell (no transistor gate), so its supply nets and ties cannot be checked
+- **Issue #2892** (closed): klt sim: relative -o/--outdir makes ngspice never start (cwd=corner dir), reported only as per-measurement 'no value' errors
+- **Issue #2851** (closed): klt sim batch: publish runner klt identity and reject incompatible clients before instance launch
 - **PR #3196**: fix(extract): deterministic FinFET source/drain assignment (#3154)
 - **PR #3152**: feat(sim): dispatch pre-composed ngspice decks to remote/batch backends (#2804)
 - **Issue #3154** (closed): tests/test_asap7_finfet.py::test_fin_count_and_gate_length_recovered_exactly fails on main (S/D net labels swapped)
