@@ -14,6 +14,10 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **mypy baseline ratchet and `py.typed`** (issue #3221): `mypy` (pinned in the
+  `dev` extra) now runs in CI against `type-baseline.json` via
+  `scripts/check_type_baseline.py`; the package ships `py.typed`. See
+  `docs/type-checking.md`.
 - **Fixed** (#2885, `klt functional-verification` `options.sdf` on Icarus —
   gf180mcu netlists with XOR/XNOR/MUX/half-adder cells no longer fail
   annotation): those cell models declare their non-unate arcs only as

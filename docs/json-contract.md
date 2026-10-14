@@ -1665,3 +1665,10 @@ roles from `provenance.input.content_hash` (the layout) and must not take
 part in layout-consistency comparisons; `klt signoff` verifies them per role
 (`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
 See [`cli/pex.md`](cli/pex.md).
+
+## Static typing of the envelope
+
+The envelope modules (`klayout_tools.cli.output`,
+`klayout_tools.signoff_envelopes`) are held to `disallow_untyped_defs` under
+mypy and the package ships `py.typed`. The rest of the code is covered by a
+baseline ratchet; see [`type-checking.md`](type-checking.md).
