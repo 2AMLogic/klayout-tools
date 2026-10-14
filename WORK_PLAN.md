@@ -126,6 +126,8 @@ Issues carrying `loom:curated`.
 - **#2898**: klt sim monte_carlo: family_mismatch reports gf180mcu poly-resistor/MIM-cap subcircuits as family 'other' (active: null), hiding that they have no per-instance mismatch *(curated)*
 - **#2899**: klt sim monte_carlo: mismatch seed is keyed on corner_index, so the same sample_index is a different die at each corner *(curated)*
 - **#2900**: Friction: documented 'klayout-tools[yield]' install path does not resolve (klt-yield-native not on PyPI) *(curated)*
+- **#2902**: klt sim: no way to sweep supply level on a ramped (PWL) supply source; transient-settling benches need one request per supply *(curated)*
+- **#2903**: klt extract --def-net-connections: nets whose DEF name contains '.' get no SPEF *CONN block since the dotted-name rewrite (#2145) *(curated)*
 - **#3072**: test: verilator pin check fails preflight on hosts with Verilator 5.052 (pinned 5.050) *(curated)*
 - **#3179**: docs: design-extraction skill and ROADMAP still claim RC parasitics are unshipped (#217 closed) *(curated)*
 
@@ -161,7 +163,7 @@ Issues carrying `loom:curated`.
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 22 |
-| Curated | 55 |
+| Curated | 57 |
 | Architect / Hermit proposals | 7 |
 | Active epics | 9 |
 <!-- guide:plan-body:end -->
