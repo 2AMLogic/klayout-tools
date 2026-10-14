@@ -1399,7 +1399,7 @@ def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
             "regression did not run to completion"
         )
     try:
-        tree = ElementTree.parse(results_xml)
+        tree = ElementTree.parse(results_xml)  # noqa: S314 - cocotb results.xml generated in the verb-owned sim build dir
     except ElementTree.ParseError as exc:
         raise FunctionalVerificationError(
             f"results file '{results_xml}' is not parseable XML: {exc}"
@@ -1575,7 +1575,7 @@ def _extract_random_seed_property(results_xml: str) -> int | None:
     perfectly well defined.
     """
     try:
-        tree = ElementTree.parse(results_xml)
+        tree = ElementTree.parse(results_xml)  # noqa: S314 - cocotb results.xml generated in the verb-owned sim build dir
     except (ElementTree.ParseError, OSError):
         return None
     for prop in tree.iter("property"):
