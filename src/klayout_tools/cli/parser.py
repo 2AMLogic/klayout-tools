@@ -2759,6 +2759,29 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--flatten-schematic",
+        dest="flatten_schematic",
+        action="store_true",
+        default=False,
+        help=(
+            "flatten the schematic DUT to PDK leaf devices before the "
+            "schematic-side run (issue #2889): every subcircuit the DUT "
+            "netlist defines is inlined (instance-path-prefixed device/node "
+            "names, parameter and m= overrides propagated, .global nets "
+            "kept), written to <outdir>/schematic-dut.flat.spice, and each "
+            "testbench's DUT .include is re-pointed at it -- so a "
+            "hierarchical schematic compares like with like against the "
+            "always-flat extraction and model_mismatch stops firing on "
+            "hierarchy alone. A cycle, an X-call pin-count mismatch or a "
+            "card the flattener cannot rename safely is an error "
+            "(error.code schematic_flatten_*), never a partial flatten. Off "
+            "by default -- byte-identical to today's behavior. Reported as "
+            "`flatten_schematic` plus the `schematic_flatten` block (path, "
+            "sha256, inlining summary). The klt pex counterpart of klt "
+            "lvs's options.flatten_reference."
+        ),
+    )
+    pex_parser.add_argument(
         "--deck",
         required=True,
         help=(
