@@ -2497,22 +2497,40 @@ a `prerequisite missing: ...` diagnostic naming the capability:
 `tests/test_asap7_bsimcmg_sim.py` skips with the missing capability named
 when the corpus, the module or a loading ngspice is absent.
 
-**Verification status (2026-10-12).** The real-run evidence (extracted
-`INVx1_ASAP7_75t_R` / `NAND2xp5_ASAP7_75t_R` simulated at TT through
-`klt sim`, with the VTC switching point or delay recorded) is **outstanding**:
-it needs a host with ngspice >= 44 built with OSDI support and a Linux x86-64
-OpenVAF-Reloaded compile, which the fleet worker (ngspice-42, no OSDI/OpenVAF)
-does not provide. The integration test in `tests/test_asap7_bsimcmg_sim.py`
-runs that simulation and skips, naming the missing capability, until the
-toolchain and the ASAP7 corpus are present. What *is* pinned and verified:
-the BSIM-CMG Verilog-A tarball sha256
-`357d69569a6fbfd7632887f28a1b3f26102605e1e64ccfcfb2de85b2399af0ab`
-(dwarning/VA-Models `6099b4e1`, contains `code/bsimcmg/vacode111/bsimcmg.va`),
-and the lambdapdk 0.2.17 TT card sha256
-`684708eec0f7d5960be1df6a045de811c8dd2d6b0e1ed7d0f805a3f697f262fc`. The
-`.osdi` hash, simulator build and electrical results are to be recorded here
-by the first run on a provisioned host. The unadapted cards on a stock ngspice
-produce the `unsupported_model_level` diagnostic above.
+**Verification status (2026-10-13).** Verified end to end on a Linux x86-64
+host with ngspice-46 (KLU, OSDI ABI 0.4) after `scripts/fetch-pdks.sh` and
+`scripts/fetch-asap7-sim-toolchain.sh`; Xyce was not used. Provenance:
+
+| Item | Value |
+|------|-------|
+| Simulator | ngspice-46, `pre_osdi` + `devhelp` load of `bsimcmg_va` verified by the fetch script |
+| Compiler | OpenVAF-Reloaded `osdi_0.4-153-g2e066436` (sha256 `9c570bf8...`) |
+| Model source | BSIM-CMG 111.0.0, dwarning/VA-Models `6099b4e1`, tarball sha256 `357d6956...` |
+| Compiled module | `pdks/asap7-sim/osdi/bsimcmg.osdi`, sha256 `4e755d14e901a84600124be5cb73e36302117b6cfc694e52ffc17640945cd9e3` (also in `environment.osdi_preload`) |
+| Model cards | lambdapdk 0.2.17 `7nm_{TT,FF,SS}_160803.pm`, TT sha256 `684708eec0f7d5960be1df6a045de811c8dd2d6b0e1ed7d0f805a3f697f262fc` |
+
+Command: `pytest tests/test_asap7_bsimcmg_sim.py` (the extracted
+`INVx1_ASAP7_75t_R` / `NAND2xp5_ASAP7_75t_R` from `asap7sc7p5t_28_R.gds.gz`
+via `klt extract --deck asap7`, adapted, then `klt sim` transient with
+`options.osdi_preload`; Vdd = 0.7 V, 25 C, 1 fF load, input rising edge at
+~110 ps). Both extracted `M` cards (`L`, total `NFIN`, no `AS/AD/PS/PD`/`NF`)
+were accepted by the BSIM-CMG instance parameter set without changing
+`finfet_card`. Observed results (`tpd_fall` is input 50% to output 50% falling):
+
+| Cell | Corner | `vout_low` (V) | `vout_high` (V) | `tpd_fall` (ps) |
+|------|--------|----------------|-----------------|-----------------|
+| INVx1 | TT | 1.06e-7 | 0.7000 | 9.18 |
+| INVx1 | FF | 1.18e-7 | 0.7000 | 8.06 |
+| INVx1 | SS | 9.30e-8 | 0.7000 | 10.45 |
+| NAND2xp5 | TT | 2.84e-7 | 0.69996 | 11.82 |
+| NAND2xp5 | FF | 3.17e-7 | 0.69996 | 10.18 |
+| NAND2xp5 | SS | 2.51e-7 | 0.69995 | 13.93 |
+
+Rail-to-rail swing and the FF < TT < SS delay ordering hold for both
+topologies. This run executed locally through `klt sim` (the report's
+`environment.remote` was null); it is a six-simulation functional check, not
+a corner grid. A stock ngspice without the module still produces the
+`unsupported_model_level` diagnostic above.
 
 ## Corner axes
 

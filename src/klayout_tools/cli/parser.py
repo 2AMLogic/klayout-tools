@@ -3051,6 +3051,19 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     signoff_parser.add_argument(
+        "--repo-root",
+        metavar="DIR",
+        help=(
+            'directory that `scope: "repo"` input paths resolve against, '
+            "instead of the nearest `.git` ancestor of the evidence file -- "
+            "for grading evidence copied outside any git checkout (a source "
+            "archive, a vendored copy, an unpacked CI artifact). Must be an "
+            "existing directory. Only meaningful with --manifest/--fleet. "
+            "See docs/cli/signoff.md's 'Grading outside a git checkout' "
+            "section."
+        ),
+    )
+    signoff_parser.add_argument(
         "--tiers-doc",
         metavar="PATH",
         help=(
