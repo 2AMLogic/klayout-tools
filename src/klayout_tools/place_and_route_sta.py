@@ -51,7 +51,12 @@ import os
 import re
 from typing import Any
 
-from ._openroad_engine import _count_violations, _run_openroad, _timing_status
+from ._openroad_engine import (
+    _count_violations,
+    _run_openroad,
+    _timing_status,
+    write_sdf_line,
+)
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
 
 
@@ -226,18 +231,6 @@ def _corner_sweep_script_lines(
 # --------------------------------------------------------------------------- #
 
 
-def _write_sdf_line(sdf_path: str) -> str:
-    """The one ``write_sdf`` Tcl command every ``klt`` SDF export emits --
-    ``klt place-and-route``'s ``post_route_sdf`` (issue #1002, via
-    :func:`_spef_sta_script_lines`) and ``klt sta``'s ``sdf`` (issue #2886).
-    Shared so the two cannot drift: both files feed the same consumer
-    (``klt functional-verification``'s ``options.sdf``), and the rationale
-    for each of the two flags is documented on :func:`_spef_sta_script_lines`.
-    Must be emitted after ``read_spef`` so the delays it writes are the
-    real routed-parasitic ones."""
-    return f"write_sdf -divider . -include_typ {sdf_path}"
-
-
 def _spef_sta_script_lines(
     *,
     checkpoint_in: str,
@@ -355,7 +348,7 @@ def _spef_sta_script_lines(
         f"read_spef {spef_path}",
     ]
     if sdf_path is not None:
-        lines.append(_write_sdf_line(sdf_path))
+        lines.append(write_sdf_line(sdf_path))
     lines += _metrics_report_lines(include_fmax=False, include_power=False)
     lines += _violation_count_lines()
     return lines

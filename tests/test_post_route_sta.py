@@ -4735,11 +4735,11 @@ def test_sta_script_lines_write_sdf_right_after_read_spef():
         sdf_path="/out/top.ss_100C_1v60.sdf",
     )
 
-    from klayout_tools.place_and_route_sta import _write_sdf_line
+    from klayout_tools._openroad_engine import write_sdf_line
 
     write_line = "write_sdf -divider . -include_typ /out/top.ss_100C_1v60.sdf"
     # The same shared command `klt place-and-route`'s `post_route_sdf` emits.
-    assert _write_sdf_line("/out/top.ss_100C_1v60.sdf") == write_line
+    assert write_sdf_line("/out/top.ss_100C_1v60.sdf") == write_line
     assert lines.count(write_line) == 1
     sdf_idx = lines.index(write_line)
     # After `read_spef` *and* outside the reader-warning markers, before the

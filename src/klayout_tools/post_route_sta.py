@@ -242,6 +242,7 @@ from ._openroad_engine import (
     _run_openroad,
     _timing_status,
     _timing_violation_report_lines,
+    write_sdf_line,
 )
 from ._paths import (
     _count_spef_nets_annotated,
@@ -252,14 +253,12 @@ from ._paths import (
 from ._provenance import (
     INPUT_ROLE_LAYOUT,
     INPUT_ROLE_NETLIST,
-    _content_hash,
     _deck_block,
     build_provenance,
     sha256_file,
 )
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
-from .place_and_route_sta import _write_sdf_line
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- versioned independently of every other verb's own
@@ -1877,7 +1876,7 @@ def _sdf_record(
         if report_paths is not None
         else env_provenance.repo_relative_path(sdf_path)
     )
-    return {**envelope, "content_hash": _content_hash(sdf_path)}
+    return {**envelope, "content_hash": f"sha256:{sha256_file(sdf_path)}"}
 
 
 def _validate_wire_load_estimate(
@@ -2444,7 +2443,7 @@ def _sta_script_lines(
     numbers do.
 
     ``sdf_path`` (issue #2886; requires ``spef_path``) appends the shared
-    ``write_sdf`` command (:func:`place_and_route_sta._write_sdf_line`)
+    ``write_sdf`` command (:func:`~klayout_tools._openroad_engine.write_sdf_line`)
     immediately after ``read_spef`` -- outside the reader-warning markers,
     so SDF-writer diagnostics are never counted as SPEF reader warnings,
     and before every report command, the same ordering ``klt
@@ -2471,7 +2470,7 @@ def _sta_script_lines(
         lines.append(f"read_spef {spef_path}")
         lines.append(f'puts "{_SPEF_READ_END}"')
         if sdf_path is not None:
-            lines.append(_write_sdf_line(sdf_path))
+            lines.append(write_sdf_line(sdf_path))
         lines += _delay_fingerprint_lines(_DELAY_POST_BEGIN, _DELAY_POST_END)
         lines += _parasitic_annotation_lines()
     if propagated_clock:

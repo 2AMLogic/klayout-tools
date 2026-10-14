@@ -397,6 +397,18 @@ _SETUP_CHECK_FAMILY_FLAGS = ("-max_delay", "-recovery", "-clock_gating_setup")
 _HOLD_CHECK_FAMILY_FLAGS = ("-min_delay", "-removal", "-clock_gating_hold")
 
 
+def write_sdf_line(sdf_path: str) -> str:
+    """The one ``write_sdf`` Tcl command every ``klt`` SDF export emits --
+    ``klt place-and-route``'s ``post_route_sdf`` (issue #1002) and ``klt
+    sta``'s ``sdf`` (issue #2886). Shared so the two cannot drift: both files
+    feed the same consumer (``klt functional-verification``'s
+    ``options.sdf``). The rationale for each of the two flags is documented on
+    ``place_and_route_sta._spef_sta_script_lines``.
+    Must be emitted after ``read_spef`` so the delays it writes are the
+    real routed-parasitic ones."""
+    return f"write_sdf -divider . -include_typ {sdf_path}"
+
+
 def _timing_violation_report_lines(
     *, setup_begin: str, setup_end: str, hold_begin: str, hold_end: str
 ) -> list[str]:
