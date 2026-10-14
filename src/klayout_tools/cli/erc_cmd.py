@@ -107,6 +107,17 @@ def _print_declared_nets(report: dict) -> None:
             )
 
 
+def _print_gate_count(report: dict) -> None:
+    """The gate count line, plus a note when it is zero (issue #2896).
+
+    A passive-only cell has no transistor gate, so the antenna half has
+    nothing to grade; say so rather than leaving a bare ``gates: 0``.
+    """
+    print(f"gates: {report['gate_count']}")
+    if not report["gate_count"]:
+        print("  (no transistor gate in this cell; antenna checks not applicable)")
+
+
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
@@ -121,7 +132,7 @@ def _print_text(report: dict) -> None:
     print(f"findings_only: {report['findings_only']}")
     print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
-    print(f"gates: {report['gate_count']}")
+    _print_gate_count(report)
 
     for gate in report["gates"]:
         print()

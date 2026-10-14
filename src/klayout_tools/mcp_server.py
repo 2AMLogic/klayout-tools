@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 
 from .mcp_tools import (
     BridgePolicy,
@@ -41,19 +40,19 @@ def build_server(policy: BridgePolicy):
 
     tools = visible_tools(derive_tools(), policy)
     by_name: dict[str, Tool] = {t.name: t for t in tools}
-    server = Server(SERVER_NAME)
 
-    @server.list_tools()
-    async def _list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name=t.name, description=t.description, inputSchema=t.input_schema
-            )
-            for t in tools
-        ]
+    async def _list_tools(ctx, params) -> types.ListToolsResult:
+        return types.ListToolsResult(
+            tools=[
+                types.Tool(
+                    name=t.name, description=t.description, input_schema=t.input_schema
+                )
+                for t in tools
+            ]
+        )
 
-    @server.call_tool(validate_input=False)
-    async def _call_tool(name: str, arguments: dict[str, Any] | None):
+    async def _call_tool(ctx, params: types.CallToolRequestParams):
+        name, arguments = params.name, params.arguments
         tool = by_name.get(name)
         if tool is None:
             payload = {
@@ -62,8 +61,8 @@ def build_server(policy: BridgePolicy):
             }
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=json.dumps(payload))],
-                structuredContent=payload,
-                isError=True,
+                structured_content=payload,
+                is_error=True,
             )
         outcome = await asyncio.to_thread(execute, tool, arguments or {}, policy)
         return types.CallToolResult(
@@ -72,12 +71,12 @@ def build_server(policy: BridgePolicy):
                     type="text", text=json.dumps(outcome.payload, indent=2)
                 )
             ],
-            structuredContent=outcome.payload,
-            isError=outcome.is_error,
-            _meta={"klt_exit_code": outcome.exit_code, "klt_argv": outcome.argv},
+            structured_content=outcome.payload,
+            is_error=outcome.is_error,
+            meta={"klt_exit_code": outcome.exit_code, "klt_argv": outcome.argv},
         )
 
-    return server
+    return Server(SERVER_NAME, on_list_tools=_list_tools, on_call_tool=_call_tool)
 
 
 async def _serve_async(policy: BridgePolicy) -> None:

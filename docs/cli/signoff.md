@@ -3134,6 +3134,57 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. Any kind's detail gains a `nothing_checked_reasons` key (issue #1996) when the source envelope's `coverage` block reports `nothing_checked: true` — the same condition that forces `passed: false`; absent for every envelope that makes no such statement. See "A check that checked nothing is refused, not reported" above. Any kind's detail also gains a `coverage_qualification` key (issue #2109) when the source envelope's versioned `coverage` block classifies as `partial`, naming the requested work it skipped — see "Partial coverage is qualified, not inferred" above — and a `coverage_state` key naming the rollup row for any envelope carrying versioned coverage at all. A `yield`-kind check's detail gains a `yield_campaign` key (issue #2467, absent when the report carries no measurements) rolling up its per-measurement `sample_size.verdict` and `negative_control` state — reported here, never graded on (`passed` is untouched); the grading gate built on the same statement belongs to `--manifest` item 6, see "Campaign discipline on item 6" below. |
 | `provenance`  | object \| null      | The source envelope's own `provenance` block, echoed verbatim (`null` for an `error`-kind check, which carries none). |
 
+## Regenerating signoff evidence in a consumer repo
+
+A consumer repo that commits its signoff evidence needs a small script to
+re-run the graders. This is the canonical shape (issue #2874). Two properties
+matter: the grader is **always the pinned registry wheel** (`klayout-tools==$KLT_VERSION`),
+never whatever `klt` happens to be on `PATH`; and a host that can run neither
+`uv` nor `python3 -m venv` fails loudly instead of silently grading with
+something else.
+
+Order of preference: `uvx` (needs no `python3-venv`/`ensurepip`), then a
+throwaway `python3 -m venv` + `pip`, then a clear stderr message and a
+non-zero exit.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The pin. Refuse to guess: an unset version would grade with an unpinned build.
+: "${KLT_VERSION:?set KLT_VERSION to the pinned klayout-tools release, e.g. KLT_VERSION=1.2.3}"
+
+if command -v uv >/dev/null 2>&1; then
+  # --from pins the registry wheel; uvx never resolves `klt` from PATH.
+  klt() { uvx --from "klayout-tools==${KLT_VERSION}" klt "$@"; }
+else
+  WORK="$(mktemp -d)"
+  trap 'rm -rf "$WORK"' EXIT
+  if python3 -m venv "$WORK/venv" >/dev/null 2>&1; then
+    "$WORK/venv/bin/pip" install --quiet "klayout-tools==${KLT_VERSION}"
+    # Absolute path into the venv, so a `klt` already on PATH is never used.
+    klt() { "$WORK/venv/bin/klt" "$@"; }
+  else
+    echo "error: cannot provision klayout-tools==${KLT_VERSION}: 'uv' is not on PATH" >&2
+    echo "       and 'python3 -m venv' failed (is python3-venv / ensurepip installed?)." >&2
+    echo "       Install uv (https://docs.astral.sh/uv/) or python3-venv and retry." >&2
+    exit 1
+  fi
+fi
+
+klt signoff --manifest signoff/manifest.json --format json > signoff/report.json
+```
+
+Notes:
+
+- `klt` here is a shell function, so every later `klt …` line in the script
+  uses the pinned build; add further verbs (`klt drc`, `klt lvs`, …) the same way.
+- `uvx` needs network (or a warm uv cache) to fetch the pinned wheel; offline
+  with a cold cache it exits non-zero and `set -e` stops the script. It does
+  not fall back to a different `klt`.
+- Verify the committed record with `--check` (see
+  [Verifying a committed report](#verifying-a-committed-report---check-issue-2249)).
+
 ## Exit codes and errors
 
 Envelope-aggregation mode:

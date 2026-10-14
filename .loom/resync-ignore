@@ -33,10 +33,14 @@
 # 71d46d0, 2026-08-05) — this pin is what prevents a recurrence. If the
 # upstream Loom project ever adopts an equivalent mechanism, this pin can be
 # dropped and the file resynced normally.
+#
+# 2am#4345 (2026-10-14): `loom:operator-only` is retired into `loom:operator`
+# (rjwalters/loom#11795); the pinned guard now escalates to, and checks for,
+# `loom:operator`. The guard itself is unchanged.
 commands/loom/champion-epic.md
 
 # #662: champion.md's Priority 4 (epic-discovery) query carries a local-only
-# 5-clause `select()` exclusion filter (loom:evaluating/loom:operator-only/
+# 5-clause `select()` exclusion filter (loom:evaluating/loom:operator/
 # loom:blocked/loom:issue/loom:building), matching the filter already used by
 # Priorities 2/3, added by #609 (closing #608) so that already-escalated
 # epics (e.g. epic #520, repeatedly rejected and capped to
@@ -46,6 +50,9 @@ commands/loom/champion-epic.md
 # 2026-08-09) — this pin is what prevents a recurrence. If the upstream Loom
 # project ever adopts an equivalent filter, this pin can be dropped and the
 # file resynced normally.
+#
+# 2am#4345 (2026-10-14): the filter's `loom:operator-only` clause now reads
+# `loom:operator` (the retired label folded into it, rjwalters/loom#11795).
 commands/loom/champion.md
 
 # #668: curator.md/judge.md/doctor.md's "Stale `loom:curating`/`loom:reviewing`/
@@ -289,6 +296,16 @@ scripts/pr-worktree.sh
 # #606/#662/#1292/#1316/#1356/#1546/#1674/#1898/#2020. If the upstream Loom
 # project ever adopts an equivalent guard, these pins can be dropped and the
 # files resynced normally.
+#
+# 2am#4345 (2026-10-14): Step 1c now keys on `loom:operator` (the retired
+# `loom:operator-only` folded into it, rjwalters/loom#11795), and the tier
+# recovery plus its `loom:operator-only,loom:operator-mechanical` escalation
+# are removed the way upstream #11512 removed them (tier labels retired,
+# #11103) -- with --apply the script now only adds `loom:issue`. Upstream's
+# current script also refuses to write over any hold (#6942/#11795), but
+# still reports MISMATCH (not OK) for a held issue in report-only mode, so
+# whether its guard is "equivalent" enough to drop these pins is left to the
+# operator.
 scripts/check-promotion-landed.sh
 scripts/tests/test-check-promotion-landed.sh
 

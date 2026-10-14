@@ -139,6 +139,17 @@ These writers differ from `apply` in two documented ways:
   the body. Readers key on `loom:blocked` first, so a leftover record on an
   unblocked issue declares nothing.
 
+### Champion's PR holds (#11861)
+
+Champion's merge-risk and critical-file holds write a reason-only record on
+the PR (`reason="champion merge-risk hold"` / `"champion critical-file hold"`,
+`by=champion`, `loom_daemon::champion_hold`), keep `loom:pr`, and add
+`loom:blocked`. The release pass skips it (`Unstated`): only Champion or a
+human releases it. A dependency-only promotion finding writes one record per
+open blocker (`park-record apply --blocked-by --by champion`, #11860; or
+`classify-dependency-block.sh --check-defer --apply`), which the release pass
+lifts when the blockers close.
+
 ## Who reads one
 
 - `loom-daemon check-stale-blocked` (`defaults/scripts/check-stale-blocked.sh`,
@@ -218,6 +229,8 @@ check_and_unblock_prs() {
     local body=$(printf '%s\n' "$pr_row" | jq -r '.body')
     local title=$(printf '%s\n' "$pr_row" | jq -r '.title')
 
+    [ "$(has_permanent_block "$number")" = "true" ] && continue  # #8742, guide.md
+
     local deps=$(parse_dependencies "$body")
 
     if [ -z "$deps" ]; then
@@ -284,7 +297,7 @@ pr_has_superseding_block() {
   fi
 
   local pr_hold=$(printf '%s\n' "$pr_json" | jq -r \
-    '[.labels[].name] | any(. == "loom:operator" or . == "loom:operator-only")')
+    '[.labels[].name] | any(. == "loom:operator" or . == "loom:frozen")')
   if [ "$pr_hold" = "true" ]; then
     echo "true"
     return
@@ -315,9 +328,9 @@ itself.
 previous_review_label() {
   local number="$1"
   local label
-  label=$(gh api "repos/{owner}/{repo}/issues/${number}/events" --jq \
-    'map(select(.event == "labeled" and (.label.name == "loom:review-requested" or .label.name == "loom:changes-requested"))) | last | .label.name' \
-    2>/dev/null)
+  label=$(gh api --paginate "repos/{owner}/{repo}/issues/${number}/events?per_page=100" --jq \
+    ".[] | select(.event == \"labeled\" and (.label.name == \"loom:review-requested\" or .label.name == \"loom:changes-requested\")) | .label.name" \
+    2>/dev/null | tail -1)  # per-issue + --paginate (#8742 review; repo-wide walk: ~300 calls on a miss, ~6-day horizon); events ascend oldest-first, so the LAST match is the latest; paging runs to the end (accepted cost)
   if [ "$label" = "loom:changes-requested" ]; then
     echo "loom:changes-requested"
   else
@@ -352,6 +365,6 @@ job (issues) and `check-stale-blocked`'s advisory report (both issues and
 PRs) — this document defines the wire format both sit on top of, nothing more.
 
 See also: [`label-state-machine.md`](label-state-machine.md) for where
-`loom:blocked` sits relative to `loom:operator`/`loom:operator-only`, and
+`loom:blocked` sits relative to `loom:operator`/`loom:frozen`, and
 [`lease-record.md`](lease-record.md) for the sibling HTML-comment-marker
 convention this format's shape was co-designed with.

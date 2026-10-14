@@ -405,14 +405,14 @@ assert_eq "0" "$(get_field "$OUT" CLEARED)" "(g) CLEARED=0 on an explicit hold"
 assert_contains "$OUT" "clear suppressed" "(g) REASON explains the suppression"
 assert_eq "" "$WRITES" "(g) No label writes on a held PR"
 
-# (g2) Same for loom:operator-only.
+# (g2) Same for loom:operator (the retired loom:operator folded into it, 2am#4345).
 reset_state
-pr_json 210 "$SHA_B" "loom:pr" "loom:operator-only"
+pr_json 210 "$SHA_B" "loom:pr" "loom:operator"
 { echo "["; verdict_comment "2026-08-08T03:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-210.json"
 run_guard 210 --clear
-assert_eq "12" "$RC" "(g2) Stale approval on loom:operator-only -> exit 12"
-assert_eq "0" "$(get_field "$OUT" CLEARED)" "(g2) CLEARED=0 on loom:operator-only"
-assert_eq "" "$WRITES" "(g2) No label writes on loom:operator-only"
+assert_eq "12" "$RC" "(g2) Stale approval on loom:operator -> exit 12"
+assert_eq "0" "$(get_field "$OUT" CLEARED)" "(g2) CLEARED=0 on loom:operator"
+assert_eq "" "$WRITES" "(g2) No label writes on loom:operator"
 
 # (h) Idempotency: the old->new transition was already announced by an earlier
 #     pass (daemon backstop and a Judge pass can both notice the same move).

@@ -93,8 +93,15 @@ def run(args: argparse.Namespace) -> int:
     except OutputLockError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    emit_success(report, args.format, _print_text)
+    deck_mode = report.get("mode") == "decks"
+    emit_success(report, args.format, _print_deck_text if deck_mode else _print_text)
 
+    if deck_mode:
+        # Issue #2804: deck-list requests carry no graded measurements, so
+        # the 3 ("ran, a limit missed") outcome cannot arise -- the deck
+        # verdict is binary. The exit code remains a shortcut derived from
+        # the payload's own `status`, which is authoritative.
+        return EXIT_CORNER_ERRORED if report["status"] != "pass" else EXIT_PASS
     # Issues #2492 + #2493: `"inconclusive"` joins `"error"`/`"not_checked"`
     # at exit 4, not the `EXIT_PASS` a status matching neither branch below
     # would otherwise fall through to -- a solve this run will not vouch for
@@ -270,6 +277,43 @@ def _print_pdk(report: dict) -> None:
             f"{', '.join(ambiguous)} -- resolution is first-match-wins; "
             f"pin models.pdk_root to choose deliberately"
         )
+
+
+def _print_deck_text(report: dict) -> None:
+    """Text courtesy rendering for a deck-list report (issue #2804): one
+    line per unit -- id, status, exit code, and where its streams landed --
+    after the same summary shape the corner renderer opens with. Stream and
+    output paths in the report are relative to `outdir`; the absolute
+    directory is printed once so a reader can compose them."""
+    print(f"mode: {report['mode']}")
+    print(f"status: {report['status']}")
+    print(
+        f"units: {report['unit_count']}  "
+        f"passed: {report['passed']}  "
+        f"errored: {report['errored']}  "
+        f"timed_out: {report['timed_out']}"
+    )
+    env = report["environment"]
+    print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
+    print(f"outdir: {report['outdir']}")
+    if env.get("remote"):
+        remote = env["remote"]
+        provider = remote.get("provider", "remote")
+        instance = remote.get("instance_type") or remote.get("instance_id") or "-"
+        print(f"remote: {provider} {instance}")
+    for unit in report["units"]:
+        exit_desc = "-" if unit["exit_code"] is None else str(unit["exit_code"])
+        print(
+            f"  {unit['id']} [{unit['status']}] exit={exit_desc} "
+            f"duration={unit['duration_s']}s  {unit['stdout']}"
+        )
+        for diagnostic in unit["diagnostics"]:
+            print(
+                f"    diagnostic: {diagnostic['severity']} "
+                f"{diagnostic['code']} - {diagnostic['message']}"
+            )
+        if unit["missing_outputs"]:
+            print(f"    missing outputs: {', '.join(unit['missing_outputs'])}")
 
 
 def _print_text(report: dict) -> None:

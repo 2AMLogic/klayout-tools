@@ -104,6 +104,7 @@ from .remote_launcher import (
     ASSUMED_THREADS_PER_CORNER,
     RemoteLaunchError,
     ami_pdk_key,
+    published_runner_identities,
 )
 from .sim_remote import (
     _build_remote_request,
@@ -1020,6 +1021,12 @@ def _resolve_batch_config(
     path on this backend at all, so it is a property of the *request* rather
     than of this host's fleet configuration and should be reported even when
     the provision script or bucket is also unresolvable.
+
+    Last, the runner ``klt`` the AMI manifest publishes is compared with
+    this client (:func:`_assess_published_runner`, issue #2851): under
+    ``runner_version_check: "enforce"`` a known mismatch raises
+    ``batch_runner_version_mismatch`` here, so neither ``klt sim`` (one job
+    or every shard) nor ``klt netlist`` uploads or launches anything.
     """
     from .sim import SimError
 
@@ -1045,7 +1052,7 @@ def _resolve_batch_config(
         batch_spec, fleet
     )
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
-    return BatchConfig(
+    config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
         jobs_prefix=(
@@ -1080,6 +1087,103 @@ def _resolve_batch_config(
         max_job_seconds_source=max_job_seconds_source,
         job_ceiling_check=job_ceiling_check,
     )
+    # Issue #2851: compare the runner klt the AMI manifest publishes with
+    # this client, once per request (so once for every shard of a
+    # `hosts > 1` run), before any S3 write or launch.
+    _enforce_published_runner_version(_assess_published_runner(request, config))
+    return config
+
+
+def _assess_published_runner(
+    request: dict[str, Any], config: BatchConfig
+) -> dict[str, Any]:
+    """Compare the ``klt`` build the AMI manifest says the fleet image runs
+    with this client's, **before** any submit or launch (issue #2851).
+
+    The source is :func:`remote_launcher.published_runner_identities`: the
+    most recently built manifest entry per ``(pdk, region)`` for the
+    request's ``models.pdk`` (every PDK when it names none) and the batch
+    ``region`` (every region when none is configured, because the fleet
+    picks its own Spot pool). Versions are compared with the runner gate's
+    own release-segment rule, :func:`_runner_gate_release` (issue #3184), so
+    this check and the runner-side preflight can never disagree about what
+    counts as compatible.
+
+    Returns ``{"status", "check", "client_klt_version", "images",
+    "message"}``. ``status`` is ``"mismatch"`` only when *every* candidate
+    image publishes a ``klt_version`` and none of them matches the client:
+    then the job could not pass the runner-side gate on any image the fleet
+    might boot. Anything less certain -- no manifest, no candidate, a legacy
+    entry without ``klt_version``, a mix of matching and mismatching images,
+    an unparseable version -- is ``"unknown"`` (or ``"match"``) and the
+    request proceeds to the existing runner-side preflight unchanged. This
+    function never raises.
+    """
+    client = _provenance._klt_version()
+    assessment: dict[str, Any] = {
+        "status": "unknown",
+        "check": config.runner_version_check,
+        "client_klt_version": client,
+        "images": [],
+        "message": None,
+    }
+    pdk = (request.get("models") or {}).get("pdk")
+    try:
+        images = published_runner_identities(str(pdk) if pdk else None, config.region)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return assessment
+    assessment["images"] = images
+    client_release = _runner_gate_release(client)
+    if not images or client_release is None:
+        return assessment
+    releases = [
+        _runner_gate_release(image["klt_version"]) if image["klt_version"] else None
+        for image in images
+    ]
+    if any(release is None for release in releases):
+        return assessment
+    if any(release == client_release for release in releases):
+        assessment["status"] = "match"
+        return assessment
+    assessment["status"] = "mismatch"
+    published = "; ".join(
+        f"{image['ami_id']} (pdk {image['pdk']}, region {image['region']}) "
+        f"runs klt {image['klt_version']}"
+        + (f" from ref {image['klt_ref']}" if image["klt_ref"] else "")
+        for image in images
+    )
+    assessment["message"] = (
+        f"the AMI manifest publishes the fleet runner image as {published}, "
+        f"but the submitting client is klt {client}; their major.minor "
+        "releases differ, so the runner-side version gate would reject the job"
+    )
+    return assessment
+
+
+def _enforce_published_runner_version(assessment: dict[str, Any]) -> None:
+    """Act on :func:`_assess_published_runner` before any S3 write or
+    launch: under ``runner_version_check: "enforce"`` a known mismatch is
+    one request-level :class:`~klayout_tools.sim.SimError` with code
+    :data:`BATCH_RUNNER_MISMATCH_CODE` -- nothing is submitted, so no
+    instance launches and no per-corner ``batch_job_failed`` diagnostics
+    exist. Under ``"warn"`` the same message goes to stderr and the request
+    is submitted as before. ``unknown``/``match`` do nothing here; the
+    runner-side preflight (issue #2719) still decides on the job instance."""
+    from .sim import SimError
+
+    if assessment["status"] != "mismatch":
+        return
+    message = assessment["message"]
+    if assessment["check"] == "enforce":
+        raise SimError(
+            f"backend 'batch' refused before submission: {message} -- the "
+            "request was not submitted and no instance was launched (rebuild "
+            "the runner image, use a client of the runner's major.minor, or "
+            'set request.batch.runner_version_check to "warn" to submit '
+            "anyway; see docs/cli/sim.md)",
+            code=BATCH_RUNNER_MISMATCH_CODE,
+        )
+    print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
 
 
 def _resolve_max_job_seconds(
@@ -1940,6 +2044,109 @@ def _status_exit_code(status: dict[str, Any]) -> int | None:
         return None
 
 
+#: Engine logs a collected ``outputs/`` tree may hold (``keep_artifacts`` runs
+#: copy each corner's log under ``artifacts/``). Only read to surface the
+#: engine's fatal error; never copied wholesale into the JSON.
+_BATCH_ENGINE_LOG_NAMES = ("ngspice.log", "xyce.log")
+
+#: Bytes read from the head of an engine log (a fatal include/parse error is
+#: printed before the simulation starts) and lines kept in a failure tail.
+_BATCH_ENGINE_LOG_HEAD_BYTES = 256 * 1024
+_BATCH_ENGINE_LOG_TAIL_LINES = 12
+_BATCH_ENGINE_LOG_TAIL_CHARS = 1500
+
+
+def _find_engine_logs(collected: str) -> list[str]:
+    """Paths of every engine log under a collected ``outputs/`` tree, sorted."""
+    found: list[str] = []
+    for root, _dirs, files in os.walk(collected):
+        found.extend(
+            os.path.join(root, name)
+            for name in files
+            if name in _BATCH_ENGINE_LOG_NAMES
+        )
+    return sorted(found)
+
+
+def _read_log_head(path: str) -> str:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(_BATCH_ENGINE_LOG_HEAD_BYTES).decode(
+                "utf-8", errors="replace"
+            )
+    except OSError:
+        return ""
+
+
+def _missing_include_diagnostic(log_text: str) -> dict[str, Any] | None:
+    """The ``missing_include`` diagnostic the local classifier would emit for
+    ``log_text`` (naming the file ngspice could not find), or ``None``."""
+    from .sim import _classify_diagnostics
+
+    for diagnostic in _classify_diagnostics(log_text):
+        if diagnostic.get("code") == "missing_include":
+            return diagnostic
+    return None
+
+
+def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> None:
+    """Add a ``missing_include`` diagnostic to every errored corner whose
+    retrieved engine log shows ngspice failing on a ``.include`` but whose
+    report (written by the runner's own, possibly older, ``klt``) carries no
+    such code -- otherwise the caller sees only ``measurement ... produced no
+    value``. Corners are matched to logs through ``artifacts.log``
+    (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one log in the tree
+    it applies to every such corner. A no-op when no log was collected."""
+    logs = _find_engine_logs(collected)
+    if not logs:
+        return
+    marker = f"/{BATCH_ARTIFACTS_DIRNAME}/"
+    for corner in corners:
+        if corner.get("status") != "error":
+            continue
+        diagnostics = corner.setdefault("diagnostics", [])
+        if any(d.get("code") == "missing_include" for d in diagnostics):
+            continue
+        log_path = None
+        remote = (corner.get("artifacts") or {}).get("log")
+        if isinstance(remote, str) and marker in remote:
+            candidate = os.path.join(
+                collected,
+                BATCH_ARTIFACTS_DIRNAME,
+                remote[remote.index(marker) + len(marker) :],
+            )
+            if os.path.isfile(candidate):
+                log_path = candidate
+        if log_path is None and len(logs) == 1:
+            log_path = logs[0]
+        if log_path is None:
+            continue
+        found = _missing_include_diagnostic(_read_log_head(log_path))
+        if found is not None:
+            diagnostics.append(found)
+
+
+def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
+    """For a job that failed without a usable report: a short message
+    fragment carrying the tail of the retrieved engine log, or stating the
+    log was unavailable, plus the ``missing_include`` diagnostic when the log
+    shows one."""
+    logs = _find_engine_logs(collected)
+    if not logs:
+        return (
+            "engine log unavailable: no ngspice.log/xyce.log in the collected "
+            "outputs (engine logs are retrieved only when artifacts are kept)",
+            None,
+        )
+    text = _read_log_head(logs[0])
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    tail = "\n".join(lines[-_BATCH_ENGINE_LOG_TAIL_LINES:])
+    tail = tail[-_BATCH_ENGINE_LOG_TAIL_CHARS:]
+    return f"{os.path.basename(logs[0])} tail: {tail}", _missing_include_diagnostic(
+        text
+    )
+
+
 def _job_failure_corners(
     corner_points: list[CornerPoint],
     measurements_spec: list[dict[str, Any]],
@@ -1948,6 +2155,8 @@ def _job_failure_corners(
     *,
     runner_error: dict[str, Any] | None = None,
     collection_note: str | None = None,
+    log_note: str | None = None,
+    log_diagnostic: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Every unit of a job that reached ``failed``/``timeout`` without
     writing a usable report, reported through the shared unrun-corner shape
@@ -1961,7 +2170,11 @@ def _job_failure_corners(
     appended to the diagnostic (its ``code``, when present, attached as
     ``runner_code``) so the actionable reason is visible without S3 access.
     ``collection_note`` records why recovery found nothing usable. Neither
-    replaces the primary job-failure code or the failed status."""
+    replaces the primary job-failure code or the failed status.
+
+    ``log_note`` is the tail of the retrieved engine log (or a statement that
+    none was available) and ``log_diagnostic`` a ``missing_include``
+    diagnostic derived from it; both are additive."""
     state = str(status.get("state") or "")
     code = "batch_job_timeout" if state == "timeout" else "batch_job_failed"
     detail = str(status.get("detail") or "").strip()
@@ -1977,10 +2190,15 @@ def _job_failure_corners(
         )
         if collection_note:
             message += f" [output recovery: {collection_note}]"
+    if log_note:
+        message += f" [{log_note}]"
     corners = [
         _unrun_corner_report(point, measurements_spec, code, message=message)
         for point in corner_points
     ]
+    if log_diagnostic is not None:
+        for corner in corners:
+            corner["diagnostics"].append(dict(log_diagnostic))
     if runner_error is not None and runner_error.get("code"):
         for corner in corners:
             for diagnostic in corner.get("diagnostics") or []:
@@ -2076,11 +2294,14 @@ def _recover_failed_job_corners(
     raw stderr text never does."""
     runner_error: dict[str, Any] | None = None
     note: str | None = None
+    log_note: str | None = "engine log unavailable: outputs could not be collected"
+    log_diagnostic: dict[str, Any] | None = None
     identity = _read_job_identity(None)
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             collect_outputs(config, job_id, collected, runner=runner)
             identity = _read_job_identity(collected, request)
+            log_note, log_diagnostic = _engine_log_note(collected)
             try:
                 kind, runner_error = _classify_collected_report(
                     read_collected_report(collected)
@@ -2107,6 +2328,8 @@ def _recover_failed_job_corners(
         job_id,
         runner_error=runner_error,
         collection_note=note,
+        log_note=log_note,
+        log_diagnostic=log_diagnostic,
     )
     _annotate_preflight_rejection(corners, runner_error, identity)
     return corners, identity
@@ -2245,6 +2468,7 @@ def _run_batch_job(
         report = read_collected_report(collected)
         environment = {**environment, **_read_job_identity(collected, request)}
         corners = report.get("corners") or []
+        _surface_missing_include(corners, collected)
         if keep_artifacts:
             _install_batch_artifacts(
                 corners, collected_dir=collected, artifacts_dir=artifacts_dir
