@@ -91,7 +91,8 @@ the 6 criteria). Without them, epic evaluation hit two distinct failure modes:
 2. **No escalation for an unrevised epic rejected repeatedly.** Epic #520 was
    rejected 3 times with essentially identical feedback while its body was never
    revised between reviews. Nothing capped the loop, so it would repeat forever;
-   the pass that surfaced this had to escalate it to `loom:operator-only` by hand.
+   the pass that surfaced this had to escalate it to the operator hold (then `loom:operator-only`,
+   now `loom:operator`) by hand.
 
 The proposal-side analogue (`champion-issue-promo.md` → "Concurrency Guard and
 Idempotency") was itself added after #4954/#4966/#4967 for exactly these two
@@ -144,7 +145,7 @@ genuine revision always gets a fresh evaluation while an unchanged epic never
 gets re-commented. Before applying that marker, also check for a **human
 operator override** (#763, extended by #772 — see below): a real human's
 comment posted after the last verdict/escalation, **or** a real human bare
-`loom:operator-only` label removal after the label was last applied — either
+`loom:operator` label removal after the label was last applied — either
 signal always takes priority over whatever the marker says. With no override,
 the check is **three-way**: no match → evaluate; match with skips left in the
 budget → skip silently; match with the budget exhausted → **escalate** (see
@@ -174,7 +175,7 @@ VERDICT_MARKER="<!-- champion:epic-verdict:body-$BODY_HASH -->"
 # of skipping again" without reaching Step 4 (mirrors #4967). Step 4 reuses them.
 PRIOR_REJECTIONS=$(printf '%s\n' "$EPIC_JSON" | jq \
   '[.comments[] | select(.body | contains("Champion Review: Epic Needs Revision"))] | length')
-ALREADY_ROUTED=$(printf '%s\n' "$EPIC_JSON" | jq -e '.labels[] | select(.name=="loom:operator-only")' >/dev/null && echo yes || echo no)
+ALREADY_ROUTED=$(printf '%s\n' "$EPIC_JSON" | jq -e '.labels[] | select(.name=="loom:operator")' >/dev/null && echo yes || echo no)
 SKIP_STREAK=0            # silent skips already recorded for THIS body revision
 ESCALATE_UNREVISED=no    # set to yes to bypass re-evaluation and go straight to Step 4's escalation
 
@@ -211,7 +212,7 @@ fi
 # Human operator override via a BARE label removal (#772). The comment-based
 # check above only sees a human who *commented*. #700 (and siblings
 # #701/#704/#706-#713) showed a second, silent override path: a human clears
-# `loom:operator-only` with no comment at all — confirmed live on #700, where
+# `loom:operator` with no comment at all — confirmed live on #700, where
 # rjwalters cleared the label twice; the first clearing had a comment (caught
 # above), but the second (2026-08-11T16:52-53Z) was a pure label edit. That
 # signal only exists in the issue's label-event timeline, never in
@@ -220,15 +221,15 @@ fi
 # need to hit the events endpoint when OPERATOR_OVERRIDE is already yes.
 if [ "$OPERATOR_OVERRIDE" = "no" ]; then
   EPIC_EVENTS=$(gh api "repos/{owner}/{repo}/issues/$EPIC_NUMBER/events" --paginate)
-  # Timestamp of the most recent event that APPLIED loom:operator-only (there
+  # Timestamp of the most recent event that APPLIED loom:operator (there
   # can be more than one apply across a flapping history — only the latest
   # matters, since anything before it was already superseded).
   LAST_OO_LABELED_AT=$(printf '%s\n' "$EPIC_EVENTS" | jq -r \
-    '[.[] | select(.event=="labeled" and .label.name=="loom:operator-only")]
+    '[.[] | select(.event=="labeled" and .label.name=="loom:operator")]
      | sort_by(.created_at) | last | .created_at // empty')
   if [ -n "$LAST_OO_LABELED_AT" ] && printf '%s\n' "$EPIC_EVENTS" | jq -e \
        --arg login "$AUTOMATION_LOGIN" --arg after "$LAST_OO_LABELED_AT" \
-       '[.[] | select(.event=="unlabeled" and .label.name=="loom:operator-only")
+       '[.[] | select(.event=="unlabeled" and .label.name=="loom:operator")
               | select(.created_at > $after)
               | select(.actor.login != $login)
               | select(.actor.login | endswith("[bot]") | not)] | length > 0' \
@@ -239,7 +240,7 @@ if [ "$OPERATOR_OVERRIDE" = "no" ]; then
     # or without prose attached to it.
     PRIOR_REJECTIONS=0
     SKIP_STREAK=0
-    echo "Epic #$EPIC_NUMBER had loom:operator-only removed by a human (non-bot, not $AUTOMATION_LOGIN) after it was last applied at $LAST_OO_LABELED_AT, with no comment required — treating the bare label removal as authoritative, resetting PRIOR_REJECTIONS/SKIP_STREAK to 0 for body hash $BODY_HASH, and re-evaluating fresh instead of re-escalating"
+    echo "Epic #$EPIC_NUMBER had loom:operator removed by a human (non-bot, not $AUTOMATION_LOGIN) after it was last applied at $LAST_OO_LABELED_AT, with no comment required — treating the bare label removal as authoritative, resetting PRIOR_REJECTIONS/SKIP_STREAK to 0 for body hash $BODY_HASH, and re-evaluating fresh instead of re-escalating"
   fi
 fi
 
@@ -259,7 +260,7 @@ if [ "$OPERATOR_OVERRIDE" = "no" ] && printf '%s\n' "$EPIC_JSON" | jq -e --arg m
 
   if [ "$ALREADY_ROUTED" = "yes" ]; then
     # Terminal state — a human owns this now. Skip without tallying or escalating.
-    echo "Epic #$EPIC_NUMBER already routed to loom:operator-only — skipping (no comment, no tally)"
+    echo "Epic #$EPIC_NUMBER already routed to loom:operator — skipping (no comment, no tally)"
   elif [ "$UNREVISED_EVALS" -ge "${LOOM_MAX_UNREVISED_EVALUATIONS:-2}" ]; then
     # Skip budget spent: do NOT skip. Jump straight to Step 4's escalation branch
     # (no re-evaluation — the text is unchanged, so the verdict is too).
@@ -328,11 +329,11 @@ epic is rejected again after the override, that rejection starts a new
 `PRIOR_REJECTIONS` count from `1`, and the N=2 escalation guard applies again
 on schedule from there.
 
-**A bare `loom:operator-only` label removal is an override too, even with no
+**A bare `loom:operator` label removal is an override too, even with no
 comment (#772).** #763's comment-based check only sees a human who typed
 something. It missed a second, equally real override: a human can express the
 identical decision — "this escalation no longer applies" — purely by clearing
-`loom:operator-only`, with zero prose attached. #700 (and its siblings
+`loom:operator`, with zero prose attached. #700 (and its siblings
 #701/#704/#706-#713) hit exactly this: a human cleared the label twice; the
 first clearing came with a comment (caught by #763's check), but the second
 (2026-08-11T16:52-53Z) was a bare label edit that the comment-only scan could
@@ -341,7 +342,7 @@ direct contradiction of the human's explicit action. This is invisible to
 `.comments` entirely — it lives only in the issue's label-event timeline
 (`gh api repos/{owner}/{repo}/issues/<N>/events`). The second check above
 walks that timeline for the latest `event=="labeled"` for
-`label.name=="loom:operator-only"`, then looks for a later `event=="unlabeled"`
+`label.name=="loom:operator"`, then looks for a later `event=="unlabeled"`
 for the same label whose `actor.login` is neither the automation actor nor
 `[bot]`-suffixed. It fires independently of the comment-based check (either
 one alone is sufficient to set `OPERATOR_OVERRIDE=yes`) and applies the exact
@@ -444,7 +445,7 @@ Close autonomously only when **all four** hold:
 
 1. `EPIC_CHILD_STRONG_OPEN == 0` and `EPIC_CHILD_STRONG_CLOSED > 0` (Step 0a's completion candidate — containment, not prose).
 2. `$MISSING` is empty (Step 0b).
-3. `ALREADY_ROUTED` (computed by the rejection idempotency check above) is `no` — the epic does not already carry `loom:operator-only`.
+3. `ALREADY_ROUTED` (computed by the rejection idempotency check above) is `no` — the epic does not already carry `loom:operator`.
 4. No comment on the epic raises outstanding **content** work dated after the last child closed. Champion's own structural verdicts (`$VERDICT_MARKER` / "Epic Needs Revision") explicitly do **not** count — those are the format gate this step supersedes, and treating them as objections would restore the deadlock through the back door.
 
 ```bash
@@ -473,7 +474,7 @@ Close it, or say what is outstanding.
 
 ---
 *Automated by Champion role*" \
-      && gh issue edit "$EPIC_NUMBER" --add-label "loom:operator-only"
+      && gh issue edit "$EPIC_NUMBER" --add-label "loom:operator"
   }
 fi
 ```
@@ -522,7 +523,7 @@ rejection idempotency check's own outcome:
   owns an already-approved epic).
 - If the idempotency check set `OPERATOR_OVERRIDE=yes` (a human operator
   commented after the last verdict/escalation, #763, **or** bare-removed
-  `loom:operator-only` after it was last applied, with or without a comment,
+  `loom:operator` after it was last applied, with or without a comment,
   #772), the marker-match branch never runs regardless of what it would have
   found — proceed to a fresh Step 2 evaluation, do not stop and do not jump to
   Step 4's escalation branch.
@@ -653,7 +654,7 @@ so do **not** recompute them:
 ```bash
 #   PRIOR_REJECTIONS  — posted "Champion Review: Epic Needs Revision" comments (any revision)
 #   SKIP_STREAK       — silent skips recorded for THIS body revision (0 if the marker did not match)
-#   ALREADY_ROUTED    — yes when loom:operator-only is already present
+#   ALREADY_ROUTED    — yes when loom:operator is already present
 # Escalation is gated on evaluation CYCLES, not on posted comments (#4967):
 UNREVISED_EVALS=$(( PRIOR_REJECTIONS + SKIP_STREAK ))
 ```
@@ -677,14 +678,14 @@ A human needs to decide whether to revise this epic, close it, or accept it as-i
 
 ---
 *Automated by Champion role*" \
-  && gh issue edit <number> --remove-label "loom:epic" --add-label "loom:operator-only"
+  && gh issue edit <number> --remove-label "loom:epic" --add-label "loom:operator"
 ```
 
 When you arrive here via `ESCALATE_UNREVISED=yes` you have **not** re-run the 6
 criteria and must not — the title and body are byte-identical to the revision the
 prior verdict was written against, so the verdict is unchanged by construction:
 lift the **Recurring findings** verbatim from that prior `Epic Needs Revision`
-comment (`$COMMENT_BODY`, fetched by the idempotency check). `loom:operator-only`
+comment (`$COMMENT_BODY`, fetched by the idempotency check). `loom:operator`
 removes the epic from every future evaluation pass, so this escalation posts
 exactly once.
 

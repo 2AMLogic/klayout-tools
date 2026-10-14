@@ -207,7 +207,7 @@ failure in the completion summary, and do not re-add `loom:pr` yourself. A
 fresh Judge pass on the current head is the only thing that makes it eligible
 again.
 
-`loom:blocked` / `loom:operator` / `loom:operator-only` PRs are reported STALE
+`loom:blocked` / `loom:operator` PRs are reported STALE
 but deliberately **not** cleared by the guard (it will not un-park a PR a human
 or the capped-PR recovery pass deliberately held). They are still not merge-
 eligible: exit 12 means do not merge, cleared or not.
@@ -941,8 +941,10 @@ Keeping \`loom:pr\`. This PR stays in the queue and is re-checked each tick agai
   # human is the only transition out" pipeline state, applied alongside the
   # marker above (whether freshly posted this tick or already standing from an
   # earlier one — `--add-label` is idempotent, so it is safe to reassert every
-  # tick the hold binds). UNLIKE loom:operator-only, this must NOT make
-  # sweep/shepherd skip the PR — loom:pr is kept (see above) and the PR stays
+  # tick the hold binds). This is meant NOT to make sweep/shepherd skip
+  # the PR (but see the 2am#4345 note under "`loom:operator` on the
+  # held-and-stale route" below: the escalation sub-kind is retired into
+  # loom:operator, which the daemon's hold set now parks) — loom:pr is kept (see above) and the PR stays
   # in the normal re-evaluation queue precisely so the release precheck
   # (loom:auto-merge-ok / operator comment / new push / new Judge review, all
   # above) can still fire and clear it. Never applied in place of loom:pr.
@@ -1649,9 +1651,9 @@ queue is exactly "`loom:pr` + `CONFLICTING`", and it deliberately excludes
 a PR a human is holding. That exclusion is correct and this section does **not**
 reverse it: a held+conflicting PR is *surfaced* here, and only becomes Doctor's
 work through the recency route below (which lands it on `loom:changes-requested`
-— Doctor's *Priority 2* queue, which excludes only `loom:blocked` /
-`loom:operator-only`, **not** `loom:operator`). Conflict alone is a report;
-conflict plus staleness is a route.
+— Doctor's *Priority 2* queue, which excludes `loom:blocked` and `loom:operator`;
+see the 2am#4345 note under "`loom:operator` on the held-and-stale route" below).
+Conflict alone is a report; conflict plus staleness is a route.
 
 ### #6 under a hold — report a broken build, and flag genuine feedback (#6852)
 
@@ -1748,9 +1750,15 @@ sweep/shepherd to skip the item" (`.loom/docs/label-state-machine.md`). Verified
 mechanically against the consumers, not assumed:
 
 - **Doctor Priority 2** (`loom:changes-requested`) excludes `loom:blocked` and
-  `loom:operator-only` — **not** `loom:operator`. The routed PR is visible to
-  Doctor with the label kept. (Doctor Priority 1 *does* exclude it, but that
-  queue is `loom:pr`-scoped and the PR has just left it.)
+  `loom:operator`. **2am#4345:** this bullet used to read "excludes
+  `loom:operator-only`, not `loom:operator`", and that distinction is gone —
+  `loom:operator-only` and its sub-kinds are retired into `loom:operator`, and
+  the daemon's hold set (`loom-daemon labels list --property hold`) parks
+  `loom:operator` for every role. So a held PR routed to Doctor with the label
+  kept is NOT visible to Doctor's queue. Upstream resolved this by moving
+  Champion's merge hold to `loom:blocked` (rjwalters/loom#11861); this pinned
+  file has not adopted that change, which is a pin-drift decision, not a label
+  rename.
 - **Judge** does not filter on `loom:operator`, so the re-review after Doctor's
   fix proceeds normally.
 - **Sweep C1c** skips routing a `loom:pr` + `loom:operator` PR to *Merge*
@@ -2645,13 +2653,13 @@ for blocked in $BLOCKED_ISSUES; do
     # label read (backlog observation, not arbitration) replaces up to
     # --max-nodes forge reads. Cached("$GH_READ") — see "Cached forge reads".
     ALREADY_ROUTED=$("$GH_READ" issue view "$blocked" --json labels \
-      --jq '[.labels[].name] | index("loom:operator-only") // empty')
+      --jq '[.labels[].name] | index("loom:operator") // empty')
 
     if [ -z "$ALREADY_ROUTED" ]; then
       CYCLE_RC=0
       ./.loom/scripts/detect-dependency-cycle.sh --issue "$blocked" --report || CYCLE_RC=$?
       if [ "$CYCLE_RC" -eq 1 ]; then
-        echo "  Dependency CYCLE on #$blocked — surfaced and routed to loom:operator-only; not re-deriving 'still blocked'"
+        echo "  Dependency CYCLE on #$blocked — surfaced and routed to loom:operator; not re-deriving 'still blocked'"
       fi
     fi
   fi
@@ -2692,13 +2700,13 @@ than re-deriving anything yourself.
 | Property | How the script guarantees it |
 |---|---|
 | **Bounded cost** | Hard caps on hops (`--max-depth`, default 4), distinct issues fetched (`--max-nodes`, default 25) and edges examined (`--max-steps`, default 500); each issue is fetched at most once per run; reads go through `gh-cached`. A bound that fires prints `SEARCH_TRUNCATED:` so `NO_CYCLE` is never mistaken for proof. |
-| **Not on every pass** | Two gates precede it. (1) It is invoked **only** on the `ALL_RESOLVED=false` branch above — i.e. only once the cheap single-hop check has already concluded "still blocked", so an issue that unblocks normally never pays for a walk. (2) An issue already carrying `loom:operator-only` is skipped outright — the cycle was surfaced on an earlier pass and a human owns it, so one cached label read replaces the whole walk from then on. |
-| **Surfaced, not silent** | `--report` posts **one** comment naming every node in the cycle and adds `loom:operator-only`. Breaking a cycle means deciding which declared edge is wrong or which side ships a partial first — a human decision Champion is not entitled to make. |
+| **Not on every pass** | Two gates precede it. (1) It is invoked **only** on the `ALL_RESOLVED=false` branch above — i.e. only once the cheap single-hop check has already concluded "still blocked", so an issue that unblocks normally never pays for a walk. (2) An issue already carrying `loom:operator` is skipped outright — the cycle was surfaced on an earlier pass and a human owns it, so one cached label read replaces the whole walk from then on. |
+| **Surfaced, not silent** | `--report` posts **one** comment naming every node in the cycle and adds `loom:operator`. Breaking a cycle means deciding which declared edge is wrong or which side ships a partial first — a human decision Champion is not entitled to make. |
 | **Idempotent** | The comment carries `<!-- champion:dep-cycle:<fingerprint> -->`, fingerprinted on the cycle's **node set** (sorted), so the same cycle discovered from either side collapses to one identity and is commented once; a genuinely different cycle still gets its own comment. Same marker-and-skip shape as `champion-issue-promo.md`'s body-hash idempotency. |
 | **Fail-safe** | A `CLOSED` node ends that branch of the walk (a resolved edge cannot deadlock anyone), an unreadable cross-repo issue is reported as `UNREADABLE:` rather than crashing, and without `--report` the script is strictly read-only. |
 
 Do **not** remove `loom:blocked` when a cycle is found — the issue genuinely is
-blocked. The change is that a human now owns it (`loom:operator-only`) instead of
+blocked. The change is that a human now owns it (`loom:operator`) instead of
 Champion re-deriving the same dead conclusion on the next pass.
 
 **A cycle is not the same finding as a completed-but-unpromoted epic.** If an
@@ -3132,7 +3140,7 @@ if [ "$HELD" = true ]; then
 
 **This PR is on a merge-risk hold, and the hold is preserved.** Routing it to Doctor addresses staleness only — it is not a release signal and does not clear the hold. The \`champion:merge-risk-hold\` marker stays on this PR, so if a later tick merges it, Champion must still post the mandatory hold-reversal comment naming what changed (#4742). Rebasing a held PR does not make it an unheld one.
 
-\`loom:operator\` is **kept** for the same reason: the human merge decision this PR is waiting on is still outstanding. It does not block Doctor — Doctor's \`loom:changes-requested\` queue excludes \`loom:blocked\` / \`loom:operator-only\`, not \`loom:operator\` (#6720)."
+\`loom:operator\` is **kept** for the same reason: the human merge decision this PR is waiting on is still outstanding. (#6720)"
 else
   STALE_HOLD_NOTE=""
 fi
@@ -3179,11 +3187,10 @@ $STALE_HOLD_NOTE
   #   HELD=true — #5802's premise is FALSE here. The hold is unresolved and the
   #     PR is expected to return still needing a human merge decision, so
   #     asserting "no human is needed" for the whole Doctor round-trip would be
-  #     a lie. Keep the label. It does not strand the PR: `loom:operator` is
-  #     the re-evaluable human-needed state and must never make sweep/shepherd
-  #     skip an item (.loom/docs/label-state-machine.md), and Doctor's
-  #     `loom:changes-requested` queue filters `loom:blocked` /
-  #     `loom:operator-only`, NOT `loom:operator`.
+  #     a lie. Keep the label. (2am#4345: the retired loom:operator-only
+  #     sub-kind collapsed into loom:operator, which Doctor's
+  #     loom:changes-requested queue and the daemon's hold set now exclude —
+  #     see "`loom:operator` on the held-and-stale route" above.)
   if [ "$HELD" = true ]; then
     echo "Kept loom:operator on #$PR_NUMBER — the merge-risk hold is unresolved (#6720)"
   else
@@ -3273,7 +3280,7 @@ This pass **never merges anything and never closes anything**. For each parked P
   --jq '.[] | "#\(.number) \(.title)"'
 ```
 
-**Skip any PR that also carries `loom:operator-only`** — a previous pass (or a human) already routed it out to the operator; do not re-decide it. Process the remaining PRs oldest first.
+**Skip any PR that also carries `loom:operator`** — a previous pass (or a human) already routed it out to the operator; do not re-decide it. Process the remaining PRs oldest first.
 
 Two more entry guards, checked against the thread in Step 2 before any decision is made:
 
@@ -3402,7 +3409,7 @@ fi
 
 ### Step 4c: Outcome — recommend closing (route to the operator)
 
-Use this when the history shows the **approach itself** is not viable — repeated rejections on the design, a superseded change, or a PR whose premise a merged change invalidated. **Champion is the router here, not the closer**: do not close the PR. Add `loom:operator-only` plus its `loom:operator-decision` sub-kind (#5671 — a genuine human ruling is needed here, not a self-clearing wait; see `.loom/docs/label-state-machine.md` "operator-only sub-kinds") (keeping `loom:blocked` + `loom:changes-requested`) so the PR leaves the automation queue for good — Mode C pre-flight hard-skips `loom:operator-only` PRs — and state the recommendation plainly for the human.
+Use this when the history shows the **approach itself** is not viable — repeated rejections on the design, a superseded change, or a PR whose premise a merged change invalidated. **Champion is the router here, not the closer**: do not close the PR. Add `loom:operator` (a genuine human ruling is needed here, not a self-clearing wait; see `.loom/docs/label-state-machine.md` → "Routing to a human"; the retired `loom:operator-only` + `loom:operator-decision` pair collapsed into it, 2am#4345), keeping `loom:blocked` + `loom:changes-requested` so the PR leaves the automation queue for good — Mode C pre-flight hard-skips `loom:operator` PRs — and state the recommendation plainly for the human.
 
 ```bash
 PR_NUMBER=<number>
@@ -3424,11 +3431,11 @@ This PR has been parked at the Doctor-cycle cap, and its rejection history indic
 - **Why more Doctor cycles will not help**: <WHY_THE_APPROACH_NOT_THE_IMPLEMENTATION_IS_THE_PROBLEM>
 - **Recommendation**: close this PR<AND_OPTIONALLY_WHAT_TO_FILE_INSTEAD>
 
-Added \`loom:operator-only\` so automation stops re-evaluating this PR. A human should close it, or remove \`loom:operator-only\` to return it to the Champion recovery pass.
+Added \`loom:operator\` so automation stops re-evaluating this PR. A human should close it, or remove \`loom:operator\` to return it to the Champion recovery pass.
 
 ---
 *Automated by Champion role*"
-  gh pr edit "$PR_NUMBER" --add-label "loom:operator-only,loom:operator-decision"
+  gh pr edit "$PR_NUMBER" --add-label "loom:operator"
   echo "Routed #$PR_NUMBER to the operator with a close recommendation"
 fi
 ```
