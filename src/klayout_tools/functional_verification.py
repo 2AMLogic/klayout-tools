@@ -218,6 +218,7 @@ from .functional_verification_sdf import (
     _collect_sdf_alias_port_bits,
     _collect_sdf_physical_only_instances,
     _drop_sdf_non_interconnect_entries,
+    _drop_sdf_unsupported_edge_modpath_iopaths,
     _drop_sdf_zero_delay_alias_port_interconnects,
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,
@@ -384,6 +385,22 @@ SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 #: *and* whose SDF carried at least one non-``INTERCONNECT`` delay entry.
 SDF_IOPATH_DROPPED_CLASS = "iopath_interconnect_only"
 
+#: The ``environment.sdf.dropped`` class counting the ``IOPATH`` entries
+#: removed before annotation because their arc's only module paths in the
+#: cell's own Verilog model are ``ifnone`` + edge-sensitive -- the gf180mcu
+#: models' XOR/XNOR/MUX-select shape, ``ifnone (posedge A1 => (Z:A1))``.
+#: Icarus discards every such path at elaboration (``sorry: ifnone with an
+#: edge-sensitive path is not supported``), so the arc has no modpath an
+#: ``IOPATH`` could match and each entry would otherwise fail with ``Unable
+#: to match ModPath`` (issue #2885). Like the zero-delay classes it is decided
+#: from the SDF text and the run's own sources up front
+#: (:func:`_drop_sdf_unsupported_edge_modpath_iopaths`), so Icarus never
+#: emits a diagnostic for these entries. Unlike them, the caller does lose
+#: real timing -- the arc simulates with no module-path delay -- so this
+#: class alone also carries an ``arcs`` list naming every dropped
+#: ``{celltype, from, to}`` arc.
+SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS = "iopath_ifnone_edge_modpath"
+
 #: A human-readable reason per dropped class, surfaced in
 #: ``environment.sdf.dropped`` (issue #1102) so a caller can explain *why* a
 #: class was dropped without re-deriving it from this module's own comments.
@@ -437,6 +454,22 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "configuration first-class and honestly reported instead of "
         "hand-filtered. A run that did not select the mode never carries "
         "this class"
+    ),
+    SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS: (
+        "The cell's own Verilog model declares this arc only through "
+        "'ifnone' edge-sensitive module paths (e.g. 'ifnone (posedge A1 => "
+        "(Z:A1))', the shape gf180mcu models give XOR/XNOR inputs and MUX "
+        "selects), which Icarus Verilog does not support: it discards every "
+        "such path at elaboration ('sorry: ifnone with an edge-sensitive path "
+        "is not supported'), so no IOPATH entry -- unqualified or "
+        "edge-qualified -- can match it ('Unable to match ModPath'). Those "
+        "IOPATH entries were removed before annotation and counted here, and "
+        "'arcs' names every affected cell arc. Removing them cannot change "
+        "simulated timing relative to annotating them, but the listed arcs "
+        "simulate with NO module-path delay at all (neither the SDF's nor "
+        "the model's placeholder): their characterised cell delay is not "
+        "represented in this run. An IOPATH that fails to match any other "
+        "arc is left in place and still fails loudly"
     ),
 }
 
@@ -2098,6 +2131,62 @@ def _apply_sdf_interconnect_only_drop(
     return new_path
 
 
+def _apply_sdf_unsupported_edge_modpath_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    sources: list[str],
+    sdf_pre_dropped_counts: dict[str, int],
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
+) -> str:
+    """Issue #2885's ``ifnone`` edge-sensitive-modpath ``IOPATH`` drop,
+    applied as one step of :func:`run_functional_verification`'s
+    SDF-normalization pipeline: an ``IOPATH`` entry onto a cell arc whose
+    only module paths in the request's own cell models are ``ifnone`` +
+    edge-sensitive (which Icarus discards at elaboration) cannot match any
+    modpath, so it is removed from the SDF text before ``$sdf_annotate`` and
+    counted under :data:`SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS`, with the
+    distinct dropped arcs recorded alongside it.
+
+    Returns the path the next normalization step should read --
+    ``annotate_source_path`` unchanged when nothing was dropped, or a new
+    normalized-copy path otherwise. The count and arcs are recorded into the
+    two dicts in place, for the same cyclomatic-complexity reason
+    :func:`_apply_sdf_physical_only_drop`'s own docstring records.
+    """
+    edge_drop = _drop_sdf_unsupported_edge_modpath_iopaths(
+        annotate_source_path, sources
+    )
+    if edge_drop is None:
+        return annotate_source_path
+    edge_text, edge_count, edge_arcs = edge_drop
+    new_path = os.path.join(output_dir, "klt_sdf_ifnone_edge_modpath_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(edge_text)
+    sdf_pre_dropped_counts[SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS] = edge_count
+    sdf_pre_dropped_arcs[SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS] = edge_arcs
+    return new_path
+
+
+def _sdf_dropped_report(
+    sdf_dropped_counts: dict[str, int],
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
+) -> dict[str, dict[str, Any]]:
+    """``environment.sdf.dropped``: per class, ``{count, reason}`` -- plus
+    ``arcs`` for a class that recorded the specific cell arcs it dropped
+    (issue #2885's :data:`SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS`; additive,
+    absent on every other class)."""
+    report: dict[str, dict[str, Any]] = {}
+    for klass, count in sorted(sdf_dropped_counts.items()):
+        entry: dict[str, Any] = {
+            "count": count,
+            "reason": SDF_BENIGN_DIAGNOSTIC_REASONS.get(klass, ""),
+        }
+        if klass in sdf_pre_dropped_arcs:
+            entry["arcs"] = sdf_pre_dropped_arcs[klass]
+        report[klass] = entry
+    return report
+
+
 def _apply_sdf_physical_only_drop(
     annotate_source_path: str,
     output_dir: str,
@@ -2248,6 +2337,8 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     # transcript scan (issue #2285). Merged with the scan's own counts once
     # the run is over.
     sdf_pre_dropped_counts: dict[str, int] = {}
+    # Per-class dropped cell arcs, for a class that names them (issue #2885).
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]] = {}
     if coverage_requested:
         build_args += list(COVERAGE_BUILD_ARGS)
     if sdf is not None:
@@ -2309,6 +2400,21 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         annotate_source_path = _apply_sdf_header_normalization(sdf["file"], output_dir)
         annotate_source_path = _apply_sdf_interconnect_only_drop(
             annotate_source_path, output_dir, sdf_pre_dropped_counts, sdf["entries"]
+        )
+        # Issue #2885: an IOPATH onto a cell arc whose only module paths are
+        # `ifnone` + edge-sensitive (gf180mcu's XOR/XNOR/MUX-select shape)
+        # has no modpath to match -- Icarus discards those paths at
+        # elaboration -- so it is removed here and counted (with the arcs
+        # named) in `environment.sdf.dropped` instead of failing the run as
+        # `Unable to match ModPath`. Any other IOPATH mismatch is left in
+        # place and still fails the diagnostic gate loudly. A no-op (the
+        # SDF is not even read) when no source mentions `ifnone`.
+        annotate_source_path = _apply_sdf_unsupported_edge_modpath_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            sdf_pre_dropped_counts,
+            sdf_pre_dropped_arcs,
         )
         # Issue #1619: a bit-selected top-level-port INTERCONNECT entry
         # (any real design's bus ports produce these) can poison a sibling
@@ -2545,13 +2651,9 @@ def run_functional_verification(request: str) -> dict[str, Any]:
                     "entries": sdf["entries"],
                     "annotated": True,
                     "partial": bool(sdf_dropped_counts),
-                    "dropped": {
-                        klass: {
-                            "count": count,
-                            "reason": SDF_BENIGN_DIAGNOSTIC_REASONS.get(klass, ""),
-                        }
-                        for klass, count in sorted(sdf_dropped_counts.items())
-                    },
+                    "dropped": _sdf_dropped_report(
+                        sdf_dropped_counts, sdf_pre_dropped_arcs
+                    ),
                 }
             ),
         },
