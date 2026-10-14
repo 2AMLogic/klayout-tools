@@ -14,6 +14,10 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **mypy baseline ratchet and `py.typed`** (issue #3221): `mypy` (pinned in the
+  `dev` extra) now runs in CI against `type-baseline.json` via
+  `scripts/check_type_baseline.py`; the package ships `py.typed`. See
+  `docs/type-checking.md`.
 - **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
   extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in
   ngspice-46 with the pinned OpenVAF-Reloaded-compiled BSIM-CMG 111.0.0 OSDI
