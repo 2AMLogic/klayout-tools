@@ -602,7 +602,7 @@ What differs from `remote` is *who acquires the machine*:
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
-| `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`); see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
+| `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`. Any other value is rejected before any S3 write. |
@@ -1004,6 +1004,83 @@ of them may break the runner contract). **Remediation** on a mismatch:
 update the runner image to the client's minor, or submit from a client of the
 image's minor. Jobs that never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.
+
+#### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
+
+The runner-side preflight only runs once a Spot instance has booted. To catch
+a known mismatch before that, the client also checks the runner `klt` that
+the **AMI manifest** publishes. This is the same `remote-sim-ami-manifest.json`
+that `remote` resolves its AMI from, found by the same search order:
+`request.remote.ami_manifest` is not consulted here, so the order is
+`$KLT_AMI_MANIFEST`, then `~/.config/klt/remote-sim-ami-manifest.json`, then
+the packaged `data/` copy. See
+[`docs/schemas/remote-sim-ami-manifest.schema.json`](../schemas/remote-sim-ami-manifest.schema.json).
+
+- **Source.** Each manifest entry may carry `klt_version` (the build string
+  the image's `klt --version` reports, without `klt `) and `klt_ref` (the git
+  ref it was installed from, for audit only).
+  `scripts/aws/build-remote-sim-ami.sh` publishes both for every new or
+  copied image. `klt_ref` is the pinned `--klt-ref` that the build installs
+  `klayout-tools` from, and `klt_version` is what that install reported on
+  the build instance. The script refuses to publish an image whose version
+  it could not read. `--emit-manifest-entry <ami_id> <klt_version>` prints
+  the entry a build would write, with no AWS call. Entries written before
+  #2851 have neither field, which means unknown.
+- **Which images.** For each `(pdk, region)` pair, the check uses the most
+  recently built entry, the same entry `resolve_ami()` would pick. Only the
+  request's `models.pdk` is considered (every PDK when it names none), and
+  only `batch.region` (every region when none is configured, because the
+  fleet chooses its own Spot pool).
+- **Rule.** The check uses the same major.minor release-segment comparison
+  as the runner-side gate (#3184, table above), so the two can never
+  disagree. It reports a mismatch only when **every** candidate image
+  publishes a `klt_version` and none of them matches the client.
+- **`enforce` (default).** A known mismatch fails the whole request once,
+  before any S3 write or launch call. It exits `1` with a top-level
+  `error.code` of `batch_runner_version_mismatch` (the existing code). The
+  message names every candidate image with its full `klt_version` and
+  `klt_ref`, plus the client's full version. No instance is launched, no
+  report or `corners[]` is produced, and there are no per-corner
+  `batch_job_failed` diagnostics. A sharded (`hosts > 1`) request is checked
+  once, not once per shard.
+- **`warn`.** Prints the same message to stderr and submits as before. The
+  runner-side preflight then runs in its `warn` mode.
+- **Unknown.** If no manifest is found, no image is published for the
+  request, any candidate is a legacy entry without `klt_version`, a version
+  is unreadable, or the candidates disagree, nothing is refused locally. The
+  request is submitted unchanged and the runner-side preflight above
+  decides, exactly as before #2851. No historical manifest entry becomes
+  unusable.
+- **Discovering the runner version before submit.** Read the manifest:
+  `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref}'
+  "${KLT_AMI_MANIFEST:-$HOME/.config/klt/remote-sim-ami-manifest.json}"`.
+  For a given pair, the entry with the latest `built_at` is the one in use.
+- **Limit.** A manifest `klt_version` is publication metadata, not proof of
+  the bytes a job executes. The fleet's own launch configuration, not this
+  repository, decides which image boots. That is why a `match` or `unknown`
+  still goes through the runner-side preflight, and why
+  `environment.remote.runner_klt_version` (what the job actually ran) stays
+  the authoritative record.
+
+**When the client is newer than the runner.** If the image is a different
+minor from your client, either:
+
+1. **Rebuild or publish a runner image** of your client's minor. Run
+   `scripts/aws/build-remote-sim-ami.sh` with a matching `--klt-ref`, or have
+   the fleet image rebuilt. This is the supported fix.
+2. **Submit from a client of the image's minor.** Released `klt 0.5.0` has
+   no `batch` backend at all ("unsupported backend 'batch'"). So against a
+   `0.5.x` image, no client can both submit and pass the gate. Option 1 is
+   the only clean path there.
+3. **Set `request.batch.runner_version_check: "warn"`** to run anyway. This
+   is an informed override, not a compatibility guarantee. The older runner
+   may reject or silently ignore request options it does not know, and the
+   run can still report a pass. Field-level compatibility under `warn` is
+   tracked in [#2901](https://github.com/2AMLogic/klayout-tools/issues/2901),
+   and the request-feature minimum-version registry in
+   [#2877](https://github.com/2AMLogic/klayout-tools/issues/2877). Check
+   `environment.remote.runner_compatibility` and
+   `runner_compatibility_warning` in the result.
 
 ### Worker-observed environment (`worker_environment`, [#2834](https://github.com/2AMLogic/klayout-tools/issues/2834))
 
