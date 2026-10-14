@@ -122,6 +122,9 @@ def _print_text(report: dict) -> None:
     print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
     print(f"gates: {report['gate_count']}")
+    if not report["gate_count"]:
+        # (issue #2896) Passive-only cell: the antenna half has nothing to grade.
+        print("  (no transistor gate in this cell; antenna checks not applicable)")
 
     for gate in report["gates"]:
         print()
