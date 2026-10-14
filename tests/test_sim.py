@@ -12084,3 +12084,114 @@ def test_run_sim_relative_artifacts_dir_is_absolutised(tmp_path, monkeypatch):
         for arg in cmd:
             if arg.startswith(("out", "./out")):
                 raise AssertionError(f"relative path in command: {arg}")
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2926: $VAR / ~ in the netlist body's own .include targets
+# --------------------------------------------------------------------------- #
+
+
+def _inc_netlist(tmp_path, include_line):
+    body = tmp_path / "body.cir"
+    body.write_text(f"* env include\n{include_line}\nV1 x 0 1\n")
+    return str(body)
+
+
+def test_expand_netlist_includes_set_var(tmp_path, monkeypatch):
+    (tmp_path / "inc.sp").write_text("R9 x 0 1k\n")
+    monkeypatch.setenv("INCDIR", str(tmp_path))
+    out_dir = tmp_path / "corner"
+    out_dir.mkdir()
+    for directive in (".include", ".inc", ".INCLUDE"):
+        body = _inc_netlist(tmp_path, f"{directive} $INCDIR/inc.sp")
+        path, diags = sim._expand_netlist_includes(body, str(out_dir))
+        assert diags == []
+        assert path != body
+        text = open(path).read()
+        assert f"{directive} {tmp_path}/inc.sp" in text
+        assert "$INCDIR" not in text
+
+
+def test_expand_netlist_includes_quoted_and_braced(tmp_path, monkeypatch):
+    monkeypatch.setenv("INCDIR", str(tmp_path))
+    body = _inc_netlist(tmp_path, '.include "${INCDIR}/inc.sp"')
+    path, diags = sim._expand_netlist_includes(body, str(tmp_path))
+    assert diags == []
+    assert f'.include "{tmp_path}/inc.sp"' in open(path).read()
+
+
+def test_expand_netlist_includes_tilde(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    body = _inc_netlist(tmp_path, ".include ~/inc.sp")
+    path, diags = sim._expand_netlist_includes(body, str(tmp_path))
+    assert diags == []
+    assert f".include {tmp_path}/inc.sp" in open(path).read()
+
+
+def test_expand_netlist_includes_unset_var_named_diagnostic(tmp_path, monkeypatch):
+    monkeypatch.delenv("NOPE_INCDIR", raising=False)
+    body = _inc_netlist(tmp_path, ".include $NOPE_INCDIR/inc.sp")
+    path, diags = sim._expand_netlist_includes(body, str(tmp_path))
+    assert path == body
+    (diag,) = diags
+    assert diag["code"] == "missing_include"
+    assert diag["severity"] == "error"
+    assert "NOPE_INCDIR" in diag["message"]
+    assert "line 2" in diag["message"]
+    assert body in diag["message"]
+
+
+def test_expand_netlist_includes_plain_netlist_untouched(tmp_path):
+    body = _inc_netlist(tmp_path, ".include inc.sp")
+    assert sim._expand_netlist_includes(body, str(tmp_path)) == (body, [])
+
+
+def test_classify_diagnostics_missing_include_ngspice42_wording():
+    diagnostics = sim._classify_diagnostics("Error: .include filename missing\n")
+    assert "missing_include" in [d["code"] for d in diagnostics]
+
+
+def _write_inc_request(tmp_path):
+    (tmp_path / "inc.sp").write_text("R9 x 0 1k\n")
+    body = _inc_netlist(tmp_path, ".include $INCDIR/inc.sp")
+    request = tmp_path / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "netlist": body,
+                "analysis": {"kind": "op", "args": ""},
+                "measurements": [{"name": "i1", "expr": "-i(v1)", "unit": "A"}],
+                "options": {"timeout_s": 30},
+            }
+        )
+    )
+    return str(request)
+
+
+@_SKIP_NO_NGSPICE
+def test_local_backend_expands_env_include(tmp_path, monkeypatch):
+    """Issue #2926: `.include $INCDIR/...` loads on the local backend."""
+    monkeypatch.setenv("INCDIR", str(tmp_path))
+    report = sim.run_sim(_write_inc_request(tmp_path), backend="local")
+    (corner,) = report["corners"]
+    assert corner["status"] == "pass"
+    assert corner["measurements"][0]["value"] == pytest.approx(1e-3)
+
+
+@_SKIP_NO_NGSPICE
+def test_local_backend_unset_env_include_is_named_not_measurement_only(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("INCDIR", raising=False)
+    report = sim.run_sim(_write_inc_request(tmp_path), backend="local")
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "missing_include" in codes
+    # ngspice may add its own classified missing_include too (wording varies by
+    # version), so look for the named up-front one rather than requiring one.
+    assert any(
+        "INCDIR" in d["message"] and "line 2" in d["message"]
+        for d in corner["diagnostics"]
+        if d["code"] == "missing_include"
+    )

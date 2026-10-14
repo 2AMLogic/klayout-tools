@@ -1310,7 +1310,8 @@ The corner-only CLI knobs are likewise refused for deck requests:
   a file that resolves nowhere on the submitting host — is a named error
   before any billable launch. `$VAR`-bearing and PDK-rooted targets stay
   the executing host's to resolve, exactly as in the corner path (and are
-  listed in the unit's `host_resolved`). Staged files are followed
+  listed in the unit's `host_resolved`; the executing host expands `$VAR`/`~`
+  in them before running the engine). Staged files are followed
   recursively, bounded by the same 64-file / 32 MiB caps as corner
   staging. A one-token `.lib <section>` … `.endl` *definition* names no
   file and is left alone; any other `.lib` shape (no arguments, more than
@@ -2502,12 +2503,22 @@ netlist's resolved include closure**, not just the netlist file
   to S3. Previously such a deck was shipped anyway and came back as a full
   set of `error`/`unavailable_measurement` corners indistinguishable from a
   real regression.
-- Two classes of include are deliberately **left verbatim**, because the
-  *executing* host owns their resolution: a target naming an environment
-  variable (`$PDK_ROOT/...`), and a target resolving under the PDK root the
+- Two classes of include are deliberately **left verbatim** when staging,
+  because the *executing* host owns their resolution: a target naming an
+  environment variable (`$PDK_ROOT/...`), and a target resolving under the PDK root the
   request already forwards (`models.pdk_root`, else this host's `$PDK_ROOT`)
   — the model library is baked into the fleet image and is never pushed per
   job (see "Remote backend" above).
+- **`$VAR`/`~` in `.include`/`.inc` targets are expanded on the executing
+  host** (every backend, including `local`), when the per-corner deck is
+  composed -- ngspice itself never expands environment variables in include
+  paths. The netlist body's include lines are rewritten into a copy beside
+  the corner deck (`${VAR}`, quoted targets and `~` are handled; includes
+  inside included files are not followed). A variable that is unset on the
+  executing host yields a `missing_include` diagnostic naming the netlist,
+  line and variable; an include ngspice itself fails to load (`Could not
+  find include file ...`, or ngspice 42's `.include filename missing`) also
+  carries `missing_include`.
 - `.lib` cards in the netlist are not followed: `.lib` is the model-library
   channel, which `models`/`models.pdk` resolve on the executing host by
   default (see "Model library resolution" below) — or, with
