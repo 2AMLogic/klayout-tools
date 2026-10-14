@@ -2044,6 +2044,109 @@ def _status_exit_code(status: dict[str, Any]) -> int | None:
         return None
 
 
+#: Engine logs a collected ``outputs/`` tree may hold (``keep_artifacts`` runs
+#: copy each corner's log under ``artifacts/``). Only read to surface the
+#: engine's fatal error; never copied wholesale into the JSON.
+_BATCH_ENGINE_LOG_NAMES = ("ngspice.log", "xyce.log")
+
+#: Bytes read from the head of an engine log (a fatal include/parse error is
+#: printed before the simulation starts) and lines kept in a failure tail.
+_BATCH_ENGINE_LOG_HEAD_BYTES = 256 * 1024
+_BATCH_ENGINE_LOG_TAIL_LINES = 12
+_BATCH_ENGINE_LOG_TAIL_CHARS = 1500
+
+
+def _find_engine_logs(collected: str) -> list[str]:
+    """Paths of every engine log under a collected ``outputs/`` tree, sorted."""
+    found: list[str] = []
+    for root, _dirs, files in os.walk(collected):
+        found.extend(
+            os.path.join(root, name)
+            for name in files
+            if name in _BATCH_ENGINE_LOG_NAMES
+        )
+    return sorted(found)
+
+
+def _read_log_head(path: str) -> str:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(_BATCH_ENGINE_LOG_HEAD_BYTES).decode(
+                "utf-8", errors="replace"
+            )
+    except OSError:
+        return ""
+
+
+def _missing_include_diagnostic(log_text: str) -> dict[str, Any] | None:
+    """The ``missing_include`` diagnostic the local classifier would emit for
+    ``log_text`` (naming the file ngspice could not find), or ``None``."""
+    from .sim import _classify_diagnostics
+
+    for diagnostic in _classify_diagnostics(log_text):
+        if diagnostic.get("code") == "missing_include":
+            return diagnostic
+    return None
+
+
+def _surface_missing_include(corners: list[dict[str, Any]], collected: str) -> None:
+    """Add a ``missing_include`` diagnostic to every errored corner whose
+    retrieved engine log shows ngspice failing on a ``.include`` but whose
+    report (written by the runner's own, possibly older, ``klt``) carries no
+    such code -- otherwise the caller sees only ``measurement ... produced no
+    value``. Corners are matched to logs through ``artifacts.log``
+    (``<$EDA_OUTPUT_DIR>/artifacts/<rel>``); with exactly one log in the tree
+    it applies to every such corner. A no-op when no log was collected."""
+    logs = _find_engine_logs(collected)
+    if not logs:
+        return
+    marker = f"/{BATCH_ARTIFACTS_DIRNAME}/"
+    for corner in corners:
+        if corner.get("status") != "error":
+            continue
+        diagnostics = corner.setdefault("diagnostics", [])
+        if any(d.get("code") == "missing_include" for d in diagnostics):
+            continue
+        log_path = None
+        remote = (corner.get("artifacts") or {}).get("log")
+        if isinstance(remote, str) and marker in remote:
+            candidate = os.path.join(
+                collected,
+                BATCH_ARTIFACTS_DIRNAME,
+                remote[remote.index(marker) + len(marker) :],
+            )
+            if os.path.isfile(candidate):
+                log_path = candidate
+        if log_path is None and len(logs) == 1:
+            log_path = logs[0]
+        if log_path is None:
+            continue
+        found = _missing_include_diagnostic(_read_log_head(log_path))
+        if found is not None:
+            diagnostics.append(found)
+
+
+def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
+    """For a job that failed without a usable report: a short message
+    fragment carrying the tail of the retrieved engine log, or stating the
+    log was unavailable, plus the ``missing_include`` diagnostic when the log
+    shows one."""
+    logs = _find_engine_logs(collected)
+    if not logs:
+        return (
+            "engine log unavailable: no ngspice.log/xyce.log in the collected "
+            "outputs (engine logs are retrieved only when artifacts are kept)",
+            None,
+        )
+    text = _read_log_head(logs[0])
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    tail = "\n".join(lines[-_BATCH_ENGINE_LOG_TAIL_LINES:])
+    tail = tail[-_BATCH_ENGINE_LOG_TAIL_CHARS:]
+    return f"{os.path.basename(logs[0])} tail: {tail}", _missing_include_diagnostic(
+        text
+    )
+
+
 def _job_failure_corners(
     corner_points: list[CornerPoint],
     measurements_spec: list[dict[str, Any]],
@@ -2052,6 +2155,8 @@ def _job_failure_corners(
     *,
     runner_error: dict[str, Any] | None = None,
     collection_note: str | None = None,
+    log_note: str | None = None,
+    log_diagnostic: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Every unit of a job that reached ``failed``/``timeout`` without
     writing a usable report, reported through the shared unrun-corner shape
@@ -2065,7 +2170,11 @@ def _job_failure_corners(
     appended to the diagnostic (its ``code``, when present, attached as
     ``runner_code``) so the actionable reason is visible without S3 access.
     ``collection_note`` records why recovery found nothing usable. Neither
-    replaces the primary job-failure code or the failed status."""
+    replaces the primary job-failure code or the failed status.
+
+    ``log_note`` is the tail of the retrieved engine log (or a statement that
+    none was available) and ``log_diagnostic`` a ``missing_include``
+    diagnostic derived from it; both are additive."""
     state = str(status.get("state") or "")
     code = "batch_job_timeout" if state == "timeout" else "batch_job_failed"
     detail = str(status.get("detail") or "").strip()
@@ -2081,10 +2190,15 @@ def _job_failure_corners(
         )
         if collection_note:
             message += f" [output recovery: {collection_note}]"
+    if log_note:
+        message += f" [{log_note}]"
     corners = [
         _unrun_corner_report(point, measurements_spec, code, message=message)
         for point in corner_points
     ]
+    if log_diagnostic is not None:
+        for corner in corners:
+            corner["diagnostics"].append(dict(log_diagnostic))
     if runner_error is not None and runner_error.get("code"):
         for corner in corners:
             for diagnostic in corner.get("diagnostics") or []:
@@ -2180,11 +2294,14 @@ def _recover_failed_job_corners(
     raw stderr text never does."""
     runner_error: dict[str, Any] | None = None
     note: str | None = None
+    log_note: str | None = "engine log unavailable: outputs could not be collected"
+    log_diagnostic: dict[str, Any] | None = None
     identity = _read_job_identity(None)
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             collect_outputs(config, job_id, collected, runner=runner)
             identity = _read_job_identity(collected, request)
+            log_note, log_diagnostic = _engine_log_note(collected)
             try:
                 kind, runner_error = _classify_collected_report(
                     read_collected_report(collected)
@@ -2211,6 +2328,8 @@ def _recover_failed_job_corners(
         job_id,
         runner_error=runner_error,
         collection_note=note,
+        log_note=log_note,
+        log_diagnostic=log_diagnostic,
     )
     _annotate_preflight_rejection(corners, runner_error, identity)
     return corners, identity
@@ -2349,6 +2468,7 @@ def _run_batch_job(
         report = read_collected_report(collected)
         environment = {**environment, **_read_job_identity(collected, request)}
         corners = report.get("corners") or []
+        _surface_missing_include(corners, collected)
         if keep_artifacts:
             _install_batch_artifacts(
                 corners, collected_dir=collected, artifacts_dir=artifacts_dir

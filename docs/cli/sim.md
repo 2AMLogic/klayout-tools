@@ -593,6 +593,26 @@ What differs from `remote` is *who acquires the machine*:
 }
 ```
 
+**PDK-root includes resolve on the runner.** A `.include` in the
+netlist body that resolves under the PDK root (`models.pdk_root`, else
+`$PDK_ROOT`) is **not** staged or rewritten: the PDK is baked into the
+runner image, so the same path must exist at the same PDK root *on the
+runner*. A body that includes
+`/home/<you>/.volare/<pdk>/libs.tech/ngspice/design.ngspice` fails on a
+runner whose image keeps that PDK elsewhere (or lacks it) with ngspice's
+`Could not find include file ...`. Prefer a PDK-root-relative include
+(`$PDK_ROOT/...`) or a path under the runner's PDK root. Includes *outside*
+the PDK root are staged from the submitting host. When the runner cannot
+resolve an include, the per-corner `diagnostics[]` carries a
+`missing_include` entry naming the file (when the engine log is retrieved,
+which needs `keep_artifacts`), not only `measurement ... produced no value`.
+A job that fails without a usable report states `engine log unavailable`
+in its `batch_job_failed` message, or carries the tail of the retrieved
+`ngspice.log`. Which PDK locations a given runner image provides, and its
+`klt` version, are fleet concerns owned by
+[2AMLogic/2am](https://github.com/2AMLogic/2am) (see also
+[#2851](https://github.com/2AMLogic/klayout-tools/issues/2851)).
+
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `batch.provision_script_path` | string, required (or `$KLT_BATCH_PROVISION_SCRIPT`) | Path to 2am's `infra/aws/batch-fleet-provision.sh` on *this* host. Resolution order: this field, then `$KLT_BATCH_PROVISION_SCRIPT`, then an error naming both — never a guessed path into a sibling checkout. An unresolvable script is an error raised **before any S3 write**, mirroring `remote.ssh_key_path`'s own early check. |

@@ -4386,3 +4386,165 @@ def test_prelaunch_sharded_request_refuses_once_with_zero_calls(tmp_path, monkey
     assert excinfo.value.code == sb.BATCH_RUNNER_MISMATCH_CODE
     assert assessed == [1]
     assert runner.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Engine-log surfacing: `missing_include` through the batch path (#2882)
+# --------------------------------------------------------------------------- #
+
+_PDK_INCLUDE = "/home/ubuntu/.volare/gf180mcuD/libs.tech/ngspice/design.ngspice"
+
+
+def _include_error_log(target: str) -> str:
+    """A canned runner `ngspice.log` whose run died on a missing include."""
+    return (
+        "Circuit: * runner deck\n"
+        f"Error: Could not find include file {target}\n"
+        "    While reading /var/tmp/eda-job-1/inputs/netlist.cir\n"
+        "ERROR: fatal error in ngspice, exit(1)\n"
+    )
+
+
+def _errored_report_without_include_code(artifact_log: str | None = None) -> str:
+    """An exit-4 report from an older runner `klt`: errored corner with only
+    the generic `measurement` diagnostic, as the issue reports."""
+    report = json.loads(_sim_report())
+    corner = report["corners"][0]
+    corner["status"] = "error"
+    corner["diagnostics"] = [
+        {
+            "severity": "error",
+            "code": "measurement",
+            "message": "measurement m1 produced no value",
+        }
+    ]
+    corner["artifacts"]["log"] = artifact_log
+    report.update(status="error", passed=0, errored=1)
+    return json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        _PDK_INCLUDE,  # absolute submitting-host PDK path
+        "design.ngspice",  # relative include
+        "$PDK_ROOT/gf180mcuD/libs.tech/ngspice/design.ngspice",  # $PDK_ROOT form
+    ],
+)
+def test_log_with_missing_include_classifies_naming_the_file(target):
+    found = sb._missing_include_diagnostic(_include_error_log(target))
+    assert found is not None
+    assert found["code"] == "missing_include"
+    assert target in found["message"]
+
+
+def test_exit_4_batch_job_surfaces_missing_include_from_retrieved_log(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
+    runner.outputs = {
+        "report.json": _errored_report_without_include_code(remote_log),
+        "artifacts/tt_1.800_27/ngspice.log": _include_error_log(_PDK_INCLUDE),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    codes = [d["code"] for d in corners[0]["diagnostics"]]
+    assert codes == ["measurement", "missing_include"]
+    assert _PDK_INCLUDE in corners[0]["diagnostics"][1]["message"]
+
+
+def test_report_already_carrying_missing_include_is_not_duplicated(
+    tmp_path, monkeypatch
+):
+    report = json.loads(_errored_report_without_include_code())
+    report["corners"][0]["diagnostics"].append(
+        {"severity": "error", "code": "missing_include", "message": "from runner"}
+    )
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    runner.outputs = {
+        "report.json": json.dumps(report),
+        "artifacts/tt_1.800_27/ngspice.log": _include_error_log(_PDK_INCLUDE),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    codes = [d["code"] for d in corners[0]["diagnostics"]]
+    assert codes.count("missing_include") == 1
+    assert corners[0]["diagnostics"][-1]["message"] == "from runner"
+
+
+def test_failed_job_with_log_but_no_report_carries_tail_and_missing_include(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.outputs = {
+        "report.json": "",
+        "artifacts/tt/ngspice.log": _include_error_log(_PDK_INCLUDE),
+    }
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner, points=2)
+
+    for corner in corners:
+        codes = [d["code"] for d in corner["diagnostics"]]
+        assert codes == ["batch_job_failed", "missing_include"]
+        message = corner["diagnostics"][0]["message"]
+        assert "ngspice.log tail:" in message
+        assert _PDK_INCLUDE in message
+        assert _PDK_INCLUDE in corner["diagnostics"][1]["message"]
+
+
+def test_failed_job_without_a_log_states_it_was_unavailable(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.outputs = {"report.json": ""}
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner)
+
+    diagnostic = corners[0]["diagnostics"][0]
+    assert diagnostic["code"] == "batch_job_failed"
+    assert "engine log unavailable" in diagnostic["message"]
+    assert [d["code"] for d in corners[0]["diagnostics"]] == ["batch_job_failed"]
+
+
+def test_engine_log_tail_is_bounded(tmp_path):
+    (tmp_path / "ngspice.log").write_text("noise line\n" * 5000)
+    note, found = sb._engine_log_note(str(tmp_path))
+    assert found is None
+    assert len(note) < sb._BATCH_ENGINE_LOG_TAIL_CHARS + 100
