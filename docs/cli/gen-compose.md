@@ -267,9 +267,15 @@ cleanly.
   **gate** port on the `poly_label` layer the extraction deck gained for this
   purpose (sky130 `poly.pin` `66/5`; gf180mcu `Poly2` label purpose `30/10`),
   so a gate survives `klt extract` as a **named, biasable** `.SUBCKT` pin
-  instead of an anonymous `$N` net. A `(block, port)` also named in any
-  `connectivity[]` entry is rejected (exit 1) — a shape the router already
-  labels must not carry a second, possibly inconsistent `pins[]` label. A port
+  instead of an anonymous `$N` net. A `(block, port)` also named in a
+  `connectivity[]` entry (#2881) is accepted **only when the pin's `net`
+  equals that `connectivity[]` net**: it promotes the internally wired net to a
+  composed-cell port reported in the response `ports[]` (so a parent
+  composition can land a route on it by name, with no dummy stub block), and
+  writes **no second label** — the router already labels the net, the response
+  `pins[]` entry reports `labelled: true`, and a `drc_hints.notes[]` entry says
+  the label comes from the router. A different `net` on such a port is a
+  conflicting label and is rejected (exit 1), naming both nets. A port
   whose layer has no label convention (e.g. a `bjt_array` collector-ring
   `COLL_*` tap on the `tap` layer) is a **partial success**: the pin is
   left unlabelled with a `drc_hints.notes[]` entry, never a hard failure.
