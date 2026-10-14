@@ -10458,7 +10458,7 @@ def test_no_ongrid_rule_family_emits_no_mfg_grid_warning(
     """gf180mcu's curated deck declares no `ongrid` rule (grid 0.0), so an
     arbitrary width earns no new warning."""
     assert (
-        gen._mfg_grid_um("gf180mcu", gen._PDK_ROLE_LAYERS["gf180mcu"]["active"]) == 0.0
+        gen.mfg_grid_um("gf180mcu", gen._PDK_ROLE_LAYERS["gf180mcu"]["active"]) == 0.0
     )
     report = _gen_mos(
         tmp_path, both_pdk_root, generator, variant="gf180mcuD", w_um=2.317, l_um=0.302

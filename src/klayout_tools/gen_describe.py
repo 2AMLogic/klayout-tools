@@ -70,7 +70,6 @@ from .gen_layer_params import (
     _gate_pad_clearance_um,
     _metal_res_geometry_min_um,
     _metal_res_layers,
-    _mfg_grid_um,
     _mos_array_well_tap_role_layer,
     _pdk_family,
     _reject_deferred_family,
@@ -80,6 +79,7 @@ from .gen_layer_params import (
     _role_layer_info,
     _sd_implant_margin_um,
     _voltage_flavor_mark_layer,
+    mfg_grid_um,
 )
 
 
@@ -304,7 +304,7 @@ def _mfg_grid_warnings(
     """Top-level ``warnings[]`` entries for a MOS generator's ``w_um``/
     ``l_um`` that is not an exact multiple of the resolved family's
     *manufacturing* grid (issue #2933) -- read from the curated deck's own
-    ``"ongrid"`` rule via :func:`_mfg_grid_um` (``w_um`` on the ``active``
+    ``"ongrid"`` rule via :func:`mfg_grid_um` (``w_um`` on the ``active``
     role, ``l_um`` on ``poly``), so this never disagrees with ``klt drc``.
     A family whose deck declares no such rule (grid ``0.0``) yields ``[]``.
 
@@ -320,7 +320,7 @@ def _mfg_grid_warnings(
     roles = _PDK_ROLE_LAYERS[family]
     warnings: list[str] = []
     for param, role in (("w_um", "active"), ("l_um", "poly")):
-        grid_um = _mfg_grid_um(family, roles.get(role))
+        grid_um = mfg_grid_um(family, roles.get(role))
         value_um = params[param]
         neighbours = _mfg_grid_neighbours(grid_um, value_um)
         if neighbours is None:

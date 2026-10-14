@@ -572,7 +572,7 @@ def _mfg_grid_neighbours(
     multiples of ``multiple * grid_um`` (issue #2933), or ``None`` when
     ``value_um`` already is one -- or when ``grid_um`` is ``0.0`` (the
     family's curated deck declares no ``"ongrid"`` rule, see
-    :func:`~klayout_tools.gen_layer_params._mfg_grid_um`), so there is
+    :func:`~klayout_tools.gen_layer_params.mfg_grid_um`), so there is
     nothing to check against.
 
     ``multiple`` is for a quantity built from ``multiple`` equal on-grid
