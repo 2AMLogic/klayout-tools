@@ -1822,29 +1822,43 @@ def _resolve_clocks(constraints: dict[str, Any] | None) -> list[dict[str, Any]]:
     seen: set[str] = set()
     for index, entry in enumerate(raw):
         where = f"request.constraints.clocks[{index}]"
-        if not isinstance(entry, dict):
-            raise SynthesizeError(f"{where} must be a {{port, period_ns}} object")
-        unknown = sorted(set(entry) - {"port", "period_ns"})
-        if unknown:
-            raise SynthesizeError(
-                f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
-                "(allowed: port, period_ns)"
-            )
-        port = entry.get("port")
-        if not isinstance(port, str) or not port.strip():
-            raise SynthesizeError(f"{where}.port must be a non-empty string")
-        period = entry.get("period_ns")
-        if isinstance(period, bool) or not isinstance(period, (int, float)):
-            raise SynthesizeError(
-                f"{where}.period_ns must be a positive number (nanoseconds)"
-            )
-        if period <= 0:
-            raise SynthesizeError(f"{where}.period_ns must be greater than zero")
+        clock = _validate_clock_entry(entry, where)
+        port = clock["port"]
         if port in seen:
             raise SynthesizeError(f"{where}.port '{port}' is listed more than once")
         seen.add(port)
-        clocks.append({"port": port, "period_ns": period})
+        clocks.append(clock)
     return clocks
+
+
+def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
+    """One validated ``constraints.clocks`` entry as ``{port, period_ns}``
+    (issue #2883).
+
+    Checks the entry in isolation -- object shape, no unknown keys, a
+    non-empty string ``port`` and a positive numeric ``period_ns``. The
+    list-level checks (array type, non-empty, unique ports) stay in
+    :func:`_resolve_clocks`. ``where`` prefixes every error message.
+    """
+    if not isinstance(entry, dict):
+        raise SynthesizeError(f"{where} must be a {{port, period_ns}} object")
+    unknown = sorted(set(entry) - {"port", "period_ns"})
+    if unknown:
+        raise SynthesizeError(
+            f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
+            "(allowed: port, period_ns)"
+        )
+    port = entry.get("port")
+    if not isinstance(port, str) or not port.strip():
+        raise SynthesizeError(f"{where}.port must be a non-empty string")
+    period = entry.get("period_ns")
+    if isinstance(period, bool) or not isinstance(period, (int, float)):
+        raise SynthesizeError(
+            f"{where}.period_ns must be a positive number (nanoseconds)"
+        )
+    if period <= 0:
+        raise SynthesizeError(f"{where}.period_ns must be greater than zero")
+    return {"port": port, "period_ns": period}
 
 
 def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
