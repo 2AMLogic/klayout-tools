@@ -31,6 +31,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   Any other `IOPATH` mismatch still fails loudly. The normalized copy is
   written to `.klt/functional-verification/klt_sdf_ifnone_edge_modpath_dropped.sdf`.
 
+- **Added** (#2886, `klt sta`; additive JSON only): per-corner post-route
+  SDF export for an already-routed DEF. `sdf: true` (`def` mode, requires
+  `spef`) writes `.klt/sta/<def stem>.<corner>.sdf` per analyzed corner with
+  the same `write_sdf -divider . -include_typ` command `place-and-route`'s
+  `post_route_sdf` uses, immediately after `read_spef`, and reports it as
+  `sdf: {path, scope, content_hash}` (per `corners[]` entry, or top level for
+  a scalar corner; `null` when not requested). Non-boolean values, `true`
+  with `verilog`, and `true` without `spef` are request errors; a missing or
+  empty file is exit 1. Omitted/`false` leaves the generated Tcl unchanged;
+  no `schema_version` bump. Documented in `docs/cli/sta.md` ("Post-route
+  SDF per corner").
+
 - **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
   extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in
   ngspice-46 with the pinned OpenVAF-Reloaded-compiled BSIM-CMG 111.0.0 OSDI
