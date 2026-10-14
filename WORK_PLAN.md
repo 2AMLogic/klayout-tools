@@ -10,7 +10,11 @@ Judge-approved PRs stuck under a `loom:operator` merge-risk hold — implementat
 - **#2645**: feat(synthesize,sta,place-and-route): shared request.macros hard-macro declaration
 - **#3143**: chore(deps): update dependency numpy to v2.5.4
 - **#3149**: fix(deps): update dependency mcp to v2
+- **#3174**: klt sim: analysis_aborted diagnostic and reject {param} braces in analysis.args
 - **#3188**: fix(lvs): don't destroy interior top circuit when pruning wrappers (#2852)
+- **#3198**: test(toolchain-pins): enforce exact Verilator/Icarus pin only on CI or pinned installs (#3072)
+- **#3199**: docs: reconcile design-stage skills and ROADMAP with shipped RC parasitics / klt pex (#3179)
+- **#3232**: feat(sim): request feature minimum-runner-version registry and docs (#2877)
 
 ## Operator Priority
 
@@ -25,11 +29,6 @@ Human-approved issues ready for implementation (`loom:issue`).
 - **#1966**: Re-evaluate the .loom/resync-ignore pin on curator.md (#668) — it may be freezing this repo against upstream Curator fixes
 - **#2340**: signoff: input_verified is always null for drc/extract envelopes that recorded an absolute host path
 - **#2849**: lvs: no device-aware path when a PDK's own KLayout LVS runset recognizes devices the curated deck lacks (no native-runset engine; runset netlists unreadable as layout.netlist)
-- **#2860**: extraction decks: a device marker cannot be a derived boolean of several layers (bipolar gap 1 of 4 from #1232)
-- **#2877**: klt sim batch: request features newer than the fleet runner fail the whole job instead of being refused client-side
-- **#3072**: test: verilator pin check fails preflight on hosts with Verilator 5.052 (pinned 5.050)
-- **#3154**: tests/test_asap7_finfet.py::test_fin_count_and_gate_length_recovered_exactly fails on main (S/D net labels swapped)
-- **#3179**: docs: design-extraction skill and ROADMAP still claim RC parasitics are unshipped (#217 closed)
 
 ## In Progress
 
@@ -41,11 +40,7 @@ _None._
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#3194**: feat(decks): BipolarDevice.marker accepts a derived LayerExpr (AND/NOT tree)
-- **#3196**: fix(extract): deterministic FinFET source/drain assignment (#3154)
-- **#3198**: test(toolchain-pins): enforce exact Verilator/Icarus pin only on CI or pinned installs (#3072)
-- **#3199**: docs: reconcile design-stage skills and ROADMAP with shipped RC parasitics / klt pex (#3179)
-- **#3232**: feat(sim): request feature minimum-runner-version registry and docs (#2877)
+_None._
 
 ## Approved (Awaiting Merge)
 
@@ -57,18 +52,21 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 - **#2795**: drc: model sg13g2 Cnt.c activ_mask join and square-contact selection
 - **#3143**: chore(deps): update dependency numpy to v2.5.4
 - **#3149**: fix(deps): update dependency mcp to v2
-- **#3152**: feat(sim): dispatch pre-composed ngspice decks to remote/batch backends (#2804)
 - **#3174**: klt sim: analysis_aborted diagnostic and reject {param} braces in analysis.args
 - **#3178**: feat(signoff): --attest producer for T1 items 1, 9, 10
 - **#3187**: test(asap7): gate shipped R/L/SL cells on exact deviations and a clean CLI run; document no DRM density rule
 - **#3188**: fix(lvs): don't destroy interior top circuit when pruning wrappers (#2852)
 - **#3193**: feat(lvs): forward abstract_cells/abstract_cell_lef to inline extraction (mixed-level LVS)
+- **#3194**: feat(decks): BipolarDevice.marker accepts a derived LayerExpr (AND/NOT tree)
+- **#3198**: test(toolchain-pins): enforce exact Verilator/Icarus pin only on CI or pinned installs (#3072)
+- **#3199**: docs: reconcile design-stage skills and ROADMAP with shipped RC parasitics / klt pex (#3179)
 - **#3200**: feat(signoff): item 6 not_applicable outcome (#2865)
 - **#3205**: feat(extract): bipolar terminal relations to another terminal of the same device (#2863)
 - **#3207**: feat(lvs): klayout-runset engine -- verdict from the PDK runset's .lvsdb (part of #2849)
 - **#3208**: feat(extract): recognise sg13g2 poly resistors with abutting-head topology (#2679)
 - **#3209**: feat(extract): SizeFilter / BipolarDevice.emitter_size (#2861)
 - **#3220**: docs: point SG13G2 SiGe HBT finding at the runset-backed LVS ruling (#2864)
+- **#3232**: feat(sim): request feature minimum-runner-version registry and docs (#2877)
 - **#3245**: klt sim batch: publish runner klt identity in the AMI manifest and refuse known mismatches before launch
 
 ## Proposed
@@ -93,7 +91,6 @@ Issues carrying `loom:curated`.
 - **#2734**: Epic: STA completeness, P&R density coverage, repair validation and iteration cost *(curated)*
 - **#2760**: ASAP7 DRC deck for KLayout *(curated)*
 - **#2766**: ci: monotonic per-file size ratchet checked against the merge-base *(curated)*
-- **#2804**: klt sim: dispatch already-composed decks to the remote/batch backends (re-filing of #2464) *(curated)*
 - **#2811**: ASAP7 DRC deck phase 3: density checks and full shipped-cell clean-run gate *(curated)*
 - **#2812**: ASAP7 FEOL/MOL gap tracker: mechanism-specific rule increments *(curated)*
 - **#2835**: sky130 DRC: enforce licon1/mcon maximum size without rejecting compound-layer exceptions *(curated)*
@@ -120,8 +117,16 @@ Issues carrying `loom:curated`.
 - **#2887**: signoff: no evidence form for T1 items 1/2 (generator/netlist-freshness, directory of committed artifacts) *(curated)*
 - **#2889**: klt pex: no way to pair a hierarchical schematic DUT with the flat extracted netlist (no flatten option, unlike klt lvs flatten_reference) *(curated)*
 - **#2890**: klt pex: extracted .SUBCKT pins are written alphabetically, but a testbench instantiates its DUT positionally; no reconciliation or diagnostic *(curated)*
+- **#2891**: klt pex/sim local backend: a testbench's relative .include of its DUT does not resolve (ngspice runs from the corner directory); only the extracted leg is rewritten to an absolute path *(curated)*
+- **#2892**: klt sim: relative -o/--outdir makes ngspice never start (cwd=corner dir), reported only as per-measurement 'no value' errors *(curated)*
+- **#2893**: klt sim: measurements[].expr after a noise analysis cannot see inoise_spectrum (current plot is noise2; needs hard-coded noise1. prefix) *(curated)*
+- **#2894**: klt sim: silent no-op supply_v key, no parameter corner axis, opaque runner capability skew (batch) *(curated)*
+- **#2896**: Friction: klt erc exits 1 on a passive-only cell (no transistor gate), so its supply nets and ties cannot be checked *(curated)*
+- **#2897**: functional-verification: escaped-divider INTERCONNECT SDFs are now rejected (fail-loud) but still cannot be back-annotated *(curated)*
+- **#2898**: klt sim monte_carlo: family_mismatch reports gf180mcu poly-resistor/MIM-cap subcircuits as family 'other' (active: null), hiding that they have no per-instance mismatch *(curated)*
+- **#2899**: klt sim monte_carlo: mismatch seed is keyed on corner_index, so the same sample_index is a different die at each corner *(curated)*
+- **#2900**: Friction: documented 'klayout-tools[yield]' install path does not resolve (klt-yield-native not on PyPI) *(curated)*
 - **#3072**: test: verilator pin check fails preflight on hosts with Verilator 5.052 (pinned 5.050) *(curated)*
-- **#3154**: tests/test_asap7_finfet.py::test_fin_count_and_gate_length_recovered_exactly fails on main (S/D net labels swapped) *(curated)*
 - **#3179**: docs: design-extraction skill and ROADMAP still claim RC parasitics are unshipped (#217 closed) *(curated)*
 
 ## Proposed (Architect / Hermit)
@@ -150,13 +155,13 @@ Issues carrying `loom:curated`.
 
 | Tier | Count |
 |------|-------|
-| Operator merge-risk holds | 4 |
+| Operator merge-risk holds | 8 |
 | Operator priority | 0 |
-| Ready (`loom:issue`) | 8 |
+| Ready (`loom:issue`) | 3 |
 | In Progress (`loom:building`) | 0 |
-| PRs awaiting review | 5 |
-| Approved PRs awaiting merge | 19 |
-| Curated | 48 |
+| PRs awaiting review | 0 |
+| Approved PRs awaiting merge | 22 |
+| Curated | 55 |
 | Architect / Hermit proposals | 7 |
 | Active epics | 9 |
 <!-- guide:plan-body:end -->

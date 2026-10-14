@@ -4,6 +4,13 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-14
 
+- **PR #3196**: fix(extract): deterministic FinFET source/drain assignment (#3154)
+- **PR #3152**: feat(sim): dispatch pre-composed ngspice decks to remote/batch backends (#2804)
+- **Issue #3154** (closed): tests/test_asap7_finfet.py::test_fin_count_and_gate_length_recovered_exactly fails on main (S/D net labels swapped)
+- **Issue #3081** (closed): klt sim monte_carlo: per-sample seeds depend on the point's position in the request, so splitting a grid into several requests draws different samples
+- **Issue #2967** (closed): klt sim monte_carlo: per-sample seeds key on positional corner index, so paired (common-random-number) draws across conditions are implicit and fragile
+- **Issue #2929** (closed): klt sim monte_carlo: no option to share the mismatch-seed schedule across corner points (paired draws)
+- **Issue #2804** (closed): klt sim: dispatch already-composed decks to the remote/batch backends (re-filing of #2464)
 - **PR #3233**: docs(signoff): uv-first pinned regeneration recipe for consumer repos
 - **Issue #2874** (closed): regenerate.sh template builds a venv with python3 -m venv/pip; fails where ensurepip is unavailable
 
