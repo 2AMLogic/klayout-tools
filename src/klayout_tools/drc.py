@@ -2578,7 +2578,7 @@ def _parse_klayout_rdb_report(
     violations found."
     """
     try:
-        tree = ET.parse(report_path)
+        tree = ET.parse(report_path)  # noqa: S314 - KLayout-written .lyrdb in the verb-owned output dir; no DTD/external entities consumed
     except ET.ParseError as exc:
         raise DrcError(
             f"could not parse klayout DRC report '{report_path}': {exc}"
