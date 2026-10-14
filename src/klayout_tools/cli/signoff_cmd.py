@@ -106,6 +106,7 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
 from __future__ import annotations
 
 import argparse
+import os
 from typing import Any
 
 from ..design_evidence_tiers import DesignEvidenceTiersError
@@ -164,10 +165,27 @@ def run(args: argparse.Namespace) -> int:
             "envelope aggregation produces no such report)",
             args.format,
         )
+    repo_root = getattr(args, "repo_root", None)
+    if repo_root is not None and not (manifest_source or fleet_source):
+        return emit_error(
+            "signoff",
+            "--repo-root only applies to --manifest/--fleet (envelope "
+            "aggregation re-hashes no input artifacts)",
+            args.format,
+        )
+    if repo_root is not None and not os.path.isdir(repo_root):
+        # Issue #2878: an explicit root that is not an existing directory is
+        # refused, never silently ignored -- grading that *looks* right while
+        # resolving against nothing would be worse than the error.
+        return emit_error(
+            "signoff",
+            f"--repo-root '{repo_root}' is not an existing directory",
+            args.format,
+        )
     if fleet_source:
-        return _run_fleet_report(args, fleet_source)
+        return _run_fleet_report(args, fleet_source, repo_root=repo_root)
     if manifest_source:
-        return _run_tier_report(args, manifest_source)
+        return _run_tier_report(args, manifest_source, repo_root=repo_root)
     return _run_envelope_aggregation(args)
 
 
@@ -198,6 +216,13 @@ def _run_describe_grader(
             "a committed tier/fleet report, and this mode renders none",
             args.format,
         )
+    if getattr(args, "repo_root", None) is not None:
+        return emit_error(
+            "signoff",
+            "--repo-root is not meaningful with --describe-grader -- it "
+            "grades no evidence, so there are no repo-scoped inputs to resolve",
+            args.format,
+        )
     result = describe_grader()
     emit_success(result, args.format, _print_describe_grader_text)
     return EXIT_PASS
@@ -223,7 +248,9 @@ def _run_envelope_aggregation(args: argparse.Namespace) -> int:
     return _EXIT_CODES[result["status"]]
 
 
-def _run_tier_report(args: argparse.Namespace, manifest_source: str) -> int:
+def _run_tier_report(
+    args: argparse.Namespace, manifest_source: str, *, repo_root: str | None = None
+) -> int:
     if args.files:
         return emit_error(
             "signoff",
@@ -241,9 +268,11 @@ def _run_tier_report(args: argparse.Namespace, manifest_source: str) -> int:
             )
         tiers_doc = getattr(args, "tiers_doc", None)
         result = (
-            build_tier_report(manifest, tiers_doc=tiers_doc)
+            build_tier_report(manifest, tiers_doc=tiers_doc, repo_root=repo_root)
             if committed is None
-            else check_tier_report(committed, manifest, tiers_doc=tiers_doc)
+            else check_tier_report(
+                committed, manifest, tiers_doc=tiers_doc, repo_root=repo_root
+            )
         )
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)
@@ -260,7 +289,9 @@ def _run_tier_report(args: argparse.Namespace, manifest_source: str) -> int:
     return EXIT_PASS if result["tier"] == "T1" else EXIT_FAIL
 
 
-def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
+def _run_fleet_report(
+    args: argparse.Namespace, fleet_source: str, *, repo_root: str | None = None
+) -> int:
     if args.files:
         return emit_error(
             "signoff",
@@ -278,9 +309,11 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
             )
         tiers_doc = getattr(args, "tiers_doc", None)
         result = (
-            build_fleet_report(fleet, tiers_doc=tiers_doc)
+            build_fleet_report(fleet, tiers_doc=tiers_doc, repo_root=repo_root)
             if committed is None
-            else check_fleet_report(committed, fleet, tiers_doc=tiers_doc)
+            else check_fleet_report(
+                committed, fleet, tiers_doc=tiers_doc, repo_root=repo_root
+            )
         )
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)

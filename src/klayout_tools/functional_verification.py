@@ -793,9 +793,9 @@ def _resolve_defines(defines: Any) -> dict[str, str | None]:
     unchanged (or ``{}`` when omitted).
 
     Forwarded to ``Runner.build(defines=...)`` -- cocotb's own ``Runner``
-    already accepts a ``Mapping[str, str | None]`` (a ``None`` value defines
-    the macro with no value, e.g. ``` `define USE_POWER_PINS ```), so this
-    module never needs to translate the mapping itself.
+    accepts string values; a ``None`` value defines the macro with no value
+    (e.g. ``` `define USE_POWER_PINS ```). cocotb 2.x cannot serialise
+    ``None`` itself, so :func:`_run_build` emits those as ``-DNAME`` build args.
     """
     if defines is None:
         return {}
@@ -1399,7 +1399,7 @@ def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
             "regression did not run to completion"
         )
     try:
-        tree = ElementTree.parse(results_xml)
+        tree = ElementTree.parse(results_xml)  # noqa: S314 - cocotb results.xml generated in the verb-owned sim build dir
     except ElementTree.ParseError as exc:
         raise FunctionalVerificationError(
             f"results file '{results_xml}' is not parseable XML: {exc}"
@@ -1575,7 +1575,7 @@ def _extract_random_seed_property(results_xml: str) -> int | None:
     perfectly well defined.
     """
     try:
-        tree = ElementTree.parse(results_xml)
+        tree = ElementTree.parse(results_xml)  # noqa: S314 - cocotb results.xml generated in the verb-owned sim build dir
     except (ElementTree.ParseError, OSError):
         return None
     for prop in tree.iter("property"):
@@ -1719,13 +1719,18 @@ def _run_build(
             f"could not initialise the '{engine}' simulator: {exc}"
         ) from exc
 
+    # cocotb >= 2.0 serialises every ``defines`` value as an SV literal and
+    # raises TypeError for ``None`` (issue #2884), so valueless defines are
+    # passed as a plain ``-DNAME`` build arg (icarus and verilator both take it).
+    valued_defines = {k: v for k, v in defines.items() if v is not None}
+    valueless_args = [f"-D{k}" for k, v in defines.items() if v is None]
     try:
         engine_runner.build(
             sources=sources,
             hdl_toplevel=hdl_toplevel,
             build_dir=build_dir,
-            build_args=build_args,
-            defines=defines,
+            build_args=[*build_args, *valueless_args],
+            defines=valued_defines,
             includes=includes,
             always=True,
             timescale=timescale,

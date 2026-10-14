@@ -104,6 +104,7 @@ from .remote_launcher import (
     ASSUMED_THREADS_PER_CORNER,
     RemoteLaunchError,
     ami_pdk_key,
+    published_runner_identities,
 )
 from .sim_remote import (
     _build_remote_request,
@@ -1020,6 +1021,12 @@ def _resolve_batch_config(
     path on this backend at all, so it is a property of the *request* rather
     than of this host's fleet configuration and should be reported even when
     the provision script or bucket is also unresolvable.
+
+    Last, the runner ``klt`` the AMI manifest publishes is compared with
+    this client (:func:`_assess_published_runner`, issue #2851): under
+    ``runner_version_check: "enforce"`` a known mismatch raises
+    ``batch_runner_version_mismatch`` here, so neither ``klt sim`` (one job
+    or every shard) nor ``klt netlist`` uploads or launches anything.
     """
     from .sim import SimError
 
@@ -1045,7 +1052,7 @@ def _resolve_batch_config(
         batch_spec, fleet
     )
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
-    return BatchConfig(
+    config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
         jobs_prefix=(
@@ -1080,6 +1087,103 @@ def _resolve_batch_config(
         max_job_seconds_source=max_job_seconds_source,
         job_ceiling_check=job_ceiling_check,
     )
+    # Issue #2851: compare the runner klt the AMI manifest publishes with
+    # this client, once per request (so once for every shard of a
+    # `hosts > 1` run), before any S3 write or launch.
+    _enforce_published_runner_version(_assess_published_runner(request, config))
+    return config
+
+
+def _assess_published_runner(
+    request: dict[str, Any], config: BatchConfig
+) -> dict[str, Any]:
+    """Compare the ``klt`` build the AMI manifest says the fleet image runs
+    with this client's, **before** any submit or launch (issue #2851).
+
+    The source is :func:`remote_launcher.published_runner_identities`: the
+    most recently built manifest entry per ``(pdk, region)`` for the
+    request's ``models.pdk`` (every PDK when it names none) and the batch
+    ``region`` (every region when none is configured, because the fleet
+    picks its own Spot pool). Versions are compared with the runner gate's
+    own release-segment rule, :func:`_runner_gate_release` (issue #3184), so
+    this check and the runner-side preflight can never disagree about what
+    counts as compatible.
+
+    Returns ``{"status", "check", "client_klt_version", "images",
+    "message"}``. ``status`` is ``"mismatch"`` only when *every* candidate
+    image publishes a ``klt_version`` and none of them matches the client:
+    then the job could not pass the runner-side gate on any image the fleet
+    might boot. Anything less certain -- no manifest, no candidate, a legacy
+    entry without ``klt_version``, a mix of matching and mismatching images,
+    an unparseable version -- is ``"unknown"`` (or ``"match"``) and the
+    request proceeds to the existing runner-side preflight unchanged. This
+    function never raises.
+    """
+    client = _provenance._klt_version()
+    assessment: dict[str, Any] = {
+        "status": "unknown",
+        "check": config.runner_version_check,
+        "client_klt_version": client,
+        "images": [],
+        "message": None,
+    }
+    pdk = (request.get("models") or {}).get("pdk")
+    try:
+        images = published_runner_identities(str(pdk) if pdk else None, config.region)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return assessment
+    assessment["images"] = images
+    client_release = _runner_gate_release(client)
+    if not images or client_release is None:
+        return assessment
+    releases = [
+        _runner_gate_release(image["klt_version"]) if image["klt_version"] else None
+        for image in images
+    ]
+    if any(release is None for release in releases):
+        return assessment
+    if any(release == client_release for release in releases):
+        assessment["status"] = "match"
+        return assessment
+    assessment["status"] = "mismatch"
+    published = "; ".join(
+        f"{image['ami_id']} (pdk {image['pdk']}, region {image['region']}) "
+        f"runs klt {image['klt_version']}"
+        + (f" from ref {image['klt_ref']}" if image["klt_ref"] else "")
+        for image in images
+    )
+    assessment["message"] = (
+        f"the AMI manifest publishes the fleet runner image as {published}, "
+        f"but the submitting client is klt {client}; their major.minor "
+        "releases differ, so the runner-side version gate would reject the job"
+    )
+    return assessment
+
+
+def _enforce_published_runner_version(assessment: dict[str, Any]) -> None:
+    """Act on :func:`_assess_published_runner` before any S3 write or
+    launch: under ``runner_version_check: "enforce"`` a known mismatch is
+    one request-level :class:`~klayout_tools.sim.SimError` with code
+    :data:`BATCH_RUNNER_MISMATCH_CODE` -- nothing is submitted, so no
+    instance launches and no per-corner ``batch_job_failed`` diagnostics
+    exist. Under ``"warn"`` the same message goes to stderr and the request
+    is submitted as before. ``unknown``/``match`` do nothing here; the
+    runner-side preflight (issue #2719) still decides on the job instance."""
+    from .sim import SimError
+
+    if assessment["status"] != "mismatch":
+        return
+    message = assessment["message"]
+    if assessment["check"] == "enforce":
+        raise SimError(
+            f"backend 'batch' refused before submission: {message} -- the "
+            "request was not submitted and no instance was launched (rebuild "
+            "the runner image, use a client of the runner's major.minor, or "
+            'set request.batch.runner_version_check to "warn" to submit '
+            "anyway; see docs/cli/sim.md)",
+            code=BATCH_RUNNER_MISMATCH_CODE,
+        )
+    print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
 
 
 def _resolve_max_job_seconds(

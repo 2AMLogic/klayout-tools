@@ -157,7 +157,7 @@ def _registry_dir() -> str:
     if explicit:
         return os.path.abspath(explicit)
     uid = os.getuid() if hasattr(os, "getuid") else 0
-    base = "/tmp" if os.path.isdir("/tmp") else _tempdir()
+    base = "/tmp" if os.path.isdir("/tmp") else _tempdir()  # noqa: S108 - shared well-known lock registry; dir is per-uid (klt-locks-<uid>) and created by this module
     return os.path.join(base, f"klt-locks-{uid}")
 
 
