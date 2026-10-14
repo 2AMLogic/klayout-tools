@@ -1563,7 +1563,7 @@ def _verilog_cell_discarded_arcs(
                         return set()
                     if path is None:
                         continue
-                    ifnone, edge, sources, destinations = path  # type: ignore[misc]
+                    ifnone, edge, sources, destinations = path  # type: ignore[misc, str-unpack]
                     target = discarded if ifnone and edge else kept
                     target.update((s, d) for s in sources for d in destinations)
     return discarded - kept
