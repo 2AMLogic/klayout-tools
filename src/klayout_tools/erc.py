@@ -548,6 +548,10 @@ SCHEMA_VERSION = 1
 #: ``skipped`` rather than ``inapplicable``. See :func:`run_erc`.
 REASON_FINDINGS_ONLY = "findings_only"
 
+#: ``coverage.inapplicable`` reason (issue #2896): the cell has no transistor
+#: gate, so the antenna half has nothing to grade.
+REASON_NO_GATES = "no_gates"
+
 #: The skip reason for a level that could have been graded had ``--pdk``
 #: named a PDK with an antenna-ratio table (or named one at all).
 REASON_MISSING_ANTENNA_PDK = "missing_antenna_pdk"
@@ -569,6 +573,10 @@ def _antenna_coverage(
     skipped = []
     inapplicable = []
     reason = _antenna_skip_reason(pdk, findings_only)
+    if not gates:
+        # (issue #2896) Nothing to accumulate against: inapplicable, not
+        # skipped -- no antenna work was requested that failed to run.
+        inapplicable.append({"id": work_id("antenna"), "reason": REASON_NO_GATES})
     for gate in gates:
         for index, level in enumerate(gate["levels"]):
             identity = work_id("antenna", gate["gate_id"], level["layer"])
@@ -907,9 +915,9 @@ def _connectivity_coverage(
     scope's own "grade against real work, not a declaration count"
     discipline:
 
-    - ``erc.floating_gate`` -- one per discovered gate. Always non-empty:
-      ``run_erc`` raises before this point when no net carries gate-role
-      geometry, and every gate has at least one level above the gate role
+    - ``erc.floating_gate`` -- one per discovered gate (none on a
+      passive-only cell, issue #2896, where ``nets[]``/``ties[]`` carry the
+      scope). Every gate has at least one level above the gate role
       (``stackup`` requires >= 2 entries), so the rule really is evaluated
       for each one.
     - ``erc.net_connectivity`` -- one per declared ``nets[]`` entry (the
@@ -4530,11 +4538,18 @@ def run_erc(
         gate_regions.append(gate_poly_region)
         gate_floating.append(is_floating)
 
-    if not gates:
+    # (issue #2896) A passive-only cell (poly resistors, MoM/MiM caps, no
+    # transistor) has no gates by construction, but its declared supplies and
+    # ties are still worth checking. Zero gates is an error only when the
+    # spec asks for nothing but antenna work.
+    if not gates and not nets_decl and not ties:
         raise ErcError(
             f"no net in '{file}' has any geometry on the declared gate role "
             f"{gate_role!r} (stackup[0], layer {stackup[0]['layer'][0]}/"
-            f"{stackup[0]['layer'][1]}) -- check the spec's stackup[0].layer "
+            f"{stackup[0]['layer'][1]}), and the spec declares no nets[] or "
+            "ties[] to check instead. Possible causes: no transistor gate in "
+            "this cell (no gate-role geometry overlapping `active_layer`, "
+            "after `--deck` carve-outs); or check the spec's stackup[0].layer "
             "against the layout's own resolved PDK gate-poly layer number"
         )
 
