@@ -4219,6 +4219,48 @@ def test_run_sim_monte_carlo_family_mismatch_reports_gf180mcu_resistor_disabled(
     assert by_family["capacitor"] is None
 
 
+def test_run_sim_monte_carlo_family_mismatch_scans_include_closure(
+    tmp_path, monkeypatch
+):
+    """Issue #2928: a wrapper testbench whose devices live in an included
+    flat netlist reports the included families and discloses what was
+    scanned, including a PDK-rooted directive left unscanned."""
+    (tmp_path / "flat.spice").write_text(
+        "XM1 mid g out b nfet_03v3 L=1u W=1u\nXR1 vdd mid res_xpoly_1p1000pl W=1\n"
+    )
+    (tmp_path / "body.spice").write_text(
+        ".include flat.spice\n.include $NOPE_PDK_ROOT/models.spice\nVdd vdd 0 DC 1\n"
+    )
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"pdk": "gf180mcuC"},
+            "monte_carlo": {"n": 2, "seed": 1, "vary": "mismatch"},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    mc_env = sim.run_sim(str(request))["environment"]["monte_carlo"]
+
+    by_family = {e["family"]: e["active"] for e in mc_env["family_mismatch"]}
+    assert by_family == {"mosfet": True, "resistor": False}
+    scan = mc_env["family_mismatch_scan"]
+    assert len(scan["scanned"]) == 2
+    assert scan["scanned"][1].endswith("flat.spice")
+    assert [n["reason"] for n in scan["not_scanned"]] == ["env_var"]
+
+
+def test_mismatch_family_report_single_file_has_no_scan_block(tmp_path):
+    body = tmp_path / "body.spice"
+    body.write_text("XM1 a b c d nfet_03v3\n")
+    scan: dict = {}
+    report = sim._mismatch_family_report(str(body), "gf180mcuC", scan=scan)
+    assert [e["family"] for e in report] == ["mosfet"]
+    assert len(scan["scanned"]) == 1 and scan["not_scanned"] == []
+
+
 # --------------------------------------------------------------------------- #
 # Monte Carlo statistics rollup (#349)
 # --------------------------------------------------------------------------- #
