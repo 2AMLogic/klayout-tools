@@ -2,8 +2,27 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-14
+
+- **PR #3233**: docs(signoff): uv-first pinned regeneration recipe for consumer repos
+- **Issue #2874** (closed): regenerate.sh template builds a venv with python3 -m venv/pip; fails where ensurepip is unavailable
+
 ### 2026-10-13
 
+- **PR #3244**: chore(deps): bump mcp from 1.30.0 to 2.2.0
+- **PR #3243**: Remove Renovate config: Dependabot takes over
+- **PR #3242**: test: session dirty-tree tripwire in conftest (#3204)
+- **PR #3241**: fix(functional-verification): accept null (valueless) options.defines under cocotb 2.x
+- **PR #3240**: feat(gen-compose): promote connectivity-wired port via pins[] when nets agree
+- **PR #3239**: Dependabot: render dependabot.yml from the org policy
+- **PR #3235**: docs(sim): record ASAP7 BSIM-CMG ngspice real-run evidence (#2814)
+- **PR #3234**: sta: emit def/verilog/spef paths as {path, scope} envelopes (schema 2)
+- **Issue #3204** (closed): tests: fail the pytest session when the run leaves new untracked files in the repo tree
+- **Issue #2884** (closed): klt functional-verification: valueless macro define (options.defines value null) fails with "Can't serialize this type as an SV literal"
+- **Issue #2881** (closed): gen-compose: a port wired by connectivity[] cannot also be promoted via pins[], so an internal net can't be exposed as a cell port without a stub
+- **Issue #2879** (closed): sta: response echoes def_path/spef_path as absolute host paths, so signoff cannot verify an sta citation's input from another checkout
+- **Issue #2814** (closed): ASAP7 FinFET: ngspice BSIM-CMG simulation of extracted netlists (OSDI prerequisite)
+- **Issue #2761** (closed): ASAP7 LVS / FinFET device extraction (nfin)
 - **PR #3236**: feat(signoff): add --repo-root and document the .git-ancestor rule for scope:"repo" inputs
 - **PR #3231**: feat(pex): carry per-side sim diagnostics and remote env into testbenches[] (#2872)
 - **PR #3229**: fix(pex): stop recommending folding shared includes into the DUT
