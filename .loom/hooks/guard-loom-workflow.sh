@@ -10,7 +10,7 @@
 #   1. LOOM: Prefer merge-pr.sh over 'gh pr merge'
 #   2. LOOM: Block 'pip install -e' inside worktrees (issue #2495, #4079)
 #   3. LOOM: Ask before real-registry-mutating `loom-daemon workspace
-#      add|remove|set-priority` (issue #4326)
+#      add|remove|set-weight` (issue #4326)
 #   4. LOOM: Deny Bash writes that edit an INSTALLED Loom file in place in a
 #      CONSUMER repo (issue #7995) — the Bash-idiom counterpart of the
 #      Edit/Write denial in guard-worktree-paths.sh
@@ -1571,7 +1571,7 @@ decision_log_enabled() {
 # =============================================================================
 # Workspace-registry guard toggle — default ON (issue #4326).
 #
-# The `loom-daemon workspace add|remove|set-priority` ask (below) is a useful
+# The `loom-daemon workspace add|remove|set-weight` ask (below) is a useful
 # default backstop against accidentally mutating the operator's real
 # ~/.loom/workspaces.json, but — like every other category guard in this
 # file — a repo/session can opt out via the same
@@ -1876,7 +1876,7 @@ fi
 # LOOM: Ask before registry-mutating `loom-daemon workspace` commands
 # (Issue #4326)
 #
-# `loom-daemon workspace add|remove|set-priority` mutate the machine-level
+# `loom-daemon workspace add|remove|set-weight` mutate the machine-level
 # workspace registry (Issue #3926), normally `~/.loom/workspaces.json` — a
 # SHARED file, not scoped to any one repo/worktree/session. An ad-hoc
 # verification step (a builder/auditor sweep exercising registry behavior)
@@ -1897,10 +1897,10 @@ fi
 # list` is read-only and is NEVER matched by this guard.
 # =============================================================================
 
-if echo "$COMMAND" | grep -qE '(^|[/[:space:];&|])loom-daemon[[:space:]]+workspace[[:space:]]+(add|remove|set-priority)([[:space:]]|$)'; then
+if echo "$COMMAND" | grep -qE '(^|[/[:space:];&|])loom-daemon[[:space:]]+workspace[[:space:]]+(add|remove|set-weight|set-priority)([[:space:]]|$)'; then
     if workspace_registry_guard_enabled; then
         if [[ -z "${LOOM_WORKSPACES_PATH:-}" ]] && ! echo "$COMMAND" | grep -qE 'LOOM_WORKSPACES_PATH='; then
-            ask "This mutates the machine-level workspace registry ('loom-daemon workspace add/remove/set-priority') — by default that is the operator's REAL ~/.loom/workspaces.json, shared across every repo/session (Issue #4326: a leaked test entry once sat at top dispatch priority for most of a day). If this is a test/verification step, prefix the command with LOOM_WORKSPACES_PATH=<scratch-file> to isolate it from the real registry. If this IS an intentional real-registry change, confirm to proceed."
+            ask "This mutates the machine-level workspace registry ('loom-daemon workspace add/remove/set-weight') — by default that is the operator's REAL ~/.loom/workspaces.json, shared across every repo/session (Issue #4326: a leaked test entry once sat at top dispatch priority for most of a day). If this is a test/verification step, prefix the command with LOOM_WORKSPACES_PATH=<scratch-file> to isolate it from the real registry. If this IS an intentional real-registry change, confirm to proceed."
         fi
     fi
 fi
@@ -1981,6 +1981,34 @@ fi
 if [[ -n "$REPO_ROOT" ]] && echo "$GH_PR_MERGE_SCAN_TEXT" | grep -qE '(^|[^[:alnum:]_-])git([[:space:]]+[^;&|[:space:]]+)*[[:space:]]+(commit|push)([[:space:]]|$)'; then
     if ! SECRET_FINDINGS=$(cd "$REPO_ROOT" && "${LOOM_DAEMON_SELF_BIN:-loom-daemon}" secret-scan --for-command "$GH_PR_MERGE_SCAN_TEXT" 2>&1) && [[ "$SECRET_FINDINGS" == *"(fp "* ]]; then
         deny "BLOCKED: this git commit/push would carry a credential-shaped value (values are never printed; path, class and sha256 fingerprint only):"$'\n'"${SECRET_FINDINGS}"$'\n'"Take the file out of the tree or .gitignore it, and if the value is real treat it as disclosed and ROTATE it. Do not route around this with --no-verify or another tool (#9133)." "loom:secret-scan"
+    fi
+fi
+
+# =============================================================================
+# LOOM: Ask before a destructive remote payload on a fleet host (#11568) —
+# `ssh <fleet-host> 'bash -s' < fix.sh` with `reset --hard` in fix.sh, an
+# inline `ssh host 'git … reset --hard'`, scp/rsync pushes, aws ssm. Parsing,
+# script reading, the fleet roster and the guards.remoteFleetExec /
+# LOOM_GUARD_REMOTE_FLEET_EXEC toggle all live in `loom-daemon guards
+# remote-exec` (loom-daemon/src/remote_fleet_exec/); it gets the RAW command
+# (its lexer is quote-aware, so prose in a --body is never an invocation) and
+# the tool cwd, and this block asks on exit 1 + its prefix. The ask reason
+# carries the approval rule and the break-glass record path; additionalContext
+# repeats it so the session still sees it after the operator approves. Last
+# before the final allow, so every deny above (role-tool-policy) wins.
+# =============================================================================
+
+# requires-daemon: guards optional   a daemon without `guards remote-exec` exits 2 on the unknown verb, which this block treats as allow (rule inert).
+RFE_PREFILTER='(^|[^[:alnum:]_.-])(ssh|scp|rsync)([^[:alnum:]_.-]|$)|[[:space:]]ssm[[:space:]]'
+if [[ "$COMMAND" =~ $RFE_PREFILTER ]]; then
+    RFE_RC=0
+    RFE_ASK=$("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" guards remote-exec --for-command "$COMMAND" --cwd "${CWD:-.}" 2>/dev/null) || RFE_RC=$?
+    if [[ "$RFE_RC" -eq 1 && "$RFE_ASK" == "ASK [remote-fleet-exec]"* ]]; then
+        log_guard_decision "ask" "ask" "loom:remote-fleet-exec" || true
+        jq -n --arg reason "$RFE_ASK" '{hookSpecificOutput: {hookEventName: "PreToolUse",
+            permissionDecision: "ask", permissionDecisionReason: $reason,
+            additionalContext: $reason}}' 2>/dev/null || ask "$RFE_ASK"
+        exit 0
     fi
 fi
 

@@ -151,6 +151,30 @@ compile the models into `libs.tech/ngspice/osdi/`, and preflight-check the
 letting a too-old ngspice reject every model deep in a simulation run with
 an opaque `NGSPICE only supports OSDI v0.3 but ... targets v0.4!`.
 
+### ASAP7 BSIM-CMG OSDI module (`asap7-sim/`)
+
+lambdapdk's ASAP7 models (`asap7/base/spice/hspice/7nm_{TT,FF,SS}_160803.pm`)
+are BSIM-CMG `level = 72` cards, which stock ngspice rejects
+(`Only MOS device levels ... are supported in this binary`). ngspice runs
+BSIM-CMG only as a compiled OSDI module, so ASAP7 simulation has its own
+provisioning command (issue #2814), parallel to the SG13G2 one above:
+
+```bash
+scripts/fetch-asap7-sim-toolchain.sh        # --force to rebuild
+```
+
+It fetches a commit-pinned, checksum-verified BSIM-CMG 111.0.0 Verilog-A
+source (dwarning/VA-Models `code/bsimcmg/vacode111`, ECL-2.0) into
+`pdks/asap7-sim/bsimcmg-va/`, compiles it with the same pinned
+OpenVAF-Reloaded build as the SG13G2 script to `pdks/asap7-sim/osdi/bsimcmg.osdi`,
+and load-verifies the module in the `ngspice` on `PATH` (`pre_osdi` +
+`devhelp`), failing closed with the missing capability named. Everything it
+writes is under the ignored `pdks/*` store — no compiler, source or `.osdi`
+is tracked. The pinned compiler is Linux x86-64; elsewhere point
+`OPENVAF_R_BIN` at a compatible `openvaf-r`. See
+[`docs/cli/sim.md`](../docs/cli/sim.md) ("ASAP7 FinFET (BSIM-CMG)
+simulation") for the card adaptation and the `options.osdi_preload` request.
+
 ### `ihp130` (lambdapdk) vs. SG13G2 (IHP-Open-PDK) — do not conflate these
 
 **`lambdapdk/lambdapdk/ihp130/` is not SG13G2.** They share the "IHP"/"ihp"

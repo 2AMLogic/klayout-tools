@@ -243,6 +243,7 @@
       "modules": [
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_mismatch",
         "klayout_tools.lvs_netgen",
         "klayout_tools.lvs_supply"
@@ -271,6 +272,7 @@
       "modules": [
         "klayout_tools.cli.netlist_cmd",
         "klayout_tools.netlist",
+        "klayout_tools.netlist_batch",
         "klayout_tools.netlist_capacitor_recovery",
         "klayout_tools.netlist_digest",
         "klayout_tools.netlist_normalize"
@@ -407,6 +409,7 @@
       "kind": "verb",
       "description": "`klt sim` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
@@ -816,6 +819,11 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "netlist",
+      "exporter": "sim",
+      "reason": "Issue #3182: `klt netlist --backend batch` submits through sim_batch's S3 job transport rather than a second transport."
+    },
+    {
       "consumer": "pdk",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
@@ -969,6 +977,11 @@
       "consumer": "sta",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "sta",
+      "exporter": "env_provenance",
+      "reason": "klt sta reports its def/verilog/spef inputs as {path, scope} envelopes via repo_relative_path/render_path_field, like sim/pex (issue #2879)."
     },
     {
       "consumer": "stats",
@@ -1128,6 +1141,60 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_batch_environment",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_classify_collected_report",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_default_batch_job_timeout_s",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_runner_identity",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_stderr_envelope",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_resolve_batch_config",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.netlist_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_status_exit_code",
+      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
       "consumer": "klayout_tools.place_and_route",

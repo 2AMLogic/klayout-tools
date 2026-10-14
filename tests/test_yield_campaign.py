@@ -449,6 +449,25 @@ def test_resolve_request_strips_only_known_yield_only_limit_keys(tmp_path):
     assert spec["measurements"][0]["limits"]["target_yield"] == 0.9
 
 
+def test_resolve_request_strips_the_issue_2873_qualification_keys(tmp_path):
+    """Issue #2873: `target_sigma` / `min_converged_samples` are yield-only
+    limit keys too -- carried to `klt yield`, never dispatched to `klt sim`."""
+    spec = _base_spec()
+    spec["measurements"][0]["limits"] = {
+        "min": 0.3,
+        "max": 0.7,
+        "target_sigma": 4.0,
+        "min_converged_samples": 100,
+    }
+
+    request, _, yield_limits, _, _ = yield_campaign._resolve_request(
+        spec, spec_dir=str(tmp_path), seed_override=None
+    )
+
+    assert request["measurements"][0]["limits"] == {"min": 0.3, "max": 0.7}
+    assert yield_limits == {"vout": {"target_sigma": 4.0, "min_converged_samples": 100}}
+
+
 def test_resolve_request_leaves_a_spec_without_target_yield_untouched(tmp_path):
     """Regression guard for the no-`target_yield` case: nothing is stripped,
     nothing is carried, and the dispatched limits are byte-identical."""

@@ -222,6 +222,10 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "netlist",
         "model_bin_range",
         "no_such_vector",
+        # Missing-capability prerequisites (issue #2814).
+        "unsupported_model_level",
+        "osdi_abi_mismatch",
+        "osdi_load_failed",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
         "engine_killed",
@@ -734,6 +738,37 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
+        # ngspice's own text when a `.model ... level = N` card names a MOS
+        # level this binary was not built with, e.g. ASAP7's BSIM-CMG
+        # `level = 72` on a stock ngspice (`Only MOS device levels
+        # 1-6,8-10,14,49,54-58,60,68,73 are supported in this binary`,
+        # issue #2814). It is a missing *capability*, not a netlist or bin
+        # problem, so it gets its own code and (see `_classify_diagnostics`)
+        # suppresses the misleading `model_bin_range` follow-on error.
+        "unsupported_model_level",
+        re.compile(
+            r"^.*Only MOS device levels .* supported in this binary",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
+        # ngspice rejecting a compiled `.osdi` whose OSDI ABI it cannot
+        # load, e.g. `NGSPICE only supports OSDI v0.3 but "x.osdi" targets
+        # v0.4!` (ngspice < 44 against an OpenVAF-Reloaded module).
+        "osdi_abi_mismatch",
+        re.compile(r"NGSPICE only supports OSDI v\d+\.\d+ but", re.IGNORECASE),
+    ),
+    (
+        # `Error: Library <x>.osdi couldn't be loaded!` -- the module file is
+        # unreadable or not a shared library this ngspice can dlopen (wrong
+        # platform, or built against another OSDI runtime).
+        "osdi_load_failed",
+        re.compile(
+            r"^Error:\s*Library\s+.*\.osdi\s+couldn't be loaded",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
         # ngspice's own diagnostic when a BSIM model card's per-instance
         # width *bin range* is exceeded, e.g. gf180mcu's undocumented
         # ~100 um ceiling on `nfet_06v0`/`pfet_06v0` (issue #1214). The raw
@@ -749,6 +784,30 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
 )
+
+
+#: Prerequisite messages (issue #2814) for the capability diagnostics: they
+#: name the missing capability instead of leaving the caller to decode
+#: ngspice's raw line. ``{raw}`` is ngspice's own line, kept verbatim.
+_PREREQUISITE_MESSAGES: dict[str, str] = {
+    "unsupported_model_level": (
+        "prerequisite missing: this ngspice build cannot run the model "
+        "card's MOS level (BSIM-CMG `level = 72` needs a compiled OSDI "
+        "module declared in options.osdi_preload; see docs/cli/sim.md "
+        '"ASAP7 FinFET (BSIM-CMG) simulation") -- ngspice said: {raw}'
+    ),
+    "osdi_abi_mismatch": (
+        "prerequisite missing: ngspice cannot load the OSDI module's ABI "
+        "(an OpenVAF-Reloaded module needs ngspice >= 44; see "
+        "scripts/fetch-asap7-sim-toolchain.sh) -- ngspice said: {raw}"
+    ),
+    "osdi_load_failed": (
+        "prerequisite missing: ngspice could not load the OSDI module "
+        "(wrong platform or OSDI ABI; rebuild it with "
+        "scripts/fetch-asap7-sim-toolchain.sh on this host's ngspice) -- "
+        "ngspice said: {raw}"
+    ),
+}
 
 
 class SimError(Exception):
@@ -6064,7 +6123,13 @@ def _classify_diagnostics(
             continue
         message = _line_containing(log_text, match.start())
         if code == "model_bin_range":
+            if any(d["code"] == "unsupported_model_level" for d in diagnostics):
+                # The follow-on "could not find a valid modelname" is a
+                # consequence of the rejected model level, not a bin range.
+                continue
             message = _diagnose_modelname_error(netlist_path) or message
+        elif code in _PREREQUISITE_MESSAGES:
+            message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
 
