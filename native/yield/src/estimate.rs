@@ -2081,7 +2081,10 @@ mod tests {
             },
         );
         let resp = analyze(&req).unwrap();
-        assert_ne!(resp.measurements[0].distribution.normality.verdict, "degenerate");
+        assert_ne!(
+            resp.measurements[0].distribution.normality.verdict,
+            "degenerate"
+        );
     }
 
     #[test]

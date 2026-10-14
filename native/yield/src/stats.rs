@@ -710,7 +710,9 @@ mod tests {
         assert_eq!(sample_stddev(&vec![1.800306041; 100]), Some(0.0));
         assert_eq!(sample_stddev(&[2.5, 2.5]), Some(0.0));
         // tiny but real spread (1e-9 relative) is kept
-        let xs: Vec<f64> = (0..100).map(|i| 1.8 * (1.0 + 1e-9 * (i % 2) as f64)).collect();
+        let xs: Vec<f64> = (0..100)
+            .map(|i| 1.8 * (1.0 + 1e-9 * (i % 2) as f64))
+            .collect();
         assert!(sample_stddev(&xs).unwrap() > 0.0);
     }
 
