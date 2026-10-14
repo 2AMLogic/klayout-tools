@@ -127,6 +127,10 @@ _MULTIPLIABLE = frozenset("RCLMQDJZX")
 
 _HIERARCHY_SEP = "."
 
+#: ngspice inline-comment rule: ``;`` anywhere, or a ``$`` with whitespace
+#: before it and whitespace (or end of line) after it.
+_INLINE_COMMENT = re.compile(r"\s\$(?=\s|$)|;")
+
 
 # --------------------------------------------------------------------------- #
 # Lexing
@@ -134,14 +138,20 @@ _HIERARCHY_SEP = "."
 
 
 def _logical_lines(text: str) -> list[str]:
-    """Comment-stripped lines with ``+`` continuations folded."""
+    """Comment-stripped lines with ``+`` continuations folded.
+
+    Inline comments follow ngspice: ``;`` anywhere, or ``$`` with whitespace
+    on both sides (or whitespace before and end of line).  A ``$`` that is
+    glued to the next token -- ``.include $PDK_ROOT/...`` -- is *not* a
+    comment and survives intact.
+    """
     lines: list[str] = []
     for raw in text.splitlines():
         stripped = raw.strip()
         if stripped.startswith("*"):
             lines.append("")
             continue
-        lines.append(re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip())
+        lines.append(_INLINE_COMMENT.split(raw, maxsplit=1)[0].rstrip())
     folded: list[str] = []
     for line in lines:
         stripped = line.lstrip()
@@ -667,7 +677,11 @@ class _Flattener:
             )
 
         declared = {name for name, _ in subckt.defaults}
-        env: dict[str, str] = {}
+        # ngspice scopes parameters hierarchically: a nested body may use a
+        # parameter bound on an enclosing instance, so the child's scope
+        # starts from the parent's resolved params and its own header
+        # defaults, instance overrides and body `.param` layer on top.
+        env: dict[str, str] = dict(parent.env)
         for name, expr in subckt.defaults:
             env[name] = _substitute(expr, env)
         mult_expr: str | None = None

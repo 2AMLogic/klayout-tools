@@ -658,7 +658,14 @@ Flattening rules:
   the testbench loads) is emitted as-is. SPICE text alone cannot tell a PDK
   primitive from a missing user subcircuit, so every such name is listed in
   `schematic_flatten.external_subckts` — check it for anything that is not a
-  PDK device.
+  PDK device. The flattener only sees subcircuits defined in the DUT file
+  itself: one pulled in through the DUT's own `.include`/`.lib` is not read,
+  so it stays an unflattened `X` call, appears in `external_subckts`, and
+  (if nothing else was inlined) the run reports `already_flat: true`.
+  (Departure from the issue's acceptance criteria, accepted in review: an
+  undefined `X` target is kept as an external leaf rather than failing with
+  `undefined_subckt`, because sky130 MOS devices are themselves `X` calls to
+  PDK-library subcircuits.)
 - **Names:** an inlined device `R1` reached through instances `X1` → `X2`
   becomes `R.X1.X2.R1` (the leading element letter is kept); an internal node
   `mid` becomes `X1.X2.mid`; pins map to the caller's nodes. Ground (`0`,
@@ -666,8 +673,10 @@ Flattening rules:
 - **Parameters:** header defaults, overridden by the instance's
   `name=value` arguments (evaluated in the caller's scope), then body
   `.param` cards, are substituted into the inlined cards' `name=value`
-  values and `{...}`/`'...'` expressions. A root subcircuit's own parameters
-  stay for ngspice to bind. An instance `m=` (when the subcircuit declares no
+  values and `{...}`/`'...'` expressions. As in ngspice, scoping is
+  hierarchical: a nested subcircuit also sees every parameter resolved on
+  its enclosing instances (its own defaults and arguments shadow them). A
+  root subcircuit's own parameters stay for ngspice to bind. An instance `m=` (when the subcircuit declares no
   `m` parameter) is pushed down onto every inlined device.
 - **`.model` cards** inside an inlined subcircuit are hoisted to the
   enclosing root, de-duplicated.

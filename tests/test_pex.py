@@ -5236,3 +5236,35 @@ def test_run_pex_flatten_schematic_keeps_relative_includes_resolvable(
     flat_text = (outdir / "schematic-dut.flat.spice").read_text()
     assert f'.include "{tmp_path / "params.spice"}"' in flat_text
     assert ".include /abs/models.spice" in flat_text
+
+
+def test_run_pex_flatten_schematic_keeps_dollar_prefixed_targets(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """`$`-prefixed `.include`/`.lib` targets are environment-variable paths
+    (`$PDK_ROOT/...`): the flattener must not read the `$` as an inline
+    comment, and `_absolutize_includes` must leave them exactly as written."""
+    dut = tmp_path / "schematic_dut.spice"
+    include = ".include $PDK_ROOT/sky130A/libs.ref/sky130_fd_pr/spice/models.spice"
+    lib = ".lib $SKY130/libs.tech/combined/sky130.lib.spice tt"
+    dut.write_text(
+        f"{include}\n{lib}\n"
+        ".SUBCKT HALF A B\nR1 A B 144.6\n.ENDS HALF\n"
+        ".SUBCKT RES RA RB\nX1 RA M HALF\nX2 M RB HALF\n.ENDS RES\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+    _install_recording_fake_run_sim(monkeypatch)
+    outdir = tmp_path / "pex"
+
+    run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        artifacts_dir=str(outdir),
+        flatten_schematic=True,
+    )
+
+    flat_lines = (outdir / "schematic-dut.flat.spice").read_text().splitlines()
+    assert include in flat_lines
+    assert lib in flat_lines

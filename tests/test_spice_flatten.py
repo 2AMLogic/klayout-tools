@@ -115,6 +115,59 @@ def test_nested_parameter_override_evaluated_in_caller_scope():
     assert card == "R.Xm.X1.R1 a b {(8/2)*3}"
 
 
+def test_nested_subckt_inherits_parameter_set_on_enclosing_instance():
+    """ngspice scopes params hierarchically: `leaf` has no `rval` of its own,
+    so it sees the `rval=2k` bound on the enclosing `mid` instance."""
+    text = (
+        ".subckt leaf a b\n"
+        "R1 a b {rval}\n"
+        ".ends\n"
+        ".subckt mid a b rval=1k\n"
+        "X1 a b leaf\n"
+        ".ends\n"
+        ".subckt top a b\n"
+        "X1 a b mid rval=2k\n"
+        ".ends\n"
+    )
+    assert _cards(flatten_spice(text, top="top").text) == ["R.X1.X1.R1 a b 2k"]
+
+
+def test_child_own_parameter_shadows_inherited_one():
+    text = (
+        ".subckt leaf a b rval=5k\n"
+        "R1 a b {rval}\n"
+        "R2 a b {w}\n"
+        ".ends\n"
+        ".subckt mid a b rval=1k w=3\n"
+        "X1 a b leaf\n"
+        ".ends\n"
+        ".subckt top a b\n"
+        "X1 a b mid rval=2k\n"
+        ".ends\n"
+    )
+    assert _cards(flatten_spice(text, top="top").text) == [
+        "R.X1.X1.R1 a b 5k",
+        "R.X1.X1.R2 a b 3",
+    ]
+
+
+def test_dollar_prefixed_include_and_lib_targets_survive():
+    """`$` starts an inline comment only with whitespace on both sides
+    (ngspice's rule); `$PDK_ROOT/...` is a path, not a comment."""
+    include = ".include $PDK_ROOT/sky130A/libs.ref/sky130_fd_pr/spice/models.spice"
+    lib = ".lib $SKY130/libs.tech/combined/sky130.lib.spice tt"
+    text = (
+        f"{include}\n{lib}\n"
+        ".subckt cell a b\nR1 a b 1k $ trailing comment\nR2 a b 2k $\n.ends cell\n"
+        ".subckt top a b\nX1 a b cell\n.ends top\n"
+    )
+    result = flatten_spice(text)
+    lines = result.text.splitlines()
+    assert include in lines
+    assert lib in lines
+    assert _cards(result.text) == ["R.X1.R1 a b 1k", "R.X1.R2 a b 2k"]
+
+
 def test_root_parameters_are_left_for_ngspice():
     text = (
         ".subckt leaf a b W=1\n"
@@ -345,3 +398,35 @@ def test_flattened_deck_simulates_to_the_same_operating_point(tmp_path):
     )
     value = float(line.split("=")[1])
     assert value == pytest.approx(1.8 * 1000 / 1289.2, rel=1e-4)
+
+
+@pytest.mark.skipif(shutil.which("ngspice") is None, reason="ngspice not installed")
+def test_flattened_deck_keeps_parameters_inherited_from_enclosing_instance(tmp_path):
+    """A file-level `.param rval=10k` must not leak in: the flattened `leaf`
+    resolves `rval` from the enclosing `mid` instance (2k), like ngspice."""
+    hierarchical = (
+        ".subckt leaf a b\nR1 a b {rval}\n.ends\n"
+        ".subckt mid a b rval=1k\nX1 a b leaf\n.ends\n"
+        ".subckt top a b\nX1 a b mid rval=2k\n.ends\n"
+    )
+    flat = flatten_spice(hierarchical, top="top").text
+    deck = (
+        "* flattened\n"
+        ".param rval=10k\n"
+        f"{flat}"
+        "V1 a 0 DC 1\nXt a 0 top\n"
+        ".control\nop\nprint i(v1)\n.endc\n.end\n"
+    )
+    path = tmp_path / "deck.cir"
+    path.write_text(deck)
+    proc = subprocess.run(
+        ["ngspice", "-b", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    line = next(
+        line for line in proc.stdout.splitlines() if line.strip().startswith("i(v1)")
+    )
+    assert float(line.split("=")[1]) == pytest.approx(-1 / 2000, rel=1e-4)
