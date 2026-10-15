@@ -530,13 +530,16 @@ def _fixed_value_capacitor_classes(
     ]
 
 
-def _fixed_value_capacitor_note(classes: Sequence[tuple[str, int]]) -> str:
+def _fixed_value_capacitor_note(classes: Sequence[tuple[str, int]]) -> list[str]:
     """The one-line statement (``warnings[]`` entry / ``--parasitics`` header
-    comment) that these capacitors are fixed values PDK corners cannot move."""
+    comment) that these capacitors are fixed values PDK corners cannot move,
+    as a zero- or one-element list (empty when ``classes`` is empty)."""
+    if not classes:
+        return []
     total = sum(count for _, count in classes)
     names = ", ".join(f"'{name}'" for name, _ in classes)
     device_word = "capacitor" if total == 1 else "capacitors"
-    return (
+    return [
         f"{total} drawn {device_word} ({names}) written as a fixed-value "
         "'C' card (the deck's nominal area+perimeter value) -- PDK process "
         "corners (e.g. mimcap_ff/mimcap_ss) do not apply to it, so "
@@ -544,7 +547,7 @@ def _fixed_value_capacitor_note(classes: Sequence[tuple[str, int]]) -> str:
         "capacitor-corner term; pass --pdk to bind the PDK capacitor "
         "subcircuit instead. See docs/cli/extract.md's 'SPICE model binding' "
         "section."
-    )
+    ]
 
 
 #: Relative permittivity assumed for the `klt mom` cross-check
@@ -2755,11 +2758,10 @@ def run_extract(
     # value is the deck's nominal area+perimeter law, so PDK process-corner
     # sections cannot move it (a `--pdk`-bound `X` subckt call can). One
     # aggregate line, plus the same fact in the `--parasitics` header below.
-    fixed_value_capacitors = _fixed_value_capacitor_classes(
-        deck, device_counts, model_bindings
+    fixed_value_capacitor_note = _fixed_value_capacitor_note(
+        _fixed_value_capacitor_classes(deck, device_counts, model_bindings)
     )
-    if fixed_value_capacitors:
-        warnings.append(_fixed_value_capacitor_note(fixed_value_capacitors))
+    warnings.extend(fixed_value_capacitor_note)
 
     # `--pdk`-bound device classes whose target subcircuit has no parameter
     # for something the extractor measured (issue #695): today, only a
@@ -3309,10 +3311,9 @@ def run_extract(
     netlist_description = f"extracted by klt extract --deck {deck_name}"
     if parasitics_report is not None:
         netlist_description += "\n" + _parasitic_model_header_comment()
-        if fixed_value_capacitors:
-            netlist_description += "\n* " + _fixed_value_capacitor_note(
-                fixed_value_capacitors
-            )
+        netlist_description += "".join(
+            "\n* " + note for note in fixed_value_capacitor_note
+        )
     try:
         netlist.write(netlist_path, writer, netlist_description)
     except Exception as exc:
