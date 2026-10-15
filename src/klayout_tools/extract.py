@@ -7467,7 +7467,7 @@ def _extract_bipolar_device(
         substrate = kdb.Region()
         substrate_layer = None
     l2n.register(substrate, f"{bipolar.class_name}_substrate")
-    inputs = {"B": base, "E": emitter, "C": collector}
+    inputs: dict[str, kdb.ShapeCollection] = {"B": base, "E": emitter, "C": collector}
     if bipolar.base_relation is not None and bipolar.base_relation.extents:
         body = base.extents()
         l2n.register(body, f"{bipolar.class_name}_base_body")
