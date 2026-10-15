@@ -431,6 +431,30 @@ def _unescape_spice_safe_net_name(name: str) -> str:
     return name
 
 
+def _def_spef(name: str) -> str:
+    """``name``'s SPEF spelling: a :class:`DefName` keeps the spelling its DEF
+    used; anything without DEF origin falls back to :func:`_spef_name`."""
+    return name.spef if isinstance(name, DefName) else _spef_name(name)
+
+
+def _def_net_spellings(
+    net_instance_pins: Mapping[str, Sequence[tuple[str, str]]] | None,
+    port_name_set: frozenset[str],
+) -> dict[str, str]:
+    """Issue #2969: net name -> the SPEF spelling its DEF used (bare ``/`` =
+    hierarchy divider vs escaped ``\\/`` = literal slash). Port nets are left
+    out so they keep :func:`_spef_name` and ``*PORTS``/``*P`` agree."""
+    return {
+        str(name): name.spef
+        for name in (net_instance_pins or {})
+        if isinstance(name, DefName) and name not in port_name_set
+    }
+
+
+def _net_spef(def_net_spellings: Mapping[str, str], name: str) -> str:
+    return def_net_spellings.get(name) or _spef_name(name)
+
+
 def _write_spef(
     path: str,
     *,
@@ -614,21 +638,7 @@ def _write_spef(
     port_names = [_unescape_spice_safe_net_name(name) for name in port_names]
 
     port_name_set = frozenset(port_names)
-    # Issue #2969: a DEF-sourced net/instance/pin name carries the SPEF
-    # spelling the DEF itself used (bare `/` = hierarchy divider vs escaped
-    # `\\/` = literal slash); anything without DEF origin falls back to
-    # `_spef_name`. Port nets keep `_spef_name` so `*PORTS`/`*P` agree.
-    def_net_spellings: dict[str, str] = {
-        str(name): name.spef
-        for name in (net_instance_pins or {})
-        if isinstance(name, DefName) and name not in port_name_set
-    }
-
-    def _net_spef(name: str) -> str:
-        return def_net_spellings.get(name) or _spef_name(name)
-
-    def _def_spef(name: str) -> str:
-        return name.spef if isinstance(name, DefName) else _spef_name(name)
+    def_net_spellings = _def_net_spellings(net_instance_pins, port_name_set)
 
     net_instance_pins_map: Mapping[str, Sequence[tuple[str, str]]] = (
         net_instance_pins or {}
@@ -667,7 +677,7 @@ def _write_spef(
         if this_net not in hub_by_net_name:
             is_unique_port = this_net in port_name_set and name_counts[this_net] == 1
             _, this_hub_node, _ = _spef_net_topology_nodes(
-                _net_spef(this_net),
+                _net_spef(def_net_spellings, this_net),
                 hub_differs=entry["hub_net"] != this_net,
                 port_node_name=(
                     _spef_port_node_name(this_net) if is_unique_port else None
@@ -721,7 +731,7 @@ def _write_spef(
         # grammar rejects the bare `$`/`|`/`[`/`]` characters KLayout's
         # extracted net names routinely carry (see that helper's docstring
         # for the live `read_spef` parse error this prevents).
-        spef_net = _net_spef(net)
+        spef_net = _net_spef(def_net_spellings, net)
         is_port = net in port_name_set
         hub_differs = hub != net
 
@@ -774,7 +784,7 @@ def _write_spef(
             # this function's docstring, "Coupling `*CAP` entries"
             # paragraph.
             coupled_hub_node = hub_by_net_name.get(
-                coupled["net"], _net_spef(coupled["net"])
+                coupled["net"], _net_spef(def_net_spellings, coupled["net"])
             )
             cap_lines.append(
                 f"{i} {hub_node} {coupled_hub_node} {coupled['capacitance_ff']:.6f}"
