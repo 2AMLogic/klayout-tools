@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
+  (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
+  `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
+  fields, read from the log without `keep_artifacts`. Previously the
+  generic `nonconvergence` pattern only matched `time step too small` (with a
+  space), so such a run reported only one `measurement` error per `.meas`.
+  Always `error` and never downgraded by the stepping-recovery rule, so a
+  run that aborted after its last measurement point is now `error` instead
+  of `pass`. `docs/cli/sim.md` documents the `trnoise()` + non-DC control
+  source engine limitation that commonly triggers it. Additive; no
+  `schema_version` bump.
+
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

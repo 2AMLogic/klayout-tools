@@ -218,6 +218,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # ngspice/Xyce log classifiers (`_DIAGNOSTIC_PATTERNS`,
         # `_XYCE_DIAGNOSTIC_PATTERNS`).
         "singular_matrix",
+        "timestep_too_small",
         "nonconvergence",
         "missing_include",
         "netlist",
@@ -787,6 +788,20 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "singular_matrix",
         re.compile(r"^\s*Warning:\s*singular matrix", re.IGNORECASE | re.MULTILINE),
+    ),
+    (
+        # ngspice's own transient abort, e.g.
+        # `doAnalyses: TRAN:  Timestep too small; time = 1.0001e-09,
+        # timestep = 5e-23: trouble with node "v1#branch"` (issue #2918).
+        # Spelled without a space -- the generic `nonconvergence` entry's
+        # `time step too small` alternative (Xyce/older wording) never matched
+        # it, so such a run surfaced only as one `measurement` diagnostic per
+        # `.meas`. Its own code because it is a *terminal* solver abort with a
+        # time and a culprit node, never stepping-recovery narration: it is
+        # deliberately absent from the `_recovered_from_stepping` downgrade.
+        # Structured fields come from `_TIMESTEP_TOO_SMALL_RE`.
+        "timestep_too_small",
+        re.compile(r"Timestep too small", re.IGNORECASE),
     ),
     (
         "nonconvergence",
@@ -5055,7 +5070,7 @@ def _parse_engine_measurements(log_text: str, engine: str) -> dict[str, float]:
 
 def _classify_engine_diagnostics(
     log_text: str, netlist_path: str, engine: str
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Engine-dispatched log diagnostics -- ``_XYCE_DIAGNOSTIC_PATTERNS``
     for Xyce, ``_DIAGNOSTIC_PATTERNS`` (plus its netlist-aware refinement)
     for ngspice."""
@@ -6622,9 +6637,82 @@ def _run_fail_fast_probe(
     }
 
 
+#: The structured detail of ngspice's ``Timestep too small`` transient abort
+#: (issue #2918): the simulation time it gave up at, the timestep it had
+#: shrunk to, and the node/branch it blamed, e.g.
+#: ``Timestep too small; time = 1.0001e-09, timestep = 5e-23: trouble with
+#: node "v1#branch"``. Each part is optional so a shortened or
+#: version-variant line still classifies (the missing field is ``None``).
+_SPICE_NUMBER = r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?"
+_TIMESTEP_TOO_SMALL_RE = re.compile(
+    r"Timestep too small"
+    rf"(?:\s*[;,]?\s*time\s*=\s*(?P<time>{_SPICE_NUMBER}))?"
+    rf"(?:\s*[;,]?\s*timestep\s*=\s*(?P<timestep>{_SPICE_NUMBER}))?"
+    r"(?:\s*:?\s*trouble with node\s*\"(?P<node>[^\"]+)\")?",
+    re.IGNORECASE,
+)
+
+
+def _netlist_mentions_trnoise(netlist_path: str) -> bool:
+    """Best-effort: does the request's top-level netlist text contain a
+    ``trnoise`` source? Never raises; an unreadable/empty path is ``False``."""
+    if not netlist_path:
+        return False
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            return "trnoise" in handle.read().lower()
+    except OSError:
+        return False
+
+
+def _timestep_too_small_diagnostic(
+    log_text: str, raw_line: str, netlist_path: str = ""
+) -> dict[str, Any]:
+    """Build the ``timestep_too_small`` diagnostic (issue #2918) from the
+    first ``Timestep too small`` line in ``log_text``: always ``error``
+    (ngspice ends the transient there -- the analysis is not recoverable),
+    with ``time_s``/``timestep_s``/``node`` carried as structured fields
+    (``None`` when ngspice's line omitted that part) and repeated in
+    ``message`` so the report names the abort without ``keep_artifacts``.
+    """
+    match = _TIMESTEP_TOO_SMALL_RE.search(log_text)
+    time_s: float | None = None
+    timestep_s: float | None = None
+    node: str | None = None
+    if match is not None:
+        if match.group("time") is not None:
+            time_s = float(match.group("time"))
+        if match.group("timestep") is not None:
+            timestep_s = float(match.group("timestep"))
+        node = match.group("node")
+    where = f" at time = {time_s:g} s" if time_s is not None else ""
+    culprit = f' (trouble with node "{node}")' if node is not None else ""
+    hint = ""
+    if _netlist_mentions_trnoise(netlist_path):
+        hint = (
+            " The netlist uses trnoise(): combined with any control source "
+            "that is not DC from t = 0 (PWL/PULSE/EXP/B-source gate, supply "
+            "ramp) this is a known ngspice limitation -- see docs/cli/sim.md "
+            '"Known limitation: trnoise() with non-DC control sources".'
+        )
+    message = (
+        f"ngspice aborted the transient: timestep too small{where}{culprit}; "
+        "no results exist past the abort, so measurements beyond it produce "
+        f"no value (engine log: {raw_line.strip()}).{hint}"
+    )
+    return {
+        "severity": "error",
+        "code": "timestep_too_small",
+        "message": message,
+        "time_s": time_s,
+        "timestep_s": timestep_s,
+        "node": node,
+    }
+
+
 def _classify_diagnostics(
     log_text: str, netlist_path: str = ""
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Classify structured diagnostics from ``log_text``, per this module's
     ordered ``_DIAGNOSTIC_PATTERNS`` (most specific first, one match per
     code). ``netlist_path``, when provided, lets the ``model_bin_range``
@@ -6633,12 +6721,17 @@ def _classify_diagnostics(
     (the default -- also what every pre-#1214 caller/test still passes) it
     falls back to ngspice's raw log line, same as every other code.
     """
-    diagnostics: list[dict[str, str]] = []
+    diagnostics: list[dict[str, Any]] = []
     for code, pattern in _DIAGNOSTIC_PATTERNS:
         match = pattern.search(log_text)
         if match is None:
             continue
         message = _line_containing(log_text, match.start())
+        if code == "timestep_too_small":
+            diagnostics.append(
+                _timestep_too_small_diagnostic(log_text, message, netlist_path)
+            )
+            continue
         if code == "model_bin_range":
             if any(d["code"] == "unsupported_model_level" for d in diagnostics):
                 # The follow-on "could not find a valid modelname" is a
