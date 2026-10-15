@@ -3482,10 +3482,9 @@ def _run_sim_corners(
         environment, backend=backend, client_ngspice_binary=ngspice_binary
     )
     environment["backend"] = backend_provenance
-    if stimulus_signals:
-        # Issue #2977: additive; the schedule as applied (skew and transition
-        # times resolved, PWL points included) -- see docs/cli/sim.md.
-        environment["stimulus"] = sim_stimulus.report_echo(stimulus_signals)
+    # Issue #2977: additive, only when declared; the schedule as applied (skew
+    # and transition times resolved, PWL points included) -- see docs/cli/sim.md.
+    environment.update(sim_stimulus.environment_entry(stimulus_signals))
     if monte_carlo_info is not None:
         # Additive/optional: only present when the request declares
         # `monte_carlo` -- the seed contract's request-level echo, per

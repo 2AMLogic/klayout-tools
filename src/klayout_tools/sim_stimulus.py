@@ -128,93 +128,117 @@ def _tstop_s(analysis: dict[str, Any]) -> float | None:
     return float(match.group(1)) * scale[match.group(2)]
 
 
+def _signal_header(raw: dict[str, Any], where: str) -> dict[str, Any]:
+    """The validated per-signal fields other than ``events``."""
+    ref = raw.get("ref", "0")
+    if not isinstance(ref, str) or not _NODE_RE.match(ref):
+        raise StimulusError(f"{where}.ref must be a node name (got {ref!r})")
+    return {
+        "source": _name(raw, "source", _SOURCE_RE, where),
+        "node": _name(raw, "node", _NODE_RE, where),
+        "ref": ref,
+        "initial": _number(raw.get("initial", 0.0), f"{where}.initial"),
+        "rise": _number(raw.get("rise_s", 0.0), f"{where}.rise_s", minimum=0.0),
+        "fall": _number(raw.get("fall_s", 0.0), f"{where}.fall_s", minimum=0.0),
+        "skew": _number(raw.get("skew_s", 0.0), f"{where}.skew_s"),
+    }
+
+
+def _resolve_event(
+    event: Any,
+    ewhere: str,
+    head: dict[str, Any],
+    state: dict[str, Any],
+    tstop: float | None,
+) -> dict[str, Any]:
+    """Validate one event against the running ``state`` (``level``,
+    ``busy_until``, ``previous_t``, ``pwl``), advance the state, and return
+    the resolved event record."""
+    if not isinstance(event, dict):
+        raise StimulusError(f"{ewhere} must be an object")
+    _reject_unknown(event, _EVENT_KEYS, ewhere)
+    if "t_s" not in event or "level" not in event:
+        raise StimulusError(f"{ewhere} requires 't_s' and 'level'")
+    t_s = _number(event["t_s"], f"{ewhere}.t_s", minimum=0.0)
+    target = _number(event["level"], f"{ewhere}.level")
+    previous_t = state["previous_t"]
+    if previous_t is not None and t_s <= previous_t:
+        raise StimulusError(
+            f"{ewhere}.t_s={t_s:g} is not after the previous event "
+            f"({previous_t:g}); events must be strictly increasing in time",
+            CODE_BAD_TIME,
+        )
+    state["previous_t"] = t_s
+    start = t_s + head["skew"]
+    if start < 0:
+        raise StimulusError(
+            f"{ewhere}: t_s + skew_s = {start:g} is negative", CODE_BAD_TIME
+        )
+    level = state["level"]
+    edge = "rise" if target > level else "fall" if target < level else "hold"
+    declared_tr = event.get("transition_s")
+    if declared_tr is not None:
+        transition = _number(declared_tr, f"{ewhere}.transition_s", minimum=0.0)
+    else:
+        transition = head["rise"] if edge == "rise" else head["fall"]
+    applied = max(transition, MIN_TRANSITION_S)
+    if start < state["busy_until"]:
+        raise StimulusError(
+            f"{ewhere}: edge starts at {start:g}s, before the previous edge "
+            f"finishes at {state['busy_until']:g}s; shorten the transition or "
+            "space the events further apart",
+            CODE_OVERLAP,
+        )
+    if tstop is not None and start >= tstop:
+        raise StimulusError(
+            f"{ewhere}: edge starts at {start:g}s, at or after the "
+            f"transient stop time {tstop:g}s, so it can never be observed",
+            CODE_AFTER_STOP,
+        )
+    pwl = state["pwl"]
+    if edge != "hold":
+        if start > pwl[-1][0]:
+            pwl.append([start, level])
+        pwl.append([start + applied, target])
+        state["busy_until"] = start + applied
+    state["level"] = target
+    return {
+        "t_s": t_s,
+        "t_applied_s": start,
+        "level": target,
+        "edge": edge,
+        "transition_s": applied if edge != "hold" else 0.0,
+    }
+
+
 def _resolve_signal(raw: Any, index: int, tstop: float | None) -> dict[str, Any]:
     where = f"request.stimulus.signals[{index}]"
     if not isinstance(raw, dict):
         raise StimulusError(f"{where} must be an object")
     _reject_unknown(raw, _SIGNAL_KEYS, where)
-    source = _name(raw, "source", _SOURCE_RE, where)
-    node = _name(raw, "node", _NODE_RE, where)
-    ref = raw.get("ref", "0")
-    if not isinstance(ref, str) or not _NODE_RE.match(ref):
-        raise StimulusError(f"{where}.ref must be a node name (got {ref!r})")
-    initial = _number(raw.get("initial", 0.0), f"{where}.initial")
-    rise = _number(raw.get("rise_s", 0.0), f"{where}.rise_s", minimum=0.0)
-    fall = _number(raw.get("fall_s", 0.0), f"{where}.fall_s", minimum=0.0)
-    skew = _number(raw.get("skew_s", 0.0), f"{where}.skew_s")
+    head = _signal_header(raw, where)
     events = raw.get("events")
     if not isinstance(events, list) or not events:
         raise StimulusError(f"{where}.events must be a non-empty list")
 
-    pwl: list[list[float]] = [[0.0, initial]]
-    level = initial
-    busy_until = 0.0  # when the previous edge finishes
-    previous_t: float | None = None
-    resolved: list[dict[str, Any]] = []
-    for e_index, event in enumerate(events):
-        ewhere = f"{where}.events[{e_index}]"
-        if not isinstance(event, dict):
-            raise StimulusError(f"{ewhere} must be an object")
-        _reject_unknown(event, _EVENT_KEYS, ewhere)
-        if "t_s" not in event or "level" not in event:
-            raise StimulusError(f"{ewhere} requires 't_s' and 'level'")
-        t_s = _number(event["t_s"], f"{ewhere}.t_s", minimum=0.0)
-        target = _number(event["level"], f"{ewhere}.level")
-        if previous_t is not None and t_s <= previous_t:
-            raise StimulusError(
-                f"{ewhere}.t_s={t_s:g} is not after the previous event "
-                f"({previous_t:g}); events must be strictly increasing in time",
-                CODE_BAD_TIME,
-            )
-        previous_t = t_s
-        start = t_s + skew
-        if start < 0:
-            raise StimulusError(
-                f"{ewhere}: t_s + skew_s = {start:g} is negative", CODE_BAD_TIME
-            )
-        edge = "rise" if target > level else "fall" if target < level else "hold"
-        declared_tr = event.get("transition_s")
-        if declared_tr is not None:
-            transition = _number(declared_tr, f"{ewhere}.transition_s", minimum=0.0)
-        else:
-            transition = rise if edge == "rise" else fall
-        applied = max(transition, MIN_TRANSITION_S)
-        if start < busy_until:
-            raise StimulusError(
-                f"{ewhere}: edge starts at {start:g}s, before the previous edge "
-                f"finishes at {busy_until:g}s; shorten the transition or space "
-                "the events further apart",
-                CODE_OVERLAP,
-            )
-        if tstop is not None and start >= tstop:
-            raise StimulusError(
-                f"{ewhere}: edge starts at {start:g}s, at or after the "
-                f"transient stop time {tstop:g}s, so it can never be observed",
-                CODE_AFTER_STOP,
-            )
-        if edge != "hold":
-            if start > pwl[-1][0]:
-                pwl.append([start, level])
-            pwl.append([start + applied, target])
-            busy_until = start + applied
-        level = target
-        resolved.append(
-            {
-                "t_s": t_s,
-                "t_applied_s": start,
-                "level": target,
-                "edge": edge,
-                "transition_s": applied if edge != "hold" else 0.0,
-            }
-        )
+    state: dict[str, Any] = {
+        "level": head["initial"],
+        "busy_until": 0.0,  # when the previous edge finishes
+        "previous_t": None,
+        "pwl": [[0.0, head["initial"]]],
+    }
+    resolved = [
+        _resolve_event(event, f"{where}.events[{i}]", head, state, tstop)
+        for i, event in enumerate(events)
+    ]
     return {
-        "source": source,
-        "node": node,
-        "ref": ref,
-        "initial": initial,
-        "skew_s": skew,
+        "source": head["source"],
+        "node": head["node"],
+        "ref": head["ref"],
+        "initial": head["initial"],
+        "skew_s": head["skew"],
         "events": resolved,
-        "pwl": pwl,
+        "pwl": state["pwl"],
     }
 
 
@@ -307,3 +331,9 @@ def deck_lines(signals: list[dict[str, Any]]) -> tuple[str, ...]:
 def report_echo(signals: list[dict[str, Any]]) -> dict[str, Any]:
     """The ``environment.stimulus`` block: the schedule as applied."""
     return {"signals": signals}
+
+
+def environment_entry(signals: list[dict[str, Any]]) -> dict[str, Any]:
+    """The additive ``environment`` fragment for a run: ``{"stimulus": ...}``
+    when signals were declared, else empty."""
+    return {"stimulus": report_echo(signals)} if signals else {}
