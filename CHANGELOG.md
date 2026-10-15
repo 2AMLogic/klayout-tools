@@ -23,6 +23,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   convention, and `klt erc --deck sg13g2`'s auto-detected device cuts agree
   with extraction. `klt deck devices` gains an additive `topology` field on
   `resistor` entries.
+- **mypy baseline ratchet and `py.typed`** (issue #3221): `mypy` (pinned in the
+  `dev` extra) now runs in CI against `type-baseline.json` via
+  `scripts/check_type_baseline.py`; the package ships `py.typed`. See
+  `docs/type-checking.md`.
+- **Fixed** (#2885, `klt functional-verification` `options.sdf` on Icarus —
+  gf180mcu netlists with XOR/XNOR/MUX/half-adder cells no longer fail
+  annotation): those cell models declare their non-unate arcs only as
+  `ifnone` edge-sensitive paths, which Icarus discards at elaboration, so
+  every OpenSTA `IOPATH` entry onto them failed with `Unable to match
+  ModPath`. Such entries — decided from the request's own cell models, never
+  from the diagnostic — are now removed before annotation and reported as the
+  new `iopath_ifnone_edge_modpath` `environment.sdf.dropped` class, which
+  additionally carries an `arcs` list (`{celltype, from, to}`) naming every
+  arc that ran with no module-path delay. Additive; no `schema_version` bump.
+  Any other `IOPATH` mismatch still fails loudly. The normalized copy is
+  written to `.klt/functional-verification/klt_sdf_ifnone_edge_modpath_dropped.sdf`.
 
 - **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
   extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in
@@ -121,6 +137,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   `vin`); the LDO entry's recorded `vout_v` at the 3.0 V corner is corrected
   from 1.80324 V (actually the 3.3 V nominal) to 1.80264 V.
 
+- **ASAP7 FinFET extraction assigns source/drain deterministically**
+  (issue #3154): a channel's two S/D neighbours used to be taken in a
+  merged KLayout region's iteration order, which differs between the macOS
+  and Linux `klayout` wheels, so the same GDS could extract with `s`/`d`
+  (and the SPICE card's D/S pins) exchanged depending on the host. The
+  neighbour whose bbox sorts first by `(left, bottom, right, top)` is now
+  always the source. S/D interchange stays electrically legal for LVS; only
+  the reported orientation changes, and only on hosts that were iterating in
+  the other order.
 - **Dev builds no longer satisfy `klayout-tools==X.Y.Z` pins** (issue #2823,
   absorbing #2888): the distribution version is now computed at build time
   from `pyproject.toml`'s `[tool.hatch.version]` `base-version` plus the
@@ -240,6 +265,38 @@ not `klt --version`, if you need to detect this kind of drift. See
   series-order cells are adjudicated as reference-vs-layout topology
   differences (see `docs/cli/lvs.md`, "FinFET decks"). The shared JSON
   envelope is unchanged.
+
+- **`klt sim`: pre-composed deck transport to the `remote`/`batch`
+  backends** (issue #2804, re-filing #2464): a request carrying a `decks`
+  list -- caller-composed ngspice decks -- is now transported verbatim to
+  the selected backend instead of being re-composed from the corner
+  contract. Each unit runs `ngspice -b` in an isolated directory
+  (`<outdir>/<id>/`) with its own timeout and the pool sizing corners use;
+  the run returns each unit's raw stdout/stderr as separate **binary**
+  stream artifacts (`stdout.bin`/`stderr.bin`, never normalized), its exit
+  code, timeout status, engine identity (`engine_version`,
+  `deck_sha256`), and which declared `outputs[]` exist vs. are missing.
+  Deck bytes are preserved (unit `deck_sha256` hashes what the engine
+  read); the deck's `.include`/`.inc` closure and every
+  `.lib <file> <section>` model file are staged at their declared
+  relative paths so unmodified directives resolve on the worker, with
+  `$VAR`/PDK-rooted targets left to the executing host and anything
+  unstageable rejected before any billable launch. `models.pdk` keeps its
+  corner meaning (image selection) for `remote`/`batch`; invalid ids,
+  path traversal, destination collisions, and corner-field mixing fail
+  with exit 1 up front, and off-host job failures/poll timeouts report
+  every unit with `batch_job_failed`/`batch_job_timeout`/
+  `batch_poll_timeout` diagnostics carrying any recoverable klt error
+  envelope; a `remote` SSH-run failure pulls the instance's unit trees
+  back before teardown and reports `remote_job_failed` per unit with the
+  recovered streams. Each run replaces (never merges into) every unit's
+  `<outdir>/<id>/`, so a previous run's files are never reported as
+  recovered evidence. `stdout.bin`/`stderr.bin` are reserved unit names.
+  New module `klayout_tools.sim_decks`; the corner request contract,
+  its reports, and its exit codes are unchanged. Documented in
+  `docs/cli/sim.md` ("Pre-composed decks"); no `schema_version` bump -- a
+  deck report carries `klt sim`'s own `schema_version` with `mode:
+  "decks"` as the additive discriminator.
 
 - **`klt lef-abstract`: structural self-check of the emitted LEF** (issue
   #2769): after writing, the command reads the file back from disk and

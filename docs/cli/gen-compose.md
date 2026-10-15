@@ -267,9 +267,15 @@ cleanly.
   **gate** port on the `poly_label` layer the extraction deck gained for this
   purpose (sky130 `poly.pin` `66/5`; gf180mcu `Poly2` label purpose `30/10`),
   so a gate survives `klt extract` as a **named, biasable** `.SUBCKT` pin
-  instead of an anonymous `$N` net. A `(block, port)` also named in any
-  `connectivity[]` entry is rejected (exit 1) — a shape the router already
-  labels must not carry a second, possibly inconsistent `pins[]` label. A port
+  instead of an anonymous `$N` net. A `(block, port)` also named in a
+  `connectivity[]` entry (#2881) is accepted **only when the pin's `net`
+  equals that `connectivity[]` net**: it promotes the internally wired net to a
+  composed-cell port reported in the response `ports[]` (so a parent
+  composition can land a route on it by name, with no dummy stub block), and
+  writes **no second label** — the router already labels the net, the response
+  `pins[]` entry reports `labelled: true`, and a `drc_hints.notes[]` entry says
+  the label comes from the router. A different `net` on such a port is a
+  conflicting label and is rejected (exit 1), naming both nets. A port
   whose layer has no label convention (e.g. a `bjt_array` collector-ring
   `COLL_*` tap on the `tap` layer) is a **partial success**: the pin is
   left unlabelled with a `drc_hints.notes[]` entry, never a hard failure.
@@ -378,6 +384,32 @@ cleanly.
   genuinely empty space, not a leg that lands on the *wrong* real geometry
   (e.g. two blocks whose actual pads happen to sit at the same coordinate
   by coincidence), which only a real netlist diff can distinguish.
+
+## Manufacturing-grid snapping of routed ports (#2932)
+
+Generators report a terminal port at the *midpoint* of its pad. When the pad's
+extent is an odd multiple of the PDK manufacturing grid (e.g. `w_um` 3.015 on
+sky130's 0.005 um grid, midpoint 1.5075), every via-drop cut, landing pad and
+backbone vertex centred there would be off-grid and fail `*.ongrid.1`, even
+though each block is clean alone. Any on-grid point inside the pad is
+electrically equivalent, so for every port named in a routed `connectivity[]`
+entry `gen-compose` applies this rule (only when `routing` is supplied):
+
+- The grid is the coarsest `ongrid` rule of the curated deck on the routing
+  layer or the port's own layer (no `ongrid` rule, no snapping).
+- Each axis is snapped independently, in the **composed** frame (block offset
+  included), to the nearest grid line. Along the port edge's tangential axis
+  (`y` for `direction_deg` 0/180, `x` for 90/270) the result is clamped to stay
+  inside the pad (`width_um`); the other neighbouring grid line is tried when
+  the nearest one is outside. Ports already on-grid are untouched
+  (byte-identical geometry, no note).
+- Each applied move adds a `drc_hints.notes[]` entry naming the block, port,
+  axis and the moved distance. A pad narrower than one grid step holds no
+  on-grid point: the port is left where it is and a note says so (expect
+  `*.ongrid.1` violations there).
+
+The change is additive (new note text only); reported block ports in the
+input are never modified.
 
 ## Known limitations (found during phase 3 bring-up, #196)
 
