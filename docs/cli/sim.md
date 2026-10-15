@@ -3161,8 +3161,16 @@ derived values are on that sample's `corners[]` entry, under
 **Deterministic negative control.** A seed component only varies across
 samples when `monte_carlo.vary` actually asks for that axis — requesting
 `vary: "process"` derives a different `process_seed` per sample but the
-*same* `mismatch_seed` for every sample of a given corner (sigma=0
-downstream), and vice versa for `vary: "mismatch"`. This guards against a
+*same* `mismatch_seed` for every sample of a given corner, and vice versa
+for `vary: "mismatch"`. Sigma=0 holds for the reported seed fields and for
+decks/netlists that consume `mc_mismatch_seed` directly. It does **not**
+hold for a deck that draws mismatch from ngspice's own RNG
+(`agauss`/`gauss` in `.param` expressions, as the gf180mcu deck does):
+ngspice receives only the combined `.options seed=<rndseed>`, which is
+derived from both components and so still changes per sample under
+`vary: "process"`. For such decks the working control is to switch the
+deck's own mismatch off (e.g. gf180mcu `sw_stat_mismatch=0`) and confirm
+sigma=0. This guards against a
 broken/no-op sampler that silently produces no variation at all (or
 variation from an unrelated source): the axis nobody asked to vary is
 provably pinned, not just "happens to look the same" this run. Two public
@@ -4361,7 +4369,7 @@ corner-sweep rollup fields above are declared.
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. Every other code is always `"error"`. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
-| `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
+| `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and the scope of the negative control (it does not cover decks that draw mismatch from ngspice's own RNG). |
 
 ### `coverage`
 
