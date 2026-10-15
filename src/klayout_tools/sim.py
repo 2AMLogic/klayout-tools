@@ -247,7 +247,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "measurement",
         "unknown",
         # Opt-in convergence retry record (`options.retry_on_convergence_error`,
-        # issue #2973), attached by `_run_corner` after the retry ran.
+        # issue #2973), attached by `_run_corner_with_retry` after the retry ran.
         "convergence_retry",
         # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
         # by `sim_steps.grade_step_measurements`: a step whose analysis
@@ -1560,6 +1560,28 @@ def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
     return resolved
 
 
+def _resolve_convergence_retry(
+    options: dict[str, Any], engine: str
+) -> dict[str, Any] | None:
+    """Validate ``options.retry_on_convergence_error`` for ``engine`` (issue
+    #2973); the retry emits an ngspice ``.options`` card, so Xyce is refused."""
+    retry = _validate_convergence_retry(options.get("retry_on_convergence_error"))
+    if retry is not None and engine == "xyce":
+        raise SimError(
+            "options.retry_on_convergence_error is not supported for engine "
+            "'xyce': the retry emits an ngspice `.options` card"
+        )
+    return retry
+
+
+def _convergence_retry_environment(
+    retry: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """The ``environment`` fragment recording a resolved retry policy (empty
+    when the request did not opt in)."""
+    return {} if retry is None else {"retry_on_convergence_error": retry}
+
+
 def _convergence_retry_deck_options(retry: dict[str, Any]) -> str:
     """The ``.options`` card a retried unit's deck carries."""
     return f".options reltol={retry['reltol']} method={retry['method']}"
@@ -2521,14 +2543,7 @@ def _run_sim_corners(
     # Validated up front like every option; an off-host worker re-reads it
     # from the forwarded request document, so only the local backends
     # receive the resolved value below.
-    convergence_retry = _validate_convergence_retry(
-        options.get("retry_on_convergence_error")
-    )
-    if convergence_retry is not None and engine == "xyce":
-        raise SimError(
-            "options.retry_on_convergence_error is not supported for engine "
-            "'xyce': the retry emits an ngspice `.options` card"
-        )
+    convergence_retry = _resolve_convergence_retry(options, engine)
     # Issue #2732: validated up front, before any corner, probe or off-host
     # job is launched. An off-host worker re-reads it from the forwarded
     # request document (see `_build_remote_request`), so only the local
@@ -3254,10 +3269,9 @@ def _run_sim_corners(
         # docs/cli/sim.md's "Monte Carlo" section. Per-sample seed values
         # live on each corner (`corners[].monte_carlo`), not here.
         environment["monte_carlo"] = monte_carlo_info
-    if convergence_retry is not None:
-        # Additive/optional (issue #2973): the resolved retry policy, only
-        # when `options.retry_on_convergence_error` opted in.
-        environment["retry_on_convergence_error"] = convergence_retry
+    # Additive/optional (issue #2973): the resolved retry policy, only when
+    # `options.retry_on_convergence_error` opted in.
+    environment.update(_convergence_retry_environment(convergence_retry))
     if budget_s is not None:
         # Additive/optional: only present when the request declares
         # `options.wall_clock_budget_s` (or `--budget-s` overrides it) --
@@ -5191,7 +5205,7 @@ def _run_local(
                 )
             )
             continue
-        result, version = _run_corner(
+        result, version = _run_corner_with_retry(
             point=point,
             netlist_path=netlist_path,
             models_lib=models_lib,
@@ -5448,7 +5462,7 @@ def _run_local_parallel(
             ):
                 point = corner_points[next_index]
                 future = pool.submit(
-                    _run_corner,
+                    _run_corner_with_retry,
                     point=point,
                     netlist_path=netlist_path,
                     models_lib=models_lib,
@@ -6193,12 +6207,12 @@ def _grade_corner(
     return "pass"
 
 
-def _run_corner(
+def _run_corner_with_retry(
     *,
     convergence_retry: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> tuple[dict[str, Any], str | None]:
-    """Run one corner point (see :func:`_run_corner_attempt`), optionally
+    """Run one corner point (see :func:`_run_corner`), optionally
     retrying a ``nonconvergence`` failure (issue #2973).
 
     With ``convergence_retry`` (the validated
@@ -6211,16 +6225,14 @@ def _run_corner(
     the unit. Any other failure class is never retried. ``None`` (the
     default) is exactly the single-attempt behaviour.
     """
-    corner, version = _run_corner_attempt(**kwargs)
+    corner, version = _run_corner(**kwargs)
     if convergence_retry is None or not _is_retryable_convergence_failure(corner):
         return corner, version
     card = _convergence_retry_deck_options(convergence_retry)
     max_attempts = convergence_retry["max_attempts"]
     total_runtime = corner["runtime_s"]
     for attempt in range(1, max_attempts + 1):
-        retried, retried_version = _run_corner_attempt(
-            **kwargs, extra_options_card=card
-        )
+        retried, retried_version = _run_corner(**kwargs, extra_options_card=card)
         total_runtime += retried["runtime_s"]
         recovered = retried["status"] != "error"
         retried["diagnostics"].append(
@@ -6241,7 +6253,7 @@ def _run_corner(
     return corner, version
 
 
-def _run_corner_attempt(
+def _run_corner(
     *,
     extra_options_card: str | None = None,
     point: CornerPoint,
