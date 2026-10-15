@@ -5101,3 +5101,149 @@ def test_run_sim_batch_resume_resubmits_job_failure_and_poll_timeout(
     assert dispatched == [ids[:2]]
     assert all(c["status"] == "pass" for c in third["corners"])
     assert third["environment"]["resume"]["checkpoint_retained"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2978: job-id line, heartbeat, --attach
+# --------------------------------------------------------------------------- #
+
+
+def test_launch_prints_job_id_on_stderr_before_polling(tmp_path, monkeypatch, capsys):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+
+    report = sim.run_sim(str(path))
+
+    captured = capsys.readouterr()
+    job_id = report["environment"]["remote"]["job_id"]
+    assert captured.out == ""
+    assert f"batch job {job_id} launched" in captured.err
+    assert f"--attach {job_id}" in captured.err
+
+
+def test_poll_heartbeat_fires_on_state_change_and_coarse_interval(tmp_path, capsys):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed(_status("running")))
+    runner.queue("status.json", fake_completed(_status("running")))
+    runner.queue("status.json", fake_completed(_status("running")))
+    runner.queue("status.json", fake_completed(_status("interrupted")))
+    runner.queue("status.json", fake_completed(_status("done")))
+    # started, then elapsed at each non-terminal poll.
+    clock = iter([0.0, 0.0, 30.0, 400.0, 430.0])
+
+    sb.poll_status(
+        _config(tmp_path, poll_timeout_s=10000.0),
+        "job-1",
+        runner=runner,
+        sleep=runner.sleep,
+        monotonic=lambda: next(clock),
+    )
+
+    lines = capsys.readouterr().err.splitlines()
+    # t=0 first beat, t=30 silent (same state, < interval), t=400 interval
+    # beat, t=430 state change beat.
+    assert lines == [
+        "klt sim: batch job job-1 state=running elapsed=0s",
+        "klt sim: batch job job-1 state=running elapsed=400s",
+        "klt sim: batch job job-1 state=interrupted elapsed=430s",
+    ]
+
+
+def _attach(tmp_path, runner, **kwargs):
+    return sb._run_batch_job(
+        config=_config(tmp_path, **kwargs),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+        attach=True,
+    )
+
+
+def test_attach_to_done_job_collects_without_submitting_or_launching(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    corners, _, environment = _attach(tmp_path, runner)
+
+    assert [c["corner_id"] for c in corners] == ["tt_1.800_27"]
+    assert environment["job_id"] == "job-1"
+    assert runner.argvs_matching("launch") == []
+    assert [
+        a for a in runner.argvs_matching("s3", "cp") if "inputs/" in " ".join(a)
+    ] == []
+
+
+def test_attach_to_running_job_waits_then_collects(tmp_path):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed(_status("running")))
+    runner.queue("status.json", fake_completed(_status("interrupted")))
+    runner.queue("status.json", fake_completed(_status("done")))
+    runner.outputs = {"report.json": _sim_report()}
+
+    corners, _, _ = _attach(tmp_path, runner)
+
+    assert len(corners) == 1
+    assert len(runner.sleeps) == 2
+    assert runner.argvs_matching("launch") == []
+
+
+def test_attach_unknown_job_id_is_a_coded_error(tmp_path):
+    runner = _FakeRunner()
+    runner.queue("job.json", fake_completed(returncode=1, stderr="404"))
+
+    with pytest.raises(sb.BatchError, match="no batch job 'job-1'") as excinfo:
+        _attach(tmp_path, runner)
+    assert excinfo.value.code == sb.BATCH_UNKNOWN_JOB_CODE
+    assert runner.argvs_matching("status.json") == []
+    assert runner.argvs_matching("launch") == []
+
+
+def test_attach_poll_timeout_reports_unrun_corners(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+
+    corners, _, environment = _attach(tmp_path, runner, poll_timeout_s=0.0)
+
+    assert corners[0]["diagnostics"][0]["code"] == "batch_poll_timeout"
+    assert environment["job_id"] == "job-1"
+    assert runner.argvs_matching("launch") == []
+
+
+def test_run_sim_attach_end_to_end_and_unknown_job_envelope(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+
+    report = sim.run_sim(str(path), attach_job_id="klt-sim-abc123")
+    assert report["environment"]["remote"]["job_id"] == "klt-sim-abc123"
+    assert runner.argvs_matching("launch") == []
+
+    runner.queue("job.json", fake_completed(returncode=1, stderr="404"))
+    with pytest.raises(sim.SimError, match="batch backend failed") as excinfo:
+        sim.run_sim(str(path), attach_job_id="klt-sim-missing")
+    assert excinfo.value.code == sb.BATCH_UNKNOWN_JOB_CODE
+
+
+def test_run_sim_attach_requires_batch_backend(tmp_path):
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    request["backend"] = "local"
+    path = _write_request(tmp_path, request)
+    with pytest.raises(sim.SimError, match="--attach requires backend 'batch'"):
+        sim.run_sim(str(path), attach_job_id="klt-sim-abc123")

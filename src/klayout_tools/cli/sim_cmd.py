@@ -128,6 +128,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             fail_on_diagnostic=args.fail_on_diagnostic,
             dry_run=getattr(args, "dry_run", False),
             submit_only=getattr(args, "submit_only", False),
+            attach_job_id=getattr(args, "attach_job_id", None),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
@@ -254,6 +255,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
         for flag, value in (
             ("a positional request", args.request),
             ("--resume", args.resume),
+            ("--attach", getattr(args, "attach_job_id", None)),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
             ("--submit-only", getattr(args, "submit_only", False)),
