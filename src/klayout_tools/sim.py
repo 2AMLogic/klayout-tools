@@ -246,6 +246,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "engine_aborted",
         "measurement",
         "unknown",
+        # Opt-in convergence retry record (`options.retry_on_convergence_error`,
+        # issue #2973), attached by `_run_corner` after the retry ran.
+        "convergence_retry",
         # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
         # by `sim_steps.grade_step_measurements`: a step whose analysis
         # produced no plot, and a result whose inputs produced no value.
@@ -1495,6 +1498,90 @@ def _validate_fail_on_diagnostic(value: Any) -> tuple[str, ...]:
     return tuple(codes)
 
 
+#: ``options.retry_on_convergence_error`` (issue #2973): the solver options a
+#: retried unit runs with when the object form leaves a key out. ``gear``
+#: integration and a looser ``reltol`` are the standard first remedies for
+#: ngspice's "time step too small".
+DEFAULT_CONVERGENCE_RETRY: dict[str, Any] = {
+    "max_attempts": 1,
+    "reltol": 0.003,
+    "method": "gear",
+}
+_CONVERGENCE_RETRY_METHODS = ("trap", "gear")
+
+
+def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
+    """Validate and normalise ``options.retry_on_convergence_error`` (issue
+    #2973).
+
+    ``None``/absent/``false`` -> ``None``: no retry, today's behaviour
+    exactly. ``true`` -> :data:`DEFAULT_CONVERGENCE_RETRY`. An object may set
+    ``max_attempts`` (integer >= 1), ``reltol`` (number in ``(0, 1)``) and
+    ``method`` (``"trap"``/``"gear"``); omitted keys take the default and an
+    unknown key is an application error (``SimError``) rather than a silent
+    no-op, like :func:`_validate_fail_on_diagnostic`.
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return dict(DEFAULT_CONVERGENCE_RETRY)
+    if not isinstance(value, dict):
+        raise SimError(
+            "options.retry_on_convergence_error must be a boolean or an object "
+            'like {"max_attempts": 1, "reltol": 0.003, "method": "gear"}'
+        )
+    unknown = sorted(set(value) - set(DEFAULT_CONVERGENCE_RETRY))
+    if unknown:
+        raise SimError(
+            "options.retry_on_convergence_error has unknown key(s): "
+            f"{', '.join(unknown)} (known: {', '.join(DEFAULT_CONVERGENCE_RETRY)})"
+        )
+    resolved = {**DEFAULT_CONVERGENCE_RETRY, **value}
+    attempts = resolved["max_attempts"]
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+        raise SimError(
+            "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
+        )
+    reltol = resolved["reltol"]
+    if (
+        isinstance(reltol, bool)
+        or not isinstance(reltol, (int, float))
+        or not 0 < reltol < 1
+    ):
+        raise SimError(
+            "options.retry_on_convergence_error.reltol must be a number "
+            "between 0 and 1 (exclusive)"
+        )
+    if resolved["method"] not in _CONVERGENCE_RETRY_METHODS:
+        raise SimError(
+            "options.retry_on_convergence_error.method must be one of: "
+            + ", ".join(_CONVERGENCE_RETRY_METHODS)
+        )
+    return resolved
+
+
+def _convergence_retry_deck_options(retry: dict[str, Any]) -> str:
+    """The ``.options`` card a retried unit's deck carries."""
+    return f".options reltol={retry['reltol']} method={retry['method']}"
+
+
+#: Error-severity diagnostic codes that can accompany a ``nonconvergence``
+#: failure without making it something other than one (the measurements and
+#: vectors a failed solve never produced). Any *other* error-severity code
+#: -- ``singular_matrix``, ``netlist``, ``timeout``, ``engine_killed``, ... --
+#: means a different failure class, which is never retried (issue #2973).
+_CONVERGENCE_CONSEQUENCE_CODES = frozenset(
+    {"nonconvergence", "measurement", "no_such_vector"}
+)
+
+
+def _is_retryable_convergence_failure(corner: dict[str, Any]) -> bool:
+    if corner["status"] != "error":
+        return False
+    codes = {d["code"] for d in corner["diagnostics"] if d["severity"] == "error"}
+    return "nonconvergence" in codes and codes <= _CONVERGENCE_CONSEQUENCE_CODES
+
+
 def _validate_ngspice_init(value: Any) -> tuple[str, ...]:
     """Validate and normalise ``options.ngspice_init`` (issue #2520).
 
@@ -2430,6 +2517,18 @@ def _run_sim_corners(
     # this is a per-request compatibility-mode declaration, not a runtime
     # dial an operator would reach for per invocation.
     ngspice_init_lines = _validate_ngspice_init(options.get("ngspice_init"))
+    # Issue #2973: opt-in per-unit retry on a `nonconvergence` failure.
+    # Validated up front like every option; an off-host worker re-reads it
+    # from the forwarded request document, so only the local backends
+    # receive the resolved value below.
+    convergence_retry = _validate_convergence_retry(
+        options.get("retry_on_convergence_error")
+    )
+    if convergence_retry is not None and engine == "xyce":
+        raise SimError(
+            "options.retry_on_convergence_error is not supported for engine "
+            "'xyce': the retry emits an ngspice `.options` card"
+        )
     # Issue #2732: validated up front, before any corner, probe or off-host
     # job is launched. An off-host worker re-reads it from the forwarded
     # request document (see `_build_remote_request`), so only the local
@@ -2753,6 +2852,7 @@ def _run_sim_corners(
             "osdi_preload": osdi_preload,
             "save_mode": save_mode,
             "ngspice_options": ngspice_options,
+            "convergence_retry": convergence_retry,
         }
         if backend not in _OFFHOST_BACKENDS
         else {"request_dir": request_dir}
@@ -3154,6 +3254,10 @@ def _run_sim_corners(
         # docs/cli/sim.md's "Monte Carlo" section. Per-sample seed values
         # live on each corner (`corners[].monte_carlo`), not here.
         environment["monte_carlo"] = monte_carlo_info
+    if convergence_retry is not None:
+        # Additive/optional (issue #2973): the resolved retry policy, only
+        # when `options.retry_on_convergence_error` opted in.
+        environment["retry_on_convergence_error"] = convergence_retry
     if budget_s is not None:
         # Additive/optional: only present when the request declares
         # `options.wall_clock_budget_s` (or `--budget-s` overrides it) --
@@ -5021,6 +5125,7 @@ def _run_local(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    convergence_retry: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -5103,6 +5208,7 @@ def _run_local(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            convergence_retry=convergence_retry,
         )
         corners.append(result)
         if version is not None:
@@ -5247,6 +5353,7 @@ def _run_local_parallel(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    convergence_retry: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -5358,6 +5465,7 @@ def _run_local_parallel(
                     osdi_preload=osdi_preload,
                     save_mode=save_mode,
                     ngspice_options=ngspice_options,
+                    convergence_retry=convergence_retry,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -5942,6 +6050,7 @@ def _prepare_corner_run(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    extra_options_card: str | None = None,
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
 
@@ -5996,6 +6105,7 @@ def _prepare_corner_run(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            extra_options_card=extra_options_card,
         )
         _write_spiceinit(corner_dir, ngspice_init)
         command = [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path]
@@ -6085,6 +6195,55 @@ def _grade_corner(
 
 def _run_corner(
     *,
+    convergence_retry: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> tuple[dict[str, Any], str | None]:
+    """Run one corner point (see :func:`_run_corner_attempt`), optionally
+    retrying a ``nonconvergence`` failure (issue #2973).
+
+    With ``convergence_retry`` (the validated
+    ``options.retry_on_convergence_error`` policy) a unit that ends
+    ``status: "error"`` purely from a ``nonconvergence`` failure is re-run
+    on the *same* :class:`CornerPoint` -- so ``sample_index`` and the Monte
+    Carlo seeds are unchanged by construction -- with the policy's tighter
+    solver options on an extra ``.options`` card, up to ``max_attempts``
+    times. The outcome is recorded as a ``convergence_retry`` diagnostic on
+    the unit. Any other failure class is never retried. ``None`` (the
+    default) is exactly the single-attempt behaviour.
+    """
+    corner, version = _run_corner_attempt(**kwargs)
+    if convergence_retry is None or not _is_retryable_convergence_failure(corner):
+        return corner, version
+    card = _convergence_retry_deck_options(convergence_retry)
+    max_attempts = convergence_retry["max_attempts"]
+    total_runtime = corner["runtime_s"]
+    for attempt in range(1, max_attempts + 1):
+        retried, retried_version = _run_corner_attempt(
+            **kwargs, extra_options_card=card
+        )
+        total_runtime += retried["runtime_s"]
+        recovered = retried["status"] != "error"
+        retried["diagnostics"].append(
+            {
+                "severity": "warning",
+                "code": "convergence_retry",
+                "message": (
+                    f"nonconvergence on the first attempt; retry {attempt}/"
+                    f"{max_attempts} with `{card}` "
+                    + ("recovered" if recovered else "still failed")
+                ),
+            }
+        )
+        corner, version = retried, retried_version or version
+        if recovered or not _is_retryable_convergence_failure(retried):
+            break
+    corner["runtime_s"] = round(total_runtime, 3)
+    return corner, version
+
+
+def _run_corner_attempt(
+    *,
+    extra_options_card: str | None = None,
     point: CornerPoint,
     netlist_path: str,
     models_lib: str | None,
@@ -6171,6 +6330,7 @@ def _run_corner(
         osdi_preload=osdi_preload,
         save_mode=save_mode,
         ngspice_options=ngspice_options,
+        extra_options_card=extra_options_card,
     )
 
     diagnostics: list[dict[str, str]] = list(include_diagnostics)
@@ -7005,6 +7165,7 @@ def _write_corner_deck(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    extra_options_card: str | None = None,
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
     seed card, ``.lib``/``.include``/``.temp``, the request's verbatim
@@ -7025,6 +7186,10 @@ def _write_corner_deck(
     byte-identical deck to before that issue.
     """
     lines = ["* klt sim -- generated corner deck, do not edit"]
+    if extra_options_card is not None:
+        # Issue #2973: the solver options of a convergence retry. `.options`
+        # is global, so its position relative to `.lib` is immaterial.
+        lines.append(extra_options_card)
     if point.mc_seed is not None:
         # `.options seed=` is ngspice's documented mechanism for seeding the
         # AGAUSS/GAUSS/random() functions a mismatch-aware model library's
