@@ -129,6 +129,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `erc_status` and tie coverage are unchanged. Requires `--findings-only`
   (exit 1 otherwise). Additive; default output is byte-identical; no
   `schema_version` bump.
+- **`klt sim` discloses transient-noise coverage** (issue #2985): ngspice
+  generates no device or resistor noise in `.tran`, only explicit
+  `trnoise`/`trrandom` source noise. A transient request (scalar `tran` or an
+  `analysis_steps[]` tran step) whose netlist declares such a source now gets
+  an additive `environment.transient_noise` field (`engine`, sorted `sources`,
+  `intrinsic_device_noise: false`, `intrinsic_resistor_noise: false`); absent
+  otherwise and for `engine: "xyce"`, so existing reports are unchanged. No
+  `schema_version` bump. Documented in `docs/cli/sim.md`.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
