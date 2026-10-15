@@ -3523,49 +3523,55 @@ def _expand_corner_units(
     points: list[CornerPoint] = []
     seen: dict[str, int] = {}
     for index, record in enumerate(units):
-        where = f"corners.units[{index}]"
-        if not isinstance(record, dict):
-            raise SimError(f"{where} must be an object")
-        unknown = sorted(set(record) - set(_CORNER_UNIT_KEYS))
-        if unknown:
-            raise SimError(
-                f"{where} has unknown key(s) {', '.join(unknown)} "
-                f"(supported: {', '.join(_CORNER_UNIT_KEYS)})"
-            )
-        raw_process = record.get("process")
-        process, sections, section_libs = (
-            (None, None, None)
-            if raw_process is None
-            else _parse_process_entry(raw_process)
-        )
-        temperature_c = record.get("temperature_c", 27)
-        if not _is_plain_number(temperature_c):
-            raise SimError(f"{where}.temperature_c must be a number")
-        supply_v = record.get("supply_v") or {}
-        if not isinstance(supply_v, dict):
-            raise SimError(f"{where}.supply_v must be an object of scalar numbers")
-        for rail, value in supply_v.items():
-            if not _is_plain_number(value):
-                raise SimError(
-                    f"{where}.supply_v.{rail} must be a scalar number "
-                    "(arrays are only valid in the crossed corners.supply_v form)"
-                )
-        point = CornerPoint(
-            process,
-            dict(supply_v),
-            temperature_c,
-            process_sections=sections,
-            process_section_libs=section_libs,
-        )
+        point = _parse_corner_unit(record, f"corners.units[{index}]")
         corner_id = point.corner_id
         if corner_id in seen:
             raise SimError(
-                f"{where} duplicates corners.units[{seen[corner_id]}] "
+                f"corners.units[{index}] duplicates corners.units[{seen[corner_id]}] "
                 f"(both resolve to corner_id '{corner_id}')"
             )
         seen[corner_id] = index
         points.append(point)
     return points
+
+
+def _parse_corner_unit(record: Any, where: str) -> CornerPoint:
+    """Validate one ``corners.units`` record and build its :class:`CornerPoint`."""
+    if not isinstance(record, dict):
+        raise SimError(f"{where} must be an object")
+    unknown = sorted(set(record) - set(_CORNER_UNIT_KEYS))
+    if unknown:
+        raise SimError(
+            f"{where} has unknown key(s) {', '.join(unknown)} "
+            f"(supported: {', '.join(_CORNER_UNIT_KEYS)})"
+        )
+    raw_process = record.get("process")
+    process, sections, section_libs = (
+        (None, None, None) if raw_process is None else _parse_process_entry(raw_process)
+    )
+    temperature_c = record.get("temperature_c", 27)
+    if not _is_plain_number(temperature_c):
+        raise SimError(f"{where}.temperature_c must be a number")
+    return CornerPoint(
+        process,
+        _parse_unit_supply_v(record.get("supply_v") or {}, where),
+        temperature_c,
+        process_sections=sections,
+        process_section_libs=section_libs,
+    )
+
+
+def _parse_unit_supply_v(supply_v: Any, where: str) -> dict[str, Any]:
+    """Require a ``corners.units`` ``supply_v`` to be rail -> scalar number."""
+    if not isinstance(supply_v, dict):
+        raise SimError(f"{where}.supply_v must be an object of scalar numbers")
+    for rail, value in supply_v.items():
+        if not _is_plain_number(value):
+            raise SimError(
+                f"{where}.supply_v.{rail} must be a scalar number "
+                "(arrays are only valid in the crossed corners.supply_v form)"
+            )
+    return dict(supply_v)
 
 
 def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool:
