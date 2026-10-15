@@ -42,6 +42,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   arc that ran with no module-path delay. Additive; no `schema_version` bump.
   Any other `IOPATH` mismatch still fails loudly. The normalized copy is
   written to `.klt/functional-verification/klt_sdf_ifnone_edge_modpath_dropped.sdf`.
+- **Fixed** (#2958, `klt functional-verification` `options.sdf` on Icarus —
+  hard-macro bus outputs): OpenSTA writes a macro's bus output per bit
+  (`IOPATH A_CLK A_DOUT[0]`) but the vendor model declares one whole-vector
+  `*>` path, which Icarus can neither parse (unescaped) nor match (escaped).
+  Such entries — decided from the request's own cell models — are now removed
+  before annotation and reported as the new `iopath_bus_bit_modpath`
+  `environment.sdf.dropped` class with an `arcs` list (`{celltype, from, to}`),
+  so the unannotated macro arcs are named. Additive; no `schema_version` bump.
+  Any other `IOPATH` mismatch still fails loudly.
 - **`klt pex --flatten-schematic`** (issue #2889): opt-in flattening of a
   hierarchical schematic DUT to PDK leaf devices before the schematic-side
   run, so it compares like with like against `klt extract`'s always-flat
