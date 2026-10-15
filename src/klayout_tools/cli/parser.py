@@ -2010,6 +2010,24 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--substrate-tie-ohms",
+        dest="substrate_tie_ohms",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "resistance of the DC-reference tie each synthesized substrate "
+            "net gets to ground under --parasitics (issue #3089). Default "
+            "1e12: the substrate is only capacitively held, i.e. floating "
+            "in transient analysis. A small value pins it; 0 is a hard tie "
+            "(written as a 1 mohm resistor -- SPICE has no zero-ohm "
+            "resistor). Must be >= 0. Reported as "
+            "`parasitics.substrate_dc_tie.resistance_ohm`/`mode`. Requires "
+            "--parasitics. See docs/cli/extract.md's 'Substrate DC tie' "
+            "section."
+        ),
+    )
+    extract_parser.add_argument(
         "--resistance-path",
         dest="resistance_paths",
         action="append",
@@ -3016,6 +3034,20 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "no net is reported in `warnings`. Off by default -- "
             "byte-identical to today's behavior. See docs/cli/extract.md's "
             "'--parasitic-variant' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--substrate-tie-ohms",
+        dest="substrate_tie_ohms",
+        type=float,
+        default=None,
+        metavar="OHM",
+        help=(
+            "resistance of the substrate DC-reference tie (default 1e12, "
+            "substrate floating in transient; 0 = hard tie), passed "
+            "through to `klt extract --substrate-tie-ohms` (issue #3089). "
+            "Must be >= 0. See docs/cli/extract.md's 'Substrate DC tie' "
+            "section."
         ),
     )
     pex_parser.add_argument(

@@ -33,6 +33,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   polygon, in integer database units. The deck grows from 232 to 234 rule
   categories (`--expect-rule-categories 234`); both ids leave the "Not
   implemented" list. Additive; no `schema_version` bump.
+- **`klt extract --parasitics --substrate-tie-ohms <ohms>`** (issue #3089, also
+  forwarded by `klt pex`): sets the substrate DC-tie resistance (default
+  `1e12`, which leaves the substrate capacitively floating in transient
+  analysis; `0` is a hard tie, written as a 1 mohm resistor because SPICE has
+  no zero-ohm resistor). Additive: `parasitics.substrate_dc_tie.mode`
+  (`"shunt"`/`"hard"`), `resistance_ohm` now reflects the written value, and a
+  `* - substrate tie: …` line in the `--parasitics` netlist header comment.
+  Default output is otherwise unchanged.
 - **`klt lvs` no longer folds one device class into another under
   `options.combine_devices`** (issue #3019): with two MiM classes stacked in
   parallel on one net pair, `layout.file` could report a wrong combined layout
