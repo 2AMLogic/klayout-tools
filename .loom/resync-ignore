@@ -167,21 +167,24 @@ scripts/tests/test-dep-recheck-fingerprint.sh
 # the file resynced normally.
 commands/loom/builder-pr.md
 
-# #1898: verify-proposal-refs.sh and tests/test-verify-proposal-refs.sh carry
-# a fix for a SIGPIPE race under `set -o pipefail` and a subshell-in-pipe cache
-# bug (closing #1863 via PR #1881), both issues that produced flaky false
-# "MISSING FILE" reports on paths that actually exist, especially early-sorting
-# paths like `docs/...` entries. The fix replaces a `full_tree()` helper
-# function and `full_tree | grep -qFx` pipe with a direct `FULL_TREE_CACHE`
-# assignment and here-string match (`grep -qFx "$path" <<< "$FULL_TREE_CACHE"`),
-# and restores `Fixture 5b` (8-iteration flake-detection loop) to the test suite.
-# A same-day resync commit (fcbf52f8, 2026-09-15T17:03:12Z) reverted both halves
-# of that fix back to the buggy pre-#1881 state, so this pin prevents an
-# unlimited stream of recurrences of the same reversion pattern as #606/#662/
-# #1292/#1316/#1356/#1546/#1674. This fix was never upstreamed into
-# rjwalters/loom's own templates, so an unpinned resync would keep reverting it.
-# If the upstream Loom project ever adopts an equivalent SIGPIPE race fix and
-# flake-detection test, this pin can be dropped and the files resynced normally.
+# #2128 (commit d0b770ad): verify-proposal-refs.sh and
+# tests/test-verify-proposal-refs.sh carry a local-only check of BARE
+# `name.ext:L` / `name.ext:L-M` citations (no directory). A bare basename is
+# considered only when its extension is in a known-extension set (so prose
+# and host:port strings are not read as files); it is then resolved to a
+# unique tracked path and its line range checked, reported as MISSING when no
+# tracked file has that name and AMBIGUOUS when several do. Fixtures 6-9b and
+# the bare-sibling case in the test suite assert it. Upstream checks only
+# directory-qualified paths, so an unpinned resync would silently drop the
+# check (17 local cases fail against upstream's script).
+#
+# History: this pin was added for #1898 (the SIGPIPE race / subshell cache
+# bug, #1863 / PR #1881, reverted by resync fcbf52f8). That fix IS upstream
+# now (rjwalters/loom#7736 / #7771, `full_tree_contains`), so #1898 no longer
+# needs the pin; the 2am#4345 audit (2026-10-15) re-ported both files onto
+# v0.19.1160 upstream with only the #2128 delta on top.
+# Drop this pin only when upstream resolves bare `name.ext:L` citations
+# (unique-basename resolution with MISSING/AMBIGUOUS reporting).
 scripts/verify-proposal-refs.sh
 scripts/tests/test-verify-proposal-refs.sh
 
@@ -199,7 +202,8 @@ scripts/tests/test-verify-proposal-refs.sh
 # rjwalters/loom's own pr-worktree.sh template (klayout-tools is a uv-based
 # Python project; upstream's own template has no Python-specific setup
 # step), so an unpinned resync would silently drop it -- the same reversion
-# pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898. If the upstream
+# pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898 (#1898 since
+# upstreamed). If the upstream
 # Loom project ever adopts an equivalent post-worktree-hook call from
 # pr-worktree.sh, this pin can be dropped and the file resynced normally.
 scripts/pr-worktree.sh
@@ -229,7 +233,8 @@ scripts/pr-worktree.sh
 #
 # The fix was not upstreamed into rjwalters/loom's own sweep-lease-fence.sh
 # template, so an unpinned resync would silently revert it -- the same
-# reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898/#2020/
+# reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898 (since
+# upstreamed)/#2020/
 # #2193. `roles/builder-pr.md` is pinned here too because `.loom/roles/` is
 # resynced from upstream's own `defaults/roles/` tree, NOT regenerated from
 # this repo's `.claude/commands/loom/` copy -- an unpinned `roles/` file is

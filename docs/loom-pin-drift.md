@@ -129,6 +129,28 @@ verified one. Drop the pin only when all of these hold:
 Alternatively, keep the local section and retire the whole-file pin once the
 upstream section-preservation mechanism below ships.
 
+## `scripts/verify-proposal-refs.sh` (+ its test)
+
+Checked **2026-10-15** against `rjwalters/loom` tag `v0.19.1160`
+(2AMLogic/2am#4345 pin audit). The pin's original reason, #1898 (SIGPIPE race
+and subshell cache bug, #1863/#1881), is **upstream** (#7736/#7771,
+`full_tree_contains`) and no longer justifies it.
+
+### Protected local behavior
+
+#2128 (`d0b770ad`): bare `name.ext:L` citations are verified. A basename with
+a known extension is resolved to a unique tracked path and its line range
+checked; no match reports MISSING, several matches report AMBIGUOUS. The
+known-extension filter keeps prose and host:port strings out. Fixtures 6-9b
+and the bare-sibling case in `test-verify-proposal-refs.sh` assert it; 17
+local cases fail against upstream's script.
+
+### Conditions to retire the pin
+
+Upstream resolves bare `name.ext:L` citations, with unique-basename
+resolution and MISSING/AMBIGUOUS reporting, and the local fixtures pass
+against the upstream script.
+
 ## Upstream proposal: section-scoped resync (PROPOSED, not shipped)
 
 > **Status: proposed, not filed, not implemented.** No upstream issue exists
