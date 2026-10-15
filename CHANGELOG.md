@@ -597,6 +597,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   the chosen point: the router draws every hop as that array at the deck's via
   pitch, pads grow to enclose it, and the landing search checks the larger
   footprint. `landing` gains `via_array`, and `via_count` counts all cuts.
+- **`klt extract --parasitics` model revision, and 0.7.0 series-R disclosure**
+  (issue #2957): `parasitics` gains an integer `model_revision` (currently
+  `2`), bumped whenever R or C extraction semantics change. Additive;
+  `schema_version` is unchanged. **Back-reference for 0.7.0:** #2392 changed
+  how series R is counted, from squares per merged net to squares per
+  conductor fragment, so series R reported by `--parasitics` can rise by up
+  to roughly 2x per net versus 0.6.0 on identical input, while C is
+  unchanged. 0.6.0-style results are revision `1`, 0.7.0-style revision `2`.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
