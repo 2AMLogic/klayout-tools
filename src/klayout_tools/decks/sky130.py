@@ -1993,12 +1993,31 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # `R_total(l) = sheet_rho_ohm_sq * l / w + fixed_offset_ohm`. All five
 # measured points (including the held-out one) fit this affine law to a
 # relative residual under `1e-8` -- comfortably inside this deck's own
-# `rel=1e-6` verification bar (see `tests/test_extract.py`). No claim is
-# made here that this affine law holds at a `w` other than the `1um` this
-# issue measures (the real PDK model's `rhead` term does have its own,
-# undetermined `w`-dependence) -- the same single-coefficient,
-# curated-approximation limitation `sheet_rho_ohm_sq` alone already carries
-# for every other resistor entry in this deck, one coefficient over.
+# `rel=1e-6` verification bar (see `tests/test_extract.py`). The affine law
+# above is only exact at `w=1um`.
+#
+# `res_high_po` w-dependence (issue #3049): the same PDK model at other
+# widths, measured via one single-corner ngspice run (`tt`, 27 C,
+# `sky130_fd_pr__res_high_po` w={0.35, 0.69, 1.41, 2.85, 5.73}um, l={1, 5,
+# 10, 35}um, same `libs.tech/combined/sky130.lib.spice` as above), total
+# two-terminal resistance in ohm (w rows, l=1/5/10/35 columns):
+#   0.35: 1958.26 / 5938.03 / 10912.7 / 35786.3
+#   0.69: 996.672 / 2880.58 / 5235.45 / 17009.9
+#   1.41: 508.199 / 1429.43 / 2580.96 / 8338.63
+#   2.85: 257.127 / 712.729 / 1282.23 / 4129.74
+#   5.73: 129.400 / 355.968 / 639.178 / 2055.23
+# The model is `rbody` (`rsh*(l+0.247)/weff`) in series with `rhead`
+# (`345.8312*sw_poly_head_res/(weff+0.1558)`), `weff = w-0.001`, so its
+# head terms scale roughly 1/w, not as a constant. With `sheet_rho_ohm_sq`
+# and the `w=1um` sum held, the split `end_term_ohm_um / w + fixed_offset_ohm`
+# is a least-squares fit (relative error) over w >= 0.69um; the curated
+# `ResistorDevice` fields cannot represent the model's two different 1/(w+c)
+# shifts exactly, so a residual remains. Extracted-vs-model error by width,
+# for l=1/5/10/35um: 0.69um +2.0/+0.7/+0.4/+0.1 %, 1.41um -1.2/-0.4/-0.2/
+# -0.04 %, 2.85um -1.6/-0.5/-0.3/-0.04 %, 5.73um +0.8/+0.4/+0.2/+0.1 %;
+# 0.35um (a different `weff` regime in the model) is not fit well:
+# +1.9/-3.9/-5.2/-6.3 %. Before this fit the constant 379.7 ohm term
+# overstated the 1.41um resistor by ~4-5 %.
 EXTRACTION_DECK = ExtractionDeck(
     active=(65, 20),  # diff.drawing
     poly=(66, 20),  # poly.drawing
@@ -2257,7 +2276,13 @@ EXTRACTION_DECK = ExtractionDeck(
             # rounded, area-only-equivalent `319.8` -- see the provenance
             # note above for the exact methodology/source files.
             sheet_rho_ohm_sq=324.827244,
-            fixed_offset_ohm=379.705147,
+            # The `w=1um` total head term (379.705147 ohm) is split into a
+            # width-normalized `end_term_ohm_um / w` part and a constant
+            # remainder (issue #3049) -- see the "w-dependence" note above.
+            # The two sum to the pre-#3049 `379.705147` at `w=1um`, so every
+            # `w=1um` value above is unchanged.
+            end_term_ohm_um=370.614275,
+            fixed_offset_ohm=9.090872,
             requires=(
                 (94, 20),  # psdm -- P+ implant, see the module comment above
                 (86, 20),  # rpm  -- 300 ohm precision-resistor implant mask
