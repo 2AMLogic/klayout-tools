@@ -12315,3 +12315,40 @@ def test_expand_netlist_includes_keeps_relative_meaning_beside_env_include(
     path, diags = sim._expand_netlist_includes(str(body), str(out_dir))
     assert diags == []
     assert f'.inc "{tmp_path}/dut.spice"' in open(path).read()
+
+
+# ---------------------------------------------------------------------------
+# `expr` after a noise analysis (issue #2893)
+# ---------------------------------------------------------------------------
+
+
+def _control_for(kind, args):
+    from types import SimpleNamespace
+
+    point = SimpleNamespace(supply_v={})
+    return sim._corner_deck_control_lines(
+        point=point,
+        analysis={"kind": kind, "args": args},
+        measurements_spec=[{"name": "s0", "expr": "onoise_spectrum[0]"}],
+        raw_path=None,
+        osdi_preload=(),
+    )
+
+
+def test_noise_expr_aliases_spectrum_vectors():
+    lines = _control_for("noise", "v(out) V1 dec 5 100 1e6")
+    assert "let inoise_spectrum = noise1.inoise_spectrum" in lines
+    assert "let onoise_spectrum = noise1.onoise_spectrum" in lines
+    assert lines.index("let onoise_spectrum = noise1.onoise_spectrum") < lines.index(
+        "let s0 = onoise_spectrum[0]"
+    )
+    assert lines.index("noise v(out) V1 dec 5 100 1e6") < lines.index(
+        "let inoise_spectrum = noise1.inoise_spectrum"
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,args", [("ac", "dec 5 100 1e6"), ("tran", "1n 1u"), ("op", "")]
+)
+def test_non_noise_expr_has_no_noise_alias(kind, args):
+    assert not any("noise1" in line for line in _control_for(kind, args))

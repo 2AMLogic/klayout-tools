@@ -5812,13 +5812,25 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {analysis['args']}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
-    for spec in _expr_measurements(measurements_spec):
+    expr_specs = _expr_measurements(measurements_spec)
+    if expr_specs and analysis["kind"] == "noise":
+        # Issue #2893: after `noise`, ngspice's current plot is the integrated
+        # one (noise2: onoise_total/inoise_total); the spectra live in noise1.
+        # Alias them into the current plot (after any `write`, so the rawfile
+        # is unchanged) so bare names resolve while totals stay bare too.
+        lines.extend(f"let {vec} = noise1.{vec}" for vec in NOISE_SPECTRUM_VECTORS)
+    for spec in expr_specs:
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
     lines.extend(crossings_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines
+
+
+#: Spectrum vectors of ngspice's first noise plot, aliased by bare name into
+#: the current (totals) plot for ``expr`` measurements (issue #2893).
+NOISE_SPECTRUM_VECTORS = ("inoise_spectrum", "onoise_spectrum")
 
 
 def _write_xyce_deck(
