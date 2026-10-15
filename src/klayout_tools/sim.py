@@ -3632,6 +3632,7 @@ class CornerPoint:
         "temperature_c",
         "sample_index",
         "mc_seed",
+        "variant",
     )
 
     def __init__(
@@ -3645,7 +3646,9 @@ class CornerPoint:
         process_section_libs_resolved: list[str | None] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, int] | None = None,
+        variant: str | None = None,
     ) -> None:
+        self.variant = variant
         self.process = process
         self.process_sections = process_sections
         self.process_section_libs = process_section_libs
@@ -3697,6 +3700,8 @@ class CornerPoint:
             )
         temp_label = _format_number(self.temperature_c)
         base = f"{process_label}/{supply_label}/{temp_label}C"
+        if self.variant is not None:
+            base = f"{base}/@{self.variant}"
         if self.sample_index is None:
             return base
         return f"{base}/mc{self.sample_index}"
@@ -3706,7 +3711,12 @@ class CornerPoint:
         """Filesystem-safe artifact-directory name for this corner, derived
         from :attr:`corner_id` (e.g. ``ss/1.620V/125C`` -> ``ss_1p620V_125C``)."""
         label = self.corner_id.replace("/", "_")
-        return label.replace(".", "p").replace("=", "").replace("-", "n")
+        return (
+            label.replace(".", "p")
+            .replace("=", "")
+            .replace("-", "n")
+            .replace("@", "v_")
+        )
 
 
 def _format_number(value: float) -> str:
@@ -3860,6 +3870,7 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
             "temperature_c": point.temperature_c,
             "sample_index": point.sample_index,
             "mc_seed": point.mc_seed,
+            "variant": point.variant,
         }
         for point in points
     ]
@@ -3901,6 +3912,7 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 process_section_libs=section_libs,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
+                variant=entry.get("variant"),
             )
         )
     return points
@@ -3953,19 +3965,24 @@ def _expand_corners(
 
     temperatures: list[float] = corners_spec.get("temperature_c") or [27]
 
+    variants = _parse_variants(corners_spec.get("variants"))
+
     points: list[CornerPoint] = []
     for process, process_sections, process_section_libs in processes:
         for supply_v in supply_points:
-            for temperature_c in temperatures:
-                point = CornerPoint(
-                    process,
-                    supply_v,
-                    temperature_c,
-                    process_sections=process_sections,
-                    process_section_libs=process_section_libs,
-                )
-                if not _is_excluded(point, exclude_spec):
-                    points.append(point)
+            for variant_name, variant_sources in variants:
+                point_supply = {**supply_v, **variant_sources}
+                for temperature_c in temperatures:
+                    point = CornerPoint(
+                        process,
+                        point_supply,
+                        temperature_c,
+                        process_sections=process_sections,
+                        process_section_libs=process_section_libs,
+                        variant=variant_name,
+                    )
+                    if not _is_excluded(point, exclude_spec):
+                        points.append(point)
     return points
 
 
@@ -4063,6 +4080,171 @@ def _parse_unit_supply_v(supply_v: Any, where: str) -> dict[str, Any]:
     return dict(supply_v)
 
 
+_VARIANT_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+_EXPR_TOKEN_RE = re.compile(
+    r"\s*(?:(?P<num>\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)"
+    r"|(?P<name>[A-Za-z_][A-Za-z0-9_.]*)|(?P<op>[-+*/()]))"
+)
+
+
+def _parse_variants(raw: Any) -> list[tuple[str | None, dict[str, float]]]:
+    """Normalize ``corners.variants`` (issue #3252) into ``(name, sources)``
+    pairs with every source value resolved to a number.
+
+    ``None`` (axis absent) yields the single nameless, source-less entry so
+    :func:`_expand_corners` is byte-identical to its pre-variant behaviour.
+    Each variant's ``sources`` map a voltage-source name to a number or to an
+    arithmetic expression of the *other* sources in the same variant; the
+    resolved numbers are applied with ``alter`` exactly like ``supply_v`` and
+    override a same-named ``supply_v`` key.
+    """
+    if raw is None:
+        return [(None, {})]
+    if not isinstance(raw, list) or not raw:
+        raise SimError("corners.variants must be a non-empty array")
+    seen: set[str] = set()
+    out: list[tuple[str | None, dict[str, float]]] = []
+    for index, entry in enumerate(raw):
+        where = f"corners.variants[{index}]"
+        if not isinstance(entry, dict):
+            raise SimError(f"{where} must be an object")
+        name = entry.get("name")
+        if not isinstance(name, str) or not _VARIANT_NAME_RE.match(name):
+            raise SimError(
+                f"{where}.name must be a non-empty string of letters, digits, "
+                "'_', '.' or '-'"
+            )
+        if name in seen:
+            raise SimError(f"corners.variants has duplicate name {name!r}")
+        seen.add(name)
+        sources = entry.get("sources")
+        if not isinstance(sources, dict) or not sources:
+            raise SimError(f"{where}.sources must be a non-empty object")
+        out.append((name, _resolve_variant_sources(name, sources)))
+    return out
+
+
+def _resolve_variant_sources(variant: str, sources: dict[str, Any]) -> dict[str, float]:
+    resolved: dict[str, float] = {}
+    visiting: list[str] = []
+    lowered = {key.strip().lower(): key for key in sources}
+
+    def resolve(key: str) -> float:
+        if key in resolved:
+            return resolved[key]
+        if key in visiting:
+            cycle = " -> ".join([*visiting[visiting.index(key) :], key])
+            raise SimError(
+                f"corners.variants[{variant!r}].sources has a cyclic "
+                f"expression: {cycle}"
+            )
+        value = sources[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise SimError(
+                f"corners.variants[{variant!r}].sources[{key!r}] must be a "
+                "number or an arithmetic expression string"
+            )
+        if isinstance(value, str):
+            visiting.append(key)
+            try:
+                result = _eval_source_expr(variant, key, value, lowered, resolve)
+            finally:
+                visiting.pop()
+        else:
+            result = float(value)
+        resolved[key] = result
+        return result
+
+    for key in sources:
+        resolve(key)
+    return {key: resolved[key] for key in sources}
+
+
+def _eval_source_expr(
+    variant: str,
+    key: str,
+    text: str,
+    lowered: dict[str, str],
+    resolve: Any,
+) -> float:
+    """Evaluate ``text`` (``+ - * /``, parentheses, numbers, and other source
+    names of the same variant) without ``eval``."""
+    where = f"corners.variants[{variant!r}].sources[{key!r}]"
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(text):
+        if not text[pos:].strip():
+            break
+        match = _EXPR_TOKEN_RE.match(text, pos)
+        if match is None:
+            raise SimError(f"{where}: cannot parse expression {text!r}")
+        kind = match.lastgroup or ""
+        tokens.append((kind, match.group(kind)))
+        pos = match.end()
+    cursor = 0
+
+    def peek() -> tuple[str, str] | None:
+        return tokens[cursor] if cursor < len(tokens) else None
+
+    def take() -> tuple[str, str]:
+        nonlocal cursor
+        token = peek()
+        if token is None:
+            raise SimError(f"{where}: unexpected end of expression {text!r}")
+        cursor += 1
+        return token
+
+    def expr() -> float:
+        value = term()
+        while (t := peek()) is not None and t[1] in "+-" and t[0] == "op":
+            take()
+            rhs = term()
+            value = value + rhs if t[1] == "+" else value - rhs
+        return value
+
+    def term() -> float:
+        value = factor()
+        while (t := peek()) is not None and t[1] in "*/" and t[0] == "op":
+            take()
+            rhs = factor()
+            if t[1] == "*":
+                value *= rhs
+            else:
+                if rhs == 0:
+                    raise SimError(f"{where}: division by zero in {text!r}")
+                value /= rhs
+        return value
+
+    def factor() -> float:
+        kind, tok = take()
+        if kind == "num":
+            return float(tok)
+        if kind == "name":
+            target = lowered.get(tok.lower())
+            if target is None:
+                raise SimError(
+                    f"{where}: unknown source name {tok!r} in expression "
+                    f"{text!r} (expressions may only reference other sources "
+                    "of the same variant)"
+                )
+            return float(resolve(target))
+        if tok == "-":
+            return -factor()
+        if tok == "+":
+            return factor()
+        if tok == "(":
+            value = expr()
+            if take()[1] != ")":
+                raise SimError(f"{where}: unbalanced parentheses in {text!r}")
+            return value
+        raise SimError(f"{where}: unexpected {tok!r} in expression {text!r}")
+
+    result = expr()
+    if peek() is not None:
+        raise SimError(f"{where}: unexpected {peek()[1]!r} in expression {text!r}")  # type: ignore[index]
+    return result
+
+
 def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool:
     """A point is excluded if it matches every key of any one exclude entry."""
     for entry in exclude_spec:
@@ -4078,6 +4260,9 @@ def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
                 return False
         elif key == "temperature_c":
             if point.temperature_c != value:
+                return False
+        elif key == "variant":
+            if point.variant != value:
                 return False
         elif key == "supply_v":
             if not isinstance(value, dict):
@@ -4511,6 +4696,7 @@ def _expand_monte_carlo(
                     base.temperature_c,
                     process_sections=base.process_sections,
                     process_section_libs=base.process_section_libs,
+                    variant=base.variant,
                     sample_index=sample_index,
                     mc_seed={
                         "process_seed": process_seed,
@@ -4817,6 +5003,13 @@ def _enforce_xyce_support_boundary(
             "so per-corner supply rails cannot be patched into the deck "
             "-- leave corners.supply_v unset (fixed supply, hardcoded in "
             "the netlist body) or use engine 'ngspice'"
+        )
+    if corners_spec.get("variants"):
+        raise SimError(
+            "engine 'xyce' does not support corners.variants: variant "
+            "sources are applied with ngspice's `alter` control command, "
+            "which Xyce has no netlist equivalent of -- leave "
+            "corners.variants unset or use engine 'ngspice'"
         )
     if monte_carlo_declared:
         raise SimError(
@@ -6317,6 +6510,9 @@ def _run_corner(
         "artifacts": artifacts,
         **noise_fields,
         "monte_carlo": monte_carlo,
+        # Additive/optional (issue #3252): the `corners.variants[]` name,
+        # present only for a variant-axis request.
+        **({"variant": point.variant} if point.variant is not None else {}),
         # Additive/optional (issue #2482): `steps` -- per-step outcomes --
         # only for an `analysis_steps[]` request; empty for every other one.
         **step_fields,
