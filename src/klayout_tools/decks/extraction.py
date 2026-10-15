@@ -1114,6 +1114,7 @@ class TerminalRelation:
                 f"(expected one of: {', '.join(TERMINAL_RELATION_OPS)})"
             )
 
+
 #: The two boolean operators a :class:`LayerExpr` node may apply (issue
 #: #2860). ``"and"`` intersects every operand; ``"not"`` subtracts every
 #: operand after the first from the first.
