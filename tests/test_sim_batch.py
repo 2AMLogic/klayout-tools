@@ -5141,6 +5141,7 @@ def test_poll_heartbeat_fires_on_state_change_and_coarse_interval(tmp_path, caps
         runner=runner,
         sleep=runner.sleep,
         monotonic=lambda: next(clock),
+        heartbeat=True,
     )
 
     lines = capsys.readouterr().err.splitlines()

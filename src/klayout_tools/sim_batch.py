@@ -1860,6 +1860,7 @@ def poll_status(
     runner: remote_transport.CommandRunner | None = None,
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
+    heartbeat: bool = False,
 ) -> dict[str, Any]:
     """Poll ``status.json`` until the job reaches a terminal state
     (:data:`BATCH_TERMINAL_STATES`) and return that status document.
@@ -1875,9 +1876,11 @@ def poll_status(
     :class:`BatchError` on a state outside the documented set -- a contract
     violation, surfaced loudly rather than waited on forever.
 
-    While waiting, a heartbeat line (job id, last observed state, elapsed)
-    goes to **stderr** on every state change and otherwise every
-    :data:`BATCH_HEARTBEAT_INTERVAL_S` (issue #2978).
+    With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, ``klt netlist``
+    does not, so its stderr stays a bare JSON envelope), a heartbeat line
+    (job id, last observed state, elapsed) goes to **stderr** on every state
+    change and otherwise every :data:`BATCH_HEARTBEAT_INTERVAL_S`
+    (issue #2978).
     """
     run = runner if runner is not None else _run_subprocess
     started = monotonic()
@@ -1904,7 +1907,7 @@ def poll_status(
                 f"{last_state or 'no status.json yet'})",
                 last_state=last_state,
             )
-        if (
+        if heartbeat and (
             beat_at is None
             or last_state != beat_state
             or elapsed - beat_at >= BATCH_HEARTBEAT_INTERVAL_S
@@ -2770,7 +2773,7 @@ def _poll_and_collect(
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The wait-and-collect tail shared by a fresh submit and ``--attach``."""
     try:
-        status = poll_status(config, job_id, runner=runner, sleep=sleep)
+        status = poll_status(config, job_id, runner=runner, sleep=sleep, heartbeat=True)
     except BatchPollTimeout as exc:
         return (
             _poll_timeout_corners(corner_points, measurements_spec, exc),
