@@ -718,6 +718,22 @@ def test_run_sim_analysis_kind_op_with_meas_op_card_raises_clear_error(tmp_path)
         sim.run_sim(str(request))
 
 
+def test_run_sim_analysis_kind_op_with_supported_meas_card_raises_clear_error(tmp_path):
+    # Issue #3109: a supported-type `.meas` card is still unsearchable under a
+    # scalar `op` analysis -- refuse it up front, pointing at `expr`.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [{"name": "x", "spice": ".meas dc x find v(out) at=0"}],
+        },
+    )
+    with pytest.raises(sim.SimError, match=r"analysis\.kind is \"op\".*expr"):
+        sim.run_sim(str(request))
+
+
 def test_run_sim_meas_op_card_rejected_even_with_non_op_analysis_kind(tmp_path):
     # A `.meas op` card is invalid on ngspice's own terms regardless of the
     # request's `analysis.kind` -- not just when the two literally match.
