@@ -2073,21 +2073,23 @@ def run_extract(
     to the parent deck instead, so nothing is dropped silently.
 
     ``hierarchical_cells`` (``klt extract --hierarchical-cells CELL[,CELL...]``,
-    issue #2722, increment 1) opts into **hierarchical SPICE emission**: one
-    ``.SUBCKT <cell>`` per named (non-nested) cell definition, holding that
-    cell's own devices, plus the top ``.SUBCKT`` carrying the remaining
-    devices and one ``X`` card per *placement* of each named cell. It exists
+    issue #2722) opts into **hierarchical SPICE emission**: one
+    ``.SUBCKT <cell>`` per named cell definition, holding that
+    cell's own devices (and ``X`` cards for named cells nested in it), plus
+    the top ``.SUBCKT`` carrying the remaining devices and one ``X`` card per
+    *placement* of each named cell. It exists
     so per-circuit ``klt lvs`` options (``options.combine_devices_per_circuit``)
     have layout-side circuits to key on. Unlike ``subcircuit_cell`` this is
     the primary deck, not a second artifact; ``devices[]``/``nets[]``/
     ``device_count`` keep describing the *flat* extraction (so they are
     unchanged by the option) and a ``hierarchy`` block is added to the
     response *only* when the option was given. Omitted/empty (the default),
-    the flat bytes and JSON are unchanged. Errors (all before any output is
-    written): an absent, top, or unreachable cell; a selection where one
-    cell contains another; placements of one cell that are not electrically
-    identical; and any combination with ``parasitics``, ``subcircuit_cell``
-    or ``abstract_cell_patterns`` (deferred to issue #2916). See
+    the flat bytes and JSON are unchanged. A selected cell containing another
+    selected cell yields a nested ``.SUBCKT`` tree (issue #2916). Errors (all
+    before any output is written): an absent, top, or unreachable cell;
+    placements of one cell that are not electrically identical; and any
+    combination with ``parasitics``, ``subcircuit_cell`` or
+    ``abstract_cell_patterns`` (rejected by design, issue #2916). See
     :mod:`klayout_tools.extract_hierarchy` and ``docs/cli/extract.md``'s
     "Hierarchical output" section.
 
@@ -3490,8 +3492,8 @@ def _normalize_hierarchical_cells(
     abstract_cell_lef_paths: tuple[str, ...],
 ) -> tuple[str, ...]:
     """Normalize ``--hierarchical-cells`` (issue #2722) to a sorted, de-duped
-    tuple (``()`` when omitted) and reject the option combinations increment 1
-    does not support -- before the extraction engine runs."""
+    tuple (``()`` when omitted) and reject the option combinations it does
+    not support -- before the extraction engine runs."""
     names = tuple(sorted({name.strip() for name in hierarchical_cells}))
     if not hierarchical_cells:
         return ()
@@ -3515,7 +3517,7 @@ def _validate_hierarchical_selection(
     layout: Any, top_cell: Any, names: tuple[str, ...]
 ) -> None:
     """Validate ``--hierarchical-cells`` against the live hierarchy (absent /
-    top / unreachable / nested) before any extraction work (issue #2722).
+    top / unreachable) before any extraction work (issue #2722).
     No-op when the option was omitted."""
     if not names:
         return
@@ -4592,7 +4594,7 @@ def extract_netlist_from_layout(
     )
 
     # `--hierarchical-cells` (issue #2722): selection validated against the
-    # live hierarchy (absent / top / unreachable / nested) before any
+    # live hierarchy (absent / top / unreachable) before any
     # extraction work or output.
     _validate_hierarchical_selection(layout, top_cell, hierarchical_cells)
 

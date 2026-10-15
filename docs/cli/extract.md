@@ -198,8 +198,8 @@ two disagree, this document (and the code) win.
 - `--hierarchical-cells` — optional, unset by default (the output stays
   flat). Comma-separated cell name(s) to emit as their **own `.SUBCKT`** in
   the written deck instead of flattening them into the top circuit (issue
-  #2722, increment 1): one definition per named cell, one `X` instance per
-  placement, so per-circuit `klt lvs` options such as
+  #2722; nested named cells yield a nested `.SUBCKT` tree, #2916): one
+  definition per named cell, one `X` instance per placement, so per-circuit `klt lvs` options such as
   `options.combine_devices_per_circuit` have layout-side circuits to key on.
   Unlike `--subcircuit` this *is* the primary deck, not a second artifact.
   See "Hierarchical output" below.
@@ -3923,6 +3923,14 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
 ...
 ```
 
+- **Nested selections (issue #2916).** A named cell may contain other named
+  cells: each gets its own `.SUBCKT` and the outer definition instantiates it
+  (`XSTAGE_1 IN_1 STAGE` inside `.SUBCKT OUTER`), numbered per parent
+  circuit. A device is written in exactly one circuit — the innermost named
+  placement it is drawn in. A net is a pin of the outer definition when it
+  touches a device outside the outer placement's whole subtree (nested cells
+  included) or is a pin of the flat deck; a nested instance's pins are wired
+  to the outer definition's nets by the flat net they resolve to.
 - **One definition per cell, one instance per placement.** Two placements of
   `macro_a` write one `.SUBCKT MACRO_A` and two `X` cards
   (`XMACRO_A_1`, `XMACRO_A_2`, numbered in a deterministic placement order),
@@ -3940,8 +3948,9 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
   declarations, provenance and `netlist_sha256` are the existing writer's.
 - **Conservation.** Before anything is written, every pre-transform device
   must appear exactly once (checked per device class, across the top circuit
-  and every child definition × instance count); a transform that lost or
-  duplicated a device is an error.
+  and every definition × its instance count from the top, so the check spans
+  every nesting level); a transform that lost or duplicated a device is an
+  error.
 - **Placements must be identical.** All placements of one cell must have the
   same devices at the same cell-local positions with the same parameters and
   the same net partition; otherwise one shared definition would be wrong for
@@ -3975,6 +3984,11 @@ byte-for-byte what it was). Otherwise:
 }
 ```
 
+`instances` lists the instances placed in the *top* circuit. A cell that holds
+nested named cells also carries a `children` array
+(`[{"cell": "STAGE", "instances": ["XSTAGE_1", "XSTAGE_2"]}]`) naming the
+instances inside its own definition; leaf cells omit it, so a non-nested run's
+JSON is unchanged. `placements` counts every placement, nested ones included.
 `device_count` is per definition (not multiplied by placements);
 `top_device_count`/`top_instance_count` describe the top circuit; `circuits`
 lists every emitted `.SUBCKT`, top first.
@@ -4000,23 +4014,33 @@ folds `MACRO_A`'s series pair to its lumped reference resistor while leaving
 Extracting the same layout flat reports `combine_devices_per_circuit.unmatched`
 for the layout side and a mismatch.
 
-### Errors and limitations (increment 1)
+### Errors and limitations
 
 All of these are application errors (exit 1) raised **before any output file
 is written**:
 
 - a named cell that is **absent**, **is the top cell**, or **has no reachable
   placement** under the top cell;
-- a **nested selection** — a named cell that contains another named cell;
 - a named cell that **contributes no recognized device**;
 - **placements of one cell that are not electrically identical**;
 - combination with **`--parasitics`**, **`--subcircuit`** or
   **`--abstract-cells`/`--abstract-cell-lef`** — the error names the
-  combination.
+  combination and the reason.
 
-Nesting and those three combinations (parasitic ownership at hierarchy
-boundaries, slicing a hierarchical deck, abstracted instances) are deferred
-to issue #2916. `--check --rerun` cannot reconstruct this flag (like every
+Those three combinations are **rejected by design** (decision recorded in
+issue #2916), not deferred:
+
+- `--parasitics`: parasitic elements are extracted on the flat deck against
+  flat nets, and a net crossing a `.SUBCKT` boundary has no single owning
+  circuit, so splitting boundary and coupling elements across definitions
+  would drop or double count them. Extract parasitics from a flat run.
+- `--subcircuit`: it writes a second, flat slice of one cell from the flat
+  deck, which would compete with the emitted hierarchy.
+- `--abstract-cells` / `--abstract-cell-lef`: abstracted cells are erased
+  before extraction, so the placements this option attributes devices to no
+  longer exist.
+
+`--check --rerun` cannot reconstruct this flag (like every
 other optional flag — see "Full mode"); use cheap `--check`. Not supported for
 FinFET decks (see "Not supported (refused by name)").
 
