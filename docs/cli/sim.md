@@ -1940,6 +1940,11 @@ A `measurements[]` entry declares **exactly one** of two forms:
 
 Declaring both, or neither, is an application error (exit 1).
 
+Under a scalar `analysis.kind: "op"`, a `spice` card is refused at request time
+(exit 1): an operating point has no dc/ac/tran sweep for a `.meas` card to
+search. Use `expr` (for example `v(out)`); no dummy `dc` sweep is needed for
+operating-point figures. Other kind/card mismatches are not checked here.
+
 ### Why `expr` exists
 
 A top-level `.meas` card is the only measurement shape ngspice's batch mode

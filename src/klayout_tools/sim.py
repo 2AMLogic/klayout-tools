@@ -1032,6 +1032,22 @@ def _resolve_analysis_and_measurements(
     # `.control` block) are the two declarable forms, exactly one per entry
     # -- see `_validate_measurement_forms` for the full rule set.
     _validate_measurement_forms(measurements_spec)
+    # Issue #3109: an `op` analysis has no dc/ac/tran/sp sweep for a `.meas`
+    # card to search, so every `spice` card would end as "produced no value".
+    if str(analysis["kind"]).lower() == "op":
+        for spec in measurements_spec:
+            if spec.get("spice") is None:
+                continue
+            # A `.meas op` card keeps its own, more specific error.
+            _validate_meas_card(spec["name"], spec["spice"])
+            raise SimError(
+                f"measurement '{spec['name']}' is a `.meas` card but "
+                'analysis.kind is "op": an operating-point analysis has no '
+                "sweep for a `.meas` card to search, so it can never produce "
+                "a value; declare the quantity as an expression instead "
+                f'(measurements[].expr, e.g. {{"name": "{spec["name"]}", '
+                '"expr": "v(out)"})'
+            )
     # Issue #2868: a crossings series is a transient-time quantity.
     sim_crossings.validate_crossings_context(measurements_spec, analysis)
     return analysis, measurements_spec
