@@ -712,6 +712,59 @@ written as a build artifact,
 `.klt/functional-verification/klt_sdf_ifnone_edge_modpath_dropped.sdf`;
 `environment.sdf.file` still reports the caller's own SDF path, unchanged.
 
+**A per-bit `IOPATH` onto a whole-vector bus output is dropped before
+annotation, counted, and its arcs named** (issue #2958). OpenSTA's `write_sdf`
+writes a hard macro's bus output one bit at a time
+(`IOPATH A_CLK A_DOUT[0] ...`), but vendor macro models usually declare a
+single whole-vector module path:
+
+```verilog
+output [3:0] A_DOUT;
+specify
+  (A_CLK *> A_DOUT) = (1.0,1.0);
+endspecify
+```
+
+Icarus registers no per-bit modpath for that, so the unescaped entry is an
+`SDF ERROR ... Invalid/malformed IOPATH` syntax error and the escaped spelling
+(`A_DOUT\[0\]`) fails `Unable to match ModPath` (both verified live against
+Icarus 13.0); no SDF spelling can annotate it. `klt` **removes** those entries
+and reports them as their own `dropped` class, which — like
+`iopath_ifnone_edge_modpath` — also lists every affected arc, the bus named
+without its bit-select:
+
+```json
+"dropped": {
+  "iopath_bus_bit_modpath": {
+    "count": 32,
+    "reason": "...",
+    "arcs": [
+      { "celltype": "sram_macro", "from": "A_CLK", "to": "A_DOUT" }
+    ]
+  }
+}
+```
+
+The listed arcs simulate with the model's own module-path delay rather than
+the SDF's per-bit delay, so their characterised delay is not represented in
+the run; that is why the arcs are named. Rewriting the entry to the
+whole-vector spelling was rejected (it would give the whole bus one bit's
+delay). The drop is decided from the run's own cell models and is fail-safe:
+
+- Only a bare `(IOPATH ...)` entry is eligible; a `COND`-wrapped entry is left
+  alone.
+- The `CELLTYPE` model must be among `request.sources`, declare the
+  destination as a bus (`output [3:0] A_DOUT`), and reach it only through
+  whole-vector module paths, one of which is the entry's own input → bus arc.
+- An output with any bit-indexed module path, a scalar port, or a `specify`
+  block with a path the scan cannot parse is never dropped from; those entries
+  still fail the run loudly.
+
+The pass never reads the SDF when no source declares a bus output alongside a
+`specify` block. It is not applied under `options.sdf.entries: "interconnect"`
+(every `IOPATH` is already dropped). The normalized copy is written to
+`.klt/functional-verification/klt_sdf_bus_bit_modpath_dropped.sdf`.
+
 **Reading a run that fails on *every* test case.** The most common shape of a
 real annotated failure is not a subtly different result on one test — it is
 every test failing identically, often with the design's outputs reading a
@@ -855,6 +908,7 @@ also names them in `arcs`:
 | `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
 | `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |
 | `iopath_ifnone_edge_modpath` | SDF-text normalization (issue #2885) | An `IOPATH` entry onto a cell arc whose only module paths in the cell's own Verilog model are `ifnone` + edge-sensitive (gf180mcu XOR/XNOR/MUX-select/half-adder-sum arcs) was removed before annotation, because Icarus discards those paths at elaboration and no `IOPATH` can match them. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc, sorted — naming every arc that ran with no module-path delay. |
+| `iopath_bus_bit_modpath` | SDF-text normalization (issue #2958) | A bit-selected `IOPATH` entry (`IOPATH A_CLK A_DOUT[0]`) onto a bus output that the cell's own Verilog model reaches only through a whole-vector module path (a hard macro's `(A_CLK *> A_DOUT)`) was removed before annotation, because Icarus registers no per-bit modpath. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc (`to` is the bus, bit-select dropped), sorted. |
 
 New classes may be added; a consumer should treat `dropped` as an open map
 keyed by class name, not as a fixed set of keys.
