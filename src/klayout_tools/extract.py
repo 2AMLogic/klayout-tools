@@ -3393,6 +3393,14 @@ def run_extract(
         # sets `pin_renames.declared_pins`/`pin_renames.def_pins` echo --
         # see `rerun_extract_report`.
         "rename_declared_pins": rename_declared_pins,
+        # Additive fields (issue #3061): the `--pins` / `--def-pins` sets as
+        # given -- a sorted list, or `null` when the flag was not given (`[]`
+        # stays distinct from `null`: the demotion passes treat an empty set
+        # differently from an absent one). Always present, independent of
+        # `--rename-declared-pins`, so `--check --rerun` can replay them; see
+        # `rerun_extract_report`.
+        "declared_pins": None if declared_pins is None else sorted(declared_pins),
+        "def_pins": None if def_pins is None else sorted(def_pins),
         # Additive field (issue #2656): `null` unless `label_layers`
         # (--label-layer) was given, otherwise the caller's own role ->
         # [layer, datatype] (or `null`) mapping echoed verbatim -- the record
@@ -4130,16 +4138,18 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     by an earlier build of this unreleased feature or hand-edited, replays
     its ``declared`` union as ``--pins`` alone) -- when the committed report
     carries a ``pin_renames`` block,
-    writing the fresh netlist back to the same ``netlist_path`` the
-    committed report recorded
-    (so that field, too, is a meaningful comparison rather than an
-    incidental path difference). **Known limitation**, mirroring ``klt lvs
+    writing the fresh netlist to a private temp directory deleted afterward
+    (issue #3061: the committed ``netlist_path`` file is never modified;
+    ``netlist_sha256`` is still computed, and ``fresh.netlist_path`` reports
+    the committed path so that field is not an incidental path difference).
+    The top-level ``declared_pins``/``def_pins`` echoes (issue #3061) replay
+    ``--pins``/``--def-pins`` independent of ``--rename-declared-pins``, and
+    win over the ``pin_renames`` echoes, which stay the fallback for an older
+    report. **Known limitation**, mirroring ``klt lvs
     --check``'s ``rerun_lvs_report()`` (``lvs.py``): every *other* optional
     ``klt extract`` flag (``--parasitics``, ``--mom-net``, ``--spef``,
     ``--critical-net``, ``--distributed-rc``, ``--def-net-names``,
     ``--def-net-connections``, ``--mom-rlc-*``, ``--top-cell-pins``,
-    ``--pins``/``--def-pins`` -- except through the ``pin_renames`` echoes
-    a run that also used ``--rename-declared-pins`` carries, see above --,
     ``--defer-resistor-fixed-offset``, ``--abstract-cells``,
     ``--abstract-cell-lef``, ``--matched-group``, ``--subcircuit``/
     ``--subcircuit-output``, ``--pdk``/``--pdk-root``)
@@ -4256,20 +4266,52 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     else:
         rename_declared_pins = False
 
-    fresh = run_extract(
-        file_path,
-        deck_name,
-        output=committed.get("netlist_path"),
-        # A report recorded by `--no-netlist` (issue #2850) has a null path:
-        # replay it as census-only rather than writing beside the input.
-        no_netlist="netlist_path" in committed and committed["netlist_path"] is None,
-        top=committed.get("top"),
-        deck_options=deck_options,
-        label_layers=label_layers,
-        declared_pins=rerun_declared_pins,
-        def_pins=rerun_def_pins,
-        rename_declared_pins=rename_declared_pins,
-    )
+    # Issue #3061: the top-level `declared_pins`/`def_pins` echoes (emitted
+    # whether or not `--rename-declared-pins` was on) win over the
+    # `pin_renames` echo above, which stays the fallback for a report that
+    # predates them. A malformed echo degrades to "not replayed".
+    if "declared_pins" in committed or "def_pins" in committed:
+        valid_top_pins, top_declared_pins = _parse_declared_set_echo(
+            committed.get("declared_pins")
+        )
+        valid_top_def, top_def_pins = _parse_declared_set_echo(
+            committed.get("def_pins")
+        )
+        if valid_top_pins and valid_top_def:
+            rerun_declared_pins = top_declared_pins
+            rerun_def_pins = top_def_pins
+
+    # Issue #3061: the rerun never writes over the committed netlist. A report
+    # recorded by `--no-netlist` (issue #2850) has a null path: replay it as
+    # census-only. Otherwise the fresh netlist goes to a private temp dir (so
+    # `netlist_sha256` is still computed) that is deleted afterward, and the
+    # embedded `fresh.netlist_path` reports the committed path -- the netlist
+    # text does not embed its own path, so the hash is unaffected.
+    committed_netlist_path = committed.get("netlist_path")
+    no_netlist = "netlist_path" in committed and committed_netlist_path is None
+    scratch_dir = None if no_netlist else tempfile.mkdtemp(prefix="klt-extract-rerun-")
+    try:
+        fresh = run_extract(
+            file_path,
+            deck_name,
+            output=(
+                None
+                if scratch_dir is None
+                else os.path.join(scratch_dir, "extracted.spice")
+            ),
+            no_netlist=no_netlist,
+            top=committed.get("top"),
+            deck_options=deck_options,
+            label_layers=label_layers,
+            declared_pins=rerun_declared_pins,
+            def_pins=rerun_def_pins,
+            rename_declared_pins=rename_declared_pins,
+        )
+    finally:
+        if scratch_dir is not None:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+    if scratch_dir is not None and fresh.get("netlist_path") is not None:
+        fresh["netlist_path"] = committed_netlist_path
     return build_rerun_result(
         report_path=report_path,
         committed=committed,
