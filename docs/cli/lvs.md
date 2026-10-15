@@ -2389,7 +2389,11 @@ conversion then fills each such card's `R` from the call's `L`/`W` through the
 very function `klt extract` uses for `devices[].params.r_ohm`
 (`L / W * sheet_rho_ohm_sq` plus the deck's `fixed_offset_ohm`,
 `end_term_ohm_um` and `width_offset_um`, so sky130's `res_high_po` offset is
-included), honouring `layout.deck_options` flavours. For that class there is
+included), honouring `layout.deck_options` flavours. `layout.deck_options` is
+applied to the reference conversion only when `reference.deck` names the same
+deck as `layout.deck`; a request has no `reference.deck_options`, so a
+`reference.deck` that differs from `layout.deck` is resolved with that deck's
+default options (no flavour). For that class there is
 no `device.placeholder_value` warning, `R` is listed under `compared` in
 `device_parameter_coverage[]`, and a drawn `R` that differs from the
 reference's beyond `options.parameter_tolerance` is a `device.property`
