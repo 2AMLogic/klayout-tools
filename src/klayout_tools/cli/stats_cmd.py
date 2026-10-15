@@ -76,11 +76,11 @@ def _print_text(report: dict) -> None:
     if not layers:
         return
 
-    rows = [
+    rows: list[tuple[str, ...]] = [
         (
             str(entry["layer"]),
             str(entry["datatype"]),
-            entry["name"] if entry["name"] is not None else "-",
+            str(entry["name"]) if entry["name"] is not None else "-",
             str(entry["area_um2"]),
             str(entry["density"]),
             str(entry["merged_area_um2"]),
