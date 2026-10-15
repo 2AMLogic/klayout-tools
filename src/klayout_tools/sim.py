@@ -5366,9 +5366,10 @@ def _run_corner(
         if raw_path is not None and os.path.isfile(raw_path):
             artifacts["raw"] = raw_path
             try:
-                artifacts["waveform"] = _parse_and_persist_waveform(raw_path)
+                waveform_path = _parse_and_persist_waveform(raw_path)
+                artifacts["waveform"] = waveform_path
                 if analysis.get("kind") == "noise":
-                    with open(artifacts["waveform"], encoding="utf-8") as fh:
+                    with open(waveform_path, encoding="utf-8") as fh:
                         noise_fields["noise_representation"] = noise_representation(
                             json.load(fh)
                         )
