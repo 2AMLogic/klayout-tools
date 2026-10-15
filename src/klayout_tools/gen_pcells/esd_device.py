@@ -345,6 +345,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_ring(
                     self.cell,
@@ -353,6 +354,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
                     gap_box,
+                    self.mfg_grid_um,
                 )
                 _insert_boxes(
                     self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
@@ -380,6 +382,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         gap_box,
                         ring["gap"]["side"] if ring["gap"] is not None else None,
                         self.ring_implant_margin_um,
+                        self.mfg_grid_um,
                     )
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down

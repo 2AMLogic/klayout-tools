@@ -36,6 +36,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _insert_implant_ring,
         _insert_ring,
         _ring_layout,
+        _snap_ring_box_um,
         _well_box_um,
     )
 
@@ -216,6 +217,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 info["outer_box_um"],
                 info["inner_box_um"],
                 gap_box,
+                self.mfg_grid_um,
             )
             _insert_ring(
                 self.cell,
@@ -224,11 +226,18 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 info["outer_box_um"],
                 info["inner_box_um"],
                 gap_box,
+                self.mfg_grid_um,
             )
             _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
             if self.add_well and self.well_present:
                 li_well = self.layout.layer(self.well_layer)
-                well_box = _well_box_um(info, WELL_ENCLOSURE_MARGIN_UM)
+                # Grows the well onto the manufacturing grid (issue #3364): an
+                # off-grid `inner_*_um` otherwise leaves Nwell vertices off it.
+                well_box = _snap_ring_box_um(
+                    _well_box_um(info, WELL_ENCLOSURE_MARGIN_UM),
+                    self.mfg_grid_um,
+                    dbu,
+                )
                 _insert_boxes(self.cell, li_well, dbu, [well_box])
             if self.ring_implant_present:
                 # Tracks the tap ring, extended `ring_implant_margin_um`
@@ -247,6 +256,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     gap_box,
                     info["gap"]["side"] if info["gap"] is not None else None,
                     self.ring_implant_margin_um,
+                    self.mfg_grid_um,
                 )
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down

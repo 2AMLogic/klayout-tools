@@ -294,6 +294,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 info["outer_box_um"],
                 info["inner_box_um"],
                 gap_box,
+                self.mfg_grid_um,
             )
             _insert_ring(
                 self.cell,
@@ -302,6 +303,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 info["outer_box_um"],
                 info["inner_box_um"],
                 gap_box,
+                self.mfg_grid_um,
             )
             _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
             if self.well_tap_implant_present:
@@ -321,6 +323,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     gap_box,
                     info["gap"]["side"] if info["gap"] is not None else None,
                     self.ring_implant_margin_um,
+                    self.mfg_grid_um,
                 )
             if self.well_present:
                 _insert_boxes(
