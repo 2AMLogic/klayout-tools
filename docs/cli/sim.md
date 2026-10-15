@@ -634,7 +634,7 @@ in its `batch_job_failed` message, or carries the tail of the retrieved
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
-| `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
+| `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`. Any other value is rejected before any S3 write. |
 
@@ -662,27 +662,33 @@ under `--format json`, an error envelope carrying a stable
 
 A capacity refusal is a fleet-wide condition that usually clears within
 minutes, so the code marks it as **retryable**, unlike a request error.
-Every other launch failure (the diversification floors, the shared
-concurrency cap, a missing `job.json`, an IAM denial) carries no `error.code`
-and is never retried. The classification is a match on the provisioner's
+The shared-fleet concurrency-cap refusal (`N instance(s) already running + 1
+requested exceeds BATCH_MAX_CONCURRENT_INSTANCES=M`,
+[#2917](https://github.com/2AMLogic/klayout-tools/issues/2917)) is the other
+transient case; it carries its own **`error.code: "batch_concurrency_cap"`**,
+so a caller can tell slot contention from a Spot shortage, and is retryable
+the same way. Every other launch failure (the diversification floors, a
+missing `job.json`, an IAM denial) carries no `error.code` and is never
+retried. The classification is a match on the provisioner's
 refusal text, because the script exits `1` for every refusal and exposes no
 distinct exit code; it lives in one helper
 (`sim_batch._classify_launch_failure`) so a wording change on the 2am side is
 a one-line fix here.
 
 `batch.capacity_wait_s` opts into waiting instead of failing. With a positive
-budget, a `batch_no_capacity` refusal re-invokes `launch` for the **same
+budget, a `batch_no_capacity` or `batch_concurrency_cap` refusal re-invokes `launch` for the **same
 job id** after a jittered exponential backoff (about 30 s, doubling, capped at
 10 min, each delay drawn from 50–100 % of its nominal value and never past
 the remaining budget) until the budget elapses; then the request fails with
-the same `batch_no_capacity` code, its message noting how many attempts were
+the same code, its message noting how many attempts were
 made. Things worth knowing:
 
 - **The wait is not charged to `batch.poll_timeout_s`.** The poll clock
   starts only once a launch succeeds.
-- **Re-launching is safe.** A refused launch starts no instance and closes the
+- **Re-launching is safe.** A refused launch starts no instance and closes any
   launch record it opened (2am's `cmd_launch` writes a `start` record and its
-  matching `end` on that path), and 2am's own Spot-interruption `reconcile`
+  matching `end` on the Spot-shortage path; the concurrency-cap check runs
+  before any record is opened), and 2am's own Spot-interruption `reconcile`
   already re-launches under an existing job id. The uploaded `job.json` and
   `inputs/` are reused, never re-uploaded.
 - **The budget is per `launch` call.** A sharded run (`remote.hosts > 1`) launches one
@@ -1940,6 +1946,11 @@ A `measurements[]` entry declares **exactly one** of two forms:
 
 Declaring both, or neither, is an application error (exit 1).
 
+Under a scalar `analysis.kind: "op"`, a `spice` card is refused at request time
+(exit 1): an operating point has no dc/ac/tran sweep for a `.meas` card to
+search. Use `expr` (for example `v(out)`); no dummy `dc` sweep is needed for
+operating-point figures. Other kind/card mismatches are not checked here.
+
 ### Why `expr` exists
 
 A top-level `.meas` card is the only measurement shape ngspice's batch mode
@@ -2018,6 +2029,17 @@ are byte-identical.
 Limitation: this applies to the single-analysis path only. Inside
 `analysis_steps` a `noise` step's spectrum plot is not captured, so spectrum
 vectors are not reachable there (tracked in [#3284](https://github.com/2AMLogic/klayout-tools/issues/3284)).
+
+### Noise units and `sqrnoise`
+
+`measurements[].unit` is a caller-supplied label; klt never checks it against
+the values. ngspice's `sqrnoise` option (from a `.spiceinit`, a worker image
+default, or `options.ngspice_init`) squares every noise output vector, so the
+same request can yield amplitude (V, A) or power (V², A²) numbers that both
+grade `pass`. A `noise` corner whose rawfile was parsed carries
+`noise_representation` (`"amplitude"` or `"power"`, see the report fields
+table) so callers can check mechanically. To pin amplitude regardless of the
+environment, set `options.ngspice_init: ["unset sqrnoise"]`.
 
 ### `expr` cannot read `.meas` results
 
@@ -4437,6 +4459,7 @@ corner-sweep rollup fields above are declared.
 | `status`         | string           | `"pass"`, `"fail"`, `"error"`, or `"inconclusive"` (issues #2492/#2493 — only reachable when the request declares `options.fail_on_diagnostic` or a plausibility bound; see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above). Precedence `error > inconclusive > fail > pass`. |
 | `runtime_s`      | number           | Engine wall-clock time for this corner (or time-to-timeout, on a killed run).                                                  |
 | `engine_exit_code` | integer \| null | Additive (issue #2848): the simulator process's exit code (`0` or nonzero). `null` when the engine was killed by a signal, when the harness's own `timeout` ended it, when it never launched, and for corners that never ran (`budget_exceeded`, `orphaned`, `lost_shard`, …). A nonzero exit alone does not change `status`. Rides in `report.json` unchanged on `--backend batch`/`remote`. |
+| `noise_representation` | string | Additive (issue #3006), `noise` corners only: `"power"` when the rawfile's integrated-noise plot is squared (`Integrated Noise - V^2 or A^2`, `voltage^2` variables — ngspice `sqrnoise` set), else `"amplitude"`. Omitted for other analyses and when no rawfile was parsed (needs `options.waveforms`/`keep_artifacts`). No `schema_version` bump. |
 | `engine_killed_by_signal` | string \| null | Additive (issue #2848): the signal name (e.g. `"SIGKILL"`) when the engine process was killed by a signal the harness did not send; such a corner also carries an `engine_killed` error diagnostic. `null` otherwise, including on a harness `timeout`. |
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"absent"` for an `optional` measurement with no value — issue #2925, `value`/`margin` `null`, info diagnostic `measurement_absent` — and `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. |
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |

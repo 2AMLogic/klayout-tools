@@ -718,6 +718,22 @@ def test_run_sim_analysis_kind_op_with_meas_op_card_raises_clear_error(tmp_path)
         sim.run_sim(str(request))
 
 
+def test_run_sim_analysis_kind_op_with_supported_meas_card_raises_clear_error(tmp_path):
+    # Issue #3109: a supported-type `.meas` card is still unsearchable under a
+    # scalar `op` analysis -- refuse it up front, pointing at `expr`.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [{"name": "x", "spice": ".meas dc x find v(out) at=0"}],
+        },
+    )
+    with pytest.raises(sim.SimError, match=r"analysis\.kind is \"op\".*expr"):
+        sim.run_sim(str(request))
+
+
 def test_run_sim_meas_op_card_rejected_even_with_non_op_analysis_kind(tmp_path):
     # A `.meas op` card is invalid on ngspice's own terms regardless of the
     # request's `analysis.kind` -- not just when the two literally match.
@@ -12892,3 +12908,26 @@ def test_monte_carlo_block_has_no_absent_key_unless_optional(tmp_path, monkeypat
     _stub_subprocess_run(monkeypatch, log_text="m = 1.0e+00\n")
     report = sim.run_sim(str(request))
     assert "absent" not in report["measurements"][0]["monte_carlo"]
+
+
+# --------------------------------------------------------------------------- #
+# noise_representation (issue #3006)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("plotname", "vtype", "expected"),
+    [
+        ("Integrated Noise", "voltage", "amplitude"),
+        ("Integrated Noise - V^2 or A^2", "voltage^2", "power"),
+        ("Integrated Noise", "current^2", "power"),
+        ("Integrated Noise - V^2 or A^2", "voltage", "power"),
+    ],
+)
+def test_noise_representation(plotname, vtype, expected):
+    waveform = {
+        "plotname": plotname,
+        "variables": [{"index": 0, "name": "onoise_total", "type": vtype}],
+        "points": [[1.0]],
+    }
+    assert sim.noise_representation(waveform) == expected
