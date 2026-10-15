@@ -1237,7 +1237,7 @@ single-layer kind.
 The `sky130` deck is a **curated starter subset**, not the full sky130
 design rule manual (which spans hundreds of rules). It currently covers 136
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
-`tap` (issue #2321),
+`tap` (issue #2401),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
 `nwell` (issue #1420) layers, plus the source deck's entire
@@ -1307,14 +1307,14 @@ independent check. This gap is documentation-only: no field of the JSON
 `coverage` object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
-literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
+literally. `diff.width.1` and `tap.width.1` (issue #2401) are the two
 curated halves of one rule defined on a *compound* layer expression (a
 boolean union of two mask layers — `difftap.1`'s `diff.or(tap)`), each
 checking one drawn layer of the union, because the native
 `Region` check primitives check one layer, or one layer against one other
 layer, at a time — they do not evaluate arbitrary layer expressions the way
 the DRC-DSL script runner does. `li1.enclosing.licon1.1` and
-`tap.enclosing.licon.1` (issue #2321) approximate `second_edges`-conditional
+`tap.enclosing.licon.1` (issue #2401) approximate `second_edges`-conditional
 enclosure rules (`li.5`, `licon.7`) at their unconditional zero-margin
 floor, the one positive-margin transcription that provably flags no
 correct-by-construction geometry. `licon1.width.1` and `mcon.width.1` (issue
@@ -2000,7 +2000,7 @@ it is installed with the package, next to its declared rule-id list
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file src/klayout_tools/decks/asap7.drc \
-    --expect-rule-categories 234 --format json
+    --expect-rule-categories 242 --format json
 ```
 
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
@@ -2046,10 +2046,10 @@ Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
 well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
 rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
-substitutes the layer name. These 234 ids are declared once, in
+substitutes the layer name. These 242 ids are declared once, in
 `asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
 test fails if the deck, that list, the fixtures or this table drift apart.
-Pass `--expect-rule-categories 234` so that a deck
+Pass `--expect-rule-categories 242` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
 
@@ -2063,11 +2063,11 @@ which silently drops a category fails the run (exit 1) instead of reporting
 | Table 3.5.2 | `ACTIVE.A.1A`, `ACTIVE.A.1B`, `ACTIVE.AUX.1` |
 | Table 3.6.1 | `GCUT.W.1`, `GCUT.ACTIVE.S.1`, `GCUT.GATE.EX.1`, `GCUT.GATE.S.2`, `GCUT.S.3`, `GCUT.AUX.1`, `GCUT.AUX.2`, `GCUT.AUX.3` |
 | Table 3.7.1 | `NSELECT.W.1`, `NSELECT.W.2`, `NSELECT.ACTIVE.EN.1`, `NSELECT.ACTIVE.EN.2`, `NSELECT.GATE.EX.1`, `NSELECT.GATE.EX.2`, `PSELECT.W.1`, `PSELECT.W.2`, `PSELECT.ACTIVE.EN.1`, `PSELECT.ACTIVE.EN.2`, `PSELECT.GATE.EX.1`, `PSELECT.GATE.EX.2`, `SLVT.W.1`, `SLVT.W.2`, `SLVT.ACTIVE.EN.1`, `SLVT.ACTIVE.EN.2`, `SLVT.GATE.EX.1`, `SLVT.GATE.EX.2`, `LVT.W.1`, `LVT.W.2`, `LVT.ACTIVE.EN.1`, `LVT.ACTIVE.EN.2`, `LVT.GATE.EX.1`, `LVT.GATE.EX.2`, `SRAMVT.W.1`, `SRAMVT.W.2`, `SRAMVT.ACTIVE.EN.1`, `SRAMVT.ACTIVE.EN.2`, `SRAMVT.GATE.EX.1`, `SRAMVT.GATE.EX.2`, `NSELECT.PSELECT.AUX.1`, `VT.AUX.2` |
-| Table 3.8.1 | `SDT.W.1`, `SDT.W.2`, `SDT.W.3`, `SDT.S.1`, `SDT.GATE.S.2`, `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2`, `SDT.GATE.AUX.1`, `SDT.ACTIVE.AUX.2`, `SDT.ACTIVE.AUX.3`, `SDT.LISD.AUX.4` |
-| Table 3.9.1 | `LISD.W.1`, `LISD.S.1`, `LISD.S.2`, `LISD.S.3`, `LISD.A.1` |
+| Table 3.8.1 | `SDT.W.1`, `SDT.W.2`, `SDT.W.3`, `SDT.S.1`, `SDT.GATE.S.2`, `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2`, `SDT.GATE.AUX.1`, `SDT.ACTIVE.AUX.2`, `SDT.ACTIVE.AUX.3`, `SDT.LISD.AUX.4`, `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` |
+| Table 3.9.1 | `LISD.W.1`, `LISD.S.1`, `LISD.S.2`, `LISD.S.3`, `LISD.A.1`, `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` |
 | Table 3.10.1 | `LIG.W.1`, `LIG.S.1`, `LIG.S.2`, `LIG.S.3`, `LIG.S.4`, `LIG.S.5` |
-| Table 3.10.2 | `LIG.GATE.S.9A`, `LIG.GATE.S.9B`, `LIG.GATE.S.10`, `LIG.GCUT.S.11`, `LIG.A.1`, `LIG.LISD.A.2`, `LIG.GATE.A.3`, `LIG.GATE.AUX.1` |
-| Table 3.10.3 | `LIG.LISD.OV.1`, `LIG.GATE.EX.1` |
+| Table 3.10.2 | `LIG.GATE.S.9A`, `LIG.GATE.S.9B`, `LIG.GATE.S.10`, `LIG.GCUT.S.11`, `LIG.A.1`, `LIG.LISD.A.2`, `LIG.GATE.A.3`, `SRAM.LIG.GATE.A.4`, `LIG.GATE.AUX.1` |
+| Table 3.10.3 | `LIG.LISD.OV.1`, `LIG.GATE.EX.1`, `SRAM.LIG.AUX.2`, `SRAM.LIG.GATE.OV.2` |
 | Table 3.11.1 | `V0.W.1` |
 | Table 3.11.2 | `V0.AUX.1`, `V0.LIG.A.1` |
 | Table 3.12.1 | `M1.W.1`, `M1.S.1`, `M1.S.2`, `M1.S.3`, `M1.S.4`, `M1.S.5`, `M1.S.6`, `M1.A.1`, `M2.W.1`, `M2.S.1`, `M2.S.2`, `M2.S.3`, `M2.S.4`, `M2.S.5`, `M2.S.6`, `M2.A.1`, `M3.W.1`, `M3.S.1`, `M3.S.2`, `M3.S.3`, `M3.S.4`, `M3.S.5`, `M3.S.6`, `M3.A.1` |
@@ -2092,6 +2092,8 @@ which silently drops a category fails the run (exit 1) instead of reporting
 | `GATE.S.3` | Table 3.4.1 | centre-to-centre distance checked as edge-to-edge spacing <= 34 nm, exact for 20 nm GATE (GATE.W.1) |
 | `SDT.ACTIVE.AUX.2` | Table 3.8.1 | 'coincide' read as 'lies on and overlaps an ACTIVE horizontal edge', per Fig. 3.8.1(d), which accepts SDT overhanging ACTIVE horizontally |
 | `LIG.LISD.OV.1` | Table 3.10.3 | any LIG/LISD overlap is treated as 'connected together' |
+| `SRAM.LISD.S.4` | Table 3.9.1 | both polygons must interact with SRAMDRC, as the DRM words it; a pair with only one of them in scope is covered by neither this rule nor `LISD.S.3` (which takes polygons lying completely outside SRAMDRC) |
+| `SRAM.LIG.GATE.OV.2` | Table 3.10.3 | the DRM gives no direction; read as the horizontal overlap across the gate width, as Fig. 3.10.2(c) draws it, measured on the LIG/GATE intersection |
 | `V0.W.1` | Table 3.11.1 | stated along the M1 length; checked in both directions (V0 is as wide as M1 across the track per V0.M1.AUX.3) |
 | `M1.S.6` | Table 3.12.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
 | `M2.S.6` | Table 3.12.1 | corner-to-corner read as Euclidean spacing between edges whose projections onto each other overlap by less than one database unit |
@@ -2221,11 +2223,7 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `ACTIVE.AUX.3` | Table 3.5.2 | the DRM gives no distance bound to check against | #2812 |
 | `ACTIVE.LUP.1` | Table 3.5.2 | DRM-confirmed 30 um maximum, but the DRM defines no tap layer, distance metric or connectivity test; no sound predicate yet (evidence: [ACTIVE.LUP.1 evidence](#activelup1-evidence)) | #2812 |
 | `SRAM.NSELECT.ACTIVE.EN.3`, `SRAM.NSELECT.ACTIVE.EN.4` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `LIG.LISD.S.6`, `LIG.LISD.S.7`, `LIG.SDT.S.8` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
-| `SRAM.LIG.GATE.A.4` | Table 3.10.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SRAM.LIG.AUX.2`, `SRAM.LIG.GATE.OV.2` | Table 3.10.3 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V0.M1.EN.1` | Table 3.11.1 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
@@ -2852,7 +2850,7 @@ field existed). sky130's five `met{1..5}.area.1` rules (issue #1955) each
 carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 (`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), its five
 `met{1..5}.holes_area.1` rules (issue #1976) likewise cite `m1.7`/`m2.7`/
-`m3.7`/`m4.7`/`m5.7`, and issue #2321's `tap.width.1` cites the same
+`m3.7`/`m4.7`/`m5.7`, and issue #2401's `tap.width.1` cites the same
 `difftap.1` source id `diff.width.1` already carries (both halve the same
 compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
 `licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
