@@ -151,6 +151,7 @@
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_report",
+        "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_subcircuit",
         "klayout_tools.parasitic_integrity",
@@ -393,6 +394,7 @@
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
         "klayout_tools.output_lock",
+        "klayout_tools.resistor_mesh",
         "klayout_tools.verilog_netlist"
       ]
     },
@@ -1209,6 +1211,30 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_deck_block",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.extract_resistance_graph",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_decompose_manhattan_polygon",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.extract_resistance_graph",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_rails_under_via",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.power",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_decompose_manhattan_polygon",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
+    },
+    {
+      "consumer": "klayout_tools.power",
+      "exporter": "klayout_tools.resistor_mesh",
+      "symbol": "_rails_under_via",
+      "reason": "Issue #2980: the Manhattan mesh-decomposition helpers moved unchanged from power.py into the shared resistor_mesh module (keeping their names) so klt power and the extraction resistance-graph builder reuse one implementation."
     },
     {
       "consumer": "klayout_tools.power",
