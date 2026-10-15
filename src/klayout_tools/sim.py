@@ -101,6 +101,7 @@ from . import (
     sim_mismatch_gate,
     sim_portable,
     sim_steps,
+    sim_supply_waveform,
     sim_transfer_meas,
 )
 
@@ -4425,6 +4426,7 @@ class CornerPoint:
         "mc_seed",
         "variant",
         "mc_injected",
+        "supply_waveforms",
     )
 
     def __init__(
@@ -4441,6 +4443,7 @@ class CornerPoint:
         mc_seed: dict[str, Any] | None = None,
         variant: str | None = None,
         mc_injected: list[dict[str, Any]] | None = None,
+        supply_waveforms: tuple[str, ...] = (),
     ) -> None:
         self.variant = variant
         self.process = process
@@ -4455,6 +4458,9 @@ class CornerPoint:
         # Issue #2911: this sample's recorded design-owned mismatch draws
         # (`sim_injected.draw`); ``None`` unless `monte_carlo.injected`.
         self.mc_injected = mc_injected
+        # Issue #2902: `supply_v` keys whose PWL/PULSE source is rescaled in
+        # the corner's netlist copy instead of `alter`ed.
+        self.supply_waveforms = supply_waveforms
 
     def section_lib(self, index: int, models_lib: str | None) -> str | None:
         """The library path the ``.lib`` card for ``process_sections[index]``
@@ -4801,6 +4807,7 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
             "mc_seed": point.mc_seed,
             "variant": point.variant,
             "mc_injected": point.mc_injected,
+            "supply_waveforms": list(point.supply_waveforms),
         }
         if point.params:
             # Issue #3035: only a parameter point carries the field, so every
@@ -4861,9 +4868,37 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 mc_seed=entry.get("mc_seed"),
                 variant=entry.get("variant"),
                 mc_injected=entry.get("mc_injected"),
+                supply_waveforms=tuple(entry.get("supply_waveforms") or ()),
             )
         )
     return points
+
+
+def _parse_supply_waveforms(
+    corners_spec: dict[str, Any], supply_spec: dict[str, list[float]]
+) -> tuple[str, ...]:
+    """Validate ``corners.supply_waveforms`` (issue #2902): an array of
+    ``corners.supply_v`` keys whose PWL/PULSE source is scaled per corner."""
+    raw = corners_spec.get("supply_waveforms")
+    if raw is None:
+        return ()
+    if (
+        not isinstance(raw, list)
+        or not all(isinstance(n, str) and n.strip() for n in raw)
+        or len(set(raw)) != len(raw)
+    ):
+        raise SimError(
+            "corners.supply_waveforms must be an array of unique "
+            "corners.supply_v source names"
+        )
+    stray = [n for n in raw if n not in supply_spec]
+    if stray:
+        raise SimError(
+            f"corners.supply_waveforms names {stray!r}, which "
+            "corners.supply_v does not sweep: every entry must also be a "
+            "corners.supply_v key"
+        )
+    return tuple(raw)
 
 
 def _expand_corners(
@@ -4911,6 +4946,7 @@ def _expand_corners(
     else:
         supply_points = [{}]
 
+    supply_waveforms = _parse_supply_waveforms(corners_spec, supply_spec)
     temperatures: list[float] = corners_spec.get("temperature_c") or [27]
 
     variants = _parse_variants(corners_spec.get("variants"))
@@ -4936,6 +4972,7 @@ def _expand_corners(
                             process_section_libs=process_section_libs,
                             params=param_row,
                             variant=variant_name,
+                            supply_waveforms=supply_waveforms,
                         )
                         if not _is_excluded(point, exclude_spec):
                             points.append(point)
@@ -7239,9 +7276,21 @@ def _validate_supply_override_targets(
     except (OSError, UnicodeDecodeError):
         return
     waveforms = _top_level_waveform_sources(text)
+    scaled = {name for point in corner_points for name in point.supply_waveforms}
+    for name in sorted(scaled):
+        # Fail closed on anything the rewrite cannot reproduce exactly.
+        sim_supply_waveform.find_source(
+            text, name, option="corners.supply_waveforms", error_cls=SimError
+        )
     for target in targets:
         waveform = waveforms.get(target.strip().lower())
-        if waveform is not None:
+        if waveform is not None and target not in scaled:
+            hint = (
+                "; to scale its levels per corner instead, list it in "
+                "corners.supply_waveforms (supported for "
+                + "/".join(k.upper() for k in sim_supply_waveform.SCALABLE_KINDS)
+                + " sources)"
+            )
             raise SimError(
                 f"corners.supply_v override of source {target!r} is not "
                 f"supported: the netlist declares it with an explicit "
@@ -7249,7 +7298,7 @@ def _validate_supply_override_targets(
                 f"{target}=<value>` has no effect on it (the run would "
                 "silently simulate the netlist's own waveform). Declare the "
                 "source as a plain DC value, or remove it from "
-                "corners.supply_v"
+                "corners.supply_v" + hint
             )
     for target, sources in _param_only_targets(netlist_path, targets).items():
         raise SimError(
@@ -7431,6 +7480,27 @@ def _expand_netlist_includes(
     with open(rewritten, "w", encoding="utf-8", errors="surrogateescape") as fh:
         fh.write("\n".join(final))
     return rewritten, diagnostics
+
+
+def _scale_supply_waveforms(
+    run_netlist_path: str, original_path: str, corner_dir: str, point: CornerPoint
+) -> tuple[str, dict[str, Any]]:
+    """Write the corner's netlist copy with each ``point.supply_waveforms``
+    source rescaled to its ``supply_v`` value (issue #2902); returns
+    ``(copy_path, disclosure)``. Relative ``.include`` targets that resolve
+    beside the original netlist are made absolute, as in
+    :func:`_expand_netlist_includes`."""
+    with open(run_netlist_path, encoding="utf-8", errors="surrogateescape") as fh:
+        text = fh.read()
+    scaled, disclosure = sim_supply_waveform.scale_netlist(
+        text, point.supply_v, point.supply_waveforms, error_cls=SimError
+    )
+    base = os.path.dirname(os.path.abspath(original_path))
+    final = [_absolutize_relative_include(line, base) for line in scaled.split("\n")]
+    out_path = os.path.join(corner_dir, "netlist.supply_waveforms.cir")
+    with open(out_path, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        fh.write("\n".join(final))
+    return out_path, disclosure
 
 
 def _prepare_corner_run(
@@ -7894,6 +7964,11 @@ def _run_corner(
     run_netlist_path, include_diagnostics = _expand_netlist_includes(
         netlist_path, corner_dir
     )
+    supply_waveform_report: dict[str, Any] = {}
+    if point.supply_waveforms:
+        run_netlist_path, supply_waveform_report = _scale_supply_waveforms(
+            run_netlist_path, netlist_path, corner_dir, point
+        )
     command, log_path, raw_path, deck_path = _prepare_corner_run(
         corner_dir=corner_dir,
         netlist_path=run_netlist_path,
@@ -8220,6 +8295,13 @@ def _run_corner(
         # Additive/optional (issue #2482): `steps` -- per-step outcomes --
         # only for an `analysis_steps[]` request; empty for every other one.
         **step_fields,
+        # Additive/optional (issue #2902): the effective per-corner waveform
+        # levels, only for a request that scales a PWL/PULSE supply source.
+        **(
+            {"supply_waveforms": supply_waveform_report}
+            if supply_waveform_report
+            else {}
+        ),
     }
     return corner, engine_version
 
@@ -9117,6 +9199,8 @@ def _corner_deck_control_lines(
         else:
             prefix.append("save all")
     for key, value in sorted(point.supply_v.items()):
+        if key in point.supply_waveforms:
+            continue  # rescaled in the netlist copy (issue #2902), no `alter`
         prefix.append(f"alter {key}={value}")
     lines.extend(prefix)
     if sim_steps.is_steps_analysis(analysis):

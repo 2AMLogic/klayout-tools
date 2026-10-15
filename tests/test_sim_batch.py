@@ -6049,3 +6049,23 @@ def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
     sb._validate_batch_pdk_variant(request, None)  # any candidate lists it
     with pytest.raises(sim.SimError):
         sb._validate_batch_pdk_variant(request, "us-east-1")
+def test_batch_and_remote_requests_carry_supply_waveforms(tmp_path):
+    """#2902: the batch/remote worker re-runs ``run_sim`` on the pushed
+    request, so the whole-request form keeps ``corners.supply_waveforms`` and
+    a shard's ``_explicit_points`` carries it per point -- either way the
+    worker rescales the source rather than ``alter``ing it."""
+    from klayout_tools import sim, sim_remote
+
+    request = {
+        "netlist": "body.spice",
+        "corners": {"supply_v": {"vdd": [1.2, 1.8]}, "supply_waveforms": ["vdd"]},
+    }
+    kwargs = {"timeout_s": 10.0, "keep_artifacts": False, "want_waveforms": False}
+    whole = sim_remote._build_remote_request(request, **kwargs)
+    assert whole["corners"]["supply_waveforms"] == ["vdd"]
+
+    points = sim._expand_corners(request["corners"], [])
+    shard = sim_remote._build_remote_request(request, explicit_points=points, **kwargs)
+    assert [p["supply_waveforms"] for p in shard["_explicit_points"]] == [["vdd"]] * 2
+    back = sim._corner_points_from_wire(shard["_explicit_points"])
+    assert all(p.supply_waveforms == ("vdd",) for p in back)
