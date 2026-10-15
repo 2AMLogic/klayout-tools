@@ -93,23 +93,16 @@ def run(args: argparse.Namespace) -> int:
     except OutputLockError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
 
-    report_out = getattr(args, "report_out", None)
-    if report_out:
-        # Issue #2975: an additive file copy of the envelope; stdout is
-        # unchanged. Written before emitting so an unwritable path fails
-        # cleanly with the error envelope rather than after a full report.
-        try:
-            write_json_file(report, report_out)
-        except OSError as exc:
-            return emit_error(
-                "sim",
-                f"could not write report to '{report_out}': {exc}",
-                args.format,
-            )
+    write_failure = _write_report_out(report, args)
+    if write_failure is not None:
+        return write_failure
 
     deck_mode = report.get("mode") == "decks"
     emit_success(report, args.format, _print_deck_text if deck_mode else _print_text)
+    return _exit_code_for(report, deck_mode)
 
+
+def _exit_code_for(report: dict, deck_mode: bool) -> int:
     if deck_mode:
         # Issue #2804: deck-list requests carry no graded measurements, so
         # the 3 ("ran, a limit missed") outcome cannot arise -- the deck
@@ -126,6 +119,27 @@ def run(args: argparse.Namespace) -> int:
     if report["status"] == "fail":
         return EXIT_MEASUREMENT_FAILED
     return EXIT_PASS
+
+
+def _write_report_out(report: dict, args: argparse.Namespace) -> int | None:
+    """Write the ``--report-out`` file copy; return an exit code only on failure.
+
+    Issue #2975: an additive file copy of the envelope; stdout is unchanged.
+    Written before emitting so an unwritable path fails cleanly with the error
+    envelope rather than after a full report.
+    """
+    report_out = getattr(args, "report_out", None)
+    if not report_out:
+        return None
+    try:
+        write_json_file(report, report_out)
+    except OSError as exc:
+        return emit_error(
+            "sim",
+            f"could not write report to '{report_out}': {exc}",
+            args.format,
+        )
+    return None
 
 
 def _run_batch_set(args: argparse.Namespace) -> int:
