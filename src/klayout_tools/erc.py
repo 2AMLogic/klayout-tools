@@ -344,6 +344,7 @@ See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Any
 
@@ -363,6 +364,13 @@ from ._paths import (
     _validate_via_entries,
 )
 from ._provenance import _content_hash, build_provenance
+from ._report_verify import (
+    build_check_result,
+    build_rerun_result,
+    get_path,
+    hash_check,
+)
+from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
 from .decks import get_extraction_deck as _get_extraction_deck
@@ -4971,3 +4979,134 @@ def run_erc(
         report["gates"] = []
         report["compact"] = compact_block
     return report
+
+
+
+
+# --------------------------------------------------------------------------- #
+# --check / --rerun: verify a previously committed report (issue #3060)
+# --------------------------------------------------------------------------- #
+
+
+def _input_hash_check(
+    field: str, expected: str | None, echoed: Any, report_path: str
+) -> dict[str, Any]:
+    """One :func:`~klayout_tools._report_verify.hash_check` entry for an input
+    path the committed report echoes back (``file``/``spec``).
+
+    Hashes via :func:`~klayout_tools._provenance._content_hash` because the
+    recorded ``provenance.*.content_hash`` values are ``sha256:``-prefixed
+    (``klt lvs``'s ``environment.*_sha256`` are bare, which is why its
+    ``_input_hash_check`` cannot be reused). An echoed path naming no existing
+    file gets the same ``input_not_found`` block ``klt lvs --check`` attaches
+    (issue #2595), so ``actual: null`` is not mistaken for a moved hash.
+    """
+    path = echoed if isinstance(echoed, str) and echoed else None
+    check = hash_check(field, expected, _content_hash(path))
+    if path is None or os.path.isfile(path):
+        return check
+    found_relative_to_report: str | None = None
+    if not os.path.isabs(path):
+        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
+        if os.path.isfile(candidate):
+            found_relative_to_report = os.path.abspath(candidate)
+    check["input_not_found"] = {
+        "path": path,
+        "resolved": os.path.abspath(path),
+        "found_relative_to_report": found_relative_to_report,
+    }
+    return check
+
+
+def check_erc_report(report_path: str) -> dict[str, Any]:
+    """``klt erc --check`` (cheap mode, issue #3060): verify a previously
+    committed ``klt erc --format json`` report at ``report_path`` still
+    reproduces, without re-running the ERC engine at all.
+
+    Re-hashes the layout (``committed["file"]``) and the spec
+    (``committed["spec"]``) exactly as echoed back by the original run and
+    compares each against ``provenance.input.content_hash`` /
+    ``provenance.spec.content_hash``; when the report used ``--deck``, also
+    re-hashes that deck's source against ``provenance.deck.content_hash``.
+    Each mismatch names which input moved. A report with no recorded hash
+    never counts as a match
+    (:func:`klayout_tools._report_verify.hash_check`).
+
+    Relative echoed paths are re-hashed relative to the current working
+    directory -- the same convention (and the same ``input_not_found``
+    diagnostic) ``klt lvs --check`` uses.
+
+    The result additionally carries the informational ``advisories`` list
+    (klt/klayout version drift) ``klt lvs --check`` emits; it never affects
+    ``status`` or the exit code.
+
+    Raises :class:`ErcError` for a missing/unparseable committed report --
+    never a traceback.
+    """
+    # Imported here, not at module level: ``lvs`` is a heavyweight module and
+    # only the --check path needs its version-drift advisory helper.
+    from .lvs import _version_drift_advisories
+
+    committed = _load_committed_report(report_path, ErcError)
+    checks = [
+        _input_hash_check(
+            "provenance.input.content_hash",
+            get_path(committed, ("provenance", "input", "content_hash")),
+            committed.get("file"),
+            report_path,
+        ),
+        _input_hash_check(
+            "provenance.spec.content_hash",
+            get_path(committed, ("provenance", "spec", "content_hash")),
+            committed.get("spec"),
+            report_path,
+        ),
+    ]
+    deck = get_path(committed, ("provenance", "deck"))
+    if isinstance(deck, dict) and deck.get("name") is not None:
+        checks.append(
+            hash_check(
+                "provenance.deck.content_hash",
+                deck.get("content_hash"),
+                _content_hash(deck_source_path(deck["name"])),
+            )
+        )
+    result = build_check_result(report_path=report_path, checks=checks)
+    result["advisories"] = _version_drift_advisories(committed)
+    return result
+
+
+def rerun_erc_report(report_path: str) -> dict[str, Any]:
+    """``klt erc --check <report> --rerun`` (full mode, issue #3060): verify a
+    previously committed ``klt erc --format json`` report by re-running ERC
+    from the ``file``/``spec``/``pdk``/``findings_only`` it echoes (and the
+    ``--deck`` named by ``provenance.deck``, when there is one) and diffing
+    the fresh report against the committed one.
+
+    Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
+    excluding :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`.
+
+    **Known limitation**: ``--top`` is not echoed in the report, so ``--rerun``
+    always runs with ``top=None``; a report from a multi-top-cell stream then
+    fails with the ordinary ambiguous-top-cell :class:`ErcError`. Use
+    ``--check`` (cheap mode) in that case.
+
+    Raises :class:`ErcError` for a missing/unparseable committed report, one
+    missing ``file``/``spec`` to rerun, or any error the rerun itself raises.
+    """
+    committed = _load_committed_report(report_path, ErcError)
+    for key in ("file", "spec"):
+        if not committed.get(key):
+            raise ErcError(
+                f"committed report has no '{key}' field to rerun: {report_path}"
+            )
+    deck = get_path(committed, ("provenance", "deck"))
+    fresh = run_erc(
+        committed["file"],
+        committed["spec"],
+        top=None,
+        pdk=committed.get("pdk"),
+        deck=deck.get("name") if isinstance(deck, dict) else None,
+        findings_only=bool(committed.get("findings_only")),
+    )
+    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)

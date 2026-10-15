@@ -8277,3 +8277,195 @@ def test_omit_antenna_tables_no_gates_entry_survives(tmp_path):
             "no_gates"
         ]
     assert omitted["status"] == full["status"]
+
+
+# --- `klt erc --check` / `--rerun` (issue #3060) --------------------------
+
+
+def _committed_erc_report(tmp_path, *, name="chk", **run_kwargs):
+    """Run ERC on the basic fixture and commit its JSON report; returns
+    ``(gds, spec, report_path)``."""
+    gds = tmp_path / f"{name}.gds"
+    spec = tmp_path / f"{name}.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+    report_path = tmp_path / f"{name}.report.json"
+    report_path.write_text(json.dumps(run_erc(str(gds), str(spec), **run_kwargs)))
+    return gds, spec, report_path
+
+
+def test_check_erc_report_clean_pass(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["schema_version"] == 1
+    assert result["mode"] == "check"
+    assert result["status"] == "match"
+    assert {c["field"] for c in result["checks"]} == {
+        "provenance.input.content_hash",
+        "provenance.spec.content_hash",
+    }
+    assert all(c["match"] for c in result["checks"])
+    assert result["advisories"] == []
+
+
+def test_check_erc_report_detects_layout_drift(tmp_path):
+    gds, _, report_path = _committed_erc_report(tmp_path)
+    gds.write_bytes(gds.read_bytes() + b"\0\0")
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+    assert by_field["provenance.spec.content_hash"]["match"] is True
+
+
+def test_check_erc_report_detects_spec_drift(tmp_path):
+    _, spec, report_path = _committed_erc_report(tmp_path)
+    spec.write_text(spec.read_text() + "\n")
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["provenance.spec.content_hash"]["match"] is False
+    assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def test_check_erc_report_missing_recorded_hash_is_drifted(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    del report["provenance"]["spec"]
+    report_path.write_text(json.dumps(report))
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["provenance.spec.content_hash"]["expected"] is None
+    assert by_field["provenance.spec.content_hash"]["match"] is False
+
+
+def test_check_erc_report_flags_input_not_found(tmp_path):
+    gds, _, report_path = _committed_erc_report(tmp_path)
+    gds.unlink()
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert "input_not_found" in by_field["provenance.input.content_hash"]
+
+
+def test_check_erc_report_version_drift_is_an_advisory_only(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    report["provenance"]["klt_version"] = "0.0.0-not-this-build"
+    report_path.write_text(json.dumps(report))
+
+    result = erc.check_erc_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert [a["field"] for a in result["advisories"]] == ["provenance.klt_version"]
+
+
+def test_check_erc_report_missing_or_invalid_report_is_a_clean_error(tmp_path):
+    with pytest.raises(ErcError, match="committed report not found"):
+        erc.check_erc_report(str(tmp_path / "nope.json"))
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(ErcError, match="not valid JSON"):
+        erc.check_erc_report(str(bad))
+
+
+def test_rerun_erc_report_match(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+
+    result = erc.rerun_erc_report(str(report_path))
+
+    assert result["mode"] == "rerun"
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_erc_report_replays_findings_only_and_pdk(tmp_path):
+    _, _, findings_only = _committed_erc_report(tmp_path, name="fo", findings_only=True)
+    _, _, with_pdk = _committed_erc_report(tmp_path, name="pk", pdk="sky130")
+
+    assert erc.rerun_erc_report(str(findings_only))["status"] == "match"
+    assert erc.rerun_erc_report(str(with_pdk))["status"] == "match"
+
+
+def test_rerun_erc_report_names_verdict_drift(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    report["gate_count"] = 99
+    report_path.write_text(json.dumps(report))
+
+    result = erc.rerun_erc_report(str(report_path))
+
+    assert result["status"] == "drifted"
+    assert "gate_count" in {d["field"] for d in result["drift"]}
+
+
+def test_rerun_erc_report_without_file_field_is_a_clean_error(tmp_path):
+    _, _, report_path = _committed_erc_report(tmp_path)
+    report = json.loads(report_path.read_text())
+    del report["file"]
+    report_path.write_text(json.dumps(report))
+
+    with pytest.raises(ErcError, match="no 'file' field to rerun"):
+        erc.rerun_erc_report(str(report_path))
+
+
+def test_cli_check_exit_codes_and_json(tmp_path, capsys):
+    gds, _, report_path = _committed_erc_report(tmp_path)
+
+    assert main(["erc", "--check", str(report_path), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "match"
+    assert data["mode"] == "check"
+
+    gds.write_bytes(gds.read_bytes() + b"\0\0")
+    assert main(["erc", "--check", str(report_path), "--format", "json"]) == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "drifted"
+
+    assert main(["erc", "--check", str(report_path)]) == 3
+    out = capsys.readouterr().out
+    assert "[DRIFTED] provenance.input.content_hash" in out
+
+
+def test_cli_check_rerun_text_and_json(tmp_path, capsys):
+    _, _, report_path = _committed_erc_report(tmp_path)
+
+    assert main(["erc", "--check", str(report_path), "--rerun"]) == 0
+    capsys.readouterr()
+    assert (
+        main(["erc", "--check", str(report_path), "--rerun", "--format", "json"]) == 0
+    )
+    assert json.loads(capsys.readouterr().out)["mode"] == "rerun"
+
+
+def test_cli_check_is_exclusive_with_file_and_spec(tmp_path):
+    gds, spec, report_path = _committed_erc_report(tmp_path)
+
+    for extra in ([str(gds)], [str(gds), str(spec)]):
+        with pytest.raises(SystemExit) as excinfo:
+            main(["erc", *extra, "--check", str(report_path)])
+        assert excinfo.value.code == 2
+
+
+def test_cli_rerun_without_check_and_missing_inputs_are_clean_errors(tmp_path, capsys):
+    gds, spec, _ = _committed_erc_report(tmp_path)
+
+    assert main(["erc", str(gds), str(spec), "--rerun"]) == 1
+    assert "--rerun requires --check" in capsys.readouterr().err
+    assert main(["erc"]) == 1
+    assert main(["erc", str(gds)]) == 1
+
+
+def test_cli_check_missing_report_is_a_clean_error(tmp_path, capsys):
+    assert main(["erc", "--check", str(tmp_path / "nope.json")]) == 1
+    assert "committed report not found" in capsys.readouterr().err

@@ -6212,15 +6212,31 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "the JSON contract."
         ),
     )
-    erc_parser.add_argument("file", help="path to a routed GDSII or OASIS layout file")
+    # `file`/`spec` (positional) and `--check` (issue #3060) are mutually
+    # exclusive input sources, as in `klt lvs`. `file` and `spec` are optional
+    # positionals, so "neither given" is enforced in `erc_cmd.run` (exit 1)
+    # rather than here.
+    erc_input_group = erc_parser.add_mutually_exclusive_group()
+    erc_input_group.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help=(
+            "path to a routed GDSII or OASIS layout file. Required unless "
+            "--check is given (the input paths are then read from the "
+            "committed report instead)"
+        ),
+    )
     erc_parser.add_argument(
         "spec",
+        nargs="?",
+        default=None,
         help=(
             "path to a JSON spec file: a 'stackup' array (>= 2 entries) "
             "mapping GDS layer/datatype pairs to fabrication-order "
             'conductor roles -- stackup[0] sets "role": "gate" -- and '
             "an optional 'vias' array -- see docs/cli/erc.md's 'Spec file' "
-            "section"
+            "section. Required unless --check is given"
         ),
     )
     erc_parser.add_argument(
@@ -6311,6 +6327,35 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "erc_status and the tie entries of erc_coverage are unchanged. "
             "Requires --findings-only -- passing it alone exits 1. Omitted, "
             "output is byte-identical."
+        ),
+    )
+    erc_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt erc --format json' report "
+            "(REPORT) instead of running a fresh check: mutually exclusive "
+            "with the positional 'file'/'spec' arguments, since inputs are "
+            "read from REPORT itself (issue #3060). Cheap mode (default): "
+            "re-hash REPORT's layout and spec (and --deck source, when one "
+            "was used) and compare against the recorded "
+            "provenance.input/spec/deck content_hash values, no ERC re-run. "
+            "Combine with --rerun for full mode. Exits 0 if still "
+            "consistent, 3 if drifted -- see docs/cli/erc.md, "
+            "'--check / --rerun'"
+        ),
+    )
+    erc_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #3060): re-run ERC from REPORT's "
+            "echoed file/spec/pdk/findings_only (and provenance.deck) and "
+            "diff verdict-bearing fields against the committed report, "
+            "excluding provenance.klt_version/klayout_version/pdk.version. "
+            "--top is not echoed in the report, so it is not replayed. "
+            "Requires --check; a clean error (exit 1) otherwise"
         ),
     )
     _add_format_arg(erc_parser)
