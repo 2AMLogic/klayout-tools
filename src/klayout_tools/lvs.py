@@ -1212,6 +1212,14 @@ def run_lvs(request: str) -> dict[str, Any]:
             if layout_parameter_correction is not None:
                 combine_per_circuit_warnings.append(layout_parameter_correction)
 
+    # Issue #2952: the layout's circuit names are snapshotted before
+    # `flatten_layout` removes the per-macro circuits, so the
+    # `reference.unresolved_subckt_call` scan's same-named-layout-circuit
+    # exemption (a black-box/`--abstract-cells` macro paired by name) holds
+    # whether or not the layout is flattened.
+    layout_circuit_names = {
+        circuit.name.upper() for circuit in layout_netlist.each_circuit()
+    }
     if flatten_layout:
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
         if layout_flatten_warning is not None:
@@ -1334,7 +1342,7 @@ def run_lvs(request: str) -> dict[str, Any]:
     # `mismatches[]` and applied to `status` at the end of the compare.
     unresolved_subckt_call_findings = _unresolved_reference_subckt_calls(
         reference_netlist,
-        layout_netlist,
+        layout_circuit_names,
         form=reference_form,
         top=reference_spec.get("top"),
         reference_path=reference_netlist_path,
@@ -6183,7 +6191,7 @@ def _reachable_reference_circuits(netlist: Any, top: str | None) -> list[Any]:
 
 def _unresolved_reference_subckt_calls(
     reference_netlist: Any,
-    layout_netlist: Any,
+    layout_names: AbstractSet[str],
     *,
     form: str,
     top: str | None,
@@ -6201,8 +6209,12 @@ def _unresolved_reference_subckt_calls(
 
     * a ``.subckt`` of that name (case-insensitive) is defined in the
       reference file itself -- a genuinely empty, positionally-pinned
-      definition is the author's own choice;
-    * the layout netlist has a circuit of the same name -- the comparer then
+      definition is the author's own choice (files pulled in by
+      ``.include`` are not followed, so such a definition in an included
+      file is reported);
+    * ``layout_names`` (the layout's upper-cased circuit names, snapshotted
+      *before* ``options.flatten_layout`` runs so a flattened layout keeps
+      this exemption) has a circuit of the same name -- the comparer then
       pairs the two by name (a black-box/``--abstract-cells`` macro, or a
       custom device class written as an ``X ... PARAMS:`` card on both sides
       with no ``deck`` given; see docs/cli/lvs.md), so the instance is
@@ -6223,7 +6235,6 @@ def _unresolved_reference_subckt_calls(
             defined = defined_subckt_names(handle.read())
     except OSError:
         defined = set()
-    layout_names = {circuit.name.upper() for circuit in layout_netlist.each_circuit()}
     findings: list[dict[str, Any]] = []
     for parent in _reachable_reference_circuits(reference_netlist, top):
         for sub in parent.each_subcircuit():

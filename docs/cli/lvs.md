@@ -3447,11 +3447,17 @@ containing circuit is still known). An instance is **not** reported when:
 
 - the reference file itself defines a `.subckt` of that name
   (case-insensitive) — an intentionally empty definition is the author's
-  choice;
-- the layout netlist has a circuit of the same name — the comparer then
-  pairs the two by name (a black-box/`--abstract-cells` macro, or a custom
-  device class written as an `X` card on both sides without a `deck`), so it
-  is compared rather than dropped;
+  choice. Only the reference file itself is read for this check: `.include`d
+  files are **not** followed, so an empty `.subckt stub 1 2` / `.ends`
+  definition that lives in an included file (pins named `1`..`N`, no
+  devices) has exactly the reader placeholder's shape and *is* reported —
+  move it into the top file or give its pins real names;
+- the layout netlist has a circuit of the same name (as named before
+  `options.flatten_layout` runs, so a flattened layout keeps this
+  exemption) — the comparer then pairs the two by name (a
+  black-box/`--abstract-cells` macro, or a custom device class written as an
+  `X` card on both sides without a `deck`), so it is compared rather than
+  dropped;
 - `reference.form` is `"gate-level-verilog"`, whose library-cell instances
   are pin-only by design.
 

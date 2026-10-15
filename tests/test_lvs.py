@@ -23082,6 +23082,7 @@ def _unresolved_call_request(
     layout_text: str = _ZERO_DEVICE_LAYOUT_SPICE,
     reference: dict | None = None,
     flatten_reference: bool = True,
+    flatten_layout: bool = False,
 ) -> str:
     layout_path = _write(tmp_path / "layout.spice", layout_text)
     reference_path = _write(tmp_path / "ref.spice", reference_text)
@@ -23090,7 +23091,10 @@ def _unresolved_call_request(
         {
             "layout": {"netlist": layout_path, "top": "top"},
             "reference": {"netlist": reference_path, "top": "top", **(reference or {})},
-            "options": {"flatten_reference": flatten_reference},
+            "options": {
+                "flatten_reference": flatten_reference,
+                "flatten_layout": flatten_layout,
+            },
         },
     )
 
@@ -23251,6 +23255,50 @@ X1 a b macro
 
     assert _unresolved_call_findings(report) == []
     assert report["status"] == "match"
+
+
+@pytest.mark.parametrize(
+    ("flatten_layout", "flatten_reference", "expected_status"),
+    [
+        (False, False, "match"),
+        (True, True, "match"),
+        (True, False, "mismatch"),
+        (False, True, "mismatch"),
+    ],
+    ids=["neither", "both", "layout-only", "reference-only"],
+)
+def test_same_named_layout_circuit_exemption_survives_flatten(
+    tmp_path, flatten_layout, flatten_reference, expected_status
+):
+    """Regression (#2952 review): the same-named-layout-circuit exemption is
+    decided from the layout's circuit names as they were *before*
+    `options.flatten_layout` removed the per-macro circuits -- so a
+    black-box macro paired by name never gets a
+    `reference.unresolved_subckt_call` finding under any flatten combination,
+    and `status` is whatever the by-name compare (unchanged from before this
+    category existed) says."""
+    report = run_lvs(
+        _unresolved_call_request(
+            tmp_path,
+            """
+.subckt top a b
+XM1 a b macro
+.ends
+""",
+            layout_text="""
+.subckt macro 1 2
+.ends
+.subckt top a b
+X1 a b macro
+.ends
+""",
+            flatten_reference=flatten_reference,
+            flatten_layout=flatten_layout,
+        )
+    )
+
+    assert _unresolved_call_findings(report) == []
+    assert report["status"] == expected_status
 
 
 def test_custom_device_class_params_card_is_not_an_unresolved_call(tmp_path):
