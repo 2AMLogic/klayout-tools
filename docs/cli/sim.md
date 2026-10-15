@@ -2997,6 +2997,41 @@ Expansion is deterministic and odometer-style: process outermost, supply
 next, temperature innermost — the same corner list, same order, every run
 against the same request.
 
+### Explicit unit list: `corners.units`
+
+The crossed axes above always produce a full cross product. For adaptive
+refinement (a few extra samples at specific coordinates) or a dependent sweep
+(a source level scanned `0..supply` *per* supply value), pass
+**`corners.units`** instead: a non-empty array of
+`{"process"?, "temperature_c"?, "supply_v"?: {rail: number}}` records, each
+executed exactly as given with no crossing
+([#2993](https://github.com/2AMLogic/klayout-tools/issues/2993)).
+
+```json
+"corners": {
+  "units": [
+    {"process": "tt", "temperature_c": 27, "supply_v": {"vdd": 1.8, "vin": 0.90}},
+    {"process": "tt", "temperature_c": 27, "supply_v": {"vdd": 1.8, "vin": 0.95}},
+    {"process": "ss", "temperature_c": 125, "supply_v": {"vdd": 1.62, "vin": 0.81}}
+  ]
+}
+```
+
+- Omitted fields collapse to the crossed form's defaults (`process` none,
+  `supply_v` `{}`, `temperature_c` 27); `process` accepts the same string or
+  bundle forms; `supply_v` values are **scalars**, not arrays.
+- `corner_id`/slug are unchanged, so a unit naming the same coordinates as a
+  crossed point has an identical `corner_id` (`--resume` checkpoints and
+  `pre_completed` reuse work across both forms). `corners[]` in the report is
+  in record order, and `monte_carlo` clones each unit as usual.
+- Mutually exclusive with `corners.process` / `supply_v` / `temperature_c`
+  and with `exclude`; an empty list, a non-object record, an unknown record
+  key, an array-valued `supply_v`, or two records with the same `corner_id`
+  (supply is formatted to 3 decimals, so 0.1004 V and 0.1001 V collide) is a
+  `SimError`.
+- Works on every backend, including `remote`/batch (the worker re-expands the
+  same list).
+
 ### Per-section corner libraries
 
 gf180mcu's bundle above still reads every section from **one** file. Some
