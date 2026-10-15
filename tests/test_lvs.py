@@ -5954,11 +5954,11 @@ def test_combine_devices_per_circuit_applies_resistor_fixed_offset_once(tmp_path
 
     layout_spice = f"""
 .subckt resmacro RA RB VSUBS
-R1 RA N1 VSUBS {resmacro_raw_r_ohm:.5f} res_high_po
-R2 N1 RB VSUBS {resmacro_raw_r_ohm:.5f} res_high_po
+R1 RA N1 VSUBS {resmacro_raw_r_ohm:.5f} res_high_po W=1U
+R2 N1 RB VSUBS {resmacro_raw_r_ohm:.5f} res_high_po W=1U
 .ends
 .subckt resmacro2 RA RB VSUBS
-R1 RA RB VSUBS {resmacro2_raw_r_ohm:.5f} res_high_po
+R1 RA RB VSUBS {resmacro2_raw_r_ohm:.5f} res_high_po W=1U
 .ends
 .subckt macrob A Y VPWR VGND
 M1 Y A VGND VGND nfet W=0.325U L=0.15U

@@ -1722,7 +1722,23 @@ because its real PDK **simulation model**
 (`sky130_fd_pr__res_high_po`'s SPICE `.subckt`) composes a length-scaling
 `rbody` term with a fixed-length `rhead` contact term the official LVS
 deck's own single-term restatement drops — measured via ngspice against
-that model, not transcribed from the LVS deck. See the per-deck module
+that model, not transcribed from the LVS deck.
+
+For `res_high_po` the full formula is `R = L / W * 324.827244 + 370.614275 / W
++ 9.090872` (ohm, `L`/`W` in µm), via `ResistorDevice.end_term_ohm_um` and
+`fixed_offset_ohm` (issue #3049). The two terms sum to the original constant
+379.705147 Ω at `W = 1 µm`, where the model was first measured, so every
+`W = 1 µm` value is unchanged. `r_ohm` is **not** bit-identical to the PDK
+ngspice model (`sky130_fd_pr__res_high_po`, `tt`, 27 °C) at other widths: the
+model's head term scales as roughly `1 / (W + 0.155)`, which these two fields
+cannot represent exactly. Verified against ngspice at `W` = 0.35 / 0.69 /
+1.41 / 2.85 / 5.73 µm and `L` = 1 / 5 / 10 / 35 µm, the extracted-vs-model
+residual is (`L` = 1 / 5 / 10 / 35 µm): 0.69 µm +2.0 / +0.7 / +0.4 / +0.1 %,
+1.41 µm −1.2 / −0.4 / −0.2 / −0.04 %, 2.85 µm −1.6 / −0.5 / −0.3 / −0.04 %,
+5.73 µm +0.8 / +0.4 / +0.2 / +0.1 %. 0.35 µm, where the model switches to a
+different effective-width regime, is **not** fit well: +1.9 / −3.9 / −5.2 /
+−6.3 %. Reconcile layout-extracted and schematic ohms with these numbers in
+mind; the measured grid is in `src/klayout_tools/decks/sky130.py`. See the per-deck module
 docstrings (`src/klayout_tools/decks/sky130.py`, `.../gf180mcu.py`) for the
 exact source lines/files, the derivation each is transcribed from, and
 every approximation taken relative to it. A deck entry that leaves
