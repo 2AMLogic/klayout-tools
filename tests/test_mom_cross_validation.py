@@ -251,3 +251,78 @@ def test_s_parameters_match_nec_reference(klt_mom_point, nec_point):
     # tests/test_mom_ports_validation.py's own matched-line test uses.
     assert abs(s11_klt) < 0.10, f"expected klt mom S11 near 0, got {s11_klt}"
     assert abs(s11_nec) < 0.10, f"expected NEC2++ S11 near 0, got {s11_nec}"
+
+
+# --- bent-path driving-point mode (issue #3037) ------------------------------
+
+
+def _run_nec_request(request: dict) -> dict:
+    result = subprocess.run(
+        [sys.executable, str(_NEC_SCRIPT)],
+        input=json.dumps(request),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _bent_request(signal: list, ret: list) -> dict:
+    area_m2 = (WIDTH_UM * 1e-6) * (HEIGHT_UM * 1e-6)
+    return {
+        "mode": "bent_path_driving_point",
+        "signal_path_um": signal,
+        "return_path_um": ret,
+        "radius_um": math.sqrt(area_m2 / math.pi) * 1e6,
+        "frequency_hz": FREQUENCY_HZ,
+        "segment_size_um": SEGMENT_SIZE_UM,
+    }
+
+
+def test_straight_control_matches_legacy_short_circuit(nec_point):
+    """The straightened control is the legacy short-circuit geometry, so the
+    driving-point mode must reproduce the legacy `Z_sc`."""
+    result = _run_nec_request(
+        _bent_request(
+            [[0, 0, 0], [LENGTH_UM, 0, 0]],
+            [[LENGTH_UM, SEPARATION_UM, 0], [0, SEPARATION_UM, 0]],
+        )
+    )
+    z_in = complex(result["z_in_real_ohm"], result["z_in_imag_ohm"])
+    z_sc = complex(nec_point["z_sc_real_ohm"], nec_point["z_sc_imag_ohm"])
+
+    # the oracle actually executed: tool identity, frequency and geometry
+    assert result["tool"]["name"] == "nec2++" and result["tool"]["binding"] == "PyNEC"
+    assert result["frequency_hz"] == FREQUENCY_HZ
+    assert [w["segments"] for w in result["wires"]] == [
+        NEC_SEGMENTS_PER_WIRE,
+        1,
+        NEC_SEGMENTS_PER_WIRE,
+        1,
+    ]
+    assert math.isfinite(z_in.real) and math.isfinite(z_in.imag)
+    assert abs(z_in - z_sc) / abs(z_sc) < 0.01, f"control {z_in} vs legacy Z_sc {z_sc}"
+    print(f"\nstraight control Z_in={z_in:.4f} ohm  legacy Z_sc={z_sc:.4f} ohm")
+
+
+def test_bent_fixture_driving_point_is_finite_and_repeatable():
+    request = _bent_request(
+        [[0, 0, 0], [200, 0, 0], [200, 100, 0]],
+        [[200, 140, 0], [160, 140, 0], [160, 40, 0], [0, 40, 0]],
+    )
+    first = _run_nec_request(request)
+    second = _run_nec_request(request)
+
+    z_in = complex(first["z_in_real_ohm"], first["z_in_imag_ohm"])
+    assert math.isfinite(z_in.real) and math.isfinite(z_in.imag)
+    assert abs(z_in) > 0.0
+    assert z_in == complex(second["z_in_real_ohm"], second["z_in_imag_ohm"])
+    assert first["tool"]["name"] == "nec2++"
+    assert first["frequency_hz"] == FREQUENCY_HZ
+    assert len(first["wires"]) == 7 and first["source"]["tag"] == 7
+    for key in ("z0_real_ohm", "s11_real"):
+        assert key not in first
+    print(
+        f"\nbent fixture Z_in={z_in:.4f} ohm  tool={first['tool']}  "
+        f"f={first['frequency_hz']:.3e} Hz  wires={len(first['wires'])}"
+    )

@@ -296,6 +296,60 @@ section models converging toward each other is exactly the kind of
 independent-implementation agreement epic #701's Phase 0 section asks this
 cross-check to demonstrate.
 
+## Bent-path driving-point mode
+
+The open/short technique above is valid only for a *uniform* line, so it
+cannot validate an arbitrary bent winding (issue #3037, child of #2730).
+`scripts/mom_nec_reference.py` therefore has a second, separate request mode,
+`"mode": "bent_path_driving_point"`; requests without `mode` keep the legacy
+straight-line schema and output unchanged.
+
+**Request.** `signal_path_um` (near signal terminal → far signal terminal) and
+`return_path_um` (far return terminal → near return terminal) are ordered 3-D
+polylines in micrometres, plus `radius_um`, `frequency_hz` and
+`segment_size_um` (optional `segments_per_leg`, an int or per-leg list).
+
+**Closed loop, explicit return.** Each consecutive point pair is one NEC wire
+leg, tagged `1..N` in traversal order: signal legs, a *far connector* (signal
+path's last point → return path's first point), return legs, then a *near feed
+stub* (return path's last point → signal path's first point). Free space has
+no ground plane, and no implicit return: the return terminal is the explicit
+return path.
+
+**Terminal polarity.** The 1 V NEC source sits on the stub's single segment.
+The stub is oriented return → signal, so the signal terminal is driven
+positive with respect to the return terminal and the reported current is the
+current entering the signal path.
+
+**Effective radius.** One shared `radius_um` on every leg, using the same
+equal-area-circle `a_eff = sqrt(area / pi)` convention as the legacy mode.
+
+**Discretisation.** Each signal/return leg gets an odd segment count,
+`ceil(length / segment_size_um)` bumped to odd (or the validated
+`segments_per_leg`, which must be odd and no coarser than `segment_size_um`).
+The connector and stub are single-segment wires. Keep segments well above
+~2× the wire radius for NEC2++'s thin-wire kernel (see "Geometry mapping").
+
+**Output.** `z_in_real_ohm` / `z_in_imag_ohm` — the near-terminal
+*driving-point impedance* — plus `frequency_hz`, `radius_um`, `tool`
+(`nec2++` via `PyNEC`, with version) and the realized `wires` (tag, role,
+segments, endpoints) and `source`. No `Z0`, `gamma` or S-parameters are
+reported: a bent, non-uniform loop is not a transmission line, and a
+one-terminal-pair impedance of a closed loop is not a winding two-port
+S-matrix (that would additionally need port definition and de-embedding,
+out of scope here).
+
+**Rejected inputs** (exit code 2, diagnostic on stderr naming the field or
+leg): fewer than two points, non-numeric/non-finite coordinates, zero-length
+legs (including a collapsed far connector or feed stub), signal/return paths
+sharing a vertex, non-positive `radius_um` / `frequency_hz` /
+`segment_size_um`, and bad `segments_per_leg`.
+
+**Tests.** `tests/test_mom_nec_bent_path.py` pins the translation with a fake
+`PyNEC` (no NEC2++ needed); `tests/test_mom_cross_validation.py` runs a
+straightened control (it must equal the legacy short-circuit `Z_sc`, same
+geometry) and a bent fixture against real NEC2++.
+
 ## Reproducing this cross-check
 
 ```bash
