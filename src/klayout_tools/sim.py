@@ -1765,6 +1765,24 @@ def _dispatch_deck_request(
     )
 
 
+def _with_forwarded_budget(
+    request: dict[str, Any],
+    options: dict[str, Any],
+    backend: str,
+    budget_s: float,
+) -> dict[str, Any]:
+    """Return ``request`` with ``budget_s`` written into a copy of its options.
+
+    Issue #3167: `_build_remote_request` forwards ``request["options"]`` to the
+    worker, so a CLI ``--budget-s`` must be written into a copy of it (never
+    the caller's dict) or the off-host worker never sees it. On-host backends
+    consume ``budget_s`` directly and get ``request`` back unchanged.
+    """
+    if backend not in _OFFHOST_BACKENDS:
+        return request
+    return {**request, "options": {**options, "wall_clock_budget_s": budget_s}}
+
+
 def _run_sim_corners(
     request_path: str,
     *,
@@ -1959,14 +1977,7 @@ def _run_sim_corners(
             raise SimError(
                 "options.wall_clock_budget_s must be a positive number of seconds"
             )
-        if backend in _OFFHOST_BACKENDS:
-            # Issue #3167: `_build_remote_request` forwards `request["options"]`
-            # to the worker, so a CLI `--budget-s` must be written into a copy
-            # of it (never the caller's dict) or the worker never sees it.
-            request = {
-                **request,
-                "options": {**options, "wall_clock_budget_s": budget_s},
-            }
+        request = _with_forwarded_budget(request, options, backend, budget_s)
 
     resume = resume if resume is not None else bool(options.get("resume", False))
     fail_fast_probe = (
