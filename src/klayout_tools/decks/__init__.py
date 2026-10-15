@@ -54,6 +54,7 @@ from .extraction import (
     ResistorDevice,
     ResistorFlavour,
     TerminalRelation,
+    UnmodelledDeviceFamily,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
@@ -87,6 +88,7 @@ __all__ = [
     "TerminalRelation",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
+    "UnmodelledDeviceFamily",
     "deck_names",
     "deck_source_path",
     "get_deck",
