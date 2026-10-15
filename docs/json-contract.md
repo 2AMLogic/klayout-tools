@@ -230,6 +230,19 @@ the flag was not given), and `klt lvs` gained the optional request field
 `docs/cli/extract.md`'s "Renaming promoted pins to their declared name"
 section.
 
+**A new key in a documented open map, and a new member on one class of that
+map's entries, are additive.** `klt functional-verification`'s
+`environment.sdf.dropped` is documented as an open map keyed by class name,
+each value `{count, reason}`. Issue #2885 added the
+`iopath_ifnone_edge_modpath` class (`IOPATH` entries onto cell arcs whose
+only modpaths Icarus discards at elaboration) and, on that class's entry
+only, an `arcs` list (`{celltype, from, to}` per distinct dropped arc) so a
+caller can see which arcs ran with no module-path delay. Every other class's
+entry is byte-identical to before (no `arcs` key), and a run with no such
+arc never carries the class, so **no `schema_version` bump**. A consumer
+must keep treating `dropped` as an open map and read `arcs` as optional. See
+`docs/cli/functional-verification.md`'s "SDF back-annotation" section.
+
 **Not every field a verb reports is a cross-build contract at all** — some
 are extractor/engine-internal bookkeeping with no meaning outside the one
 run that produced them (e.g. `klt extract`'s `net_id`/anonymous `$N`
@@ -1652,3 +1665,10 @@ roles from `provenance.input.content_hash` (the layout) and must not take
 part in layout-consistency comparisons; `klt signoff` verifies them per role
 (`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
 See [`cli/pex.md`](cli/pex.md).
+
+## Static typing of the envelope
+
+The envelope modules (`klayout_tools.cli.output`,
+`klayout_tools.signoff_envelopes`) are held to `disallow_untyped_defs` under
+mypy and the package ships `py.typed`. The rest of the code is covered by a
+baseline ratchet; see [`type-checking.md`](type-checking.md).

@@ -547,8 +547,64 @@ def _detect_device_families(netlist_text: str) -> list[str]:
     return families
 
 
+def _mismatch_scan_closure(
+    request: dict[str, Any] | None, netlist_path: str, repo_root: str | None
+) -> tuple[list[tuple[str, str]], list[dict[str, str]]]:
+    """Files ``family_mismatch`` scans (issue #2928): the top-level netlist
+    plus its resolved ``.include``/``.inc`` closure (same resolver as
+    ``environment.netlist_closure``). Returns ``([(report_path, abs_path)],
+    not_scanned)``; ``not_scanned`` lists directives left to the executing
+    host (``env_var``/``pdk_root``) or the whole closure when it cannot be
+    resolved -- the top-level file is still scanned in that case."""
+    from . import env_provenance
+
+    top = (
+        env_provenance.repo_relative_path(netlist_path, repo_root=repo_root),
+        netlist_path,
+    )
+    try:
+        staged = sim_staging.stage_netlist(
+            netlist_path,
+            netlist_staged_name="netlist.cir",
+            roots=sim_staging.host_resolved_roots(request or {}),
+        )
+    except sim_staging.IncludeStagingError as exc:
+        return (
+            [(_scan_label(top[0], netlist_path), netlist_path)],
+            [{"target": "<include closure>", "reason": f"unresolved: {exc}"}],
+        )
+    files: list[tuple[str, str]] = []
+    for item in staged.files:
+        source = item.source_path or item.local_path
+        # stage_netlist always sets one of the two (source_path whenever
+        # content rewrote the file, local_path otherwise).
+        assert source is not None
+        info = env_provenance.repo_relative_path(source, repo_root=repo_root)
+        files.append((_scan_label(info, source), source))
+    not_scanned = [
+        {"target": target, "reason": reason}
+        for target, reason in staged.host_resolved_detail
+    ]
+    return files, not_scanned
+
+
+def _scan_label(info: dict[str, Any], source: str = "") -> str:
+    """Report label for a scanned file: repo-relative path, else
+    ``<scope>/<basename>`` (never an absolute external path, like other
+    report fields)."""
+    return (
+        info.get("path")
+        or f"<{info.get('scope', 'external')}>/{os.path.basename(source)}"
+    )
+
+
 def _mismatch_family_report(
-    netlist_path: str, pdk_variant: str | None
+    netlist_path: str,
+    pdk_variant: str | None,
+    *,
+    request: dict[str, Any] | None = None,
+    repo_root: str | None = None,
+    scan: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Per-device-family mismatch-activity report for a ``monte_carlo.vary``
     request that includes ``"mismatch"`` (issue #355).
@@ -564,16 +620,32 @@ def _mismatch_family_report(
     ``active: None`` ("not independently verified"), never a guessed
     ``True``/``False``.
     """
-    try:
-        with open(netlist_path, encoding="utf-8") as handle:
-            netlist_text = handle.read()
-    except OSError:
-        netlist_text = ""
+    # Issue #2928: scan the whole `.include` closure, not just the top-level
+    # file, so a wrapper testbench reports the families its included flat
+    # netlist actually instantiates. When ``scan`` is passed it is filled
+    # with ``{"scanned": [...], "not_scanned": [...]}`` for the caller.
+    files, not_scanned = _mismatch_scan_closure(request, netlist_path, repo_root)
+    families: list[str] = []
+    seen_families: set[str] = set()
+    for _label, path in files:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
+        except (OSError, UnicodeDecodeError):
+            not_scanned.append({"target": _label, "reason": "unreadable"})
+            continue
+        for family in _detect_device_families(text):
+            if family not in seen_families:
+                seen_families.add(family)
+                families.append(family)
+    if scan is not None:
+        scan["scanned"] = [label for label, _ in files]
+        scan["not_scanned"] = not_scanned
 
     pdk_family = pdk_variant_family(pdk_variant) if pdk_variant else None
 
     report: list[dict[str, Any]] = []
-    for family in _detect_device_families(netlist_text):
+    for family in families:
         entry = _MISMATCH_ACTIVITY.get((pdk_family, family)) if pdk_family else None
         if entry is not None:
             report.append(
@@ -719,7 +791,10 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # is the more specific reading of the same class of failure.
         "missing_include",
         re.compile(
-            r"^\s*Error:\s*Could not find include file",
+            # The second form is ngspice 42's wording for the same failure
+            # (`.include filename missing`, issue #2926).
+            r"^\s*Error:\s*Could not find include file"
+            r"|^\s*(?:Error:\s*)?\.inc(?:lude)?\s+filename\s+missing",
             re.IGNORECASE | re.MULTILINE,
         ),
     ),
@@ -1943,12 +2018,20 @@ def _run_sim_corners(
             # varies mismatch. Never claims a hard-zero-mismatch family
             # (e.g. gf180mcu's poly resistor) was sampled just because the
             # request's global mismatch switch/section was engaged.
-            monte_carlo_info = {
-                **monte_carlo_info,
-                "family_mismatch": _mismatch_family_report(
-                    netlist_path, models.get("pdk")
-                ),
-            }
+            family_scan: dict[str, Any] = {}
+            family_report = _mismatch_family_report(
+                netlist_path,
+                models.get("pdk"),
+                request=request,
+                repo_root=repo_root,
+                scan=family_scan,
+            )
+            monte_carlo_info = {**monte_carlo_info, "family_mismatch": family_report}
+            # Issue #2928: additive disclosure of what was scanned, only
+            # when the closure is more than the lone top-level file or some
+            # part of it could not be scanned (simple requests unchanged).
+            if len(family_scan["scanned"]) > 1 or family_scan["not_scanned"]:
+                monte_carlo_info["family_mismatch_scan"] = family_scan
         quantiles, k_sigma = _validate_mc_statistics_spec(monte_carlo_spec)
         monte_carlo_stats = {"quantiles": quantiles, "k_sigma": k_sigma}
         # Echo only what the request actually declared, so a sampling-only
@@ -4649,6 +4732,125 @@ def _validate_supply_override_targets(
         )
 
 
+_NETLIST_INCLUDE_RE = re.compile(
+    r"^(?P<lead>\s*\.inc(?:lude)?\s+)(?P<target>\"[^\"]*\"|'[^']*'|\S+)(?P<tail>.*)$",
+    re.IGNORECASE,
+)
+
+
+def _split_include_target(match: re.Match[str]) -> tuple[str, str]:
+    """Return ``(quote, target)`` for an ``_NETLIST_INCLUDE_RE`` match."""
+    raw = match.group("target")
+    quote = raw[0] if raw[0] in "\"'" else ""
+    return quote, (raw[1:-1] if quote else raw)
+
+
+def _unset_include_diagnostic(
+    netlist_path: str, number: int, target: str, expanded: str
+) -> dict[str, str]:
+    unset = sorted(set(re.findall(r"\$\{?(\w+)\}?", expanded)))
+    return {
+        "severity": "error",
+        "code": "missing_include",
+        "message": (
+            f"{netlist_path} line {number}: .include target "
+            f"{target!r} names environment variable(s) "
+            f"{', '.join(unset) or '?'} that are not set on this "
+            "host, so ngspice cannot load it"
+        ),
+    }
+
+
+def _expand_include_line(
+    line: str, number: int, netlist_path: str
+) -> tuple[str | None, dict[str, str] | None]:
+    """Expand ``$VAR``/``~`` in one line's ``.include`` target.
+
+    Returns ``(rewritten_line, diagnostic)``: ``rewritten_line`` is ``None``
+    when the line is left as written (not an include, nothing to expand, or
+    an unset variable -- the latter also yields a diagnostic)."""
+    match = _NETLIST_INCLUDE_RE.match(line)
+    if match is None:
+        return None, None
+    quote, target = _split_include_target(match)
+    if "$" not in target and not target.startswith("~"):
+        return None, None
+    expanded = os.path.expandvars(target)
+    if "$" in expanded:
+        return None, _unset_include_diagnostic(netlist_path, number, target, expanded)
+    expanded = os.path.expanduser(expanded)
+    if not quote and any(ch.isspace() for ch in expanded):
+        quote = '"'
+    return (
+        f"{match.group('lead')}{quote}{expanded}{quote}{match.group('tail')}",
+        None,
+    )
+
+
+def _absolutize_relative_include(line: str, base: str) -> str:
+    """Rewrite a relative ``.include`` target that resolves beside the
+    original netlist (``base``) to its absolute path."""
+    match = _NETLIST_INCLUDE_RE.match(line)
+    if match is None:
+        return line
+    quote, target = _split_include_target(match)
+    if not target or os.path.isabs(target):
+        return line
+    candidate = os.path.join(base, target)
+    if not os.path.isfile(candidate):
+        return line
+    q = quote or ('"' if any(c.isspace() for c in candidate) else "")
+    return f"{match.group('lead')}{q}{candidate}{q}{match.group('tail')}"
+
+
+def _expand_netlist_includes(
+    netlist_path: str, corner_dir: str
+) -> tuple[str, list[dict[str, str]]]:
+    """Expand ``$VAR``/``~`` in the netlist body's own ``.include``/``.inc``
+    targets on the *executing* host (issue #2926).
+
+    ngspice does not expand environment variables in include paths, so a
+    ``$PDK_ROOT/...`` include (which off-host backends deliberately leave
+    verbatim for the executing host) would otherwise fail to load. Uses the
+    same ``os.path.expandvars``/``expanduser`` semantics as
+    ``sim_staging`` (an unset variable stays as ``$``). Returns
+    ``(netlist_path_to_include, diagnostics)``: the original path unchanged
+    when no include needs expanding; otherwise a rewritten copy under
+    ``corner_dir`` (relative targets that resolve beside the original
+    netlist are made absolute so the copy keeps their meaning). A target
+    whose variable is unset is left as written and yields a
+    ``missing_include`` diagnostic naming the file, line and variable.
+    """
+    try:
+        with open(netlist_path, encoding="utf-8", errors="surrogateescape") as fh:
+            text = fh.read()
+    except OSError:
+        return netlist_path, []
+    if "$" not in text and "~" not in text:
+        return netlist_path, []
+    out: list[str] = []
+    diagnostics: list[dict[str, str]] = []
+    changed = False
+    for number, line in enumerate(text.split("\n"), start=1):
+        rewritten_line, diagnostic = _expand_include_line(line, number, netlist_path)
+        if diagnostic is not None:
+            diagnostics.append(diagnostic)
+        if rewritten_line is None:
+            out.append(line)
+            continue
+        out.append(rewritten_line)
+        changed = True
+    if not changed:
+        return netlist_path, diagnostics
+    # Keep other relative includes meaning what they meant beside the original.
+    base = os.path.dirname(os.path.abspath(netlist_path))
+    final = [_absolutize_relative_include(line, base) for line in out]
+    rewritten = os.path.join(corner_dir, "netlist.expanded.cir")
+    with open(rewritten, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        fh.write("\n".join(final))
+    return rewritten, diagnostics
+
+
 def _prepare_corner_run(
     *,
     corner_dir: str,
@@ -4873,9 +5075,12 @@ def _run_corner(
     else:
         corner_dir = _tmp_work_dir()
 
+    run_netlist_path, include_diagnostics = _expand_netlist_includes(
+        netlist_path, corner_dir
+    )
     command, log_path, raw_path, deck_path = _prepare_corner_run(
         corner_dir=corner_dir,
-        netlist_path=netlist_path,
+        netlist_path=run_netlist_path,
         models_lib=models_lib,
         point=point,
         analysis=analysis,
@@ -4888,7 +5093,7 @@ def _run_corner(
         save_mode=save_mode,
     )
 
-    diagnostics: list[dict[str, str]] = []
+    diagnostics: list[dict[str, str]] = list(include_diagnostics)
     started = time.monotonic()
     timed_out = False
     engine_version: str | None = None

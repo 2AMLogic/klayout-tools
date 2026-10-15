@@ -522,16 +522,27 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
     - ``kind`` -- the recognition family (``"mos"``, ``"bipolar"``,
       ``"capacitor"``, ``"mom_capacitor"``, ``"resistor"``, ``"diode"``).
     - ``marker`` -- the class's device-recognition marker layer, or ``None``
-      for a markerless (geometry-driven) class.
+      for a markerless (geometry-driven) class or one whose marker is a
+      derived expression.
+    - ``marker_expression`` -- ``None`` unless the marker is a derived
+      :class:`~klayout_tools.decks.LayerExpr` (issue #2860), in which case
+      it is ``{op, name, operands}`` with each operand a layer object or a
+      nested node of the same shape. Its leaves are folded into
+      ``required_layers`` (under an even number of ``"not"`` subtractions)
+      or ``excluded_layers`` (under an odd number).
     - ``marker_gated`` / ``predicate_gated`` -- booleans, so "which classes
       need something beyond their own conductor/diffusion geometry" is
       answerable by filtering rather than by prose. ``marker_gated`` is
-      ``marker is not None``; ``predicate_gated`` is ``True`` when any
-      terminal declares a non-empty ``requires``.
+      ``True`` when ``marker`` or ``marker_expression`` is set;
+      ``predicate_gated`` is ``True`` when any terminal declares a non-empty
+      ``requires``.
     - ``terminals`` -- one entry per recognised terminal, each
-      ``{name, layer, requires, excludes}``. ``layer`` is ``None`` for a
-      terminal formed by the substrate rather than by a drawn mask (e.g.
-      ``diode_nd2ps_06v0``'s anode).
+      ``{name, layer, requires, excludes, relation}``. ``layer`` is ``None``
+      for a terminal formed by the substrate rather than by a drawn mask
+      (e.g. ``diode_nd2ps_06v0``'s anode). ``relation`` (issue #2863) is
+      ``None`` unless the terminal is selected by geometric interaction with
+      another terminal of the same device, then ``{"source", "op",
+      "extents"}`` -- see :class:`~klayout_tools.decks.TerminalRelation`.
     - ``required_layers`` / ``excluded_layers`` -- the flattened union, in
       first-mention order: every layer that must be drawn over the geometry
       for this class to be recognised, and every layer whose presence
@@ -610,13 +621,49 @@ def _terminal_entry(
     requires: tuple[tuple[int, int], ...],
     excludes: tuple[tuple[int, int], ...],
     layer_names: dict[tuple[int, int], str],
+    relation: Any = None,
 ) -> dict[str, Any]:
-    """One terminal of a device class, in :func:`deck_devices`' shape."""
+    """One terminal of a device class, in :func:`deck_devices`' shape.
+
+    ``relation`` is the terminal's
+    :class:`~klayout_tools.decks.TerminalRelation` (issue #2863) -- reported
+    as ``{"source", "op", "extents"}`` so two entries differing only in a
+    relation project differently -- or ``None`` (``null``) for a terminal
+    defined by its static layer/``requires``/``excludes`` alone, which is
+    every terminal of every non-bipolar class.
+    """
     return {
         "name": name,
         "layer": _layer_entry(layer, layer_names),
         "requires": [_layer_entry(pair, layer_names) for pair in requires],
         "excludes": [_layer_entry(pair, layer_names) for pair in excludes],
+        "relation": (
+            None
+            if relation is None
+            else {
+                "source": relation.source,
+                "op": relation.op,
+                "extents": relation.extents,
+            }
+        ),
+    }
+
+
+def _marker_expression_entry(
+    expr: Any, layer_names: dict[tuple[int, int], str]
+) -> dict[str, Any]:
+    """A :class:`~klayout_tools.decks.LayerExpr` as :func:`deck_devices`'
+    ``marker_expression`` object (issue #2860): ``{op, name, operands}``,
+    each operand either a layer object or another such node."""
+    return {
+        "op": expr.op,
+        "name": expr.name or None,
+        "operands": [
+            _layer_entry(operand, layer_names)
+            if isinstance(operand, tuple)
+            else _marker_expression_entry(operand, layer_names)
+            for operand in expr.operands
+        ],
     }
 
 
@@ -624,7 +671,7 @@ def _device_class_entry(
     *,
     name: str,
     kind: str,
-    marker: tuple[int, int] | None,
+    marker: Any,
     terminals: list[dict[str, Any]],
     layer_names: dict[tuple[int, int], str],
     provenance: Any = None,
@@ -645,8 +692,20 @@ def _device_class_entry(
             return
         bucket.append(entry)
 
-    marker_entry = _layer_entry(marker, layer_names)
-    add(required, marker_entry)
+    marker_expression: dict[str, Any] | None = None
+    if marker is None or isinstance(marker, tuple):
+        marker_entry = _layer_entry(marker, layer_names)
+        add(required, marker_entry)
+    else:
+        # A derived `LayerExpr` marker (issue #2860): no single layer to
+        # report as `marker`, so the tree goes in `marker_expression` and its
+        # leaves feed the flattened unions by polarity.
+        marker_entry = None
+        marker_expression = _marker_expression_entry(marker, layer_names)
+        for pair in marker.required_layers():
+            add(required, _layer_entry(pair, layer_names))
+        for pair in marker.excluded_layers():
+            add(excluded, _layer_entry(pair, layer_names))
     predicate_gated = False
     for terminal in terminals:
         add(required, terminal["layer"])
@@ -660,7 +719,8 @@ def _device_class_entry(
         "name": name,
         "kind": kind,
         "marker": marker_entry,
-        "marker_gated": marker_entry is not None,
+        "marker_expression": marker_expression,
+        "marker_gated": marker_entry is not None or marker_expression is not None,
         "predicate_gated": predicate_gated,
         "terminals": terminals,
         "required_layers": required,
@@ -745,15 +805,30 @@ def _project_device_classes(
         # when the entry declares it, so every deck predating that field
         # diffs identically.
         terminals = [
-            _terminal_entry("base", bipolar.base, (), (), layer_names),
+            _terminal_entry(
+                "base",
+                bipolar.base,
+                (),
+                (),
+                layer_names,
+                bipolar.base_relation,
+            ),
             _terminal_entry(
                 "emitter",
                 bipolar.emitter,
                 bipolar.emitter_requires,
                 bipolar.emitter_excludes,
                 layer_names,
+                bipolar.emitter_relation,
             ),
-            _terminal_entry("collector", bipolar.collector, (), (), layer_names),
+            _terminal_entry(
+                "collector",
+                bipolar.collector,
+                (),
+                (),
+                layer_names,
+                bipolar.collector_relation,
+            ),
         ]
         if bipolar.substrate is not None:
             terminals.append(

@@ -247,9 +247,6 @@ from .gen_layer_params import (
     _metal_res_layers as _metal_res_layers,
 )
 from .gen_layer_params import (
-    _mfg_grid_um as _mfg_grid_um,
-)
-from .gen_layer_params import (
     _mos_array_well_tap_role_layer as _mos_array_well_tap_role_layer,
 )
 from .gen_layer_params import (
@@ -287,6 +284,9 @@ from .gen_layer_params import (
 )
 from .gen_layer_params import (
     _voltage_flavor_mark_margin_um as _voltage_flavor_mark_margin_um,
+)
+from .gen_layer_params import (
+    mfg_grid_um as mfg_grid_um,
 )
 from .gen_pcells import (
     _build_bjt_array_pcell,
@@ -415,7 +415,7 @@ _HIDDEN_PARAMS = {
     "contact_fixed_size_um",
     "cap_top_via_fixed_size_um",
     # Manufacturing grid (um) the contact layer's curated deck requires cut
-    # vertices on (issue #2648), resolved by `_mfg_grid_um`; `0.0` = no snap.
+    # vertices on (issue #2648), resolved by `mfg_grid_um`; `0.0` = no snap.
     "mfg_grid_um",
     # sky130 precision-poly rectangular end contact (issue #2449), resolved
     # per (family, flavor) by `_res_end_contact_um`; never request-facing.
@@ -2662,7 +2662,7 @@ def _clamp_cut_boxes(
     The grid snap is the one place derived cut centres (a gate contact on the
     poly comb's midpoint, a clamp's half-difference offset, ...) are forced
     onto the PDK's manufacturing grid, read from the layer-param table
-    (:func:`~klayout_tools.gen_layer_params._mfg_grid_um`) rather than rounded
+    (:func:`~klayout_tools.gen_layer_params.mfg_grid_um`) rather than rounded
     per call site. Each box is *translated* to the nearest grid-aligned
     origin, preserving its size (so a width rule's margin is untouched) when
     that size is itself a grid multiple; otherwise each edge is rounded to the

@@ -26,6 +26,35 @@ not `klt --version`, if you need to detect this kind of drift. See
   source engine limitation that commonly triggers it. Additive; no
   `schema_version` bump.
 
+- **Bipolar markers can be derived layer expressions** (issue #2860):
+  `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
+  of drawn layers that can nest, as well as a bare `(layer, datatype)`
+  pair. This is the deck-model piece SG13G2's NPN marker needs
+  (`trans & (pwell_allowed - nwell - digisub_gap) & ptap_holes`). No
+  built-in deck uses it yet, so sky130/gf180mcu extraction is unchanged.
+  **Additive contract change:** every `klt deck devices`
+  `device_classes[]` entry gains `marker_expression`. It is `null` unless
+  the marker is derived. For a derived marker, `marker` is `null`,
+  `marker_gated` is `true`, and the leaves are folded into
+  `required_layers`/`excluded_layers`. `schema_version` is unchanged.
+
+- **mypy baseline ratchet and `py.typed`** (issue #3221): `mypy` (pinned in the
+  `dev` extra) now runs in CI against `type-baseline.json` via
+  `scripts/check_type_baseline.py`; the package ships `py.typed`. See
+  `docs/type-checking.md`.
+- **Fixed** (#2885, `klt functional-verification` `options.sdf` on Icarus —
+  gf180mcu netlists with XOR/XNOR/MUX/half-adder cells no longer fail
+  annotation): those cell models declare their non-unate arcs only as
+  `ifnone` edge-sensitive paths, which Icarus discards at elaboration, so
+  every OpenSTA `IOPATH` entry onto them failed with `Unable to match
+  ModPath`. Such entries — decided from the request's own cell models, never
+  from the diagnostic — are now removed before annotation and reported as the
+  new `iopath_ifnone_edge_modpath` `environment.sdf.dropped` class, which
+  additionally carries an `arcs` list (`{celltype, from, to}`) naming every
+  arc that ran with no module-path delay. Additive; no `schema_version` bump.
+  Any other `IOPATH` mismatch still fails loudly. The normalized copy is
+  written to `.klt/functional-verification/klt_sdf_ifnone_edge_modpath_dropped.sdf`.
+
 - **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
   extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in
   ngspice-46 with the pinned OpenVAF-Reloaded-compiled BSIM-CMG 111.0.0 OSDI
@@ -122,6 +151,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   kb requests were keyed this way and are re-keyed to their sources (`vdd`,
   `vin`); the LDO entry's recorded `vout_v` at the 3.0 V corner is corrected
   from 1.80324 V (actually the 3.3 V nominal) to 1.80264 V.
+- **Bipolar terminal relations** (issue #2863): `BipolarDevice` gains
+  optional `base_relation`/`emitter_relation`/`collector_relation` fields
+  (a new `TerminalRelation(source, op="interacting", extents=False)`), so a
+  terminal can be the part of its layer that interacts with another terminal
+  of the same device — optionally through that layer's per-polygon extents,
+  the SG13G2 `pnpMPA` idiom
+  `pnp_b.interacting(pnp_b.extents.interacting(pnp_mpa_e))`. Self-references,
+  cycles, and relations on/against a `None` collector are rejected at deck
+  construction. Entries without a relation (every shipped deck entry)
+  extract unchanged. **Additive contract change:** `klt deck devices`'
+  `terminals[]` entries gain a `relation` key (`null`, or
+  `{source, op, extents}`); no existing field changes.
 
 - **ASAP7 FinFET extraction assigns source/drain deterministically**
   (issue #3154): a channel's two S/D neighbours used to be taken in a

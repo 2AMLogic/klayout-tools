@@ -398,6 +398,7 @@ field by field, which two separate passes on a real design had to do
       "name": "diode_pd2nw_06v0",
       "kind": "diode",
       "marker": { "layer": 115, "datatype": 5, "name": "diode_mk" },
+      "marker_expression": null,
       "marker_gated": true,
       "predicate_gated": true,
       "terminals": [
@@ -408,13 +409,15 @@ field by field, which two separate passes on a real design had to do
             { "layer": 31, "datatype": 0, "name": "Pplus" },
             { "layer": 55, "datatype": 0, "name": "Dualgate" }
           ],
-          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ]
+          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ],
+          "relation": null
         },
         {
           "name": "cathode",
           "layer": { "layer": 21, "datatype": 0, "name": "Nwell" },
           "requires": [],
-          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ]
+          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ],
+          "relation": null
         }
       ],
       "required_layers": [ … ],
@@ -439,7 +442,15 @@ field by field, which two separate passes on a real design had to do
 - `kind` — the recognition family: `mos`, `bipolar`, `capacitor`,
   `mom_capacitor`, `resistor`, `diode`.
 - `marker` — the class's device-recognition marker layer, or `null` for a
-  markerless (drawn-geometry-only) class.
+  markerless (drawn-geometry-only) class or one whose marker is derived.
+- `marker_expression` — `null` unless the marker is a derived `LayerExpr`
+  (issue #2860; today only `BipolarDevice.marker` accepts one, and no
+  built-in deck uses it). Then it is `{op, name, operands}`: `op` is `"and"`
+  or `"not"` (first operand minus the rest), `name` is the derived layer's
+  label or `null`, and each operand is a layer object or another node of the
+  same shape. Its leaves are folded into `required_layers` (leaves under an
+  even number of `"not"` subtractions) and `excluded_layers` (an odd
+  number), and `marker_gated` is `true`.
 - `marker_gated` / `predicate_gated` — booleans, so "which classes need
   something beyond their own conductor/diffusion geometry" is answerable by
   filtering rather than by reading prose. **Marker- and predicate-gated
@@ -450,14 +461,22 @@ field by field, which two separate passes on a real design had to do
   non-empty `requires` — note this is honestly `true` for `pfet` (a PMOS is
   not recognised outside `nwell`) and `false` for `nfet`.
 - `terminals` — one entry per recognised terminal:
-  `{name, layer, requires, excludes}`. `layer` is `null` for a terminal
-  formed by the substrate rather than by a drawn mask (gf180mcu's
+  `{name, layer, requires, excludes, relation}`. `layer` is `null` for a
+  terminal formed by the substrate rather than by a drawn mask (gf180mcu's
   `diode_nd2ps_06v0` anode). Every layer in `requires` must **also** cover
   the region; every layer in `excludes` is subtracted from it. A bipolar
   entry that declares the optional four-terminal `substrate` layer (issue
   #2862) reports a fourth `substrate` terminal after `collector`; entries
   that leave it `None` — every deck shipped today — report the
-  three-terminal shape only.
+  three-terminal shape only. `relation` (issue #2863) is `null` for a
+  terminal defined by those static layer sets alone — every terminal of
+  every shipped class today — and otherwise
+  `{"source": <terminal>, "op": "interacting", "extents": <bool>}`: the
+  terminal is only the part of its layer that interacts with the same
+  device's already-resolved `source` terminal (with `extents: true`, the
+  part whose own bounding box does — how a base ring surrounding its
+  emitter is attributed to that one device). Bipolar classes only; see
+  `TerminalRelation` in `decks/extraction.py`.
 - `required_layers` / `excluded_layers` — the flattened union in
   first-mention order (marker first, then each terminal's own layer and its
   `requires`). `required_layers` is the "what am I missing?" list — every
