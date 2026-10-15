@@ -519,6 +519,21 @@ def _mos_series_ports(
     return ports
 
 
+def _mos_array_port_cells(info: dict, dummy_ports: bool) -> list[tuple[str, dict]]:
+    """``(port-name prefix, cell)`` pairs for a mos_array's reported units.
+
+    #2904: opt-in ``dummy_ports`` also reports the dummy units' S/D/G as
+    ``D<k>_*`` (k = row-major, left-to-right order), so ``gen-compose``
+    connectivity can tie them off. Off by default -- ``dummy`` defaults to 1,
+    so reporting them unconditionally would change every default array.
+    """
+    port_cells = [(f"U{c['idx']}", c) for c in info["cells"]]
+    if dummy_ports:
+        ordered = sorted(info["dummy_cells"], key=lambda c: (c["row"], c["col"]))
+        port_cells += [(f"D{k}", c) for k, c in enumerate(ordered)]
+    return port_cells
+
+
 def _mos_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -593,14 +608,7 @@ def _mos_array_describe(
         and not params["mos_cap"]
     )
 
-    # #2904: opt-in `dummy_ports` also reports the dummy units' S/D/G as
-    # `D<k>_*` (k = row-major, left-to-right order), so `gen-compose`
-    # connectivity can tie them off. Off by default -- `dummy` defaults to 1,
-    # so reporting them unconditionally would change every default array.
-    port_cells = [(f"U{c['idx']}", c) for c in info["cells"]]
-    if params.get("dummy_ports"):
-        ordered = sorted(info["dummy_cells"], key=lambda c: (c["row"], c["col"]))
-        port_cells += [(f"D{k}", c) for k, c in enumerate(ordered)]
+    port_cells = _mos_array_port_cells(info, bool(params.get("dummy_ports")))
 
     ports: list[dict[str, Any]] = []
     if params["mos_cap"]:
