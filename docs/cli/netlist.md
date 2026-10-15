@@ -222,6 +222,7 @@ envelope's `error.code` classifies it:
 | `error.code` | Meaning |
 | --- | --- |
 | `batch_no_capacity` | The launch was refused for lack of Spot capacity (retryable). |
+| `batch_concurrency_cap` | The launch was refused because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (retryable; waited out under `batch.capacity_wait_s`). |
 | `batch_runner_version_mismatch` / `batch_runner_version_unknown` | The runner's `klt` differs from this client's, or could not be read; nothing ran. A mismatch that the AMI manifest already publishes is refused before upload, with no job launched ([sim.md](sim.md), "Pre-launch check from the AMI manifest"). |
 | `batch_poll_timeout` | The job did not finish within the poll budget. It may still finish on the runner; nothing was collected. |
 | `batch_job_timeout` | The harness stopped the job at its `timeout_seconds`. |
