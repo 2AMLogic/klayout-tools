@@ -9188,10 +9188,15 @@ def test_sky130_precision_implant_mask_is_not_extracted_as_generic_poly_res(tmp_
         # heads (`RA`/`RB`) merge onto one continuous, device-less net that
         # survives extraction instead of purging away -- see
         # `test_unmarked_poly_bar_is_not_a_resistor`.
-        assert len(report["warnings"]) == 2
+        # A third (issue #3138): the declared `poly.res` marker is claimed by
+        # no resistor class, so the unclaimed-marker warning fires too.
+        assert len(report["warnings"]) == 3
         assert "deck-coverage gap" in report["warnings"][0]
         assert "carry no resistor-marker layer at all" not in report["warnings"][0]
-        assert "merges 2 distinct labels (RA, RB)" in report["warnings"][1]
+        assert any(
+            "claimed by no declared resistor class" in w for w in report["warnings"]
+        )
+        assert any("merges 2 distinct labels (RA, RB)" in w for w in report["warnings"])
 
 
 def test_gf180mcu_salicided_poly_is_not_extracted_as_unsalicided_resistor(tmp_path):
