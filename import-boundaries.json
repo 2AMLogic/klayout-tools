@@ -208,6 +208,7 @@
       "modules": [
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
+        "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_routing"
       ]
     },
