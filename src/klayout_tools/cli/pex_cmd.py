@@ -109,6 +109,9 @@ def run(args: argparse.Namespace) -> int:
             # for one named net's Phase 1/2 lumped-RC/coupling-C value.
             # `None` for all four when the flags were never given,
             # unchanged from every call site that predates them.
+            # `--parasitic-variant` (issue #3056): `None` when the flag was
+            # never given, unchanged from every call site that predates it.
+            parasitic_variants=args.parasitic_variants,
             mom_rlc_net=args.mom_rlc_net,
             mom_rlc_resistance_ohm=args.mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=args.mom_rlc_capacitance_ff,

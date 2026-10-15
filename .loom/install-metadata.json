@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1165",
-  "loom_commit": "1b8655450ed885a934e5c3f646f17925480b3823",
+  "loom_version": "0.19.1166",
+  "loom_commit": "8a9aad12e32504cea9a7c7d2ed774749c487f875",
   "install_date": "2026-08-02",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -405,7 +405,6 @@
     ".claude/commands/loom/sweep-doctor-glm-escalation.md",
     ".claude/commands/loom/sweep-arguments.md",
     ".loom/docs/graphql-body-size-cap.md",
-    ".loom/docs/stale-check-inputs.md",
     ".loom/scripts/tests/test-check-ci-status.sh",
     ".loom/docs/fleet-config-lifecycle.md",
     ".loom/docs/session-output.md",
@@ -416,7 +415,6 @@
     ".agents/skills/loom-builder-worktree/SKILL.md",
     ".loom/docs/merge-pr-exit-code-exceptions.md",
     ".loom/scripts/tests/test-judge-payload-drop-guard.sh",
-    ".loom/scripts/tests/test-merge-pr-ci-result.sh",
     ".loom/scripts/tests/test-version-check-gate-callsites.sh",
     ".agents/skills/loom-curator-estimate/SKILL.md",
     ".claude/commands/loom/curator-estimate.md",
@@ -434,7 +432,6 @@
     ".loom/scripts/create-issue.sh",
     ".loom/scripts/tests/test-create-pr-priority-labels.sh",
     ".loom/scripts/tests/test-forge-check-runs-pagination.sh",
-    ".loom/scripts/tests/test-merge-pr-stale-check-redate.sh",
     ".loom/scripts/tests/test-merge-pr-verdict-label-guard.sh",
     ".loom/docs/forge-events.md",
     ".loom/scripts/tests/test-merge-pr-closed-issue-cleanup.sh",
@@ -569,10 +566,13 @@
     ".loom/scripts/check-shell-syntax.sh",
     ".loom/scripts/lib/run-job-exec.sh",
     ".loom/scripts/tests/test-judge-tdd-merge-base.sh",
-    ".loom/scripts/tests/test-merge-pr-stale-required-checks.sh",
     ".loom/scripts/tests/test-run-job.sh",
     ".loom/scripts/tests/test-worktree-refused-claim-no-lease.sh",
-    ".loom/scripts/tests/test-check-cas-recheck-consistency.sh"
+    ".loom/scripts/tests/test-check-cas-recheck-consistency.sh",
+    ".loom/docs/merge-queue-authorization.md",
+    ".loom/docs/merge-queue-ci.md",
+    ".loom/scripts/tests/test-version-bump-workflow-identity.sh",
+    ".loom/scripts/tests/test-write-scope.sh"
   ],
   "last_resync": "2026-10-15",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
