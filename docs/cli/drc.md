@@ -6,7 +6,7 @@ report violations as structured data.
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
@@ -63,6 +63,11 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   issue #2689; ignored for `--engine curated`). Omitted (the default), no
   version check runs. See "Engine" → `"klayout"` → "Declaring a minimum
   application version".
+- `--negative-control LAYOUT` — run the same native deck first against a
+  known-bad fixture and require findings (`--engine klayout` only, issue
+  #3076). See "Engine" → `"klayout"` → "Negative control".
+- `--negative-control-categories A,B` — rule categories the fixture must
+  also produce (requires `--negative-control`).
 - `--expect-rule-categories N` — opt-in coverage assertion (`--engine
   klayout` only, issue #2697; ignored for `--engine curated`). `N` must be a
   positive integer; `0`, negatives and non-integers are rejected before
@@ -139,6 +144,8 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `allow_deck_errors` | boolean | `--allow-deck-errors` |
 | `allow_missing_host_tools` | boolean | `--allow-missing-host-tools` |
 | `min_klayout_version` | string | `--min-klayout-version` (dotted decimal, e.g. `"0.30.12"`) |
+| `negative_control` | string | `--negative-control` (a path, resolved relative to the request document's directory) |
+| `negative_control_categories` | string | `--negative-control-categories` (comma-separated) |
 | `expect_rule_categories` | positive integer | `--expect-rule-categories` (booleans, floats, strings, `0` and negatives are rejected) |
 | `expect_rule_categories_file` | string | `--expect-rule-categories-file` (a path, resolved relative to the request document's own directory like `deck_file`; mutually exclusive with `expect_rule_categories`. The *names* are not inlined in the request — point at the reviewed manifest.) |
 | `pdk` | string | `--pdk` |
@@ -3167,3 +3174,43 @@ suppressed) and `example.drc.json` with `provenance` stripped, so a
 regeneration on an unchanged tree leaves `git status` clean —
 `tests/test_drc.py::test_example_generator_reproduces_committed_fixtures`
 guards exactly that.
+
+#### Machine-readable failure codes
+
+A second opinion that *could not run* is distinguishable from bad input
+without parsing prose (issue #3076). With `--format json` the error envelope
+carries `error.code` (exit stays `1`, so no contract break):
+
+| `error.code` | Meaning |
+| ------------ | ------- |
+| `klayout_unavailable` | the standalone `klayout` binary is missing or could not be launched |
+| `klayout_version_too_old` | the detected version is below `--min-klayout-version` |
+| `negative_control_failed` | see "Negative control" |
+
+Any other failure carries no code. Exit `1` is deliberate: an exit-0 "could
+not run" is what a CI script could mistake for clean.
+
+#### Deck tree identity
+
+`provenance.deck.content_hash` pins the entry script. When that script pulls
+in other files through literal `require`/`require_relative`/`load`, the
+report also carries an additive `provenance.deck.tree`:
+`{"file_count", "content_hash", "release"}` — a sha256 over the sorted
+(relative path, file hash) pairs of the entry script plus every reachable
+literal include, and `git describe --tags --always --dirty` of the deck's
+checkout (`null` if not a git checkout). Single-file decks omit the field.
+Computed include paths are not followed. `klt drc --check` re-hashes the tree
+and reports `provenance.deck.tree.content_hash` drift. Additive, so
+`schema_version` is unchanged (`docs/json-contract.md`: optional fields are
+additive).
+
+#### Negative control
+
+`--negative-control LAYOUT` (request field `negative_control`) runs the same
+deck, with the same options, against a layout you know violates it, before
+the real run. Zero violations — or a missing `--negative-control-categories`
+entry — fails the run with `error.code` `negative_control_failed` (exit `1`),
+because a deck that flags nothing on known-bad input may not have executed.
+On success the report carries `negative_control`:
+`{"file", "status": "passed", "violation_count", "rules_found",
+"expected_categories"}`.
