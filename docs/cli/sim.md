@@ -765,7 +765,7 @@ the fleet's own, and that one is the limit that loses results when it is hit
 | Limit | Set by | Bounds | What happens when it is hit |
 | --- | --- | --- | --- |
 | `options.timeout_s` (default `120`) | The request | **One unit** (one corner or Monte Carlo sample) on the job instance | That unit is killed and reported with its own timeout diagnostic. The other units still run. |
-| `options.wall_clock_budget_s` | The request | The **in-worker dispatch loop**: the job's own `klt sim --backend local-parallel` stops starting units once the budget is spent, and writes a complete report with the rest marked `budget_exceeded` | Only applies if the worker reaches that point. It does **not** save a report when the fleet kills the enclosing job first. `--budget-s` overrides it on the submitting client only. The client's dispatch loop does not run on `batch`, so the flag is not forwarded to the job. To bound the worker, put the budget in the request. |
+| `options.wall_clock_budget_s` | The request | The **in-worker dispatch loop**: the job's own `klt sim --backend local-parallel` stops starting units once the budget is spent, and writes a complete report with the rest marked `budget_exceeded` | Only applies if the worker reaches that point. It does **not** save a report when the fleet kills the enclosing job first. `--budget-s` overrides it and is written into the request the job receives ([#3167](https://github.com/2AMLogic/klayout-tools/issues/3167)). |
 | Fleet whole-job ceiling (`batch.max_job_seconds`) | 2am's fleet (`BATCH_MAX_JOB_SECONDS`, default `3600`) | The **whole job**. The harness kills the job command at this age, and the instance powers off soon after. | `status.json` reports `state: "timeout"`, `exit_code: 124`. The interrupted `report.json` is not a complete report, so **every** unit of the job comes back `batch_job_timeout`. Units that had finished are not recovered (see "Failed jobs" below). |
 
 **Pre-submit check (one-job requests).** Before the first S3 write, a
@@ -1597,6 +1597,14 @@ three gaps directly, as an extension of `local`/`local-parallel` (and any
   time, passes) the first corner — the check happens once per dispatch slot,
   not as a pre-flight gate that could report zero corners for a legitimately
   tiny budget.
+
+  On `remote` and `batch`, `--budget-s` is forwarded to the worker by writing
+  it into the pushed request's `options.wall_clock_budget_s` (the CLI value
+  wins over the request's own), so the job's `local-parallel` loop enforces
+  it ([#3167](https://github.com/2AMLogic/klayout-tools/issues/3167)). On a
+  `hosts > 1` sharded run every shard's worker applies the full budget from
+  its own start, so the whole-run bound is approximately, not exactly, the
+  budget.
 
 - **Orphan safety is always on, no configuration required.** `klt sim`
   captures its own parent PID once, at the start of the sweep, and the

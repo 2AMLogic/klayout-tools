@@ -1959,6 +1959,14 @@ def _run_sim_corners(
             raise SimError(
                 "options.wall_clock_budget_s must be a positive number of seconds"
             )
+        if backend in _OFFHOST_BACKENDS:
+            # Issue #3167: `_build_remote_request` forwards `request["options"]`
+            # to the worker, so a CLI `--budget-s` must be written into a copy
+            # of it (never the caller's dict) or the worker never sees it.
+            request = {
+                **request,
+                "options": {**options, "wall_clock_budget_s": budget_s},
+            }
 
     resume = resume if resume is not None else bool(options.get("resume", False))
     fail_fast_probe = (

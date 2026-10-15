@@ -1317,6 +1317,38 @@ def test_run_sim_batch_uploads_a_local_parallel_request_document(tmp_path, monke
     assert "remote" not in document
 
 
+def test_run_sim_batch_forwards_cli_budget_s_to_the_uploaded_request(
+    tmp_path, monkeypatch
+):
+    """Issue #3167: `--budget-s` reaches the job's request; CLI wins."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    uploaded: dict[str, str] = {}
+    real_open = open
+
+    def _capture(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            with real_open(argv[-3], encoding="utf-8") as handle:
+                uploaded["request"] = handle.read()
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+
+    _write_body(tmp_path)
+    body = _batch_request(tmp_path)
+    body["options"] = {**body.get("options", {}), "wall_clock_budget_s": 3600}
+    path = _write_request(tmp_path, body)
+
+    sim.run_sim(str(path), budget_s=90)
+    assert json.loads(uploaded["request"])["options"]["wall_clock_budget_s"] == 90
+
+    sim.run_sim(str(path))
+    assert json.loads(uploaded["request"])["options"]["wall_clock_budget_s"] == 3600
+
+
 def test_run_sim_batch_accepts_an_analysis_steps_request(tmp_path, monkeypatch):
     """Issue #2482: an ordered `analysis_steps[]` request reaches the batch
     fleet unchanged -- the sequence is request/deck text the worker's own
