@@ -5645,3 +5645,67 @@ def test_attach_refused_with_submit_only(tmp_path):
     path = _write_request(tmp_path, _batch_request(tmp_path))
     with pytest.raises(sim.SimError, match="mutually exclusive"):
         sim.run_sim(str(path), attach_job_id="klt-sim-abc123", submit_only=True)
+
+
+# --------------------------------------------------------------------------- #
+# PDK variant vs. the image's published variants (issue #3251)
+# --------------------------------------------------------------------------- #
+
+
+def _variant_run(tmp_path, monkeypatch, images, pdk="gf180mcuC"):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, images)
+    runner = _FakeRunner()
+    monkeypatch.setattr(sb, "_run_subprocess", runner)
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+    request["models"] = {"pdk": pdk}
+    path = _write_request(tmp_path, request)
+    return runner, path
+
+
+def test_unshipped_pdk_variant_refused_before_any_s3_write(tmp_path, monkeypatch):
+    runner, path = _variant_run(
+        tmp_path,
+        monkeypatch,
+        [_image(pdk="gf180mcu", klt_version="0.7.0", pdk_variants=["gf180mcuD"])],
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sim.run_sim(str(path))
+    assert "gf180mcuC" in str(excinfo.value)
+    assert "gf180mcuD" in str(excinfo.value)
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        {"pdk_variants": ["gf180mcuC", "gf180mcuD"]},  # listed
+        {},  # legacy entry: unknown
+    ],
+)
+def test_pdk_variant_check_passes_when_listed_or_unknown(tmp_path, monkeypatch, image):
+    _, path = _variant_run(
+        tmp_path, monkeypatch, [_image(pdk="gf180mcu", klt_version="0.7.0", **image)]
+    )
+    request = json.loads(path.read_text())
+    sb._validate_batch_pdk_variant(request, "us-east-1")  # does not raise
+
+
+def test_pdk_variant_check_absent_manifest_and_any_candidate_match(
+    tmp_path, monkeypatch
+):
+    request = {"models": {"pdk": "gf180mcuC"}}
+    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "missing.json"))
+    sb._validate_batch_pdk_variant(request, None)
+    _publish_manifest(
+        tmp_path,
+        monkeypatch,
+        [
+            _image(region="us-east-1", pdk="gf180mcu", pdk_variants=["gf180mcuD"]),
+            _image(region="us-west-2", pdk="gf180mcu", pdk_variants=["gf180mcuC"]),
+        ],
+    )
+    sb._validate_batch_pdk_variant(request, None)  # any candidate lists it
+    with pytest.raises(sim.SimError):
+        sb._validate_batch_pdk_variant(request, "us-east-1")

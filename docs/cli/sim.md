@@ -1315,6 +1315,16 @@ the packaged `data/` copy. See
   request is submitted unchanged and the runner-side preflight above
   decides, exactly as before #2851. No historical manifest entry becomes
   unusable.
+- **PDK variant (#3251).** A manifest entry may publish `pdk_variants`, the
+  PDK variant directories its image ships (e.g. `["gf180mcuD"]`;
+  `build-remote-sim-ami.sh --pdk-variants`). The family-level check only maps
+  `gf180mcuC` to `gf180mcu`, so without this field an unshipped variant fails
+  on the runner as one `batch_job_failed` per corner. When **every** candidate
+  image (same selection as above) publishes `pdk_variants` and none lists the
+  request's `models.pdk`, the whole request is refused with a `SimError`
+  naming the variants the image carries, before any S3 write or launch. A
+  legacy entry without the field, an absent manifest, or a request without
+  `models.pdk` is unchanged.
 - **Discovering the runner version before submit.** Read the manifest:
   `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref}'
   "${KLT_AMI_MANIFEST:-$HOME/.config/klt/remote-sim-ami-manifest.json}"`.

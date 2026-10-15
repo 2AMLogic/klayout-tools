@@ -1330,6 +1330,42 @@ def _validate_batch_models_lib(request: dict[str, Any]) -> None:
     )
 
 
+def _validate_batch_pdk_variant(request: dict[str, Any], region: str | None) -> None:
+    """Refuse a ``models.pdk`` variant the fleet image does not ship,
+    **before** any S3 write (issue #3251).
+
+    :func:`_validate_batch_pdk` only reduces a variant to its family
+    (``gf180mcuC`` -> ``gf180mcu``), so a variant the image lacks used to
+    surface on the runner as one ``batch_job_failed`` per corner. When the
+    AMI manifest's entries publish ``pdk_variants``, the request is refused
+    only if **every** candidate image (see :func:`_assess_published_runner`
+    for the selection) publishes the field and none lists the variant.
+    Legacy entries, no manifest, no candidate or a request without a PDK
+    stay unchanged. Never raises anything but :class:`SimError`.
+    """
+    from .sim import SimError
+
+    pdk = (request.get("models") or {}).get("pdk")
+    if not pdk:
+        return
+    try:
+        images = published_runner_identities(str(pdk), region)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return
+    published = [image.get("pdk_variants") for image in images]
+    if not published or any(variants is None for variants in published):
+        return
+    if any(str(pdk) in variants for variants in published):
+        return
+    carried = sorted({v for variants in published for v in variants})
+    raise SimError(
+        f"backend 'batch': PDK variant {str(pdk)!r} is not shipped by the fleet "
+        f"image the AMI manifest publishes (it carries: {', '.join(carried)}) "
+        "-- the request was not submitted and no instance was launched; use "
+        "one of those variants as models.pdk"
+    )
+
+
 def _resolve_batch_config(
     request: dict[str, Any],
     *,
@@ -1430,6 +1466,8 @@ def _resolve_batch_config(
         assessment = _assess_published_runner(request, config)
         _enforce_published_runner_version(assessment)
         _enforce_published_runner_features(request, assessment)
+        # Issue #3251: refuse a PDK variant the published image does not ship.
+        _validate_batch_pdk_variant(request, config.region)
     return config
 
 

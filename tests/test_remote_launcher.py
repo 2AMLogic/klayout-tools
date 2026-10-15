@@ -1818,6 +1818,7 @@ def test_published_runner_identities_latest_per_pdk_and_region(tmp_path):
             "ami_id": "ami-0000000000000002",
             "klt_version": "0.7.0",
             "klt_ref": "v0.7.0",
+            "pdk_variants": None,
         }
     ]
     any_region = rl.published_runner_identities("sky130A", None, manifest)
@@ -1905,7 +1906,7 @@ def test_build_script_publishes_the_pinned_klt_ref_and_installed_version():
     script = _BUILD_SCRIPT.read_text()
     # The same $KLT_REF is what the build instance installs.
     assert 'klayout-tools@${KLT_REF}"' in script
-    assert '"$BUILT_AT" "$3" "$KLT_REF")' in script
+    assert '"$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS")' in script
 
 
 def test_build_script_refuses_to_publish_an_unknown_version():
@@ -1915,3 +1916,38 @@ def test_build_script_refuses_to_publish_an_unknown_version():
     )  # fmt: skip
     assert result.returncode == 2
     assert "klt_version" in result.stderr
+
+
+def test_manifest_entry_round_trips_pdk_variants():
+    base = dict(
+        pdk="gf180mcu",
+        region="us-east-1",
+        ami_id="ami-0123456789abcdef0",
+        pdk_snapshot="gf180mcu-2026.10.01",
+        ngspice_version="46",
+        built_at="2026-10-01T00:00:00Z",
+        klt_version="0.7.0",
+        klt_ref="v0.7.0",
+    )
+    assert "pdk_variants" not in rl.ami_manifest_entry(**base)
+    entry = rl.ami_manifest_entry(**base, pdk_variants=["gf180mcuD"])
+    assert entry["pdk_variants"] == ["gf180mcuD"]
+    _validate_manifest([entry])
+    _validate_manifest([_entry()])  # legacy shape still validates
+    with pytest.raises(rl.RemoteLaunchError):
+        rl.ami_manifest_entry(**base, pdk_variants=[])
+    with pytest.raises(rl.RemoteLaunchError):
+        rl.ami_manifest_entry(**base, pdk_variants=["gf180 mcuD"])
+
+
+def test_published_runner_identities_carry_pdk_variants(tmp_path):
+    manifest = _write_manifest(
+        tmp_path,
+        [
+            _entry(pdk="gf180mcu", pdk_variants=["gf180mcuD"]),
+            _entry(pdk="sky130A", pdk_variants="bogus"),
+        ],
+    )
+    by_pdk = {i["pdk"]: i for i in rl.published_runner_identities(None, None, manifest)}
+    assert by_pdk["gf180mcu"]["pdk_variants"] == ["gf180mcuD"]
+    assert by_pdk["sky130A"]["pdk_variants"] is None
