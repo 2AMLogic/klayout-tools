@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs` no longer folds one device class into another under
+  `options.combine_devices`** (issue #3019): with two MiM classes stacked in
+  parallel on one net pair, `layout.file` could report a wrong combined layout
+  netlist (a class showing `layout_devices: 0`, or `device.property` errors)
+  where `layout.netlist` of the same extraction matched, depending on heap
+  state inside KLayout. Classes sharing nets are now rebuilt before combining
+  and a combine that still folds across classes is reported as
+  `device.combine_incomplete` (so `status` degrades to `inconclusive` instead
+  of a false verdict). Additive; no `schema_version` bump. See
+  `docs/cli/lvs.md`'s `device.combine_incomplete` section.
+
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
