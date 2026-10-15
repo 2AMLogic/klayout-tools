@@ -2660,6 +2660,8 @@ def _run_sim_corners(
             "checkpoint_retained": checkpoint_retained,
         }
 
+    _attach_timeout_budget_hint(environment, corners, timeout_s)
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "netlist": _report_path(netlist_path, repo_root=repo_root),
@@ -2727,6 +2729,60 @@ def _run_sim_corners(
 # --------------------------------------------------------------------------- #
 # Model/netlist path resolution
 # --------------------------------------------------------------------------- #
+
+
+#: Fraction of ``options.timeout_s`` at which a unit's runtime is reported as
+#: a near-miss budget (issue #2894).
+_TIMEOUT_HINT_FRACTION = 0.8
+
+
+def _timeout_budget_hint(
+    corners: list[dict[str, Any]], timeout_s: float
+) -> dict[str, Any] | None:
+    """Report-level hint that a failure is a per-unit time budget, not a
+    netlist problem (issue #2894): present when any unit carries a
+    ``timeout`` diagnostic or ran for >= 80% of ``options.timeout_s``."""
+    runtimes = [
+        float(c["runtime_s"])
+        for c in corners
+        if isinstance(c.get("runtime_s"), (int, float))
+    ]
+    timed_out = [
+        c.get("corner_id")
+        for c in corners
+        if any(d.get("code") == "timeout" for d in c.get("diagnostics") or [])
+    ]
+    max_runtime = max(runtimes, default=0.0)
+    if not timed_out and not (
+        timeout_s > 0 and max_runtime >= _TIMEOUT_HINT_FRACTION * timeout_s
+    ):
+        return None
+    suggested = math.ceil(max(max_runtime, timeout_s) * 2 / 60) * 60
+    return {
+        "max_unit_runtime_s": round(max_runtime, 3),
+        "timeout_s": timeout_s,
+        "suggested_timeout_s": suggested,
+        "units_timed_out": len(timed_out),
+        "message": (
+            f"The longest unit ran {max_runtime:g}s against "
+            f"options.timeout_s={timeout_s:g}s"
+            + (f"; {len(timed_out)} unit(s) timed out" if timed_out else "")
+            + ". This is a per-unit time budget, not a netlist problem: "
+            f"raise options.timeout_s (for example to {suggested}s) and re-run."
+        ),
+    }
+
+
+def _attach_timeout_budget_hint(
+    environment: dict[str, Any], corners: list[dict[str, Any]], timeout_s: float
+) -> None:
+    """Add ``environment["timeout_budget_hint"]`` when
+    :func:`_timeout_budget_hint` reports one (issue #2894). Additive/optional:
+    absent unless a unit timed out or came within 80% of ``options.timeout_s``.
+    Kept out of ``_run_sim_corners`` to hold its C901 complexity ratchet."""
+    hint = _timeout_budget_hint(corners, timeout_s)
+    if hint is not None:
+        environment["timeout_budget_hint"] = hint
 
 
 def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
@@ -4694,6 +4750,39 @@ def _param_only_targets(netlist_path: str, targets: list[str]) -> dict[str, list
     return found
 
 
+def _unresolved_supply_targets(netlist_path: str, targets: list[str]) -> list[str]:
+    """The ``supply_v`` keys that name no element and no ``.param`` anywhere
+    in a fully resolved netlist closure (#2894), so ``alter <key>=<value>``
+    would silently address nothing.
+
+    Same conclusiveness rule as :func:`_param_only_targets`: the top-level
+    file must be readable and every ``.include``/``.lib`` reference must
+    resolve, otherwise nothing is reported (the name may live in the part
+    the scan cannot see). Matching is case-insensitive. Hierarchical keys
+    (``x1.vdd``) address elements inside subcircuit instances, which the
+    top-level scan does not model, so they are never reported. ``.param``
+    names are left to :func:`_param_only_targets`."""
+    try:
+        with open(netlist_path, encoding="utf-8") as handle:
+            decl = _netlist_declarations(handle.read())
+    except (OSError, UnicodeDecodeError):
+        return []
+    included: set[str] = set()
+    if decl.includes:
+        resolved = _included_elements(netlist_path, decl.includes)
+        if resolved is None:
+            return []
+        included = resolved
+    return [
+        t
+        for t in targets
+        if "." not in t
+        and t.strip().lower() not in decl.elements
+        and t.strip().lower() not in decl.params
+        and t.strip().lower() not in included
+    ]
+
+
 def _param_target_hint(param: str, sources: list[str]) -> str:
     if sources:
         names = ", ".join(repr(s) for s in sources)
@@ -4751,6 +4840,15 @@ def _validate_supply_override_targets(
             "amplitude -- were evaluated when the deck was parsed, so every "
             "corner would silently simulate the nominal value). "
             + _param_target_hint(target, sources)
+        )
+    for target in _unresolved_supply_targets(netlist_path, targets):
+        raise SimError(
+            f"corners.supply_v key {target!r} names no element and no .param "
+            "in the netlist (including every .include/.lib it pulls in): "
+            f"ngspice's `alter {target}=<value>` would address nothing, so "
+            "every corner would silently simulate the nominal value. Check "
+            "the spelling against the voltage-source name declared in the "
+            "netlist"
         )
 
 

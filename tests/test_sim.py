@@ -11616,7 +11616,7 @@ def test_supply_override_scalar_sources_and_lexical_non_matches(tmp_path):
         "Vdc dc 0 DC 1.2\n"
     )
     (tmp_path / "n.spice").write_text(body)
-    points = [sim.CornerPoint(None, {"vdd": 1.0, "vdc": 1.1, "sig": 2.0}, 27)]
+    points = [sim.CornerPoint(None, {"vdd": 1.0, "vdc": 1.1, "vsig": 2.0}, 27)]
     sim._validate_supply_override_targets(str(tmp_path / "n.spice"), points)
     # Waveform source without an override remains usable.
     sim._validate_supply_override_targets(
@@ -12364,3 +12364,47 @@ def test_gf180_pdk_native_passives_report_inactive():
     ) == ["resistor", "capacitor"]
     for fam in ("resistor", "capacitor"):
         assert sim._MISMATCH_ACTIVITY[("gf180mcu", fam)]["active"] is False
+
+
+# --- #2894: unknown supply_v key, timeout-budget hint ----------------------- #
+
+
+def test_supply_override_unknown_key_is_rejected(tmp_path):
+    with pytest.raises(sim.SimError, match="'vddd'"):
+        _validate_supply(tmp_path, "Vdd vdd 0 DC 1\nR1 vdd 0 1k\n", {"vddd": 1.0})
+
+
+def test_supply_override_known_keys_case_and_hierarchy_not_rejected(tmp_path):
+    _validate_supply(
+        tmp_path,
+        "Vdd vdd 0 DC 1\nX1 vdd 0 blk\n.subckt blk a b\nVin a b DC 1\n.ends\n",
+        {"VDD": 1.0, "x1.vin": 1.1},
+    )
+
+
+def test_supply_override_unknown_key_with_unresolved_include_not_rejected(tmp_path):
+    _validate_supply(tmp_path, ".include missing.spice\nR1 a 0 1k\n", {"vsupply": 1.0})
+
+
+def test_supply_override_key_in_resolved_include_not_rejected(tmp_path):
+    (tmp_path / "inc.spice").write_text("Vsupply s 0 DC 1\n")
+    _validate_supply(tmp_path, ".include inc.spice\nR1 s 0 1k\n", {"VSupply": 1.0})
+
+
+def _hint_corner(runtime_s, timeout=False):
+    diags = [{"code": "timeout"}] if timeout else []
+    return {"corner_id": "c", "runtime_s": runtime_s, "diagnostics": diags}
+
+
+def test_timeout_budget_hint_near_budget_and_timeout():
+    hint = sim._timeout_budget_hint([_hint_corner(490.0), _hint_corner(10.0)], 600)
+    assert hint["max_unit_runtime_s"] == 490.0
+    assert hint["timeout_s"] == 600
+    assert hint["suggested_timeout_s"] > 600
+    assert "not a netlist problem" in hint["message"]
+    timed = sim._timeout_budget_hint([_hint_corner(600.0, timeout=True)], 600)
+    assert timed["units_timed_out"] == 1
+
+
+def test_timeout_budget_hint_absent_when_well_inside_budget():
+    assert sim._timeout_budget_hint([_hint_corner(100.0)], 600) is None
