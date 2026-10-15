@@ -2538,9 +2538,7 @@ def run_place_and_route(
         }
     else:
         tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
-        tapcell_distance_um = power.get("tapcell_distance_um")
-        if tapcell_distance_um is None:
-            tapcell_distance_um = table_distance_um
+        tapcell_distance_um = _effective_tapcell_distance(power, table_distance_um)
         power_info = {
             "preset": power["preset"],
             "pdn": True,
@@ -3215,37 +3213,7 @@ def _validate_power(
     # diffusion-to-tap distance. A `_NO_TAPCELL_LIBRARIES` library emits no
     # `tapcell` line, so an override there is rejected rather than silently
     # ignored.
-    tapcell = power.get("tapcell")
-    tapcell_distance_um: int | float | None = None
-    if tapcell is not None:
-        if not isinstance(tapcell, dict):
-            raise PlaceAndRouteError(
-                "request.power.tapcell must be a JSON object when given "
-                "(request.power.tapcell.distance_um is its only field)"
-            )
-        unknown = sorted(set(tapcell) - {"distance_um"})
-        if unknown:
-            raise PlaceAndRouteError(
-                f"request.power.tapcell has unknown key(s) {unknown}; "
-                "only distance_um is supported"
-            )
-        tapcell_distance_um = tapcell.get("distance_um")
-        if (
-            not isinstance(tapcell_distance_um, (int, float))
-            or isinstance(tapcell_distance_um, bool)
-            or not math.isfinite(tapcell_distance_um)
-            or tapcell_distance_um <= 0
-        ):
-            raise PlaceAndRouteError(
-                "request.power.tapcell.distance_um is required and must be a "
-                "positive number"
-            )
-        if cell_library in _NO_TAPCELL_LIBRARIES:
-            raise PlaceAndRouteError(
-                f"request.power.tapcell.distance_um cannot be honored: "
-                f"standard-cell library '{cell_library}' has no tap/endcap "
-                "cells, so no tapcell call is emitted"
-            )
+    tapcell_distance_um = _validate_tapcell(power.get("tapcell"), cell_library)
 
     return {
         "preset": preset_name,
@@ -3255,6 +3223,51 @@ def _validate_power(
         "straps": validated_straps,
         "connects": validated_connects,
     }
+
+
+def _validate_tapcell(tapcell: Any, cell_library: str) -> int | float | None:
+    """Validate ``request.power.tapcell`` (issue #3051); return its
+    ``distance_um`` override, or ``None`` when ``tapcell`` is omitted."""
+    if tapcell is None:
+        return None
+    if not isinstance(tapcell, dict):
+        raise PlaceAndRouteError(
+            "request.power.tapcell must be a JSON object when given "
+            "(request.power.tapcell.distance_um is its only field)"
+        )
+    unknown = sorted(set(tapcell) - {"distance_um"})
+    if unknown:
+        raise PlaceAndRouteError(
+            f"request.power.tapcell has unknown key(s) {unknown}; "
+            "only distance_um is supported"
+        )
+    distance_um = tapcell.get("distance_um")
+    if (
+        not isinstance(distance_um, (int, float))
+        or isinstance(distance_um, bool)
+        or not math.isfinite(distance_um)
+        or distance_um <= 0
+    ):
+        raise PlaceAndRouteError(
+            "request.power.tapcell.distance_um is required and must be a "
+            "positive number"
+        )
+    if cell_library in _NO_TAPCELL_LIBRARIES:
+        raise PlaceAndRouteError(
+            f"request.power.tapcell.distance_um cannot be honored: "
+            f"standard-cell library '{cell_library}' has no tap/endcap "
+            "cells, so no tapcell call is emitted"
+        )
+    return distance_um
+
+
+def _effective_tapcell_distance(
+    power: dict[str, Any], table_distance_um: int | None
+) -> int | float | None:
+    """The ``tapcell -distance`` pitch: the validated override, else the
+    per-library table value."""
+    override = power.get("tapcell_distance_um")
+    return table_distance_um if override is None else override
 
 
 def _validate_macros(
