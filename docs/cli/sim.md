@@ -3154,7 +3154,9 @@ When `monte_carlo.vary` is `"mismatch"` or `"both"`, the response's
 one entry per distinct device family the netlist instantiates (detected
 from plain SPICE element types — `R`/`C`/`D`/`Q`/`M` — and from
 recognised keywords in `X` subcircuit-call names, e.g. `nfet_03v3` →
-`mosfet`, `res_xpoly_1p1000pl` → `resistor`), each stating whether that
+`mosfet`, `res_xpoly_1p1000pl` → `resistor`; gf180mcu's own passive names
+`ppolyf_*`/`npolyf_*`/`nplus_*`/`pplus_*`/`rm<N>` → `resistor` and
+`cap_mim_*` → `capacitor`, both reported `active: false`), each stating whether that
 family's mismatch is structurally active in the selected PDK deck:
 
 ```json
