@@ -2116,6 +2116,28 @@ def _run_sim_corners(
             f"(supported: {', '.join(SUPPORTED_NETLIST_SOURCES)})"
         )
 
+    # Issue #3074: normalised netlist identity, stamped on the report and
+    # (when the caller hands the stamp of the record it compares against)
+    # checked before anything is simulated.
+    netlist_identity, netlist_identity_error = sim_staging.netlist_identity(
+        request, netlist_path
+    )
+    expect_identity = request.get("expect_netlist_identity")
+    if expect_identity is not None:
+        if not isinstance(expect_identity, str) or not expect_identity:
+            raise SimError("expect_netlist_identity must be a non-empty string")
+        if netlist_identity is None:
+            raise SimError(
+                "expect_netlist_identity was given but the netlist identity "
+                f"could not be computed: {netlist_identity_error}"
+            )
+        if expect_identity != netlist_identity:
+            raise SimError(
+                "netlist identity mismatch: request expects "
+                f"{expect_identity} but '{netlist_ref}' has {netlist_identity} "
+                "(the referenced record was produced from a different netlist)"
+            )
+
     corners_spec = request.get("corners") or {}
     models = request.get("models") or {}
     models_lib: str | None = None
@@ -2914,6 +2936,9 @@ def _run_sim_corners(
     # Additive/optional (issue #3111): the declared solver options, verbatim,
     # so the setting is part of the report's evidence.
     environment.update({"ngspice_options": ngspice_options} if ngspice_options else {})
+    environment["netlist_identity"] = netlist_identity
+    if netlist_identity_error is not None:
+        environment["netlist_identity_error"] = netlist_identity_error
     if netlist_source is not None:
         # Additive/optional: only present when the request declares it, so
         # existing consumers of a request that omits netlist_source see an
