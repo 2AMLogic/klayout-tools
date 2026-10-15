@@ -1616,6 +1616,40 @@ fidelity limits that choice carries.
 | `ring_gap_um`        | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
 | `ring_gap_offset_um` | double | `0.0`              | Slide the opening off its side's midpoint (µm) — e.g. onto the column of emitter ports a route needs to reach. |
 
+### `cap_vpp_array` (PDK fixed-cell capacitor array, issue #3100)
+
+A row of `num` instances of one of the PDK's **fixed, pre-drawn**
+vertical-parallel-plate (interdigitated metal) capacitor cells — sky130's
+`sky130_fd_pr__cap_vpp_*` (70 cells in `libs.ref/sky130_fd_pr/gds/sky130_fd_pr.gds`).
+Unlike every other generator it draws no geometry of its own: the named cell
+is copied from the resolved PDK's GDS at request time (never vendored) and
+placed as drawn, with the first instance's bounding box at the origin.
+sky130 only.
+
+| Param      | Type   | Default | Meaning |
+|------------|--------|---------|---------|
+| `pdk_cell` | string | `sky130_fd_pr__cap_vpp_02p4x04p6_m1m2_noshield` | PDK cell to array. Named `pdk_cell`, not `cell`, because `cell` collides with the PCell helper's own target-cell attribute. An unknown name fails with the standard error envelope listing every available `cap_vpp_*` name. |
+| `num`      | int    | `4`     | Instances in the row; must be `>= 1`. |
+| `pitch_um` | double | `0.0`   | Centre-to-centre pitch. `0` abuts at the cell's bounding-box width; a non-zero pitch smaller than the cell width (with `num > 1`) is rejected rather than silently overlapping. |
+
+**Ports** are derived from the cell's own pin labels (e.g. `C0`, `C1`, `SUB`),
+reported per instance as `U<i>_<label>` with the label's layer/datatype, its
+position, and an additive `bbox_um` — the smallest drawing-datatype shape
+under the label, or `null` when none is found. A cell with no pin labels
+(13 of sky130's 70, mostly the `pol1…` and `o2subcell` variants) reports no
+ports and says so in `drc_hints.notes`; ports are never invented.
+
+Terminals are **not** strapped between instances, and no matched/common-
+centroid placement is done. The output passes `klt drc --deck sky130` without
+a generator-introduced crash; whether `klt lvs` recognises `cap_vpp` as a
+device depends on the sky130 deck and is not claimed here.
+
+```bash
+klt gen cap_vpp_array --pdk sky130A \
+  --params '{"pdk_cell":"sky130_fd_pr__cap_vpp_02p4x04p6_m1m2_noshield","num":4,"pitch_um":3}' \
+  -o caps.gds --format json
+```
+
 ### `bond_pad` (chip-boundary bond pad, issue #568)
 
 Every generator above draws a *core analog* device, on the shared `metal`

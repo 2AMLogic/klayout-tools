@@ -679,6 +679,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "bond_pad",
         "esd_device",
         "cap_array",
+        "cap_vpp_array",
         "well_island",
     }
 

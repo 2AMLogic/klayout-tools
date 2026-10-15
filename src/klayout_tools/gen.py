@@ -59,6 +59,11 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
 from ._provenance import build_provenance
+from .gen_cap_vpp import (
+    _cap_vpp_array_describe,
+    _cap_vpp_array_layer_params,
+    _cap_vpp_array_validate,
+)
 
 # Issue #2347 moved every family's `validate`/`describe` pair (plus the
 # helpers used only by them, and `_well_island_layer_params`, which #1875 had
@@ -292,6 +297,7 @@ from .gen_pcells import (
     _build_bjt_array_pcell,
     _build_bond_pad_pcell,
     _build_cap_array_pcell,
+    _build_cap_vpp_array_pcell,
     _build_diff_pair_pcell,
     _build_esd_device_pcell,
     _build_guard_ring_pcell,
@@ -330,6 +336,7 @@ _PCELL_LIBRARY_NAME = "klt_gen_reference"
 #: ``cap_top_requires_<i>_*`` slots are appended the same way below
 #: :data:`_PDK_CAP_TOP_PLATE_REQUIRES` (issue #1555).
 _HIDDEN_PARAMS = {
+    "vpp_gds_path",
     "layer",
     "active_layer",
     "poly_layer",
@@ -3290,6 +3297,7 @@ def _build_pcell_classes() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     pcell_classes.update(_build_mos_array_pcell())
     pcell_classes.update(_build_res_array_pcell())
     pcell_classes.update(_build_cap_array_pcell())
+    pcell_classes.update(_build_cap_vpp_array_pcell())
     pcell_classes.update(_build_guard_ring_pcell())
     pcell_classes.update(_build_well_island_pcell())
     pcell_classes.update(_build_diff_pair_pcell())
@@ -3402,6 +3410,19 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         validate=_cap_array_validate,
         describe=_cap_array_describe,
         layer_params=_cap_array_layer_params,
+    ),
+    "cap_vpp_array": _GeneratorSpec(
+        name="cap_vpp_array",
+        summary=(
+            "Row of a PDK's fixed-layout vertical-parallel-plate capacitor "
+            "cell (sky130's sky130_fd_pr__cap_vpp_*), instantiated as-drawn "
+            "from the PDK GDS on params.pitch_um; ports are read from the "
+            "cell's own pin labels (issue #3100)."
+        ),
+        dbu=0.001,
+        validate=_cap_vpp_array_validate,
+        describe=_cap_vpp_array_describe,
+        layer_params=_cap_vpp_array_layer_params,
     ),
     "guard_ring": _GeneratorSpec(
         name="guard_ring",
