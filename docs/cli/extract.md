@@ -1143,6 +1143,29 @@ collector layer (the vertical bipolar's collector is the substrate itself),
 so the collector terminal is tied to the deck's global substrate net
 (`vsubs` by default), mirroring the NMOS-body wiring above.
 
+**Terminal relations (issue #2863).** A `BipolarDevice` may also define a
+terminal by a geometric relation to *another terminal of the same device*,
+via the optional `base_relation`/`emitter_relation`/`collector_relation`
+fields (each a `TerminalRelation(source=..., op="interacting",
+extents=...)`). This is what attributes a base ring to the one device whose
+emitter it surrounds when several devices' rings sit side by side — the
+SG13G2 `pnpMPA` idiom `pnp_b.interacting(pnp_b.extents.interacting(pnp_mpa_e))`
+is `base_relation=TerminalRelation(source="emitter", extents=True)`. When any
+relation is declared, each terminal starts from its own layer `& marker`
+(the emitter also narrowed by `emitter_requires`/`emitter_excludes`) and is
+resolved in a deterministic dependency order; a relation-defined terminal
+keeps only the polygons that interact with the resolved source (or, with
+`extents=True`, whose bounding box does). A self-reference, a dependency
+cycle, or a relation on/against a `None` collector is rejected when the deck
+entry is constructed. An entry declaring no relation — both shipped curated
+entries — extracts exactly as described above. Because the device is still
+formed by the stock `DeviceExtractorBJT3Transistor` (an emitter must lie
+inside a base polygon), an `extents` base is recognised over each selected
+ring's bounding box while the base terminal is wired through the ring
+itself; a lateral collector ring wholly outside that body is not
+attributable through the stock extractor. No shipped deck declares a
+relation yet (`sg13g2`'s `pnpMPA` still needs the gaps tracked in
+#2860–#2862/#2864).
 **Derived markers (issue #2860).** `BipolarDevice.marker` is either one drawn
 `(layer, datatype)` pair — the form both curated entries above use — or a
 `LayerExpr`: a frozen boolean tree of drawn pairs and nested `LayerExpr`
