@@ -1285,6 +1285,20 @@ boolean expression no `klt gen` generator draws today) — are deliberately
 **not** transcribed; see the "nwell (well-layer) rule coverage" note in
 `sky130.py`'s own module docstring for the full reasoning.
 
+**Precision-poly-resistor head rules are not checked (issue #3077).** The
+deck has no rule for the contacts on a precision poly resistor's heads:
+`licon.1b` (0.19 µm contact width) and `licon.1c` (2.0 µm contact length,
+and the 2.16 µm poly-contact-extension that `sky130A.tech`'s DRC reports as
+"poly contact extends poly resistor by < 2.16um"), nor `rpm.1`'s minimum
+mask width. `licon.1`'s own 0.17 µm minimum is merely exempted for these
+licons by an approximation (see the `licon1.width.1` note below), not
+replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell therefore
+reads `clean` here while the PDK's own Magic `drc(full)` still reports those
+head rules; a `klt drc --deck sky130` pass is not evidence the heads meet
+them. `klt drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the
+independent check. This gap is documentation-only: no field of the JSON
+`coverage` object changes.
+
 Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
 curated halves of one rule defined on a *compound* layer expression (a
