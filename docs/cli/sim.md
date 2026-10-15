@@ -593,6 +593,17 @@ What differs from `remote` is *who acquires the machine*:
 }
 ```
 
+**Relative includes resolve beside the netlist.** On the local backends a
+relative `.include`/`.inc` target in the netlist body (e.g. a testbench's
+`.include "dut.spice"`) resolves against the **netlist's own directory**, not
+the invoking cwd and not the per-corner artifact directory ngspice runs in
+(ngspice resolves a relative include against the including file's directory;
+verified on ngspice 42 and 46, also with a relative `-o`). Off-host backends
+stage and rewrite the same closure, so one committed testbench behaves the
+same on `local` and `batch`. An include that cannot be found yields a
+`missing_include` diagnostic naming the file, not only per-measurement
+"no value" errors.
+
 **PDK-root includes resolve on the runner.** A `.include` in the
 netlist body that resolves under the PDK root (`models.pdk_root`, else
 `$PDK_ROOT`) is **not** staged or rewritten: the PDK is baked into the

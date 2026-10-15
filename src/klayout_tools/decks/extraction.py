@@ -4,7 +4,8 @@ dataclasses an :class:`ExtractionDeck` composes.
 Split out of ``decks/__init__.py`` (issue #1821) as a self-contained
 domain: :class:`ResistorDevice`/:class:`ResistorFlavour`,
 :class:`MOSFlavour`, :class:`ExtractionDeck` itself,
-:class:`BipolarDevice` (with its :class:`LayerExpr` derived-marker form),
+:class:`BipolarDevice` (with its :class:`LayerExpr` derived-marker form) and
+:class:`TerminalRelation`,
 :class:`CapacitorDevice`/:class:`CapacitorFlavour`,
 :class:`MomCapacitorDevice`, and :class:`DiodeDevice` -- the curated device
 tables ``klt extract`` matches drawn geometry against to recognise
@@ -1081,6 +1082,73 @@ class ExtractionDeck:
         return dataclasses.replace(self, **replacements)
 
 
+#: The terminal names a :class:`TerminalRelation` may reference on a
+#: :class:`BipolarDevice` -- also the order :meth:`BipolarDevice.terminal_
+#: resolution_order` falls back to when nothing forces a different one.
+BIPOLAR_TERMINALS: tuple[str, ...] = ("base", "emitter", "collector")
+
+#: The geometric operations a :class:`TerminalRelation` may name (issue
+#: #2863). Deliberately closed: each value is one KLayout ``Region`` method
+#: ``extract.py`` applies verbatim, so an unknown op fails at deck
+#: construction rather than silently selecting nothing.
+TERMINAL_RELATION_OPS: tuple[str, ...] = ("interacting",)
+
+
+@dataclass(frozen=True)
+class TerminalRelation:
+    """A per-terminal geometric relation to *another terminal of the same
+    device* (issue #2863): "this terminal is the part of its candidate layer
+    that is related by ``op`` to the already-resolved ``source`` terminal".
+
+    A static ``requires``/``excludes`` layer set (what every device entry
+    already supports) can only say "this layer, narrowed by those layers".
+    It cannot say "the piece of this layer that touches *that instance's*
+    emitter", which is how a PDK attributes a base ring to the one device it
+    surrounds when several devices' rings sit side by side -- e.g. SG13G2's
+    ``pnpMPA`` base, transcribed from its LVS deck as::
+
+        pnp_mpa_b = pnp_b.interacting(pnp_b.extents.interacting(pnp_mpa_e))
+
+    which is ``TerminalRelation(source="emitter", extents=True)`` on the
+    base terminal.
+
+    - ``source`` -- the terminal this one is selected against: one of
+      :data:`BIPOLAR_TERMINALS` other than the terminal that declares the
+      relation. It is resolved first (see
+      :meth:`BipolarDevice.terminal_resolution_order`).
+    - ``op`` -- the geometric selection; ``"interacting"`` (the only value
+      today, see :data:`TERMINAL_RELATION_OPS`) keeps each whole polygon of
+      the candidate region that touches or overlaps ``source``.
+    - ``extents`` -- when ``False``, a candidate polygon is kept if *the
+      polygon itself* interacts with ``source``
+      (``candidate.interacting(source)``). When ``True``, it is kept if its
+      own **bounding box** interacts with ``source``
+      (``candidate.interacting(candidate.extents.interacting(source))``,
+      the PDK idiom above) -- what selects a ring that *surrounds* its
+      emitter without touching it.
+
+    Pure data with no geometry of its own; ``extract.py`` applies it. Frozen
+    and hashable, so two deck entries differing only in a relation compare
+    unequal and project differently in ``klt deck devices``.
+    """
+
+    source: str
+    op: str = "interacting"
+    extents: bool = False
+
+    def __post_init__(self) -> None:
+        if self.source not in BIPOLAR_TERMINALS:
+            raise ValueError(
+                f"TerminalRelation: unknown source terminal {self.source!r} "
+                f"(expected one of: {', '.join(BIPOLAR_TERMINALS)})"
+            )
+        if self.op not in TERMINAL_RELATION_OPS:
+            raise ValueError(
+                f"TerminalRelation: unknown op {self.op!r} "
+                f"(expected one of: {', '.join(TERMINAL_RELATION_OPS)})"
+            )
+
+
 #: The two boolean operators a :class:`LayerExpr` node may apply (issue
 #: #2860). ``"and"`` intersects every operand; ``"not"`` subtracts every
 #: operand after the first from the first.
@@ -1323,6 +1391,44 @@ class BipolarDevice:
     been backfilled for this entry yet -- the prose citation in the deck
     module's own inline comment remains the only record, exactly as for
     every entry before this field existed.
+
+    ``base_relation``/``emitter_relation``/``collector_relation`` (issue
+    #2863) each optionally define that terminal by a geometric relation to
+    *another terminal of the same device* -- see :class:`TerminalRelation`.
+    All three default to ``None``, and an entry declaring none of them is
+    resolved by exactly the fixed base-first path described above
+    (``base & marker``, then emitter/collector scoped to that base), so every
+    existing deck extracts bit-for-bit as before. Once *any* relation is
+    declared, each terminal is resolved from a marker-scoped **candidate**
+    region (its own layer ``& marker``, minus the deck's ``dummy`` marker;
+    the emitter's candidate is further narrowed by
+    ``emitter_requires``/``emitter_excludes`` first), then:
+
+    - a terminal that declares a relation keeps only the candidate polygons
+      the relation selects against its (already-resolved) ``source``;
+    - a terminal that declares none keeps the legacy scoping -- the emitter
+      and collector are intersected with the resolved base -- *unless* the
+      base itself is relation-defined, in which case they stay at their
+      marker-scoped candidate (scoping them to a base that is itself derived
+      from them would be circular).
+
+    Terminals are resolved in :meth:`terminal_resolution_order`. An entry
+    whose relations reference the declaring terminal itself, form a cycle,
+    or reference / declare a relation on a ``collector`` that is ``None``
+    is rejected at construction with a :class:`ValueError` naming the
+    problem, never resolved to a silently-empty region.
+
+    The device is still formed by KLayout's stock
+    ``DeviceExtractorBJT3Transistor``, which only recognises an emitter
+    lying *inside* a base polygon. A base selected with ``extents=True`` is
+    typically a ring around its emitter, so ``extract.py`` hands the
+    extractor each selected base polygon's bounding box as the device body
+    while still registering the ring itself as the base terminal's
+    connectivity layer. Likewise a drawn collector only becomes the ``C``
+    terminal where it overlaps that body; a lateral collector ring lying
+    wholly *outside* the base body is not attributable through the stock
+    extractor (``extract.py`` then falls back to the vertical,
+    collector-is-base case) -- a limit of the extractor, not of the relation.
     """
 
     base: tuple[int, int]
@@ -1334,6 +1440,103 @@ class BipolarDevice:
     class_name: str = "bjt"
     provenance: RuleProvenance | None = None
     substrate: tuple[int, int] | None = None
+    base_relation: TerminalRelation | None = None
+    emitter_relation: TerminalRelation | None = None
+    collector_relation: TerminalRelation | None = None
+
+    def __post_init__(self) -> None:
+        # Validates eagerly so a malformed deck entry fails where it is
+        # declared (at import of the deck module), not on the first layout
+        # that happens to draw the device.
+        self.terminal_resolution_order()
+
+    def relation(self, terminal: str) -> TerminalRelation | None:
+        """The :class:`TerminalRelation` ``terminal`` declares, or ``None``."""
+        if terminal not in BIPOLAR_TERMINALS:
+            raise ValueError(
+                f"bipolar '{self.class_name}': unknown terminal {terminal!r} "
+                f"(expected one of: {', '.join(BIPOLAR_TERMINALS)})"
+            )
+        relation: TerminalRelation | None = getattr(self, f"{terminal}_relation")
+        return relation
+
+    @property
+    def has_relations(self) -> bool:
+        """Whether any terminal is relation-defined -- ``False`` selects the
+        legacy fixed base-first resolution path unchanged."""
+        return any(self.relation(t) is not None for t in BIPOLAR_TERMINALS)
+
+    def terminal_dependencies(self, terminal: str) -> tuple[str, ...]:
+        """The terminals ``terminal``'s region is derived from: its declared
+        relation's ``source``, else (legacy scoping) ``("base",)`` for the
+        emitter/collector while the base is not itself relation-defined,
+        else nothing."""
+        relation = self.relation(terminal)
+        if relation is not None:
+            return (relation.source,)
+        if terminal != "base" and self.base_relation is None:
+            return ("base",)
+        return ()
+
+    def terminal_resolution_order(self) -> tuple[str, ...]:
+        """The deterministic order ``extract.py`` resolves this entry's
+        drawn terminals in: a topological order of
+        :meth:`terminal_dependencies`, ties broken by
+        :data:`BIPOLAR_TERMINALS` order. A ``None`` collector is omitted
+        (it has no drawn geometry to resolve).
+
+        Raises :class:`ValueError` for a self-referencing relation, a
+        relation on or against a ``None`` collector, or a dependency cycle.
+        """
+        name = f"bipolar '{self.class_name}'"
+        drawn = tuple(
+            t
+            for t in BIPOLAR_TERMINALS
+            if t != "collector" or self.collector is not None
+        )
+        for terminal in BIPOLAR_TERMINALS:
+            relation = self.relation(terminal)
+            if relation is None:
+                continue
+            if terminal not in drawn:
+                raise ValueError(
+                    f"{name}: collector_relation is set but collector is None "
+                    "-- a substrate-formed collector has no drawn geometry to "
+                    "select from; declare a collector layer or drop the relation"
+                )
+            if relation.source == terminal:
+                raise ValueError(
+                    f"{name}: {terminal}_relation references {terminal} itself "
+                    "-- a terminal cannot be selected against its own region"
+                )
+            if relation.source not in drawn:
+                raise ValueError(
+                    f"{name}: {terminal}_relation references the collector, "
+                    "but collector is None (substrate-formed, no drawn "
+                    "geometry to select against)"
+                )
+
+        order: list[str] = []
+        remaining = list(drawn)
+        while remaining:
+            ready = [
+                t
+                for t in remaining
+                if all(dep in order for dep in self.terminal_dependencies(t))
+            ]
+            if not ready:
+                cycle = ", ".join(
+                    f"{t} -> {'/'.join(self.terminal_dependencies(t))}"
+                    for t in remaining
+                )
+                raise ValueError(
+                    f"{name}: terminal relations form a dependency cycle "
+                    f"({cycle}) -- at least one terminal must be resolvable "
+                    "from its own layer alone"
+                )
+            order.append(ready[0])
+            remaining.remove(ready[0])
+        return tuple(order)
 
 
 @dataclass(frozen=True)

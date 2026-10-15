@@ -12237,3 +12237,81 @@ def test_local_backend_unset_env_include_is_named_not_measurement_only(
         for d in corner["diagnostics"]
         if d["code"] == "missing_include"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2891: a testbench's *relative* `.include` of its DUT resolves against
+# the netlist's directory on the local backend (ngspice runs with cwd=corner
+# dir, but resolves a relative include against the including file's directory).
+# --------------------------------------------------------------------------- #
+
+
+def _write_relative_include_tb(tmp_path, directive=".include", target='"dut.spice"'):
+    tb_dir = tmp_path / "tb"
+    tb_dir.mkdir()
+    (tb_dir / "dut.spice").write_text(
+        "* dut\n.subckt dut in out\nR1 in out 1k\nR2 out 0 1k\n.ends\n"
+    )
+    (tb_dir / "tb.spice").write_text(
+        f"* tb\n{directive} {target}\nV1 in 0 1\nX1 in out dut\n.end\n"
+    )
+    request = tb_dir / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "netlist": "tb.spice",
+                "analysis": {"kind": "op", "args": ""},
+                "measurements": [{"name": "vo", "expr": "v(out)", "unit": "V"}],
+                "options": {"timeout_s": 30},
+            }
+        )
+    )
+    return str(request)
+
+
+@_SKIP_NO_NGSPICE
+@pytest.mark.parametrize(
+    ("directive", "target"),
+    [(".include", '"dut.spice"'), (".inc", "dut.spice"), (".INCLUDE", "'dut.spice'")],
+)
+def test_local_backend_relative_include_from_foreign_cwd(
+    tmp_path, monkeypatch, directive, target
+):
+    """Measured for #2891: a relative DUT include resolves beside the
+    netlist, independent of the invoking cwd and of `-o` being relative."""
+    request = _write_relative_include_tb(tmp_path, directive, target)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    monkeypatch.chdir(foreign)
+    report = sim.run_sim(request, backend="local")
+    (corner,) = report["corners"]
+    assert corner["status"] == "pass"
+    assert corner["measurements"][0]["value"] == pytest.approx(0.5)
+
+
+@_SKIP_NO_NGSPICE
+def test_local_backend_unresolvable_relative_include_is_named(tmp_path, monkeypatch):
+    request = _write_relative_include_tb(tmp_path, target='"nope.spice"')
+    monkeypatch.chdir(tmp_path)
+    report = sim.run_sim(request, backend="local")
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    named = [d for d in corner["diagnostics"] if d["code"] == "missing_include"]
+    assert named
+    assert any("nope.spice" in d["message"] for d in named)
+
+
+def test_expand_netlist_includes_keeps_relative_meaning_beside_env_include(
+    tmp_path, monkeypatch
+):
+    """When an env include forces a rewritten copy under the corner dir, a
+    sibling relative include is made absolute so it keeps resolving."""
+    monkeypatch.setenv("INCDIR", str(tmp_path))
+    (tmp_path / "dut.spice").write_text("R9 x 0 1k\n")
+    body = tmp_path / "body.cir"
+    body.write_text('* t\n.include $INCDIR/dut.spice\n.inc "dut.spice"\n')
+    out_dir = tmp_path / "corner"
+    out_dir.mkdir()
+    path, diags = sim._expand_netlist_includes(str(body), str(out_dir))
+    assert diags == []
+    assert f'.inc "{tmp_path}/dut.spice"' in open(path).read()
