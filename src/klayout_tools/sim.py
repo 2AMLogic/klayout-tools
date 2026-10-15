@@ -786,6 +786,11 @@ _MEAS_VALUE_RE = re.compile(
 #: ``.meas``/``.measure``), e.g. ``tran`` in ``.meas tran vout find v(out)``.
 _MEAS_CARD_TYPE_RE = re.compile(r"^\s*\.meas(?:ure)?\s+(\S+)", re.IGNORECASE)
 
+#: A value position in a `.meas` card: an identifier right after ``=`` that is
+#: not a function call (``v(x)``/``i(x)`` never match -- the negative
+#: lookahead rejects a following ``(``). Issue #3038.
+_MEAS_VALUE_REF_RE = re.compile(r"=\s*([A-Za-z_]\w*)\b(?!\s*\()")
+
 #: ngspice's own ``.MEASURE`` statement only implements these analysis types
 #: (verified empirically against ngspice 46 -- see issue #205). Notably,
 #: there is no ``.MEASURE OP``: an operating-point analysis has no sweep
@@ -1129,6 +1134,7 @@ def _resolve_analysis_and_measurements(
                 f'(measurements[].expr, e.g. {{"name": "{spec["name"]}", '
                 '"expr": "v(out)"})'
             )
+    _validate_no_dependent_meas_cards(measurements_spec)
     # Issue #2868: a crossings series is a transient-time quantity.
     sim_crossings.validate_crossings_context(measurements_spec, analysis)
     # Issue #2947: so is a cycle-aligned mean.
@@ -1188,6 +1194,50 @@ def _validate_meas_card(name: str, spice: str) -> None:
             'its own `.control` block -- or use analysis.kind: "tran" with '
             "a short single-step transient and `.meas tran ... at=<t>`"
         )
+
+
+def _validate_no_dependent_meas_cards(measurements_spec: list[dict[str, Any]]) -> None:
+    """Refuse a ``spice`` card whose value field names another measurement.
+
+    A file-scope ``.meas`` card resolves the right-hand side of ``at=``,
+    ``from=``, ``to=``, ``td=``, ``val=`` ... as a netlist ``.param``, never as
+    an earlier ``.meas`` result, so ``.meas tran vos find v(rmp) at=t_flip``
+    kills the whole deck at parse time (``Undefined parameter [t_flip]``) and
+    every measurement in the unit reads ``produced no value`` (issue #3038).
+    This names the dependent card up front instead.
+
+    Deliberately narrow: only an identifier directly after ``=`` (not a
+    function call such as ``v(vout)``) that case-insensitively equals the
+    ``name`` of a *different* ``measurements[]`` entry. A card referencing a
+    real netlist ``.param`` that happens to share a measurement name is
+    refused too -- that is ambiguous in ngspice anyway. Only ``spice`` cards
+    are scanned (``expr`` has its own rule, see ``docs/cli/sim.md``);
+    ``analysis_steps[]`` never reaches here (control-scope ``meas`` has
+    different semantics).
+    """
+    names = {
+        str(spec["name"]).lower(): spec["name"]
+        for spec in measurements_spec
+        if spec.get("name") is not None
+    }
+    for spec in measurements_spec:
+        spice = spec.get("spice")
+        if not isinstance(spice, str):
+            continue
+        own = str(spec["name"]).lower()
+        for ref in _MEAS_VALUE_REF_RE.findall(spice):
+            key = ref.lower()
+            if key in names and key != own:
+                raise SimError(
+                    f"measurement '{spec['name']}' references measurement "
+                    f"'{names[key]}' in its .meas card: a file-scope .meas "
+                    "card cannot read another .meas result (ngspice resolves "
+                    f"'{ref}' as a netlist .param and fails with 'Undefined "
+                    "parameter'). Fold both into one self-contained card "
+                    "(e.g. `.meas tran vos find v(rmp) when v(dn)=0.5 "
+                    "rise=1`), measure the interval with trig/targ, or "
+                    "compute it with measurements[].expr over saved vectors"
+                )
 
 
 def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None:

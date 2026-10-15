@@ -2305,6 +2305,33 @@ the raw `.meas` result `ph` against bounds converted back into its own unit
 reported raw measurements, or to compute it directly from vectors in `expr`
 (a `vecmax()`/`mean()` reduction that does not reference any `.meas` result).
 
+### A `spice` card cannot read another `.meas` result
+
+The same limit applies **`spice` -> `spice`**. A card whose value field
+(`at=`, `from=`, `to=`, `td=`, `val=`, ...) names another measurement's result:
+
+```json
+"measurements": [
+  { "name": "t_flip", "spice": ".meas tran t_flip when v(dn)=0.5 rise=1 td=8u" },
+  { "name": "vos",    "spice": ".meas tran vos find v(rmp) at=t_flip" }
+]
+```
+
+fails inside ngspice with `Undefined parameter [t_flip]`, because a file-scope
+`.meas` card resolves that right-hand side as a netlist `.param`. The whole
+unit would then read `produced no value`. `klt sim` instead refuses the
+request up front (exit 1, standard error envelope) naming the dependent card
+and the measurement it references. Only an identifier directly after `=` that
+equals another `measurements[]` name (case-insensitive) is flagged; `v(vout)`
+or a card's own name are not. A real netlist `.param` that shares a
+measurement name is refused as well. `expr` entries and `analysis_steps[]`
+measurements are not scanned.
+
+Workarounds: fold the pair into one self-contained card
+(`.meas tran vos find v(rmp) when v(dn)=0.5 rise=1 td=8u`), measure an
+interval with a single **trig/targ** card, or compute the figure with an
+`expr` over saved vectors.
+
 ### `.meas` `WHEN` thresholds must be literal numbers
 
 ngspice's `.meas ... when v(x)=<value>` accepts only a literal number (or a
