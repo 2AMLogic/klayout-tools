@@ -1442,3 +1442,197 @@ def write_cases(path: str, cases: Sequence[Case]) -> None:
 def slot_of(bbox: dict[str, int]) -> int:
     """Index of the case whose slot holds a finding's bbox (dbu)."""
     return int((bbox["left"] * D) // SLOT_NM)
+
+
+# --------------------------------------------------------------------------
+# ACTIVE.LUP.1 evidence experiments (#3087)
+# --------------------------------------------------------------------------
+#
+# ACTIVE.LUP.1 (DRM Table 3.5.2) is *not* a deck rule, so none of this is in
+# all_cases(). Each experiment is its own layout (one top cell, nothing else
+# in it), because the 5.376 um case slots are far closer than 30 um and
+# neighbouring cases would supply a tap. The reference predicate below
+# classifies the *written* layout, so it is not a circular check of the
+# generator's own intent.
+
+#: Candidate readings of "distance" between two ACTIVE shapes (the DRM does
+#: not pick one); all are edge-to-edge between bounding boxes.
+LATCHUP_METRICS = ("euclidean", "manhattan", "chebyshev")
+#: The DRM's maximum MOS-to-tap distance, in nm (Table 3.5.2: <= 30 um).
+LATCHUP_MAX_NM = 30000.0
+#: x of the first feature right of device(): its ACTIVE's right edge.
+_MOS_RIGHT = 116.0
+_MOS_TOP = 108.0
+
+
+@dataclass(frozen=True)
+class LatchupExperiment:
+    name: str
+    shapes: tuple[Shape, ...]
+    #: Hand-derived (from the DRM reading), per metric: does the leftmost
+    #: MOS ACTIVE have an eligible tap within 30 um?
+    expect: dict[str, bool]
+
+
+def _lup(name: str, shapes: Iterable[Shape], **expect: bool) -> LatchupExperiment:
+    """``expect`` per metric; a bare ``all=`` sets every metric."""
+    if "all" in expect:
+        verdict = expect.pop("all")
+        expect = dict.fromkeys(LATCHUP_METRICS, verdict)
+    assert set(expect) == set(LATCHUP_METRICS), name
+    return LatchupExperiment(name, tuple(shapes), dict(expect))
+
+
+def _tap(sel: str, dx: float, dy: float = 0.0, w: float = 70) -> list[Shape]:
+    """A gateless ACTIVE (a bulk contact) ``dx`` / ``dy`` nm past the device's
+    ACTIVE edge, inside its own select."""
+    x1 = _MOS_RIGHT + dx
+    y1 = _MOS_TOP + dy if dy else 27
+    return active_in(sel, x1, y1, x1 + w, y1 + 81)
+
+
+def latchup_experiments() -> list[LatchupExperiment]:
+    """Isolated MOS-to-tap experiments for ACTIVE.LUP.1.
+
+    The NMOS sits in the substrate (outside every WELL) and needs a PSELECT
+    tap there; the PMOS sits in a WELL and needs an NSELECT tap in the same
+    WELL.
+    """
+    nmos = device(sel="NSELECT")
+    pmos = device(sel="PSELECT")
+    in_well = box("WELL", -150, -150, 40000, 300)
+    exp = [
+        _lup("nmos-ptap-5um", [*nmos, *_tap("PSELECT", 5000)], all=True),
+        _lup("nmos-ptap-at-30um", [*nmos, *_tap("PSELECT", 30000)], all=True),
+        _lup(
+            "nmos-ptap-1dbu-past-30um",
+            [*nmos, *_tap("PSELECT", 30000 + D)],
+            all=False,
+        ),
+        _lup("nmos-no-tap", nmos, all=False),
+        # Ordinary active-to-active: a second MOS 5 um away is not a tap.
+        _lup(
+            "nmos-ordinary-active-neighbour",
+            [*nmos, *(_shift(s, 5000 + _MOS_RIGHT - 46) for s in pmos)],
+            all=False,
+        ),
+        # Wrong class: an N+ gateless ACTIVE in the substrate is not a
+        # substrate (P+) contact.
+        _lup("nmos-wrong-class-ntap", [*nmos, *_tap("NSELECT", 5000)], all=False),
+        # Right class, wrong well: a P+ ACTIVE inside a WELL contacts the
+        # WELL, not the substrate the NMOS is in.
+        _lup(
+            "nmos-ptap-in-well",
+            [
+                *nmos,
+                *_tap("PSELECT", 5000),
+                box("WELL", _MOS_RIGHT + 5000 - 100, -50, _MOS_RIGHT + 5200, 200),
+            ],
+            all=False,
+        ),
+        _lup(
+            "pmos-ntap-same-well-5um",
+            [*pmos, in_well, *_tap("NSELECT", 5000)],
+            all=True,
+        ),
+        _lup(
+            "pmos-ntap-same-well-at-30um",
+            [*pmos, in_well, *_tap("NSELECT", 30000)],
+            all=True,
+        ),
+        # Same class, but in a different WELL polygon (>= 108 nm apart).
+        _lup(
+            "pmos-ntap-other-well",
+            [
+                *pmos,
+                box("WELL", -150, -150, _MOS_RIGHT + 3000, 300),
+                *_tap("NSELECT", 5000),
+                box("WELL", _MOS_RIGHT + 4800, -150, _MOS_RIGHT + 6000, 300),
+            ],
+            all=False,
+        ),
+        # Diagonal pairs: the verdict depends on the undefined metric.
+        _lup(
+            "nmos-ptap-diagonal-21um",
+            [*nmos, *_tap("PSELECT", 21000, 21000)],
+            euclidean=True,  # hypot(21, 21) = 29.70 um
+            manhattan=False,  # 42 um
+            chebyshev=True,  # 21 um
+        ),
+        _lup(
+            "nmos-ptap-diagonal-22um",
+            [*nmos, *_tap("PSELECT", 22000, 22000)],
+            euclidean=False,  # hypot(22, 22) = 31.11 um
+            manhattan=False,  # 44 um
+            chebyshev=True,  # 22 um
+        ),
+    ]
+    return exp
+
+
+def _shift(shape: Shape, dx: float) -> Shape:
+    assert len(shape) == 5, "latch-up experiments only shift boxes"
+    layer, x1, y1, x2, y2 = shape  # type: ignore[misc]
+    return (layer, x1 + dx, y1, x2 + dx, y2)
+
+
+def _gap_nm(a: kdb.Box, b: kdb.Box, metric: str) -> float:
+    dx = max(0, a.left - b.right, b.left - a.right) * D
+    dy = max(0, a.bottom - b.top, b.bottom - a.top) * D
+    if metric == "euclidean":
+        return math.hypot(dx, dy)
+    if metric == "manhattan":
+        return dx + dy
+    assert metric == "chebyshev", metric
+    return max(dx, dy)
+
+
+def latchup_reference(path: str, metric: str) -> bool:
+    """Reference reading of ACTIVE.LUP.1 on a written experiment layout:
+    does its leftmost MOS ACTIVE (ACTIVE crossed by GATE; a second MOS is an
+    ordinary-active control, never a tap) have an eligible tap within 30 um?
+
+    A tap is a gateless ACTIVE whose select is the opposite polarity of the
+    MOS's (a substrate / WELL contact has the well's own dopant type) and
+    that lies in the same WELL polygon, or, for a MOS outside every WELL,
+    also outside every WELL. Connectivity is not modelled (the DRM states
+    none). ACTIVE shapes must be boxes.
+    """
+    layout = kdb.Layout()
+    layout.read(path)
+    top = layout.top_cell()
+
+    def region(name: str) -> kdb.Region:
+        return kdb.Region(top.begin_shapes_rec(layout.layer(LAYERS[name], 0))).merged()
+
+    active, gate = region("ACTIVE"), region("GATE")
+    nsel, wells = region("NSELECT"), list(region("WELL").each())
+    mos = active.interacting(gate)
+    taps = active.not_interacting(gate)
+    assert mos.count() >= 1, "every experiment draws a MOS"
+
+    def sel_of(poly: kdb.Polygon) -> str:
+        return "NSELECT" if not (kdb.Region(poly) & nsel).is_empty() else "PSELECT"
+
+    def well_of(poly: kdb.Polygon) -> int:
+        for i, w in enumerate(wells):
+            if not kdb.Region(poly).inside(kdb.Region(w)).is_empty():
+                return i
+        return -1
+
+    m = min(mos.each(), key=lambda p: p.bbox().left)  # the device under test
+    assert m.is_box()
+    for t in taps.each():
+        assert t.is_box()
+        if sel_of(t) == sel_of(m):
+            continue
+        if well_of(t) != well_of(m):
+            continue
+        if _gap_nm(m.bbox(), t.bbox(), metric) <= LATCHUP_MAX_NM:
+            return True
+    return False
+
+
+def write_latchup_experiment(path: str, exp: LatchupExperiment) -> None:
+    """Write one experiment as its own single-top-cell GDS."""
+    write_shapes(path, exp.shapes)
