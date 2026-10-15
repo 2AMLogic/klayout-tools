@@ -3789,6 +3789,28 @@ error, exit 1).
     (a dependency chain).
   - A bare step-measurement name without its `<step>.` qualifier is refused
     with a hint.
+- **Derived sweep windows.** A step's `analysis.args` may contain
+  `${<expr>}` placeholders over earlier steps' scalar results, so a second
+  sweep can be centred on a feature a first one located
+  ([#3055](https://github.com/2AMLogic/klayout-tools/issues/3055)):
+  `"args": "VIN ${coarse.edge - 0.5} ${coarse.edge + 0.5} 0.25"`.
+  - Each `<expr>` must reference at least one `<step>.<measurement>` of an
+    **earlier** step; unknown, forward and self references are refused, as is
+    a reference to an `intermediate` (it may be non-scalar).
+  - The deck `let`s each expression into a scalar in the step's fresh plot
+    and the analysis line reads it with `$&`, so the window is computed at
+    full precision inside ngspice. The step's `args` in the report stay the
+    request text.
+  - If a referenced result produced no value in a corner (its step failed, or
+    the expression was not a scalar), the dependent step is reported failed
+    with `derived_input_unavailable` and its results are never graded.
+- **Intermediates.** A step or top-level `expr` measurement with
+  `"intermediate": true` is `let` only: later `expr` entries may use it (by
+  bare name inside the step, `<step>.<name>` elsewhere), but it is not
+  printed, graded, or reported, and does not count toward `limits` coverage.
+  It must be an `expr` and may not declare `limits` or `plausible_range`;
+  it is refused on the scalar `analysis` form. Use it to name a vector stage
+  (a per-segment slope, a mask) instead of repeating the expression.
 - **References** must point backwards. An unknown step, an unknown
   measurement, a forward reference, and a self-reference are each refused,
   as is a step measurement that reads its own or a later step.
