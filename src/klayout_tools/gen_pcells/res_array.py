@@ -248,7 +248,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             )
             self.param(
                 "res_poly_heads_only",
-                self.TypeBoolean,
+                self.TypeBoolean,  # type: ignore[attr-defined]
                 "Draw poly_layer as only the two end heads (the resistive "
                 "body is the res_mark_layer segment alone, abutting them) -- "
                 "the IHP sg13g2 PCell convention (issue #2679)",
@@ -287,7 +287,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.metal_res_via_space_min_um,
                 self.end_contact_w_um,
                 self.end_contact_h_um,
-                self.res_poly_heads_only,
+                self.res_poly_heads_only,  # type: ignore[attr-defined]
             )
             unit_boxes = info["unit"]["boxes_um"]
             all_cells = info["cells"] + info["dummy_cells"]
