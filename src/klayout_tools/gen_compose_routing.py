@@ -2983,6 +2983,13 @@ def route_two_pin(
             stub_a_um = max(stub_um, a[1] - jog_y)
             stub_b_um = max(stub_um, b[1] - jog_y)
 
+    # A plane-change junction (#2930) is a free point, not a block pad: its
+    # port has no approach stub, so the path meets it exactly at the waypoint.
+    if port_a.get("junction"):
+        stub_a_um = 0.0
+    if port_b.get("junction"):
+        stub_b_um = 0.0
+
     points = manhattan_backbone(
         a,
         dir_a,
@@ -4404,6 +4411,197 @@ def route_bundle(
             return None
         return retry
 
+    # Plane-bearing waypoints (#2930): a leg whose `waypoints_um` carries a
+    # `[x, y, "layer_role"]` triple changes routing plane at that point. It is
+    # split there into one same-plane segment per plane, each routed by the
+    # ordinary `route_two_pin()` (so every routability check -- obstacles,
+    # rings, own-block shorts, the via-drop resolution -- applies to each
+    # segment on the plane it is drawn on) between two ends that are either a
+    # real pin or a *junction*: a synthetic one-port, zero-area block placed at
+    # the waypoint whose port sits on the plane the route continues on. The
+    # segment arriving at a junction therefore drops to the junction's plane
+    # through the very same #454/#1567 via ladder it would use to reach a
+    # block's pad, and the segment leaving it starts on that plane with no
+    # drop -- no new via or pad geometry exists. The result is one leg whose
+    # `segments` carry each plane's drawing payload.
+    def _route_plane_change_leg(
+        i: int,
+        j: int,
+        leg_spec: dict[str, Any],
+        start_layer: tuple[int, int] | None,
+        start_width_um: float,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        waypoints = list(leg_spec["waypoints_um"])
+        waypoint_layers = leg_spec["waypoint_layers"]
+        if start_layer is None or extraction_deck is None:
+            return None, (
+                "a plane-bearing waypoint needs a resolved routing layer and "
+                "PDK extraction deck to build the via ladder between planes"
+            )
+
+        # Split into segments at every waypoint that actually changes plane.
+        segments: list[dict[str, Any]] = []
+        current: dict[str, Any] = {
+            "layer": start_layer,
+            "width_um": start_width_um,
+            "waypoints": [],
+        }
+        for k, waypoint in enumerate(waypoints):
+            plane = waypoint_layers[k]
+            if plane is None or plane["layer"] == current["layer"]:
+                current["waypoints"].append(waypoint)
+                continue
+            current["end_junction"] = k
+            segments.append(current)
+            current = {
+                "layer": plane["layer"],
+                "width_um": plane["width_um"],
+                "waypoints": [],
+                "start_junction": k,
+            }
+        segments.append(current)
+
+        junction_ids = {
+            k: f"__plane_change_{k}__"
+            for seg in segments
+            for k in (seg.get("start_junction"), seg.get("end_junction"))
+            if k is not None
+        }
+        scoped_blocks = dict(blocks)
+        scoped_offsets = dict(offsets_um)
+        scoped_bboxes = dict(placed_bboxes_um)
+        for k, junction_id in junction_ids.items():
+            x, y = waypoints[k]
+            plane_layer = waypoint_layers[k]["layer"]
+            scoped_blocks[junction_id] = {
+                "port_names": {"J"},
+                "ports": {
+                    "J": {
+                        "x_um": 0.0,
+                        "y_um": 0.0,
+                        "direction_deg": 0,
+                        "layer": {"layer": plane_layer[0], "datatype": plane_layer[1]},
+                        "junction": True,
+                    }
+                },
+            }
+            scoped_offsets[junction_id] = {"x": x, "y": y}
+            scoped_bboxes[junction_id] = {"x0": x, "y0": y, "x1": x, "y1": y}
+
+        def _junction_pin(k: int) -> dict[str, str]:
+            return {"block": junction_ids[k], "port": "J"}
+
+        def _scoped_fetch(plane_fetch: Any) -> Any:
+            # A junction owns no drawn geometry: answer for it here instead of
+            # asking compose()'s per-block reader, which only knows real blocks.
+            if plane_fetch is None:
+                return None
+
+            def _fetch(block_id: str) -> Any:
+                if block_id in junction_ids.values():
+                    return {block_id: None}
+                return plane_fetch(block_id)
+
+            return _fetch
+
+        def _segment_geometry(fetch: Any, seg_pins: tuple[dict[str, str], ...]) -> Any:
+            if fetch is None:
+                return None
+            geometry = None
+            for pin in seg_pins:
+                if pin["block"] in junction_ids.values():
+                    continue
+                if (
+                    pin["block"] == pins[i]["block"] == pins[j]["block"]
+                    or blocks[pin["block"]].get("source") == "cell"
+                ):
+                    geometry = fetch(pin["block"])
+            return geometry
+
+        drawn: list[dict[str, Any]] = []
+        total_um = 0.0
+        for seg in segments:
+            start_k, end_k = seg.get("start_junction"), seg.get("end_junction")
+            seg_a = _junction_pin(start_k) if start_k is not None else pins[i]
+            seg_b = _junction_pin(end_k) if end_k is not None else pins[j]
+            seg_waypoints = list(seg["waypoints"])
+            if not seg_waypoints:
+                # Always take the caller-steered path (#634) -- the fixed
+                # one-jog shape assumes two block ports facing each other, not
+                # a free junction. Anchoring on the junction gives a single
+                # deterministic elbow (x first, then y) from the pin's stub.
+                anchor_k = start_k if start_k is not None else end_k
+                seg_waypoints = [waypoints[anchor_k]]
+            plane_fetch = (
+                block_geometry_for
+                if seg["layer"] == route_layer or geometry_for_layer is None
+                else geometry_for_layer(seg["layer"])
+            )
+            fetch = _scoped_fetch(plane_fetch)
+            result = route_two_pin(
+                seg_a,
+                seg_b,
+                scoped_blocks,
+                scoped_offsets,
+                scoped_bboxes,
+                seg["width_um"],
+                seg["layer"],
+                extraction_deck,
+                _segment_geometry(fetch, (seg_a, seg_b)),
+                waypoints_um=seg_waypoints,
+                leg_conflict=leg_conflict,
+                block_geometry_for=fetch,
+                grid_um=grid_um,
+            )
+            # Drops landing on a junction are not on any block's own geometry:
+            # null the block id so compose()'s own-block pad check skips them.
+            for drop in result.get("via_drops", []):
+                if drop.get("block_id") in junction_ids.values():
+                    drop["block_id"] = None
+            for widen in result.get("stub_widen", []):
+                if widen.get("block_id") in junction_ids.values():
+                    widen["block_id"] = None
+            reason = None if result["routed"] else result["reason"]
+            if result["routed"] and leg_conflict is not None:
+                reason = leg_conflict(
+                    result["points_um"],
+                    result.get("via_drops", []),
+                    result.get("stub_widen", []),
+                    result.get("route_layer"),
+                )
+            if reason is not None:
+                at = end_k if end_k is not None else start_k
+                if at is None:
+                    return None, reason
+                x, y = waypoints[at]
+                return None, (
+                    f"plane change at waypoints_um[{at}] ({x:g}, {y:g}): {reason}"
+                )
+            total_um += result["route_length_um"]
+            drawn.append(
+                {
+                    "points_um": result["points_um"],
+                    "via_drops": result.get("via_drops", []),
+                    "stub_widen": result.get("stub_widen", []),
+                    "route_layer": result.get("route_layer"),
+                    "width_um": result.get("width_um", seg["width_um"]),
+                }
+            )
+
+        first = drawn[0]
+        return {
+            "routed": True,
+            "route_length_um": total_um,
+            "points_um": [pt for part in drawn for pt in part["points_um"]],
+            "via_drops": first["via_drops"],
+            "stub_widen": first["stub_widen"],
+            "route_layer": first["route_layer"],
+            "width_um": first["width_um"],
+            "channel_track": 0,
+            "segments": drawn,
+            "reason": None,
+        }, None
+
     legs: list[dict[str, Any]] = []
     total_length_um = 0.0
     # Pin pairs an explicit *layer-pinned* leg (#1655) tried and failed on its
@@ -4451,7 +4649,28 @@ def route_bundle(
         leg_width_um = leg_spec.get("width_um")
         leg_effective_width_um = width_um if leg_width_um is None else leg_width_um
         geometry, cross_geometry = _leg_geometry(i, j)
-        if leg_route_layer is not None:
+        if any(plane is not None for plane in leg_spec.get("waypoint_layers") or ()):
+            # Plane-bearing waypoints (#2930): pinned to its named planes
+            # like any layer-pinned leg -- no cross-block retry, no automatic
+            # re-pickup of the pin pair if a segment is rejected.
+            result, reason = _route_plane_change_leg(
+                i,
+                j,
+                leg_spec,
+                leg_route_layer if leg_route_layer is not None else route_layer,
+                leg_effective_width_um,
+            )
+            if result is None:
+                result = {"routed": False}
+                pinned_failed_pairs.add(
+                    frozenset(
+                        (
+                            (pins[i]["block"], pins[i]["port"]),
+                            (pins[j]["block"], pins[j]["port"]),
+                        )
+                    )
+                )
+        elif leg_route_layer is not None:
             override_layer = leg_route_layer
             override_geometry = (
                 geometry
@@ -4564,6 +4783,12 @@ def route_bundle(
                     "route_layer": result.get("route_layer"),
                     "width_um": result.get("width_um", width_um),
                     "channel_track": result.get("channel_track", 0),
+                    # Per-plane drawing payloads of a plane-changing leg (#2930).
+                    **(
+                        {"segments": result["segments"]}
+                        if result.get("segments")
+                        else {}
+                    ),
                 }
             )
         else:
