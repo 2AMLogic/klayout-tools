@@ -1649,6 +1649,23 @@ three gaps directly, as an extension of `local`/`local-parallel` (and any
   recomputed this run; `checkpoint_retained` is `false` once a run finishes
   with every corner accounted for (the file is then deleted).
 
+## Timeout-budget hint
+
+Issue [#2894](https://github.com/2AMLogic/klayout-tools/issues/2894): when
+any unit carries a `timeout` diagnostic, or ran for at least 80% of
+`options.timeout_s`, the report gains an additive, optional
+`environment.timeout_budget_hint` object (absent otherwise; no existing
+field changes):
+
+```json
+{"max_unit_runtime_s": 490.2, "timeout_s": 600, "suggested_timeout_s": 1200,
+ "units_timed_out": 2, "message": "..."}
+```
+
+It states that the failure is a per-unit time budget, not a netlist problem,
+and suggests a larger `options.timeout_s` (twice the larger of the two
+numbers, rounded up to a whole minute).
+
 ## Timeout-budget preflight
 
 Issue [#1686](https://github.com/2AMLogic/klayout-tools/issues/1686): a
@@ -2951,6 +2968,11 @@ a corner grid. A stock ngspice without the module still produces the
   looking for an element of that name; if any reference cannot be resolved
   and read, the key is not rejected (an unresolved declaration is never
   assumed absent). Hierarchical names are never treated as parameters.
+  **Unknown keys (#2894).** A key that names no element and no `.param` in
+  the fully resolved netlist closure (a typo; matching is case-insensitive)
+  is rejected with a `SimError` naming the key, because `alter` on it would
+  address nothing. Not rejected when any `.include`/`.lib` reference cannot
+  be resolved, nor for hierarchical keys such as `x1.vdd`.
   **Scalar sources only.** ngspice's `alter` silently has no effect on an
   independent voltage source with an explicit transient waveform
   (`PWL`/`PULSE`/`SIN`/`EXP`/`SFFM`/`AM`), so `klt sim` rejects such a request
