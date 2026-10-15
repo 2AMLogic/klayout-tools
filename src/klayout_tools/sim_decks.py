@@ -1426,9 +1426,12 @@ def _deck_batch_command(version_check: str) -> str:
     (unit streams are the result, not an opt-in artifact) and the report
     redirected to ``report.json`` (stdout is not a clean channel back --
     see ``sim_batch._build_batch_job_spec``)."""
-    command = sim_batch._runner_preflight_script(
-        _provenance._klt_version(),
-        enforce=version_check == "enforce",
+    command = (
+        sim_batch._runner_preflight_script(
+            _provenance._klt_version(),
+            enforce=version_check == "enforce",
+        )
+        + sim_batch._deck_preflight_lines()
     ) + (
         f'klt sim "$EDA_INPUT_DIR/{remote_transport.REMOTE_REQUEST_FILENAME}" '
         "--backend local-parallel --format json"
@@ -1578,6 +1581,11 @@ def _recover_failed_deck_job(
     message = base_message
     if runner_error is not None:
         message += f": the job's klt reported: {runner_error['message']}"
+        if "missing required field: netlist" in str(runner_error["message"]):
+            message += (
+                " -- a deck-list request read as a corner request: the fleet "
+                "runner's klt predates decks[] support (rebuild the runner image)"
+            )
     elif note:
         message += (
             f" [output recovery: {note} -- see harness.log under the job's S3 prefix]"
@@ -1613,6 +1621,7 @@ def _run_decks_batch(
     config = sim_batch._resolve_batch_config(
         request, corner_count=1, timeout_s=serial_worst_s
     )
+    sim_batch._assess_deck_support(request, config)
     spec = sim_batch.BatchJobSpec(
         cmd=_deck_batch_command(config.runner_version_check),
         tool=sim_batch._batch_job_tool_label(worker_request),
