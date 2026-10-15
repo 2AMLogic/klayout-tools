@@ -2404,6 +2404,75 @@ def test_res_array_device_count_and_ports(tmp_path, pdk_root):
     assert report["drc_hints"]["matched_group_id"] == "res_array:3"
 
 
+def _series_report(tmp_path, pdk_root, name, **params):
+    output = tmp_path / f"{name}.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    return output, report
+
+
+def test_res_array_series_false_matches_default(tmp_path, pdk_root):
+    _, default = _series_report(tmp_path, pdk_root, "d", num=4, rows=2)
+    _, off = _series_report(tmp_path, pdk_root, "o", num=4, rows=2, series=False)
+    assert default["ports"] == off["ports"]
+    assert default["drc_hints"] == off["drc_hints"]
+    assert len(off["ports"]) == 8
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"rows": 1},
+        {"rows": 2},
+        {"rows": 3, "num": 7},
+        {"rows": 2, "flavor": "high", "width_um": 0.35},
+        {"rows": 2, "flavor": "xhigh", "width_um": 0.35},
+        {"rows": 2, "metal_level": 1, "width_um": 0.5},
+        {"rows": 2, "metal_level": 5, "width_um": 2.0, "length_um": 4.0},
+    ],
+)
+def test_res_array_series_ports_note_and_drc_clean(tmp_path, pdk_root, extra):
+    params = {"num": 6, "dummy": 1, **extra}
+    output, report = _series_report(tmp_path, pdk_root, "s", series=True, **params)
+    num = params["num"]
+    assert [p["name"] for p in report["ports"]] == ["R0_A", f"R{num - 1}_B"]
+    assert report["device_count"] == num
+    assert report["drc_hints"]["matched_group_id"] == f"res_array:{num}"
+    notes = " ".join(report["drc_hints"]["notes"])
+    assert f"{num - 1} joint jumper" in notes
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_res_array_series_num_1_has_no_jumpers(tmp_path, pdk_root):
+    _, report = _series_report(tmp_path, pdk_root, "s1", num=1, series=True)
+    assert [p["name"] for p in report["ports"]] == ["R0_A", "R0_B"]
+    assert "0 joint jumper" in " ".join(report["drc_hints"]["notes"])
+
+
+def test_res_array_series_extracts_as_connected_chain(tmp_path, pdk_root):
+    output, _ = _series_report(
+        tmp_path, pdk_root, "chain", num=4, rows=2, dummy=0, series=True
+    )
+    extract_report = run_extract(str(output), "sky130")
+    assert extract_report["device_counts"] == {"res_generic_po": 4}
+    cards = Path(extract_report["netlist_path"]).read_text().splitlines()
+    ends = [line.split()[1:3] for line in cards if line.startswith("R")]
+    degree: dict[str, int] = {}
+    for a, b in ends:
+        degree[a] = degree.get(a, 0) + 1
+        degree[b] = degree.get(b, 0) + 1
+    # A 4-resistor series chain: 5 nets, two terminals (degree 1), three
+    # interior joints (degree 2). Unjoined units would give 8 degree-1 nets.
+    assert sorted(degree.values()) == [1, 1, 2, 2, 2], degree
+
+
 def test_res_array_num_1_boundary_and_zero_dummy(tmp_path, pdk_root):
     output = tmp_path / "res_array_1.gds"
     report = generate(

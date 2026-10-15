@@ -80,6 +80,15 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=1,
             )
             self.param(
+                "series",
+                self.TypeBoolean,
+                "Join the num unit resistors end to end (R<i>_B to "
+                "R<i + 1>_A) with short local-metal jumpers so the array is "
+                "one logical series resistor; default False draws "
+                "independent units (issue #2997)",
+                default=False,
+            )
+            self.param(
                 "flavor",
                 self.TypeString,
                 "Poly-resistor flavour selecting the recognised device class "
@@ -291,6 +300,14 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     _insert_boxes(
                         self.cell, li, dbu, unit_boxes[role], c["x0_um"], c["y0_um"]
                     )
+
+            # Issue #2997: series joints, on the unit end pads' layer (the
+            # body layer for a metal_level resistor, whose end pad is the
+            # body itself).
+            if self.series:
+                li_joint = li_poly if self.metal_level else li_metal
+                for j in info["jumpers"]:
+                    _insert_boxes(self.cell, li_joint, dbu, [j["box_um"]], 0.0, 0.0)
 
             # Draw the PDK resistor-ID marker, plus every requires-mask the
             # requested flavour needs (none on sky130's `res_generic_po`, two

@@ -647,6 +647,7 @@ def _res_array_describe(
     )
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
 
+    series = bool(params.get("series", False))
     ports = []
     left_xy = unit["a_xy"]  # physically local-left pad -- always points 180deg
     right_xy = unit["b_xy"]  # physically local-right pad -- always points 0deg
@@ -666,28 +667,32 @@ def _res_array_describe(
         else:
             entry_xy, entry_deg = right_xy, 0
             exit_xy, exit_deg = left_xy, 180
-        ports.append(
-            {
-                "name": f"R{idx}_A",
-                "net": None,
-                "layer": metal_layer,
-                "x_um": c["x0_um"] + entry_xy[0],
-                "y_um": c["y0_um"] + entry_xy[1],
-                "width_um": unit["pad_height_um"],
-                "direction_deg": entry_deg,
-            }
-        )
-        ports.append(
-            {
-                "name": f"R{idx}_B",
-                "net": None,
-                "layer": metal_layer,
-                "x_um": c["x0_um"] + exit_xy[0],
-                "y_um": c["y0_um"] + exit_xy[1],
-                "width_um": unit["pad_height_um"],
-                "direction_deg": exit_deg,
-            }
-        )
+        # Issue #2997: a series string exposes only its two outer terminals,
+        # `R0_A` and `R<num - 1>_B`; interior pads are joined by jumpers.
+        if not series or idx == 0:
+            ports.append(
+                {
+                    "name": f"R{idx}_A",
+                    "net": None,
+                    "layer": metal_layer,
+                    "x_um": c["x0_um"] + entry_xy[0],
+                    "y_um": c["y0_um"] + entry_xy[1],
+                    "width_um": unit["pad_height_um"],
+                    "direction_deg": entry_deg,
+                }
+            )
+        if not series or idx == params["num"] - 1:
+            ports.append(
+                {
+                    "name": f"R{idx}_B",
+                    "net": None,
+                    "layer": metal_layer,
+                    "x_um": c["x0_um"] + exit_xy[0],
+                    "y_um": c["y0_um"] + exit_xy[1],
+                    "width_um": unit["pad_height_um"],
+                    "direction_deg": exit_deg,
+                }
+            )
 
     notes = []
     # The effective spacing actually drawn -- the requested `spacing_um`,
@@ -721,6 +726,25 @@ def _res_array_describe(
             f"{metal_level}'s own minimum body width "
             f"({floors['body_width_min_um']}um) on PDK family '{family}' -- "
             "the drawn body will violate that layer's own DRC width rule"
+        )
+
+    if series:
+        joints = info["jumpers"]
+        in_row = [j["length_um"] for j in joints if j["kind"] == "row"]
+        folds = [j["length_um"] for j in joints if j["kind"] == "fold"]
+        overhead = []
+        if in_row:
+            overhead.append(f"{in_row[0]}um in-row (effective spacing_um)")
+        if folds:
+            overhead.append(
+                f"{folds[0]}um at a row fold (row_pitch_um - pad_height_um)"
+            )
+        notes.append(
+            f"series=true: {len(joints)} joint jumper(s) (num - 1) join the "
+            "units end to end; only R0_A and "
+            f"R{params['num'] - 1}_B are reported as ports. Per-joint "
+            "overhead (jumper length): "
+            + (", ".join(overhead) if overhead else "none (num is 1)")
         )
 
     if end_contact[0] > 0.0:
