@@ -20059,6 +20059,81 @@ def test_def_net_instance_pins_empty_when_file_missing(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _divider_report(net):
+    return {
+        "nets": [
+            {
+                "net": net,
+                "hub_net": net,
+                "capacitance_ff": 1.5,
+                "resistance_ohm": 0.0,
+                "terminals": [{"leg_net": "leg_$1_G", "resistance_ohm": 5.0}],
+                "coupled": [],
+            },
+        ]
+    }
+
+
+def test_spef_preserves_def_hierarchy_divider_and_escaped_slash(tmp_path):
+    """Issue #2969: a bare `/` in the DEF (hierarchy divider) is emitted bare
+    in `*I`/`*RES`/`*D_NET`; an escaped `\\/` (literal slash, the #1623 shape)
+    keeps its backslash; escaped brackets keep theirs."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def_path = tmp_path / "h.def"
+    def_path.write_text(
+        "NETS 2 ;\n"
+        "- sub/n1 ( sub/_001_ A ) ( g_slice\\[0\\].u\\/_08_ Y ) ;\n"
+        "- flat\\/n2 ( u3 A ) ;\n"
+        "END NETS\n"
+    )
+    pins = def_net_instance_pins(str(def_path))
+    # Equality against plain str is unchanged by the spelling carrier.
+    assert pins["sub/n1"] == (("sub/_001_", "A"), ("g_slice[0].u/_08_", "Y"))
+
+    report = {
+        "nets": [
+            _divider_report("sub/n1")["nets"][0],
+            _divider_report("flat/n2")["nets"][0],
+        ]
+    }
+    out = tmp_path / "h.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+        net_instance_pins=pins,
+    )
+    text = out.read_text()
+    assert "*D_NET sub/n1 " in text
+    assert "*I sub/_001_:A B" in text
+    assert "1 sub/n1:1 sub/n1:2 5.000000" in text
+    assert "2 sub/n1:1 sub/_001_:A 0.000000" in text
+    assert "*I g_slice\\[0\\]\\.u\\/_08_:Y B" in text
+    assert "*D_NET flat\\/n2 " in text
+
+
+def test_spef_names_without_def_origin_are_unchanged(tmp_path):
+    """Issue #2969 regression: plain-str names keep `_spef_name` escaping,
+    including `/`."""
+    from klayout_tools.extract_spef import _write_spef
+
+    out = tmp_path / "p.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=_divider_report("a/b"),
+        port_names=[],
+        net_instance_pins={"a/b": (("sub/u", "A"),)},
+    )
+    text = out.read_text()
+    assert "*D_NET a\\/b " in text
+    assert "*I sub\\/u:A B" in text
+
+
 def test_spef_conn_emits_instance_pin_entries_and_zero_ohm_legs(tmp_path):
     """`net_instance_pins` adds one `*I <inst>:<pin> B` `*CONN` entry per
     connection (alongside any `*P` port entry) and wires each into the RC
