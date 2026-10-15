@@ -12672,7 +12672,7 @@ def test_expand_netlist_includes_keeps_relative_meaning_beside_env_include(
 def _control_for(kind, args):
     from types import SimpleNamespace
 
-    point = SimpleNamespace(supply_v={})
+    point = SimpleNamespace(supply_v={}, params={})
     return sim._corner_deck_control_lines(
         point=point,
         analysis={"kind": kind, "args": args},

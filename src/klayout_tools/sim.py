@@ -2322,6 +2322,8 @@ def _run_sim_corners(
     # Issue #2706: fail fast (before any probe or backend dispatch) when a
     # supply override targets a source with an explicit transient waveform.
     _validate_supply_override_targets(netlist_path, corner_points)
+    # Issue #3035: the same for a `corners.params` name no `.param` declares.
+    _validate_param_targets(netlist_path, corner_points)
     # Issue #2482: the same pre-dispatch check for a step's own `alter`
     # overrides (plus a clash with the corner's own supply axis).
     sim_steps.validate_alter_targets(analysis, netlist_path, corner_points)
@@ -2609,6 +2611,8 @@ def _run_sim_corners(
             hosts=hosts,
             measurements_spec=measurements_spec,
         )
+
+    _require_params_echo(dispatch_points, corners_new, backend=backend)
 
     if resume:
         # Reassemble the full corner list in the request's own order: a
@@ -3354,6 +3358,11 @@ class CornerPoint:
     so a sampled point flows through exactly the same path as an
     unsampled one.
 
+    ``params`` (issue #3035) is the normalized ``{name: scalar}`` row of the
+    ``corners.params`` axis this point sits on -- ``{}`` for a request with
+    no parameter axis, in which case :attr:`corner_id` and :attr:`slug` are
+    exactly the legacy ones.
+
     ``process_sections`` is populated only when the request's
     ``corners.process[]`` entry for this point was the multi-section bundle
     object form (``{"name": str, "sections": [...]}``, see
@@ -3389,6 +3398,7 @@ class CornerPoint:
         "process_section_libs_resolved",
         "supply_v",
         "temperature_c",
+        "params",
         "sample_index",
         "mc_seed",
     )
@@ -3402,10 +3412,12 @@ class CornerPoint:
         process_sections: list[str] | None = None,
         process_section_libs: list[str | None] | None = None,
         process_section_libs_resolved: list[str | None] | None = None,
+        params: dict[str, int | float] | None = None,
         sample_index: int | None = None,
         mc_seed: dict[str, int] | None = None,
     ) -> None:
         self.process = process
+        self.params: dict[str, int | float] = params or {}
         self.process_sections = process_sections
         self.process_section_libs = process_section_libs
         self.process_section_libs_resolved = process_section_libs_resolved
@@ -3456,6 +3468,8 @@ class CornerPoint:
             )
         temp_label = _format_number(self.temperature_c)
         base = f"{process_label}/{supply_label}/{temp_label}C"
+        if self.params:
+            base = f"{base}/params:{_format_params_label(self.params)}"
         if self.sample_index is None:
             return base
         return f"{base}/mc{self.sample_index}"
@@ -3463,9 +3477,15 @@ class CornerPoint:
     @property
     def slug(self) -> str:
         """Filesystem-safe artifact-directory name for this corner, derived
-        from :attr:`corner_id` (e.g. ``ss/1.620V/125C`` -> ``ss_1p620V_125C``)."""
-        label = self.corner_id.replace("/", "_")
-        return label.replace(".", "p").replace("=", "").replace("-", "n")
+        from :attr:`corner_id` (e.g. ``ss/1.620V/125C`` -> ``ss_1p620V_125C``).
+        See :func:`_slugify_corner_id` for the parameter-axis form."""
+        return _slugify_corner_id(self.corner_id)
+
+
+def _params_report_field(point: CornerPoint) -> dict[str, Any]:
+    """The additive ``params`` field of a corner report: present only for a
+    point on a ``corners.params`` axis, so every other report is unchanged."""
+    return {"params": dict(point.params)} if point.params else {}
 
 
 def _format_number(value: float) -> str:
@@ -3473,6 +3493,133 @@ def _format_number(value: float) -> str:
     if float(value).is_integer():
         return str(int(value))
     return str(value)
+
+
+_PARAM_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _format_param_value(value: int | float) -> str:
+    """Canonical text of one ``corners.params`` value (issue #3035): the
+    shortest round-trip JSON decimal spelling, an integral value rendered as
+    an integer, negative zero as ``0`` -- never a rounded or unit-suffixed
+    form, so close-valued parameters keep distinct IDs."""
+    return repr(_normalize_param_value(value))
+
+
+def _normalize_param_value(value: int | float) -> int | float:
+    """The scalar a parameter coordinate is carried as everywhere (report,
+    wire, deck): an integer when the value is integral, else the float."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _format_params_label(params: dict[str, int | float]) -> str:
+    """``name=value`` pairs, sorted by (lowercase) name, comma-joined."""
+    return ",".join(
+        f"{name}={_format_param_value(value)}" for name, value in sorted(params.items())
+    )
+
+
+def _validate_param_scalar(value: Any, where: str) -> int | float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        raise SimError(f"{where} must be a finite number (booleans excluded)")
+    return _normalize_param_value(value)
+
+
+def _validate_param_name(name: Any, where: str) -> str:
+    """Lowercased parameter name, or a :class:`SimError` for a malformed or
+    reserved (``mc_*``) one."""
+    if not isinstance(name, str) or not _PARAM_NAME_RE.fullmatch(name):
+        raise SimError(
+            f"{where} name {name!r} must match [A-Za-z_][A-Za-z0-9_]* "
+            "(a bare SPICE parameter name)"
+        )
+    lowered = name.lower()
+    if lowered.startswith("mc_"):
+        raise SimError(
+            f"{where} name {name!r} is reserved: mc_* parameters are "
+            "generated by monte_carlo"
+        )
+    return lowered
+
+
+def _normalize_param_row(
+    raw: Any, where: str, supply_v: dict[str, Any] | None = None
+) -> dict[str, int | float]:
+    """One scalar ``{name: value}`` parameter row (a report/wire ``params``
+    map), validated and normalized; ``supply_v`` names may not repeat."""
+    if not isinstance(raw, dict):
+        raise SimError(f"{where} must be an object mapping names to numbers")
+    row: dict[str, int | float] = {}
+    supply_names = {str(key).lower() for key in (supply_v or {})}
+    for name, value in raw.items():
+        lowered = _validate_param_name(name, where)
+        if lowered in row:
+            raise SimError(f"{where} declares {lowered!r} more than once")
+        if lowered in supply_names:
+            raise SimError(
+                f"{where} name {name!r} is also a supply_v key: a name may "
+                "not be in both corners.params and corners.supply_v"
+            )
+        row[lowered] = _validate_param_scalar(value, f"{where}.{name}")
+    return dict(sorted(row.items()))
+
+
+def _expand_param_axis(
+    corners_spec: dict[str, Any],
+) -> list[dict[str, int | float]]:
+    """The zipped ``corners.params`` rows (issue #3035), or ``[{}]`` for a
+    request with no parameter axis. Names zip by index; every array must be
+    nonempty and the same length; duplicate normalized rows are rejected."""
+    spec = corners_spec.get("params")
+    if spec is None or spec == {}:
+        return [{}]
+    if not isinstance(spec, dict):
+        raise SimError(
+            "corners.params must be an object mapping parameter names to "
+            "equal-length arrays of numbers"
+        )
+    columns: dict[str, list[int | float]] = {}
+    for name, values in spec.items():
+        lowered = _validate_param_name(name, "corners.params")
+        if lowered in columns:
+            raise SimError(
+                f"corners.params declares {lowered!r} more than once "
+                "(names are case-insensitive)"
+            )
+        if not isinstance(values, list) or not values:
+            raise SimError(f"corners.params.{name} must be a nonempty array of numbers")
+        columns[lowered] = [
+            _validate_param_scalar(value, f"corners.params.{name}[{i}]")
+            for i, value in enumerate(values)
+        ]
+    if len({len(values) for values in columns.values()}) != 1:
+        raise SimError("corners.params arrays must all be the same length")
+    supply_names = {str(key).lower() for key in (corners_spec.get("supply_v") or {})}
+    clash = sorted(set(columns) & supply_names)
+    if clash:
+        raise SimError(
+            f"corners.params name {clash[0]!r} is also a corners.supply_v key: "
+            "a name may be in only one of the two maps (supply_v addresses a "
+            "source with `alter`, params address a .param)"
+        )
+    count = len(next(iter(columns.values())))
+    rows = [
+        dict(sorted((name, values[i]) for name, values in columns.items()))
+        for i in range(count)
+    ]
+    seen: set[str] = set()
+    for row in rows:
+        label = _format_params_label(row)
+        if label in seen:
+            raise SimError(f"corners.params declares the row {label!r} twice")
+        seen.add(label)
+    return rows
 
 
 def _parse_process_entry(
@@ -3610,8 +3757,9 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
     ``None`` for every pre-#2522 corner list, so those shards' payloads are
     unchanged apart from one added null field.
     """
-    return [
-        {
+    wire = []
+    for point in points:
+        entry: dict[str, Any] = {
             "process": point.process,
             "process_sections": point.process_sections,
             "process_section_libs": point.process_section_libs,
@@ -3620,8 +3768,13 @@ def _corner_points_to_wire(points: list[CornerPoint]) -> list[dict[str, Any]]:
             "sample_index": point.sample_index,
             "mc_seed": point.mc_seed,
         }
-        for point in points
-    ]
+        if point.params:
+            # Issue #3035: only a parameter point carries the field, so every
+            # request without a `corners.params` axis serialises exactly as
+            # before.
+            entry["params"] = point.params
+        wire.append(entry)
+    return wire
 
 
 def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
@@ -3651,13 +3804,25 @@ def _corner_points_from_wire(data: Any) -> list[CornerPoint]:
                 "request._explicit_points[].process_section_libs must be the "
                 "same length as process_sections"
             )
+        supply_v = entry.get("supply_v") or {}
+        raw_params = entry.get("params")
+        # Issue #3035: validated here again, at the receiving worker, with
+        # the same rules the caller applied (a wire payload is not trusted).
+        params = (
+            _normalize_param_row(
+                raw_params, "request._explicit_points[].params", supply_v
+            )
+            if raw_params is not None
+            else {}
+        )
         points.append(
             CornerPoint(
                 entry.get("process"),
-                entry.get("supply_v") or {},
+                supply_v,
                 entry.get("temperature_c"),
                 process_sections=sections,
                 process_section_libs=section_libs,
+                params=params,
                 sample_index=entry.get("sample_index"),
                 mc_seed=entry.get("mc_seed"),
             )
@@ -3706,20 +3871,55 @@ def _expand_corners(
 
     temperatures: list[float] = corners_spec.get("temperature_c") or [27]
 
+    # Issue #3035: the innermost axis. Its rows are validated before the
+    # exclusion rules so a selector can be checked against the declared names.
+    param_rows = _expand_param_axis(corners_spec)
+    declared_params = set(param_rows[0])
+    _validate_exclude_params(exclude_spec, declared_params)
+
     points: list[CornerPoint] = []
     for process, process_sections, process_section_libs in processes:
         for supply_v in supply_points:
             for temperature_c in temperatures:
-                point = CornerPoint(
-                    process,
-                    supply_v,
-                    temperature_c,
-                    process_sections=process_sections,
-                    process_section_libs=process_section_libs,
-                )
-                if not _is_excluded(point, exclude_spec):
-                    points.append(point)
+                for param_row in param_rows:
+                    point = CornerPoint(
+                        process,
+                        supply_v,
+                        temperature_c,
+                        process_sections=process_sections,
+                        process_section_libs=process_section_libs,
+                        params=param_row,
+                    )
+                    if not _is_excluded(point, exclude_spec):
+                        points.append(point)
     return points
+
+
+def _validate_exclude_params(
+    exclude_spec: list[dict[str, Any]], declared: set[str]
+) -> None:
+    """Reject an ``exclude[].params`` selector naming a parameter the request
+    does not sweep (issue #3035) -- it could never match, so it would
+    silently exclude nothing."""
+    for entry in exclude_spec:
+        if not isinstance(entry, dict) or "params" not in entry:
+            continue
+        selector = entry["params"]
+        if not isinstance(selector, dict):
+            raise SimError("exclude[].params must be an object of name: number")
+        for name, value in selector.items():
+            lowered = name.lower() if isinstance(name, str) else name
+            if lowered not in declared:
+                raise SimError(
+                    f"exclude[].params names {name!r}, which is not a "
+                    "corners.params parameter of this request"
+                    + (
+                        f" (declared: {', '.join(sorted(declared))})"
+                        if declared
+                        else ""
+                    )
+                )
+            _validate_param_scalar(value, f"exclude[].params.{name}")
 
 
 def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool:
@@ -3728,6 +3928,15 @@ def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool
         if _matches_exclude(point, entry):
             return True
     return False
+
+
+def _mapping_matches(actual: dict[str, Any], selector: Any, fold: Any) -> bool:
+    """Whether every ``selector`` key (name folded by ``fold``) equals the
+    point's value for it -- the subset match of ``exclude[].supply_v`` and
+    ``exclude[].params``."""
+    if not isinstance(selector, dict):
+        return False
+    return all(actual.get(fold(name)) == value for name, value in selector.items())
 
 
 def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
@@ -3739,11 +3948,11 @@ def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
             if point.temperature_c != value:
                 return False
         elif key == "supply_v":
-            if not isinstance(value, dict):
+            if not _mapping_matches(point.supply_v, value, str):
                 return False
-            for supply_key, supply_value in value.items():
-                if point.supply_v.get(supply_key) != supply_value:
-                    return False
+        elif key == "params":
+            if not _mapping_matches(point.params, value, lambda n: str(n).lower()):
+                return False
         else:
             return False
     return True
@@ -4078,6 +4287,7 @@ def _expand_monte_carlo(
                     base.temperature_c,
                     process_sections=base.process_sections,
                     process_section_libs=base.process_section_libs,
+                    params=base.params,
                     sample_index=sample_index,
                     mc_seed={
                         "process_seed": process_seed,
@@ -4358,6 +4568,13 @@ def _enforce_xyce_support_boundary(
             "so per-corner supply rails cannot be patched into the deck "
             "-- leave corners.supply_v unset (fixed supply, hardcoded in "
             "the netlist body) or use engine 'ngspice'"
+        )
+    if corners_spec.get("params"):
+        raise SimError(
+            "engine 'xyce' does not support corners.params: the parameter "
+            "axis is applied with ngspice's `alterparam` + `reset` control "
+            "commands, which Xyce has no netlist equivalent of -- use engine "
+            "'ngspice'"
         )
     if monte_carlo_declared:
         raise SimError(
@@ -5051,7 +5268,18 @@ def _included_elements(netlist_path: str, includes: list[str]) -> set[str] | Non
     pulls in through ``.include``/``.lib`` (recursively), or ``None`` when
     any reference cannot be resolved and read -- an unresolved declaration
     is never assumed absent."""
+    closure = _included_declarations(netlist_path, includes)
+    return None if closure is None else closure[0]
+
+
+def _included_declarations(
+    netlist_path: str, includes: list[str]
+) -> tuple[set[str], set[str]] | None:
+    """``(elements, params)`` declared at the top level of every file in the
+    ``.include``/``.lib`` closure (see :func:`_included_elements`; the same
+    walk also collects the ``.param`` names, issue #3035)."""
     elements: set[str] = set()
+    params: set[str] = set()
     seen: set[str] = set()
     pending = [
         (ref, os.path.dirname(os.path.abspath(netlist_path))) for ref in includes
@@ -5073,8 +5301,9 @@ def _included_elements(netlist_path: str, includes: list[str]) -> set[str] | Non
         except OSError:
             return None
         elements |= decl.elements
+        params |= decl.params
         pending.extend((ref, os.path.dirname(path)) for ref in decl.includes)
-    return elements
+    return elements, params
 
 
 def _param_only_targets(netlist_path: str, targets: list[str]) -> dict[str, list[str]]:
@@ -5220,6 +5449,48 @@ def _validate_supply_override_targets(
             "the spelling against the voltage-source name declared in the "
             "netlist"
         )
+
+
+def _validate_param_targets(
+    netlist_path: str, corner_points: list[CornerPoint]
+) -> None:
+    """Reject a ``corners.params`` name that no top-level ``.param`` declares
+    (issue #3035), before any dispatch.
+
+    ngspice's ``alterparam`` of an unknown name only logs ``parameter ... not
+    found`` and carries on, which would let every corner simulate the
+    nominal value and pass. Lexical, with the same conclusiveness rule as
+    :func:`_unresolved_supply_targets`: the scan covers the top-level file
+    and its resolved ``.include``/``.lib`` closure, and when any reference
+    cannot be read nothing is reported here -- :func:`_run_corner` still
+    fails the corner if the engine itself rejects the target. A name only
+    declared inside a ``.subckt`` is not a top-level ``.param`` and is
+    reported (subcircuit-local targeting is out of scope)."""
+    targets = sorted({name for point in corner_points for name in point.params})
+    if not targets:
+        return
+    try:
+        with open(netlist_path, encoding="utf-8") as handle:
+            decl = _netlist_declarations(handle.read())
+    except (OSError, UnicodeDecodeError):
+        return
+    declared = set(decl.params)
+    if decl.includes:
+        closure = _included_declarations(netlist_path, decl.includes)
+        if closure is None:
+            return
+        declared |= closure[1]
+    for target in targets:
+        if target not in declared:
+            raise SimError(
+                f"corners.params name {target!r} is not declared by any "
+                "top-level `.param` in the netlist (including every "
+                ".include/.lib it pulls in): ngspice's `alterparam` of an "
+                "unknown name changes nothing, so every corner would "
+                "silently simulate the nominal value. Declare "
+                f"`.param {target}=<default>` at the top level (subcircuit-"
+                "local parameters cannot be targeted)"
+            )
 
 
 _NETLIST_INCLUDE_RE = re.compile(
@@ -5434,6 +5705,87 @@ def _classify_engine_diagnostics(
     if engine == "xyce":
         return _classify_xyce_diagnostics(log_text)
     return _classify_diagnostics(log_text, netlist_path)
+
+
+PARAMS_UNSUPPORTED_WORKER_CODE = "params_unsupported_worker"
+
+
+def _require_params_echo(
+    points: list[CornerPoint],
+    corners: list[dict[str, Any]],
+    *,
+    backend: str = "remote",
+) -> None:
+    """Fail the request when an off-host worker did not honor a parameter
+    axis (issue #3035).
+
+    A worker that predates ``corners.params`` ignores the field -- it would
+    run every row at the netlist's default and report ``pass`` under the
+    legacy corner ID. A worker that supports it echoes each point's
+    normalized ``params`` and its parameter-suffixed ``corner_id``, so the
+    caller compares both against what it dispatched. This is independent of
+    any version check (which compares only major.minor), so it also catches
+    a same-release runner image built before the feature landed.
+    """
+    if backend not in _OFFHOST_BACKENDS or not any(p.params for p in points):
+        return
+    problem: str | None = None
+    if len(corners) != len(points):
+        problem = (
+            f"it returned {len(corners)} corner report(s) for "
+            f"{len(points)} dispatched point(s)"
+        )
+    else:
+        for point, corner in zip(points, corners, strict=True):
+            if corner.get("corner_id") != point.corner_id or (
+                corner.get("params") or {}
+            ) != (point.params or {}):
+                problem = (
+                    f"corner {point.corner_id!r} came back as "
+                    f"{corner.get('corner_id')!r} with params "
+                    f"{corner.get('params')!r}"
+                )
+                break
+    if problem is not None:
+        raise SimError(
+            "the remote/batch worker did not honor corners.params -- "
+            f"{problem}. A worker built before the parameter axis (issue "
+            "#3035) ignores it and would simulate the netlist default for "
+            "every row; update the runner image to this klt release, or "
+            "use a local backend. No result was reported",
+            code=PARAMS_UNSUPPORTED_WORKER_CODE,
+        )
+
+
+#: ngspice's reply to an ``alterparam`` whose target is not a ``.param`` it
+#: knows: ``Error: parameter 'bogus' not found,`` / ``command 'alterparam'
+#: skipped`` -- printed, but the run continues and exits 0 (issue #3035).
+_ALTERPARAM_FAILURE_RE = re.compile(
+    r"parameter '(?P<name>[^']+)' not found|command 'alterparam' skipped",
+    re.IGNORECASE,
+)
+
+
+def _alterparam_failures(point: CornerPoint, log_text: str) -> list[dict[str, Any]]:
+    """An error diagnostic when the engine refused an ``alterparam`` target,
+    so a corner that simulated the nominal value can never grade ``pass``."""
+    match = _ALTERPARAM_FAILURE_RE.search(log_text)
+    if match is None:
+        return []
+    named = match.group("name")
+    return [
+        {
+            "severity": "error",
+            "code": "netlist",
+            "message": (
+                "corners.params could not be applied: the engine rejected "
+                "`alterparam`"
+                + (f" for {named!r}" if named else "")
+                + " (no such top-level .param), so this corner would have "
+                "simulated the netlist's own default"
+            ),
+        }
+    ]
 
 
 def _grade_corner(
@@ -5656,6 +6008,10 @@ def _run_corner(
             )
         diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
         no_log_reported = False
+        if point.params:
+            diagnostics.extend(
+                _alterparam_failures(point, log_text + "\n" + stdout_text)
+            )
         if engine_exit_code and not log_text and not os.path.exists(log_path):
             diagnostics.append(
                 {
@@ -5827,6 +6183,7 @@ def _run_corner(
         "process": point.process,
         "supply_v": point.supply_v,
         "temperature_c": point.temperature_c,
+        **_params_report_field(point),
         "status": status,
         "runtime_s": runtime_s,
         # Additive (issue #2848): the engine process's raw outcome. Both are
@@ -6353,6 +6710,25 @@ def _write_corner_deck(
         handle.write("\n".join(lines) + "\n")
 
 
+def _param_reset_lines(point: CornerPoint) -> list[str]:
+    """Issue #3035: `alterparam` rewrites the named top-level `.param`
+    defaults, and ONE `reset` re-parses the deck so every expression that
+    reads them is re-evaluated. Everything after these lines (`save all`, the
+    supply `alter`s, the analysis) must come after the reset, because reset
+    reloads the circuit and drops instance-level `alter`s. The `.temp`/
+    `.options` cards are file-scope and survive the reload. Empty for a
+    point without a parameter axis."""
+    if not point.params:
+        return []
+    return [
+        *(
+            f"alterparam {name}={_format_param_value(value)}"
+            for name, value in sorted(point.params.items())
+        ),
+        "reset",
+    ]
+
+
 def _corner_deck_control_lines(
     *,
     point: CornerPoint,
@@ -6449,6 +6825,7 @@ def _corner_deck_control_lines(
     lines = [".control"]
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
+    lines.extend(_param_reset_lines(point))
     if save_mode == DEFAULT_SAVE_MODE and (measurements_spec or raw_path is not None):
         lines.append("save all")
     for key, value in sorted(point.supply_v.items()):
@@ -8304,8 +8681,24 @@ def _slugify_corner_id(corner_id: str) -> str:
     :attr:`CornerPoint.slug`'s transform exactly (that property is not
     reachable from a plain corner report dict, only from the pre-run
     :class:`CornerPoint` this same corner was produced from)."""
-    label = corner_id.replace("/", "_")
+    match = _PARAMS_ID_RE.fullmatch(corner_id)
+    if match is None:
+        return _slugify_label(corner_id)
+    # Issue #3035: a parameter point keeps its PVT slug and appends the full
+    # SHA-256 of the whole ID (MC suffix included) -- parameter values never
+    # reach the filesystem, so close values cannot collide and no value can
+    # inject a path character.
+    digest = hashlib.sha256(corner_id.encode("utf-8")).hexdigest()
+    return f"{_slugify_label(match.group('pvt'))}_params_{digest}"
+
+
+def _slugify_label(label: str) -> str:
+    label = label.replace("/", "_")
     return label.replace(".", "p").replace("=", "").replace("-", "n")
+
+
+#: ``<pvt>/params:<pairs>[/mc<n>]`` -- the shape of a parameter-axis ID.
+_PARAMS_ID_RE = re.compile(r"(?P<pvt>.*?)/params:[^/]*(?:/mc\d+)?")
 
 
 #: Any run of characters that is not alphanumeric/underscore, collapsed to a

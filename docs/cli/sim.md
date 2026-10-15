@@ -266,10 +266,10 @@ naming what *is* supported:
   `measurements[]` constraint as ngspice applies.
 - **Corners**: `process` (`.lib` sections — note Xyce requires a *named*
   `.endl <section>` in the library file where ngspice accepts a bare
-  `.endl`) and `temperature`. **`corners.supply_v` is refused**: Xyce has
-  no netlist equivalent of ngspice's `alter`, so per-corner supply rails
-  cannot be patched into the deck — keep the supply hardcoded in the
-  netlist body.
+  `.endl`) and `temperature`. **`corners.supply_v` and `corners.params` are refused**: Xyce has
+  no netlist equivalent of ngspice's `alter`/`alterparam`, so per-corner
+  supply rails and parameter rows cannot be patched into the deck — keep
+  them hardcoded in the netlist body.
 - **Backends**: `local` and `local-parallel` only; `remote`/`batch` pin
   the ngspice toolchain and are refused for this engine.
 - **Refused**: `monte_carlo` (no seed wiring),
@@ -1154,6 +1154,14 @@ the packaged `data/` copy. See
   `environment.remote.runner_klt_version` (what the job actually ran) stays
   the authoritative record.
 
+- **What the gate cannot see (`corners.params`, #3035).** The gate compares
+  major.minor only, so a same-minor image built *before* a request field
+  existed passes it and ignores that field. For `corners.params` `klt sim`
+  does not rely on the version: it requires every returned corner to echo
+  the dispatched `corner_id` and `params`, and fails the request with
+  `params_unsupported_worker` otherwise (see "Corner axes"). Other newer
+  fields still depend on the version check above.
+
 **When the client is newer than the runner.** If the image is a different
 minor from your client, either:
 
@@ -1876,8 +1884,8 @@ its own**. `klt sim` generates a corner-specific wrapper deck that
 `.include`s the file and appends the corner's `.lib`/`.temp` cards, the
 request's verbatim `.meas` cards, and a `.control` block that `pre_osdi`-loads
 any declared OSDI libraries, restores the full saved set with `save all` (see
-"Saved signal set" below), `alter`s the supply sources, and runs the
-declared analysis. A netlist that already
+"Saved signal set" below), applies any `corners.params` row (`alterparam` + `reset`), `alter`s the
+supply sources, and runs the declared analysis. A netlist that already
 carries its own `.end` (a full deck exported as-is, e.g. straight off some
 schematic tools) is not supported in this version — strip the top-level
 control/end cards before pointing a request at it. A PDK whose devices are
@@ -3239,13 +3247,84 @@ a corner grid. A stock ngspice without the module still produces the
   is never assumed to be DC. Rewriting waveform sources is out of scope.
 - **`corners.temperature_c`** (`array<number>`, optional) — degrees Celsius,
   one `.temp <value>` card per point. Defaults to `[27]` when omitted.
+- **`corners.params`** (`object`, optional, [#3035](https://github.com/2AMLogic/klayout-tools/issues/3035))
+  — a numeric design-parameter axis: SPICE parameter names mapped to
+  equal-length, nonempty arrays of finite JSON numbers. Use it for a
+  parameter-dependent resistor, bias value, trim code, or a waveform
+  amplitude/frequency that must vary across PVT *within one request*, without
+  pretending the coordinate is a supply voltage.
+
+  ```json
+  {"corners": {"temperature_c": [27, 85],
+               "params": {"rload": [1000, 2000], "code": [0, 1]}}}
+  ```
+
+  This expands to four points, in this order: 27 °C/row 0, 27 °C/row 1,
+  85 °C/row 0, 85 °C/row 1 (row *i* is `rload=array[i], code=array[i]`).
+
+  - **Rules.** Names match `[A-Za-z_][A-Za-z0-9_]*`, are normalized to
+    lowercase, and may not repeat case-insensitively or start with `mc_`
+    (reserved for Monte Carlo). Values are numbers only — no booleans,
+    `null`, `NaN`/`Infinity`, or expression strings. `null`, `[]`, unequal
+    lengths and duplicate (normalized) rows are rejected. A name may not
+    appear in both `corners.params` and `corners.supply_v`
+    (case-insensitive); the request is refused before any dispatch.
+  - **Expansion order**, outer to inner: process → supply → temperature →
+    parameter row. Monte Carlo samples stay inside the expanded point.
+    Parameter arrays always zip by index; there are no process-zipped,
+    dependent or sparse parameter axes.
+  - **What a parameter addresses.** An existing *top-level* `.param`
+    declaration, in the request's netlist or anything it `.include`s. The
+    requested value replaces the declared default and every expression that
+    reads it (instance values, `SIN()` amplitude/frequency, dependent
+    `.param`s) is re-evaluated. The deck applies it as `alterparam <name>=<value>`
+    for each name, then **one** `reset`, before the saved-set `save all`, the
+    supply `alter` commands and the analysis; `.temp`, `.options`, the
+    Monte Carlo seed card and `options.osdi_preload` are unaffected. A name no
+    top-level `.param` declares is a `SimError` before dispatch (when the
+    `.include`/`.lib` closure cannot be fully read, the scan defers and the
+    engine's own `alterparam ... not found` instead grades that corner
+    `error` with a `netlist` diagnostic). Subcircuit-local parameters and
+    arbitrary text injection are not supported, and source cards are never
+    rewritten.
+  - **Precedence with `supply_v`.** Parameters are evaluated first, instance
+    `alter`s after: if a parameter sets a source's default, an explicit
+    `corners.supply_v` override of that source wins its value. Note that
+    `alter` addresses *instances* and never updates a `.param` definition —
+    that is what this axis is for.
+  - **Identity.** `params` (the normalized scalar map, integral values as
+    integers) is echoed on each corner report and in `_explicit_points`. For a
+    parameter point the `corner_id` gains `/params:<pairs>` before any
+    `/mc<N>` suffix: pairs are sorted lowercase names joined by commas, each
+    `name=value`, values in the shortest round-trip decimal (integral values
+    as integers, negative zero as `0`) — never three-decimal rounding or
+    voltage units. Example: `default/novdd/27C/params:code=1,rload=2000`.
+    A request with no (or an empty) `params` keeps its legacy IDs and slugs
+    byte-for-byte. The artifact directory of a parameter point is the existing
+    PVT slug plus `_params_` plus the full hexadecimal SHA-256 of the UTF-8
+    `corner_id` (MC suffix included), so close-valued parameters never share a
+    directory. Checkpoint identity uses the complete ID and the existing
+    request fingerprint.
+  - **Support.** ngspice on `local`/`local-parallel`, and on `remote`/`batch`
+    **with an updated worker image** (one built from a `klt` that includes
+    `corners.params`). `engine: "xyce"` with `corners.params` fails before
+    execution, and `--op-lint` refuses a corner that carries parameters.
+    An older worker silently ignores the unknown field, and the runner
+    version check compares only major.minor, so it cannot tell such an image
+    apart. `klt sim` therefore checks the answer: every returned corner must
+    echo the dispatched `corner_id` and `params`, otherwise the request fails
+    with error code `params_unsupported_worker` and reports no result. Update
+    the runner image, or use a local backend.
 - **`exclude`** (`array<object>`, optional) — partial corner specs
-  (`process`, `temperature_c`, and/or `supply_v`) dropped from the expansion,
-  for sparse matrices.
+  (`process`, `temperature_c`, `supply_v`, and/or `params`) dropped from the
+  expansion, for sparse matrices. `exclude[].params` is an exact-match subset
+  of a point's `params` map (names case-insensitive, values compared
+  numerically), ANDed with the other selector keys; naming a parameter the
+  request does not sweep is a `SimError`.
 
 Expansion is deterministic and odometer-style: process outermost, supply
-next, temperature innermost — the same corner list, same order, every run
-against the same request.
+next, temperature next, parameter row innermost — the same corner list, same
+order, every run against the same request.
 
 ### Per-section corner libraries
 
@@ -4416,7 +4495,8 @@ the *response* echoes back.
 | `corners.process`        | array\<string \| {name, sections: array\<string \| {lib, section}\>}\> | Process-corner axis. Each entry is either a bare `.lib` section name (single `.lib` card) or a bundle object `{"name": str, "sections": [...]}` (one `.lib` card per section, in order). Each `sections[]` entry is a bare section name (read from `models.lib`) or `{"lib": str, "section": str}` naming its own model library for that section (issue #2522 — `$VAR`/`~` expand, relative refs resolve like `models.lib`; each must exist, checked before any corner runs, exit 1 otherwise). See "Corner axes" above. |
 | `corners.supply_v`       | object            | Supply axis, keyed by voltage-source name (not a `.param`); arrays sweep together by index.                                                                            |
 | `corners.temperature_c`  | array\<number\>   | Temperature axis, degrees Celsius. Defaults to `[27]`.                                                                                                                 |
-| `exclude`                | array\<object\>   | Partial corner specs dropped from the expansion.                                                                                                                       |
+| `corners.params`         | object            | Issue #3035. Numeric design-parameter axis: SPICE parameter name → equal-length nonempty array of finite numbers, zipped by index and expanded innermost (after temperature). Applied with `alterparam` + `reset`; each corner echoes `params` and its `corner_id` gains `/params:<pairs>`. See "Corner axes" above. |
+| `exclude`                | array\<object\>   | Partial corner specs (`process`, `temperature_c`, `supply_v`, `params`) dropped from the expansion.                                                                      |
 | `monte_carlo.n`          | integer           | Number of samples per expanded corner point. Positive integer, required when `monte_carlo` is present. See "Monte Carlo sampling" above.                              |
 | `monte_carlo.seed`       | integer           | Base seed the sample sequence derives from. Required when `monte_carlo` is present.                                                                                    |
 | `monte_carlo.vary`       | string            | `"mismatch"`, `"process"`, or `"both"` — which axis the sample sequence varies. Required when `monte_carlo` is present.                                                 |
@@ -4513,6 +4593,7 @@ the *response* echoes back.
       "process": "tt",
       "supply_v": { "vdd": 1.62 },
       "temperature_c": -40,
+      "params": { "rload": 2000 },
       "status": "pass",
       "runtime_s": 0.082,
       "measurements": [

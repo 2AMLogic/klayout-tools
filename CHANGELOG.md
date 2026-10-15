@@ -54,6 +54,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   block is still non-`null` in both cases; `model_set` output is unchanged.
   Additive; no `schema_version` bump.
 
+- **`klt sim` gains a numeric design-parameter axis, `corners.params`**
+  (issue #3035): SPICE parameter names mapped to equal-length arrays of
+  numbers, zipped by index and expanded innermost (after temperature),
+  applied with `alterparam` + one `reset`. Additive: each parameter point's
+  corner report carries `params`, its `corner_id` gains `/params:<pairs>`
+  before any `/mc<N>` suffix, and `exclude[].params` selects rows; requests
+  without the axis keep byte-identical IDs, slugs and wire payloads.
+  `remote`/`batch` workers must be updated: a worker that does not echo the
+  dispatched `params` fails the request with `params_unsupported_worker`
+  instead of passing at the netlist defaults. `engine: "xyce"` and
+  `--op-lint` refuse the axis. See `docs/cli/sim.md` "Corner axes".
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
