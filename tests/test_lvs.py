@@ -22522,3 +22522,69 @@ def test_strict_pin_count_netgen_engine_real_binary(tmp_path):
     assert report["status"] == "mismatch"
     (finding,) = _pin_count_findings(report)
     assert finding["details"] == {"layout_pin_count": 3, "reference_pin_count": 2}
+
+
+# ---------------------------------------------------------------------------
+# Issue #3078: bare pre-extracted layout.netlist with a resistor `X` card
+# ---------------------------------------------------------------------------
+
+_BARE_RES_LAYOUT = """\
+.SUBCKT top a b vsubs
+X$1 a b vsubs res_high_po r=3627.97760 L=9.765U W=1U
+.ENDS top
+"""
+_BARE_RES_REFERENCE = """\
+.SUBCKT top a b vsubs
+R1 a b vsubs 3627.97760 res_high_po
+.ENDS top
+"""
+
+
+def _bare_res_request(tmp_path, layout_text, *, layout_deck=None, ref_deck="sky130"):
+    layout = {"netlist": _write(tmp_path / "lay.spice", layout_text), "top": "top"}
+    if layout_deck:
+        layout["deck"] = layout_deck
+    reference = {
+        "netlist": _write(tmp_path / "ref.spice", _BARE_RES_REFERENCE),
+        "top": "top",
+    }
+    if ref_deck:
+        reference["deck"] = ref_deck
+    return _write_request(
+        tmp_path / "req.json", {"layout": layout, "reference": reference}
+    )
+
+
+def test_bare_layout_netlist_resistor_x_card_requires_layout_deck(tmp_path):
+    """#3078: a bare pre-extracted netlist's resistor `X` card is refused
+    with an error naming `layout.deck`, not reported as a `mismatch`."""
+    with pytest.raises(
+        LvsError, match=r"layout\.deck.*X\$1 \(res_high_po\)|X\$1.*layout\.deck"
+    ):
+        run_lvs(_bare_res_request(tmp_path, _BARE_RES_LAYOUT))
+
+
+def test_bare_layout_netlist_resistor_x_card_class_is_case_insensitive(tmp_path):
+    with pytest.raises(LvsError, match=r"layout\.deck"):
+        run_lvs(
+            _bare_res_request(
+                tmp_path, _BARE_RES_LAYOUT.replace("res_high_po", "RES_HIGH_PO")
+            )
+        )
+
+
+def test_bare_layout_netlist_resistor_x_card_with_layout_deck_still_matches(tmp_path):
+    report = run_lvs(
+        _bare_res_request(tmp_path, _BARE_RES_LAYOUT, layout_deck="sky130")
+    )
+    assert report["status"] == "match"
+
+
+def test_bare_layout_netlist_resistor_x_card_without_reference_deck_unchanged(tmp_path):
+    report = run_lvs(_bare_res_request(tmp_path, _BARE_RES_LAYOUT, ref_deck=None))
+    assert report["status"] == "mismatch"
+
+
+def test_bare_layout_netlist_two_terminal_r_card_unaffected(tmp_path):
+    report = run_lvs(_bare_res_request(tmp_path, _BARE_RES_REFERENCE))
+    assert report["status"] == "match"
