@@ -12648,3 +12648,26 @@ def test_timeout_budget_hint_near_budget_and_timeout():
 
 def test_timeout_budget_hint_absent_when_well_inside_budget():
     assert sim._timeout_budget_hint([_hint_corner(100.0)], 600) is None
+
+
+# --------------------------------------------------------------------------- #
+# noise_representation (issue #3006)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("plotname", "vtype", "expected"),
+    [
+        ("Integrated Noise", "voltage", "amplitude"),
+        ("Integrated Noise - V^2 or A^2", "voltage^2", "power"),
+        ("Integrated Noise", "current^2", "power"),
+        ("Integrated Noise - V^2 or A^2", "voltage", "power"),
+    ],
+)
+def test_noise_representation(plotname, vtype, expected):
+    waveform = {
+        "plotname": plotname,
+        "variables": [{"index": 0, "name": "onoise_total", "type": vtype}],
+        "points": [[1.0]],
+    }
+    assert sim.noise_representation(waveform) == expected

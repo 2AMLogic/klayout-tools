@@ -2030,6 +2030,17 @@ Limitation: this applies to the single-analysis path only. Inside
 `analysis_steps` a `noise` step's spectrum plot is not captured, so spectrum
 vectors are not reachable there (tracked in [#3284](https://github.com/2AMLogic/klayout-tools/issues/3284)).
 
+### Noise units and `sqrnoise`
+
+`measurements[].unit` is a caller-supplied label; klt never checks it against
+the values. ngspice's `sqrnoise` option (from a `.spiceinit`, a worker image
+default, or `options.ngspice_init`) squares every noise output vector, so the
+same request can yield amplitude (V, A) or power (V², A²) numbers that both
+grade `pass`. A `noise` corner whose rawfile was parsed carries
+`noise_representation` (`"amplitude"` or `"power"`, see the report fields
+table) so callers can check mechanically. To pin amplitude regardless of the
+environment, set `options.ngspice_init: ["unset sqrnoise"]`.
+
 ### `expr` cannot read `.meas` results
 
 The chaining rule above covers **`expr` -> `expr`** only. A `spice` entry's
@@ -4383,6 +4394,7 @@ corner-sweep rollup fields above are declared.
 | `status`         | string           | `"pass"`, `"fail"`, `"error"`, or `"inconclusive"` (issues #2492/#2493 — only reachable when the request declares `options.fail_on_diagnostic` or a plausibility bound; see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above). Precedence `error > inconclusive > fail > pass`. |
 | `runtime_s`      | number           | Engine wall-clock time for this corner (or time-to-timeout, on a killed run).                                                  |
 | `engine_exit_code` | integer \| null | Additive (issue #2848): the simulator process's exit code (`0` or nonzero). `null` when the engine was killed by a signal, when the harness's own `timeout` ended it, when it never launched, and for corners that never ran (`budget_exceeded`, `orphaned`, `lost_shard`, …). A nonzero exit alone does not change `status`. Rides in `report.json` unchanged on `--backend batch`/`remote`. |
+| `noise_representation` | string | Additive (issue #3006), `noise` corners only: `"power"` when the rawfile's integrated-noise plot is squared (`Integrated Noise - V^2 or A^2`, `voltage^2` variables — ngspice `sqrnoise` set), else `"amplitude"`. Omitted for other analyses and when no rawfile was parsed (needs `options.waveforms`/`keep_artifacts`). No `schema_version` bump. |
 | `engine_killed_by_signal` | string \| null | Additive (issue #2848): the signal name (e.g. `"SIGKILL"`) when the engine process was killed by a signal the harness did not send; such a corner also carries an `engine_killed` error diagnostic. `null` otherwise, including on a harness `timeout`. |
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. |
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
