@@ -3372,6 +3372,20 @@ Both shapes apply verbatim to a `corners.process` bundle's per-section
 above) — a per-section library resolves exactly as the `models.lib` it
 stands in for would, and is reported in `environment.corner_section_libs`.
 
+**Only the PDK-relative form is portable to `remote`/`batch`.** The runner
+resolves `models.lib` on its own box against its own PDK root, so an absolute
+host path (`/home/<user>/.volare/...`, or a `~/...` path) names a file that
+does not exist there. On the `batch` backend such a request is refused before
+any S3 write or instance launch
+([#3296](https://github.com/2AMLogic/klayout-tools/issues/3296)): exit `1`,
+`error.code` `models_lib_host_path`, naming each offending ref (`models.lib`
+or a per-section `corners.process[].sections[].lib`) and, when the path sits
+in a `<variant>/libs.tech/...` tree, the replacement
+`{"pdk": "<variant>", "lib": "libs.tech/..."}`. Not refused: a PDK-relative
+`lib`, a `$PDK_ROOT/...` form (the runner expands it), and any request with
+`options.stage_model_inputs: true` (the library ships with the job).
+`local`/`local-parallel` accept absolute paths unchanged.
+
 Either way, the resolved library is reported in the response's
 `environment.models_lib` as the `{path, scope}` shape (`schema_version` `3`,
 issue [#1274](https://github.com/2AMLogic/klayout-tools/issues/1274)) — never

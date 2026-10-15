@@ -1060,6 +1060,71 @@ def test_a_variant_reducible_to_a_published_family_is_accepted(
     assert config.bucket == FAKE_BUCKET
 
 
+_HOST_LIB = "/home/u/.volare/gf180mcuD/libs.tech/ngspice/sm141064.ngspice"
+
+
+def _lib_request(tmp_path, **fields):
+    script = _provision_script(tmp_path)
+    return {
+        "batch": {"provision_script_path": str(script), "bucket": FAKE_BUCKET},
+        **fields,
+    }
+
+
+def test_absolute_models_lib_is_refused_with_the_pdk_relative_form(tmp_path):
+    request = _lib_request(tmp_path, models={"lib": _HOST_LIB})
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_host_path"
+    message = str(excinfo.value)
+    assert _HOST_LIB in message
+    assert '"pdk": "gf180mcuD"' in message
+    assert '"lib": "libs.tech/ngspice/sm141064.ngspice"' in message
+
+
+def test_absolute_models_lib_outside_a_pdk_has_no_rewrite_hint(tmp_path):
+    request = _lib_request(tmp_path, models={"lib": "/opt/custom/models.lib"})
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_host_path"
+    assert "use {" not in str(excinfo.value)
+
+
+def test_tilde_models_lib_is_a_host_path(tmp_path):
+    request = _lib_request(tmp_path, models={"lib": "~/models.lib"})
+    with pytest.raises(sim.SimError, match="host-path model library"):
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+
+
+def test_absolute_per_section_lib_is_refused(tmp_path):
+    request = _lib_request(
+        tmp_path,
+        models={"pdk": "gf180mcuD"},
+        corners={
+            "process": [
+                {"name": "tt", "sections": [{"lib": _HOST_LIB, "section": "typical"}]}
+            ]
+        },
+    )
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0)
+    assert excinfo.value.code == "models_lib_host_path"
+    assert "corners.process[0].sections[0].lib" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"models": {"pdk": "gf180mcuD", "lib": "libs.tech/ngspice/sm141064.ngspice"}},
+        {"models": {"lib": "$PDK_ROOT/gf180mcuD/libs.tech/ngspice/sm141064.ngspice"}},
+        {"models": {"lib": _HOST_LIB}, "options": {"stage_model_inputs": True}},
+    ],
+)
+def test_portable_or_staged_models_lib_is_not_refused(tmp_path, extra):
+    request = _lib_request(tmp_path, **extra)
+    assert sb._resolve_batch_config(request, corner_count=1, timeout_s=30.0).bucket
+
+
 def test_a_request_naming_no_pdk_at_all_is_not_refused(tmp_path, monkeypatch):
     """Edge case that must not regress: a process-less request has no model
     library to resolve, so there is no PDK to validate and nothing to refuse."""
