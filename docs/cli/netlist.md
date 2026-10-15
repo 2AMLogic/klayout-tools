@@ -255,6 +255,7 @@ envelope's `error.code` classifies it:
 | `batch_concurrency_cap` | The launch was refused because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (retryable; waited out under `batch.capacity_wait_s`). |
 | `batch_runner_version_mismatch` / `batch_runner_version_unknown` | The runner's `klt` differs from this client's, or could not be read; nothing ran. A mismatch that the AMI manifest already publishes is refused before upload, with no job launched ([sim.md](sim.md), "Pre-launch check from the AMI manifest"). |
 | `batch_poll_timeout` | The job did not finish within the poll budget. It may still finish on the runner; nothing was collected. |
+| `batch_job_interrupted` | The job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than the default 1800 s grace ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)), so polling stopped before the poll budget. It may still be recoverable on the fleet; the client does not re-launch it. `klt netlist` has no request to carry `batch.interrupted_grace_s`, and prints no progress lines (its stderr carries the error envelope). |
 | `batch_job_timeout` | The harness stopped the job at its `timeout_seconds`. |
 | `batch_job_failed` | The job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted (and its `error.code` used, when it has one). |
 | `unevaluated_expr` | The netlist still contains a literal `expr(...)` (see above). Also returned by the local backend. |

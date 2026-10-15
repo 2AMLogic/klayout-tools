@@ -750,7 +750,7 @@ def _transport_error(job_id: str, exc: sim_batch.BatchError) -> NetlistError:
         return NetlistError(
             f"batch job {job_id}: {exc} -- it may still finish on the fleet, but "
             f"no netlist was collected {_NO_FALLBACK}",
-            code=BATCH_POLL_TIMEOUT_CODE,
+            code=exc.code or BATCH_POLL_TIMEOUT_CODE,
             job_id=job_id,
         )
     return NetlistError(
@@ -767,11 +767,14 @@ def _submit_and_wait(
     sleep: Callable[[float], None],
 ) -> dict[str, Any]:
     """Upload, launch and poll to a terminal ``status.json``. Every transport
-    failure, the poll timeout included, becomes a :class:`NetlistError`."""
+    failure, the poll timeout included, becomes a :class:`NetlistError`.
+    No progress lines: `klt netlist` carries its error envelope on stderr."""
     try:
-        sim_batch.submit_job(config, job_id, spec, runner=runner)
+        sim_batch.submit_job(config, job_id, spec, runner=runner, progress=False)
         sim_batch.launch_job(config, job_id, runner=runner, sleep=sleep)
-        return sim_batch.poll_status(config, job_id, runner=runner, sleep=sleep)
+        return sim_batch.poll_status(
+            config, job_id, runner=runner, sleep=sleep, progress=False
+        )
     except sim_batch.BatchError as exc:
         raise _transport_error(job_id, exc) from exc
 

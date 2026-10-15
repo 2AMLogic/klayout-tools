@@ -260,6 +260,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_failed",
         "batch_job_timeout",
         "batch_poll_timeout",
+        "batch_job_interrupted",
     }
 )
 

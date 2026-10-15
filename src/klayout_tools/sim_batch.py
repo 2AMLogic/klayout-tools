@@ -314,8 +314,28 @@ BATCH_TERMINAL_STATES = ("done", "failed", "timeout")
 #: ``status.json`` states that mean "keep waiting". ``interrupted`` is
 #: included on purpose: Spot reclaimed the instance, and 2am's own
 #: ``reconcile`` (scheduled on the captain, 2am#533) re-launches the job.
-#: The client waits; it never re-submits an ``interrupted`` job itself.
+#: The client waits (at most ``request.batch.interrupted_grace_s`` of
+#: continuous ``interrupted``, issue #2992); it never re-submits an
+#: ``interrupted`` job itself.
 BATCH_WAITING_STATES = ("running", "interrupted")
+
+#: Machine-readable diagnostic/``error.code`` of a poll that gave up on a job
+#: that stayed ``interrupted`` for longer than
+#: ``request.batch.interrupted_grace_s`` (issue #2992).
+BATCH_JOB_INTERRUPTED_CODE = "batch_job_interrupted"
+
+#: Diagnostic/``error.code`` of a poll whose wall-clock budget elapsed.
+BATCH_POLL_TIMEOUT_CODE = "batch_poll_timeout"
+
+#: Default for ``request.batch.interrupted_grace_s``: how long a job may sit
+#: continuously ``interrupted`` (waiting for 2am's scheduled ``reconcile`` to
+#: re-launch it) before :func:`poll_status` stops waiting. ``0`` disables the
+#: fail-fast and restores waiting out the whole ``poll_timeout_s``.
+DEFAULT_INTERRUPTED_GRACE_S = 1800.0
+
+#: :func:`poll_status` prints a progress line on stderr on every state change
+#: and otherwise once every this many polls.
+_POLL_PROGRESS_EVERY = 10
 
 #: `klt sim` exit codes that still mean "the sweep ran and wrote a report":
 #: 0 (pass) / 3 (measurement failure) / 4 (corner error). The harness marks
@@ -376,9 +396,35 @@ class BatchPollTimeout(BatchError):
     failed.
     """
 
-    def __init__(self, message: str, *, last_state: str | None = None) -> None:
-        super().__init__(message)
+    def __init__(
+        self,
+        message: str,
+        *,
+        last_state: str | None = None,
+        code: str | None = BATCH_POLL_TIMEOUT_CODE,
+    ) -> None:
+        super().__init__(message, code=code)
         self.last_state = last_state
+
+
+class BatchJobInterrupted(BatchPollTimeout):
+    """The job stayed ``interrupted`` for longer than
+    ``config.interrupted_grace_s`` (issue #2992), so polling stopped early
+    rather than waiting out ``poll_timeout_s`` for a ``reconcile`` re-launch
+    that is not coming.
+
+    A :class:`BatchPollTimeout` subclass: every handler of the poll budget
+    reports the job's units as unrun and not failed -- the job may still be
+    recoverable on the fleet -- but with ``code ==
+    "batch_job_interrupted"`` and ``interrupted_s`` recording how long it
+    had been interrupted.
+    """
+
+    def __init__(self, message: str, *, interrupted_s: float) -> None:
+        super().__init__(
+            message, last_state="interrupted", code=BATCH_JOB_INTERRUPTED_CODE
+        )
+        self.interrupted_s = interrupted_s
 
 
 # --------------------------------------------------------------------------- #
@@ -1153,6 +1199,8 @@ class BatchConfig:
     #: units of one job; ``None`` -- the default -- leaves the split to
     #: ``job_ceiling_check: "split"`` (or to no split at all).
     max_units_per_job: int | None = None
+    #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
+    interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -1422,6 +1470,7 @@ def _resolve_batch_config(
         max_job_seconds_source=max_job_seconds_source,
         job_ceiling_check=job_ceiling_check,
         max_units_per_job=max_units_per_job,
+        interrupted_grace_s=_resolve_interrupted_grace_s(batch_spec),
     )
     # Issue #2851: compare the runner klt the AMI manifest publishes with
     # this client, once per request (so once for every shard of a
@@ -1834,6 +1883,27 @@ def _resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
     return float(value)
 
 
+def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
+    """``request.batch.interrupted_grace_s``: a finite, non-negative number of
+    seconds (default :data:`DEFAULT_INTERRUPTED_GRACE_S`; ``0`` disables the
+    fail-fast), else :class:`~klayout_tools.sim.SimError` -- raised before any
+    S3 write. A ``bool`` is refused, as for ``capacity_wait_s``."""
+    from .sim import SimError
+
+    value = batch_spec.get("interrupted_grace_s", DEFAULT_INTERRUPTED_GRACE_S)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise SimError(
+            "request.batch.interrupted_grace_s must be a non-negative number "
+            f"of seconds (got {value!r})"
+        )
+    return float(value)
+
+
 # --------------------------------------------------------------------------- #
 # S3 / launch transport (every call through an injectable runner)
 # --------------------------------------------------------------------------- #
@@ -1941,12 +2011,19 @@ def _capacity_backoff_s(retry_index: int, jitter: Callable[[], float]) -> float:
     return nominal * (0.5 + 0.5 * jitter())
 
 
+def _progress(line: str) -> None:
+    """One progress line on stderr (never stdout: that carries the JSON
+    envelope). Resolves ``sys.stderr`` at call time so it can be captured."""
+    print(line, file=sys.stderr, flush=True)
+
+
 def submit_job(
     config: BatchConfig,
     job_id: str,
     spec: BatchJobSpec,
     *,
     runner: remote_transport.CommandRunner | None = None,
+    progress: bool = True,
 ) -> None:
     """Upload ``inputs/**`` and then ``job.json`` to
     ``s3://<bucket>/<jobs>/<job-id>/``.
@@ -1956,9 +2033,15 @@ def submit_job(
     head-object``) and the harness fetches first, so writing it last makes
     the submission atomic from the fleet's point of view -- a launch can
     never observe a job spec whose inputs are still uploading.
+
+    ``progress`` (issue #2992) prints the job id on stderr before uploading;
+    a verb whose stderr carries its error envelope (``klt netlist``) passes
+    ``False``.
     """
     run = runner if runner is not None else _run_subprocess
     prefix = job_uri(config, job_id)
+    if progress:
+        _progress(f"klt: batch job {job_id} submitting to {prefix}")
     with tempfile.TemporaryDirectory(prefix="klt-batch-") as staging:
         for item in spec.inputs:
             local_path = item.local_path
@@ -2153,6 +2236,7 @@ def poll_status(
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
     heartbeat: bool = False,
+    progress: bool = True,
 ) -> dict[str, Any]:
     """Poll ``status.json`` until the job reaches a terminal state
     (:data:`BATCH_TERMINAL_STATES`) and return that status document.
@@ -2161,14 +2245,23 @@ def poll_status(
     (:data:`BATCH_WAITING_STATES`). ``interrupted`` specifically is **not**
     re-submitted here: Spot reclaimed the instance and 2am's own scheduled
     ``reconcile`` re-launches the job -- a client that also re-launched
-    would double-spend the shared fleet budget.
+    would double-spend the shared fleet budget. The wait is bounded, though:
+    a job continuously ``interrupted`` for longer than
+    ``config.interrupted_grace_s`` (``0`` = unbounded) raises
+    :class:`BatchJobInterrupted`; returning to ``running`` resets that clock,
+    and an unreadable ``status.json`` neither starts nor resets it.
+
+    Unless ``progress=False``, progress goes to stderr (:func:`_progress`): a
+    line on every state change and one per :data:`_POLL_PROGRESS_EVERY` polls
+    otherwise (state, elapsed, the instance id when ``status.json`` has one).
 
     Raises :class:`BatchPollTimeout` once ``config.poll_timeout_s`` elapses
     (the caller reports unrun corners rather than a failed sweep), and
     :class:`BatchError` on a state outside the documented set -- a contract
     violation, surfaced loudly rather than waited on forever.
 
-    With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, ``klt netlist``
+    With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, with
+    ``progress=False`` so the two stderr streams do not duplicate each other, ``klt netlist``
     does not, so its stderr stays a bare JSON envelope), a heartbeat line
     (job id, last observed state, elapsed) goes to **stderr** on every state
     change and otherwise every :data:`BATCH_HEARTBEAT_INTERVAL_S`
@@ -2179,8 +2272,13 @@ def poll_status(
     last_state: str | None = None
     beat_state: str | None = None
     beat_at: float | None = None
+    reported_state: str | None = None
+    interrupted_since: float | None = None
+    polls = 0
     while True:
+        polls += 1
         status = _read_status(config, job_id, run)
+        now = monotonic()
         if status is not None:
             last_state = str(status.get("state") or "")
             if last_state in BATCH_TERMINAL_STATES:
@@ -2191,7 +2289,42 @@ def poll_status(
                     f"{last_state!r} (expected one of "
                     f"{', '.join(BATCH_WAITING_STATES + BATCH_TERMINAL_STATES)})"
                 )
-        elapsed = monotonic() - started
+            if last_state == "interrupted":
+                if interrupted_since is None:
+                    interrupted_since = now
+            else:
+                interrupted_since = None
+            if progress and (
+                last_state != reported_state or polls % _POLL_PROGRESS_EVERY == 0
+            ):
+                reported_state = last_state
+                instance = status.get("instance_id")
+                _progress(
+                    f"klt: batch job {job_id} state={last_state} "
+                    f"elapsed={now - started:.0f}s"
+                    + (f" instance={instance}" if instance else "")
+                )
+        elif progress and polls % _POLL_PROGRESS_EVERY == 0:
+            _progress(
+                f"klt: batch job {job_id} no readable status.json "
+                f"elapsed={now - started:.0f}s"
+            )
+        if (
+            interrupted_since is not None
+            and config.interrupted_grace_s > 0
+            and now - interrupted_since >= config.interrupted_grace_s
+        ):
+            interrupted_s = now - interrupted_since
+            raise BatchJobInterrupted(
+                f"job {job_id} stayed 'interrupted' (Spot reclaimed) for "
+                f"{interrupted_s:.0f}s, past batch.interrupted_grace_s="
+                f"{config.interrupted_grace_s:g}s, with no re-launch observed; "
+                "it may still be recoverable on the fleet (check "
+                f"{job_uri(config, job_id)}/status.json) -- the client does "
+                "not re-launch it itself",
+                interrupted_s=interrupted_s,
+            )
+        elapsed = now - started
         if elapsed >= config.poll_timeout_s:
             raise BatchPollTimeout(
                 f"job {job_id} did not reach a terminal state within "
@@ -2928,13 +3061,19 @@ def _poll_timeout_corners(
     exc: BatchPollTimeout,
 ) -> list[dict[str, Any]]:
     """Every unit of a job whose wall-clock poll budget elapsed, reported
-    through the shared unrun-corner shape (``batch_poll_timeout``). The job
+    through the shared unrun-corner shape (``batch_poll_timeout``, or
+    ``batch_job_interrupted`` for :class:`BatchJobInterrupted`). The job
     may well still be running on the fleet -- which is exactly why this is
     not a ``SimError``: the sweep reports what it knows instead of claiming
     the run failed."""
     return [
         _unrun_corner_report(
-            point, measurements_spec, "batch_poll_timeout", message=str(exc)
+            point,
+            measurements_spec,
+            "batch_job_interrupted"
+            if isinstance(exc, BatchJobInterrupted)
+            else "batch_poll_timeout",
+            message=str(exc),
         )
         for point in corner_points
     ]
@@ -3086,7 +3225,14 @@ def _poll_and_collect(
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The wait-and-collect tail shared by a fresh submit and ``--attach``."""
     try:
-        status = poll_status(config, job_id, runner=runner, sleep=sleep, heartbeat=True)
+        status = poll_status(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=True,
+            progress=False,
+        )
     except BatchPollTimeout as exc:
         return (
             _poll_timeout_corners(corner_points, measurements_spec, exc),
@@ -3097,6 +3243,11 @@ def _poll_and_collect(
                 "bucket": config.bucket,
                 "region": config.region,
                 "state": exc.last_state,
+                **(
+                    {"interrupted_s": round(exc.interrupted_s, 1)}
+                    if isinstance(exc, BatchJobInterrupted)
+                    else {}
+                ),
                 **_read_job_identity(None),
             },
         )
@@ -3407,7 +3558,9 @@ __all__ = [
     "BATCH_STDERR_FILENAME",
     "BATCH_REQUEST_FILENAME",
     "BATCH_TERMINAL_STATES",
+    "BATCH_JOB_INTERRUPTED_CODE",
     "BATCH_WAITING_STATES",
+    "BatchJobInterrupted",
     "BatchConfig",
     "BatchError",
     "BatchJobInput",
