@@ -437,6 +437,14 @@
         "klayout_tools.size"
       ]
     },
+    "reset_coverage": {
+      "kind": "verb",
+      "description": "`klt reset_coverage` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.reset_coverage_cmd",
+        "klayout_tools.reset_coverage"
+      ]
+    },
     "socket_check": {
       "kind": "verb",
       "description": "`klt socket_check` implementation: core modules plus CLI adapter.",
@@ -901,6 +909,11 @@
       "consumer": "report",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "reset_coverage",
+      "exporter": "cli-infra",
+      "reason": "Verb CLI adapter uses the shared output envelope helpers, as every other verb does."
     },
     {
       "consumer": "ring_check",
