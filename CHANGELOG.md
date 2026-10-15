@@ -53,6 +53,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   source engine limitation that commonly triggers it. Additive; no
   `schema_version` bump.
 
+- **`klt place-and-route` reports routability** (issue #2994): the route
+  stage entry (and top level) gains an additive `congestion` object —
+  global-route overflow and per-layer usage, detailed-route violation series,
+  unrouted-net count and routability-driven placement congestion. Figures the
+  engine cannot produce are `null` and named in `congestion.null_reasons`.
+  The generated route script now runs `global_route -verbose` (routing is
+  unchanged) so the engine prints its congestion table.
+  `schema_version` is unchanged.
+
 - **`klt reset-coverage`** (issue #2998, part 1 of 2): a read-only verb that
   classifies every sequential cell and hard macro of a flat gate-level
   Verilog netlist as reset-covered or unreset (machine-readable reason code),
