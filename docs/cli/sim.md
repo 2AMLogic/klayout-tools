@@ -3208,6 +3208,61 @@ leave ambiguous. It exists so a caller (or a human) reading the response
 can tell a genuinely-sampled family from a structurally-excluded one without
 reading the vendored model deck line by line.
 
+### Per-instance mismatch selection
+
+`monte_carlo.instances` (optional, issue #2995) turns local mismatch on for a
+subset of instances, so a spread can be attributed to a device group without a
+hand-written netlist wrapper:
+
+```json
+"monte_carlo": {
+  "n": 200, "seed": 7, "vary": "mismatch",
+  "instances": { "include": ["xm1*", "xm2*"], "exclude": ["xm1_tail"] }
+}
+```
+
+`include` and `exclude` are case-insensitive globs over **top-level `X`
+(subcircuit) instance names** of the request netlist. An instance is
+randomised when it matches `include` (or `include` is empty) and does not match
+`exclude`. At least one list must be non-empty. klt wraps every other `X`
+instance in a generated one-instance subcircuit that sets the PDK's mismatch
+switch to `0` locally (`mc_mm_switch` for sky130, `sw_stat_mismatch` for
+gf180mcu); the instance line, including `m` and every other parameter, moves
+*inside* the wrapper verbatim, so nothing is forwarded across the extra
+hierarchy level. The netlist you wrote is not modified; a gated copy runs.
+Hierarchical probes of a wrapped instance gain one level
+(`xm1.xm1_klt`).
+
+Refused up front with a `SimError`: a glob that matches no `X` instance (or
+only non-subcircuit elements), a hierarchical glob (`.`/`/`), `vary:
+"process"`, a `models.pdk` without a known switch, and the `remote`/`batch`
+backends. Instances inside user `.subckt` bodies and in `.include`d files are
+not gated individually.
+
+The response adds `environment.monte_carlo.instance_mismatch`:
+
+```json
+{
+  "switch": "mc_mm_switch",
+  "include": [], "exclude": ["xm1"],
+  "instances": [
+    { "instance": "XM1", "model": "sky130_fd_pr__nfet_01v8", "randomised": false },
+    { "instance": "XM2", "model": "sky130_fd_pr__nfet_01v8", "randomised": true }
+  ],
+  "negative_control": false
+}
+```
+
+`negative_control: true` means every `X` instance was excluded: that run should
+reproduce the mismatch-off run under the same seed, so diff it against one to
+catch a wrapper that drops a parameter. The report states which instances were
+gated, not that the PDK model responded to the switch. Whether the remaining
+instances draw the same values as an ungated run under the same seed depends on
+the engine's random-stream ordering and is not guaranteed by klt. Worked
+example: `examples/sim/request-monte-carlo-instances.json`. Key names and entry
+shape are intended to stay consistent with the injected-mismatch proposal in
+#2911.
+
 ## Monte Carlo statistics
 
 A `monte_carlo` request additionally reduces its samples to a **statistical
