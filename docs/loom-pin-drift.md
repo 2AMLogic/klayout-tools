@@ -8,9 +8,9 @@ records what a pin protects, what it is currently missing, and when it can be
 dropped. It lives under `docs/` (not `.loom/docs/`) because `.loom/docs/` is
 itself resynced from upstream.
 
-Tracking issue: #2501. Separate work: #1966 re-evaluates the curator/judge/
-doctor pins (#668). This page does not cover those pins or duplicate that
-issue's scope.
+Tracking issue: #2501. The curator/judge/doctor pins (#668) were retired by
+#1966: their frozen-timeline protection now lives in the pinned
+`scripts/claim-staleness.sh`. This page does not cover them.
 
 ## `commands/loom/champion-epic.md`
 
