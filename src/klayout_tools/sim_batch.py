@@ -2465,7 +2465,10 @@ def _run_batch_job(
 
     with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
         collect_outputs(config, job_id, collected, runner=runner)
+        from .sim import check_ngspice_options_echo
+
         report = read_collected_report(collected)
+        check_ngspice_options_echo(request, report)
         environment = {**environment, **_read_job_identity(collected, request)}
         corners = report.get("corners") or []
         _surface_missing_include(corners, collected)
