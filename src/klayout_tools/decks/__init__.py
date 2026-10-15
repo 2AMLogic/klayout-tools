@@ -45,6 +45,7 @@ from .extraction import (
     BipolarDevice,
     CapacitorDevice,
     CapacitorFlavour,
+    CapacitorVariant,
     DiodeDevice,
     ExtractionDeck,
     InvalidLabelLayerError,
@@ -68,6 +69,7 @@ __all__ = [
     "BipolarDevice",
     "CapacitorDevice",
     "CapacitorFlavour",
+    "CapacitorVariant",
     "DerivedLayer",
     "DiodeDevice",
     "DrcRule",
@@ -357,6 +359,7 @@ def get_extraction_deck(
             f"unknown deck '{name}' (available: {available})"
         ) from None
     if deck_options:
+        deck = _resolve_capacitor_variant(name, deck, deck_options)
         deck = _resolve_device_flavours(name, deck, deck_options)
     return deck.with_label_layers(label_layers, deck_name=name)
 
@@ -383,6 +386,34 @@ def resolve_deck_option_values(
     return get_extraction_deck(name, deck_options).resolved_option_values
 
 
+def _resolve_capacitor_variant(
+    name: str, deck: ExtractionDeck, deck_options: Mapping[str, str]
+) -> ExtractionDeck:
+    """Apply the capacitor-variant selector (issue #2920, gf180mcu's
+    ``mim_option``) in ``deck_options`` to ``deck``: swap ``capacitors`` for
+    the selected :class:`CapacitorVariant`'s. Returns ``deck`` unchanged when
+    it declares no variants, the key is absent, or the default is selected.
+    Runs before :func:`_resolve_device_flavours`, so a flavour key is then
+    validated against the *selected* variant's entries.
+    """
+    if not deck.capacitor_variants:
+        return deck
+    option = deck.capacitor_variants[0].option
+    if option not in deck_options:
+        return deck
+    value = deck_options[option]
+    variant = next((v for v in deck.capacitor_variants if v.value == value), None)
+    if variant is None:
+        available = ", ".join(v.value for v in deck.capacitor_variants)
+        raise InvalidDeckOptionError(
+            f"deck '{name}' option '{option}={value}' is not one of this "
+            f"deck's declared values (available: {available})"
+        )
+    return dataclasses.replace(
+        deck, capacitors=variant.capacitors, capacitor_variant_selected=value
+    )
+
+
 def _resolve_device_flavours(
     name: str, deck: ExtractionDeck, deck_options: Mapping[str, str]
 ) -> ExtractionDeck:
@@ -404,6 +435,9 @@ def _resolve_device_flavours(
         for device in (*deck.resistors, *deck.capacitors)
         if device.flavour_option is not None
     }
+    # The capacitor-variant selector (issue #2920) was consumed by
+    # `_resolve_capacitor_variant` before this runs, but stays a valid key.
+    selectable_keys.update(variant.option for variant in deck.capacitor_variants)
     unknown_keys = sorted(set(deck_options) - selectable_keys)
     if unknown_keys:
         available = ", ".join(sorted(selectable_keys)) or "none"
