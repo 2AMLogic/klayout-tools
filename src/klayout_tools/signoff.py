@@ -5698,6 +5698,15 @@ def _grade_evidence(
             in (_REASON_UNDERSIZED_SAMPLE, _REASON_NEGATIVE_CONTROL_NOT_DETECTED)
             else {}
         )
+        # Issue #3063: the early return above would otherwise hide a stale
+        # `content_hash` pin behind the campaign refusal until the sample is
+        # raised. Disclosed beside the verdict, never changing it.
+        if failure_detail:
+            pin_state = _content_hash_pin_state(
+                spec.get("content_hash"), resolution["content_hash"]
+            )
+            if pin_state is not None:
+                failure_detail["content_hash_pin"] = pin_state
         return "unmet", kind_gated, None, failure_detail
 
     # Issue #2718: a generic citation's declared item identity and, for the
@@ -5708,10 +5717,12 @@ def _grade_evidence(
     if binding_refusal is not None:
         return "unmet", binding_refusal, None, {}
 
-    expected_hash = spec.get("content_hash")
-    if expected_hash is not None and resolution["content_hash"] != expected_hash:
-        if resolution["content_hash"] is None:
-            return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
+    pin_state = _content_hash_pin_state(
+        spec.get("content_hash"), resolution["content_hash"]
+    )
+    if pin_state == _PIN_UNVERIFIABLE:
+        return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
+    if pin_state == _PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
     citation = _citation(resolution)
@@ -5721,6 +5732,28 @@ def _grade_evidence(
     if anchored_refusal is not None:
         return "unmet", anchored_refusal, None, {}
     return "met", None, citation, {}
+
+
+_PIN_VERIFIED = "verified"
+_PIN_STALE = "stale"
+_PIN_UNVERIFIABLE = "unverifiable"
+
+
+def _content_hash_pin_state(
+    expected_hash: str | None, live_hash: str | None
+) -> str | None:
+    """Compare a manifest-pinned ``content_hash`` to the resolved live one.
+
+    ``None`` when the entry pins nothing; otherwise ``"verified"`` (equal),
+    ``"unverifiable"`` (no live hash to compare) or ``"stale"`` (differs).
+    Shared by the staleness gate and the issue #3063 disclosure on the
+    ``yield`` refusals so the two cannot drift.
+    """
+    if expected_hash is None:
+        return None
+    if live_hash is None:
+        return _PIN_UNVERIFIABLE
+    return _PIN_VERIFIED if live_hash == expected_hash else _PIN_STALE
 
 
 def _bind_anchored_citation(
