@@ -213,6 +213,7 @@ from .extract_parasitics import (
     _compute_parasitics,
     _detect_dead_metal,
     _inject_parasitics,
+    parse_parasitic_variants,
 )
 from .extract_parasitics import spice_safe_net_name as spice_safe_net_name
 
@@ -1159,6 +1160,7 @@ def run_extract(
     mom_rlc_resistance_ohm: float | None = None,
     mom_rlc_capacitance_ff: float | None = None,
     mom_rlc_inductance_nh: float | None = None,
+    parasitic_variants: Sequence[str] | None = None,
     matched_device_groups: Mapping[str, Sequence[str]] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
@@ -1538,6 +1540,18 @@ def run_extract(
     since a caller may legitimately name several candidate nets across
     several blocks/runs. ``None``/empty (the default) skips this entirely --
     byte-identical to before this feature existed.
+
+    ``parasitic_variants`` (``klt extract --parasitic-variant <variant>``,
+    repeatable, issue #3056) drops parasitic elements at injection time so a
+    failing ``klt pex`` delta row can be attributed to R or C: ``drop-r:NET|*``
+    shorts a net's star legs into its hub, ``drop-c-ground:NET|*`` omits its
+    ground capacitor, ``drop-c-coupling`` omits every ``Ccc_*`` card. Anything
+    else raises :class:`ExtractError`, as does use without ``parasitics``; a
+    ``NET`` matching no net goes to ``warnings``, as does one that names a
+    ``--distributed-rc`` net (left unchanged). ``None``/empty (the default)
+    emits the network and report byte-identically to before this feature
+    existed; otherwise the report's ``parasitics`` block carries
+    ``parasitic_variant`` (the request, verbatim).
 
     ``parasitics_nets`` (``klt extract --parasitics-net <net>``, repeatable,
     issue #1700) scopes the *ground* R/C pass itself -- the base per-net
@@ -2458,6 +2472,12 @@ def run_extract(
     if parasitics_nets_set is not None and not parasitics:
         raise ExtractError("--parasitics-net requires --parasitics")
 
+    # `--parasitic-variant` (issue #3056) requires `--parasitics`: it edits
+    # the injected network, which only exists with that pass.
+    variants = parse_parasitic_variants(parasitic_variants, ExtractError)
+    if variants is not None and not parasitics:
+        raise ExtractError("--parasitic-variant requires --parasitics")
+
     # `--parasitics-top-cell-only` (issue #1704) requires `--parasitics`:
     # it splits the same lumped-RC ground pass this flag piggybacks on into
     # a top-cell-drawn/instance-drawn share -- same reasoning as
@@ -3027,6 +3047,7 @@ def run_extract(
                 # can attribute every parasitic element to one electrical net.
                 # `False` (every other run) writes no property at all.
                 record_slice_topology=subcircuit_cell is not None,
+                variants=variants,
             )
         else:
             parasitics_report = {
@@ -3105,6 +3126,40 @@ def run_extract(
         parasitics_report["parasitics_nets"] = (
             list(parasitics_nets) if parasitics_nets else []
         )
+        if variants is not None:
+            # Additive field (issue #3056): present only when
+            # `--parasitic-variant` was given, so every other report is
+            # byte-identical to before the flag existed.
+            parasitics_report["parasitic_variant"] = list(variants.raw)
+            matched_variant_nets = {
+                spice_safe_net_name(entry["net"]) for entry in ground_nets
+            }
+            unmatched_variant = sorted(variants.named_nets() - matched_variant_nets)
+            if unmatched_variant:
+                warnings.append(
+                    "--parasitic-variant net name(s) "
+                    f"{', '.join(repr(name) for name in unmatched_variant)} "
+                    "match no net with ground-eligible parasitics geometry "
+                    "in this layout -- nothing was dropped for them. See "
+                    "docs/cli/extract.md's '--parasitic-variant' section."
+                )
+            distributed_variant = sorted(
+                {
+                    n["net"]
+                    for n in parasitics_report.get("nets", [])
+                    if n.get("rc_model") == "distributed"
+                    and (
+                        variants.drops_r(n["net"]) or variants.drops_c_ground(n["net"])
+                    )
+                }
+            )
+            if distributed_variant:
+                warnings.append(
+                    "--parasitic-variant drop-r/drop-c-ground does not apply "
+                    "to --distributed-rc net(s) "
+                    f"{', '.join(repr(name) for name in distributed_variant)} "
+                    "-- their ladder is left unchanged."
+                )
         if parasitics_nets_set:
             # Same escaped-spelling comparison `critical_nets` makes below
             # (issue #1162): `ground_nets[].net` is the unescaped identity

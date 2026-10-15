@@ -732,6 +732,19 @@ def test_no_capacity_keeps_its_code(repo, fake, no_local_xschem, tmp_path, capsy
     assert no_local_xschem == []
 
 
+def test_concurrency_cap_keeps_its_code(repo, fake, no_local_xschem, tmp_path, capsys):
+    fake.failures["launch --job"] = fake_completed(
+        returncode=1,
+        stderr="error: 8 instance(s) already running + 1 requested exceeds "
+        "BATCH_MAX_CONCURRENT_INSTANCES=8",
+    )
+    code, error = _run_failing(repo, tmp_path, capsys)
+    assert code == 1
+    assert error["code"] == sim_batch.BATCH_CONCURRENCY_CAP_CODE
+    assert _job_id(fake) in error["message"]
+    assert no_local_xschem == []
+
+
 def test_poll_timeout(repo, fake, no_local_xschem, monkeypatch, tmp_path, capsys):
     fake.statuses = [_status("running")]
     clock = iter(range(0, 10**9, 1000))

@@ -2113,6 +2113,7 @@ def run_pex(
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     critical_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
+    parasitic_variants: Sequence[str] | None = None,
     mom_rlc_net: str | None = None,
     mom_rlc_resistance_ohm: float | None = None,
     mom_rlc_capacitance_ff: float | None = None,
@@ -2361,6 +2362,7 @@ def run_pex(
             label_layers=label_layers,
             critical_nets=critical_nets,
             distributed_rc=distributed_rc,
+            parasitic_variants=parasitic_variants,
             mom_rlc_net=mom_rlc_net,
             mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
@@ -2815,6 +2817,14 @@ def run_pex(
             # (verbatim per-net payloads, `parasitics.nets[]` order). See
             # `_parasitic_integrity_report`.
             "parasitic_integrity": _parasitic_integrity_report(parasitics),
+            # Additive field (issue #3056): echoes `--parasitic-variant`
+            # back so a variant run is attributable -- present only when
+            # the flag was given, byte-identical to before otherwise.
+            **(
+                {"parasitic_variant": parasitics["parasitic_variant"]}
+                if "parasitic_variant" in parasitics
+                else {}
+            ),
         },
         # Additive field (issue #1983): whether the extracted netlist this
         # run re-simulated has a DC bias path for every device body, reduced
