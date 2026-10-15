@@ -394,7 +394,7 @@ def _normalized_netlist_text(text: str) -> str:
     replaced by its directive name (location is not content; the included
     file's own text is hashed in its place). Line order is left untouched:
     ``.param``/``.model`` order can matter, so a reorder is a mismatch."""
-    from ._paths import _fold_spice_continuations
+    from ._paths import fold_spice_continuations
 
     lines: list[str] = []
     for raw in text.splitlines():
@@ -403,7 +403,7 @@ def _normalized_netlist_text(text: str) -> str:
             continue
         lines.append(line)
     out: list[str] = []
-    for line in _fold_spice_continuations(lines):
+    for line in fold_spice_continuations(lines):
         match = _INCLUDE_RE.match(line)
         if match:
             line = match.group("prefix")
