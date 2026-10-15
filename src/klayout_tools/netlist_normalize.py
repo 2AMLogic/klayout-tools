@@ -244,7 +244,8 @@ class NormalizeError(Exception):
 def _tokenize(text: str) -> list[str]:
     """Whitespace-split ``text`` into SPICE tokens, treating quoted strings
     (``'...'``/``"..."``) and bracketed expressions (``{...}``/``(...)``) as
-    single tokens and stopping at an unquoted ``$`` inline comment.
+    single tokens and stopping at an unquoted ``$`` inline comment (a ``$``
+    that begins a token; mid-token it belongs to the name, e.g. ``X$1``).
 
     A parasitic parameter like ``ad='int((nf+1)/2) * w/nf * 0.18u'`` carries
     spaces *inside* an expression -- a naive split would shatter it and
@@ -274,8 +275,11 @@ def _tokenize(text: str) -> list[str]:
             depth = max(0, depth - 1)
             current.append(char)
             continue
-        if char == "$" and depth == 0:
-            break  # rest of the line is a SPICE inline comment
+        if char == "$" and depth == 0 and not current:
+            # Rest of the line is a SPICE inline comment. Only at a token
+            # start: KLayout names cards `X$1`/`M$1`, so a mid-token `$` is
+            # part of the name (issue #2972).
+            break
         if char.isspace() and depth == 0:
             if current:
                 tokens.append("".join(current))

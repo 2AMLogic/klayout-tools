@@ -3617,6 +3617,33 @@ def _resolve_layout(
         raise LvsError(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
+    # Issue #2972: the layout-side twin of `_read_reference_netlist`'s
+    # simulation-form guard. `klt extract --pdk` writes PDK-bound `X` cards;
+    # read back unguarded they are undefined-subcircuit instances (zero
+    # layout devices, a topology cascade) rather than a form-mismatch error.
+    from .netlist_normalize import detect_subckt_call_devices
+    from .pdk_models import known_device_subckt_names
+
+    # MOS only: bare `klt extract` also writes resistor/capacitor/bipolar
+    # devices as `X` cards under the same curated names (issue #1157/#1942
+    # round-trips), so only a MOS subcircuit call proves the `--pdk` form.
+    known_devices = known_device_subckt_names()
+    offending = [
+        name
+        for name in detect_subckt_call_devices(layout_netlist_text)
+        if known_devices[name][1].kind == "mos"
+    ]
+    if offending:
+        raise LvsError(
+            f"layout netlist '{layout_netlist_path}' is in the simulation "
+            f"(subcircuit-call) form: it instantiates curated PDK device "
+            f"subcircuit(s) {', '.join(offending)} via undefined 'X' cards, "
+            "which 'klt lvs' cannot compare as extracted plain-element "
+            "devices (it would silently read as zero layout devices and "
+            "report a topology mismatch). Re-extract the layout without "
+            "'--pdk' (plain-element M-cards) -- see docs/cli/lvs.md, "
+            '"Netlist form".'
+        )
     recovered_capacitor_classes = parse_capacitor_class_comments(layout_netlist_text)
     # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
     # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
