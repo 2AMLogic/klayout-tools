@@ -363,8 +363,46 @@ def test_build_delta_rows_single_testbench_bare_spec_row():
             "extracted_value": 1.1,
             "delta_pct": 10.0,
             "status": "pass",
+            "schematic_status": "pass",
+            "extracted_status": "pass",
         }
     ]
+
+
+def test_build_delta_rows_carry_per_side_status():
+    # Issue #2989: schematic fail / extracted pass keeps `status: "pass"` but
+    # names the schematic-side violation.
+    schematic = _sim_report(
+        [{"corner_id": "tt", "measurements": [_measurement(1.0, "fail")]}]
+    )
+    extracted = _sim_report(
+        [{"corner_id": "tt", "measurements": [_measurement(1.1, "pass")]}]
+    )
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["status"] == "pass"
+    assert row["schematic_status"] == "fail"
+    assert row["extracted_status"] == "pass"
+
+
+def test_build_delta_rows_missing_schematic_measurement_is_error_side():
+    schematic = _sim_report([{"corner_id": "tt", "measurements": []}])
+    extracted = _sim_report([{"corner_id": "tt", "measurements": [_measurement(1.1)]}])
+    (row,) = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    assert row["schematic_status"] == "error"
+    assert row["extracted_status"] == "pass"
+
+
+def test_unextracted_delta_rows_carry_per_side_status():
+    schematic = _sim_report(
+        [{"corner_id": "tt", "measurements": [_measurement(1.0, "fail")]}]
+    )
+    (row,) = _unextracted_delta_rows(spec_row_prefix=None, schematic_report=schematic)
+    assert row["schematic_status"] == "fail"
+    assert row["extracted_status"] == "error"
 
 
 def test_build_delta_rows_multi_testbench_prefixes_spec_row():
@@ -3657,6 +3695,16 @@ def test_run_pex_measure_command_produces_delta_rows(
     ]
     assert [row["schematic_value"] for row in report["delta"]] == [1.0, 2.0]
     assert [row["extracted_value"] for row in report["delta"]] == [1.1, 2.2]
+    # Issue #2989: per-side limit status rides on command-mode rows too, and
+    # `schematic_failed` is reported (here 0) without touching `status`.
+    assert all(
+        row["schematic_status"] in {"pass", "fail", "error"}
+        and row["extracted_status"] in {"pass", "fail", "error"}
+        for row in report["delta"]
+    )
+    assert report["schematic_failed"] == sum(
+        row["schematic_status"] == "fail" for row in report["delta"]
+    )
     # The delta is computed by `klt pex`, not supplied by the caller.
     assert [row["delta_pct"] for row in report["delta"]] == [10.0, 10.0]
     assert report["passed"] == 2
