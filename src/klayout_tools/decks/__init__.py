@@ -54,8 +54,8 @@ from .extraction import (
     MOSFlavour,
     ResistorDevice,
     ResistorFlavour,
-    TerminalRelation,
     SizeFilter,
+    TerminalRelation,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
