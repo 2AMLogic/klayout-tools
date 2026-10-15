@@ -41,6 +41,7 @@ no journal is created, when no OTLP exporter runs.
 | `started_at` / `ended_at` | RFC 3339 | tick bounds. Present on **empty ticks too**, so cadence per host and gaps (stalls) are measurable |
 | `repo` | string, optional | role records only (#11858): the repo the tick ran for, forge slug or `repo_unresolved`; present with an empty queue too, so empty-queue repos are a `loom.repo` filter. Absent on work-finder records and older daemons; additive, so `schema_version` stays `2` |
 | `outcome` | string | role: the `role_tick.outcome` result (`success`, `skipped_queue_empty`, ...); work finder: `dispatched`, `halted`, `idle`, `none_dispatched` |
+| `dispatch_result` | string, optional | work finder only (#11840): the completed tick's canonical `loom.dispatch.result`, the same token the tick's `loom.dispatch.tick` span carries, classified once from the tick's own report by `observability::ops::dispatch::tick_result` (first match wins): `dispatched`; a whole hold as `halted_<cause>` (one `work_finder::halt_cause` token, e.g. `halted_main_red`, `halted_drain`), `halted_ci_billing` (also a cause-less hold while billing-blocked) or `halted` (several causes, or none named); `saturation_held`; `error`; `build_backoff_held`; `no_eligible_work`; `capacity_full`; `all_skipped`. A partial hold falls through to the rows below it. It repeats on every chunk. `outcome` is unchanged beside it. Absent on role ticks and older daemons: absence means *unavailable*, never idle or ready (free slots alone do not establish readiness). Additive, so `schema_version` stays `2` |
 | `candidates_total` | integer | candidates considered (the full count; `candidates[]` lists every one, across chunks) |
 | `candidates[]` | array | in the ranker's order, **every candidate, uncapped** (#11567): `rank` (1-based), `repo` (forge slug, or `repo_unresolved`; never a local path), `number`, `stage`, `sort_key` (`name`, `value`) |
 | `acted[]` | array | `repo`, `number`, `action`, uncapped. Work finder: `dispatched`. Roles: one entry per distinct observed write, from the closed set below; may name an item outside `candidates` |
@@ -164,6 +165,7 @@ it, only a hold label names a reason; other candidates are undecided.
 `PickSkipReason::from_disposition`, so a new disposition must be classified
 there. The step engine's weight-0 exclusions map through the parallel total match
 `PickSkipReason::from_exclusion`: `pool_exhausted` → `quota`, `build_backoff`
+→ `backoff`, `ci_pending` (a Judge step whose PR head has CI running, #12042)
 → `backoff`, `frozen` / `operator` / `hard_exclusion` → `operator_hold`,
 `claimed` / `queued` → `in_flight`, `shared_pr` → `pr_open_skip`, `sequenced`
 → `overlap_chain`, `blocked` → `blocked`, `capability_missing` →
@@ -217,7 +219,7 @@ one tick are not counted as multiple ticks.
 
 ## Record volume
 
-> **Step dispatch (accepted design, #11894; not yet implemented).** Under `autonomous.workFinder.stepDispatch: on`, item roles leave the fixed role-runner cadences, so this table no longer holds for them. Work-finder rows gain the step, the item-draw weight terms and `age_source`. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
+> **Step dispatch (#11894, live since #11909).** Item roles have left the fixed role-runner cadences, so this table no longer holds for Curator, Judge and Doctor. Work-finder records carry `item_draw` (the step, the weight terms, `age_source`, and `weight_overflow`), and each work-finder row's `stage` names its step. See [`docs/design/work-finder-step-dispatch.md`](https://github.com/rjwalters/loom/blob/main/docs/design/work-finder-step-dispatch.md) §12.
 
 Derived from the shipped default cadences, **not measured on a live fleet**:
 
@@ -253,7 +255,7 @@ if volume proves unacceptable.
 (`chunk_index` 0 and `chunk_count` 1 when unsplit; additive, `schema_version`
 stays `2`). Chunks of one
 tick share `tick_id` and repeat the header (`role`, `host`, timestamps,
-`outcome`, `candidates_total`, `candidate_source`, `decisions_observed`,
+`outcome`, `dispatch_result`, `candidates_total`, `candidate_source`, `decisions_observed`,
 `workspace_draw.seed` / `draws_total` / `seed_scheme` /
 `seed_minute` / `seed_host`); the list entries are packed in order, so
 concatenating the chunks' lists in `chunk_index` order reproduces the original.

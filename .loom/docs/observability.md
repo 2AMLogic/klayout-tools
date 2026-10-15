@@ -690,7 +690,8 @@ covers created → curated, curated → `loom:issue`, building → review reques
 and review requested → merged. Beside the per-label counts, `stage_items` has
 queue states from one ETag-cached open-items walk per repo (#11847):
 `triage`, `unlabeled`, `curated_not_promoted`, `issue_open_pr`,
-`issue_no_pr`, `parked` and `pr_held`. They are absent, not `0`, for a repo
+`issue_no_pr`, `parked`, `pr_held` and `pr_champion_held` (the Champion-hold
+label shape, `loom:pr` + `loom:blocked`, #11905; it reads no marker, so markerless parks count too). They are absent, not `0`, for a repo
 whose walk did not complete. `stage_items` is per repo, so a per-host total is `sum by (state)`, and the
 states overlap, so never sum across them. It reads ETag-cached stage listings every 5
 minutes plus at most 8 per-item reads per sample, never per tick. With
@@ -833,7 +834,9 @@ every span also names the endpoint: `github.route` (a template such as
 `github.api.route`), `http.request.method`, and `github.command` (`pr view`
 for an agent front read), so `api.rest` and `agent_gh_front` spend can be
 ranked by route. That pass also
-emits a `pass.summary` log per pass and a `pass.verdict` per artifact; see
+emits a `pass.summary` log per pass and a `pass.verdict` per artifact; Champion
+steps add `pass.verdict` rows with `mechanism=step:champion` and a
+`stage_items{state="pr_refused"}` gauge (#12027); see
 [`telemetry-schema.md`](telemetry-schema.md) and
 `defaults/observability/signoz/pass-queries.sql`.
 

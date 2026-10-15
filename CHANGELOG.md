@@ -42,6 +42,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   arc that ran with no module-path delay. Additive; no `schema_version` bump.
   Any other `IOPATH` mismatch still fails loudly. The normalized copy is
   written to `.klt/functional-verification/klt_sdf_ifnone_edge_modpath_dropped.sdf`.
+- **`klt pex --flatten-schematic`** (issue #2889): opt-in flattening of a
+  hierarchical schematic DUT to PDK leaf devices before the schematic-side
+  run, so it compares like with like against `klt extract`'s always-flat
+  netlist and `model_mismatch` no longer fires on hierarchy alone — the `klt
+  pex` counterpart of `klt lvs`'s `options.flatten_reference`. Backed by a
+  new SPICE-text flattener (`klayout_tools.spice_flatten`: instance-path
+  prefixed names, parameter and `m=` propagation, `.global` nets kept, hard
+  errors on cycles / `X`-call pin-count mismatches / unsupported cards). New
+  additive report fields `flatten_schematic` and `schematic_flatten` (path,
+  `netlist_sha256`, inlining summary); flattener failures carry
+  `error.code` `schematic_flatten_*`. Default runs are unchanged apart from
+  the two new fields (`false` / `null`); no `schema_version` bump.
 
 - **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
   extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in

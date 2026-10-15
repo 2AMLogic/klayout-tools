@@ -1649,6 +1649,23 @@ three gaps directly, as an extension of `local`/`local-parallel` (and any
   recomputed this run; `checkpoint_retained` is `false` once a run finishes
   with every corner accounted for (the file is then deleted).
 
+## Timeout-budget hint
+
+Issue [#2894](https://github.com/2AMLogic/klayout-tools/issues/2894): when
+any unit carries a `timeout` diagnostic, or ran for at least 80% of
+`options.timeout_s`, the report gains an additive, optional
+`environment.timeout_budget_hint` object (absent otherwise; no existing
+field changes):
+
+```json
+{"max_unit_runtime_s": 490.2, "timeout_s": 600, "suggested_timeout_s": 1200,
+ "units_timed_out": 2, "message": "..."}
+```
+
+It states that the failure is a per-unit time budget, not a netlist problem,
+and suggests a larger `options.timeout_s` (twice the larger of the two
+numbers, rounded up to a whole minute).
+
 ## Timeout-budget preflight
 
 Issue [#1686](https://github.com/2AMLogic/klayout-tools/issues/1686): a
@@ -1984,6 +2001,23 @@ later expression may reference an earlier one's name:
   { "name": "vmid_mv", "expr": "vmid * 1e3",  "unit": "mV" }
 ]
 ```
+
+### `expr` after a `noise` analysis
+
+ngspice leaves the *integrated* plot current after `noise` (`noise2`:
+`onoise_total`, `inoise_total`); the spectra (`inoise_spectrum`,
+`onoise_spectrum`) live in the first plot, `noise1`. For a single `noise`
+analysis with at least one `expr` measurement, `klt sim` therefore emits
+`let inoise_spectrum = noise1.inoise_spectrum` (and the same for
+`onoise_spectrum`) before the `expr` lets. Both the totals and the spectra
+resolve by **bare name** (e.g. `onoise_spectrum[10]`, `onoise_total`); the
+`noise1.` prefix also still works. The aliases come after any rawfile `write`,
+so `options.waveforms` output is unchanged, and decks for other analysis kinds
+are byte-identical.
+
+Limitation: this applies to the single-analysis path only. Inside
+`analysis_steps` a `noise` step's spectrum plot is not captured, so spectrum
+vectors are not reachable there (tracked in [#3284](https://github.com/2AMLogic/klayout-tools/issues/3284)).
 
 ### `expr` cannot read `.meas` results
 
@@ -2934,6 +2968,11 @@ a corner grid. A stock ngspice without the module still produces the
   looking for an element of that name; if any reference cannot be resolved
   and read, the key is not rejected (an unresolved declaration is never
   assumed absent). Hierarchical names are never treated as parameters.
+  **Unknown keys (#2894).** A key that names no element and no `.param` in
+  the fully resolved netlist closure (a typo; matching is case-insensitive)
+  is rejected with a `SimError` naming the key, because `alter` on it would
+  address nothing. Not rejected when any `.include`/`.lib` reference cannot
+  be resolved, nor for hierarchical keys such as `x1.vdd`.
   **Scalar sources only.** ngspice's `alter` silently has no effect on an
   independent voltage source with an explicit transient waveform
   (`PWL`/`PULSE`/`SIN`/`EXP`/`SFFM`/`AM`), so `klt sim` rejects such a request
@@ -3137,7 +3176,9 @@ When `monte_carlo.vary` is `"mismatch"` or `"both"`, the response's
 one entry per distinct device family the netlist instantiates (detected
 from plain SPICE element types — `R`/`C`/`D`/`Q`/`M` — and from
 recognised keywords in `X` subcircuit-call names, e.g. `nfet_03v3` →
-`mosfet`, `res_xpoly_1p1000pl` → `resistor`), each stating whether that
+`mosfet`, `res_xpoly_1p1000pl` → `resistor`; gf180mcu's own passive names
+`ppolyf_*`/`npolyf_*`/`nplus_*`/`pplus_*`/`rm<N>` → `resistor` and
+`cap_mim_*` → `capacitor`, both reported `active: false`), each stating whether that
 family's mismatch is structurally active in the selected PDK deck:
 
 ```json
