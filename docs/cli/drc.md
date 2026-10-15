@@ -1019,6 +1019,13 @@ sizes, not ranges.
 | `sg13g2` | `cont.width.1`, `via1.width.1`–`via4.width.1`, `topvia1.width.1`, `topvia2.width.1` | `cont_sq.without_bbox_width(0.16um)` / `<layer>_nseal.without_bbox_min/max(...)` |
 | `sky130` | `via.width.1`, `via2.width.1`, `via3.width.1`, `via4.width.1` | `via_not_mt.drc(length > 0.15)` (`via.1a_b`) / the `via2.1a_b`, `via3.1_b`, `via4.1_b` max-length halves (0.2 / 0.2 / 0.8 um) |
 
+sg13g2's `cont.width.1` (and `cont.space.1`) set `layer_selection="squares"`
+(issues #2943, #3139), mirroring upstream's `cont_sq`: only square merged Cont
+polygons are measured, so contact bars and rows of abutting 0.16 µm contacts
+(drawn inside the PDK's own `npn13G2`/`rsil` cells) are not reported as one
+oversized contact. They belong to the PDK's separate `CntB.*` family, which
+this deck does not yet transcribe.
+
 sg13g2's `cont.width.1`/`via1.width.1`–`via4.width.1` and sky130's
 `via.width.1` were first deferred behind issue #2585: `klt gen` and
 `klt gen compose` drew every cut at a PDK-generic `gen.CONTACT_SIZE_UM`
@@ -1284,6 +1291,20 @@ official well rules — `nwell`'s enclosure of opposite-type diffusion/tap
 boolean expression no `klt gen` generator draws today) — are deliberately
 **not** transcribed; see the "nwell (well-layer) rule coverage" note in
 `sky130.py`'s own module docstring for the full reasoning.
+
+**Precision-poly-resistor head rules are not checked (issue #3077).** The
+deck has no rule for the contacts on a precision poly resistor's heads:
+`licon.1b` (0.19 µm contact width) and `licon.1c` (2.0 µm contact length,
+and the 2.16 µm poly-contact-extension that `sky130A.tech`'s DRC reports as
+"poly contact extends poly resistor by < 2.16um"), nor `rpm.1`'s minimum
+mask width. `licon.1`'s own 0.17 µm minimum is merely exempted for these
+licons by an approximation (see the `licon1.width.1` note below), not
+replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell therefore
+reads `clean` here while the PDK's own Magic `drc(full)` still reports those
+head rules; a `klt drc --deck sky130` pass is not evidence the heads meet
+them. `klt drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the
+independent check. This gap is documentation-only: no field of the JSON
+`coverage` object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
@@ -1979,7 +2000,7 @@ it is installed with the package, next to its declared rule-id list
 ```bash
 klt drc layout.gds --engine klayout \
     --deck-file src/klayout_tools/decks/asap7.drc \
-    --expect-rule-categories 232 --format json
+    --expect-rule-categories 234 --format json
 ```
 
 `--pdk asap7` does not resolve this deck: `klt pdk` finds an ASAP7 process
@@ -2025,10 +2046,10 @@ Each RDB category is the DRM rule name verbatim (DRM section 1.2.3). Where the
 DRM says a rule "applies to the layers PSELECT, SLVT, LVT, and SRAMVT as
 well" (section 3.7), or that the M1 / V1 / M4 / V4 / M6 / V6 / M8 / V8
 rules apply to the layers above them (sections 3.12-3.19), the mirrored rule
-substitutes the layer name. These 232 ids are declared once, in
+substitutes the layer name. These 234 ids are declared once, in
 `asap7_rules.RULES`; renaming or dropping one is a breaking change, and a
 test fails if the deck, that list, the fixtures or this table drift apart.
-Pass `--expect-rule-categories 232` so that a deck
+Pass `--expect-rule-categories 234` so that a deck
 which silently drops a category fails the run (exit 1) instead of reporting
 `clean`.
 
@@ -2038,11 +2059,11 @@ which silently drops a category fails the run (exit 1) instead of reporting
 | Table 3.2.1 | `WELL.W.1`, `WELL.W.2`, `WELL.S.1`, `WELL.S.2`, `WELL.A.1A`, `WELL.A.1B`, `WELL.GATE.EX.1`, `WELL.GATE.EX.2` |
 | Table 3.3.1 | `FIN.W.1`, `FIN.W.2`, `FIN.S.1`, `FIN.AUX.1` |
 | Table 3.4.1 | `GATE.W.1`, `GATE.W.2`, `GATE.S.1`, `GATE.S.2`, `GATE.S.3`, `GATE.AUX.1`, `GATE.ACTIVE.AUX.3`, `GATE.ACTIVE.EX.1`, `GATE.ACTIVE.EX.2`, `GATE.ACTIVE.S.4` |
-| Table 3.5.1 | `ACTIVE.FIN.EX.1`, `ACTIVE.W.1`, `ACTIVE.W.3`, `ACTIVE.S.1`, `ACTIVE.S.2B`, `ACTIVE.WELL.S.4`, `ACTIVE.WELL.EN.1` |
+| Table 3.5.1 | `ACTIVE.FIN.EX.1`, `ACTIVE.W.1`, `ACTIVE.W.2`, `ACTIVE.W.3`, `ACTIVE.S.1`, `ACTIVE.S.2B`, `ACTIVE.WELL.S.4`, `ACTIVE.WELL.EN.1` |
 | Table 3.5.2 | `ACTIVE.A.1A`, `ACTIVE.A.1B`, `ACTIVE.AUX.1` |
 | Table 3.6.1 | `GCUT.W.1`, `GCUT.ACTIVE.S.1`, `GCUT.GATE.EX.1`, `GCUT.GATE.S.2`, `GCUT.S.3`, `GCUT.AUX.1`, `GCUT.AUX.2`, `GCUT.AUX.3` |
 | Table 3.7.1 | `NSELECT.W.1`, `NSELECT.W.2`, `NSELECT.ACTIVE.EN.1`, `NSELECT.ACTIVE.EN.2`, `NSELECT.GATE.EX.1`, `NSELECT.GATE.EX.2`, `PSELECT.W.1`, `PSELECT.W.2`, `PSELECT.ACTIVE.EN.1`, `PSELECT.ACTIVE.EN.2`, `PSELECT.GATE.EX.1`, `PSELECT.GATE.EX.2`, `SLVT.W.1`, `SLVT.W.2`, `SLVT.ACTIVE.EN.1`, `SLVT.ACTIVE.EN.2`, `SLVT.GATE.EX.1`, `SLVT.GATE.EX.2`, `LVT.W.1`, `LVT.W.2`, `LVT.ACTIVE.EN.1`, `LVT.ACTIVE.EN.2`, `LVT.GATE.EX.1`, `LVT.GATE.EX.2`, `SRAMVT.W.1`, `SRAMVT.W.2`, `SRAMVT.ACTIVE.EN.1`, `SRAMVT.ACTIVE.EN.2`, `SRAMVT.GATE.EX.1`, `SRAMVT.GATE.EX.2`, `NSELECT.PSELECT.AUX.1`, `VT.AUX.2` |
-| Table 3.8.1 | `SDT.W.1`, `SDT.W.2`, `SDT.S.1`, `SDT.GATE.S.2`, `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2`, `SDT.GATE.AUX.1`, `SDT.ACTIVE.AUX.2`, `SDT.ACTIVE.AUX.3`, `SDT.LISD.AUX.4` |
+| Table 3.8.1 | `SDT.W.1`, `SDT.W.2`, `SDT.W.3`, `SDT.S.1`, `SDT.GATE.S.2`, `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2`, `SDT.GATE.AUX.1`, `SDT.ACTIVE.AUX.2`, `SDT.ACTIVE.AUX.3`, `SDT.LISD.AUX.4` |
 | Table 3.9.1 | `LISD.W.1`, `LISD.S.1`, `LISD.S.2`, `LISD.S.3`, `LISD.A.1` |
 | Table 3.10.1 | `LIG.W.1`, `LIG.S.1`, `LIG.S.2`, `LIG.S.3`, `LIG.S.4`, `LIG.S.5` |
 | Table 3.10.2 | `LIG.GATE.S.9A`, `LIG.GATE.S.9B`, `LIG.GATE.S.10`, `LIG.GCUT.S.11`, `LIG.A.1`, `LIG.LISD.A.2`, `LIG.GATE.A.3`, `LIG.GATE.AUX.1` |
@@ -2166,6 +2187,23 @@ Related notes:
   BEOL rule here. They draw nothing on M3-M9 or V2-V9, so those rules are
   exercised by the generated fixtures only.
 
+### Integer-multiple vertical widths (`ACTIVE.W.2`, `SDT.W.3`)
+
+DRM Tables 3.5.1 and 3.8.1 (Figs. 3.5.1 and 3.8.1: `= N x ACTIVE.W.1` /
+`N x SDT.W.2`, `N` a positive integer) require the *vertical* width increment
+of ACTIVE, and of SDT outside SRAMDRC, to be a whole multiple of 27 nm. This is
+checked exactly, not approximated, and is not a bounding-box test: each merged
+rectilinear polygon is cut at every x where one of its vertices (hull or
+hole) lies, the cross-section inside each strip is a stack of rectangles, and
+each rectangle's height is that polygon's local vertical width there. Any
+height that is not a whole multiple of 27 nm, compared in integer database
+units (0.25 nm), is reported, so a stepped polygon is judged step by step and
+abutting boxes are judged as the one merged polygon they form. Horizontal
+widths are not constrained, SDT interacting with SRAMDRC is excluded as the
+DRM says (ACTIVE.W.2 has no SRAM qualifier), and non-rectilinear shapes are
+left to `GEOMETRY.NONORTHOGONAL`. The shipped-cell regression below needed no
+new deviation.
+
 ### Not implemented
 
 DRM rules in Tables 3.1-3.19 that the deck does not check yet. Rows group
@@ -2177,14 +2215,12 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | Rule ids | DRM table | Reason | Tracked by |
 | --- | --- | --- | --- |
 | `GATE.AUX.2` | Table 3.4.1 | the DRM gives no distance bound to check against | #2812 |
-| `ACTIVE.W.2` | Table 3.5.1 | integer-multiple width has no modulo predicate in the DRC DSL | #2812 |
 | `ACTIVE.S.2A` | Table 3.5.1 | needs net connectivity (different-net spacing) | #2812 |
 | `SRAM.ACTIVE.WELL.S.5`, `SRAM.ACTIVE.WELL.EN.2` | Table 3.5.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.ACTIVE.A.2A`, `SRAM.ACTIVE.A.2B`, `SRAM.ACTIVE.AUX.2` | Table 3.5.2 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `ACTIVE.AUX.3` | Table 3.5.2 | the DRM gives no distance bound to check against | #2812 |
 | `ACTIVE.LUP.1` | Table 3.5.2 | latch-up distance (30 um) needs tap/device classification | #2812 |
 | `SRAM.NSELECT.ACTIVE.EN.3`, `SRAM.NSELECT.ACTIVE.EN.4` | Table 3.7.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
-| `SDT.W.3` | Table 3.8.1 | integer-multiple width has no modulo predicate in the DRC DSL | #2812 |
 | `SRAM.SDT.W.4`, `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4` | Table 3.8.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `SRAM.LISD.S.4`, `SRAM.LISD.AUX.1` | Table 3.9.1 | SRAMDRC-marked variant; no SRAM cells ship with the pinned PDK and the DRM says SRAM rules may be waived for other cells | #2812 |
 | `LIG.LISD.S.6`, `LIG.LISD.S.7`, `LIG.SDT.S.8` | Table 3.10.1 | needs net connectivity (different-net spacing) | #2812 |
@@ -2193,7 +2229,7 @@ Nothing in Tables 3.14-3.19 is left out for want of mask colouring.
 | `V0.S.1` | Table 3.11.1 | classified by routing track (same / parallel / aligned tracks); the deck has no routing-direction or track assignment | #3147 |
 | `V0.S.2`, `V0.S.3`, `V0.S.4` | Table 3.11.1 | corner-to-corner spacing conditioned on a 5 nm metal end-cap; needs per-via end-cap classification against the upper metal | #3147 |
 | `V0.M1.EN.1` | Table 3.11.1 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
-| `V0.LISD.EN.2`, `V0.LISD.EN.3` | Table 3.11.2 | exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') needs routing direction and a per-side enclosure predicate | #3147 |
+| `V0.LISD.EN.2`, `V0.LISD.EN.3` | Table 3.11.2 | '== 3 nm on at least two opposite sides' is expressible without a routing direction, but the literal '==' contradicts the pinned shipped cells (100 V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells satisfy only the 'at least 3 nm' reading, so the exact check is not shipped | #3147 |
 | `V0.LIG.EN.4` | Table 3.11.2 | 'on two opposite sides' with a per-side minimum (V0.LIG.EN.4 1 nm of LIG past V0) needs the LIG routing direction to pick the side pair | #3147 |
 | `V0.LIG.AUX.2` | Table 3.11.2 | edge parallel to the LIG length needs the LIG routing direction | #3147 |
 | `V0.M1.AUX.3` | Table 3.11.2 | exact width across the metal track needs the metal routing direction | #3147 |
@@ -2266,7 +2302,11 @@ cases list the extra ids and say why, for example:
 - a GCUT within 4 nm of the channel shortens the cut gate's extension past
   ACTIVE (`GATE.ACTIVE.EX.1`);
 - SDT edges lie on ACTIVE edges and SDT lies inside LISD, so a short SDT also
-  breaks `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2` and `ACTIVE.W.1`;
+  breaks `SDT.ACTIVE.OV.1`, `SDT.LISD.OV.2` and `ACTIVE.W.1`, and, being
+  27 nm less one dbu, is no whole multiple of 27 nm either (`ACTIVE.W.2`,
+  `SDT.W.3`);
+- an SDT drawn to ACTIVE's height is off-multiple exactly when ACTIVE is, so
+  an `SDT.W.3` failure also trips `ACTIVE.W.2`;
 - an M4-M7 width or spacing one dbu below its minimum puts an edge off the
   `AUX.1` grid, and the W.2 maximum (20 x W.1) is itself an even multiple
   that `W.3` forbids.

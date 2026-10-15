@@ -918,7 +918,35 @@ ladder uses to spend far fewer squares per ohm. The layer/purpose numbers
 come straight from the same `klayout_tools.decks.sky130` extraction deck that
 recognises them, so a `flavor="high"`/`"xhigh"` array round-trips through
 `klt extract` to the matching device class rather than always reading
-`res_generic_po`. On gf180mcu (issue #1550), `"1k"`/`"2k"`/`"3k"` each draw
+`res_generic_po`. One exception (issue #3077): on sky130 `"high"`/`"xhigh"`
+also draw `npc` `(95, 20)`, which the curated extraction deck never requires
+but the open_pdks Magic tech does — `sky130A.tech` forms its
+`xhrpoly`/`uhrpoly` resistor only where `RPM|URPM & POLYRES & POLY & PSDM &
+NPC`, so without it Magic sees no resistor at all (an independent Magic
+`ext2spice` of the cell comes out empty). `rpm`/`urpm`, `psdm` and `npc` all
+cover the whole unit, end heads included, at `0.2`/`0.11`/`0.095` µm
+enclosure (`rpm.3`, `rpm.4`, and the 0.095 µm with which `sky130A.tech`'s
+own `cifoutput` grows NPC around the resistor), so adjacent units' masks
+abut and merge. With that, Magic's `extract all` + `ext2spice` recognises
+the cell as `sky130_fd_pr__res_high_po_<w>` / `res_xhigh_po_<w>`. Magic's own
+`drc(full)` still reports, on these cells, `licon.1c`'s "poly contact extends
+poly resistor by < 2.16um" and `rpm.1`'s minimum RPM/URPM width: the
+generator's heads are not drawn to the foundry cell's head geometry, and
+`klt drc --deck sky130` does not check those rules (see `docs/cli/drc.md`,
+"Precision-poly-resistor head rules are not checked"). So the `high`/`xhigh`
+output is recognised by Magic but is **not** Magic-DRC-clean; use `klt drc
+--engine klayout` for the independent check. A reporter also saw Magic
+(10 nm input scale) extract a body whose length is an odd multiple of 5 nm
+(e.g. `length_um: 9.765`) as a generic `res_high_po` with both terminals
+on one net when its left edge sat on the 10 nm grid, and correctly when
+shifted by 5 nm; a 9.76 µm body worked at either offset. That is Magic's
+input-scale rounding, not something the generator can correct without
+changing the requested geometry, so it is documented rather than snapped:
+when an independent Magic extraction matters, prefer body lengths that are
+multiples of 10 nm or place the cell on a 5 nm offset. (Not reproduced when
+re-measured: at the generator's own output placement, 9.76 and 9.765 µm
+bodies were both recognised and extracted with the right length; only the
+reporter's placement was seen to fail, so this note is as-reported.) On gf180mcu (issue #1550), `"1k"`/`"2k"`/`"3k"` each draw
 `SAB` `(49, 0)` plus the `Resistor` high-sheet-rho marker `(62, 0)` over the
 `RES_MK` body — no `Pplus`, since `ppolyf_u_1k`'s (and its `_2k`/`_3k`
 siblings') own `requires` set neither needs nor excludes it. All three names

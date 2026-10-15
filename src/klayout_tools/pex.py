@@ -1013,6 +1013,12 @@ def _model_mismatch(
     which names appear): a run whose two sides name the same models but a
     different number of each still reports the divergence, since that
     could equally mean a device was dropped/duplicated on one side.
+
+    The additive ``kind`` field (issue #3054) separates the two meanings:
+    ``"model_set"`` when either ``*_only`` list is non-empty (a wrong model
+    flavour), ``"count_only"`` when the model sets are identical and only
+    the instance counts differ (usually finger/multiplier decomposition),
+    each with its own ``detail`` wording.
     """
     reference_text = _read_text(reference_netlist) or ""
     reference_counts = _device_model_counts(reference_text)
@@ -1038,6 +1044,7 @@ def _model_mismatch(
         if key not in reference_multiset
     )
 
+    kind = "model_set" if reference_only or extracted_only else "count_only"
     hierarchical_reference = _reference_is_hierarchical(reference_text)
     if hierarchical_reference:
         unrelated_clause = (
@@ -1056,6 +1063,18 @@ def _model_mismatch(
             "run, before treating this as evidence the two sides are "
             "unrelated. "
         )
+    elif kind == "count_only":
+        unrelated_clause = (
+            "the reference (schematic) and extracted netlists instantiate "
+            "the same device models/`.subckt`s and differ only in how many "
+            "instances of each they carry. The usual cause is "
+            "finger/multiplier decomposition: the layout draws a device as "
+            "several fingers while the schematic has one instance (with "
+            "`nf`/`m`, or none), a difference `klt lvs` has already "
+            "reconciled. It does not by itself make `delta[]` unrelated, "
+            "but representation effects (fingering, AS/AD) are folded "
+            "into `delta[]` alongside the parasitics. "
+        )
     else:
         unrelated_clause = (
             "the reference (schematic) and extracted netlists instantiate "
@@ -1065,6 +1084,7 @@ def _model_mismatch(
         )
 
     return {
+        "kind": kind,
         "reference_only": reference_only,
         "extracted_only": extracted_only,
         "counts": {
@@ -1089,7 +1109,7 @@ def _model_mismatch(
                 "to the PDK family's default flavour while the reference "
                 "netlist names a different one -- see docs/cli/pex.md's "
                 "`model_mismatch` section"
-                if not hierarchical_reference
+                if kind == "model_set" and not hierarchical_reference
                 else "See docs/cli/pex.md's `model_mismatch` section"
             )
         ),
@@ -2113,6 +2133,7 @@ def run_pex(
     label_layers: Mapping[str, tuple[int, int] | None] | None = None,
     critical_nets: Sequence[str] | None = None,
     distributed_rc: bool = False,
+    parasitic_variants: Sequence[str] | None = None,
     mom_rlc_net: str | None = None,
     mom_rlc_resistance_ohm: float | None = None,
     mom_rlc_capacitance_ff: float | None = None,
@@ -2361,6 +2382,7 @@ def run_pex(
             label_layers=label_layers,
             critical_nets=critical_nets,
             distributed_rc=distributed_rc,
+            parasitic_variants=parasitic_variants,
             mom_rlc_net=mom_rlc_net,
             mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
@@ -2815,6 +2837,14 @@ def run_pex(
             # (verbatim per-net payloads, `parasitics.nets[]` order). See
             # `_parasitic_integrity_report`.
             "parasitic_integrity": _parasitic_integrity_report(parasitics),
+            # Additive field (issue #3056): echoes `--parasitic-variant`
+            # back so a variant run is attributable -- present only when
+            # the flag was given, byte-identical to before otherwise.
+            **(
+                {"parasitic_variant": parasitics["parasitic_variant"]}
+                if "parasitic_variant" in parasitics
+                else {}
+            ),
         },
         # Additive field (issue #1983): whether the extracted netlist this
         # run re-simulated has a DC bias path for every device body, reduced
