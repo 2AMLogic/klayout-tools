@@ -1155,6 +1155,7 @@ any list index.
 | `drc` | `file` | input layout, as provided by the caller |
 | `extract` | `file` | input layout, as provided by the caller |
 | `extract` | `netlist_path` | written SPICE netlist (explicit `--output`, else derived from `file`); `null` only under `--no-netlist` (issue #2850), where `netlist_sha256` is `null` too |
+| `extract` | `netlist_normalized_sha256` | additive (issue #3407): SHA-256 hex of the flat `devices[]`/`nets[]` connectivity with anonymous-net (`$N`) numbering normalized away, so it is stable across `klayout` builds where `netlist_sha256` (written-bytes hash) is not; `null` exactly when `netlist_sha256` is; no `schema_version` bump |
 | `extract` | `spef_path` | written SPEF (`--spef`), else `null` |
 | `extract` | `subcircuit.path` | written sub-circuit netlist (`--subcircuit`) |
 | `extract` | `abstracted_cells.*.lef_path` | LEF file an abstracted cell's pins came from |

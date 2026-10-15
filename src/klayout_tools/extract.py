@@ -132,6 +132,8 @@ exercised by ``tests/test_extract.py``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -1697,6 +1699,8 @@ def run_extract(
             "dbu_um": <database unit in micrometres, float>,
             "netlist_path": <resolved output path>,
             "netlist_sha256": <hex digest of the written netlist file>,
+            "netlist_normalized_sha256": <hex digest of the devices[]/nets[]
+                connectivity with anonymous-net numbering normalized away>,
             "status": "extracted",
             "device_count": <int>,
             "net_count": <int>,
@@ -3364,6 +3368,15 @@ def run_extract(
         "dbu_um": dbu_um,
         "netlist_path": reported_netlist_path,
         "netlist_sha256": netlist_sha256,
+        # Additive field (issue #3407): `null` exactly when `netlist_sha256`
+        # is (`--no-netlist`); otherwise a numbering-independent digest of
+        # the flat `devices[]`/`nets[]` connectivity -- see
+        # `_normalized_netlist_sha256`.
+        "netlist_normalized_sha256": (
+            None
+            if netlist_sha256 is None
+            else _normalized_netlist_sha256(devices, nets)
+        ),
         "status": "extracted",
         "device_count": len(devices),
         "net_count": len(nets),
@@ -4123,6 +4136,25 @@ def _canonicalize_extract_report_for_rerun_diff(
             )
 
     return normalized
+
+
+def _normalized_netlist_sha256(devices: list[Any], nets: list[Any]) -> str:
+    """Issue #3407: SHA-256 hex digest of this run's flat ``devices[]`` /
+    ``nets[]`` connectivity with KLayout's anonymous-net numbering
+    normalized away -- the same ``net_id`` strip, ``\\$<n>`` structural
+    rewrite and ``(name, attachment key)`` re-sort
+    :func:`_canonicalize_extract_report_for_rerun_diff` applies, serialized
+    as sorted-key compact JSON. Unlike ``netlist_sha256`` (the written
+    ``.spice`` bytes, which embed the ``$N`` counter) it is stable across
+    ``klayout`` builds that only renumber anonymous nets; any real
+    connectivity, device-parameter or net-name change alters it. Covers the
+    flat netlist only (not ``--subcircuit`` decks or parasitics output).
+    """
+    canonical = _canonicalize_extract_report_for_rerun_diff(
+        {"devices": devices, "nets": nets}
+    )
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _parasitics_net_attachment_key(entry: Mapping[str, Any]) -> str:
