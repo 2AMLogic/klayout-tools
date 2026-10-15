@@ -2410,25 +2410,7 @@ def _run_sim_corners(
     # `diagnostics` list. Always present, even when empty (a zero-
     # diagnostic grid reports empty dicts and a zero count, never omits the
     # field) -- see docs/cli/sim.md's report schema.
-    diagnostic_counts_by_code: dict[str, int] = {}
-    diagnostic_counts_by_severity: dict[str, int] = {}
-    corners_with_diagnostics = 0
-    for corner in corners:
-        corner_diagnostics = corner["diagnostics"]
-        if corner_diagnostics:
-            corners_with_diagnostics += 1
-        for diag in corner_diagnostics:
-            diagnostic_counts_by_code[diag["code"]] = (
-                diagnostic_counts_by_code.get(diag["code"], 0) + 1
-            )
-            diagnostic_counts_by_severity[diag["severity"]] = (
-                diagnostic_counts_by_severity.get(diag["severity"], 0) + 1
-            )
-    diagnostic_counts = {
-        "by_code": diagnostic_counts_by_code,
-        "by_severity": diagnostic_counts_by_severity,
-        "corners_with_diagnostics": corners_with_diagnostics,
-    }
+    diagnostic_counts = _diagnostic_counts(corners)
 
     if checkpoint is not None:
         if corners_skipped == 0:
@@ -2483,74 +2465,12 @@ def _run_sim_corners(
             )
 
     coverage = _build_coverage(measurements_spec, corners)
-    passed = sum(1 for c in corners if c["status"] == "pass")
-    failed = sum(1 for c in corners if c["status"] == "fail")
-    errored = sum(1 for c in corners if c["status"] == "error")
-    # Issues #2492 + #2493: ONE count for the single "this corner produced
-    # numbers, but they are not trustworthy enough to grade" status -- see
-    # :data:`_INCONCLUSIVE_STATUS` for why the two increments' originally
-    # separate `inconclusive`/`implausible_solution` statuses are one token
-    # with two *reason codes* rather than two parallel statuses and two
-    # parallel counts. Counted separately from `passed`/`failed`/`errored`
-    # (a distrusted corner is none of the three), always present, and always
-    # `0` for a request that declares neither `options.fail_on_diagnostic`
-    # nor a plausibility bound -- so
-    # `passed + failed + errored + inconclusive == corner_count` holds and a
-    # caller scanning only the original three cannot silently miscount the
-    # corners that moved to the new status. *Which* reason applied is read
-    # off `diagnostic_counts` (issue #2491), which already counts the
-    # `inconclusive`/`implausible_solution` marker diagnostics by code.
-    inconclusive = sum(1 for c in corners if c["status"] == _INCONCLUSIVE_STATUS)
-    # A `mean +/- k*sigma` Monte Carlo window outside the limits is a real
-    # design failure even when every individual sample passed -- it is only
-    # reachable via a declared sigma window, since every other rollup `fail`
-    # is already inherited from a corner that failed above -- so it feeds
-    # the same `failed` precedence input as a failed corner, rather than
-    # being reported and ignored.
-    measurement_rollup_failed = any(m["status"] == "fail" for m in measurements_rollup)
-    # Issue #2109: the common rollup rule is the single decision table for
-    # real failures/errors, zero/partial/unknown/malformed coverage and full
-    # success -- see `docs/coverage-contract.md`'s "The common rollup rule"
-    # and this module's own coverage-adapter row in its producer/
-    # compatibility table. `failed`/`errored` are this run's own outcome,
-    # decided before coverage is consulted at all; coverage is read from the
-    # `coverage` block this function already built. `rollup_status` reports
-    # `"pass_partial"` (the token #1997 already shipped for `klt power`) for
-    # successful checks alongside a nonempty skip list -- e.g. an
-    # unrecognised `limits` key beside a recognised one, or a corner with no
-    # requested measurements -- rather than the unconditional `"pass"` a
-    # nonempty skip list must never be reported as.
-    rollup = coverage_rollup(
-        {"coverage": coverage},
-        failed=bool(failed) or measurement_rollup_failed,
-        errored=bool(errored),
-    )
-    status = rollup_status(rollup, success="pass", failure="fail", errored="error")
-    # Issues #2492 + #2493: `inconclusive` outranks every non-`"error"`
-    # verdict token (`"fail"`, `"pass"`, `"pass_partial"`, `"not_checked"`).
-    # The common rollup rule has no vocabulary for "at least one result
-    # cannot be trusted enough to grade", so this is applied here as a
-    # final, narrowly-scoped override rather than folded into
-    # `coverage_rollup` itself -- `rollup`/`coverage` keep describing what
-    # was *covered*, which is a separate question from whether the covered
-    # results are trustworthy. `"error"` still wins: a corner that produced
-    # no number at all is strictly less information than a number the run
-    # declines to trust.
-    #
-    # This mints a top-level `status: "inconclusive"` rather than folding
-    # into `"error"`. `docs/json-contract.md` frames status/exit codes as
-    # *additive per verb* ("a command may ship a new code above 2 in a later
-    # release ... the new code is a new verdict"), and `klt lvs` already
-    # ships exactly this token at exactly this exit code
-    # (`lvs.py`'s `STATUS_INCONCLUSIVE`, issue #1370) -- so `klt sim`
-    # reporting `"inconclusive"`/exit `4` for "ran fine, cannot vouch for
-    # the numbers" is the established house spelling, not a new invention,
-    # and it keeps "the simulator broke" (`"error"`) distinguishable from
-    # "I do not trust this solve" at the top level and not only in the
-    # counts. Never fires unless the request opted in, so an unmodified
-    # request's `status` is byte-identical to before either issue.
-    if status != "error" and inconclusive:
-        status = _INCONCLUSIVE_STATUS
+    graded = _grade_corners(corners, measurements_rollup, coverage)
+    passed = graded["passed"]
+    failed = graded["failed"]
+    errored = graded["errored"]
+    inconclusive = graded["inconclusive"]
+    status = graded["status"]
 
     environment: dict[str, Any] = {
         "engine": engine,
@@ -2729,6 +2649,115 @@ def _run_sim_corners(
 # --------------------------------------------------------------------------- #
 # Model/netlist path resolution
 # --------------------------------------------------------------------------- #
+
+
+def _diagnostic_counts(corners: list[dict[str, Any]]) -> dict[str, Any]:
+    """Issue #2491 rollup of ``corners[].diagnostics[]`` across the grid.
+
+    Shared by :func:`run_sim` and :mod:`klayout_tools.sim_merge`.
+    """
+    by_code: dict[str, int] = {}
+    by_severity: dict[str, int] = {}
+    corners_with_diagnostics = 0
+    for corner in corners:
+        corner_diagnostics = corner["diagnostics"]
+        if corner_diagnostics:
+            corners_with_diagnostics += 1
+        for diag in corner_diagnostics:
+            by_code[diag["code"]] = by_code.get(diag["code"], 0) + 1
+            by_severity[diag["severity"]] = by_severity.get(diag["severity"], 0) + 1
+    return {
+        "by_code": by_code,
+        "by_severity": by_severity,
+        "corners_with_diagnostics": corners_with_diagnostics,
+    }
+
+
+def _grade_corners(
+    corners: list[dict[str, Any]],
+    measurements_rollup: list[dict[str, Any]],
+    coverage: dict[str, Any],
+) -> dict[str, Any]:
+    """The per-corner status counts and the report-level ``status``.
+
+    Shared by :func:`run_sim` and :mod:`klayout_tools.sim_merge`, so a merged
+    report is graded by exactly the rule a single request is.
+    """
+    passed = sum(1 for c in corners if c["status"] == "pass")
+    failed = sum(1 for c in corners if c["status"] == "fail")
+    errored = sum(1 for c in corners if c["status"] == "error")
+    # Issues #2492 + #2493: ONE count for the single "this corner produced
+    # numbers, but they are not trustworthy enough to grade" status -- see
+    # :data:`_INCONCLUSIVE_STATUS` for why the two increments' originally
+    # separate `inconclusive`/`implausible_solution` statuses are one token
+    # with two *reason codes* rather than two parallel statuses and two
+    # parallel counts. Counted separately from `passed`/`failed`/`errored`
+    # (a distrusted corner is none of the three), always present, and always
+    # `0` for a request that declares neither `options.fail_on_diagnostic`
+    # nor a plausibility bound -- so
+    # `passed + failed + errored + inconclusive == corner_count` holds and a
+    # caller scanning only the original three cannot silently miscount the
+    # corners that moved to the new status. *Which* reason applied is read
+    # off `diagnostic_counts` (issue #2491), which already counts the
+    # `inconclusive`/`implausible_solution` marker diagnostics by code.
+    inconclusive = sum(1 for c in corners if c["status"] == _INCONCLUSIVE_STATUS)
+    # A `mean +/- k*sigma` Monte Carlo window outside the limits is a real
+    # design failure even when every individual sample passed -- it is only
+    # reachable via a declared sigma window, since every other rollup `fail`
+    # is already inherited from a corner that failed above -- so it feeds
+    # the same `failed` precedence input as a failed corner, rather than
+    # being reported and ignored.
+    measurement_rollup_failed = any(m["status"] == "fail" for m in measurements_rollup)
+    # Issue #2109: the common rollup rule is the single decision table for
+    # real failures/errors, zero/partial/unknown/malformed coverage and full
+    # success -- see `docs/coverage-contract.md`'s "The common rollup rule"
+    # and this module's own coverage-adapter row in its producer/
+    # compatibility table. `failed`/`errored` are this run's own outcome,
+    # decided before coverage is consulted at all; coverage is read from the
+    # `coverage` block this function already built. `rollup_status` reports
+    # `"pass_partial"` (the token #1997 already shipped for `klt power`) for
+    # successful checks alongside a nonempty skip list -- e.g. an
+    # unrecognised `limits` key beside a recognised one, or a corner with no
+    # requested measurements -- rather than the unconditional `"pass"` a
+    # nonempty skip list must never be reported as.
+    rollup = coverage_rollup(
+        {"coverage": coverage},
+        failed=bool(failed) or measurement_rollup_failed,
+        errored=bool(errored),
+    )
+    status = rollup_status(rollup, success="pass", failure="fail", errored="error")
+    # Issues #2492 + #2493: `inconclusive` outranks every non-`"error"`
+    # verdict token (`"fail"`, `"pass"`, `"pass_partial"`, `"not_checked"`).
+    # The common rollup rule has no vocabulary for "at least one result
+    # cannot be trusted enough to grade", so this is applied here as a
+    # final, narrowly-scoped override rather than folded into
+    # `coverage_rollup` itself -- `rollup`/`coverage` keep describing what
+    # was *covered*, which is a separate question from whether the covered
+    # results are trustworthy. `"error"` still wins: a corner that produced
+    # no number at all is strictly less information than a number the run
+    # declines to trust.
+    #
+    # This mints a top-level `status: "inconclusive"` rather than folding
+    # into `"error"`. `docs/json-contract.md` frames status/exit codes as
+    # *additive per verb* ("a command may ship a new code above 2 in a later
+    # release ... the new code is a new verdict"), and `klt lvs` already
+    # ships exactly this token at exactly this exit code
+    # (`lvs.py`'s `STATUS_INCONCLUSIVE`, issue #1370) -- so `klt sim`
+    # reporting `"inconclusive"`/exit `4` for "ran fine, cannot vouch for
+    # the numbers" is the established house spelling, not a new invention,
+    # and it keeps "the simulator broke" (`"error"`) distinguishable from
+    # "I do not trust this solve" at the top level and not only in the
+    # counts. Never fires unless the request opted in, so an unmodified
+    # request's `status` is byte-identical to before either issue.
+    if status != "error" and inconclusive:
+        status = _INCONCLUSIVE_STATUS
+    return {
+        "passed": passed,
+        "failed": failed,
+        "errored": errored,
+        "inconclusive": inconclusive,
+        "status": status,
+    }
 
 
 #: Fraction of ``options.timeout_s`` at which a unit's runtime is reported as

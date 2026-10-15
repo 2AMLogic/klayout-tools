@@ -412,6 +412,7 @@
       "modules": [
         "klayout_tools.asap7_bsimcmg",
         "klayout_tools.cli.sim_cmd",
+        "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
         "klayout_tools.remote_launcher",
@@ -420,6 +421,7 @@
         "klayout_tools.sim_batch",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_merge",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",

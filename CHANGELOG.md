@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim-merge` recombines per-request sim reports** (issue #3045): a
+  corner grid split across several `klt sim` requests (one per process
+  corner, say) is merged against a manifest of the planned requests. The
+  per-measurement rollup (`status`, `worst_case`), `coverage` (with
+  re-based `checked` ids), the `corner_count`/`passed`/`failed`/`errored`/
+  `inconclusive` counters, `metrics` and `status` are recomputed over the
+  union with `klt sim`'s own helpers, and per-report fields
+  (`environment.netlist_sha256`, `environment.remote`,
+  `provenance.input.content_hash`) become per-shard arrays. A missing,
+  duplicate, unexpected or mismatching report, or a changed request, is
+  refused with its own exit code (`5`-`10`, `status: "refused"` payload).
+  Additive: new verb, new `merge` block, no `schema_version` bump. See
+  `docs/cli/sim.md` "Merging per-request reports". Shard planning is not
+  included.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

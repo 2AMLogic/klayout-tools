@@ -756,6 +756,92 @@ failed, `4` at least one request errored or was refused (**a partial set exits
 (e.g. an empty or invalid `--max-in-flight`) and no report was written; the
 error envelope goes to stderr as usual.
 
+### Merging per-request reports (`klt sim-merge`, [#3045](https://github.com/2AMLogic/klayout-tools/issues/3045))
+
+```
+klt sim-merge <manifest.json> <report.json>... [--format text|json]
+```
+
+When one corner grid cannot be a single request (for example the executing
+runner is older than the client and cannot carry per-section libraries,
+preloaded model binaries or the full model-library set), submit one request per
+process corner and recombine the reports with `klt sim-merge` instead of a
+per-repo script. It is a separate verb, not `klt sim merge`: `klt sim` takes a
+positional request path, so a `merge` subcommand would be ambiguous with a
+request file of that name.
+
+The **manifest** is the plan, written by whoever split the grid
+([`docs/schemas/sim-merge-manifest.schema.json`](../schemas/sim-merge-manifest.schema.json)):
+
+```json
+{
+  "schema_version": 1,
+  "shards": [
+    {"id": "tt", "request": "req-tt.json", "request_sha256": "<hex>",
+     "corners": ["tt/1.800V/-40C", "tt/1.800V/125C"]},
+    {"id": "ss", "request": "req-ss.json", "request_sha256": "<hex>",
+     "corners": ["ss/1.800V/-40C", "ss/1.800V/125C"]}
+  ]
+}
+```
+
+`corners` is the ordered `corners[].corner_id` list the shard's report must
+carry (that is how a report is matched to its shard -- reports carry no shard
+id, so two shards planning the identical list is an invalid manifest).
+`request`/`request_sha256` are optional; when given, `request` (relative to the
+manifest) is hashed and must equal the pin. Shard order in the manifest is the
+merged `corners[]` order, so the output does not depend on the order the report
+paths are given.
+
+**What is recomputed over the union** (with the same code `klt sim` uses, never
+copied from one shard): `corner_count`, `passed`/`failed`/`errored`/
+`inconclusive`, `status`, `metrics`, `diagnostic_counts`, the per-measurement
+rollup (`measurements[].status` and `worst_case`: minimum margin, an absent
+margin worst, ties to the first corner in merged order) and `coverage`
+(`corners_simulated`, `checked`/`inapplicable`/`skipped`, `nothing_checked`),
+whose ids carry corner indices local to each report and are re-based to the
+merged corner order. Merging N per-process reports therefore yields the report
+one request over the same grid would.
+
+**Per-report fields become arrays**, aligned with `merge.shards[]`:
+`environment.netlist_sha256`, `environment.remote` (job ids; `null` for a shard
+run locally) and `provenance.input.content_hash` always; any other
+`environment`/`provenance` field whose value differs between shards becomes an
+array too, and fields all shards agree on stay scalar. The output adds one
+additive block, `merge` (`schema_version: 1`, `shard_count`, `shards[]` with
+`id`, `request`, `request_sha256`, `corner_count`); the report's own
+`schema_version` is unchanged
+([`docs/schemas/sim-merge-report.schema.json`](../schemas/sim-merge-report.schema.json)).
+`measurements[].plot` is not carried over (it names one shard's artifact).
+
+**Refusals.** Nothing is merged from a set that is not exactly the plan. A
+refusal is a verdict, so (per the "a report was emitted" rule for exits `>= 3`)
+stdout carries `{"schema_version": 1, "status": "refused", "refusal": {"code",
+"message"}}`:
+
+| Exit | `refusal.code` | Meaning |
+| ---- | ------------ | ------- |
+| `5` | `missing_shard` | a planned shard has no report |
+| `6` | `duplicate_shard` | two reports carry the same planned shard's corners |
+| `7` | `unexpected_shard` | a report shares no corner with the plan |
+| `8` | `corner_mismatch` | a report overlaps the plan but is not exactly one shard's corners |
+| `9` | `request_mismatch` | a planned request file is unreadable or not the one the plan pinned |
+| `10` | `inconsistent_shards` | shards disagree on measurement names/units/limits, the simulated netlist or `schema_version` |
+
+When several classes apply the exit code is the first in the order `9, 8, 7, 6,
+5, 10`; the message lists every problem. Other exits: `1` could not run, with the usual error envelope on stderr
+(unreadable or invalid manifest/report; a Monte Carlo or deck-list report,
+which cannot be merged because sample seeds and statistics depend on the whole
+sample sequence), `2` usage. A merge that succeeds exits like `klt sim` for the
+merged `status`: `0` pass, `3` a measurement failed, `4` errored, inconclusive
+or nothing checked.
+
+`request_sha256` pins the *planned request file*; a report does not embed the
+request that produced it, so the report-to-request binding is the corner list
+plus the cross-shard consistency checks above. A deterministic shard planner
+(split by a corner axis, emit requests and the manifest) is not part of this
+verb.
+
 ### Three budgets, and the fleet's whole-job ceiling
 
 A batch request is bounded by three separate time limits. Only one of them is
