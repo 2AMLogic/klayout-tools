@@ -387,7 +387,18 @@ _SRAM = (
 )
 _NETS = "needs net connectivity (different-net spacing)"
 _MULTIPLE = "integer-multiple width has no modulo predicate in the DRC DSL"
-_NO_BOUND = "the DRM gives no distance bound to check against"
+_GATE_DISCONTINUOUS = (
+    "no distance bound, but a topological condition (a GATE column split into "
+    "separate polygons, Fig. 3.4.2(a)); the DRM does not say how far two GATE "
+    "polygons may overlap sideways to share a column, so the predicate needs "
+    "that reading ratified before it is enforced"
+)
+_ACTIVE_NOTCH = (
+    "no distance bound, but a topological condition (a slot cut into a "
+    "vertical ACTIVE edge, Fig. 3.5.4(b)); the DRM defines neither 'notch' "
+    "nor its size, so the predicate needs that reading ratified before it is "
+    "enforced"
+)
 _TRACK = (
     "classified by routing track (same / parallel / aligned tracks); the deck "
     "has no routing-direction or track assignment"
@@ -476,7 +487,7 @@ _ONE_SIDE = (
 
 #: DRM rules from the covered tables (3.1-3.19) the deck does not check yet.
 NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
-    Asap7RuleGap("GATE.AUX.2", "Table 3.4.1", _NO_BOUND, "#2812"),
+    Asap7RuleGap("GATE.AUX.2", "Table 3.4.1", _GATE_DISCONTINUOUS, "#2812"),
     Asap7RuleGap("ACTIVE.W.2", "Table 3.5.1", _MULTIPLE, "#2812"),
     Asap7RuleGap("ACTIVE.S.2A", "Table 3.5.1", _NETS, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.WELL.S.5", "Table 3.5.1", _SRAM, "#2812"),
@@ -484,7 +495,7 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("SRAM.ACTIVE.A.2A", "Table 3.5.2", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.A.2B", "Table 3.5.2", _SRAM, "#2812"),
     Asap7RuleGap("SRAM.ACTIVE.AUX.2", "Table 3.5.2", _SRAM, "#2812"),
-    Asap7RuleGap("ACTIVE.AUX.3", "Table 3.5.2", _NO_BOUND, "#2812"),
+    Asap7RuleGap("ACTIVE.AUX.3", "Table 3.5.2", _ACTIVE_NOTCH, "#2812"),
     Asap7RuleGap(
         "ACTIVE.LUP.1",
         "Table 3.5.2",
