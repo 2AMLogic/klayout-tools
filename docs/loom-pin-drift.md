@@ -14,6 +14,16 @@ issue's scope.
 
 ## `commands/loom/champion-epic.md`
 
+> **RETIRED 2026-10-15** (2AMLogic/2am#4345, operator ruling Q5 option 1).
+> The pin is dropped and the file carries installed upstream (v0.19.1160).
+> Re-checked against rjwalters/loom `7e4d69c7a`: conditions 1-3 below are met
+> by Step 2.75 (#6601), the unrevised-epic cap (#5865, default 2) and
+> `OPERATOR_RULED` (#7921), and condition 4 holds — all four guard suites pass
+> on the upstream file and fail on the old pinned one. One accepted change: a
+> human comment alone no longer un-parks a held epic; removing the hold label
+> is the release, matching the post-#11795 hold taxonomy. The rest of this
+> section is kept as the historical record.
+
 Checked **2026-10-09** against `rjwalters/loom` @
 `4487a6a0114498e9e2d44a24259702593a2f4db0` (upstream `main`; the last commit
 touching `defaults/.claude/commands/loom/champion-epic.md` is `dc87ce9e`,
