@@ -2313,6 +2313,21 @@ after every device class on today's roadmap lands — it is a property of
 "connectivity layer with no matching extractor", not of any specific missing
 class.
 
+**Unclaimed resistor marker (issue #3138).** A second, distinct `warnings[]`
+string covers a resistor-ID marker the deck *declares* but that no
+`ResistorDevice` claims. `_resolve_resistors` drops a spec whose body region
+(`body & marker`, narrowed by `requires`/`excludes`) is empty, and the poly
+heuristic below does not fire because the marker is declared. So a marker
+drawn beside or abutting the conductor (e.g. an abutting-head primitive cell on
+an overlap-topology deck), or one whose `requires`/`excludes` conditions fail,
+previously extracted as a clean, device-less layout. Now, per marker layer, if
+marker shapes interact with none of the pre-`dummy` candidate bodies of the
+specs sharing that marker, one warning names the layer, the unclaimed shape
+count and the deck's declared resistor classes on it. A marker shared by several
+flavours is judged against the union of their bodies, and a body fully consumed
+by the `dummy` cut still counts as claimed. Warning only: exit code and
+`status` are unchanged and there is no new JSON field.
+
 `warnings[]` now carries one narrowly-scoped heuristic diagnostic for the
 most common shape of this problem: a **poly resistor body** drawn without
 (or excluded from) a resistor-ID marker layer, or any other conductor shape
