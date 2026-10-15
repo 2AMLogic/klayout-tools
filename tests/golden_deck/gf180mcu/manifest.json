@@ -2998,6 +2998,71 @@
       ]
     }
   },
+  "poly2.enclosing.sab.1": {
+    "check": "enclosing",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            2000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        },
+        {
+          "box": [
+            -290,
+            -290,
+            2290,
+            2290
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      30,
+      0
+    ],
+    "threshold_dbu": 220,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            2000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        },
+        {
+          "box": [
+            0,
+            0,
+            1500,
+            2000
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        }
+      ]
+    }
+  },
   "poly2.space.1": {
     "check": "space",
     "clean": {
@@ -3620,6 +3685,177 @@
           ],
           "layer": [
             31,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "sab.separation.contact.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            1000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        },
+        {
+          "box": [
+            1250,
+            400,
+            1470,
+            620
+          ],
+          "layer": [
+            33,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      49,
+      0
+    ],
+    "threshold_dbu": 150,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            1000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        },
+        {
+          "box": [
+            1100,
+            400,
+            1320,
+            620
+          ],
+          "layer": [
+            33,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "sab.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        },
+        {
+          "box": [
+            2520,
+            0,
+            4520,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      49,
+      0
+    ],
+    "threshold_dbu": 420,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        },
+        {
+          "box": [
+            2320,
+            0,
+            4320,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "sab.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            520,
+            4000
+          ],
+          "layer": [
+            49,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      49,
+      0
+    ],
+    "threshold_dbu": 420,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            320,
+            4000
+          ],
+          "layer": [
+            49,
             0
           ]
         }

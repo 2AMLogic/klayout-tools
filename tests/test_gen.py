@@ -15,6 +15,11 @@ from pathlib import Path
 
 import pytest
 
+from helpers.drc_known_findings import (
+    GF180MCU_OFFGRID_RULES,
+    GF180MCU_RES_ARRAY_SB_RULES,
+    assert_drc_clean_except,
+)
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import run_drc
@@ -702,6 +707,48 @@ def test_list_generators_phase2_params_have_no_hidden_layer_fields(name):
     }
 
 
+@pytest.mark.parametrize(
+    ("generator", "params", "expected_rule", "tracking_issue"),
+    [
+        ("res_array", {}, "poly2.enclosing.sab.1", "#3000"),
+        (
+            "diff_pair",
+            {"splits": 1, "add_guard_ring": True, "ring_padding_um": 0.5015},
+            "comp.ongrid.1",
+            "#3364",
+        ),
+    ],
+)
+def test_known_gf180mcu_generator_findings_are_still_present(
+    tmp_path, both_pdk_root, generator, params, expected_rule, tracking_issue
+):
+    """Tripwire for the allowances `assert_drc_clean_except` grants gf180mcu
+    generator output (`helpers/drc_known_findings.py`).
+
+    Issue #3001 added the PDK runset's `OFFGRID` and `SB.*` rules to the
+    gf180mcu deck, which surfaced two generator defects. When
+    `tracking_issue` lands this test fails -- which is the point: delete it
+    and the matching allowance, restoring the plain clean assertions.
+    """
+    output = tmp_path / f"{generator}_known_finding.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), "gf180mcu")
+
+    assert drc_report["rule_counts"].get(expected_rule), (
+        f"{tracking_issue} appears to be fixed -- delete this test and the "
+        "matching allowance in helpers/drc_known_findings.py. "
+        f"rule_counts: {drc_report['rule_counts']}"
+    )
+
+
 @pytest.mark.parametrize(("generator_name", "deck"), _PHASE2_GENERATOR_X_DECK)
 def test_phase2_generator_default_params_are_drc_clean(
     generator_name, deck, tmp_path, both_pdk_root
@@ -722,7 +769,11 @@ def test_phase2_generator_default_params_are_drc_clean(
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean"
+    if deck == "gf180mcu" and generator_name == "res_array":
+        # SB.4/SB.10 geometry is #3000's; see `helpers/drc_known_findings.py`.
+        assert_drc_clean_except(drc_report, GF180MCU_RES_ARRAY_SB_RULES)
+    else:
+        assert drc_report["status"] == "clean"
 
     # bbox_um and ports[] are populated (acceptance criterion #3).
     bbox = report["bbox_um"]
@@ -3162,7 +3213,11 @@ def test_res_array_rows_folded_is_drc_clean(tmp_path, both_pdk_root, deck):
     )
     assert output.is_file()
     drc_report = run_drc(str(output), deck)
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    if deck == "gf180mcu":
+        # SB.4/SB.10 geometry is #3000's; see `helpers/drc_known_findings.py`.
+        assert_drc_clean_except(drc_report, GF180MCU_RES_ARRAY_SB_RULES)
+    else:
+        assert drc_report["status"] == "clean", drc_report["violations"]
     assert report["device_count"] == 9
 
 
@@ -3292,7 +3347,15 @@ def test_res_array_half_dbu_tie_length_draws_full_contact_and_is_drc_clean(
     # carry `ongrid` findings (a user-supplied dimension, not a derived
     # centre -- issue #2648 snaps only the latter). Every other rule, and in
     # particular the licon1 cut and its `ongrid` rule, must stay clean.
-    assert set(drc_report["rule_counts"]) <= {"li1.ongrid.1", "poly.ongrid.1"}
+    allowed = {"li1.ongrid.1", "poly.ongrid.1"}
+    if deck == "gf180mcu":
+        # Same user-supplied-dimension reasoning for every gf180mcu body
+        # layer, but never the Contact cut's own grid rule; the SB findings
+        # are `res_array`'s (#3000).
+        allowed = (GF180MCU_OFFGRID_RULES - {"contact.ongrid.1"}) | (
+            GF180MCU_RES_ARRAY_SB_RULES
+        )
+    assert set(drc_report["rule_counts"]) <= allowed
 
 
 @pytest.mark.parametrize("length_um", _ISSUE_1551_NON_TIE_LENGTHS_UM)
@@ -3455,8 +3518,11 @@ def test_gf180mcu_diff_pair_off_grid_ring_padding_is_drc_clean(
         assert (x1 - x0, y1 - y0) == (expected_dbu, expected_dbu)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
-    assert drc_report["rule_counts"] == {}
+    # The ring cuts stay clean (the point of #2442); the ring body still has
+    # off-grid vertices at these paddings (#3364), so only the grid rules are
+    # tolerated -- see `helpers/drc_known_findings.py`.
+    assert_drc_clean_except(drc_report, GF180MCU_OFFGRID_RULES - {"contact.ongrid.1"})
+    assert not any(rule.startswith("contact.") for rule in drc_report["rule_counts"])
 
 
 @pytest.mark.parametrize(
@@ -3499,8 +3565,10 @@ def test_gf180mcu_sibling_guard_ring_generators_off_grid_padding_drc_clean(
         }
     )
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
-    assert drc_report["rule_counts"] == {}
+    # Ring cuts stay clean; ring body vertices are off-grid at this padding
+    # (#3364) -- see `helpers/drc_known_findings.py`.
+    assert_drc_clean_except(drc_report, GF180MCU_OFFGRID_RULES - {"contact.ongrid.1"})
+    assert not any(rule.startswith("contact.") for rule in drc_report["rule_counts"])
 
 
 @pytest.mark.parametrize("ring_padding_um", (0.5015, 1.2345, 3.1415))
@@ -9510,7 +9578,11 @@ def test_phase2_generator_stays_drc_clean_at_pdk_resolved_finer_dbu(
     assert report["dbu_um"] == pytest.approx(0.0005)
 
     drc_report = run_drc(str(fine), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    if generator_name == "res_array":
+        # SB.4/SB.10 geometry is #3000's; see `helpers/drc_known_findings.py`.
+        assert_drc_clean_except(drc_report, GF180MCU_RES_ARRAY_SB_RULES)
+    else:
+        assert drc_report["status"] == "clean", drc_report["violations"]
 
     assert _merged_geometry_um(coarse) == _merged_geometry_um(fine), (
         f"{generator_name}: drawn geometry differs between 0.001 and 0.0005 dbu"
@@ -10357,7 +10429,9 @@ def test_gf180mcu_guard_ring_off_grid_implant_still_extends_exactly_margin(
     _assert_ring_implant_tracks_comp(active_region, nplus_region, layout.dbu)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert drc_report["status"] == "clean", drc_report["violations"]
+    # `inner_um` is itself off the 0.005um grid, so the ring body carries grid
+    # findings (#3364); nothing else may fire.
+    assert_drc_clean_except(drc_report, GF180MCU_OFFGRID_RULES - {"contact.ongrid.1"})
 
 
 #: `diff_pair` paddings that put the automatically-sized ring's own box edges on

@@ -480,6 +480,24 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             ]
         },
     ),
+    # `sab.separation.contact.1` (SB.4, 150 dbu): the generic
+    # `_separation_pair` bar would be a Contact wider than `CO.1`'s fixed
+    # 220 dbu square and trip `contact.width.1`, so the Contact here is the
+    # legal 220x220 square (issue #3001).
+    "sab.separation.contact.1": (
+        {  # violate: contact 100 dbu (< 150) from the SAB's right edge
+            "shapes": [
+                {"layer": [49, 0], "box": [0, 0, 1000, 1000]},  # SAB
+                {"layer": [33, 0], "box": [1100, 400, 1320, 620]},  # Contact
+            ]
+        },
+        {  # clean: contact 250 dbu (> 150) from the SAB's right edge
+            "shapes": [
+                {"layer": [49, 0], "box": [0, 0, 1000, 1000]},  # SAB
+                {"layer": [33, 0], "box": [1250, 400, 1470, 620]},  # Contact
+            ]
+        },
+    ),
     "mim.space.1": (
         {  # violate: second Metal4 bar 1100 dbu (< 1200) from the plate
             "shapes": [

@@ -2393,7 +2393,7 @@ def _run_check(
         edge_pairs = getattr(region, f"{check}_check")(other_region, d)
 
         outside_region = None
-        if check in _OUTSIDE_CHECKS:
+        if check in _OUTSIDE_CHECKS and rule.report_escapes:
             if check == "enclosing":
                 # `region` is the enclosing layer, `other_region` the
                 # enclosed one -- among the `other_region` shapes that do

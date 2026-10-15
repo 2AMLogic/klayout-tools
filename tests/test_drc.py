@@ -2957,6 +2957,27 @@ def test_run_drc_gf180mcu_cut_enclosure_escape_violation(
     assert violation["layer"] == conductor_name
 
 
+def _without_grid_findings(report):
+    """`(rule_counts, violations)` of a gf180mcu report minus the
+    `<layer>.ongrid.1` findings (issue #3001).
+
+    Several tests below deliberately draw geometry a single dbu (1 nm) short
+    of a threshold to pin a *marginal* rule; such coordinates are, by
+    construction, off the 0.005um manufacturing grid, so the deck's `OFFGRID`
+    rules now (correctly) flag them too. Those tests are about the enclosure /
+    spacing rule, not the grid, and grid behaviour is covered by
+    `tests/test_drc_gf180mcu_offgrid_sab.py`."""
+    counts = {
+        rule: n
+        for rule, n in report["rule_counts"].items()
+        if not rule.endswith(".ongrid.1")
+    }
+    violations = [
+        v for v in report["violations"] if not v["rule"].endswith(".ongrid.1")
+    ]
+    return counts, violations
+
+
 @pytest.mark.parametrize(
     "rule_id,conductor,conductor_name,cut,cut_name,threshold_dbu",
     _GF180MCU_CUT_ENCLOSURE_RULES_WITH_MARGIN,
@@ -2980,10 +3001,11 @@ def test_run_drc_gf180mcu_cut_enclosure_marginal_violation(
     )
 
     report = run_drc(str(path), "gf180mcu")
+    rule_counts, violations = _without_grid_findings(report)
 
     assert report["status"] == "violations"
-    assert report["rule_counts"] == {rule_id: 1}
-    (violation,) = report["violations"]
+    assert rule_counts == {rule_id: 1}
+    (violation,) = violations
     assert violation["rule"] == rule_id
     assert violation["check"] == "enclosing"
     assert violation["layer"] == conductor_name
@@ -3697,9 +3719,12 @@ def test_run_drc_gf180mcu_row_abutment_subdbu_gap_real_shortfall(tmp_path):
     path = _gf180mcu_and2_row(tmp_path, "row_abutment_subdbu_gap", pitch_delta_dbu=1)
 
     report = run_drc(str(path), "gf180mcu", top="ROW_ABUTMENT_TEST")
+    # The 1 dbu offset also puts the shifted instance off the 0.005um grid
+    # (issue #3001); this test pins the spacing rule, not the grid.
+    rule_counts, _violations = _without_grid_findings(report)
 
     assert report["status"] == "violations"
-    assert report["rule_counts"] == {"metal1.space.1": 4}
+    assert rule_counts == {"metal1.space.1": 4}
 
 
 def test_run_drc_gf180mcu_reproducer_from_issue(tmp_path):
