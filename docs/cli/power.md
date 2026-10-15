@@ -227,6 +227,16 @@ The spec file is a JSON object:
     instances attach" below), not to a node spliced in at that exact point.
   - `voltage_v` (number, required) — the voltage this pad holds its node at,
     e.g. `1.8` for a supply and `0.0` for a ground.
+- `max_decomposition_cells` (optional positive integer, default `4096`) —
+  the mesh-cell cap a non-rectangular merged polygon may need before its
+  island is declared unsolved (see "When a polygon cannot be decomposed
+  exactly" below). Raise it when a large `li1`-class polygon on a
+  chip-scale layout reports `unsolved_reason` "... needs up to N mesh
+  cells, over this build's 4096-mesh-cell cap": set it to at least the N
+  named there and the full model solves. A value that is not an integer, is
+  a boolean, or is below 1 exits `1`. Larger caps cost memory and solve
+  time; the report echoes the effective value as top-level
+  `max_decomposition_cells`.
 - `current_model` (optional object) — what each instance draws:
   - `supply_net` / `ground_net` (strings, optional) — per-model defaults for
     the instances below; each must be one of `power_nets`.
@@ -449,10 +459,9 @@ are `0`, and a `warnings` entry says so. Two cases reach this:
 
 - the polygon is **not axis-aligned** (45° geometry has no exact
   decomposition into rectangles), or
-- its grid would exceed the build's `MAX_DECOMPOSITION_CELLS` cap
-  (`klayout_tools/power.py`, 4096 today) — a pathological, thousands-of-
-  vertices segment would otherwise explode into a network no consumer can
-  read.
+- its grid would exceed the spec's `max_decomposition_cells` cap (default
+  4096) — a pathological, thousands-of-vertices segment would otherwise
+  explode into a network no consumer can read. Raise the field to solve it.
 
 An unsolved island still counts toward `island_count` (the geometry is real;
 only its resistor model is missing), contributes no nodes for a pad or an
@@ -943,6 +952,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `worst_case_droop_mv` | number \| null    | The largest \|voltage − island reference voltage\| anywhere solved, in millivolts (`null` when there was no solve; `0.0` when there was a solve but nothing drooped). Equal to `ir_drop_map.worst_case.droop_mv`. |
 | `em_verdict`         | object \| null     | The per-net EM current-density verdict, or `null` when the spec declared neither `pads` nor `current_model` (the same condition under which `ir_drop_map` is `null`) — see below. |
 | `devices`            | array\<object\>    | One entry per `devices[]` spec declaration, in declaration order: `{"name", "body_layer", "on", "body_area_um2"}`. `body_area_um2` is the area this declaration **actually** subtracted — the marker intersected with the `on` role's own drawn region, not the marker layer's own area — so `0.0` means the declaration changed nothing. `[]` when the spec declares no `devices`. See "Device bodies are not wires" below. |
+| `max_decomposition_cells` | integer      | The effective decomposition cap this run used: the spec's `max_decomposition_cells`, or the default `4096` when omitted. |
 | `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry (listing the net names actually present), a count of non-rectangular segments decomposed into sub-segments, an island declared unsolved, a via that lands on no modelled segment of one of the roles it declares, an island whose emitted network is more than one connected component (some real connection is not modelled), a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
 | `provenance`         | object             | The shared reproducibility block (issue #2349) — see "Provenance" above and [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block": `klt_version`, `klayout_version`, `pdk`/`deck` (always `null` for this verb), `input.content_hash` (the layout) and the verb-local `spec.content_hash` (the spec's contents), plus `top_cell`. |
 
