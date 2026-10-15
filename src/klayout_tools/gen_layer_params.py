@@ -390,6 +390,24 @@ CAP_BOTTOM_PLATE_MARGIN_UM = 0.5
 #: plate).
 CAP_TOP_ESCAPE_CLEARANCE_UM = CAP_BOTTOM_PLATE_MARGIN_UM
 
+#: Distance (um) `cap_array`'s ``connect="parallel"`` top-plate via grid
+#: (issue #3022) keeps between the plate edge and the nearest via's edge.
+#: Exceeds sky130's `capm.enclosing.via3.1` (0.14um) with margin; an
+#: implementation choice for the one family parallel mode is verified on
+#: (:data:`_PDK_CAP_PARALLEL_UNIT_RANGE_UM`), not a transcribed rule.
+CAP_PARALLEL_VIA_EDGE_INSET_UM = 0.3
+
+#: Families `cap_array`'s ``connect="parallel"`` is verified on (issue #3022,
+#: DRC-clean + one extracted capacitor, see `tests/test_gen.py`), mapped to
+#: the unit plate side range (um, inclusive) the PDK characterises -- sky130's
+#: own `sky130_fd_pr__cap_mim_m3_1` device generator offers 2-30um per side.
+#: Every other family is rejected: gf180mcu's oversized virtual bottom plate
+#: and 1.2um `mim.space.1`, and sg13g2's coarse `TopMetal1` width, are not
+#: verified for a shared-plate bank.
+_PDK_CAP_PARALLEL_UNIT_RANGE_UM: dict[str, tuple[float, float]] = {
+    "sky130": (2.0, 30.0),
+}
+
 #: Guard ring sizing `diff_pair` uses for its own, automatically-generated
 #: ring. `GUARD_RING_DEFAULT_PADDING_UM` is the default for `diff_pair`'s own
 #: `ring_padding_um` param (issue #484) -- the ring's thickness itself
@@ -2880,6 +2898,31 @@ def _cap_family_layers(family: str) -> dict[str, tuple[int, int] | None]:
     }
 
 
+def _check_cap_parallel_supported(family: str, params: dict[str, Any]) -> None:
+    """Reject ``connect="parallel"`` on a family it is not verified on, or a
+    unit plate side outside that family's characterised range (issue #3022).
+    A no-op for ``connect="independent"``."""
+    from .gen import GenError
+
+    if params.get("connect", "independent") != "parallel":
+        return
+    unit_range = _PDK_CAP_PARALLEL_UNIT_RANGE_UM.get(family)
+    if unit_range is None:
+        raise GenError(
+            "generator 'cap_array': params.connect='parallel' is only verified "
+            f"on {', '.join(sorted(_PDK_CAP_PARALLEL_UNIT_RANGE_UM))}, not on "
+            f"PDK family '{family}'"
+        )
+    lo, hi = unit_range
+    for name in ("plate_w_um", "plate_h_um"):
+        if not lo <= params[name] <= hi:
+            raise GenError(
+                f"generator 'cap_array': params.{name} must be within the "
+                f"{family} MiM characterised unit range {lo}-{hi}um for "
+                f"connect='parallel' (got {params[name]})"
+            )
+
+
 def _cap_array_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2910,6 +2953,7 @@ def _cap_array_layer_params(
     import klayout.db as kdb
 
     family = _pdk_family(pdk_info["variant"])
+    _check_cap_parallel_supported(family, params)
     layers = _cap_family_layers(family)
     top_via = layers["cap_top_via"]
     top_via_metal = layers["cap_top_via_metal"]

@@ -66,6 +66,21 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "num", self.TypeInt, "Number of matched unit capacitors", default=4
             )
             self.param(
+                "connect",
+                self.TypeString,
+                "'independent' draws num separate capacitors; 'parallel' "
+                "draws one shared bottom plate with the top plates strapped "
+                "into a single two-terminal capacitor of num x C_unit",
+                default="independent",
+            )
+            self.param(
+                "top_via_pitch_um",
+                self.TypeDouble,
+                "connect='parallel' only: pitch (um) of the top-plate via "
+                "grid over each unit (0 = twice the drawn via side)",
+                default=0.0,
+            )
+            self.param(
                 "cap_top_plate_layer",
                 self.TypeLayer,
                 "MiM top-plate drawing layer",
@@ -177,6 +192,43 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         def display_text_impl(self) -> str:
             return f"cap_array(w={self.plate_w_um},h={self.plate_h_um},n={self.num})"
 
+        def _produce_parallel(
+            self, boxes: dict[str, list], top_requires_layers: list
+        ) -> None:
+            """``connect='parallel'`` (issue #3022): the shared bottom plate,
+            every unit's top plate (+ requires masks), the top-plate via
+            grids and the strap/escape metal, all in absolute coordinates."""
+            dbu = self.layout.dbu
+            cell = self.cell
+            _insert_boxes(
+                cell,
+                self.layout.layer(self.cap_bottom_plate_layer),
+                dbu,
+                boxes["bottom_plate"],
+                0.0,
+                0.0,
+            )
+            plate_layers = [
+                self.layout.layer(self.cap_top_plate_layer),
+                *(self.layout.layer(lp) for lp in top_requires_layers),
+            ]
+            for li in plate_layers:
+                _insert_boxes(cell, li, dbu, boxes["top_plate"], 0.0, 0.0)
+            if self.cap_top_via_present:
+                li_via = self.layout.layer(self.cap_top_via_layer)
+                _insert_boxes(cell, li_via, dbu, boxes["top_via"], 0.0, 0.0)
+                if self.cap_top_via_fixed_size_um > 0.0:
+                    _clamp_cut_boxes(cell, li_via, dbu, self.cap_top_via_fixed_size_um)
+            if self.cap_top_via_metal_present:
+                _insert_boxes(
+                    cell,
+                    self.layout.layer(self.cap_top_via_metal_layer),
+                    dbu,
+                    boxes["top_via_metal"],
+                    0.0,
+                    0.0,
+                )
+
         def produce_impl(self) -> None:
             dbu = self.layout.dbu
             li_top = self.layout.layer(self.cap_top_plate_layer)
@@ -190,6 +242,8 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.cap_top_via_min_w_um,
                 self.cap_bottom_plate_margin_min_um,
                 self.cap_min_spacing_um,
+                self.connect,
+                self.top_via_pitch_um,
             )
             unit_boxes = info["unit"]["boxes_um"]
             # Every extra mask this family's own MiM device class requires
@@ -203,6 +257,11 @@ def _build_cap_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 for i in range(_MAX_CAP_TOP_PLATE_REQUIRES)
                 if getattr(self, f"cap_top_requires_{i}_present")
             ]
+            if self.connect == "parallel":
+                self._produce_parallel(
+                    info["parallel"]["boxes_um"], top_requires_layers
+                )
+                return
             for c in info["cells"]:
                 _insert_boxes(
                     self.cell,
