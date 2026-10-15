@@ -2794,13 +2794,13 @@ def test_port_io_delay_lines_target_only_mapped_ports():
         "clk", 0.0, 0.1, _BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS
     )
     delay_lines = [ln for ln in lines if ln.lstrip().startswith("set_")]
-    assert [ln for ln in delay_lines if "[get_ports" in ln and "-m" in ln] == [
-        "set_input_delay -min 0.3 -clock clk [get_ports a_in]",
-        "set_input_delay -max 0.6 -clock clk [get_ports a_in]",
-        "set_input_delay -min 0.05 -clock clk [get_ports b_in]",
-        "set_input_delay -max 1.2 -clock clk [get_ports b_in]",
-        "set_input_delay -min -0.2 -clock clk [get_ports bus\\[1\\]]",
-        "set_output_delay -max 0.5 -clock clk [get_ports q_a]",
+    assert [ln for ln in delay_lines if "$klt_ports_by_name" in ln and "-m" in ln] == [
+        "set_input_delay -min 0.3 -clock clk [dict get $klt_ports_by_name a_in]",
+        "set_input_delay -max 0.6 -clock clk [dict get $klt_ports_by_name a_in]",
+        "set_input_delay -min 0.05 -clock clk [dict get $klt_ports_by_name b_in]",
+        "set_input_delay -max 1.2 -clock clk [dict get $klt_ports_by_name b_in]",
+        "set_input_delay -min -0.2 -clock clk [dict get $klt_ports_by_name bus\\[1\\]]",
+        "set_output_delay -max 0.5 -clock clk [dict get $klt_ports_by_name q_a]",
     ]
     # Partial bounds are never mirrored onto the other side.
     assert not any("-max" in ln and "bus\\[1\\]" in ln for ln in lines)
@@ -2824,7 +2824,9 @@ def test_port_io_delay_lines_without_scalar_emits_no_default():
     lines = post_route_sta._port_io_delay_lines(
         "clk", None, None, {"a": {"max_ns": 1.0}}, None
     )
-    assert lines == ["set_input_delay -max 1.0 -clock clk [get_ports a]"]
+    assert lines == [
+        "set_input_delay -max 1.0 -clock clk [dict get $klt_ports_by_name a]"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2845,7 +2847,9 @@ def test_tcl_literal_port_names_never_substituted(port, tcl):
     lines = post_route_sta._port_io_delay_lines(
         "clk", None, None, {port: {"min_ns": 0.1}}, None
     )
-    assert lines == [f"set_input_delay -min 0.1 -clock clk [get_ports {tcl}]"]
+    assert lines == [
+        f"set_input_delay -min 0.1 -clock clk [dict get $klt_ports_by_name {tcl}]"
+    ]
 
 
 def test_port_check_lines_list_every_key_with_allowed_directions():
@@ -2859,8 +2863,113 @@ def test_port_check_lines_list_every_key_with_allowed_directions():
     ) in script
     assert f'puts "{post_route_sta._PORT_CHECK_BEGIN}"' in lines
     assert f"    exit {post_route_sta._PORT_CHECK_EXIT_CODE}" in lines
-    # Literal match only: exactly one port, whose full name equals the key.
-    assert "[get_full_name $klt_port] ne $klt_name" in script
+    # Literal match only: a dict keyed by exact full name, never `get_ports`
+    # (which re-parses its argument as a Tcl list of glob patterns, #3050).
+    assert "dict set klt_ports_by_name [get_full_name $klt_port] $klt_port" in script
+    assert "dict exists $klt_ports_by_name $klt_name" in script
+    assert "get_ports" not in script
+
+
+_TCL_STUB_PORTS = """
+proc get_ports {name} {
+    if {$name ne "clk"} { error "unexpected get_ports $name" }
+    return pi_clk
+}
+proc all_inputs {} { return {pi_clk pi_b pi_inout} }
+proc all_outputs {} { return {po_y pi_inout} }
+proc get_property {port prop} { return [dict get $::klt_dirs $port] }
+proc get_full_name {port} { return [dict get $::klt_names $port] }
+proc set_input_delay {args} { lappend ::klt_calls [list in {*}$args] }
+proc set_output_delay {args} { lappend ::klt_calls [list out {*}$args] }
+set klt_calls {}
+"""
+
+
+def _run_generated_tcl(tmp_path, names, dirs, body_lines):
+    """Execute generated port Tcl under a real ``tclsh`` with the OpenSTA
+    port commands stubbed (``get_ports`` only answers for the clock port: a
+    per-port lookup through it fails the run). ``names``/``dirs`` map the stub port
+    objects to their full names / directions."""
+    import shutil
+    import subprocess
+
+    tclsh = shutil.which("tclsh")
+    if tclsh is None:
+        pytest.skip("needs tclsh")
+    script = (
+        "set klt_names [dict create "
+        + " ".join(f"{k} {post_route_sta._tcl_literal(v)}" for k, v in names.items())
+        + "]\n"
+        "set klt_dirs [dict create "
+        + " ".join(f"{k} {v}" for k, v in dirs.items())
+        + "]\n"
+        + _TCL_STUB_PORTS
+        + "\n".join(body_lines)
+        + "\nputs [list CALLS $klt_calls]\n"
+    )
+    path = tmp_path / "ports.tcl"
+    path.write_text(script, encoding="utf-8")
+    done = subprocess.run([tclsh, str(path)], capture_output=True, text=True)
+    return done
+
+
+def test_generated_port_lookup_resolves_awkward_names_literally(tmp_path):
+    """Issue #3050: names that break ``get_ports``' list re-parse (`{port`,
+    `"port`, `sp ace`) or look like globs resolve to exactly their own port
+    object, which the delay commands receive unchanged."""
+    ports = ["{port", '"port', "sp ace", "a[0]", "*"]
+    names = {"pi_clk": "clk", "pi_b": "b", "pi_inout": "io", "po_y": "y"}
+    dirs = {
+        "pi_clk": "input",
+        "pi_b": "input",
+        "pi_inout": "bidirect",
+        "po_y": "output",
+    }
+    # Rename the stub inputs so each awkward name is a real port.
+    names = {f"pi_{i}": p for i, p in enumerate(ports)} | names
+    dirs = {f"pi_{i}": "input" for i in range(len(ports))} | dirs
+
+    stub_inputs = " ".join(f"pi_{i}" for i in range(len(ports)))
+    in_map = {p: {"min_ns": 0.1 * (i + 1)} for i, p in enumerate(ports)}
+    lines = [
+        f"proc all_inputs {{}} {{ return {{{stub_inputs} pi_clk pi_b pi_inout}} }}"
+    ]
+    lines += post_route_sta._request_io_delay_lines(
+        "clk", 0.5, None, in_map, {"io": {"max_ns": 0.2}}
+    )
+    done = _run_generated_tcl(tmp_path, names, dirs, lines)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert f"{post_route_sta._PORT_CHECK_BEGIN}\n{post_route_sta._PORT_CHECK_END}" in (
+        done.stdout
+    )
+    calls = done.stdout.split("CALLS ", 1)[1]
+    for i in range(len(ports)):
+        # Each per-port delay was applied to that port's own object.
+        assert f"in -min {0.1 * (i + 1)!r} -clock clk pi_{i}" in calls
+    assert "out -max 0.2 -clock clk pi_inout" in calls
+
+
+def test_generated_port_lookup_reports_missing_and_wrong_direction(tmp_path):
+    names = {"pi_a": "{port", "po_y": "y"}
+    dirs = {"pi_a": "input", "po_y": "output"}
+    lines = [
+        "proc all_inputs {} { return pi_a }",
+        "proc all_outputs {} { return po_y }",
+    ]
+    lines += post_route_sta._port_check_lines(
+        {"{port": {"min_ns": 0.1}, "{por": {"min_ns": 0.1}, "y": {"min_ns": 0.1}},
+        {"p*": {"max_ns": 0.1}},
+    )
+    done = _run_generated_tcl(tmp_path, names, dirs, lines)
+
+    assert done.returncode == post_route_sta._PORT_CHECK_EXIT_CODE
+    rows = post_route_sta._parse_port_check_errors(done.stdout)
+    assert rows == [
+        ("input", "{por", "not_found"),
+        ("input", "y", "direction_output"),
+        ("output", "p*", "not_found"),
+    ]
 
 
 @pytest.mark.parametrize("mode", ["def", "verilog"])
@@ -2881,7 +2990,7 @@ def test_run_sta_both_modes_apply_same_port_semantics(tmp_path, monkeypatch, mod
     assert clock_idx < start
     # The port check precedes every per-port delay write.
     assert lines.index(f'puts "{post_route_sta._PORT_CHECK_END}"') < lines.index(
-        "set_input_delay -min 0.3 -clock clk [get_ports a_in]"
+        "set_input_delay -min 0.3 -clock clk [dict get $klt_ports_by_name a_in]"
     )
 
 
