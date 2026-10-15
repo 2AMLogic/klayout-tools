@@ -100,6 +100,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   real sky130 cell models, whose `input wire CLK` declarations hid every
   asynchronous pin (every flop classified `no_async_pin`).
 
+- **`klt functional-verification` missing-cocotb error names the real
+  remedy** (issue #3102): the message now includes the failing interpreter
+  (`sys.executable`) and the tool-install route (`klayout-tools[functional-verification] @ <url>`
+  on the `uv tool install` / `pipx install` / `uvx --from` spec), and
+  qualifies `pip install cocotb`. **Additive contract change:** that error
+  carries `error.code == "missing_optional_dependency"`; no `schema_version`
+  bump.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
