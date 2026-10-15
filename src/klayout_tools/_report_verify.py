@@ -68,6 +68,7 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
         # `klt extract`'s additive wall-clock `timing` object (issue #3181):
         # a measurement of the run, never part of the evidence.
         ("timing",),
+        ("provenance", "pdk", "linked_trees"),
     }
 )
 
