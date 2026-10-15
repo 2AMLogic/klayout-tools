@@ -2228,6 +2228,52 @@ def job_exists(
     return result.returncode == 0
 
 
+def _advance_interrupted_clock(
+    state: str, interrupted_since: float | None, now: float
+) -> float | None:
+    """Start the continuous-``interrupted`` clock on entry, reset it on any
+    other state."""
+    if state != "interrupted":
+        return None
+    return now if interrupted_since is None else interrupted_since
+
+
+def _format_progress(
+    job_id: str, status: dict[str, Any], state: str, elapsed_s: float
+) -> str:
+    """The stderr progress line for one observed ``status.json``."""
+    instance = status.get("instance_id")
+    return f"klt: batch job {job_id} state={state} elapsed={elapsed_s:.0f}s" + (
+        f" instance={instance}" if instance else ""
+    )
+
+
+def _check_interrupted_grace(
+    config: BatchConfig,
+    job_id: str,
+    interrupted_since: float | None,
+    now: float,
+) -> None:
+    """Raise :class:`BatchJobInterrupted` once the job has been continuously
+    ``interrupted`` for ``config.interrupted_grace_s`` (``0`` = unbounded)."""
+    if (
+        interrupted_since is None
+        or config.interrupted_grace_s <= 0
+        or now - interrupted_since < config.interrupted_grace_s
+    ):
+        return
+    interrupted_s = now - interrupted_since
+    raise BatchJobInterrupted(
+        f"job {job_id} stayed 'interrupted' (Spot reclaimed) for "
+        f"{interrupted_s:.0f}s, past batch.interrupted_grace_s="
+        f"{config.interrupted_grace_s:g}s, with no re-launch observed; "
+        "it may still be recoverable on the fleet (check "
+        f"{job_uri(config, job_id)}/status.json) -- the client does "
+        "not re-launch it itself",
+        interrupted_s=interrupted_s,
+    )
+
+
 def poll_status(
     config: BatchConfig,
     job_id: str,
@@ -2261,8 +2307,9 @@ def poll_status(
     violation, surfaced loudly rather than waited on forever.
 
     With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, with
-    ``progress=False`` so the two stderr streams do not duplicate each other, ``klt netlist``
-    does not, so its stderr stays a bare JSON envelope), a heartbeat line
+    ``progress=False`` so the two stderr streams do not duplicate each other;
+    ``klt netlist`` does not, so its stderr stays a bare JSON envelope), a
+    heartbeat line
     (job id, last observed state, elapsed) goes to **stderr** on every state
     change and otherwise every :data:`BATCH_HEARTBEAT_INTERVAL_S`
     (issue #2978).
@@ -2289,41 +2336,20 @@ def poll_status(
                     f"{last_state!r} (expected one of "
                     f"{', '.join(BATCH_WAITING_STATES + BATCH_TERMINAL_STATES)})"
                 )
-            if last_state == "interrupted":
-                if interrupted_since is None:
-                    interrupted_since = now
-            else:
-                interrupted_since = None
+            interrupted_since = _advance_interrupted_clock(
+                last_state, interrupted_since, now
+            )
             if progress and (
                 last_state != reported_state or polls % _POLL_PROGRESS_EVERY == 0
             ):
                 reported_state = last_state
-                instance = status.get("instance_id")
-                _progress(
-                    f"klt: batch job {job_id} state={last_state} "
-                    f"elapsed={now - started:.0f}s"
-                    + (f" instance={instance}" if instance else "")
-                )
+                _progress(_format_progress(job_id, status, last_state, now - started))
         elif progress and polls % _POLL_PROGRESS_EVERY == 0:
             _progress(
                 f"klt: batch job {job_id} no readable status.json "
                 f"elapsed={now - started:.0f}s"
             )
-        if (
-            interrupted_since is not None
-            and config.interrupted_grace_s > 0
-            and now - interrupted_since >= config.interrupted_grace_s
-        ):
-            interrupted_s = now - interrupted_since
-            raise BatchJobInterrupted(
-                f"job {job_id} stayed 'interrupted' (Spot reclaimed) for "
-                f"{interrupted_s:.0f}s, past batch.interrupted_grace_s="
-                f"{config.interrupted_grace_s:g}s, with no re-launch observed; "
-                "it may still be recoverable on the fleet (check "
-                f"{job_uri(config, job_id)}/status.json) -- the client does "
-                "not re-launch it itself",
-                interrupted_s=interrupted_s,
-            )
+        _check_interrupted_grace(config, job_id, interrupted_since, now)
         elapsed = now - started
         if elapsed >= config.poll_timeout_s:
             raise BatchPollTimeout(
