@@ -90,7 +90,8 @@ plausible netlist that compares clean when it shouldn't). So:
   export silently mis-scaled every device geometry by ``1e6`` with no
   diagnostic (see :func:`_parse_um`).
 - resistor/capacitor ``nf``/``m``/``mult`` > 1 (a multi-finger / multiplied
-  device the curated plain-element resistor/capacitor forms cannot represent) is **rejected**
+  device the curated plain-element resistor/capacitor forms cannot
+  represent) is **rejected**
   with a specific error naming the device and value, never silently
   dropped or misinterpreted. Bipolar's ``mult`` is the one exception --
   carried onto ``NE``, not rejected (see "Device family coverage" above).
