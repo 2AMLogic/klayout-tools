@@ -6344,6 +6344,7 @@ def _read_spec_rows(
         if not isinstance(rows, list) or not rows:
             parsed = None
         else:
+            valid: list[dict[str, Any]] = []
             seen: set[str] = set()
             for row in rows:
                 row_id = row.get("id") if isinstance(row, dict) else None
@@ -6354,10 +6355,11 @@ def _read_spec_rows(
                     or row_id in seen
                     or (gap is not None and (not isinstance(gap, str) or not gap))
                 ):
-                    parsed = None
+                    valid = []
                     break
                 seen.add(row_id)
-                parsed.append({"id": row_id, "gap": gap})
+                valid.append({"id": row_id, "gap": gap})
+            parsed = valid or None
         out[item_id] = parsed
     return out
 
@@ -6391,58 +6393,22 @@ def _grade_multi_citation(
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
-    invalid = ("unmet", _REASON_INVALID_EVIDENCE, None, {}, {})
+    invalid: tuple[str, str | None, None, dict[str, Any], dict[str, Any]] = (
+        "unmet",
+        _REASON_INVALID_EVIDENCE,
+        None,
+        {},
+        {},
+    )
     if spec_rows_invalid:
         return invalid
-    raw_members = raw_entry if isinstance(raw_entry, list) else [raw_entry]
-    if not raw_members:
+    members = _parse_multi_members(raw_entry)
+    if members is None or not _members_rows_declared(members, spec_rows):
         return invalid
-
-    members: list[tuple[dict[str, Any], list[str] | None]] = []
-    for raw in raw_members:
-        spec = _normalize_evidence_entry(raw)
-        if spec is None:
-            return invalid
-        rows: list[str] | None = None
-        if isinstance(raw, dict) and "rows" in raw:
-            rows = raw["rows"]
-            if (
-                not isinstance(rows, list)
-                or not rows
-                or not all(isinstance(r, str) and r for r in rows)
-            ):
-                return invalid
-        members.append((spec, rows))
-
-    declared = {row["id"]: row for row in spec_rows or []}
-    for _, rows in members:
-        for row_id in rows or []:
-            if spec_rows is not None and (
-                row_id not in declared or declared[row_id]["gap"] is not None
-            ):
-                return invalid
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
-    row_info: dict[str, Any] = {}
-    if spec_rows is not None:
-        covered = {r for _, rows, g in graded if g[0] == "met" for r in rows or []}
-        failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
-        row_info = {
-            "failed_rows": failed_rows,
-            "uncovered_rows": [
-                row["id"]
-                for row in spec_rows
-                if row["gap"] is None
-                and row["id"] not in covered
-                and row["id"] not in failed_rows
-            ],
-            "declared_gaps": [
-                {"id": row["id"], "gap": row["gap"]}
-                for row in spec_rows
-                if row["gap"] is not None
-            ],
-        }
+    row_info = _multi_row_info(graded, failed, spec_rows)
     extra: dict[str, Any] = {
         "citations_graded": [
             {
@@ -6469,6 +6435,73 @@ def _grade_multi_citation(
         extra["row_coverage"] = row_info
     extra["citations"] = [g[2] for _, _, g in graded]
     return "met", None, graded[0][2][2], {}, extra
+
+
+def _parse_multi_members(
+    raw_entry: Any,
+) -> list[tuple[dict[str, Any], list[str] | None]] | None:
+    """Normalize each member of a multi-citation entry to ``(spec, rows)``;
+    ``None`` when the entry or any member is malformed."""
+    raw_members = raw_entry if isinstance(raw_entry, list) else [raw_entry]
+    if not raw_members:
+        return None
+    members: list[tuple[dict[str, Any], list[str] | None]] = []
+    for raw in raw_members:
+        spec = _normalize_evidence_entry(raw)
+        if spec is None:
+            return None
+        rows: list[str] | None = None
+        if isinstance(raw, dict) and "rows" in raw:
+            rows = raw["rows"]
+            if (
+                not isinstance(rows, list)
+                or not rows
+                or not all(isinstance(r, str) and r for r in rows)
+            ):
+                return None
+        members.append((spec, rows))
+    return members
+
+
+def _members_rows_declared(
+    members: list[tuple[dict[str, Any], list[str] | None]],
+    spec_rows: list[dict[str, Any]] | None,
+) -> bool:
+    """True unless a member names an undeclared (or declared-``gap``) row."""
+    if spec_rows is None:
+        return True
+    declared = {row["id"]: row for row in spec_rows}
+    return all(
+        row_id in declared and declared[row_id]["gap"] is None
+        for _, rows in members
+        for row_id in rows or []
+    )
+
+
+def _multi_row_info(
+    graded: list[Any], failed: list[Any], spec_rows: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` for the
+    declared ``spec_rows`` (empty when none were declared)."""
+    if spec_rows is None:
+        return {}
+    covered = {r for _, rows, g in graded if g[0] == "met" for r in rows or []}
+    failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
+    return {
+        "failed_rows": failed_rows,
+        "uncovered_rows": [
+            row["id"]
+            for row in spec_rows
+            if row["gap"] is None
+            and row["id"] not in covered
+            and row["id"] not in failed_rows
+        ],
+        "declared_gaps": [
+            {"id": row["id"], "gap": row["gap"]}
+            for row in spec_rows
+            if row["gap"] is not None
+        ],
+    }
 
 
 # --------------------------------------------------------------------------- #
