@@ -191,7 +191,10 @@ def _capped(value: int, cap: int | None) -> int:
 
 
 def _width_pair(
-    layer: tuple[int, int], threshold_dbu: int, max_dbu: int | None = None
+    layer: tuple[int, int],
+    threshold_dbu: int,
+    max_dbu: int | None = None,
+    square_only: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     margin = _margin_dbu(threshold_dbu)
     violate_w = max(threshold_dbu - margin, 1)
@@ -204,7 +207,12 @@ def _width_pair(
     clean_w = _capped(threshold_dbu + margin, max_dbu)
     bar_length = _capped(_WIDTH_BAR_LENGTH_DBU, max_dbu)
     layer_list = list(layer)
-    violate = {"shapes": [{"layer": layer_list, "box": [0, 0, violate_w, bar_length]}]}
+    # A `layer_selection="squares"` rule (issues #2943/#3139) only measures
+    # square merged polygons, so its violate fixture must itself be a square.
+    violate_length = violate_w if square_only else bar_length
+    violate = {
+        "shapes": [{"layer": layer_list, "box": [0, 0, violate_w, violate_length]}]
+    }
     clean = {"shapes": [{"layer": layer_list, "box": [0, 0, clean_w, bar_length]}]}
     return violate, clean
 
@@ -728,7 +736,10 @@ def build_manifest(
             violate, clean = _DERIVED_LAYER_FIXTURES[rule.id]
         elif rule.check == "width":
             violate, clean = _width_pair(
-                rule.layer, rule.threshold_dbu, max_sizes.get(rule.layer)
+                rule.layer,
+                rule.threshold_dbu,
+                max_sizes.get(rule.layer),
+                square_only=rule.layer_selection == "squares",
             )
         elif rule.check == "space":
             violate, clean = _space_pair(
