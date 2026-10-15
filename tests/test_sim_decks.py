@@ -1410,6 +1410,7 @@ def argparse_namespace(request: str):
         max_workers=None,
         hosts=None,
         budget_s=None,
+        capacity_wait=None,
         resume=None,
         plot=None,
         fail_fast_probe=None,
