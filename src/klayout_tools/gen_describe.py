@@ -159,6 +159,44 @@ def _resistor_strip_describe(
     }
 
 
+def _validate_pitch_overrides(params: dict[str, Any]) -> None:
+    from .gen import GenError
+
+    for pitch_name in ("pitch_x_um", "pitch_y_um"):
+        if params[pitch_name] < 0:
+            raise GenError(f"generator 'mos_array': params.{pitch_name} must be >= 0")
+
+
+def _pitch_hints_and_warnings(
+    params: dict[str, Any], info: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """Issue #3299 (Phase 1): only when a pitch override was requested, report
+    the effective pitch and whether it was clamped up to the legal minimum
+    (empty otherwise, so default reports are unchanged)."""
+    if params["pitch_x_um"] <= 0 and params["pitch_y_um"] <= 0:
+        return {}, []
+    hints = {
+        "pitch": {
+            "col_pitch_um": info["col_pitch_um"],
+            "row_pitch_um": info["row_pitch_um"],
+            "min_col_pitch_um": info["min_col_pitch_um"],
+            "min_row_pitch_um": info["min_row_pitch_um"],
+            "pitch_x_clamped": info["pitch_x_clamped"],
+            "pitch_y_clamped": info["pitch_y_clamped"],
+        }
+    }
+    warnings = [
+        f"params.{name}={params[name]} is below the legal minimum "
+        f"pitch {minimum}um; clamped up to {minimum}um"
+        for axis, name, minimum in (
+            ("x", "pitch_x_um", info["min_col_pitch_um"]),
+            ("y", "pitch_y_um", info["min_row_pitch_um"]),
+        )
+        if info[f"pitch_{axis}_clamped"]
+    ]
+    return hints, warnings
+
+
 def _mos_array_validate(params: dict[str, Any]) -> None:
     from .gen import (
         GenError,
@@ -199,9 +237,7 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'mos_array': params.ring_padding_um must be >= 0")
     if params["interior_channel_um"] < 0:
         raise GenError("generator 'mos_array': params.interior_channel_um must be >= 0")
-    for pitch_name in ("pitch_x_um", "pitch_y_um"):
-        if params[pitch_name] < 0:
-            raise GenError(f"generator 'mos_array': params.{pitch_name} must be >= 0")
+    _validate_pitch_overrides(params)
 
     # `ring_gap_side`/`ring_gap_um`/`ring_gap_offset_um` are validated against
     # a hypothetical ring (`add_guard_ring=True`) regardless of the request's
@@ -539,29 +575,7 @@ def _mos_array_describe(
         for x0, y0, x1, y1 in info["navigable_regions_um"]
     ]
 
-    # Issue #3299 (Phase 1): only when a pitch override was requested, report
-    # the effective pitch and whether it was clamped up to the legal minimum
-    # (absent otherwise, so default reports are unchanged).
-    pitch_hints: dict[str, Any] = {}
-    pitch_warnings: list[str] = []
-    if params["pitch_x_um"] > 0 or params["pitch_y_um"] > 0:
-        pitch_hints["pitch"] = {
-            "col_pitch_um": info["col_pitch_um"],
-            "row_pitch_um": info["row_pitch_um"],
-            "min_col_pitch_um": info["min_col_pitch_um"],
-            "min_row_pitch_um": info["min_row_pitch_um"],
-            "pitch_x_clamped": info["pitch_x_clamped"],
-            "pitch_y_clamped": info["pitch_y_clamped"],
-        }
-        for axis, name, minimum in (
-            ("x", "pitch_x_um", info["min_col_pitch_um"]),
-            ("y", "pitch_y_um", info["min_row_pitch_um"]),
-        ):
-            if info[f"pitch_{axis}_clamped"]:
-                pitch_warnings.append(
-                    f"params.{name}={params[name]} is below the legal minimum "
-                    f"pitch {minimum}um; clamped up to {minimum}um"
-                )
+    pitch_hints, pitch_warnings = _pitch_hints_and_warnings(params, info)
 
     return {
         "device_count": device_count,

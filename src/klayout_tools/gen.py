@@ -1141,6 +1141,17 @@ def _mos_array_well_tap_layout(
     }
 
 
+def _clamp_pitch_override(override_um: float, minimum_um: float) -> tuple[float, bool]:
+    """Resolve a pitch override against its legal minimum (issue #3299).
+
+    Returns ``(effective_pitch_um, clamped)``: ``0.0`` means "no override"
+    (the minimum, not clamped); a positive value below ``minimum_um`` is
+    clamped up to it and reported as clamped."""
+    if override_um <= 0.0:
+        return minimum_um, False
+    return max(override_um, minimum_um), override_um < minimum_um
+
+
 def _mos_array_layout(
     w_um: float,
     l_um: float,
@@ -1257,16 +1268,10 @@ def _mos_array_layout(
     )
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
-    col_pitch = min_col_pitch
-    row_pitch = min_row_pitch
     # Issue #3299 (Phase 1): an explicit pitch override, clamped up to the
     # legal minimum. `0.0` (the default) leaves the pitch untouched.
-    pitch_x_clamped = 0.0 < pitch_x_um < min_col_pitch
-    pitch_y_clamped = 0.0 < pitch_y_um < min_row_pitch
-    if pitch_x_um > 0.0:
-        col_pitch = max(pitch_x_um, min_col_pitch)
-    if pitch_y_um > 0.0:
-        row_pitch = max(pitch_y_um, min_row_pitch)
+    col_pitch, pitch_x_clamped = _clamp_pitch_override(pitch_x_um, min_col_pitch)
+    row_pitch, pitch_y_clamped = _clamp_pitch_override(pitch_y_um, min_row_pitch)
     # Issue #1531 (Phase 1): a positive `interior_channel_um` widens both
     # pitches by exactly that amount -- `0.0` (the default) is a strict no-op
     # on both, so every existing caller's `col_pitch`/`row_pitch` (and thus
