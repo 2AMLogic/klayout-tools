@@ -718,6 +718,22 @@ def test_run_sim_analysis_kind_op_with_meas_op_card_raises_clear_error(tmp_path)
         sim.run_sim(str(request))
 
 
+def test_run_sim_analysis_kind_op_with_supported_meas_card_raises_clear_error(tmp_path):
+    # Issue #3109: a supported-type `.meas` card is still unsearchable under a
+    # scalar `op` analysis -- refuse it up front, pointing at `expr`.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "op", "args": ""},
+            "measurements": [{"name": "x", "spice": ".meas dc x find v(out) at=0"}],
+        },
+    )
+    with pytest.raises(sim.SimError, match=r"analysis\.kind is \"op\".*expr"):
+        sim.run_sim(str(request))
+
+
 def test_run_sim_meas_op_card_rejected_even_with_non_op_analysis_kind(tmp_path):
     # A `.meas op` card is invalid on ngspice's own terms regardless of the
     # request's `analysis.kind` -- not just when the two literally match.
@@ -4414,6 +4430,79 @@ def test_mismatch_family_report_single_file_has_no_scan_block(tmp_path):
     report = sim._mismatch_family_report(str(body), "gf180mcuC", scan=scan)
     assert [e["family"] for e in report] == ["mosfet"]
     assert len(scan["scanned"]) == 1 and scan["not_scanned"] == []
+
+
+def test_noise_sources_in_text_covers_v_i_subckt_continuation_case():
+    text = (
+        "* Vc c 0 trnoise(1 1 1 1)\n"
+        "VN1 a 0 DC 0 TRNOISE(1m 1n 0 0)\n"
+        "Iq b 0 trrandom(2 1n 1m)\n"
+        ".subckt blk p n\n"
+        "Vin p n dc 0\n"
+        "+ trnoise(1m 1n 0 0)\n"
+        ".ends\n"
+        "Vplain d 0 DC 1 ; trnoise(1 1 1 1)\n"
+        "R1 a b 1k\n"
+    )
+    assert sim._noise_sources_in_text(text) == [
+        ("vn1", "trnoise"),
+        ("iq", "trrandom"),
+        ("vin", "trnoise"),
+    ]
+
+
+def _noise_mc_request(tmp_path, body: str, mc: dict | None = None):
+    (tmp_path / "body.spice").write_text(body)
+    req = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+    }
+    if mc is not None:
+        req["monte_carlo"] = mc
+    return _write_request(tmp_path, req)
+
+
+def test_run_sim_monte_carlo_discloses_unseeded_noise_sources(
+    tmp_path, monkeypatch, capsys
+):
+    request = _noise_mc_request(
+        tmp_path,
+        "Vn a 0 trnoise(1m 1n 0 0)\nIr b 0 trrandom(2 1n 1m)\nR1 a b 1k\n",
+        {"n": 2, "seed": 1, "vary": "process"},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    mc_env = sim.run_sim(str(request))["environment"]["monte_carlo"]
+
+    assert mc_env["unseeded_sources"] == [
+        {"name": "ir", "keyword": "trrandom"},
+        {"name": "vn", "keyword": "trnoise"},
+    ]
+    assert "redraws" in mc_env["unseeded_sources_note"]
+    assert "unseeded_sources_not_scanned" not in mc_env
+    assert capsys.readouterr().err.count("not governed by monte_carlo.seed") == 1
+
+
+def test_run_sim_monte_carlo_without_noise_sources_shape_unchanged(
+    tmp_path, monkeypatch
+):
+    request = _noise_mc_request(
+        tmp_path,
+        "Vd a 0 DC 1\nR1 a 0 1k\n",
+        {"n": 2, "seed": 1, "vary": "process"},
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    mc_env = sim.run_sim(str(request))["environment"]["monte_carlo"]
+
+    assert set(mc_env) == {"n", "seed", "vary"}
+
+
+def test_run_sim_without_monte_carlo_has_no_noise_field(tmp_path, monkeypatch):
+    request = _noise_mc_request(tmp_path, "Vn a 0 trnoise(1m 1n 0 0)\nR1 a 0 1k\n")
+    _stub_subprocess_run(monkeypatch)
+
+    assert "monte_carlo" not in sim.run_sim(str(request))["environment"]
 
 
 # --------------------------------------------------------------------------- #

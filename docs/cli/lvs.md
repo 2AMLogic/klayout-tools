@@ -2959,6 +2959,23 @@ again a practical signoff artifact. A `device.combine_incomplete` entry's
 (`"...after 5 attempts against independent netlist copies (issue #1185)..."`)
 when more than one was tried.
 
+**Cross-class folds (issue #3019).** The same entry is also emitted when
+`Netlist.combine_devices()` returns *normally* but has folded the devices of
+one device class into another class's survivor — seen with two capacitor
+classes in parallel on one net pair (sky130's stacked `sky130_fd_pr__model__cap_mim`
+over `..._cap_mim_m4`), where one class showed `layout_devices: 0` after
+combining under `layout.file` while `layout.netlist` of the same extraction
+matched. KLayout tells classes apart by an internal id that copied classes
+(the extractor's, and every `Netlist.dup()` clone) can carry uninitialised, so
+the fold depends on heap state. `klt lvs` therefore rebuilds all but one of the
+device classes that have devices on the very same nets on freshly constructed
+classes before combining (the emptied original is renamed
+`<class>__renewed`, so the comparer may add one `topology` warning for a class
+with no devices), and checks the combined result for a class that vanished
+from nets another class still occupies. If every attempt still folds, the side
+is reported here (the `description` names the folded class) rather than
+compared. No JSON field changes.
+
 **Exhaustion rate scales with netlist size and shape — the default budget's
 derivation does not generalize (issue #1412).** The ~1-in-30,000 figure above
 was derived from a single fixture: one multi-finger NMOS device (~200 gate

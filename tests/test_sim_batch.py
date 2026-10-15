@@ -690,13 +690,89 @@ def test_classify_launch_failure_only_matches_the_capacity_refusal():
     assert sb.BATCH_NO_CAPACITY_CODE == "batch_no_capacity"
     for other in (
         "error: only 2 instance type(s) configured, floor is 3",
-        "error: 4 instance(s) already running + 1 requested exceeds "
-        "BATCH_MAX_CONCURRENT_INSTANCES=4",
         "error: nothing launched and pools refused with UnauthorizedOperation",
         "error: no job spec at s3://bucket/jobs/x/job.json",
         "",
     ):
         assert sb._classify_launch_failure(other) is None
+
+
+#: Verbatim shape of 2am's concurrency-cap refusal (issue #2917).
+_CAP_REFUSAL = (
+    "error: 8 instance(s) already running + 1 requested exceeds "
+    "BATCH_MAX_CONCURRENT_INSTANCES=8"
+)
+
+
+def test_classify_launch_failure_matches_the_concurrency_cap_refusal():
+    assert sb._classify_launch_failure(_CAP_REFUSAL) == "batch_concurrency_cap"
+    assert sb.BATCH_CONCURRENCY_CAP_CODE == "batch_concurrency_cap"
+    # Both markers present: the Spot refusal wins (checked first).
+    both = f"{_CAPACITY_REFUSAL}; {_CAP_REFUSAL}"
+    assert sb._classify_launch_failure(both) == "batch_no_capacity"
+
+
+def test_concurrency_cap_without_wait_is_one_attempt_with_a_code(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    runner.queue("launch", fake_completed(returncode=1, stderr=_CAP_REFUSAL))
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb.launch_job(
+            _config(tmp_path),
+            "job-1",
+            runner=runner,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+    assert excinfo.value.code == "batch_concurrency_cap"
+    assert len(runner.argvs_matching("launch")) == 1
+    assert clock.sleeps == []
+
+
+def test_concurrency_cap_wait_relaunches_the_same_job(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    for _ in range(2):
+        runner.queue("launch", fake_completed(returncode=1, stderr=_CAP_REFUSAL))
+
+    sb.launch_job(
+        _config(tmp_path, capacity_wait_s=3600.0),
+        "job-1",
+        runner=runner,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+        jitter=lambda: 0.0,
+    )
+
+    launches = runner.argvs_matching("launch")
+    assert len(launches) == 3
+    assert all(argv == launches[0] for argv in launches)
+    assert clock.sleeps == [15.0, 30.0]
+
+
+def test_concurrency_cap_budget_exhausted_keeps_its_code(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    for _ in range(10):
+        runner.queue("launch", fake_completed(returncode=1, stderr=_CAP_REFUSAL))
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb.launch_job(
+            _config(tmp_path, capacity_wait_s=100.0),
+            "job-1",
+            runner=runner,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+            jitter=lambda: 1.0,
+        )
+
+    assert excinfo.value.code == "batch_concurrency_cap"
+    assert "capacity wait budget of 100s exhausted after 4 launch attempt(s)" in str(
+        excinfo.value
+    )
+    assert _CAP_REFUSAL in str(excinfo.value)
 
 
 def test_capacity_refusal_without_wait_is_one_attempt_with_a_code(tmp_path):
@@ -780,12 +856,11 @@ def test_capacity_wait_never_retries_an_unrelated_launch_failure(tmp_path):
         "launch",
         fake_completed(
             returncode=1,
-            stderr="error: 4 instance(s) already running + 1 requested exceeds "
-            "BATCH_MAX_CONCURRENT_INSTANCES=4",
+            stderr="error: only 2 instance type(s) configured, floor is 3",
         ),
     )
 
-    with pytest.raises(sb.BatchError, match="BATCH_MAX_CONCURRENT_INSTANCES") as exc:
+    with pytest.raises(sb.BatchError, match="capacity floor|floor is 3") as exc:
         sb.launch_job(
             _config(tmp_path, capacity_wait_s=3600.0),
             "job-1",

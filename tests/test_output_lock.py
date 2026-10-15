@@ -414,6 +414,61 @@ def test_nested_sim_inherits_pex_style_ancestor_ownership(tmp_path, stub_ngspice
     assert report["status"] == "pass"
 
 
+def _deck_request_path(tmp_path: Path) -> Path:
+    from test_sim_decks import deck_request, write_request
+
+    return write_request(tmp_path, deck_request(tmp_path))
+
+
+def test_run_sim_deck_list_default_outdir_is_owned(tmp_path, holder_factory):
+    request = _deck_request_path(tmp_path)
+    outdir = tmp_path / ".klt" / "sim"
+    outdir.mkdir(parents=True)
+    (outdir / "sentinel.txt").write_text("owner data")
+    before = _snapshot(outdir)
+    holder = holder_factory(outdir)
+
+    with pytest.raises(output_lock.OutputDirLockedError):
+        sim.run_sim(str(request))
+    assert _snapshot(outdir) == before
+
+    holder.release()
+    assert sim.run_sim(str(request))["status"] == "pass"
+
+
+def test_run_sim_deck_list_explicit_outdir_contends_via_alias(tmp_path, holder_factory):
+    request = _deck_request_path(tmp_path)
+    real = tmp_path / "real"
+    alias = tmp_path / "alias"
+    real.mkdir()
+    alias.symlink_to(real, target_is_directory=True)
+    holder_factory(real)
+
+    with pytest.raises(output_lock.OutputDirLockedError):
+        sim.run_sim(str(request), artifacts_dir=str(alias))
+    assert _snapshot(real) == {}
+
+
+def test_run_sim_deck_list_nested_under_owned_ancestor_does_not_self_contend(
+    tmp_path,
+):
+    request = _deck_request_path(tmp_path)
+    work = tmp_path / "pexroot"
+    with output_lock.hold_output_dir(work):
+        report = sim.run_sim(str(request), artifacts_dir=str(work / "tb"))
+    assert report["status"] == "pass"
+
+
+def test_run_sim_deck_list_flag_errors_take_no_lock_and_create_nothing(
+    tmp_path, holder_factory
+):
+    request = _deck_request_path(tmp_path)
+    holder_factory(tmp_path / ".klt" / "sim")
+    with pytest.raises(sim.SimError, match="--resume"):
+        sim.run_sim(str(request), resume=True)
+    assert not (tmp_path / ".klt" / "sim" / "tt_27c").exists()
+
+
 def test_run_pex_default_and_explicit_roots_are_owned(tmp_path, holder_factory):
     layout = tmp_path / "cell.gds"  # never read: ownership precedes all work
     holder = holder_factory(tmp_path / ".klt" / "pex")

@@ -333,8 +333,8 @@ def _gate_cases() -> list[Case]:
     # ACTIVE's left edge inside the first gate of a standalone channel.
     aux3 = [
         *gate_pair(0, 150),
-        box("ACTIVE", 10, 30, 99, 120),
-        box("NSELECT", -36, 3, 145, 147),
+        box("ACTIVE", 10, 30, 99, 111),
+        box("NSELECT", -36, 3, 145, 138),
     ]
     c.append(_fail("GATE.ACTIVE.AUX.3", aux3))
     c.append(_pass("GATE.ACTIVE.AUX.3", device()))
@@ -349,24 +349,93 @@ def _gate_cases() -> list[Case]:
     return c
 
 
+def _active_w2_cases() -> list[Case]:
+    """ACTIVE.W.2: every local vertical width is N x 27 nm, N a positive
+    integer. One database unit either side of one and of several allowed
+    multiples; stepped, holed and merged polygons are measured locally, never
+    by bounding-box height; horizontal widths are not constrained."""
+    c: list[Case] = []
+    for h in (27 + D, 54 - D, 54 + D, 81 - D, 81 + D, 135 - D):
+        c.append(_fail("ACTIVE.W.2", active_in("NSELECT", 0, 0, 70, h)))
+    # Allowed multiples: one (the minimum), two, three and five. The 70 nm
+    # width is not a multiple of 27 nm: only the vertical direction counts.
+    for h in (27, 54, 81, 135):
+        c.append(_pass("ACTIVE.W.2", active_in("NSELECT", 0, 0, 70, h)))
+    # Stepped: the 81 nm bounding box is a multiple but the 60 nm right-hand
+    # step is not (fail); a 94.5 nm bounding box is not a multiple but both
+    # steps are 81 nm tall (pass).
+    short_step = poly(
+        "ACTIVE", (0, 0), (0, 81), (70, 81), (70, 60), (140, 60), (140, 0)
+    )
+    offset_step = poly(
+        "ACTIVE",
+        (0, 0),
+        (0, 81),
+        (70, 81),
+        (70, 94.5),
+        (140, 94.5),
+        (140, 13.5),
+        (70, 13.5),
+        (70, 0),
+    )
+    for rule_case, step, sel in (
+        (_fail, short_step, box("NSELECT", -46, -27, 186, 108)),
+        (_pass, offset_step, box("NSELECT", -46, -27, 186, 121.5)),
+    ):
+        c.append(rule_case("ACTIVE.W.2", [step, sel]))
+    # Holed: the 40 nm bar under the hole is not a multiple, the 81 nm
+    # columns either side are.
+    sel = box("NSELECT", -46, -27, 246, 162)
+    c.append(
+        _fail("ACTIVE.W.2", [ring("ACTIVE", (0, 0, 200, 135), (84, 40, 150, 108)), sel])
+    )
+    c.append(
+        _pass("ACTIVE.W.2", [ring("ACTIVE", (0, 0, 200, 135), (84, 54, 150, 108)), sel])
+    )
+    # Merged: two abutting boxes of 40 and 41 nm are one 81 nm polygon.
+    c.append(
+        _pass(
+            "ACTIVE.W.2",
+            [
+                box("ACTIVE", 0, 0, 70, 40),
+                box("ACTIVE", 0, 40, 70, 81),
+                box("NSELECT", -46, -27, 116, 108),
+            ],
+        )
+    )
+    return c
+
+
 def _active_cases() -> list[Case]:
     c: list[Case] = []
     c += [
-        _fail("ACTIVE.FIN.EX.1", device(ay1=108 - D)),
+        # Pulling ACTIVE's top edge in by one database unit leaves 9.75 nm past
+        # the top fin; no ACTIVE whose height stays a multiple of 27 nm both
+        # fails here and keeps the gate/GCUT rules clean, so ACTIVE.W.2 (and
+        # SDT.W.3 for the SDT drawn to ACTIVE's height) trip with it.
+        _fail(
+            "ACTIVE.FIN.EX.1",
+            device(ay1=108 - D),
+            also=["ACTIVE.W.2", "SDT.W.3"],
+        ),
         _pass("ACTIVE.FIN.EX.1", device()),
     ]
-    c.append(_fail("ACTIVE.W.1", active_in("NSELECT", 0, 0, 70, 27 - D)))
+    # A height below 27 nm is no positive multiple of 27 nm either.
+    c.append(
+        _fail("ACTIVE.W.1", active_in("NSELECT", 0, 0, 70, 27 - D), also=["ACTIVE.W.2"])
+    )
     c.append(_pass("ACTIVE.W.1", active_in("NSELECT", 0, 0, 70, 27)))
+    c += _active_w2_cases()
     c.append(_fail("ACTIVE.W.3", active_in("NSELECT", 0, 0, 16 - D, 81, margin_h=50)))
     c.append(_pass("ACTIVE.W.3", active_in("NSELECT", 0, 0, 16, 81, margin_h=50)))
     for gap, mk in ((27 - D, _fail), (27, _pass)):
-        sel = box("NSELECT", -46, -27, 116, 81 + gap + 27)
+        sel = box("NSELECT", -46, -27, 116, 108 + gap + 27)
         c.append(
             mk(
                 "ACTIVE.S.1",
                 [
-                    box("ACTIVE", 0, 0, 70, 40),
-                    box("ACTIVE", 0, 40 + gap, 70, 81 + gap),
+                    box("ACTIVE", 0, 0, 70, 54),
+                    box("ACTIVE", 0, 54 + gap, 70, 108 + gap),
                     sel,
                 ],
             )
@@ -409,18 +478,18 @@ def _active_cases() -> list[Case]:
     # i.e. 1026 nm^2 > 864 nm^2, so a hole at or just under the area
     # threshold also breaks the horizontal spacing; the pass case shows the
     # 864 nm^2 boundary itself does not trip ACTIVE.A.1B.
-    ring_sel = box("NSELECT", -46, -27, 246, 147)
+    ring_sel = box("NSELECT", -46, -27, 246, 108)
     c.append(
         _fail(
             "ACTIVE.A.1B",
-            [ring("ACTIVE", (0, 0, 200, 120), (84, 46, 116 - D, 73)), ring_sel],
+            [ring("ACTIVE", (0, 0, 200, 81), (84, 27, 116 - D, 54)), ring_sel],
             also=["ACTIVE.S.2B"],
         )
     )
     c.append(
         _pass(
             "ACTIVE.A.1B",
-            [ring("ACTIVE", (0, 0, 200, 120), (84, 46, 116, 73)), ring_sel],
+            [ring("ACTIVE", (0, 0, 200, 81), (84, 27, 116, 54)), ring_sel],
             also=["ACTIVE.S.2B"],
         )
     )
@@ -533,13 +602,63 @@ def _select_cases() -> list[Case]:
     return c
 
 
+def _sdt_w3_cases() -> list[Case]:
+    """SDT.W.3: like ACTIVE.W.2 for SDT (outside SRAMDRC). SDT horizontal
+    edges lie on ACTIVE's (SDT.ACTIVE.AUX.2) and SDT sits inside LISD
+    (SDT.LISD.AUX.4), so each case draws all three at the same height, and
+    an off-multiple SDT is an off-multiple ACTIVE too (ACTIVE.W.2)."""
+    c: list[Case] = []
+
+    def column(h: float, *, sram: bool = False) -> list[Shape]:
+        shapes: list[Shape] = [
+            *active_in("NSELECT", 0, 0, 70, h),
+            box("SDT", 10, 0, 34, h),
+            box("LISD", 10, 0, 34, h),
+        ]
+        if sram:
+            shapes.append(box("SRAMDRC", -10, -10, 80, h + 10))
+        return shapes
+
+    for h in (27 + D, 54 - D, 54 + D, 81 - D, 81 + D):
+        c.append(_fail("SDT.W.3", column(h), also=["ACTIVE.W.2"]))
+    for h in (27, 54, 81, 135):
+        c.append(_pass("SDT.W.3", column(h)))
+    # The rule excludes SDT interacting with SRAMDRC; ACTIVE is not excluded.
+    c.append(_pass("SDT.W.3", column(81 - D, sram=True), also=["ACTIVE.W.2"]))
+    # Merged: two abutting SDT boxes of 40 and 41 nm are one 81 nm polygon.
+    merged = [
+        *active_in("NSELECT", 0, 0, 70, 81),
+        box("SDT", 10, 0, 34, 40),
+        box("SDT", 10, 40, 34, 81),
+        box("LISD", 10, 0, 34, 81),
+    ]
+    c.append(_pass("SDT.W.3", merged))
+    # Stepped: an 81 nm bounding box is a multiple, the 60 nm step is not.
+    # The step edge is inside ACTIVE, so SDT.ACTIVE.AUX.2 is expected too.
+    step = [
+        *active_in("NSELECT", 0, 0, 70, 81),
+        poly("SDT", (10, 0), (10, 81), (34, 81), (34, 60), (58, 60), (58, 0)),
+        box("LISD", 10, 0, 58, 81),
+    ]
+    c.append(_fail("SDT.W.3", step, also=["SDT.ACTIVE.AUX.2"]))
+    return c
+
+
 def _sdt_cases() -> list[Case]:
     c: list[Case] = []
     c += [_fail("SDT.W.1", device(sdt1=(42, 66 - D))), _pass("SDT.W.1", device())]
     # SDT edges sit on ACTIVE edges (SDT.ACTIVE.AUX.2) and SDT sits inside
     # LISD (SDT.LISD.AUX.4), so a short SDT is also a short ACTIVE, a short
-    # SDT/ACTIVE overlap and a short SDT/LISD overlap.
-    short = ["SDT.W.2", "SDT.ACTIVE.OV.1", "SDT.LISD.OV.2", "ACTIVE.W.1"]
+    # SDT/ACTIVE overlap and a short SDT/LISD overlap -- and 27 nm less one
+    # database unit is no whole multiple of 27 nm (ACTIVE.W.2, SDT.W.3).
+    short = [
+        "SDT.W.2",
+        "SDT.ACTIVE.OV.1",
+        "SDT.LISD.OV.2",
+        "ACTIVE.W.1",
+        "ACTIVE.W.2",
+        "SDT.W.3",
+    ]
 
     def flat_sd(h: float) -> list[Shape]:
         return [
@@ -551,6 +670,7 @@ def _sdt_cases() -> list[Case]:
     for rule in short[:3]:
         c.append(_fail(rule, flat_sd(27 - D), also=[r for r in short if r != rule]))
         c.append(_pass(rule, flat_sd(27)))
+    c += _sdt_w3_cases()
     for gap, mk in ((30 - D, _fail), (30, _pass)):
         sds = [box("SDT", 10, 0, 34, 81), box("LISD", 10, 0, 34, 81)]
         sds += [
@@ -567,7 +687,7 @@ def _sdt_cases() -> list[Case]:
     c.append(_fail("SDT.GATE.AUX.1", device(sdt1=(37, 61)), also=["SDT.GATE.S.2"]))
     c.append(_pass("SDT.GATE.AUX.1", device()))
     aux2 = [s for s in device() if not (s[0] in ("SDT", "LISD") and s[1] == 42)]
-    aux2 += [box("SDT", 42, 27, 66, 108 + D), box("LISD", 42, 27, 66, 108 + D)]
+    aux2 += [box("SDT", 42, 27 + D, 66, 108 + D), box("LISD", 42, 27 + D, 66, 108 + D)]
     c += [_fail("SDT.ACTIVE.AUX.2", aux2), _pass("SDT.ACTIVE.AUX.2", device())]
     # An SDT entirely outside ACTIVE cannot have its horizontal edges on
     # ACTIVE's, so SDT.ACTIVE.AUX.2 trips with it; abutting is still outside.

@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
+  vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
+  3.8.1) are now measured per local vertical width of each merged rectilinear
+  polygon, in integer database units. The deck grows from 232 to 234 rule
+  categories (`--expect-rule-categories 234`); both ids leave the "Not
+  implemented" list. Additive; no `schema_version` bump.
+- **`klt lvs` no longer folds one device class into another under
+  `options.combine_devices`** (issue #3019): with two MiM classes stacked in
+  parallel on one net pair, `layout.file` could report a wrong combined layout
+  netlist (a class showing `layout_devices: 0`, or `device.property` errors)
+  where `layout.netlist` of the same extraction matched, depending on heap
+  state inside KLayout. Classes sharing nets are now rebuilt before combining
+  and a combine that still folds across classes is reported as
+  `device.combine_incomplete` (so `status` degrades to `inconclusive` instead
+  of a false verdict). Additive; no `schema_version` bump. See
+  `docs/cli/lvs.md`'s `device.combine_incomplete` section.
+
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
@@ -25,6 +42,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   of `pass`. `docs/cli/sim.md` documents the `trnoise()` + non-DC control
   source engine limitation that commonly triggers it. Additive; no
   `schema_version` bump.
+
+- **`klt reset-coverage`** (issue #2998, part 1 of 2): a read-only verb that
+  classifies every sequential cell and hard macro of a flat gate-level
+  Verilog netlist as reset-covered or unreset (machine-readable reason code),
+  with a waiver file (fail on an unwaived element and on a stale waiver).
+  `options.initial_state` for `functional-verification` follows separately.
 
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree

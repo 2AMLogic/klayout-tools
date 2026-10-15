@@ -278,6 +278,14 @@ _BATCH_LAUNCH_TIMEOUT_S = 900.0
 #: distinct from a request error a caller must not retry.
 BATCH_NO_CAPACITY_CODE = "batch_no_capacity"
 
+#: ``error.code`` for a launch refused by the shared fleet's concurrency cap
+#: (``N instance(s) already running + 1 requested exceeds
+#: BATCH_MAX_CONCURRENT_INSTANCES=M``, issue #2917): retryable like
+#: :data:`BATCH_NO_CAPACITY_CODE` and waited out under the same
+#: ``request.batch.capacity_wait_s`` budget, but a distinct code so a caller
+#: can tell slot contention from a Spot shortage.
+BATCH_CONCURRENCY_CAP_CODE = "batch_concurrency_cap"
+
 #: Capacity-wait backoff (``request.batch.capacity_wait_s``, issue #2721):
 #: the first re-launch waits ~:data:`_CAPACITY_BACKOFF_BASE_S`, each further
 #: one doubles, capped at :data:`_CAPACITY_BACKOFF_CAP_S`. Every delay is
@@ -334,7 +342,8 @@ class BatchError(Exception):
     ``code`` is an optional machine-readable classification (issue #2721),
     carried through to that ``SimError`` and from there to the error
     envelope's ``error.code``. ``None`` -- the common case -- means
-    "unclassified"; today only :data:`BATCH_NO_CAPACITY_CODE` is set.
+    "unclassified"; today :data:`BATCH_NO_CAPACITY_CODE` and
+    :data:`BATCH_CONCURRENCY_CAP_CODE` are set.
     """
 
     def __init__(self, message: str, *, code: str | None = None) -> None:
@@ -989,7 +998,8 @@ class BatchConfig:
     poll_timeout_s: float
     aws_binary: str = "aws"
     #: Wall-clock budget :func:`launch_job` keeps re-launching through a
-    #: ``batch_no_capacity`` refusal (``request.batch.capacity_wait_s``,
+    #: ``batch_no_capacity`` / ``batch_concurrency_cap`` refusal
+    #: (``request.batch.capacity_wait_s``,
     #: issue #2721). ``0`` -- the default -- is one launch attempt.
     capacity_wait_s: float = 0.0
     #: ``request.batch.runner_version_check`` (issue #2719).
@@ -1589,10 +1599,23 @@ def _run_checked(
 #: the capacity-refusal case, ..."``) that identifies a Spot capacity refusal.
 _CAPACITY_REFUSAL_MARKER = "no capacity in any of the"
 
+#: The fragment of the same script's concurrency-cap refusal (``fail "N
+#: instance(s) already running + K requested exceeds
+#: BATCH_MAX_CONCURRENT_INSTANCES=M"``), checked before any launch record is
+#: opened (issue #2917).
+_CONCURRENCY_CAP_MARKER = "exceeds BATCH_MAX_CONCURRENT_INSTANCES"
+
+#: The refusal codes :func:`submit_launch` waits out under ``capacity_wait_s``.
+_RETRYABLE_LAUNCH_CODES = frozenset(
+    {BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE}
+)
+
 
 def _classify_launch_failure(stderr: str) -> str | None:
     """:data:`BATCH_NO_CAPACITY_CODE` when a failed ``launch``'s stderr is
-    the provisioner's capacity refusal, else ``None``.
+    the provisioner's Spot capacity refusal,
+    :data:`BATCH_CONCURRENCY_CAP_CODE` when it is the shared-fleet
+    concurrency-cap refusal, else ``None``.
 
     **Coupling:** this is a text match against 2am's
     ``infra/aws/batch-fleet-provision.sh`` (``cmd_launch``'s final
@@ -1603,7 +1626,11 @@ def _classify_launch_failure(stderr: str) -> str | None:
     the 2am side is a one-line fix here. Every other launch failure stays
     unclassified, so it is never mistaken for something worth retrying.
     """
-    return BATCH_NO_CAPACITY_CODE if _CAPACITY_REFUSAL_MARKER in stderr else None
+    if _CAPACITY_REFUSAL_MARKER in stderr:
+        return BATCH_NO_CAPACITY_CODE
+    if _CONCURRENCY_CAP_MARKER in stderr:
+        return BATCH_CONCURRENCY_CAP_CODE
+    return None
 
 
 def _capacity_backoff_s(retry_index: int, jitter: Callable[[], float]) -> float:
@@ -1695,9 +1722,11 @@ def launch_job(
     duplicate already-tested logic, and skipping it would be a safety
     regression.
 
-    **Capacity wait (issue #2721).** A launch the provisioner refuses for
-    lack of Spot capacity raises :class:`BatchError` with
-    ``code == "batch_no_capacity"`` (:func:`_classify_launch_failure`). With
+    **Capacity wait (issues #2721, #2917).** A launch the provisioner refuses
+    for lack of Spot capacity, or because the shared fleet is at
+    ``BATCH_MAX_CONCURRENT_INSTANCES``, raises :class:`BatchError` with
+    ``code == "batch_no_capacity"`` / ``"batch_concurrency_cap"``
+    (:func:`_classify_launch_failure`). With
     ``config.capacity_wait_s > 0`` such a refusal is instead retried -- the
     same ``launch`` invocation for the same job id, after a jittered, capped
     exponential backoff (:func:`_capacity_backoff_s`) -- until that budget
@@ -1705,8 +1734,9 @@ def launch_job(
     raised at once, never retried. Re-invoking is safe because a refused
     launch creates no instance and closes the launch record it opened (2am's
     ``cmd_launch`` writes a ``start`` record and its matching ``end`` on that
-    path), and 2am's own Spot-interruption ``reconcile`` already re-launches
-    under an existing job id. The wait is measured on its own clock and is
+    path; the concurrency-cap check runs before any record is opened), and
+    2am's own Spot-interruption ``reconcile`` already re-launches under an
+    existing job id. The wait is measured on its own clock and is
     **not** charged to ``poll_timeout_s``, whose clock starts in
     :func:`poll_status` once a launch succeeds. ``sleep``/``monotonic``/
     ``jitter`` are injectable for tests; ``None`` resolves to
@@ -1742,14 +1772,14 @@ def launch_job(
             )
             return
         except BatchError as exc:
-            if exc.code != BATCH_NO_CAPACITY_CODE or config.capacity_wait_s <= 0:
+            if exc.code not in _RETRYABLE_LAUNCH_CODES or config.capacity_wait_s <= 0:
                 raise
             remaining = config.capacity_wait_s - (monotonic() - started)
             if remaining <= 0:
                 raise BatchError(
                     f"{exc} (capacity wait budget of {config.capacity_wait_s:g}s "
                     f"exhausted after {attempts} launch attempt(s))",
-                    code=BATCH_NO_CAPACITY_CODE,
+                    code=exc.code,
                 ) from exc
             sleep(min(_capacity_backoff_s(attempts - 1, jitter), remaining))
 
@@ -2833,6 +2863,7 @@ __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
     "BATCH_JOB_CEILING_CODE",
     "BATCH_JOB_TOOL",
+    "BATCH_CONCURRENCY_CAP_CODE",
     "BATCH_NO_CAPACITY_CODE",
     "BATCH_NETLIST_FILENAME",
     "BATCH_REPORT_FILENAME",
