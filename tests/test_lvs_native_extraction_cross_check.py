@@ -424,7 +424,11 @@ def test_res_high_po_r_disagrees_with_native_deck_by_a_documented_refinement(
     resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == "res_high_po")
     assert resistor.provenance.rule_id == "sky130_fd_pr__res_high_po_0p35"
     assert resistor.sheet_rho_ohm_sq == pytest.approx(324.827244)
-    assert resistor.fixed_offset_ohm == pytest.approx(379.705147)
+    # Issue #3049 split the `w=1um` 379.705147 ohm head term into
+    # `end_term_ohm_um / w + fixed_offset_ohm`; the sum at w=1um is unchanged.
+    assert resistor.end_term_ohm_um + resistor.fixed_offset_ohm == pytest.approx(
+        379.705147
+    )
 
     path = _write_gds(
         _make_resistor_layout(0.35, extra_layers=((94, 20), (86, 20))),  # psdm, rpm

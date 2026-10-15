@@ -2456,6 +2456,93 @@ def test_stubbed_sdf_still_fails_on_a_wellformed_error_beside_a_splice(
         run_functional_verification(request_path)
 
 
+#: Issue #2996: the splice lands *after* an intact locator, inside the
+#: message, with the orphaned tail on a later line of its own.
+_MESSAGE_SPLICED_TRANSCRIPT = (
+    "SDF WARNING: /abs/path/klt_sdf_safe.sdf:21217: TIM   590.00ns INFO     "
+    "cocotb.klt_sdf_dut_wrapper         watching uo_out against 4 edge checks\n"
+    "INGCHECK not supported.\n"
+)
+
+#: Issue #2996: cut inside the path; the spliced-in Python warning line
+#: carries its own ``<file>:<line>:`` which satisfies the locator regex.
+_PYWARNINGS_SPLICED_TRANSCRIPT = (
+    "SDF WARNING: /abs/flow/post-layout- 48164.00ns WARNING  py.warnings  "
+    "/abs/tb.py:251: DeprecationWarning: `task.kill()` is deprecated in "
+    "favor of `task.cancel()`.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        _MESSAGE_SPLICED_TRANSCRIPT,
+        _PYWARNINGS_SPLICED_TRANSCRIPT,
+        "SDF WARNING: /a/x.sdf:1: TIM 12.50ps DEBUG cocotb.x y\n",
+        "SDF WARNING: /a/x.sdf:1: TIM 3us CRITICAL cocotb.x y\n",
+    ],
+)
+def test_scan_sdf_diagnostics_drops_a_message_spliced_line(tmp_path, transcript):
+    """Issue #2996: a splice after the locator is dropped from both buckets."""
+    log = _write(tmp_path / "test_icarus.log", transcript)
+
+    assert fv._scan_sdf_diagnostics(log) == ([], {})
+
+
+def test_scan_sdf_diagnostics_message_splice_keeps_intact_siblings(tmp_path):
+    log = _write(
+        tmp_path / "test_icarus.log",
+        "SDF WARNING: /a/x.sdf:1: TIMINGCHECK not supported.\n"
+        + _MESSAGE_SPLICED_TRANSCRIPT,
+    )
+
+    actionable, dropped = fv._scan_sdf_diagnostics(log)
+
+    assert actionable == []
+    assert dropped == {"timingcheck": 1}
+
+
+def test_stubbed_sdf_tolerates_a_message_spliced_transcript(tmp_path, monkeypatch):
+    """End-to-end regression for issue #2996."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=_MESSAGE_SPLICED_TRANSCRIPT + _PYWARNINGS_SPLICED_TRANSCRIPT,
+        ),
+    )
+
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+
+
+def test_stubbed_sdf_still_fails_on_a_wellformed_error_beside_a_message_splice(
+    tmp_path, monkeypatch
+):
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML_WITH_SKIP,
+            extra_test_log=(
+                _MESSAGE_SPLICED_TRANSCRIPT
+                + "SDF ERROR: route.sdf:2976: Unable to match ModPath D -> Q "
+                "in gcd._647_\n"
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="did not fully apply: 1 diagnostic.*Unable to match ModPath",
+    ):
+        run_functional_verification(request_path)
+
+
 def test_sdf_diagnostics_are_only_scanned_on_annotated_runs(tmp_path, monkeypatch):
     """Regression guard: a request with no `options.sdf` behaves exactly as
     it did before this feature existed -- no shim, no build args, no

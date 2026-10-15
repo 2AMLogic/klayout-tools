@@ -2,8 +2,38 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-15
+
+- **PR #3294**: feat(sim): recognise gf180mcu resistor/MIM-cap subcircuits in family_mismatch
+- **PR #3286**: test(sim): pin relative .include resolution on local backend (#2891)
+- **PR #3285**: feat(sim): bare noise spectrum names in expr measurements
+- **PR #3281**: Bump Repo Skills 0.19.5 -> 0.24.1
+- **PR #3280**: test(synthesize): make memory-mapping evidence check immune to random run dirs
+- **PR #3278**: chore(loom): unpin upstreamed Loom files and re-port the rest (2am#4345)
+- **PR #3205**: feat(extract): bipolar terminal relations to another terminal of the same device (#2863)
+- **PR #3194**: feat(decks): BipolarDevice.marker accepts a derived LayerExpr (AND/NOT tree)
+- **Issue #3279** (closed): main red after resync: test_memory_mapping_production_script_has_no_evidence_passes (Python 3.14)
+- **Issue #3059** (closed): klt sim: relative -o/--outdir makes every local unit error instantly with no diagnostic
+- **Issue #2966** (closed): klt sim --backend local: relative -o outdir yields all-error envelope with no engine log
+- **Issue #2956** (closed): Friction: klt sim reports an OSDI library the local ngspice cannot load (ABI v0.3 vs v0.4) as 'measurement produced no value'
+- **Issue #2951** (closed): klt synthesize: output netlist location moved under a per-run-id directory with no documented stable path
+- **Issue #2948** (closed): klt sim batch backend: runner/client version mismatch (runner 0.5.0 vs client 0.7.0) and capacity_wait_s not honoured
+- **Issue #2942** (closed): klt sim: relative -o path makes every measurement fail with 'produced no value', no diagnostic
+- **Issue #2939** (closed): klt sim: a relative --outdir with keep_artifacts runs ngspice against a wrong deck path
+- **Issue #2898** (closed): klt sim monte_carlo: family_mismatch reports gf180mcu poly-resistor/MIM-cap subcircuits as family 'other'
+- **Issue #2893** (closed): klt sim: measurements[].expr after a noise analysis cannot see inoise_spectrum
+- **Issue #2891** (closed): klt pex/sim local backend: a testbench's relative .include of its DUT does not resolve
+- **Issue #2863** (closed): BipolarDevice: a terminal cannot be defined by geometric interaction with another terminal of the same instance
+- **Issue #2860** (closed): extraction decks: a device marker cannot be a derived boolean of several layers
+
 ### 2026-10-14
 
+- **PR #3277**: Add mypy baseline ratchet, CI step, and py.typed
+- **PR #3274**: fix(functional-verification): drop IOPATHs onto ifnone edge-only cell arcs (#2885)
+- **PR #3267**: fix(sim): family_mismatch scans the .include closure (#2928)
+- **Issue #3221** (closed): ci: add a baseline-ratcheted static type check and ship py.typed for the JSON-contract modules
+- **Issue #2928** (closed): klt sim monte_carlo: family_mismatch report scans only the top-level netlist file, not its .include closure
+- **Issue #2885** (closed): functional-verification options.sdf: write_sdf IOPATH entries cannot match edge-qualified cell-model arcs
 - **PR #3268**: fix(sim): expand $VAR/~ in .include targets on the executing host
 - **Issue #2926** (closed): klt sim: $VAR .include targets are documented as executing-host-resolved but are never expanded, and fail as 'measurement produced no value'
 - **PR #3272**: gen-compose: snap routed port attach points onto the manufacturing grid

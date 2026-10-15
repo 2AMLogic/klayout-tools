@@ -8215,8 +8215,8 @@ def test_sky130_precision_implant_mask_extracts_own_flavour(
     assert device["nets"]["w"] == get_extraction_deck("sky130").substrate_net
 
 
-def _make_sky130_res_high_po_layout(l_um: float) -> kdb.Layout:
-    """A `w=1um` `res_high_po`-marked poly bar with a `l_um`-long marked
+def _make_sky130_res_high_po_layout(l_um: float, w_um: float = 1.0) -> kdb.Layout:
+    """A `w_um` (default 1um) `res_high_po`-marked poly bar with a `l_um`-long marked
     (resistive) segment and a contacted, labelled 3um head at each end --
     the parametrised sibling of `_make_poly_resistor_layout`'s fixed 6um
     marked segment, used by
@@ -8239,17 +8239,19 @@ def _make_sky130_res_high_po_layout(l_um: float) -> kdb.Layout:
     l_nm = int(round(l_um * 1000))
     head_nm = int(round(head_um * 1000))
     total_nm = int(round(total_um * 1000))
+    w_nm = int(round(w_um * 1000))
+    mid_nm = w_nm // 2
 
-    draw(66, 20, kdb.Box(0, 0, total_nm, 1000))  # poly.drawing
-    marked = kdb.Box(head_nm, 0, head_nm + l_nm, 1000)
+    draw(66, 20, kdb.Box(0, 0, total_nm, w_nm))  # poly.drawing
+    marked = kdb.Box(head_nm, 0, head_nm + l_nm, w_nm)
     draw(66, 13, marked)  # poly.res
     draw(86, 20, marked.enlarged(200, 200))  # rpm
     draw(94, 20, marked.enlarged(200, 200))  # psdm
 
     for x, name in ((head_nm // 2, "RA"), (total_nm - head_nm // 2, "RB")):
-        draw(66, 44, kdb.Box(x - 100, 400, x + 100, 600))  # licon1.drawing
-        draw(67, 20, kdb.Box(x - 400, 200, x + 400, 800))  # li1.drawing
-        label(67, 5, name, x, 500)  # li1.pin
+        draw(66, 44, kdb.Box(x - 100, mid_nm - 100, x + 100, mid_nm + 100))  # licon1
+        draw(67, 20, kdb.Box(x - 400, mid_nm - 300, x + 400, mid_nm + 300))  # li1
+        label(67, 5, name, x, mid_nm)  # li1.pin
 
     return layout
 
@@ -8288,6 +8290,55 @@ def test_sky130_res_high_po_fixed_offset_matches_pdk_model_card(tmp_path, l_um):
     assert device["params"]["r_ohm"] > l_um / 1.0 * 319.8
 
 
+# ngspice `sky130_fd_pr__res_high_po` (tt, 27 C) total resistance, measured
+# for issue #3049 -- see `decks/sky130.py`'s provenance note.
+_RES_HIGH_PO_MODEL_OHM = {
+    (0.69, 5.0): 2880.58,
+    (0.69, 35.0): 17009.9,
+    (1.41, 1.0): 508.199,
+    (1.41, 10.0): 2580.96,
+    (1.41, 35.0): 8338.63,
+    (2.85, 10.0): 1282.23,
+    (5.73, 5.0): 355.968,
+}
+
+
+@pytest.mark.parametrize(("w_um", "l_um"), sorted(_RES_HIGH_PO_MODEL_OHM))
+def test_sky130_res_high_po_tracks_pdk_model_at_other_widths(tmp_path, w_um, l_um):
+    """Issue #3049: at `w != 1um` the head term is width-normalized
+    (`end_term_ohm_um / w`), so `r_ohm` stays near the PDK model value the
+    old constant `379.7` ohm offset overstated by ~4-5 % at `w=1.41um`. The
+    curated `ResistorDevice` fields cannot match the model exactly across
+    widths; the residual documented in `decks/sky130.py` is under 2.1 %."""
+    path = _write_gds(
+        _make_sky130_res_high_po_layout(l_um, w_um),
+        tmp_path / f"res_high_po_{w_um}_{l_um}.gds",
+    )
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / f"res_high_po_{w_um}_{l_um}.spice")
+    )
+
+    (device,) = report["devices"]
+    assert device["params"]["w_um"] == pytest.approx(w_um)
+    r_ohm = device["params"]["r_ohm"]
+    (res_high_po,) = [
+        r for r in get_extraction_deck("sky130").resistors if r.name == "res_high_po"
+    ]
+    expected = (
+        res_high_po.sheet_rho_ohm_sq * l_um / w_um
+        + res_high_po.end_term_ohm_um / w_um
+        + res_high_po.fixed_offset_ohm
+    )
+    assert r_ohm == pytest.approx(expected, rel=1e-6)
+    assert r_ohm == pytest.approx(_RES_HIGH_PO_MODEL_OHM[(w_um, l_um)], rel=0.021)
+    # Regression for the issue's own case: the pre-#3049 constant offset gave
+    # a `w=1.41um`, `l=10um` value ~4 % above the model.
+    old_r_ohm = 324.827244 * l_um / w_um + 379.705147
+    assert abs(r_ohm / _RES_HIGH_PO_MODEL_OHM[(w_um, l_um)] - 1) < abs(
+        old_r_ohm / _RES_HIGH_PO_MODEL_OHM[(w_um, l_um)] - 1
+    )
+
+
 def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
     """`ResistorDevice.fixed_offset_ohm` defaults to `0.0` (issue #518): a
     deck entry that does not set it (mirroring every deck's own field before
@@ -8302,7 +8353,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
     uncorrected_deck = dataclasses.replace(
         deck,
         resistors=tuple(
-            dataclasses.replace(r, fixed_offset_ohm=0.0)
+            dataclasses.replace(r, fixed_offset_ohm=0.0, end_term_ohm_um=0.0)
             if r.name == "res_high_po"
             else r
             for r in deck.resistors
