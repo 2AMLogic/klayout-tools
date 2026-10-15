@@ -4597,6 +4597,15 @@ def _add_layers_parser(subparsers: argparse._SubParsersAction) -> None:
             "unique text strings (requires --flattened)"
         ),
     )
+    layers_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "built-in deck whose layer-name table fills each entry's name "
+            "when the stream carries none; the report also records the "
+            "deck's content_hash"
+        ),
+    )
     _add_format_arg(layers_parser)
     layers_parser.set_defaults(func=layers_cmd.run)
 

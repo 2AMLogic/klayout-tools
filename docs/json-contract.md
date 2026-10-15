@@ -230,6 +230,16 @@ the flag was not given), and `klt lvs` gained the optional request field
 `docs/cli/extract.md`'s "Renaming promoted pins to their declared name"
 section.
 
+**A new field *next to* a string-list field is how a list's element type
+changes without breaking it.** Issue #3092: `klt deck rules`' per-rule
+`layers` stays `list[str]` (deck name, or the raw `"L/D"` string when unnamed);
+the stream layer/datatype behind each entry arrives as a new parallel
+`layer_refs` list, plus top-level `layer_table`, `ambiguous_names` and
+`unresolved`. `klt layers` gained an opt-in `--deck` that fills `name` and adds
+a `deck: {name, content_hash}` block; without it the output is byte-identical.
+No `schema_version` bump on either command. See `docs/cli/deck.md` and
+`docs/cli/layers.md`.
+
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
 `environment.sdf.dropped` is documented as an open map keyed by class name,
