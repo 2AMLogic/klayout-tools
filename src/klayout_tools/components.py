@@ -265,10 +265,9 @@ def _qualified_region(layout: Any, cell: Any, spec: dict[str, Any]) -> Any:
         layers = spec.get(key)
         if layers is None:
             continue
-        mask = None
-        for layer in layers:
-            layer_region = _region(layout, cell, layer)
-            mask = layer_region if mask is None else mask + layer_region
+        mask = _region(layout, cell, layers[0])
+        for layer in layers[1:]:
+            mask = mask + _region(layout, cell, layer)
         mask = mask.merged()
         region = region & mask if key == "and" else region - mask
     return region
