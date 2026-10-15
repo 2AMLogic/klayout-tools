@@ -243,6 +243,7 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
+from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
 
 #: Contract identifier for the request envelope (spike section 2).
@@ -2193,7 +2194,7 @@ def _parse_pins(
     raw_pins: Any,
     blocks: dict[str, dict[str, Any]],
     connectivity: list[dict[str, Any]],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Parse and validate the ``pins[]`` request field (#210).
 
     Each entry -- ``{"net": <string>, "block": <string>, "port": <string>}``
@@ -2204,12 +2205,16 @@ def _parse_pins(
     ``connectivity[]`` is (:func:`_validate_block_port`): an unknown
     ``block``/``port`` is an application error (exit 1).
 
-    A ``(block, port)`` pair that also appears in any ``connectivity[]`` entry
-    is rejected: that shape is already labelled by the router, so a second,
-    possibly inconsistent ``pins[]`` label on it is ambiguous rather than
-    additive.
+    A ``(block, port)`` pair that also appears in a ``connectivity[]`` entry is
+    accepted only when the pin's ``net`` equals that entry's ``net`` (#2881):
+    that is a *promotion* of the internally wired net to a reported composed
+    port, not a second label. Such an entry is returned with
+    ``router_labelled: True`` so the label loop writes no duplicate
+    ``kdb.Text`` (the router already labels the net). A different ``net`` is
+    an ambiguous, conflicting label and is rejected (exit 1), naming both nets.
 
-    Returns a list of ``{net, block, port}`` dicts. ``None``/absent yields an
+    Returns a list of ``{net, block, port}`` dicts (plus ``router_labelled``
+    for agreeing connectivity pins). ``None``/absent yields an
     empty list (omitting ``pins[]`` entirely must not change any behavior).
     """
     if raw_pins is None:
@@ -2217,11 +2222,14 @@ def _parse_pins(
     if not isinstance(raw_pins, list):
         raise GenComposeError("request.pins must be an array")
 
-    connectivity_pairs = {
-        (pin["block"], pin["port"]) for entry in connectivity for pin in entry["pins"]
-    }
+    connectivity_pairs: dict[tuple[str, str], list[str]] = {}
+    for conn_entry in connectivity:
+        for conn_pin in conn_entry["pins"]:
+            connectivity_pairs.setdefault(
+                (conn_pin["block"], conn_pin["port"]), []
+            ).append(conn_entry["net"])
 
-    pins: list[dict[str, str]] = []
+    pins: list[dict[str, Any]] = []
     for index, entry in enumerate(raw_pins):
         if not isinstance(entry, dict):
             raise GenComposeError(f"request.pins[{index}] must be a JSON object")
@@ -2242,17 +2250,44 @@ def _parse_pins(
             blocks, block_id, port, f"request.pins[{index}] (net '{net}')"
         )
 
-        if (block_id, port) in connectivity_pairs:
-            raise GenComposeError(
-                f"request.pins[{index}] (net '{net}') names port '{port}' on block "
-                f"'{block_id}', which is already labelled by a connectivity[] net "
-                "-- a port may be promoted by pins[] or wired by connectivity[], "
-                "not both"
-            )
-
-        pins.append({"net": net, "block": block_id, "port": port})
+        pin_entry: dict[str, Any] = {"net": net, "block": block_id, "port": port}
+        if _check_pin_vs_connectivity(index, net, block_id, port, connectivity_pairs):
+            pin_entry["router_labelled"] = True
+        pins.append(pin_entry)
 
     return pins
+
+
+def _check_pin_vs_connectivity(
+    index: int,
+    net: str,
+    block_id: str,
+    port: str,
+    connectivity_pairs: dict[tuple[str, str], list[str]],
+) -> bool:
+    """Reconcile one ``pins[]`` entry with ``connectivity[]`` (#2881).
+
+    Returns ``True`` when ``(block_id, port)`` is wired by a ``connectivity[]``
+    net of the same name (the router labels it, so the pin is a promotion, not
+    a second label), ``False`` when the port is not wired by ``connectivity[]``
+    at all. Raises :class:`GenComposeError` when the port is wired by
+    ``connectivity[]`` under a different net name, naming every such net.
+    """
+    conn_nets = connectivity_pairs.get((block_id, port))
+    if conn_nets is None:
+        return False
+    if net not in conn_nets:
+        unique_nets = list(dict.fromkeys(conn_nets))
+        noun = "net" if len(unique_nets) == 1 else "nets"
+        named = ", ".join(f"'{name}'" for name in unique_nets)
+        raise GenComposeError(
+            f"request.pins[{index}] (net '{net}') names port '{port}' on block "
+            f"'{block_id}', which is already wired by connectivity[] {noun} "
+            f"{named} -- a pins[] entry on a connectivity[] port must "
+            "use the same net name (it promotes that net to a composed port); "
+            "a different name would be a conflicting label"
+        )
+    return True
 
 
 def _port_has_geometry(port: Any) -> bool:
@@ -2278,6 +2313,60 @@ def _port_has_geometry(port: Any) -> bool:
     )
 
 
+def _plan_pin_label(
+    entry: dict[str, Any],
+    port: Any,
+    variant: Any,
+    offsets_um: dict[str, dict[str, float]],
+    notes: list[str],
+) -> tuple[bool, dict[str, Any] | None]:
+    """Decide how one promoted ``pins[]`` entry is labelled (#210, #2881).
+
+    Returns ``(labelled, placement)``: ``placement`` is the composed-frame
+    ``{net, x_um, y_um, layer}`` label to write as a ``kdb.Text``, or ``None``
+    when no label is written. Three cases write no label, each appending a
+    ``notes`` entry: a ``router_labelled`` pin (a connectivity[] net of the
+    same name -- the router already labels it, so ``labelled`` is ``True``), a
+    port with no reported geometry, and a port whose drawn layer has no PDK
+    label-layer convention (both ``labelled`` ``False``).
+    """
+    net_label = entry["net"]
+    where = f"pin '{net_label}' (block '{entry['block']}' port '{entry['port']}')"
+    if entry.get("router_labelled"):
+        # #2881: promotion of a connectivity[]-wired net -- the router
+        # already labels it; a second kdb.Text would be a duplicate.
+        notes.append(
+            f"{where} is also wired by a connectivity[] net of the same name -- "
+            "reported in ports[] only; its label is supplied by the router, no "
+            "duplicate label was written"
+        )
+        return True, None
+    if not _port_has_geometry(port):
+        notes.append(
+            f"{where} has no reported {{x_um, y_um, layer}} geometry -- it was "
+            "not labelled"
+        )
+        return False, None
+    draw_layer = (port["layer"]["layer"], port["layer"]["datatype"])
+    pin_label_layer = _resolve_label_layer(variant, draw_layer)
+    if pin_label_layer is None:
+        notes.append(
+            f"{where} is on layer {draw_layer[0]}/{draw_layer[1]}, which has no "
+            "PDK label-layer convention `klt extract` recognises -- the pin was "
+            "not labelled, so it will not survive as a named .SUBCKT pin "
+            "after extraction"
+        )
+        return False, None
+    offset = offsets_um[entry["block"]]
+    placement = {
+        "net": net_label,
+        "x_um": port["x_um"] + offset["x"],
+        "y_um": port["y_um"] + offset["y"],
+        "layer": pin_label_layer,
+    }
+    return True, placement
+
+
 #: Allowed keys in ``request.pdk`` (spike section 2). Any other key is an
 #: application error rather than a silent fallback -- see #328: a typo such
 #: as ``{"pdk": {"name": "gf180mcuD"}}`` (``name`` being what ``klt gen``'s
@@ -2295,7 +2384,7 @@ COMPOSE_GENERATOR = "gen-compose"
 
 
 def promote_composed_ports(
-    promoted_pins: list[dict[str, str]],
+    promoted_pins: list[dict[str, Any]],
     blocks: dict[str, dict[str, Any]],
     offsets_um: dict[str, dict[str, float]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -2404,6 +2493,122 @@ def promote_composed_ports(
 # count toward its enclosing function's cyclomatic complexity, so defining
 # them here keeps the ratchet measuring this feature's own complexity on its
 # own small functions instead of inflating an already-baselined one.
+
+
+def _snap_routed_ports_to_grid(
+    connectivity: list[dict[str, Any]],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    grid_for_layer: Callable[[tuple[int, int] | None], float],
+    route_layer: tuple[int, int] | None,
+    notes: list[str],
+) -> None:
+    """Move every routed port's attach point onto the PDK manufacturing grid
+    (issue #2932).
+
+    Generators report a terminal port at the *midpoint* of its pad, which is
+    half a manufacturing-grid step off-grid whenever the pad's extent is an
+    odd multiple of the grid (e.g. ``w_um`` 3.015 on a 0.005um grid ->
+    1.5075). Every via-drop cut/landing pad and backbone vertex is centred on
+    that point, so the composed cell failed ``*.ongrid.1`` while each block
+    was clean alone. Any on-grid point inside the pad is electrically
+    equivalent, so the port is moved (in the *composed* frame, then translated
+    back) to the nearest grid line that stays inside the pad along the port
+    edge's tangential axis (``width_um``; unknown extent is treated as
+    unconstrained). Updates ``blocks[...]["ports"]`` in place (the parsed
+    copies, never the caller's report). A move, or a port that cannot be
+    snapped (pad narrower than one grid step), is recorded in ``notes``.
+    Already-on-grid ports are untouched and add no note.
+    """
+    if route_layer is None:
+        return
+    seen: set[tuple[str, str]] = set()
+    for entry in connectivity:
+        for pin in entry["pins"]:
+            key = (pin["block"], pin["port"])
+            if key in seen:
+                continue
+            seen.add(key)
+            block = blocks.get(pin["block"])
+            port = (block or {}).get("ports", {}).get(pin["port"])
+            if not _port_has_geometry(port):
+                continue
+            layer_info = port.get("layer")
+            port_layer = (layer_info["layer"], layer_info["datatype"])
+            grid = max(grid_for_layer(route_layer), grid_for_layer(port_layer))
+            if grid <= 0.0:
+                continue
+            block["ports"][pin["port"]] = _snap_port_to_grid(
+                port, pin, offsets_um[pin["block"]], grid, notes
+            )
+
+
+def _pdk_mfg_grid_um(pdk_info: dict[str, Any], layer: tuple[int, int] | None) -> float:
+    """The manufacturing grid (um) for ``layer`` in ``pdk_info``'s PDK family,
+    or ``0.0`` (no snap) when the family cannot be resolved (issue #2932)."""
+    try:
+        return mfg_grid_um(_pdk_family(pdk_info["variant"]), layer)
+    except GenError:
+        return 0.0
+
+
+def _snap_port_to_grid(
+    port: dict[str, Any],
+    pin: dict[str, Any],
+    offset: dict[str, float],
+    grid: float,
+    notes: list[str],
+) -> dict[str, Any]:
+    """Return a copy of ``port`` with each off-grid axis of its attach point
+    moved onto ``grid`` (composed frame) while staying inside the pad along the
+    port edge's tangential axis; see :func:`_snap_routed_ports_to_grid`."""
+    direction = int(port.get("direction_deg", 0)) % 360
+    tangential = "y" if direction in (0, 180) else "x"
+    width = port.get("width_um")
+    half = (
+        float(width) / 2.0
+        if isinstance(width, (int, float)) and not isinstance(width, bool)
+        else None
+    )
+    new_port = dict(port)
+    for axis in ("x", "y"):
+        composed = float(port[f"{axis}_um"]) + offset[axis]
+        steps = composed / grid
+        if abs(steps - round(steps)) < 1e-6:
+            continue
+        limit = half if axis == tangential else None
+        snapped = _nearest_grid_point_within(composed, grid, limit)
+        where = f"block '{pin['block']}' port '{pin['port']}' {axis}"
+        if snapped is None:
+            notes.append(
+                f"{where}: attach point {composed:.6g}um is off the "
+                f"{grid:g}um manufacturing grid and the pad "
+                f"(width {2 * limit:g}um) holds no on-grid point -- "
+                "drawn off-grid; expect *.ongrid.1 violations"
+            )
+            continue
+        new_port[f"{axis}_um"] = snapped - offset[axis]
+        notes.append(
+            f"{where}: attach point snapped from {composed:.6g}um to "
+            f"{snapped:.6g}um onto the {grid:g}um manufacturing grid "
+            f"(moved {abs(snapped - composed):.4g}um, inside the pad)"
+        )
+    return new_port
+
+
+def _nearest_grid_point_within(
+    composed: float, grid: float, limit: float | None
+) -> float | None:
+    """The grid point nearest ``composed`` that lies within ``limit`` of it
+    (``None`` limit = unconstrained), or ``None`` when no candidate fits."""
+    steps = composed / grid
+    base = math.floor(steps + 0.5 + 1e-9)
+    candidates = sorted((base, base - 1, base + 1), key=lambda c: abs(c - steps))
+    for cand in candidates:
+        value = cand * grid
+        if limit is None or abs(value - composed) <= limit + 1e-9:
+            return value
+    return None
 
 
 def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
@@ -3130,6 +3335,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             _min_spacing_um_cache[layer] = best
         return _min_spacing_um_cache[layer]
 
+    _snap_routed_ports_to_grid(
+        connectivity,
+        blocks,
+        offsets_um,
+        lambda layer: _pdk_mfg_grid_um(pdk_info, layer),
+        route_layer,
+        notes,
+    )
+
     for net_index, entry in enumerate(connectivity):
         net_label = entry["net"]
         pins = entry["pins"]
@@ -3776,34 +3990,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         block_id = entry["block"]
         port_name = entry["port"]
         port = blocks[block_id]["ports"].get(port_name)
-        labelled = False
-        if not _port_has_geometry(port):
-            notes.append(
-                f"pin '{net_label}' (block '{block_id}' port '{port_name}') has no "
-                "reported {x_um, y_um, layer} geometry -- it was not labelled"
-            )
-        else:
-            draw_layer = (port["layer"]["layer"], port["layer"]["datatype"])
-            pin_label_layer = _resolve_label_layer(pdk_info["variant"], draw_layer)
-            if pin_label_layer is None:
-                notes.append(
-                    f"pin '{net_label}' (block '{block_id}' port '{port_name}') is "
-                    f"on layer {draw_layer[0]}/{draw_layer[1]}, which has no PDK "
-                    "label-layer convention `klt extract` recognises -- the pin was "
-                    "not labelled, so it will not survive as a named .SUBCKT pin "
-                    "after extraction"
-                )
-            else:
-                offset = offsets_um[block_id]
-                pin_placements.append(
-                    {
-                        "net": net_label,
-                        "x_um": port["x_um"] + offset["x"],
-                        "y_um": port["y_um"] + offset["y"],
-                        "layer": pin_label_layer,
-                    }
-                )
-                labelled = True
+        labelled, placement = _plan_pin_label(
+            entry, port, pdk_info["variant"], offsets_um, notes
+        )
+        if placement is not None:
+            pin_placements.append(placement)
         response_pins.append(
             {
                 "net": net_label,

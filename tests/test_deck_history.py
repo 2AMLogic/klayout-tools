@@ -678,6 +678,61 @@ def test_deck_devices_reports_the_full_diode_predicate_set_without_the_deck_sour
     assert entry["provenance"]["rule_id"] == "gf180mcu_fd_pr__diode_pd2nw_06v0"
 
 
+def test_deck_devices_drawn_bipolar_markers_report_no_expression():
+    """sky130/gf180mcu bipolars keep their single drawn `marker` layer; the
+    `marker_expression` field (issue #2860) is `null` for them."""
+    for deck, name, pair in (
+        ("sky130", "pnp", (82, 44)),
+        ("gf180mcu", "bjt", (127, 5)),
+    ):
+        entry = _device_class(deck, name)
+        assert (entry["marker"]["layer"], entry["marker"]["datatype"]) == pair
+        assert entry["marker_expression"] is None
+        assert entry["marker_gated"] is True
+
+
+def test_deck_devices_projects_a_derived_bipolar_marker_expression(capsys):
+    """A `LayerExpr` marker (issue #2860) reports as `marker_expression`, with
+    its leaves folded into `required_layers`/`excluded_layers` by polarity."""
+    import dataclasses
+
+    from klayout_tools.cli.deck_cmd import _print_devices_text
+    from klayout_tools.decks import LayerExpr, get_extraction_deck
+
+    pwell = LayerExpr.not_((240, 0), (31, 0), (241, 0), name="pwell")
+    npn_mk = LayerExpr.and_((26, 0), pwell, (242, 0), name="npn_mk")
+    deck = get_extraction_deck("sky130")
+    (pnp,) = deck.bipolars
+    deck = dataclasses.replace(
+        deck, bipolars=(dataclasses.replace(pnp, marker=npn_mk),)
+    )
+
+    (entry,) = [
+        e for e in history._project_device_classes(deck, {}) if e["kind"] == "bipolar"
+    ]
+    assert entry["marker"] is None
+    assert entry["marker_gated"] is True
+    expr = entry["marker_expression"]
+    assert expr["op"] == "and" and expr["name"] == "npn_mk"
+    assert expr["operands"][0] == {"layer": 26, "datatype": 0, "name": None}
+    assert expr["operands"][1]["op"] == "not"
+    assert expr["operands"][1]["name"] == "pwell"
+    assert _layer_pairs(expr["operands"][1]["operands"]) == [
+        (240, 0),
+        (31, 0),
+        (241, 0),
+    ]
+    assert _layer_pairs(entry["required_layers"])[:3] == [(26, 0), (240, 0), (242, 0)]
+    assert _layer_pairs(entry["excluded_layers"]) == [(31, 0), (241, 0)]
+    json.dumps(entry)  # JSON-serialisable as-is
+
+    _print_devices_text({"deck": "x", "content_hash": None, "device_classes": [entry]})
+    assert (
+        "marker: npn_mk = (26/0 & pwell = (240/0 - 31/0 - 241/0) & 242/0)"
+        in capsys.readouterr().out
+    )
+
+
 def test_deck_devices_reports_the_deck_content_hash_and_declaration_order():
     report = history.deck_devices("gf180mcu")
 
