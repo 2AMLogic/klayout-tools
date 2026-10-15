@@ -43,6 +43,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 import warnings
 from pathlib import Path
 
@@ -5642,6 +5643,12 @@ def test_memory_mapping_default_is_none_detected_and_metrics_unchanged(
 def test_memory_mapping_production_script_has_no_evidence_passes(tmp_path, monkeypatch):
     """The production script stays the pre-#2745 pass sequence: the
     evidence passes live only in the side script."""
+    # Pin the run directory to a UUID whose hex contains "abc": the evidence
+    # script embeds absolute output paths under ``run-<uuid4 hex>``, so a
+    # raw substring check flaked whenever the random hex spelled "abc"
+    # (klayout-tools#3279). Pinning it keeps that case exercised every run.
+    pinned = uuid.UUID("854c2957aabc47319f036781e1b0a79e")
+    monkeypatch.setattr(synthesize.uuid, "uuid4", lambda: pinned)
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_yosys_success(monkeypatch)
 
@@ -5654,8 +5661,12 @@ def test_memory_mapping_production_script_has_no_evidence_passes(tmp_path, monke
     evidence = Path(_abs_path(report["memory_mapping"]["script_path"], tmp_path))
     evidence_text = evidence.read_text()
     assert "synth -top gcd -run :fine" in evidence_text
-    assert "abc" not in evidence_text and "dfflibmap" not in evidence_text
-    assert "write_verilog" not in evidence_text
+    # Compare pass names as command words, not substrings: the script's
+    # ``tee -o <path>`` arguments carry a random run directory.
+    words = set(re.split(r"[\s;]+", evidence_text))
+    assert "run-854c2957aabc47319f036781e1b0a79e" in evidence_text
+    assert "abc" not in words and "dfflibmap" not in words
+    assert "write_verilog" not in words
 
 
 def test_memory_mapping_reports_lowered_ram(tmp_path, monkeypatch):
