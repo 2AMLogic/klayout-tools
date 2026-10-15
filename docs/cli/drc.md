@@ -1340,8 +1340,9 @@ planned until the precondition at the end of this note is met. The reasoning
 comes from reading what the open PDKs' own density decks actually do, in the
 same pinned install this deck's rule values are verified against
 (`fossi-foundation/open-pdks` at
-`c6d73a35f524070e85faff4a6a9eef49553ebc2b`, i.e. `volare enable sky130
-c6d73a35f524070e85faff4a6a9eef49553ebc2b`):
+`c6d73a35f524070e85faff4a6a9eef49553ebc2b`, originally fetched via `volare enable sky130
+c6d73a35f524070e85faff4a6a9eef49553ebc2b`; to reproduce today use `ciel enable --pdk-family sky130
+-l sky130_fd_pr f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`, volare's feed having ended):
 
 - **`sky130A_mr.drc` — the deck this repo transcribes from — contains no
   density rules at all.** The only density-shaped rules anywhere in its
@@ -1540,7 +1541,7 @@ current PDK build: the conductor-over-cut enclosure rules added in issue
 #551 (`CO.6`, `V1.3a`, `Vn.3b`/`Vn.4a` — see the next paragraph) are
 re-derived from a real fetched install's own
 `libs.tech/klayout/drc/rule_decks/{contact,via1,via2,via3,via4}.drc`
-(`volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b`, the same
+(originally `volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b`; fetch today with `ciel enable --pdk-family gf180mcu -l gf180mcu_fd_pr f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`; the same
 open_pdks build this repo already cites for gf180mcu's LVS-derived
 extraction deck), and each cites both its DRM rule id and the executable
 statement it was re-derived from. The same install's `comp.drc` (issue
