@@ -2399,6 +2399,29 @@ def test_run_pex_critical_nets_threaded_through_to_extraction(
 
 
 @_SKIP_NO_NGSPICE
+def test_run_pex_parasitic_variant_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--parasitic-variant` (issue #3056) is forwarded from `run_pex` to
+    `run_extract` and echoed in `extraction.parasitic_variant`; absent
+    otherwise."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        parasitic_variants=["drop-c-ground:*"],
+    )
+
+    assert report["extraction"]["parasitic_variant"] == ["drop-c-ground:*"]
+    baseline = run_pex(resistor_layout, [str(request)], "sky130")
+    assert "parasitic_variant" not in baseline["extraction"]
+
+
+@_SKIP_NO_NGSPICE
 def test_run_pex_distributed_rc_threaded_through_to_extraction(
     tmp_path, resistor_layout
 ):
