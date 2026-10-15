@@ -1698,7 +1698,8 @@ _PDK_RES_FLAVOR_END_CONTACT_UM: dict[str, dict[str, tuple[float, float]]] = {
 #: ``sky130A.tech``'s own ``cifoutput`` grows NPC around ``xpc`` / ``xhrpoly``
 #: / ``uhrpoly`` (``npc.1``/``npc.2``'s 0.27um width/space are met because
 #: neighbouring units' boxes abut, as for rpm/psdm). The resistor-ID marker
-#: (``poly.res`` 66/13) stays on the body only. A mask absent here keeps the body-only box.
+#: (``poly.res`` 66/13) stays on the body only. A mask absent here keeps the
+#: body-only box.
 _PDK_RES_FLAVOR_MASK_ENCLOSURE_UM: dict[str, dict[tuple[int, int], float]] = {
     "sky130": {
         (86, 20): 0.2,  # rpm  -- rpm.3
