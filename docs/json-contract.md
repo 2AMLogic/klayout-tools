@@ -1639,6 +1639,33 @@ violation (issue #2029).
 - `json` — the stable API. Breaking a JSON field (renaming, removing, or
   retyping it) is a breaking change per CLAUDE.md; adding a field is not.
 
+## Response schemas (`docs/schemas/<verb>-response.schema.json`)
+
+A verb's success payload may ship a machine-readable JSON Schema (Draft
+2020-12) alongside its prose in `docs/cli/<verb>.md`. Today `klt layers`,
+`klt cells` and `klt stats` have one:
+[`layers-response`](schemas/layers-response.schema.json),
+[`cells-response`](schemas/cells-response.schema.json) and
+[`stats-response`](schemas/stats-response.schema.json).
+
+- **Naming.** `docs/schemas/<verb>-response.schema.json`, one file per verb.
+- **Required means always present.** Every field the verb always emits is in
+  `required`; fields that appear only under a flag (e.g. `klt layers
+  --flattened`) are declared in `properties` but not required. Nullable
+  fields are typed explicitly (`["string", "null"]`).
+- **Version pin.** The top-level `schema_version` is pinned with `const`.
+- **Extensibility.** Object boundaries keep `additionalProperties: true`, so
+  additive pre-1.0 fields stay compatible. That does not excuse leaving a
+  documented field out of `properties`.
+- **Version-bump rule.** Renaming, removing or retyping a field, or making an
+  optional field always-present, changes the shape: bump the verb's
+  `schema_version` and the schema's `const` together. Adding an optional
+  field does not bump it, but the schema must be updated to describe it.
+- **Testing.** The verb's existing `test_json_*` module loads the shipped
+  schema, runs `Draft202012Validator.check_schema` on it, validates real CLI
+  output for each option-dependent shape, and asserts that deleting a
+  required field raises `jsonschema.ValidationError`.
+
 ## Adding a new command
 
 1. The library function backing the command returns a plain dict payload
