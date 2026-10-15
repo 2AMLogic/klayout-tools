@@ -449,6 +449,15 @@ _MISMATCH_ACTIVITY: dict[tuple[str, str], dict[str, Any]] = {
             "resistor variation. See issue #355."
         ),
     },
+    ("gf180mcu", "capacitor"): {
+        "active": False,
+        "note": (
+            "The MIM-capacitor subcircuits (cap_mim_*) reference only the "
+            "global sw_stat_global terms (one draw per run shared by every "
+            "instance); sw_stat_mismatch is not referenced inside them, so "
+            "no per-instance capacitor mismatch is sampled. See issue #2898."
+        ),
+    },
     ("sky130", "mosfet"): {
         "active": True,
         "note": (
@@ -505,6 +514,29 @@ _SUBCKT_FAMILY_KEYWORDS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: gf180mcu's own resistor subcircuit names (``ppolyf_u_1k``,
+#: ``npolyf_s_1k``, ``nplus_u_*``, ``pplus_s_*``, ``rm1``..``rm3``/``tm*``
+#: metal resistors) carry no ``res_`` keyword (issue #2898), so they are
+#: matched against the X line's subcircuit-name token (the last token
+#: before any ``name=value`` parameters) rather than the whole line.
+_SUBCKT_NAME_FAMILY_RE: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?:ppolyf|npolyf|nplus|pplus)_[a-z0-9_]+"), "resistor"),
+    (re.compile(r"(?:rm|tm)\d+[a-z0-9_]*"), "resistor"),
+)
+
+
+def _subckt_name_token(line: str) -> str | None:
+    """Subcircuit name of an ``X`` call line: the last token before the
+    first ``name=value`` parameter (or the last token), lower-cased."""
+    tokens = line.split()[1:]
+    plain: list[str] = []
+    for tok in tokens:
+        if "=" in tok:
+            break
+        plain.append(tok)
+    return plain[-1].lower() if len(plain) > 1 else None
+
+
 def _classify_device_family(element_type: str, line: str) -> str | None:
     """Canonical device family for one netlist element line, or ``None``
     when ``element_type`` never names a PDK device (sources, controlled
@@ -519,6 +551,11 @@ def _classify_device_family(element_type: str, line: str) -> str | None:
     if element_type in _ELEMENT_TYPE_FAMILY:
         return _ELEMENT_TYPE_FAMILY[element_type]
     if element_type == "X":
+        name = _subckt_name_token(line)
+        if name is not None:
+            for pattern, family in _SUBCKT_NAME_FAMILY_RE:
+                if pattern.fullmatch(name):
+                    return family
         lowered = line.lower()
         for keyword, family in _SUBCKT_FAMILY_KEYWORDS:
             if keyword in lowered:

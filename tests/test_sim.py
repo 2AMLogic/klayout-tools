@@ -4074,6 +4074,11 @@ def test_run_sim_monte_carlo_deck_carries_seed_and_param_cards(tmp_path, monkeyp
         ("XQ1 c b e bjt_pnp_model", "bipolar"),
         ("XC1 a b moscap_model", "capacitor"),
         ("XU1 a b some_unrecognised_block", "other"),
+        ("XR1 a b gnd ppolyf_u_1k r_width=1u r_length=2u", "resistor"),
+        ("XR2 a b gnd npolyf_s_1k r_width=1u", "resistor"),
+        ("XR3 a b nplus_u_1k", "resistor"),
+        ("XR4 a b rm1 r_width=1u", "resistor"),
+        ("XC1 a b cap_mim_1f0fF c_width=10u", "capacitor"),
         ("V1 vdd 0 DC 1.0", None),
         ("I1 a b DC 1m", None),
         ("L1 a b 1u", None),
@@ -4214,9 +4219,8 @@ def test_run_sim_monte_carlo_family_mismatch_reports_gf180mcu_resistor_disabled(
     by_family = {entry["family"]: entry["active"] for entry in family_mismatch}
     assert by_family["resistor"] is False
     assert by_family["mosfet"] is True
-    # capacitor has no curated gf180mcu table entry -- unverified, not
-    # assumed active or inactive.
-    assert by_family["capacitor"] is None
+    # capacitor: gf180mcu MIM caps have no per-instance mismatch hook (#2898).
+    assert by_family["capacitor"] is False
 
 
 def test_run_sim_monte_carlo_family_mismatch_scans_include_closure(
@@ -12352,3 +12356,11 @@ def test_noise_expr_aliases_spectrum_vectors():
 )
 def test_non_noise_expr_has_no_noise_alias(kind, args):
     assert not any("noise1" in line for line in _control_for(kind, args))
+
+
+def test_gf180_pdk_native_passives_report_inactive():
+    assert sim._detect_device_families(
+        "XR1 a b gnd ppolyf_u_1k r_width=1u\nXC1 a b cap_mim_1f0fF c_width=1u\n"
+    ) == ["resistor", "capacitor"]
+    for fam in ("resistor", "capacitor"):
+        assert sim._MISMATCH_ACTIVITY[("gf180mcu", fam)]["active"] is False
