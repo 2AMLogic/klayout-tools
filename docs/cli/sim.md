@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--report-out <path>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -52,6 +52,15 @@ this document (and the code) win.
   even when the recovered-stepping rule downgraded that diagnostic to
   `severity: "warning"` — which is the point. See "Grading a recovered
   diagnostic as inconclusive" below.
+- `--report-out` — also write the report envelope to this path
+  ([#2975](https://github.com/2AMLogic/klayout-tools/issues/2975)),
+  byte-identical to `--format json` stdout. A path ending `.gz` is
+  gzip-compressed with a zeroed header (identical results give identical
+  bytes); anything else is plain indented JSON. A Monte Carlo campaign
+  report runs to tens of MB indented but ~30x smaller gzipped, small enough
+  to commit unmodified as evidence. Stdout and exit codes (0/3/4) are
+  unaffected; an unwritable path exits 1 with the error envelope. `klt
+  yield` accepts the `.json.gz` file directly.
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform

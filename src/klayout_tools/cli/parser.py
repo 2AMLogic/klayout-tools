@@ -708,6 +708,19 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--report-out",
+        dest="report_out",
+        default=None,
+        metavar="PATH",
+        help=(
+            "also write the report envelope to PATH, byte-identical to "
+            "`--format json` stdout; gzip-compressed (deterministic) when "
+            "PATH ends `.gz`, plain indented JSON otherwise. Stdout is "
+            "unchanged (issue #2975). `klt yield` reads `.json.gz` "
+            "directly. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--plot",
         dest="plot",
         default=None,

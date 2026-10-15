@@ -47,7 +47,7 @@ from ..op_sanity import OpSanityError, run_op_sanity
 from ..output_lock import OutputLockError
 from ..sim import SimError, run_sim
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, run_sim_set
-from .output import EXIT_USAGE_ERROR, emit_error, emit_success
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, write_json_file
 
 EXIT_PASS = 0
 EXIT_MEASUREMENT_FAILED = 3
@@ -92,6 +92,20 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("sim", str(exc), args.format, code=exc.code)
     except OutputLockError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
+
+    report_out = getattr(args, "report_out", None)
+    if report_out:
+        # Issue #2975: an additive file copy of the envelope; stdout is
+        # unchanged. Written before emitting so an unwritable path fails
+        # cleanly with the error envelope rather than after a full report.
+        try:
+            write_json_file(report, report_out)
+        except OSError as exc:
+            return emit_error(
+                "sim",
+                f"could not write report to '{report_out}': {exc}",
+                args.format,
+            )
 
     deck_mode = report.get("mode") == "decks"
     emit_success(report, args.format, _print_deck_text if deck_mode else _print_text)
