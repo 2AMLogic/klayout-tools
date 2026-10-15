@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--dry-run] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -44,6 +44,22 @@ this document (and the code) win.
   cannot plausibly cover the full analysis window, overriding the
   request's own `options.fail_fast_probe` when given. See "Timeout-budget
   preflight" below.
+- `--dry-run` — validate the request and report its expansion without
+  simulating or submitting anything ([#3064](https://github.com/2AMLogic/klayout-tools/issues/3064)).
+  Every pre-dispatch check a real run performs still runs (request shape,
+  Monte Carlo spec, measurement forms, model/OSDI resolution, the
+  `stage_model_inputs` closure and the off-host PDK check), and a failure
+  exits 1 with the same message a real run gives. It then returns before
+  the fail-fast probe, the output-directory lock and any backend, so no
+  ngspice, SSH, S3 or EC2 is touched. Corner/Monte Carlo requests only;
+  `decks` requests are refused. The JSON response is the shared envelope
+  with: `dry_run: true`, `status: "valid"`, `engine`, `backend` (resolved),
+  `hosts`, `netlist`, `models_lib`, `unit_count`, `units[]` (`corner_id`
+  and, for Monte Carlo, `sample_index`, `rndseed`, `process_seed`,
+  `mismatch_seed` -- the values the real run derives), `monte_carlo`,
+  `staged_files[]` (the staged model inputs, as in
+  `environment.staged_model_inputs`), and `warnings[]` (unknown top-level
+  request keys; a warning only, never an error).
 - `--fail-on-diagnostic` — grade any corner that emitted this diagnostic
   `code` as `status: "inconclusive"` rather than `pass`/`fail` ("the solve
   did not convincingly converge", reported as a distinct claim from "the

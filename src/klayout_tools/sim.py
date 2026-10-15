@@ -1566,6 +1566,7 @@ def run_sim(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    dry_run: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -1788,6 +1789,13 @@ def run_sim(
     owns its outdir (#3168). Ownership of an ancestor
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
+
+    **Dry run (issue #3064).** ``dry_run=True`` runs every pre-dispatch
+    check of a corner request (shape, Monte Carlo spec, measurement forms,
+    model/OSDI resolution, staging closure, off-host PDK check) and returns
+    :func:`_build_dry_run_report` -- the expanded unit list with its derived
+    seeds -- without running the fail-fast probe, taking an output-directory
+    lock, or invoking any backend (no ngspice, SSH, S3 or EC2).
     """
     request = load_request(request_path)
     # Issue #2892: the engine runs with ``cwd=<corner dir>``, so a relative
@@ -1796,6 +1804,11 @@ def run_sim(
     if artifacts_dir is not None:
         artifacts_dir = os.path.abspath(artifacts_dir)
     if sim_decks.DECKS_FIELD in request:
+        if dry_run:
+            raise SimError(
+                "--dry-run does not apply to deck-list requests (`decks`); "
+                "it validates corner/Monte Carlo requests only"
+            )
         return _dispatch_deck_request(
             request,
             request_path=request_path,
@@ -1821,6 +1834,7 @@ def run_sim(
         plot_dir=plot_dir,
         fail_fast_probe=fail_fast_probe,
         fail_on_diagnostic=fail_on_diagnostic,
+        dry_run=dry_run,
         _ownership=_ownership,
     )
 
@@ -1920,6 +1934,7 @@ def _run_sim_corners(
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    dry_run: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -2295,12 +2310,13 @@ def _run_sim_corners(
     # Issue #2770: own every persistent artifact root before the first write
     # to it. Temporary-only runs (no keep_artifacts/resume/plots, local
     # backends) never touch `artifacts_dir`, so they take no lock.
-    _own_persistent_roots(
-        _ownership,
-        artifacts_dir,
-        plot_dir,
-        persistent=bool(keep_artifacts or resume or backend in _OFFHOST_BACKENDS),
-    )
+    if not dry_run:
+        _own_persistent_roots(
+            _ownership,
+            artifacts_dir,
+            plot_dir,
+            persistent=bool(keep_artifacts or resume or backend in _OFFHOST_BACKENDS),
+        )
     checkpoint_path = _checkpoint_path(artifacts_dir)
     pre_completed: dict[str, dict[str, Any]] = {}
     loaded_engine_version: str | None = None
@@ -2347,7 +2363,12 @@ def _run_sim_corners(
     # did not run at all (opted out, wrong analysis kind, empty grid) or
     # came back inconclusive -- see `_run_fail_fast_probe`.
     probe_result: dict[str, Any] | None = None
-    if fail_fast_probe and backend not in _OFFHOST_BACKENDS and dispatch_points:
+    if (
+        fail_fast_probe
+        and not dry_run
+        and backend not in _OFFHOST_BACKENDS
+        and dispatch_points
+    ):
         probe_result = _run_fail_fast_probe(
             corner_points=dispatch_points,
             netlist_path=netlist_path,
@@ -2443,6 +2464,19 @@ def _run_sim_corners(
         backend=backend,
         enabled=stage_model_inputs,
     )
+
+    if dry_run:
+        return _build_dry_run_report(
+            request,
+            engine=engine,
+            backend=backend,
+            hosts=hosts,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            corner_points=corner_points,
+            monte_carlo_info=monte_carlo_info,
+            staged_model_environment=staged_model_environment,
+        )
 
     if hosts == 1:
         # The exact pre-#376 call for the default case (no budget, no
@@ -2973,6 +3007,83 @@ def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
     warning = pdk_ambiguity_warning(resolution) if resolution else None
     if warning is not None:
         print(warning, file=sys.stderr)
+
+
+#: Top-level request keys ``klt sim`` reads (or documents). A dry run
+#: reports anything else as a warning (issue #3064) -- never an error, so no
+#: existing request starts failing.
+_KNOWN_REQUEST_KEYS = frozenset(
+    {
+        "analysis",
+        "analysis_steps",
+        "backend",
+        "batch",
+        "confidence",
+        "corners",
+        "decks",
+        "engine",
+        "exclude",
+        "measurements",
+        "models",
+        "monte_carlo",
+        "netlist",
+        "netlist_source",
+        "options",
+        "remote",
+        "schema",
+        "schema_version",
+        "target_ci_halfwidth",
+        "_explicit_points",
+        sim_staging.STAGED_MODEL_INPUTS_FIELD,
+    }
+)
+
+
+def _build_dry_run_report(
+    request: dict[str, Any],
+    *,
+    engine: str,
+    backend: str,
+    hosts: int,
+    netlist_path: str,
+    models_lib: str | None,
+    corner_points: list[CornerPoint],
+    monte_carlo_info: dict[str, Any] | None,
+    staged_model_environment: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """The ``klt sim --dry-run`` response (issue #3064): the request as
+    :func:`_run_sim_corners` expanded it, with nothing simulated or submitted.
+
+    Built from the same ``corner_points`` / ``monte_carlo_info`` the real run
+    dispatches, so the per-sample seeds are exactly the ones a real run uses.
+    """
+    units: list[dict[str, Any]] = []
+    for point in corner_points:
+        unit: dict[str, Any] = {"corner_id": point.corner_id}
+        if point.sample_index is not None:
+            unit["sample_index"] = point.sample_index
+        if point.mc_seed is not None:
+            for key in ("rndseed", "process_seed", "mismatch_seed"):
+                unit[key] = point.mc_seed[key]
+        units.append(unit)
+    warnings = [
+        f"unknown top-level request key '{key}' (ignored by klt sim)"
+        for key in sorted(set(request) - _KNOWN_REQUEST_KEYS)
+    ]
+    return {
+        "dry_run": True,
+        "status": "valid",
+        "engine": engine,
+        "backend": backend,
+        "hosts": hosts,
+        "netlist": netlist_path,
+        "models_lib": models_lib,
+        "unit_count": len(units),
+        "units": units,
+        "monte_carlo": monte_carlo_info,
+        "staged_files": staged_model_environment.get("staged_model_inputs", []),
+        "warnings": warnings,
+    }
 
 
 def _preflight_staged_model_inputs(

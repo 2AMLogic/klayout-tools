@@ -41,6 +41,7 @@ see ``docs/cli/sim.md``'s "Operating-point lint" section.
 
 import argparse
 import sys
+from typing import Any
 
 from ..env_provenance import render_path_field
 from ..op_sanity import OpSanityError, run_op_sanity
@@ -52,6 +53,24 @@ from .output import EXIT_USAGE_ERROR, emit_error, emit_success
 EXIT_PASS = 0
 EXIT_MEASUREMENT_FAILED = 3
 EXIT_CORNER_ERRORED = 4
+
+
+def _print_dry_run_text(report: dict[str, Any]) -> None:
+    print(
+        f"klt sim --dry-run: valid ({report['unit_count']} unit(s), "
+        f"engine={report['engine']}, backend={report['backend']})"
+    )
+    for unit in report["units"]:
+        seeds = "".join(
+            f" {key}={unit[key]}"
+            for key in ("rndseed", "process_seed", "mismatch_seed")
+            if key in unit
+        )
+        print(f"  {unit['corner_id']}{seeds}")
+    for staged in report["staged_files"]:
+        print(f"  stage: {staged['name']} ({staged['kind']})")
+    for warning in report["warnings"]:
+        print(f"  warning: {warning}")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -87,11 +106,18 @@ def run(args: argparse.Namespace) -> int:
             plot_dir=args.plot,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
+            dry_run=getattr(args, "dry_run", False),
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
     except OutputLockError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)
+
+    if report.get("dry_run"):
+        # Issue #3064: a dry run reaching here passed every pre-dispatch
+        # check (a failure raised SimError above -> exit 1).
+        emit_success(report, args.format, _print_dry_run_text)
+        return EXIT_PASS
 
     deck_mode = report.get("mode") == "decks"
     emit_success(report, args.format, _print_deck_text if deck_mode else _print_text)

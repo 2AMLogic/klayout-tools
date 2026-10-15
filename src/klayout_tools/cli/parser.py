@@ -680,6 +680,18 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help=(
+            "validate the request and print its expansion (resolved "
+            "backend/engine, corner ids, per-sample Monte Carlo seeds, "
+            "staged model files, unknown-key warnings) without running "
+            "ngspice or touching SSH/S3/EC2; exits 1 on any validation "
+            "failure. Corner/Monte Carlo requests only. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--fail-fast-probe",
         dest="fail_fast_probe",
         action="store_true",
