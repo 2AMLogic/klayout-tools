@@ -2185,6 +2185,70 @@ def test_timed_out_job_recovers_an_envelope_but_keeps_its_code(tmp_path, monkeyp
     assert environment["state"] == "timeout"
 
 
+def _fake_clock():
+    ticks = iter(range(100))
+    return lambda: f"2026-10-15T17:00:{next(ticks):02d}.000000Z"
+
+
+def test_failed_job_reports_client_timestamps_up_to_terminal(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="1"))
+
+    _, _, environment = _run_failed_job(
+        tmp_path, monkeypatch, runner, points=1, now=_fake_clock()
+    )
+
+    assert environment["client_submitted_at"] == "2026-10-15T17:00:00.000000Z"
+    assert environment["client_launched_at"] == "2026-10-15T17:00:01.000000Z"
+    assert environment["client_status_terminal_at"] == "2026-10-15T17:00:02.000000Z"
+    assert environment["client_collected_at"] is None
+
+
+def test_poll_timeout_reports_submitted_and_launched_only(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+
+    _, _, environment = _run_failed_job(
+        tmp_path,
+        monkeypatch,
+        runner,
+        points=1,
+        config=_config(tmp_path, poll_timeout_s=0.0),
+        now=_fake_clock(),
+    )
+
+    assert environment["client_submitted_at"] == "2026-10-15T17:00:00.000000Z"
+    assert environment["client_launched_at"] == "2026-10-15T17:00:01.000000Z"
+    assert environment["client_status_terminal_at"] is None
+    assert environment["client_collected_at"] is None
+
+
+def test_successful_job_reports_ordered_client_timestamps(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+
+    _, _, environment = _run_failed_job(
+        tmp_path, monkeypatch, runner, points=1, now=_fake_clock()
+    )
+
+    stamps = [
+        environment[key]
+        for key in (
+            "client_submitted_at",
+            "client_launched_at",
+            "client_status_terminal_at",
+            "client_collected_at",
+        )
+    ]
+    assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT[\d:.]+Z", stamp) for stamp in stamps)
+    assert stamps == sorted(stamps)
+
+
+def test_default_clock_is_rfc3339_utc():
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z", sb._utc_now())
+
+
 def test_poll_timeout_does_not_attempt_recovery(tmp_path, monkeypatch):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("running"))
@@ -2536,6 +2600,8 @@ def test_hosts_greater_than_one_submits_one_job_per_shard(tmp_path, monkeypatch)
     ]
     assert engine_version == "46"
     assert len(environment["fleet"]) == 2
+    for entry in environment["fleet"]:
+        assert entry["client_submitted_at"] <= entry["client_collected_at"]
 
 
 def test_every_shard_request_preserves_options_save_mode(tmp_path, monkeypatch):
