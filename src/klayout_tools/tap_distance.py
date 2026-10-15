@@ -349,11 +349,13 @@ def _measure_island(
         )
         return entry, violations
 
-    span = max(bbox.width(), bbox.height()) + max(
-        (subject + taps).bbox().width(), (subject + taps).bbox().height()
-    )
-    fail, cover = _bisect(subject, taps, max(span, max_dbu + 2))
     cos_n = math.cos(math.pi / POLYGON_SIDES)
+    # Every subject point is within the union bbox diagonal of its nearest tap;
+    # the inscribed polygon covers only cos_n of its radius, so scale up.
+    union = (subject + taps).bbox()
+    diagonal = math.hypot(union.width(), union.height())
+    span = math.ceil(diagonal / cos_n) + 2
+    fail, cover = _bisect(subject, taps, max(span, max_dbu + 2))
     entry["measured_max_distance_um"] = 0.0 if fail < 0 else (cover + 1) * dbu
     entry["lower_bound_um"] = 0.0 if fail < 0 else max(0.0, fail * cos_n - 1) * dbu
     if fail >= 0:

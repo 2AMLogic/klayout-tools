@@ -113,6 +113,23 @@ def test_euclidean_not_manhattan_diagonal(tmp_path):
     assert _run(path, 18.0)["status"] == "pass"
 
 
+def test_bracket_holds_on_failing_diagonal_offset_layout(tmp_path):
+    # Small subject, tap far off on the diagonal: the farthest subject corner
+    # (0,0) is hypot(100,100) = 141.421 um from the tap corner (100,100). A
+    # failing run (max below that) must still bracket the true distance.
+    path = _write(
+        tmp_path / "diag.gds",
+        {_SUBJECT: [_box(0, 0, 1, 1)], _TAP: [_box(100, 100, 101, 101)]},
+    )
+    true = math.hypot(100, 100)
+    report = _run(path, 10.0)
+    m = report["measurement"]
+    assert report["status"] == "fail"
+    assert m["lower_bound_um"] <= true <= m["measured_max_distance_um"]
+    island = report["islands"][0]
+    assert island["lower_bound_um"] <= true <= island["measured_max_distance_um"]
+
+
 def test_tap_overlapping_subject_is_zero_distance(tmp_path):
     path = _write(
         tmp_path / "d.gds",
