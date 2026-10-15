@@ -151,6 +151,7 @@ def _parse_label_names(
     for index, entry in enumerate(raw_names):
         at = f"{where}.names[{index}]"
         access = shared_access
+        name: Any
         if isinstance(entry, str):
             name = entry
         elif isinstance(entry, dict):
