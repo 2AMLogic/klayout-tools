@@ -1163,6 +1163,8 @@ def _mos_array_layout(
     sd_implant_margin_um: float = 0.0,
     voltage_flavor_mark_margin_um: float = WELL_ENCLOSURE_MARGIN_UM,
     interior_channel_um: float = 0.0,
+    pitch_x_um: float = 0.0,
+    pitch_y_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1231,7 +1233,17 @@ def _mos_array_layout(
     opaque block) keeps the generator responsible for its own routability
     the same way it is already responsible for its own DRC cleanliness;
     ``res_array``/``diff_pair`` are expected to grow the same parameter in a
-    later phase, not this one."""
+    later phase, not this one.
+
+    ``pitch_x_um``/``pitch_y_um`` (issue #3299, Phase 1) override the base
+    column/row pitch (otherwise unit extent plus
+    :data:`MIN_SAME_LAYER_SPACING_UM`). A value below that legal minimum is
+    *clamped up* to it -- never emitted as DRC-violating geometry -- and the
+    clamp is reported via ``pitch_x_clamped``/``pitch_y_clamped``;
+    ``min_col_pitch_um``/``min_row_pitch_um`` give the legal minimum. ``0.0``
+    (the default) means "no override" and is a strict no-op. The override
+    replaces the base pitch, and ``interior_channel_um`` is then added on top
+    of the effective base pitch."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -1243,8 +1255,18 @@ def _mos_array_layout(
         bottom_endcap_um,
         sd_implant_margin_um,
     )
-    col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
-    row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
+    min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
+    col_pitch = min_col_pitch
+    row_pitch = min_row_pitch
+    # Issue #3299 (Phase 1): an explicit pitch override, clamped up to the
+    # legal minimum. `0.0` (the default) leaves the pitch untouched.
+    pitch_x_clamped = 0.0 < pitch_x_um < min_col_pitch
+    pitch_y_clamped = 0.0 < pitch_y_um < min_row_pitch
+    if pitch_x_um > 0.0:
+        col_pitch = max(pitch_x_um, min_col_pitch)
+    if pitch_y_um > 0.0:
+        row_pitch = max(pitch_y_um, min_row_pitch)
     # Issue #1531 (Phase 1): a positive `interior_channel_um` widens both
     # pitches by exactly that amount -- `0.0` (the default) is a strict no-op
     # on both, so every existing caller's `col_pitch`/`row_pitch` (and thus
@@ -1368,6 +1390,10 @@ def _mos_array_layout(
         "unit": unit,
         "col_pitch_um": col_pitch,
         "row_pitch_um": row_pitch,
+        "min_col_pitch_um": min_col_pitch,
+        "min_row_pitch_um": min_row_pitch,
+        "pitch_x_clamped": pitch_x_clamped,
+        "pitch_y_clamped": pitch_y_clamped,
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,

@@ -199,6 +199,9 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'mos_array': params.ring_padding_um must be >= 0")
     if params["interior_channel_um"] < 0:
         raise GenError("generator 'mos_array': params.interior_channel_um must be >= 0")
+    for pitch_name in ("pitch_x_um", "pitch_y_um"):
+        if params[pitch_name] < 0:
+            raise GenError(f"generator 'mos_array': params.{pitch_name} must be >= 0")
 
     # `ring_gap_side`/`ring_gap_um`/`ring_gap_offset_um` are validated against
     # a hypothetical ring (`add_guard_ring=True`) regardless of the request's
@@ -220,6 +223,8 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
             add_guard_ring=True,
             ring_padding_um=params["ring_padding_um"],
             interior_channel_um=params["interior_channel_um"],
+            pitch_x_um=params["pitch_x_um"],
+            pitch_y_um=params["pitch_y_um"],
         )
     )
     _validate_ring_gap(
@@ -334,6 +339,8 @@ def _mos_array_describe(
         _contact_gate_extra_offset_um(family),
         _gate_bottom_endcap_um(family),
         interior_channel_um=params["interior_channel_um"],
+        pitch_x_um=params["pitch_x_um"],
+        pitch_y_um=params["pitch_y_um"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -532,6 +539,30 @@ def _mos_array_describe(
         for x0, y0, x1, y1 in info["navigable_regions_um"]
     ]
 
+    # Issue #3299 (Phase 1): only when a pitch override was requested, report
+    # the effective pitch and whether it was clamped up to the legal minimum
+    # (absent otherwise, so default reports are unchanged).
+    pitch_hints: dict[str, Any] = {}
+    pitch_warnings: list[str] = []
+    if params["pitch_x_um"] > 0 or params["pitch_y_um"] > 0:
+        pitch_hints["pitch"] = {
+            "col_pitch_um": info["col_pitch_um"],
+            "row_pitch_um": info["row_pitch_um"],
+            "min_col_pitch_um": info["min_col_pitch_um"],
+            "min_row_pitch_um": info["min_row_pitch_um"],
+            "pitch_x_clamped": info["pitch_x_clamped"],
+            "pitch_y_clamped": info["pitch_y_clamped"],
+        }
+        for axis, name, minimum in (
+            ("x", "pitch_x_um", info["min_col_pitch_um"]),
+            ("y", "pitch_y_um", info["min_row_pitch_um"]),
+        ):
+            if info[f"pitch_{axis}_clamped"]:
+                pitch_warnings.append(
+                    f"params.{name}={params[name]} is below the legal minimum "
+                    f"pitch {minimum}um; clamped up to {minimum}um"
+                )
+
     return {
         "device_count": device_count,
         "ports": ports,
@@ -543,12 +574,14 @@ def _mos_array_describe(
             "notes": notes,
             **voltage_flavor_hints,
             **sd_implant_hints,
+            **pitch_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
             else []
-        ),
+        )
+        + pitch_warnings,
     }
 
 
