@@ -76,7 +76,7 @@ print_info() { echo -e "${BLUE}ℹ $1${NC}"; }
 print_warning() { echo -e "${YELLOW}⚠ $1${NC}"; }
 
 # Runs the repo-owned .loom/hooks/post-worktree.sh (if present) inside a PR
-# review worktree (issue #2020). worktree.sh already invokes this hook for
+# review worktree (LOCAL klayout-tools #2020; pinned in .loom/resync-ignore). worktree.sh already invokes this hook for
 # issue worktrees; pr-worktree.sh did not, so a PR review worktree's `pytest`
 # run could silently import the MAIN CHECKOUT's src/ via a stale editable
 # install instead of the worktree's own copy -- a false negative on a PR
@@ -154,8 +154,21 @@ if ! DEFAULT_BRANCH="$(cd "$REPO_ROOT" && loom_default_branch)"; then
     print_error "Could not determine the default branch. Set LOOM_DEFAULT_BRANCH or run: git remote set-head origin -a"
     exit 1
 fi
+# (#9106: loom_default_branch refuses an unsafe name at the source, so the
+# `git fetch origin -- "$DEFAULT_BRANCH"` below can never receive one.)
 
 WORKTREE_PATH="$WORKTREE_ROOT_DIR/pr-$PR_NUMBER"
+
+# Attended live output for the issue this PR closes (#10120): an attended Judge
+# never claims, so this checkout is where its output starts publishing. Every
+# decision (only exactly one closing issue, subagents only, a silent no-op when
+# live output is off) lives in `loom-daemon live-output-attend --pr`; this file
+# is a `contract` entry and admits no logic. Never fails the checkout.
+# requires-daemon: live-output-attend optional   #10120 — an absent or older binary (no `--pr`) just publishes nothing; output is discarded either way
+# shellcheck source=lib/locate-daemon-bin.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/locate-daemon-bin.sh" 2>/dev/null || true
+_LD_BIN="$(loom_resolve_self_daemon_bin 2>/dev/null || true)"
+[[ -z "$_LD_BIN" ]] || "$_LD_BIN" live-output-attend --pr "$PR_NUMBER" --workspace "$REPO_ROOT" >/dev/null 2>&1 || true
 
 # If the worktree already exists, treat it as reusable. The doctor may
 # re-enter for the same PR across multiple iterations.
@@ -211,7 +224,7 @@ print_info "  Path: $WORKTREE_PATH"
 mkdir -p "$WORKTREE_ROOT_DIR"
 
 # Fetch origin/<default-branch> so we have something to base the worktree on.
-git -C "$REPO_ROOT" fetch origin "$DEFAULT_BRANCH" >/dev/null 2>&1 || \
+git -C "$REPO_ROOT" fetch origin -- "$DEFAULT_BRANCH" >/dev/null 2>&1 || \
     print_warning "Could not fetch origin/$DEFAULT_BRANCH (continuing)"
 
 # Use --detach so we don't create a stale branch ref. `gh pr checkout` will
