@@ -1574,7 +1574,9 @@ def _validate_input_transitions(
             raise PostRouteStaError(
                 f"{field}[{port!r}] must be a finite non-negative number"
             )
-        parsed[port] = float(_validate_transition_value(entry, f"{field}[{port!r}]"))
+        validated = _validate_transition_value(entry, f"{field}[{port!r}]")
+        assert validated is not None  # entry is not None, checked above
+        parsed[port] = validated
     return scalar, parsed or None
 
 
