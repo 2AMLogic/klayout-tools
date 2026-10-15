@@ -256,6 +256,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   sigma. **Additive:** no existing payload changes.
   See [`docs/cli/yield-threshold.md`](docs/cli/yield-threshold.md).
 
+- **`klt lvs`: unresolved reference subcircuit calls are an error, not a
+  silent drop** (issue #2952): a reference `X` card naming a subcircuit that
+  is not defined in the reference, was not converted to a device, and has no
+  same-named layout circuit (e.g. sg13g2 `XQ1 c b e sub npn13G2 Nx=1` while no
+  bipolar binding exists) used to be read as an empty placeholder circuit, so
+  with `options.flatten_reference` a zero-device layout reported
+  `status: "match"`. Each such instance now emits a new
+  `mismatches[].category` value, `reference.unresolved_subckt_call`
+  (`severity: "error"`, naming the containing circuit, instance and callee),
+  and forces `status: "mismatch"` under `reference.form` `plain-element` and
+  `subckt-call` (never downgraded to `"inconclusive"`). Defined hierarchy,
+  deck custom-device-class `X ... PARAMS:` cards, callees paired by name with
+  a layout circuit, and `gate-level-verilog` references are unaffected.
+  **Additive contract change**; `schema_version` is unchanged.
+
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
