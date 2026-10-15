@@ -22,6 +22,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   `mismatch`. It now exits 1 with an error naming `layout.deck` as the fix;
   the same request with `layout.deck` still matches, and netlists without
   such cards (or without `reference.deck`) behave as before.
+- **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
+  vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
+  3.8.1) are now measured per local vertical width of each merged rectilinear
+  polygon, in integer database units. The deck grows from 232 to 234 rule
+  categories (`--expect-rule-categories 234`); both ids leave the "Not
+  implemented" list. Additive; no `schema_version` bump.
 - **`klt lvs` no longer folds one device class into another under
   `options.combine_devices`** (issue #3019): with two MiM classes stacked in
   parallel on one net pair, `layout.file` could report a wrong combined layout

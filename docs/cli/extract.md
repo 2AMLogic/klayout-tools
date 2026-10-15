@@ -267,6 +267,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `spef` | string | `--spef` |
 | `critical_nets` | array\<string\> \| string | repeatable `--critical-net` |
 | `parasitics_nets` | array\<string\> \| string | repeatable `--parasitics-net` |
+| `parasitic_variants` | array\<string\> \| string | repeatable `--parasitic-variant` |
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
 | `distributed_rc` | bool | `--distributed-rc` |
 | `resistance_paths` | array\<object\> | repeatable `--resistance-path NET_ID FROM TO` (issue #2765). Each entry is exactly `{"net_id": <int>, "from": <string>, "to": <string>}`; any other shape (a missing/extra key, a non-integer `net_id`, a bare array) is rejected. |
@@ -4856,6 +4857,49 @@ whose other nets genuinely had no ground-eligible geometry:
 | Field | Meaning |
 |---|---|
 | `parasitics.parasitics_nets` | The `--parasitics-net` request, echoed back verbatim. `[]` when the flag was never given (i.e. a full-layout pass). |
+
+### Dropping parasitic elements to attribute a failing delta (`--parasitic-variant`, issue #3056)
+
+After a `klt pex` delta row fails, the next question is *which* parasitic
+elements explain it. `--parasitic-variant <variant>` (repeatable, composable;
+requires `--parasitics`) omits elements **at injection time**, where the tool
+already knows which card is which net's leg/hub/ground cap/coupling cap — no
+dependence on the (cosmetic, sanitized) `R<net>_t<k>`/`C<net>`/`Ccc_*` card
+names:
+
+| Variant | Effect |
+|---|---|
+| `drop-r:NET` / `drop-r:*` | Short the net's star legs into its hub: device terminals stay on the hub, no series resistor. The hub and its ground C are unchanged. A net with no device terminal (Gamma-shunt fallback) gets no series R either. |
+| `drop-c-ground:NET` / `drop-c-ground:*` | Omit the net's ground capacitor (and the `--mom-rlc-inductance-nh` series inductor that sits in series with it). |
+| `drop-c-coupling` | Omit every `Ccc_*` coupling card. |
+
+"All C removed" is `drop-c-ground:*` + `drop-c-coupling`; "all R removed" is
+`drop-r:*`.
+
+```
+klt extract cell.gds --deck sky130 --parasitics --parasitic-variant drop-r:VOUT --format json
+```
+
+- **Closed grammar.** Anything else is a usage error (exit 2), as is the flag
+  without `--parasitics`.
+- **Unmatched `NET` is a warning**, as for `--parasitics-net`.
+- **`--distributed-rc` nets** are left unchanged by `drop-r`/`drop-c-ground`
+  (with a warning) — no new modelling for the ladder.
+- **Accounting follows the netlist.** `r_count`, `c_count`, `cc_count` and
+  the `total_*` fields count what was actually emitted; per-net
+  `resistance_ohm`/`capacitance_ff` remain the computed values. A net left
+  with neither R nor C is not reported as an orphan by `parasitics.integrity`.
+- **Omitted is unchanged:** netlist and JSON are byte-identical to a run
+  without the flag.
+
+| Field | Meaning |
+|---|---|
+| `parasitics.parasitic_variant` | The `--parasitic-variant` request, echoed back verbatim. Present only when the flag was given. |
+
+`klt pex` accepts the same flag, passes it through, and echoes it as
+`extraction.parasitic_variant` so a variant run is attributable. Re-measuring
+only the extracted side on a corner subset is a separate capability and not
+part of this flag.
 
 ### Lateral (same-layer, sidewall) coupling capacitance for critical nets (`--critical-net`, issue #976)
 

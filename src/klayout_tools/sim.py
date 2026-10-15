@@ -1655,7 +1655,8 @@ def run_sim(
     lifetime through :func:`klayout_tools.output_lock.hold_output_dir`; a
     competing cooperating run raises
     :class:`~klayout_tools.output_lock.OutputDirLockedError`. A run that
-    only uses temporary directories takes no lock. Ownership of an ancestor
+    only uses temporary directories takes no lock. A deck-list run always
+    owns its outdir (#3168). Ownership of an ancestor
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
     """
@@ -1678,6 +1679,7 @@ def run_sim(
             plot_dir=plot_dir,
             fail_fast_probe=fail_fast_probe,
             fail_on_diagnostic=fail_on_diagnostic,
+            _ownership=_ownership,
         )
     return _run_sim_corners(
         request_path,
@@ -1707,6 +1709,7 @@ def _dispatch_deck_request(
     plot_dir: str | None,
     fail_fast_probe: bool | None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
     resolving the backend exactly as the corner path does (flag >
@@ -1756,9 +1759,20 @@ def _dispatch_deck_request(
             "--fail-on-diagnostic grades corner diagnostics, which "
             "deck-list requests do not produce"
         )
+    request_dir = os.path.dirname(os.path.abspath(request_path))
+    # Issue #3168: a deck run always writes (and a remote/batch pull replaces)
+    # unit trees under its outdir, so it owns that root unconditionally --
+    # after the flag checks above, which must fail without locking anything.
+    if _ownership is not None:
+        _own_persistent_roots(
+            _ownership,
+            sim_decks.resolve_deck_outdir(artifacts_dir, request_dir),
+            None,
+            persistent=True,
+        )
     return run_deck_request(
         request,
-        request_dir=os.path.dirname(os.path.abspath(request_path)),
+        request_dir=request_dir,
         backend=resolved_backend,
         max_workers=max_workers,
         artifacts_dir=artifacts_dir,
