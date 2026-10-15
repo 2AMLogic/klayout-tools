@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--distributed-rc] [--parasitic-variant <variant>]... [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -139,6 +139,12 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   rows) reflect the finer-grained model. Off by default -- byte-identical to
   before this feature existed. See [`extract.md`](extract.md)'s "Distributed
   (multi-segment) RC ladder for critical nets" section.
+- `--parasitic-variant` (issue #3056) — passed through to `klt extract
+  --parasitic-variant` (`drop-r:NET|*`, `drop-c-ground:NET|*`,
+  `drop-c-coupling`; repeatable) to drop parasitic elements and attribute a
+  failing delta row. Echoed as `extraction.parasitic_variant` (present only
+  when given). See [`extract.md`](extract.md)'s `--parasitic-variant`
+  section.
 - `--mom-rlc-net` / `--mom-rlc-resistance-ohm` / `--mom-rlc-capacitance-ff` /
   `--mom-rlc-inductance-nh` — passed through to `klt extract --mom-rlc-net`
   (issue #988, Epic #709 Phase 3a). Substitutes a caller-supplied,
@@ -576,6 +582,7 @@ way a substituted flavour is:
 
 ```json
 "model_mismatch": {
+  "kind": "model_set",
   "reference_only": ["sky130_fd_pr__nfet_g5v0"],
   "extracted_only": ["sky130_fd_pr__nfet_01v8"],
   "counts": {
@@ -592,6 +599,18 @@ case-insensitive about model/subcircuit names); `counts` echoes each side's
 full per-model instance count so a caller can see a same-name-different-count
 divergence too, even though that case leaves both list fields empty. `null`
 when the two multisets agree exactly.
+
+`kind` (issue #3054, additive) tells the two non-`null` cases apart without
+re-deriving the set difference: `"model_set"` when `reference_only` or
+`extracted_only` is non-empty (a wrong model flavour — the case above, and a
+real reason to distrust `delta[]`), `"count_only"` when the model sets are
+identical and only the instance counts differ. A `count_only` `detail` is
+neutral: the usual cause is finger/multiplier decomposition (the layout draws
+several fingers, the schematic has one instance with `nf`/`m` or none), which
+`klt lvs` has already reconciled. It does not by itself make `delta[]`
+unrelated, though representation effects (fingering, AS/AD) are folded into
+`delta[]` alongside the parasitics. A hierarchical reference keeps the
+hierarchy-artifact wording for either kind.
 
 **Reported, not enforced — the same precedent as `body_bias`.** `status` is
 untouched: a run whose deltas all met tolerance still reports `status:
@@ -1140,7 +1159,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `layout`             | object            | `{path, scope}` — `<layout>` normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when `<layout>` sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
 | `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. |
-| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
 | `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
 | `measurement`        | object            | Issue #2478 (additive field, always present). How this run's two legs were measured, so a reader of a committed record never has to infer it from the presence/absence of `testbenches[]`. `mode` is `"testbench"` (the default path — `command`/`timeout_s`/`sides` are then all `null`) or `"command"` (a caller-supplied `--measure-command` produced both legs). For `"command"`: `command` is the argv **list** verbatim (never a shell string — it is never run through a shell), `timeout_s` the per-invocation cap in force, and `sides` an object keyed `schematic`/`extracted`, each carrying `netlist` (`{path, scope}`, the exact netlist that side was measured on), `exit_status`, `corner_count` and `measurement_names`. See "Measuring with a caller-supplied command" above. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `request_sha256`, `netlist` (`{path, scope}` — the simulation body the request names), `netlist_sha256`, `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `schematic_netlist_sha256`, `corner_count`, `measurement_names`, and the issue #2872 `sides` / `nothing_simulated_corners` execution evidence (see "Per-side execution evidence" below). The `*_sha256` fields are the issue #2875 content identities, see "Schematic-side content identity" below. Informational — the full per-corner detail lives in `delta[]`. **Empty (`[]`) for a `--measure-command` run**, which has no testbenches at all; `measurement.sides` carries the equivalent per-leg detail there. |
@@ -1151,7 +1170,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `coverage`           | object            | Issue #1996 (additive field). What this `status` was actually compared over: `testbenches`, `delta_rows`, `corners_compared`, plus the shared `nothing_checked`/`nothing_checked_reasons` roll-up. See "`coverage`: an empty `delta[]` is not a pass" below. |
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
 | `flat_dut_mismatch`  | object \| null    | `null` unless the schematic DUT is netlisted flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction (issue #1255, Gap 2 — additive field). Same shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` objects, `ngspice_message` — always `null` here, no engine is ever invoked — and `detail`); mutually exclusive with `pin_count_mismatch` (the extracted side is never attempted when this fires). See "Flat schematic DUT vs `.SUBCKT`-wrapped extraction" above. |
-| `model_mismatch`     | object \| null    | `null` when the reference (schematic) and extracted netlists' `M`/`X`/`Q`/`D` device cards instantiate the same models/`.subckt`s the same number of times (issue #2402 — additive field). Non-`null` names the divergence: `reference_only`/`extracted_only` (model names unique to one side, by instance count), `counts` (each side's full per-model instance count), and a human-readable `detail`. Unlike `pin_count_mismatch`/`flat_dut_mismatch`, computed unconditionally (independent of whether the top-level pin lists match) and never skips the extracted-side simulation — it never changes `status`. See "A device-model divergence invalidates the comparison too" above. |
+| `model_mismatch`     | object \| null    | `null` when the reference (schematic) and extracted netlists' `M`/`X`/`Q`/`D` device cards instantiate the same models/`.subckt`s the same number of times (issue #2402 — additive field). Non-`null` names the divergence: `kind` (`model_set` or `count_only`, issue #3054), `reference_only`/`extracted_only` (model names unique to one side, by instance count), `counts` (each side's full per-model instance count), and a human-readable `detail`. Unlike `pin_count_mismatch`/`flat_dut_mismatch`, computed unconditionally (independent of whether the top-level pin lists match) and never skips the extracted-side simulation — it never changes `status`. See "A device-model divergence invalidates the comparison too" above. |
 | `flatten_schematic`  | boolean           | Issue #2889 (additive, always present). Echo of `--flatten-schematic` — `false` when not given. |
 | `schematic_flatten`  | object \| null    | Issue #2889 (additive). `null` unless `--flatten-schematic` was given. Otherwise the flattened schematic DUT the schematic leg ran: `netlist` (`{path, scope}`), `netlist_sha256` (`sha256:<hex>` of its exact bytes), `subckts` (root `.subckt` names kept), `inlined_instances`, `inlined_subckts`, `external_subckts` (undefined `X` targets kept as leaf devices — audit these) and `already_flat`. See "Flattening a hierarchical schematic DUT" above. |
 | `provenance`         | object            | The extraction's own shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). `deck` pins the extraction deck (name + `sha256:` content hash — the "deck version" this report pins); `input` pins `<layout>`. |

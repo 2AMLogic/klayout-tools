@@ -62,6 +62,7 @@ docs/
     precheck.md
     render.md
     report.md
+    reset-coverage.md
     ring-check.md
     signoff.md
     sim.md

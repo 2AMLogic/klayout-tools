@@ -835,8 +835,10 @@ def test_model_mismatch_reports_divergent_flavours(tmp_path):
     mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
 
     assert mismatch is not None
+    assert mismatch["kind"] == "model_set"
     assert mismatch["reference_only"] == ["sky130_fd_pr__nfet_g5v0"]
     assert mismatch["extracted_only"] == ["sky130_fd_pr__nfet_01v8"]
+    assert "different device models" in mismatch["detail"]
     assert mismatch["counts"]["reference"] == {"sky130_fd_pr__nfet_g5v0": 2}
     assert mismatch["counts"]["extracted"] == {"sky130_fd_pr__nfet_01v8": 2}
     assert "sky130_fd_pr__nfet_g5v0" in mismatch["detail"]
@@ -953,10 +955,41 @@ def test_model_mismatch_detects_instance_count_only_divergence(tmp_path):
         reference_netlist=str(reference), extracted_netlist=str(extracted)
     )
     assert mismatch is not None
+    assert mismatch["kind"] == "count_only"
     assert mismatch["reference_only"] == []
     assert mismatch["extracted_only"] == []
     assert mismatch["counts"]["reference"] == {"nfet_01v8": 2}
     assert mismatch["counts"]["extracted"] == {"nfet_01v8": 1}
+    # Issue #3054: the detail must not claim a model divergence.
+    detail = mismatch["detail"]
+    assert "different device models" not in detail
+    assert "electrically unrelated" not in detail
+    assert "A common cause" not in detail
+    assert "finger/multiplier" in detail
+
+
+def test_model_mismatch_hierarchical_reference_keeps_hierarchy_text(tmp_path):
+    """Issue #3054: a hierarchical reference keeps the hierarchy-artifact
+    wording alongside the new `kind` field."""
+    reference = tmp_path / "schematic_dut.spice"
+    reference.write_text(
+        ".SUBCKT CELL A Y VSS\n"
+        "Xn1 Y A VSS VSS nfet_01v8\n"
+        "Xn2 Y A VSS VSS nfet_01v8\n"
+        ".ENDS CELL\n"
+        ".SUBCKT TOP A Y VSS\n"
+        "Xi1 A Y VSS CELL\n"
+        ".ENDS TOP\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT TOP A Y VSS\nXn1 Y A VSS VSS nfet_01v8\n.ENDS TOP\n")
+    mismatch = _model_mismatch(
+        reference_netlist=str(reference), extracted_netlist=str(extracted)
+    )
+    assert mismatch is not None
+    assert mismatch["reference_only"] == ["CELL"]
+    assert mismatch["kind"] == "model_set"
+    assert "#1085" in mismatch["detail"]
 
 
 def test_reference_is_hierarchical_detects_local_subckt_call(tmp_path):
@@ -1022,6 +1055,7 @@ def test_model_mismatch_names_hierarchy_not_electrically_unrelated(tmp_path):
     assert mismatch is not None
     # Same circuit: the only divergence is hierarchy depth, not device
     # identity -- `reference_only` names the leaf `.subckt` call itself.
+    assert mismatch["kind"] == "model_set"
     assert mismatch["reference_only"] == ["INV"]
     assert mismatch["extracted_only"] == []
     assert "electrically unrelated" not in mismatch["detail"]
@@ -2396,6 +2430,29 @@ def test_run_pex_critical_nets_threaded_through_to_extraction(
 
     assert report["extraction"]["critical_nets"] == ["RB"]
     assert report["status"] == "pass"
+
+
+@_SKIP_NO_NGSPICE
+def test_run_pex_parasitic_variant_threaded_through_to_extraction(
+    tmp_path, resistor_layout
+):
+    """`--parasitic-variant` (issue #3056) is forwarded from `run_pex` to
+    `run_extract` and echoed in `extraction.parasitic_variant`; absent
+    otherwise."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        parasitic_variants=["drop-c-ground:*"],
+    )
+
+    assert report["extraction"]["parasitic_variant"] == ["drop-c-ground:*"]
+    baseline = run_pex(resistor_layout, [str(request)], "sky130")
+    assert "parasitic_variant" not in baseline["extraction"]
 
 
 @_SKIP_NO_NGSPICE
