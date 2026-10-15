@@ -75,6 +75,7 @@
       "met1.space.1",
       "met1.width.1",
       "poly.angle.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],
@@ -238,6 +239,7 @@
       "met1.space.1",
       "met1.width.1",
       "poly.angle.1",
+      "poly.endcap.diff.1",
       "poly.ongrid.1",
       "poly.width.1"
     ],
@@ -734,7 +736,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:2a1882936df91d37e1b0e3c897f1d9bd5347910e53b6f0572a07e6bd9413e92a",
+      "content_hash": "sha256:e48be0e34450b971d7b8b3bdb97a0655a3bf7540a3f02a3d704364cb5f53da8b",
       "released": null
     },
     "input": {

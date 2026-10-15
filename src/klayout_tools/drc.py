@@ -482,6 +482,7 @@ def _derived_region(
     Region; neither input (nor the source layout) is modified.
     """
     derived = rule.derived_layer
+    assert derived is not None, "_derived_region requires a derived_layer rule"
     size_dbu = round(derived.sized_by_um / dbu)
     if derived.mode == "holes":
         # Interior voids of the merged `base` region (#1976) --
