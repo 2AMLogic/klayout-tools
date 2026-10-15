@@ -12316,6 +12316,7 @@ def test_expand_netlist_includes_keeps_relative_meaning_beside_env_include(
     assert diags == []
     assert f'.inc "{tmp_path}/dut.spice"' in open(path).read()
 
+
 # ---------------------------------------------------------------------------
 # `expr` after a noise analysis (issue #2893)
 # ---------------------------------------------------------------------------
