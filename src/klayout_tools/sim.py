@@ -2056,12 +2056,9 @@ def _run_sim_corners(
                 monte_carlo_info["family_mismatch_scan"] = family_scan
         # Issue #2963: disclose transient-noise sources the seed contract
         # does not cover, whatever `vary` asks for.
-        noise_report = _unseeded_noise_report(
-            netlist_path, request=request, repo_root=repo_root
+        monte_carlo_info = _with_unseeded_noise(
+            monte_carlo_info, netlist_path, request=request, repo_root=repo_root
         )
-        if noise_report is not None:
-            monte_carlo_info = {**monte_carlo_info, **noise_report}
-            print(f"warning: {_UNSEEDED_NOISE_NOTE}", file=sys.stderr)
         quantiles, k_sigma = _validate_mc_statistics_spec(monte_carlo_spec)
         monte_carlo_stats = {"quantiles": quantiles, "k_sigma": k_sigma}
         # Echo only what the request actually declared, so a sampling-only
@@ -4556,6 +4553,24 @@ def _unseeded_noise_report(
     if not_scanned:
         report["unseeded_sources_not_scanned"] = not_scanned
     return report
+
+
+def _with_unseeded_noise(
+    monte_carlo_info: dict[str, Any],
+    netlist_path: str,
+    *,
+    request: dict[str, Any],
+    repo_root: str | None,
+) -> dict[str, Any]:
+    """``monte_carlo_info`` plus the issue #2963 unseeded-noise disclosure
+    (and its stderr warning) when a scanned file declares such a source."""
+    noise_report = _unseeded_noise_report(
+        netlist_path, request=request, repo_root=repo_root
+    )
+    if noise_report is None:
+        return monte_carlo_info
+    print(f"warning: {_UNSEEDED_NOISE_NOTE}", file=sys.stderr)
+    return {**monte_carlo_info, **noise_report}
 
 
 _UNSEEDED_NOISE_NOTE = (
