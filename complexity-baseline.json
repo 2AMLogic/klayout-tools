@@ -765,13 +765,13 @@
     },
     {
       "file": "src/klayout_tools/sim.py",
-      "function": "parse_ascii_rawfile",
-      "complexity": 15
+      "function": "_run_sim_corners",
+      "complexity": 54
     },
     {
       "file": "src/klayout_tools/sim.py",
-      "function": "run_sim",
-      "complexity": 54
+      "function": "parse_ascii_rawfile",
+      "complexity": 15
     },
     {
       "file": "src/klayout_tools/sim_plot.py",

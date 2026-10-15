@@ -2,8 +2,47 @@
 
 Merged pull requests and closed issues from the last 30 days at initialization. Guide appends newly recorded events in later updates.
 
+### 2026-10-14
+
+- **PR #3261**: feat(sim): surface missing_include and engine-log tail for batch jobs
+- **PR #2795**: drc: model sg13g2 Cnt.c activ_mask join and square-contact selection
+- **Issue #2882** (closed): Friction: klt sim batch jobs fail with 'Could not find include file <host PDK path>/libs.tech/ngspice/design.ngspice' on the fleet (client 0.6.0 past the version gate)
+- **Issue #2688** (closed): drc: curated sg13g2 Cnt.c drops the activ_mask join, so every HBT contact false-positives
+- **PR #3255**: feat(erc): grade nets/ties on passive-only cells with zero gates
+- **PR #3254**: fix(sim): absolutise artifacts_dir for relative -o (#2892)
+- **PR #3253**: ci: enable high-signal ruff security (S) rules (#3222)
+- **PR #3245**: klt sim batch: publish runner klt identity in the AMI manifest and refuse known mismatches before launch
+- **Issue #3222** (closed): ci: enable the clean high-signal ruff security (S) rules and review the 4 remaining findings
+- **Issue #2907** (closed): klt lvs --check --rerun cannot replay a report whose request used reference.form: subckt-call
+- **Issue #2896** (closed): Friction: klt erc exits 1 on a passive-only cell (no transistor gate), so its supply nets and ties cannot be checked
+- **Issue #2892** (closed): klt sim: relative -o/--outdir makes ngspice never start (cwd=corner dir), reported only as per-measurement 'no value' errors
+- **Issue #2851** (closed): klt sim batch: publish runner klt identity and reject incompatible clients before instance launch
+- **PR #3196**: fix(extract): deterministic FinFET source/drain assignment (#3154)
+- **PR #3152**: feat(sim): dispatch pre-composed ngspice decks to remote/batch backends (#2804)
+- **Issue #3154** (closed): tests/test_asap7_finfet.py::test_fin_count_and_gate_length_recovered_exactly fails on main (S/D net labels swapped)
+- **Issue #3081** (closed): klt sim monte_carlo: per-sample seeds depend on the point's position in the request, so splitting a grid into several requests draws different samples
+- **Issue #2967** (closed): klt sim monte_carlo: per-sample seeds key on positional corner index, so paired (common-random-number) draws across conditions are implicit and fragile
+- **Issue #2929** (closed): klt sim monte_carlo: no option to share the mismatch-seed schedule across corner points (paired draws)
+- **Issue #2804** (closed): klt sim: dispatch already-composed decks to the remote/batch backends (re-filing of #2464)
+- **PR #3233**: docs(signoff): uv-first pinned regeneration recipe for consumer repos
+- **Issue #2874** (closed): regenerate.sh template builds a venv with python3 -m venv/pip; fails where ensurepip is unavailable
+
 ### 2026-10-13
 
+- **PR #3244**: chore(deps): bump mcp from 1.30.0 to 2.2.0
+- **PR #3243**: Remove Renovate config: Dependabot takes over
+- **PR #3242**: test: session dirty-tree tripwire in conftest (#3204)
+- **PR #3241**: fix(functional-verification): accept null (valueless) options.defines under cocotb 2.x
+- **PR #3240**: feat(gen-compose): promote connectivity-wired port via pins[] when nets agree
+- **PR #3239**: Dependabot: render dependabot.yml from the org policy
+- **PR #3235**: docs(sim): record ASAP7 BSIM-CMG ngspice real-run evidence (#2814)
+- **PR #3234**: sta: emit def/verilog/spef paths as {path, scope} envelopes (schema 2)
+- **Issue #3204** (closed): tests: fail the pytest session when the run leaves new untracked files in the repo tree
+- **Issue #2884** (closed): klt functional-verification: valueless macro define (options.defines value null) fails with "Can't serialize this type as an SV literal"
+- **Issue #2881** (closed): gen-compose: a port wired by connectivity[] cannot also be promoted via pins[], so an internal net can't be exposed as a cell port without a stub
+- **Issue #2879** (closed): sta: response echoes def_path/spef_path as absolute host paths, so signoff cannot verify an sta citation's input from another checkout
+- **Issue #2814** (closed): ASAP7 FinFET: ngspice BSIM-CMG simulation of extracted netlists (OSDI prerequisite)
+- **Issue #2761** (closed): ASAP7 LVS / FinFET device extraction (nfin)
 - **PR #3236**: feat(signoff): add --repo-root and document the .git-ancestor rule for scope:"repo" inputs
 - **PR #3231**: feat(pex): carry per-side sim diagnostics and remote env into testbenches[] (#2872)
 - **PR #3229**: fix(pex): stop recommending folding shared includes into the DUT

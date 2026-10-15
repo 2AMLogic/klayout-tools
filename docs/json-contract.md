@@ -230,6 +230,19 @@ the flag was not given), and `klt lvs` gained the optional request field
 `docs/cli/extract.md`'s "Renaming promoted pins to their declared name"
 section.
 
+**A new key in a documented open map, and a new member on one class of that
+map's entries, are additive.** `klt functional-verification`'s
+`environment.sdf.dropped` is documented as an open map keyed by class name,
+each value `{count, reason}`. Issue #2885 added the
+`iopath_ifnone_edge_modpath` class (`IOPATH` entries onto cell arcs whose
+only modpaths Icarus discards at elaboration) and, on that class's entry
+only, an `arcs` list (`{celltype, from, to}` per distinct dropped arc) so a
+caller can see which arcs ran with no module-path delay. Every other class's
+entry is byte-identical to before (no `arcs` key), and a run with no such
+arc never carries the class, so **no `schema_version` bump**. A consumer
+must keep treating `dropped` as an open map and read `arcs` as optional. See
+`docs/cli/functional-verification.md`'s "SDF back-annotation" section.
+
 **Not every field a verb reports is a cross-build contract at all** — some
 are extractor/engine-internal bookkeeping with no meaning outside the one
 run that produced them (e.g. `klt extract`'s `net_id`/anonymous `$N`
@@ -1465,8 +1478,9 @@ the exit code alone is authoritative.
   | Command | `error.code` | Meaning |
   |---------|--------------|---------|
   | `sim` | `batch_no_capacity` | `--backend batch`: 2am's fleet launcher refused the job for lack of Spot capacity in every pool (after any `batch.capacity_wait_s` budget was spent). A fleet-wide, usually transient condition — retrying later is reasonable. See [docs/cli/sim.md](cli/sim.md) "Batch backend". |
+  | `sim` | `batch_runner_version_mismatch` | `--backend batch` under `batch.runner_version_check: "enforce"` (the default): the AMI manifest publishes a runner `klt` whose major.minor differs from this client's, for every image the request could boot. Refused once, before any upload or launch, so no report and no per-corner diagnostics exist (issue #2851). Not retryable without a matching runner image or client. A mismatch found only on the runner keeps reporting through per-corner `batch_job_failed` diagnostics with `runner_code`. See [docs/cli/sim.md](cli/sim.md) "Pre-launch check from the AMI manifest". |
   | `netlist` | `batch_no_capacity` | `--backend batch`: the fleet launcher refused the job for lack of Spot capacity. Usually transient; retrying later is reasonable. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
-  | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
+  | `netlist` | `batch_runner_version_mismatch` | `--backend batch`: the runner's `klt` version differs from this client's; the job was refused before netlisting, or before submission when the AMI manifest already publishes the mismatch (issue #2851). Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_runner_version_unknown` | `--backend batch`: the runner's `klt` version could not be read; the job was refused before netlisting. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_poll_timeout` | `--backend batch`: the job did not finish within the client's poll budget. It may still finish on the runner; nothing was collected. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `netlist` | `batch_job_failed` | `--backend batch`: the job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted and, if that error carried an `error.code`, the runner's code is passed through in place of `batch_job_failed`. Nothing ran locally. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
@@ -1651,3 +1665,10 @@ roles from `provenance.input.content_hash` (the layout) and must not take
 part in layout-consistency comparisons; `klt signoff` verifies them per role
 (`citation.pex_inputs`). Pre-change envelopes omit them and stay readable.
 See [`cli/pex.md`](cli/pex.md).
+
+## Static typing of the envelope
+
+The envelope modules (`klayout_tools.cli.output`,
+`klayout_tools.signoff_envelopes`) are held to `disallow_untyped_defs` under
+mypy and the package ships `py.typed`. The rest of the code is covered by a
+baseline ratchet; see [`type-checking.md`](type-checking.md).
