@@ -226,32 +226,49 @@ def _plateaus(values: list[float | None], level: float) -> list[tuple[int, int]]
     return out
 
 
+def _exact_hit_event(values: list[float | None], k: int, level: float) -> _Event | None:
+    """Event for a sample exactly on ``level`` whose neighbours straddle it."""
+    if k == 0 or k + 1 >= len(values):
+        return None
+    left, right = values[k - 1], values[k + 1]
+    if left is None or right is None:
+        return None
+    return _straddle_event(k, left - level, right - level, 0.0)
+
+
+def _straddle_event(index: int, a: float, b: float, weight: float) -> _Event | None:
+    if a < 0.0 < b:
+        return _Event(index, weight, "rise")
+    if a > 0.0 > b:
+        return _Event(index, weight, "fall")
+    return None
+
+
+def _segment_event(values: list[float | None], k: int, level: float) -> _Event | None:
+    """Event for a strict crossing between samples ``k`` and ``k + 1``."""
+    v = values[k]
+    nxt = values[k + 1] if k + 1 < len(values) else None
+    if v is None or nxt is None:
+        return None
+    a, b = v - level, nxt - level
+    if not (a < 0.0 < b or a > 0.0 > b):
+        return None
+    return _straddle_event(k, a, b, (0.0 - a) / (b - a))
+
+
 def _level_events(values: list[float | None], level: float) -> list[_Event]:
     """Ordered isolated crossings of ``level`` (see module docstring)."""
     events: list[_Event] = []
-    n = len(values)
-    for k in range(n):
-        v = values[k]
+    for k, v in enumerate(values):
         if v is None:
             continue
-        if v == level:
-            if k == 0 or k + 1 >= n:
-                continue
-            left, right = values[k - 1], values[k + 1]
-            if left is None or right is None:
-                continue
-            a, b = left - level, right - level
-            if a < 0.0 < b:
-                events.append(_Event(k, 0.0, "rise"))
-            elif a > 0.0 > b:
-                events.append(_Event(k, 0.0, "fall"))
-            continue
-        if k + 1 < n and values[k + 1] is not None:
-            a, b = v - level, values[k + 1] - level  # type: ignore[operator]
-            if a < 0.0 < b:
-                events.append(_Event(k, (0.0 - a) / (b - a), "rise"))
-            elif a > 0.0 > b:
-                events.append(_Event(k, (0.0 - a) / (b - a), "fall"))
+        ev = (
+            _exact_hit_event(values, k, level)
+            if v == level
+            else _segment_event(values, k, level)
+        )
+        if ev is not None:
+            events.append(ev)
     return events
 
 
@@ -276,28 +293,9 @@ def _at(values: list[float | None], ev: _Event) -> float:
     return _lerp(a, b, ev.weight)
 
 
-def analyze_transfer(
-    freq_hz: Sequence[float],
-    numerator: Sequence[complex],
-    denominator: Sequence[complex],
-) -> TransferMetrics:
-    """Compute the six return-ratio metrics for ``T = numerator / denominator``.
-
-    Raises :class:`TransferInputError` for malformed arrays; invalid *samples*
-    never raise -- they surface as ``None`` metrics with reasons.
-    """
-    freqs, nums, dens = _check_arrays(freq_hz, numerator, denominator)
-    n = len(freqs)
-
-    ratios = [_ratio(nums[i], dens[i]) for i in range(n)]
-    invalid = [i for i, t in enumerate(ratios) if t is None]
-
-    mag_db: list[float | None] = [
-        None if t is None else 20.0 * math.log10(abs(t)) for t in ratios
-    ]
-
-    # Unwrapped phase, restarting from the principal argument after a gap.
-    phase: list[float | None] = [None] * n
+def _unwrap_phase(ratios: list[complex | None]) -> list[float | None]:
+    """Unwrapped phase, restarting from the principal argument after a gap."""
+    phase: list[float | None] = [None] * len(ratios)
     prev_principal: float | None = None
     for i, t in enumerate(ratios):
         if t is None:
@@ -311,24 +309,17 @@ def analyze_transfer(
             assert prev_phase is not None
             phase[i] = prev_phase + _wrap_deg(principal - prev_principal)
         prev_principal = principal
+    return phase
 
-    res = TransferMetrics(
-        invalid_samples=invalid,
-        magnitude_db=mag_db,
-        phase_unwrapped_deg=phase,
-    )
 
-    first_valid = next((i for i, t in enumerate(ratios) if t is not None), None)
-    if first_valid is None:
-        for name in _METRIC_NAMES:
-            res.reasons[name] = REASON_NO_VALID_SAMPLES
-        return res
-
-    first_ratio = ratios[first_valid]
-    assert first_ratio is not None
-    res.low_frequency_magnitude = abs(first_ratio)
-
-    # --- unity (0 dB) crossings -------------------------------------------
+def _fill_unity_metrics(
+    res: TransferMetrics,
+    freqs: list[float],
+    mag_db: list[float | None],
+    phase: list[float | None],
+    invalid: list[int],
+) -> None:
+    """Unity (0 dB) crossing count, frequency, phase and phase margin."""
     mag_plateaus = _plateaus(mag_db, 0.0)
     res.zero_db_plateaus = [list(p) for p in mag_plateaus]
     unity_events = _level_events(mag_db, 0.0)
@@ -341,44 +332,85 @@ def analyze_transfer(
             "unity_crossing_count",
         ):
             res.reasons[name] = REASON_ZERO_DB_PLATEAU
+        return
+
+    if invalid:
+        res.reasons["unity_crossing_count"] = REASON_INVALID_SAMPLES
     else:
-        if invalid:
-            res.reasons["unity_crossing_count"] = REASON_INVALID_SAMPLES
-        else:
-            res.unity_crossing_count = len(unity_events)
+        res.unity_crossing_count = len(unity_events)
 
-        first_fall = next((e for e in unity_events if e.direction == "fall"), None)
-        if first_fall is not None and not any(j < first_fall.index for j in invalid):
-            res.unity_crossing_hz = _event_freq(freqs, first_fall)
-            phase_u = _at(phase, first_fall)
-            res.phase_at_unity_deg = phase_u
-            res.phase_margin_deg = 180.0 + phase_u
-        else:
-            reason = (
-                REASON_INVALID_SAMPLES if invalid else REASON_NO_FALLING_UNITY_CROSSING
-            )
-            for name in ("unity_crossing_hz", "phase_at_unity_deg", "phase_margin_deg"):
-                res.reasons[name] = reason
+    first_fall = next((e for e in unity_events if e.direction == "fall"), None)
+    if first_fall is not None and not any(j < first_fall.index for j in invalid):
+        res.unity_crossing_hz = _event_freq(freqs, first_fall)
+        phase_u = _at(phase, first_fall)
+        res.phase_at_unity_deg = phase_u
+        res.phase_margin_deg = 180.0 + phase_u
+    else:
+        reason = REASON_INVALID_SAMPLES if invalid else REASON_NO_FALLING_UNITY_CROSSING
+        for name in ("unity_crossing_hz", "phase_at_unity_deg", "phase_margin_deg"):
+            res.reasons[name] = reason
 
-    # --- gain margin (first downward -180 degree phase crossing) ----------
+
+def _fill_gain_margin(
+    res: TransferMetrics,
+    mag_db: list[float | None],
+    phase: list[float | None],
+    invalid: list[int],
+) -> None:
+    """Gain margin at the first downward -180 degree phase crossing."""
     phase_plateaus = _plateaus(phase, GAIN_MARGIN_PHASE_DEG)
     res.phase_plateaus = [list(p) for p in phase_plateaus]
     if phase_plateaus:
         res.reasons["gain_margin_db"] = REASON_PHASE_PLATEAU
+        return
+    first_down = next(
+        (
+            e
+            for e in _level_events(phase, GAIN_MARGIN_PHASE_DEG)
+            if e.direction == "fall"
+        ),
+        None,
+    )
+    if first_down is not None and not any(j < first_down.index for j in invalid):
+        res.gain_margin_db = -_at(mag_db, first_down)
     else:
-        first_down = next(
-            (
-                e
-                for e in _level_events(phase, GAIN_MARGIN_PHASE_DEG)
-                if e.direction == "fall"
-            ),
-            None,
+        res.reasons["gain_margin_db"] = (
+            REASON_INVALID_SAMPLES if invalid else REASON_NO_PHASE_CROSSING
         )
-        if first_down is not None and not any(j < first_down.index for j in invalid):
-            res.gain_margin_db = -_at(mag_db, first_down)
-        else:
-            res.reasons["gain_margin_db"] = (
-                REASON_INVALID_SAMPLES if invalid else REASON_NO_PHASE_CROSSING
-            )
 
+
+def analyze_transfer(
+    freq_hz: Sequence[float],
+    numerator: Sequence[complex],
+    denominator: Sequence[complex],
+) -> TransferMetrics:
+    """Compute the six return-ratio metrics for ``T = numerator / denominator``.
+
+    Raises :class:`TransferInputError` for malformed arrays; invalid *samples*
+    never raise -- they surface as ``None`` metrics with reasons.
+    """
+    freqs, nums, dens = _check_arrays(freq_hz, numerator, denominator)
+
+    ratios = [_ratio(n_, d_) for n_, d_ in zip(nums, dens, strict=False)]
+    invalid = [i for i, t in enumerate(ratios) if t is None]
+    mag_db: list[float | None] = [
+        None if t is None else 20.0 * math.log10(abs(t)) for t in ratios
+    ]
+    phase = _unwrap_phase(ratios)
+
+    res = TransferMetrics(
+        invalid_samples=invalid,
+        magnitude_db=mag_db,
+        phase_unwrapped_deg=phase,
+    )
+
+    first_ratio = next((t for t in ratios if t is not None), None)
+    if first_ratio is None:
+        for name in _METRIC_NAMES:
+            res.reasons[name] = REASON_NO_VALID_SAMPLES
+        return res
+    res.low_frequency_magnitude = abs(first_ratio)
+
+    _fill_unity_metrics(res, freqs, mag_db, phase, invalid)
+    _fill_gain_margin(res, mag_db, phase, invalid)
     return res
