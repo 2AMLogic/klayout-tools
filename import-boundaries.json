@@ -420,6 +420,7 @@
         "klayout_tools.sim_batch",
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_energy",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
