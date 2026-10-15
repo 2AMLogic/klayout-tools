@@ -6025,6 +6025,38 @@ def _fold_pex_schematic_inputs(
     return checked_inputs, None
 
 
+def _fold_kind_inputs(
+    check_kind: str,
+    envelope: dict[str, Any],
+    spec: dict[str, Any],
+    file_label: str | None,
+    actual_hash: Any,
+    input_verified: bool | None,
+    repo_root: str | Path | None = None,
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None, bool | None]:
+    """Fold the kind-specific multi-input verifications into ``input_verified``.
+
+    Returns ``(pex_inputs, input_members, input_verified)``.
+
+    Issue #2875: a ``pex`` envelope also pins the schematic side of its
+    comparison, verified per role so a changed resolvable input can never keep
+    a fully verified citation. Issue #3044: a ``generic`` envelope may bind a
+    *set* of artifacts (``provenance.input.paths``) instead of one; its members
+    are verified the same way.
+    """
+    pex_inputs: list[dict[str, Any]] | None = None
+    input_members: list[dict[str, Any]] | None = None
+    if check_kind == "pex":
+        pex_inputs, input_verified = _fold_pex_schematic_inputs(
+            envelope, spec, file_label, input_verified, repo_root
+        )
+    elif check_kind == "generic":
+        input_members, input_verified = _fold_generic_input_set(
+            envelope, spec, file_label, actual_hash, input_verified, repo_root
+        )
+    return pex_inputs, input_members, input_verified
+
+
 def _resolve_evidence(
     spec: dict[str, Any],
     repo_root: str | Path | None = None,
@@ -6168,23 +6200,9 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, file_label, repo_root
         )
 
-    # Issue #2875: a `pex` envelope also pins the schematic side of its
-    # comparison. Verified per role and folded into `input_verified` so a
-    # changed resolvable input can never keep a fully verified citation.
-    pex_inputs: list[dict[str, Any]] | None = None
-    if check_kind == "pex":
-        pex_inputs, input_verified = _fold_pex_schematic_inputs(
-            envelope, spec, file_label, input_verified, repo_root
-        )
-
-    # Issue #3044: a `generic` envelope may bind a *set* of artifacts
-    # (`provenance.input.paths`) instead of one; its members are verified
-    # the same way and folded into `input_verified`.
-    input_members: list[dict[str, Any]] | None = None
-    if check_kind == "generic":
-        input_members, input_verified = _fold_generic_input_set(
-            envelope, spec, file_label, actual_hash, input_verified, repo_root
-        )
+    pex_inputs, input_members, input_verified = _fold_kind_inputs(
+        check_kind, envelope, spec, file_label, actual_hash, input_verified, repo_root
+    )
 
     return (
         {
