@@ -22,9 +22,10 @@ provenance fields:
   :class:`UnknownDeckError`).
 - :mod:`klayout_tools.decks.extraction` -- the extraction device domain
   (:class:`ResistorDevice`, :class:`ResistorFlavour`, :class:`MOSFlavour`,
-  :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`CapacitorDevice`,
+  :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`TerminalRelation`,
+  :class:`CapacitorDevice`,
   :class:`CapacitorFlavour`, :class:`MomCapacitorDevice`,
-  :class:`DiodeDevice`, :class:`InvalidLabelLayerError`).
+  :class:`DiodeDevice`, :class:`LayerExpr`, :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
   (:class:`LayerRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
@@ -47,10 +48,12 @@ from .extraction import (
     DiodeDevice,
     ExtractionDeck,
     InvalidLabelLayerError,
+    LayerExpr,
     MomCapacitorDevice,
     MOSFlavour,
     ResistorDevice,
     ResistorFlavour,
+    TerminalRelation,
 )
 from .finfet import FinFETExtractionDeck, FinFETFlavour
 from .parasitics import (
@@ -73,6 +76,7 @@ __all__ = [
     "FinFETFlavour",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
+    "LayerExpr",
     "LayerRC",
     "MOSFlavour",
     "MomCapacitorDevice",
@@ -80,6 +84,7 @@ __all__ = [
     "ResistorDevice",
     "ResistorFlavour",
     "RuleProvenance",
+    "TerminalRelation",
     "UnknownDeckError",
     "UnknownExtractionDeckError",
     "deck_names",

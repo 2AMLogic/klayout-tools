@@ -4074,6 +4074,11 @@ def test_run_sim_monte_carlo_deck_carries_seed_and_param_cards(tmp_path, monkeyp
         ("XQ1 c b e bjt_pnp_model", "bipolar"),
         ("XC1 a b moscap_model", "capacitor"),
         ("XU1 a b some_unrecognised_block", "other"),
+        ("XR1 a b gnd ppolyf_u_1k r_width=1u r_length=2u", "resistor"),
+        ("XR2 a b gnd npolyf_s_1k r_width=1u", "resistor"),
+        ("XR3 a b nplus_u_1k", "resistor"),
+        ("XR4 a b rm1 r_width=1u", "resistor"),
+        ("XC1 a b cap_mim_1f0fF c_width=10u", "capacitor"),
         ("V1 vdd 0 DC 1.0", None),
         ("I1 a b DC 1m", None),
         ("L1 a b 1u", None),
@@ -4214,9 +4219,8 @@ def test_run_sim_monte_carlo_family_mismatch_reports_gf180mcu_resistor_disabled(
     by_family = {entry["family"]: entry["active"] for entry in family_mismatch}
     assert by_family["resistor"] is False
     assert by_family["mosfet"] is True
-    # capacitor has no curated gf180mcu table entry -- unverified, not
-    # assumed active or inactive.
-    assert by_family["capacitor"] is None
+    # capacitor: gf180mcu MIM caps have no per-instance mismatch hook (#2898).
+    assert by_family["capacitor"] is False
 
 
 def test_run_sim_monte_carlo_family_mismatch_scans_include_closure(
@@ -11612,7 +11616,7 @@ def test_supply_override_scalar_sources_and_lexical_non_matches(tmp_path):
         "Vdc dc 0 DC 1.2\n"
     )
     (tmp_path / "n.spice").write_text(body)
-    points = [sim.CornerPoint(None, {"vdd": 1.0, "vdc": 1.1, "sig": 2.0}, 27)]
+    points = [sim.CornerPoint(None, {"vdd": 1.0, "vdc": 1.1, "vsig": 2.0}, 27)]
     sim._validate_supply_override_targets(str(tmp_path / "n.spice"), points)
     # Waveform source without an override remains usable.
     sim._validate_supply_override_targets(
@@ -12237,3 +12241,170 @@ def test_local_backend_unset_env_include_is_named_not_measurement_only(
         for d in corner["diagnostics"]
         if d["code"] == "missing_include"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2891: a testbench's *relative* `.include` of its DUT resolves against
+# the netlist's directory on the local backend (ngspice runs with cwd=corner
+# dir, but resolves a relative include against the including file's directory).
+# --------------------------------------------------------------------------- #
+
+
+def _write_relative_include_tb(tmp_path, directive=".include", target='"dut.spice"'):
+    tb_dir = tmp_path / "tb"
+    tb_dir.mkdir()
+    (tb_dir / "dut.spice").write_text(
+        "* dut\n.subckt dut in out\nR1 in out 1k\nR2 out 0 1k\n.ends\n"
+    )
+    (tb_dir / "tb.spice").write_text(
+        f"* tb\n{directive} {target}\nV1 in 0 1\nX1 in out dut\n.end\n"
+    )
+    request = tb_dir / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "netlist": "tb.spice",
+                "analysis": {"kind": "op", "args": ""},
+                "measurements": [{"name": "vo", "expr": "v(out)", "unit": "V"}],
+                "options": {"timeout_s": 30},
+            }
+        )
+    )
+    return str(request)
+
+
+@_SKIP_NO_NGSPICE
+@pytest.mark.parametrize(
+    ("directive", "target"),
+    [(".include", '"dut.spice"'), (".inc", "dut.spice"), (".INCLUDE", "'dut.spice'")],
+)
+def test_local_backend_relative_include_from_foreign_cwd(
+    tmp_path, monkeypatch, directive, target
+):
+    """Measured for #2891: a relative DUT include resolves beside the
+    netlist, independent of the invoking cwd and of `-o` being relative."""
+    request = _write_relative_include_tb(tmp_path, directive, target)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    monkeypatch.chdir(foreign)
+    report = sim.run_sim(request, backend="local")
+    (corner,) = report["corners"]
+    assert corner["status"] == "pass"
+    assert corner["measurements"][0]["value"] == pytest.approx(0.5)
+
+
+@_SKIP_NO_NGSPICE
+def test_local_backend_unresolvable_relative_include_is_named(tmp_path, monkeypatch):
+    request = _write_relative_include_tb(tmp_path, target='"nope.spice"')
+    monkeypatch.chdir(tmp_path)
+    report = sim.run_sim(request, backend="local")
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    named = [d for d in corner["diagnostics"] if d["code"] == "missing_include"]
+    assert named
+    assert any("nope.spice" in d["message"] for d in named)
+
+
+def test_expand_netlist_includes_keeps_relative_meaning_beside_env_include(
+    tmp_path, monkeypatch
+):
+    """When an env include forces a rewritten copy under the corner dir, a
+    sibling relative include is made absolute so it keeps resolving."""
+    monkeypatch.setenv("INCDIR", str(tmp_path))
+    (tmp_path / "dut.spice").write_text("R9 x 0 1k\n")
+    body = tmp_path / "body.cir"
+    body.write_text('* t\n.include $INCDIR/dut.spice\n.inc "dut.spice"\n')
+    out_dir = tmp_path / "corner"
+    out_dir.mkdir()
+    path, diags = sim._expand_netlist_includes(str(body), str(out_dir))
+    assert diags == []
+    assert f'.inc "{tmp_path}/dut.spice"' in open(path).read()
+
+
+# ---------------------------------------------------------------------------
+# `expr` after a noise analysis (issue #2893)
+# ---------------------------------------------------------------------------
+
+
+def _control_for(kind, args):
+    from types import SimpleNamespace
+
+    point = SimpleNamespace(supply_v={})
+    return sim._corner_deck_control_lines(
+        point=point,
+        analysis={"kind": kind, "args": args},
+        measurements_spec=[{"name": "s0", "expr": "onoise_spectrum[0]"}],
+        raw_path=None,
+        osdi_preload=(),
+    )
+
+
+def test_noise_expr_aliases_spectrum_vectors():
+    lines = _control_for("noise", "v(out) V1 dec 5 100 1e6")
+    assert "let inoise_spectrum = noise1.inoise_spectrum" in lines
+    assert "let onoise_spectrum = noise1.onoise_spectrum" in lines
+    assert lines.index("let onoise_spectrum = noise1.onoise_spectrum") < lines.index(
+        "let s0 = onoise_spectrum[0]"
+    )
+    assert lines.index("noise v(out) V1 dec 5 100 1e6") < lines.index(
+        "let inoise_spectrum = noise1.inoise_spectrum"
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,args", [("ac", "dec 5 100 1e6"), ("tran", "1n 1u"), ("op", "")]
+)
+def test_non_noise_expr_has_no_noise_alias(kind, args):
+    assert not any("noise1" in line for line in _control_for(kind, args))
+
+
+def test_gf180_pdk_native_passives_report_inactive():
+    assert sim._detect_device_families(
+        "XR1 a b gnd ppolyf_u_1k r_width=1u\nXC1 a b cap_mim_1f0fF c_width=1u\n"
+    ) == ["resistor", "capacitor"]
+    for fam in ("resistor", "capacitor"):
+        assert sim._MISMATCH_ACTIVITY[("gf180mcu", fam)]["active"] is False
+
+
+# --- #2894: unknown supply_v key, timeout-budget hint ----------------------- #
+
+
+def test_supply_override_unknown_key_is_rejected(tmp_path):
+    with pytest.raises(sim.SimError, match="'vddd'"):
+        _validate_supply(tmp_path, "Vdd vdd 0 DC 1\nR1 vdd 0 1k\n", {"vddd": 1.0})
+
+
+def test_supply_override_known_keys_case_and_hierarchy_not_rejected(tmp_path):
+    _validate_supply(
+        tmp_path,
+        "Vdd vdd 0 DC 1\nX1 vdd 0 blk\n.subckt blk a b\nVin a b DC 1\n.ends\n",
+        {"VDD": 1.0, "x1.vin": 1.1},
+    )
+
+
+def test_supply_override_unknown_key_with_unresolved_include_not_rejected(tmp_path):
+    _validate_supply(tmp_path, ".include missing.spice\nR1 a 0 1k\n", {"vsupply": 1.0})
+
+
+def test_supply_override_key_in_resolved_include_not_rejected(tmp_path):
+    (tmp_path / "inc.spice").write_text("Vsupply s 0 DC 1\n")
+    _validate_supply(tmp_path, ".include inc.spice\nR1 s 0 1k\n", {"VSupply": 1.0})
+
+
+def _hint_corner(runtime_s, timeout=False):
+    diags = [{"code": "timeout"}] if timeout else []
+    return {"corner_id": "c", "runtime_s": runtime_s, "diagnostics": diags}
+
+
+def test_timeout_budget_hint_near_budget_and_timeout():
+    hint = sim._timeout_budget_hint([_hint_corner(490.0), _hint_corner(10.0)], 600)
+    assert hint["max_unit_runtime_s"] == 490.0
+    assert hint["timeout_s"] == 600
+    assert hint["suggested_timeout_s"] > 600
+    assert "not a netlist problem" in hint["message"]
+    timed = sim._timeout_budget_hint([_hint_corner(600.0, timeout=True)], 600)
+    assert timed["units_timed_out"] == 1
+
+
+def test_timeout_budget_hint_absent_when_well_inside_budget():
+    assert sim._timeout_budget_hint([_hint_corner(100.0)], 600) is None

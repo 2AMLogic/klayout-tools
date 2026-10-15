@@ -1489,6 +1489,7 @@ the exit code alone is authoritative.
   | `netlist` | `batch_input_too_large` | `--backend batch`: the input tree's uncompressed size is above the batch cap. Raised before any archive is built or anything is uploaded. Not retryable without shrinking the tree. See [docs/cli/netlist.md](cli/netlist.md#batch-backend). |
   | `extract` | `finfet_malformed_geometry` | A FinFET deck (`--deck asap7`) found device geometry it refuses to approximate (no crossing fin, clipped fin, wrong gate length, missing select, VT conflict, ...). `error.message` lists each finding with its bounding box. Not retryable: the layout must change. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `extract` | `finfet_dbu_mismatch` | A FinFET deck was run on a layout whose database unit differs from the deck's; it is refused rather than rescaled. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
+  | `pex` | `schematic_flatten_cycle`, `schematic_flatten_pin_count_mismatch`, `schematic_flatten_unsupported_card`, `schematic_flatten_malformed` | `--flatten-schematic` (issue #2889): the schematic DUT could not be flattened faithfully — a subcircuit instantiation cycle, an `X` call whose node count differs from the subcircuit's pin count, a card the flattener cannot rename safely, or unbalanced/duplicate `.subckt` definitions. Raised before anything simulates; no partial flatten is written. Not retryable without changing the DUT netlist. See [docs/cli/pex.md](cli/pex.md) "Flattening a hierarchical schematic DUT". |
   | `pex`, `sim`, `place-and-route` | `outdir_locked` | Another cooperating `klt` run owns this run's persistent output directory (or an ancestor/descendant of it). Exit `1`, empty stdout. Transient: retry after the owner finishes. See "Output-directory ownership" below. |
   | `pex`, `sim`, `place-and-route` | `outdir_lock_unavailable` | Ownership could not be established for a reason other than contention (unwritable lock registry, no `flock` on this platform or filesystem). Not retryable without changing the environment. Exit `1`, empty stdout. |
 
@@ -1654,6 +1655,17 @@ violation (issue #2029).
 
 See `src/klayout_tools/cli/layers_cmd.py` and `docs/cli/layers.md` for a
 worked example.
+
+### `klt pex --flatten-schematic` (issue #2889)
+
+`klt pex` adds the always-present boolean `flatten_schematic` echo and the
+`schematic_flatten` block (`null` unless the flag is given; otherwise the
+flattened schematic DUT's `{path, scope}` `netlist`, its `netlist_sha256`
+under the issue #2875 `sha256:<hex>` convention, and an inlining summary).
+Both are additive under the opt-in-flag rule above: no existing field
+changes name, type or meaning — `reference_netlist` and
+`testbenches[].schematic_netlist*` still name the caller's own DUT — so
+**no `schema_version` bump**. See [`cli/pex.md`](cli/pex.md).
 
 ### `klt pex` schematic-side content digests (issue #2875)
 

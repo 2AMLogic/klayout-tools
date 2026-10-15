@@ -306,10 +306,11 @@
     },
     "pex": {
       "kind": "verb",
-      "description": "`klt pex` implementation: core modules plus CLI adapter.",
+      "description": "`klt pex` implementation: core modules (including the SPICE-text subckt flattener behind --flatten-schematic) plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.pex_cmd",
-        "klayout_tools.pex"
+        "klayout_tools.pex",
+        "klayout_tools.spice_flatten"
       ]
     },
     "place_and_route": {

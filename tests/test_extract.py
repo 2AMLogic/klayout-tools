@@ -30,15 +30,18 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools import extract_abstract, pdk
+from klayout_tools._layout import region_expr as _region_expr
 from klayout_tools.cli import main
 from klayout_tools.decks import (
     BipolarDevice,
     DiodeDevice,
     ExtractionDeck,
     InvalidLabelLayerError,
+    LayerExpr,
     get_extraction_deck,
     get_unmodeled_voltage_markers,
 )
+from klayout_tools.decks.extraction import layer_operand_leaves
 from klayout_tools.extract import (
     PARASITIC_MODEL_SCOPE,
     ExtractError,
@@ -12968,10 +12971,198 @@ def test_extraction_deck_connectivity_layers_covers_all_role_layers():
     # Bipolar + capacitor recognition layers
     for bipolar in deck.bipolars:
         assert bipolar.base in conn
-        assert bipolar.marker in conn
+        assert set(layer_operand_leaves(bipolar.marker)) <= conn
     for capacitor in deck.capacitors:
         assert capacitor.top_plate in conn
         assert capacitor.bottom_plate in conn
+
+
+# --------------------------------------------------------------------------- #
+# Derived bipolar markers (issue #2860): `BipolarDevice.marker` may be a
+# `LayerExpr` boolean of several drawn layers, not only one drawn layer.
+# --------------------------------------------------------------------------- #
+
+# Synthetic stand-ins for SG13G2's NPN-marker operands. The real
+# `pwell_allowed`/`ptap_holes`/`digisub_gap` are themselves derived upstream
+# (from extents/holes/sizing this model does not express); here each is one
+# drawn layer so the boolean structure alone is under test.
+_NPN_TRANS = (26, 0)
+_NPN_PWELL_ALLOWED = (240, 0)
+_NPN_NWELL = (31, 0)
+_NPN_DIGISUB_GAP = (241, 0)
+_NPN_PTAP_HOLES = (242, 0)
+
+
+def _sg13g2_npn_marker_expr() -> LayerExpr:
+    """`npn_mk = trans & pwell & ptap_holes`, `pwell = pwell_allowed - nwell -
+    digisub_gap` -- the shape of SG13G2's `bjt_derivations.lvs` /
+    `general_derivations.lvs` NPN marker."""
+    pwell = LayerExpr.not_(
+        _NPN_PWELL_ALLOWED, _NPN_NWELL, _NPN_DIGISUB_GAP, name="pwell"
+    )
+    return LayerExpr.and_(_NPN_TRANS, pwell, _NPN_PTAP_HOLES, name="npn_mk")
+
+
+def _npn_marker_layout(*, omit: tuple[int, int] | None = None, extra=()):
+    """Every positive operand drawn as the same 0..1000 square, plus any
+    ``extra`` ``(layer, box)`` shapes; ``omit`` leaves one operand undrawn."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    for layer in (_NPN_TRANS, _NPN_PWELL_ALLOWED, _NPN_PTAP_HOLES):
+        if layer != omit:
+            top.shapes(layout.layer(*layer)).insert(kdb.Box(0, 0, 1000, 1000))
+    for layer, box in extra:
+        top.shapes(layout.layer(*layer)).insert(box)
+    return layout, top
+
+
+def test_layer_expr_sg13g2_npn_marker_full_overlap_is_the_whole_square():
+    layout, top = _npn_marker_layout()
+    region = _region_expr(layout, top, _sg13g2_npn_marker_expr())
+    assert region.area() == 1000 * 1000
+
+
+@pytest.mark.parametrize("subtracted", [_NPN_NWELL, _NPN_DIGISUB_GAP])
+def test_layer_expr_sg13g2_npn_marker_not_operands_remove_area(subtracted):
+    """Each nested NOT operand (`nwell`, `digisub_gap`) actually cuts the
+    marker: a 400-wide strip of it leaves 600x1000 of marker."""
+    layout, top = _npn_marker_layout(extra=[(subtracted, kdb.Box(0, 0, 400, 1000))])
+    region = _region_expr(layout, top, _sg13g2_npn_marker_expr())
+    assert region.area() == 600 * 1000
+    assert region.bbox() == kdb.Box(400, 0, 1000, 1000)
+
+
+@pytest.mark.parametrize("subtracted", [_NPN_NWELL, _NPN_DIGISUB_GAP])
+def test_layer_expr_sg13g2_npn_marker_fully_subtracted_is_empty(subtracted):
+    layout, top = _npn_marker_layout(extra=[(subtracted, kdb.Box(0, 0, 1000, 1000))])
+    assert _region_expr(layout, top, _sg13g2_npn_marker_expr()).is_empty()
+
+
+@pytest.mark.parametrize("missing", [_NPN_TRANS, _NPN_PWELL_ALLOWED, _NPN_PTAP_HOLES])
+def test_layer_expr_sg13g2_npn_marker_missing_and_operand_is_empty(missing):
+    """A leaf absent from the stream reads as empty -- no crash -- so a
+    missing AND operand empties the marker."""
+    layout, top = _npn_marker_layout(omit=missing)
+    assert _region_expr(layout, top, _sg13g2_npn_marker_expr()).is_empty()
+
+
+def test_layer_expr_leaf_and_polarity_accessors():
+    expr = _sg13g2_npn_marker_expr()
+    assert expr.leaf_layers() == (
+        _NPN_TRANS,
+        _NPN_PWELL_ALLOWED,
+        _NPN_NWELL,
+        _NPN_DIGISUB_GAP,
+        _NPN_PTAP_HOLES,
+    )
+    assert expr.required_layers() == (_NPN_TRANS, _NPN_PWELL_ALLOWED, _NPN_PTAP_HOLES)
+    assert expr.excluded_layers() == (_NPN_NWELL, _NPN_DIGISUB_GAP)
+    # Double negation flips back: c in `a - (b - c)` is required.
+    nested = LayerExpr.not_((1, 0), LayerExpr.not_((2, 0), (3, 0)))
+    assert nested.required_layers() == ((1, 0), (3, 0))
+    assert nested.excluded_layers() == ((2, 0),)
+    # Frozen, hashable, comparable -- like every other deck dataclass.
+    assert hash(expr) == hash(_sg13g2_npn_marker_expr())
+    assert expr == _sg13g2_npn_marker_expr()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: LayerExpr("or", ((1, 0), (2, 0))),
+        lambda: LayerExpr("and", ()),
+        lambda: LayerExpr("and", ((1, 0, 0),)),
+        lambda: LayerExpr("and", ([1, 0],)),
+        lambda: LayerExpr("and", ((True, 0),)),
+    ],
+)
+def test_layer_expr_rejects_malformed_nodes(build):
+    with pytest.raises(ValueError):
+        build()
+
+
+def _sky130_deck_with_pnp_marker(marker):
+    """The registered sky130 extraction deck with its one `pnp` entry's
+    `marker` swapped for ``marker``; everything else unchanged."""
+
+    def factory(name="sky130", deck_options=None, label_layers=None):
+        deck = get_extraction_deck(name, deck_options, label_layers)
+        (pnp,) = deck.bipolars
+        return dataclasses.replace(
+            deck, bipolars=(dataclasses.replace(pnp, marker=marker),)
+        )
+
+    return factory
+
+
+def test_derived_bipolar_marker_single_leaf_matches_bare_pair(tmp_path, monkeypatch):
+    """`LayerExpr.and_(pnp.drawing)` recognises exactly what the bare
+    `pnp.drawing` pair does on the sky130 PNP fixture."""
+    path = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt.gds")
+    baseline = run_extract(path, "sky130", output=str(tmp_path / "base.spice"))
+
+    monkeypatch.setattr(
+        "klayout_tools.extract.get_extraction_deck",
+        _sky130_deck_with_pnp_marker(LayerExpr.and_((82, 44))),
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "expr.spice"))
+
+    assert baseline["device_counts"] == {"pnp": 1}
+    assert report["device_counts"] == baseline["device_counts"]
+    assert report["devices"] == baseline["devices"]
+    assert report["ignored_layers"] == baseline["ignored_layers"]
+
+
+def test_derived_bipolar_marker_not_operand_suppresses_the_device(
+    tmp_path, monkeypatch
+):
+    """`pnp.drawing - X`: drawing X over the whole device empties the derived
+    marker, so no PNP is recognised; with X undrawn the device extracts."""
+    exclude = (243, 0)
+    expr = LayerExpr.not_((82, 44), exclude)
+    monkeypatch.setattr(
+        "klayout_tools.extract.get_extraction_deck",
+        _sky130_deck_with_pnp_marker(expr),
+    )
+
+    clean = _write_gds(_make_sky130_bjt_layout(), tmp_path / "clean.gds")
+    assert run_extract(clean, "sky130", output=str(tmp_path / "a.spice"))[
+        "device_counts"
+    ] == {"pnp": 1}
+
+    layout = _make_sky130_bjt_layout()
+    layout.top_cell().shapes(layout.layer(*exclude)).insert(
+        kdb.Box(-100, -100, 2100, 2100)
+    )
+    covered = _write_gds(layout, tmp_path / "covered.gds")
+    report = run_extract(covered, "sky130", output=str(tmp_path / "b.spice"))
+    assert report["device_counts"].get("pnp", 0) == 0
+
+
+def test_derived_bipolar_marker_leaf_is_registered_as_read(tmp_path, monkeypatch):
+    """A layer reachable only through the expression (here an extra AND
+    operand) counts as read: it is in `device_recognition_layers`, extraction
+    honours it, and `ignored_layers` does not report it."""
+    extra = (244, 0)
+    expr = LayerExpr.and_((82, 44), extra)
+    factory = _sky130_deck_with_pnp_marker(expr)
+    assert extra in factory().device_recognition_layers
+    assert extra in factory().connectivity_layers
+    monkeypatch.setattr("klayout_tools.extract.get_extraction_deck", factory)
+
+    layout = _make_sky130_bjt_layout()
+    layout.top_cell().shapes(layout.layer(*extra)).insert(kdb.Box(0, 0, 2000, 2000))
+    path = _write_gds(layout, tmp_path / "bjt_extra.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "out.spice"))
+    assert report["device_counts"] == {"pnp": 1}
+    ignored = {(e["layer"], e["datatype"]) for e in report["ignored_layers"]}
+    assert extra not in ignored
+
+    # Without the extra operand drawn, the AND is empty and nothing is
+    # recognised -- the leaf genuinely gates recognition.
+    bare = _write_gds(_make_sky130_bjt_layout(), tmp_path / "bjt_bare.gds")
+    report = run_extract(bare, "sky130", output=str(tmp_path / "bare.spice"))
+    assert report["device_counts"].get("pnp", 0) == 0
 
 
 # --------------------------------------------------------------------------- #
