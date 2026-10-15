@@ -1213,6 +1213,14 @@ def _validate_expr_body(name: Any, expr: Any) -> None:
             ".control block, so a newline would split it into a "
             "separate control command -- use a single-line expression"
         )
+    if "<" in expr or ">" in expr:
+        raise SimError(
+            f"measurement '{name}' has a bare '<' or '>' in 'expr': in "
+            "ngspice's control language these are I/O redirection, not "
+            "comparisons, so the measurement would produce no value (and "
+            "stray files) -- spell comparisons gt / lt / ge / le / eq / ne, "
+            "e.g. `(v(a) lt v(b))*v(a)`"
+        )
 
 
 def _validate_expr_names_unique(measurements_spec: list[dict[str, Any]]) -> None:
