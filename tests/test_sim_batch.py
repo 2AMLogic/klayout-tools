@@ -4548,3 +4548,149 @@ def test_engine_log_tail_is_bounded(tmp_path):
     note, found = sb._engine_log_note(str(tmp_path))
     assert found is None
     assert len(note) < sb._BATCH_ENGINE_LOG_TAIL_CHARS + 100
+
+
+# --- request-feature capability check (issue #3249) --------------------------
+
+_STEPS_REQUEST = {"models": {}, "options": {}, "analysis_steps": [{"tran": {}}]}
+
+
+def _feature_spec(tmp_path, request, client="0.7.1.dev384+gf386aca", **kwargs):
+    return sb._build_batch_job_spec(
+        request,
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=True,
+        client_version=client,
+        **kwargs,
+    )
+
+
+def test_analysis_steps_on_a_pre_feature_runner_is_rejected_by_name(tmp_path):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _feature_spec(tmp_path, _STEPS_REQUEST), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "analysis_steps" in error["message"]
+    assert "0.7.0" in error["message"] and "0.7.1.dev384" in error["message"]
+
+
+@pytest.mark.parametrize("runner", ["0.7.1", "0.7.1.dev5+gabc", "0.7.3"])
+def test_analysis_steps_on_a_supporting_runner_passes(tmp_path, runner):
+    proc, _, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _feature_spec(tmp_path, _STEPS_REQUEST), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_request_without_the_feature_is_unaffected_on_an_old_runner(tmp_path):
+    proc, _, marker = _run_job_cmd_with_fake_klt(
+        tmp_path,
+        _feature_spec(tmp_path, {"models": {}, "options": {}}),
+        _fake_klt("klt 0.7.0"),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_feature_gate_warn_mode_still_runs_the_job(tmp_path):
+    spec = _feature_spec(tmp_path, _STEPS_REQUEST, version_check="warn")
+    proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.7.0"))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_feature_gate_never_overrides_a_version_rejection(tmp_path):
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path, _feature_spec(tmp_path, _STEPS_REQUEST), _fake_klt("klt 0.6.0")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+
+
+def test_missing_runner_features_unknown_version_is_not_missing():
+    assert sb._missing_runner_features(["analysis_steps"], None) is None
+    assert sb._missing_runner_features(["analysis_steps"], "dirty") is None
+    assert sb._missing_runner_features(["analysis_steps"], "0.7.0") == [
+        "analysis_steps"
+    ]
+    assert sb._missing_runner_features(["analysis_steps"], "0.7.1") == []
+
+
+def test_environment_carries_the_capability_result(monkeypatch):
+    _pin_client_version(monkeypatch, "0.7.1.dev384+gf386aca")
+    fields = sb._read_runner_identity(None, _STEPS_REQUEST)
+    assert fields["runner_request_features"] == {
+        "required": ["analysis_steps"],
+        "missing": None,
+        "status": "unknown",
+    }
+    assert "runner_request_features" not in sb._read_runner_identity(None, {})
+
+
+def test_environment_reports_unsupported_feature_on_a_matching_minor(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, "0.7.1.dev384+gf386aca")
+    (tmp_path / "runner_identity.json").write_text(_identity("0.7.0"))
+    fields = sb._read_runner_identity(str(tmp_path), _STEPS_REQUEST)
+    assert fields["runner_compatibility"] == "match"
+    assert fields["runner_request_features"]["status"] == "unsupported"
+    assert fields["runner_request_features"]["missing"] == ["analysis_steps"]
+    assert "analysis_steps" in fields["runner_compatibility_warning"]
+
+
+def test_preflight_feature_rejection_is_annotated_on_the_corner(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="87", detail="x"))
+    runner.outputs = {
+        "report.json": _envelope(
+            "predates analysis_steps", code=sb.BATCH_RUNNER_FEATURE_CODE
+        ),
+        "runner_identity.json": _identity("0.7.0"),
+    }
+    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
+    diagnostic = corners[0]["diagnostics"][0]
+    assert diagnostic["runner_code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert diagnostic["runner_klt_version"] == "0.7.0"
+
+
+def test_prelaunch_refuses_a_feature_every_published_image_predates(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    request = {"models": {"pdk": "sky130A"}, "analysis_steps": [{}]}
+    assessment = sb._assess_published_runner(request, _config(tmp_path))
+    assert assessment["status"] == "match"
+    with pytest.raises(sim.SimError) as raised:
+        sb._enforce_published_runner_features(request, assessment)
+    assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "analysis_steps" in str(raised.value)
+
+
+def test_prelaunch_feature_check_passes_when_unknown_or_supported(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    request = {"models": {"pdk": "sky130A"}, "analysis_steps": [{}]}
+    for images in ([_image()], [_image(klt_version="0.7.1")], []):
+        _publish_manifest(tmp_path, monkeypatch, images)
+        assessment = sb._assess_published_runner(request, _config(tmp_path))
+        sb._enforce_published_runner_features(request, assessment)  # no raise
+
+
+def test_prelaunch_feature_check_warn_mode_does_not_raise(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    request = {"models": {"pdk": "sky130A"}, "analysis_steps": [{}]}
+    assessment = sb._assess_published_runner(
+        request, _config(tmp_path, runner_version_check="warn")
+    )
+    sb._enforce_published_runner_features(request, assessment)

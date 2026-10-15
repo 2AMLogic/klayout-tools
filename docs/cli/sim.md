@@ -1036,6 +1036,40 @@ update the runner image to the client's minor, or submit from a client of the
 image's minor. Jobs that never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.
 
+#### Request-feature capability check ([#3249](https://github.com/2AMLogic/klayout-tools/issues/3249))
+
+The major.minor gate lets a post-tag client (`0.7.1.devN`) talk to a `0.7.0`
+runner, so `runner_compatibility: match` does not mean the runner can parse
+every field the request carries. A small registry of request features that
+landed after a release is therefore compared against the runner's **full**
+release segment:
+
+| Feature | Detected when | First runner release |
+|---|---|---|
+| `analysis_steps` ([#2482](https://github.com/2AMLogic/klayout-tools/issues/2482)) | `analysis_steps` is present | `0.7.1` |
+
+`decks[]` ([#3303](https://github.com/2AMLogic/klayout-tools/issues/3303)) is
+the next registry entry.
+
+- **Before launch**: when every image the AMI manifest publishes predates a
+  feature the request uses, the request is refused once with
+  `batch_runner_feature_unsupported` naming the feature and both versions.
+  Nothing is uploaded or launched.
+- **On the runner**: after the version gate passes, the preflight exits `87`
+  with the same code before `klt sim` runs; each unit gets a `batch_job_failed`
+  diagnostic with `runner_code: "batch_runner_feature_unsupported"` plus
+  `runner_klt_version` / `client_klt_version`.
+- **`environment.remote.runner_request_features`** (only when the request uses
+  a registry feature) holds `required`, `missing` (`null` when the runner
+  version is unknown) and `status` (`supported` / `unsupported` / `unknown`).
+  An `unsupported` status also sets `runner_compatibility_warning`, even when
+  `runner_compatibility` is `match`.
+- **Unknown degrades to a warning**: an unreadable runner version, or a legacy
+  manifest entry without `klt_version`, is never treated as missing.
+  `runner_version_check: "warn"` reports without refusing.
+- Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
+  one built after, so it counts as supporting it.
+
 #### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
 
 The runner-side preflight only runs once a Spot instance has booted. To catch
