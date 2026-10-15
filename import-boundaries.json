@@ -427,6 +427,7 @@
         "klayout_tools.sim_crossings",
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_injected",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_raw",

@@ -1,0 +1,7 @@
+* klt sim worked example: design-owned (injected) mismatch
+* klt emits `.param mc_inj_r1_r` / `mc_inj_r2_r` per sample.
+.param vdd=1.8
+Vdd vdd 0 DC {vdd}
+R1 vdd out {1k*mc_inj_r1_r}
+R2 out 0 {1k*mc_inj_r2_r}
+C1 out 0 1n
