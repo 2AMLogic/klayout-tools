@@ -1902,6 +1902,22 @@ def _compare_pdk_stamps(
     }
 
 
+def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
+    """The worker-reported ``model_inputs`` list, re-validated and bounded.
+    ``None`` (not ``[]``) when the capture carries no list at all."""
+    models_in = doc.get("model_inputs")
+    if not isinstance(models_in, list):
+        return None
+    return [
+        {
+            "name": _bounded_str(entry.get("name")),
+            "sha256": _bounded_str(entry.get("sha256"), 64),
+        }
+        for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
+        if isinstance(entry, dict)
+    ]
+
+
 def _read_worker_environment(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -1968,17 +1984,6 @@ def _read_worker_environment(
                     manifest[_bounded_str(key, 40) or "?"] = value
                 elif isinstance(value, str):
                     manifest[_bounded_str(key, 40) or "?"] = _bounded_str(value)
-        model_inputs: list[dict[str, str | None]] | None = None
-        models_in = doc.get("model_inputs")
-        if isinstance(models_in, list):
-            model_inputs = [
-                {
-                    "name": _bounded_str(entry.get("name")),
-                    "sha256": _bounded_str(entry.get("sha256"), 64),
-                }
-                for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
-                if isinstance(entry, dict)
-            ]
         diagnostics = [
             _bounded_str(item, 200)
             for item in (doc.get("diagnostics") or [])[:20]
@@ -1991,7 +1996,7 @@ def _read_worker_environment(
             "cpu_model": _bounded_str(doc.get("cpu_model")),
             "omp_num_threads": _bounded_str(doc.get("omp_num_threads"), 40),
             "image_manifest": manifest,
-            "model_inputs": model_inputs,
+            "model_inputs": _bounded_model_inputs(doc),
             "diagnostics": diagnostics,
             "pdk_stamp_comparison": _compare_pdk_stamps(
                 pdk, _client_pdk_stamp(request)
