@@ -228,7 +228,7 @@ also the order a `--rules` subset executes in.
   "mode": "list_rules",
   "deck": "sky130",
   "engine": "curated",
-  "rule_count": 136,
+  "rule_count": 138,
   "groups": {
     "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
     "scope": { "m1": 5, "poly": 1, "...": 0 }
@@ -310,7 +310,7 @@ A `--rules` run adds one top-level block, `rule_selection`, relative to the
   "selectors": ["met1.*"],
   "selected": ["met1.width.1", "met1.space.1", "met1.enclosing.mcon.1", "..."],
   "omitted": ["poly.width.1", "diff.width.1", "..."],
-  "deck_rule_count": 136,
+  "deck_rule_count": 138,
   "subset": true
 }
 ```
@@ -1228,9 +1228,9 @@ single-layer kind.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 136
+design rule manual (which spans hundreds of rules). It currently covers 138
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
-`tap` (issue #2321),
+`tap` (issue #2321), `rpm`/`urpm` marker width (issue #3030),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
 `nwell` (issue #1420) layers, plus the source deck's entire
@@ -1252,7 +1252,7 @@ Broken down by check kind:
 
 | kind         | count |
 | ------------ | ----: |
-| `width`      |    18 |
+| `width`      |    20 |
 | `space`      |    13 |
 | `isolated`   |     1 |
 | `enclosing`  |    17 |
@@ -1260,7 +1260,7 @@ Broken down by check kind:
 | `area`       |    10 |
 | `ongrid`     |    38 |
 | `angle`      |    37 |
-| **total**    |**136**|
+| **total**    |**138**|
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five

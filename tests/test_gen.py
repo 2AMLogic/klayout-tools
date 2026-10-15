@@ -3493,6 +3493,45 @@ def test_res_array_sky130_flavor_high_draws_psdm_and_rpm(tmp_path, pdk_root):
     assert _SKY130_URPM_LAYER not in present
 
 
+@pytest.mark.parametrize(
+    ("flavor", "marker_layer", "rule_id"),
+    [
+        ("high", _SKY130_RPM_LAYER, "rpm.width.1"),
+        ("xhigh", _SKY130_URPM_LAYER, "urpm.width.1"),
+    ],
+)
+def test_res_array_sky130_min_width_marker_meets_pdk_minimum(
+    tmp_path, pdk_root, flavor, marker_layer, rule_id
+):
+    """A minimum-width (0.42 um) `res_array` keeps its rpm/urpm marker at or
+    above the PDK's 1.27 um floor (`rpm.1a`/`urpm.1a`): the marker covers the
+    contacted heads, not just the narrow body (#2449). The curated deck's
+    `rpm.width.1`/`urpm.width.1` (#3030) guard that, so a regression to a
+    body-width marker is visible to `klt drc --deck sky130`."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_min_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": flavor, "width_um": 0.42, "length_um": 52},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    marker = kdb.Region(top.begin_shapes_rec(layout.layer(*marker_layer))).merged()
+    assert not marker.is_empty()
+    for polygon in marker.each():
+        bbox = polygon.bbox()
+        assert min(bbox.width(), bbox.height()) * layout.dbu >= 1.27
+
+    drc_report = run_drc(str(output), "sky130")
+    assert rule_id not in drc_report["rule_counts"]
+
+
 def test_res_array_sky130_flavor_xhigh_draws_psdm_and_urpm(tmp_path, pdk_root):
     """`flavor='xhigh'` (`res_xhigh_po`) draws the psdm P+ implant and the urpm
     precision-resistor mask over each unit body -- and *not* rpm."""
