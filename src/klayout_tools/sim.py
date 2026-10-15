@@ -144,7 +144,7 @@ from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 #: helpers (self-aliased) so ``klayout_tools.sim.<name>`` resolves them too.
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
-from .sim_batch import _run_batch, _run_batch_fleet
+from .sim_batch import _run_batch, _run_batch_fleet, attach_engine_build_comparison
 from .sim_batch_async import SUBMIT_ONLY_UNSUPPORTED_CODE
 from .sim_batch_async import submit_only as _submit_batch_only
 from .sim_decks import run_deck_request
@@ -3270,6 +3270,10 @@ def _run_sim_corners(
     inconclusive = graded["inconclusive"]
     status = graded["status"]
 
+    engine_build = _probe_engine_build(ngspice_binary)
+    if remote_environment is not None and backend == "batch":
+        attach_engine_build_comparison(remote_environment, engine_build)
+
     environment: dict[str, Any] = {
         "engine": engine,
         "engine_version": engine_version,
@@ -3280,6 +3284,8 @@ def _run_sim_corners(
         # nullable: `None` for `"engine": "xyce"`, which this issue adds no
         # override for (see `_resolve_ngspice_binary`'s own docstring).
         "ngspice_binary": ngspice_binary,
+        # Issue #3095: build identity of that binary (``null`` for xyce).
+        "engine_build": engine_build,
         # Issue #1274: normalised like every other path field this response
         # echoes -- the resolved library usually lives outside the repo (a
         # PDK under the user's home directory), which reports
@@ -8143,6 +8149,67 @@ def _write_xyce_deck(
 
     with open(deck_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
+
+
+#: Bound on the recorded ``--version`` banner; matches the worker capture's
+#: ``WORKER_CAPTURE_BANNER_MAX`` so the two sides compare like for like.
+_ENGINE_BANNER_MAX = 2000
+_ENGINE_BANNER_TIMEOUT_S = 10
+
+
+def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
+    """``environment.engine_build`` (issue #3095): the local ngspice build
+    identity -- ``--version`` banner plus binary sha256 -- probed once per
+    sweep. ``engine_version`` is the major version only and two builds of one
+    major can differ in options (FFTW vs. padded FFT). ``None`` for engines
+    without a probe (xyce). A failed probe never fails the run: the banner is
+    ``None`` and ``probe`` / ``reason`` say why."""
+    if ngspice_binary is None:
+        return None
+    build: dict[str, Any] = {
+        "version_banner": None,
+        "binary_sha256": None,
+        "probe": "ok",
+        "reason": None,
+    }
+    try:
+        build["binary_sha256"] = sha256_file(ngspice_binary)
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(
+            [ngspice_binary, "--version"],
+            capture_output=True,
+            text=False,
+            timeout=_ENGINE_BANNER_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        build.update(
+            probe="timeout", reason=f"--version exceeded {_ENGINE_BANNER_TIMEOUT_S}s"
+        )
+        return build
+    except Exception as exc:  # the probe must never fail the sweep
+        build.update(probe="error", reason=f"could not run --version: {exc}"[:200])
+        return build
+    raw = proc.stdout or proc.stderr or b""
+    if isinstance(raw, bytes):
+        raw = raw[: _ENGINE_BANNER_MAX * 4].decode("utf-8", "replace")
+    raw = raw[: _ENGINE_BANNER_MAX * 4]
+    banner = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in raw).strip()[
+        :_ENGINE_BANNER_MAX
+    ]
+    if proc.returncode != 0 or not banner:
+        build.update(
+            probe="error",
+            reason=(
+                f"--version exited {proc.returncode}"
+                if proc.returncode != 0
+                else "--version printed no banner"
+            ),
+        )
+        return build
+    build["version_banner"] = banner
+    return build
 
 
 def _extract_engine_version(stdout: str) -> str | None:
