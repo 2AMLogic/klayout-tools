@@ -11158,6 +11158,7 @@ def test_run_sim_per_section_libs_alongside_a_models_lib_section(tmp_path, monke
     assert report["environment"]["models_lib_sha256"] == sim.sha256_file(
         str(models_lib)
     )
+    assert report["environment"]["models_lib_sha256_scope"] == "local"
 
 
 def test_run_sim_without_per_section_libs_omits_the_environment_field(

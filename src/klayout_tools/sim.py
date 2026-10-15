@@ -2570,6 +2570,13 @@ def _run_sim_corners(
         # still pins exactly which library ran.
         "models_lib": _report_path(models_lib, repo_root=repo_root),
         "models_lib_sha256": sha256_file(models_lib),
+        # Additive: `models_lib_sha256` is always hashed on the submitting
+        # host, so for an off-host backend it is the *client's* resolution,
+        # not necessarily what the runner loaded (see
+        # `environment.remote.runner_model_inputs`).
+        "models_lib_sha256_scope": (
+            "client" if remote_environment is not None else "local"
+        ),
         "netlist_sha256": sha256_file(netlist_path),
     }
     # Issue #2799: `netlist_sha256` covers only the top-level file, so also
