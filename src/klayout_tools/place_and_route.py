@@ -2254,8 +2254,9 @@ def run_place_and_route(
             hold_count = _count_violations(
                 completed.stdout, _HOLD_VIOLATIONS_BEGIN, _HOLD_VIOLATIONS_END
             )
-        if stage == "place":
-            placement_routability = parse_placement_routability(completed.stdout)
+        placement_routability = _placement_routability_after(
+            stage, completed.stdout, placement_routability
+        )
         congestion: dict[str, Any] | None = None
         antenna_count = None
         route_drc_count = None
@@ -5255,6 +5256,21 @@ def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
     return data
 
 
+def _placement_routability_after(
+    stage: str, stdout: str, previous: dict[str, Any]
+) -> dict[str, Any]:
+    """Issue #2994: the routability-driven placement figures to carry forward
+    once ``stage`` has run -- parsed fresh from the ``place`` stage's log,
+    unchanged for every other stage."""
+    return parse_placement_routability(stdout) if stage == "place" else previous
+
+
+def _congestion_entry(congestion: dict[str, Any] | None) -> dict[str, Any]:
+    """Issue #2994: the route-stage-only ``congestion`` key for a stage entry
+    (empty when the stage produced no congestion block)."""
+    return {} if congestion is None else {"congestion": congestion}
+
+
 def _extract_stage_metrics(
     stage: str,
     metrics: dict[str, Any],
@@ -5381,8 +5397,7 @@ def _extract_stage_metrics(
                 max_capacitance_violation_count_vs_library
             )
         # Issue #2994: route-stage-only, absent elsewhere like the fields above.
-        if congestion is not None:
-            entry["congestion"] = congestion
+        entry.update(_congestion_entry(congestion))
 
     # Issue #1865: whether the slack fields above are measurements at all.
     # OpenSTA reports the worst slack of a design with no constrained
