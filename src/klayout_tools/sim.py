@@ -98,6 +98,7 @@ from . import (
     sim_decks,
     sim_energy,
     sim_mismatch_gate,
+    sim_portable,
     sim_steps,
     sim_transfer_meas,
 )
@@ -1159,6 +1160,34 @@ def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
     which is not necessarily what a caller meant.
     """
     return env_provenance.repo_relative_path(path, repo_root=repo_root)
+
+
+def _portable_substitutions(
+    roots: sim_portable.Roots, *, repo_root: str | None, models_lib_sha256: str | None
+) -> list[dict[str, Any]]:
+    """``environment.portable_artifacts.substitutions``: one entry per token
+    (issue #3052), with the root it stood for normalised like every other
+    path this report echoes (so the report itself carries no host path),
+    plus ``$CORNER_DIR``, the per-corner scratch directory."""
+    out: list[dict[str, Any]] = [
+        {
+            "token": sim_portable.CORNER_DIR_TOKEN,
+            "stands_for": "per-corner artifact directory",
+        }
+    ]
+    seen: set[str] = set()
+    for token, root in roots:
+        if token in seen:
+            continue
+        seen.add(token)
+        entry: dict[str, Any] = {
+            "token": token,
+            "stands_for": _report_path(root, repo_root=repo_root),
+        }
+        if token == "$MODELS_DIR" and models_lib_sha256 is not None:
+            entry["models_lib_sha256"] = models_lib_sha256
+        out.append(entry)
+    return out
 
 
 def _validate_meas_card(name: str, spice: str) -> None:
@@ -2445,6 +2474,9 @@ def _run_sim_corners(
         )
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     keep_artifacts = bool(options.get("keep_artifacts", False))
+    portable_artifacts = options.get("portable_artifacts", False)
+    if not isinstance(portable_artifacts, bool):
+        raise SimError("request.options.portable_artifacts must be a boolean")
     want_waveforms = bool(options.get("waveforms", False))
     if plot_dir is not None:
         # A waveform SVG can only be rendered from a waveform artifact that
@@ -2831,8 +2863,32 @@ def _run_sim_corners(
     # directories.
     # `request_dir` (issue #2668) rides along to the off-host backends only:
     # it is where `options.stage_model_inputs` resolves model sources from.
+    # Issue #3052: the run-wide substitution roots for `options.portable_artifacts`;
+    # `None` (the default) leaves every persisted deck/log byte-identical.
+    # Off-host shards read the option from the forwarded request themselves.
+    portable_roots: sim_portable.Roots | None = (
+        sim_portable.build_roots(
+            request_dir=request_dir,
+            artifacts_dir=artifacts_dir,
+            models_lib=models_lib,
+            section_libs=[
+                lib
+                for point in corner_points
+                if point.process_sections is not None
+                for lib in (
+                    point.section_lib(i, models_lib)
+                    for i in range(len(point.process_sections))
+                )
+                if lib != models_lib
+            ],
+            osdi_preload=osdi_preload,
+        )
+        if portable_artifacts and keep_artifacts
+        else None
+    )
     local_engine_kwargs = (
         {
+            "portable_roots": portable_roots,
             "engine": engine,
             "ngspice_binary": ngspice_binary,
             "fail_on_diagnostic": fail_on_diagnostic_codes,
@@ -3237,6 +3293,18 @@ def _run_sim_corners(
     # when `options.stage_model_inputs` staged model inputs for an off-host
     # backend -- see `_preflight_staged_model_inputs`.
     environment.update(staged_model_environment)
+    if portable_roots is not None:
+        # Additive/optional (issue #3052): only present when
+        # `options.portable_artifacts` rewrote the persisted deck/log. Names
+        # what each token stood for; the inputs themselves stay pinned by
+        # `models_lib_sha256` / `netlist_closure` above.
+        environment["portable_artifacts"] = {
+            "substitutions": _portable_substitutions(
+                portable_roots,
+                repo_root=repo_root,
+                models_lib_sha256=environment["models_lib_sha256"],
+            )
+        }
     if remote_environment is not None:
         # Additive/optional: only present for the `remote` backend -- see
         # `_run_remote` and docs/cli/sim.md's "Remote backend" section.
@@ -5350,6 +5418,7 @@ def _run_local(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    portable_roots: sim_portable.Roots | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -5432,6 +5501,7 @@ def _run_local(
             osdi_preload=osdi_preload,
             save_mode=save_mode,
             ngspice_options=ngspice_options,
+            portable_roots=portable_roots,
         )
         corners.append(result)
         if version is not None:
@@ -5576,6 +5646,7 @@ def _run_local_parallel(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    portable_roots: sim_portable.Roots | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -5687,6 +5758,7 @@ def _run_local_parallel(
                     osdi_preload=osdi_preload,
                     save_mode=save_mode,
                     ngspice_options=ngspice_options,
+                    portable_roots=portable_roots,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -6568,6 +6640,7 @@ def _run_corner(
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
     ngspice_options: dict[str, Any] | None = None,
+    portable_roots: sim_portable.Roots | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
     classify the result.
@@ -6885,6 +6958,24 @@ def _run_corner(
                         "severity": "warning",
                         "code": "unknown",
                         "message": f"could not parse waveform rawfile: {exc}",
+                    }
+                )
+        if portable_roots is not None:
+            # Issue #3052: the engine has exited and its log is parsed, so
+            # the persisted deck/log can now be rewritten to stable tokens.
+            try:
+                sim_portable.rewrite_corner_files(
+                    corner_dir, deck_path, log_path, portable_roots
+                )
+            except OSError as exc:
+                diagnostics.append(
+                    {
+                        "severity": "warning",
+                        "code": "unknown",
+                        "message": (
+                            "options.portable_artifacts: could not rewrite the "
+                            f"persisted deck/log (host paths remain): {exc}"
+                        ),
                     }
                 )
         if os.path.isfile(deck_path):
