@@ -690,6 +690,18 @@ micrometres, matching that vendor deck's own `.option scale=1.0u`). `klt
 lvs`'s layout netlist is the unbound `M`-card form, which still carries
 explicit suffixes.
 
+**`form: "subckt-call"` resolves parametrised geometry (issue #2953).** An
+exported schematic netlist often writes `L=lacc W=wparam` or `W='w*2'` /
+`{a+b}` against `.subckt X ... lacc=0.5u` header defaults or `.param` lines.
+`klt lvs` resolves such a value against the enclosing `.subckt`'s header
+defaults, then the top-level `.param` lines, before the bare-literal rule
+below applies. Supported: identifiers, `+ - * /`, parentheses, unary sign and
+SPICE suffixes (`u`, `n`, `meg`, ...); no function calls, and a sibling
+parameter on the same `X` card is not a symbol. A value that cannot be
+resolved still fails with an error naming the parameter and the unresolved
+symbol — never a silent fallback. Already-literal values are untouched, and
+`ad`/`as`/`pd`/`ps` (never carried) can use any expression.
+
 **`form: "subckt-call"` resolves a bare literal per `reference.deck`
 (issue #1492).** A real xschem/ngspice schematic-flow netlist for a deck
 whose model library sets an ambient `.option scale=1.0u` (confirmed for
