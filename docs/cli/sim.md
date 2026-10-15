@@ -1985,6 +1985,23 @@ later expression may reference an earlier one's name:
 ]
 ```
 
+### `expr` after a `noise` analysis
+
+ngspice leaves the *integrated* plot current after `noise` (`noise2`:
+`onoise_total`, `inoise_total`); the spectra (`inoise_spectrum`,
+`onoise_spectrum`) live in the first plot, `noise1`. For a single `noise`
+analysis with at least one `expr` measurement, `klt sim` therefore emits
+`let inoise_spectrum = noise1.inoise_spectrum` (and the same for
+`onoise_spectrum`) before the `expr` lets. Both the totals and the spectra
+resolve by **bare name** (e.g. `onoise_spectrum[10]`, `onoise_total`); the
+`noise1.` prefix also still works. The aliases come after any rawfile `write`,
+so `options.waveforms` output is unchanged, and decks for other analysis kinds
+are byte-identical.
+
+Limitation: this applies to the single-analysis path only. Inside
+`analysis_steps` a `noise` step's spectrum plot is not captured, so spectrum
+vectors are not reachable there (tracked in [#3284](https://github.com/2AMLogic/klayout-tools/issues/3284)).
+
 ### `expr` cannot read `.meas` results
 
 The chaining rule above covers **`expr` -> `expr`** only. A `spice` entry's
