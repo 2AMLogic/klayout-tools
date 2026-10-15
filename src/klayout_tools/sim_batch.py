@@ -522,6 +522,14 @@ def _request_features(request: dict[str, Any]) -> list[str]:
     ]
 
 
+def _feature_release_key(name: str) -> int:
+    """Comparable key of the runner release that introduced registry feature
+    ``name``. Registry versions are literal tuples, so they always parse."""
+    key = _release_key(".".join(map(str, _RUNNER_REQUEST_FEATURES[name][0])))
+    assert key is not None, name
+    return key
+
+
 def _missing_runner_features(
     features: list[str], runner_version: str | None
 ) -> list[str] | None:
@@ -531,11 +539,7 @@ def _missing_runner_features(
     key = _release_key(release) if release else None
     if key is None:
         return None
-    return [
-        name
-        for name in features
-        if key < _release_key(".".join(map(str, _RUNNER_REQUEST_FEATURES[name][0])))
-    ]
+    return [name for name in features if key < _feature_release_key(name)]
 
 
 #: Filename the worker capture writes under ``$EDA_OUTPUT_DIR`` (issue #2834):
@@ -796,10 +800,9 @@ def _feature_gate_shell(features: tuple[str, ...], client_version: str) -> str:
     Only registry names and integers are embedded."""
     checks = []
     for name in features:
-        key = _release_key(".".join(map(str, _RUNNER_REQUEST_FEATURES[name][0])))
+        key = _feature_release_key(name)
         checks.append(
-            f'if [ "$rk" -lt {int(key)} ]; then '
-            f'fmiss="${{fmiss}}${{fmiss:+, }}{name}"; fi'
+            f'if [ "$rk" -lt {key} ]; then fmiss="${{fmiss}}${{fmiss:+, }}{name}"; fi'
         )
     return (
         'fmiss=; if [ -n "$rfull" ]; then '
@@ -1300,7 +1303,7 @@ def _enforce_published_runner_features(
     ]
     if any(not gap for gap in gaps):  # unknown (None) or complete (empty)
         return
-    missing = sorted({name for gap in gaps for name in gap})
+    missing = sorted({name for gap in gaps for name in gap or ()})
     versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
     message = (
         f"the request uses {', '.join(missing)}, which the fleet runner image "
