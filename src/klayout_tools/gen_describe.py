@@ -601,6 +601,69 @@ def _res_array_validate(params: dict[str, Any]) -> None:
         )
 
 
+def _res_array_ports(
+    info: dict[str, Any], metal_layer: dict[str, Any], series: bool, num: int
+) -> list[dict[str, Any]]:
+    """The ``res_array`` ports: every unit's ``R<i>_A``/``R<i>_B`` pad, or
+    (issue #2997, ``series``) only the string's two outer terminals,
+    ``R0_A`` and ``R<num - 1>_B`` -- interior pads are joined by jumpers."""
+    unit = info["unit"]
+    ports = []
+    left_xy = unit["a_xy"]  # physically local-left pad -- always points 180deg
+    right_xy = unit["b_xy"]  # physically local-right pad -- always points 0deg
+    for c in info["cells"]:
+        idx = c["idx"]
+        # A unit's poly body is drawn identically regardless of row
+        # direction (never mirrored) -- on a right-to-left (odd) row the
+        # physically-adjacent pad for a short row-transition jumper is the
+        # *entry* pad on that unit's physical right, not its left. Swapping
+        # which physical pad reports as `_A` (entry, from the previous unit
+        # in the chain) vs `_B` (exit, toward the next) keeps `R<i>_B`
+        # physically next to `R<i + 1>_A` in every row, per
+        # :func:`_res_array_layout`'s docstring.
+        if c.get("direction", 1) >= 0:
+            entry_xy, entry_deg = left_xy, 180
+            exit_xy, exit_deg = right_xy, 0
+        else:
+            entry_xy, entry_deg = right_xy, 0
+            exit_xy, exit_deg = left_xy, 180
+        for suffix, keep, (px, py), deg in (
+            ("A", idx == 0, entry_xy, entry_deg),
+            ("B", idx == num - 1, exit_xy, exit_deg),
+        ):
+            if series and not keep:
+                continue
+            ports.append(
+                {
+                    "name": f"R{idx}_{suffix}",
+                    "net": None,
+                    "layer": metal_layer,
+                    "x_um": c["x0_um"] + px,
+                    "y_um": c["y0_um"] + py,
+                    "width_um": unit["pad_height_um"],
+                    "direction_deg": deg,
+                }
+            )
+    return ports
+
+
+def _res_array_series_note(joints: list[dict[str, Any]], num: int) -> str:
+    """The ``series=true`` advisory: joint count and per-joint jumper overhead."""
+    in_row = [j["length_um"] for j in joints if j["kind"] == "row"]
+    folds = [j["length_um"] for j in joints if j["kind"] == "fold"]
+    overhead = []
+    if in_row:
+        overhead.append(f"{in_row[0]}um in-row (effective spacing_um)")
+    if folds:
+        overhead.append(f"{folds[0]}um at a row fold (row_pitch_um - pad_height_um)")
+    return (
+        f"series=true: {len(joints)} joint jumper(s) (num - 1) join the "
+        f"units end to end; only R0_A and R{num - 1}_B are reported as ports. "
+        "Per-joint overhead (jumper length): "
+        + (", ".join(overhead) if overhead else "none (num is 1)")
+    )
+
+
 def _res_array_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -648,51 +711,7 @@ def _res_array_describe(
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
 
     series = bool(params.get("series", False))
-    ports = []
-    left_xy = unit["a_xy"]  # physically local-left pad -- always points 180deg
-    right_xy = unit["b_xy"]  # physically local-right pad -- always points 0deg
-    for c in info["cells"]:
-        idx = c["idx"]
-        # A unit's poly body is drawn identically regardless of row
-        # direction (never mirrored) -- on a right-to-left (odd) row the
-        # physically-adjacent pad for a short row-transition jumper is the
-        # *entry* pad on that unit's physical right, not its left. Swapping
-        # which physical pad reports as `_A` (entry, from the previous unit
-        # in the chain) vs `_B` (exit, toward the next) keeps `R<i>_B`
-        # physically next to `R<i + 1>_A` in every row, per
-        # :func:`_res_array_layout`'s docstring.
-        if c.get("direction", 1) >= 0:
-            entry_xy, entry_deg = left_xy, 180
-            exit_xy, exit_deg = right_xy, 0
-        else:
-            entry_xy, entry_deg = right_xy, 0
-            exit_xy, exit_deg = left_xy, 180
-        # Issue #2997: a series string exposes only its two outer terminals,
-        # `R0_A` and `R<num - 1>_B`; interior pads are joined by jumpers.
-        if not series or idx == 0:
-            ports.append(
-                {
-                    "name": f"R{idx}_A",
-                    "net": None,
-                    "layer": metal_layer,
-                    "x_um": c["x0_um"] + entry_xy[0],
-                    "y_um": c["y0_um"] + entry_xy[1],
-                    "width_um": unit["pad_height_um"],
-                    "direction_deg": entry_deg,
-                }
-            )
-        if not series or idx == params["num"] - 1:
-            ports.append(
-                {
-                    "name": f"R{idx}_B",
-                    "net": None,
-                    "layer": metal_layer,
-                    "x_um": c["x0_um"] + exit_xy[0],
-                    "y_um": c["y0_um"] + exit_xy[1],
-                    "width_um": unit["pad_height_um"],
-                    "direction_deg": exit_deg,
-                }
-            )
+    ports = _res_array_ports(info, metal_layer, series, params["num"])
 
     notes = []
     # The effective spacing actually drawn -- the requested `spacing_um`,
@@ -729,23 +748,7 @@ def _res_array_describe(
         )
 
     if series:
-        joints = info["jumpers"]
-        in_row = [j["length_um"] for j in joints if j["kind"] == "row"]
-        folds = [j["length_um"] for j in joints if j["kind"] == "fold"]
-        overhead = []
-        if in_row:
-            overhead.append(f"{in_row[0]}um in-row (effective spacing_um)")
-        if folds:
-            overhead.append(
-                f"{folds[0]}um at a row fold (row_pitch_um - pad_height_um)"
-            )
-        notes.append(
-            f"series=true: {len(joints)} joint jumper(s) (num - 1) join the "
-            "units end to end; only R0_A and "
-            f"R{params['num'] - 1}_B are reported as ports. Per-joint "
-            "overhead (jumper length): "
-            + (", ".join(overhead) if overhead else "none (num is 1)")
-        )
+        notes.append(_res_array_series_note(info["jumpers"], params["num"]))
 
     if end_contact[0] > 0.0:
         notes.append(
