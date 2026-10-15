@@ -1,0 +1,46 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_task/1",
+  "id": "five-transistor-ota-layout",
+  "title": "5T OTA layout (fixture)",
+  "pdk": "sky130",
+  "description": "Synthetic fixture for the layout-task schema: a five-transistor OTA given as a frozen netlist; the agent must produce a DRC- and LVS-clean layout. Paths and hashes are placeholders -- the real corpus is built in #3025.",
+  "block_spec": {
+    "spec_class": "ota",
+    "io_nodes": [
+      "INP",
+      "INN",
+      "OUT",
+      "VDD",
+      "VSS"
+    ],
+    "target_specs": null
+  },
+  "frozen_netlist": {
+    "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/netlist.spice",
+    "sha256": "4f57053a65ab71e9000c13b6f2815be6e4576a08823520ddc53c136b069b14fa"
+  },
+  "reference_layout": {
+    "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/reference.gds",
+    "sha256": "fc232d021e55564216aad3b3dec0129e4692a650b98e08d664dc861a013742bd",
+    "cell_name": "ota5t"
+  },
+  "generator_recipe": {
+    "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/recipe.json",
+    "sha256": "399ca554dc592d8aa17a240d31f8f73eff46be78056c299999c02007ebc19733"
+  },
+  "negative_controls": [
+    {
+      "id": "poly-width",
+      "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/neg-drc.gds",
+      "sha256": "e33529d5ad5b19b94f344513dd96cdc314a2f6dcb95cbd7262d9a077c4b71278",
+      "expected_failure": "drc"
+    },
+    {
+      "id": "swapped-pair",
+      "path": "benchmarks/design-agent/layout-corpus/five-transistor-ota/neg-lvs.gds",
+      "sha256": "8a6741bc8cdb2ef739bba629a7e49e8a2e13cb1660cd99ace05df19750ce4526",
+      "expected_failure": "lvs"
+    }
+  ],
+  "notes": "Synthetic fixture; hashes are sha256 of 'fixture:<name>'."
+}

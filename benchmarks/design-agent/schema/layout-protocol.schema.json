@@ -1,0 +1,363 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/benchmarks/design-agent/schema/layout-protocol.schema.json",
+  "title": "Layout-flow benchmark protocol (klt.design_agent_benchmark.layout_protocol/1)",
+  "description": "The versioned, frozen protocol of the three-arm layout-flow benchmark (epic #2252, phase 1 #3024): arm definitions, tool surfaces, seeding, eligibility, validity, scoring, failure semantics, seed identity, repeatability, and the live-agent budget policy. Shape only -- cross-field rules (arm/class consistency, status table, budget constants) are enforced by `design_agent_benchmark_layout.validate_protocol`. See benchmarks/design-agent/README.md 'Layout-flow protocol'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol_version",
+    "title",
+    "description",
+    "tool_classes",
+    "tool_recording",
+    "arms",
+    "seeding_decision",
+    "refinement_sufficiency",
+    "task_eligibility",
+    "validity",
+    "score",
+    "failure_semantics",
+    "seed_identity",
+    "repeatability",
+    "budget"
+  ],
+  "$defs": {
+    "slug": { "type": "string", "pattern": "^[a-z0-9]+([-+][a-z0-9]+)*$" },
+    "text": { "type": "string", "minLength": 1 },
+    "classList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/slug" },
+      "minItems": 1,
+      "uniqueItems": true
+    }
+  },
+  "properties": {
+    "schema": { "const": "klt.design_agent_benchmark.layout_protocol/1" },
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Semver. A change to any decision in this document is a version bump; results are only comparable within one version."
+    },
+    "title": { "$ref": "#/$defs/text" },
+    "description": { "$ref": "#/$defs/text" },
+    "tool_classes": {
+      "type": "object",
+      "description": "Class name -> `klt` verbs. Classes are disjoint; arms and phases are expressed in classes.",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/slug" },
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/slug" },
+        "minItems": 1,
+        "uniqueItems": true
+      }
+    },
+    "tool_recording": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanism", "description", "record_fields", "violation_status"],
+      "properties": {
+        "mechanism": { "const": "klt-shim" },
+        "description": { "$ref": "#/$defs/text" },
+        "record_fields": {
+          "type": "array",
+          "items": { "enum": ["seq", "phase", "verb", "class", "exit_code"] },
+          "minItems": 5,
+          "uniqueItems": true
+        },
+        "violation_status": { "const": "invalid_tool_surface" }
+      }
+    },
+    "arms": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "analog", "description", "seed", "phases"],
+        "properties": {
+          "id": { "enum": ["draw-only", "gen-only", "gen+refine"] },
+          "analog": { "$ref": "#/$defs/text" },
+          "description": { "$ref": "#/$defs/text" },
+          "seed": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["source_arm", "policy", "scope", "seed_is_round_zero", "unseedable_status"],
+                "properties": {
+                  "source_arm": { "const": "gen-only" },
+                  "policy": { "const": "same_run_best_valid" },
+                  "scope": {
+                    "type": "array",
+                    "items": { "enum": ["task_id", "agent_id", "replicate"] },
+                    "minItems": 3,
+                    "uniqueItems": true
+                  },
+                  "seed_is_round_zero": { "type": "boolean" },
+                  "unseedable_status": { "const": "not_run_no_seed" }
+                }
+              }
+            ]
+          },
+          "phases": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "allowed_classes"],
+              "properties": {
+                "id": { "enum": ["draw", "generate", "refine"] },
+                "allowed_classes": { "$ref": "#/$defs/classList" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "seeding_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question", "decision", "rationale", "reproducibility_check", "measurement_outcome"],
+      "properties": {
+        "question": { "$ref": "#/$defs/text" },
+        "decision": { "enum": ["same_run_best_valid_gen_only", "fixed_reference_composition"] },
+        "rationale": { "$ref": "#/$defs/text" },
+        "reproducibility_check": { "$ref": "#/$defs/text" },
+        "measurement_outcome": { "$ref": "#/$defs/text" }
+      }
+    },
+    "refinement_sufficiency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question", "verdict", "evidence", "gap", "consequence", "follow_up"],
+      "properties": {
+        "question": { "$ref": "#/$defs/text" },
+        "verdict": { "enum": ["sufficient", "additive_only", "insufficient"] },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/text" }, "minItems": 1 },
+        "gap": { "type": ["string", "null"] },
+        "consequence": { "$ref": "#/$defs/text" },
+        "follow_up": { "type": ["string", "null"] }
+      }
+    },
+    "task_eligibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "rules"],
+      "properties": {
+        "description": { "$ref": "#/$defs/text" },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "description"],
+            "properties": {
+              "id": { "enum": ["frozen_netlist", "reference_layout_valid", "generator_reachable", "negative_controls", "open_pdk"] },
+              "description": { "$ref": "#/$defs/text" }
+            }
+          }
+        }
+      }
+    },
+    "validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "required_checks", "derivation", "drc", "lvs", "provenance", "note"],
+      "properties": {
+        "description": { "$ref": "#/$defs/text" },
+        "required_checks": {
+          "type": "array",
+          "items": { "enum": ["drc", "lvs", "provenance"] },
+          "minItems": 3,
+          "uniqueItems": true
+        },
+        "derivation": { "const": "repo_frozen" },
+        "drc": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["verb", "pass_status"],
+          "properties": { "verb": { "const": "drc" }, "pass_status": { "const": "clean" } }
+        },
+        "lvs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["verb", "pass_status", "reference"],
+          "properties": {
+            "verb": { "const": "lvs" },
+            "pass_status": { "const": "match" },
+            "reference": { "const": "task.frozen_netlist" }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rule", "scorer_rederives"],
+          "properties": { "rule": { "$ref": "#/$defs/text" }, "scorer_rederives": { "const": true } }
+        },
+        "note": { "$ref": "#/$defs/text" }
+      }
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "primary", "fields", "relative_to", "aggregate", "comparable_pair"],
+      "properties": {
+        "direction": { "const": "lower_is_better" },
+        "primary": { "const": "area_um2" },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "source", "required"],
+            "properties": {
+              "id": { "enum": ["area_um2", "utilization", "sim_margin"] },
+              "source": { "$ref": "#/$defs/text" },
+              "required": { "type": "boolean" },
+              "deferred": { "$ref": "#/$defs/text" }
+            }
+          }
+        },
+        "relative_to": { "const": "draw-only" },
+        "aggregate": { "$ref": "#/$defs/text" },
+        "comparable_pair": { "$ref": "#/$defs/text" }
+      }
+    },
+    "failure_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "statuses"],
+      "properties": {
+        "description": { "$ref": "#/$defs/text" },
+        "statuses": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "scored", "counts_in_denominator"],
+            "properties": {
+              "id": {
+                "enum": [
+                  "valid",
+                  "invalid_drc",
+                  "invalid_lvs",
+                  "invalid_provenance",
+                  "invalid_tool_surface",
+                  "timeout",
+                  "budget_exhausted",
+                  "agent_error",
+                  "not_run_no_seed",
+                  "interrupted"
+                ]
+              },
+              "scored": { "type": "boolean" },
+              "counts_in_denominator": { "type": "boolean" },
+              "resumable": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "seed_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "hash", "canonicalization", "fields", "seeded_arm_extra_fields"],
+      "properties": {
+        "description": { "$ref": "#/$defs/text" },
+        "hash": { "const": "sha256" },
+        "canonicalization": { "$ref": "#/$defs/text" },
+        "fields": {
+          "type": "array",
+          "items": { "enum": ["protocol_version", "task_id", "task_sha256", "arm", "agent_id", "replicate"] },
+          "minItems": 6,
+          "uniqueItems": true
+        },
+        "seeded_arm_extra_fields": {
+          "type": "array",
+          "items": { "const": "seed_artifact_sha256" },
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+    "repeatability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replicates_min", "deterministic_scope", "rescore_must_match", "fingerprint_fields"],
+      "properties": {
+        "replicates_min": { "type": "integer", "minimum": 1 },
+        "deterministic_scope": { "$ref": "#/$defs/text" },
+        "rescore_must_match": {
+          "type": "array",
+          "items": { "enum": ["status", "validity", "score.area_um2"] },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "fingerprint_fields": {
+          "type": "array",
+          "items": { "enum": ["protocol_sha256", "task_sha256"] },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "credentialed_steps",
+        "credential_free_steps",
+        "per_run",
+        "ci",
+        "accounting",
+        "exhaustion_status"
+      ],
+      "properties": {
+        "description": { "$ref": "#/$defs/text" },
+        "credentialed_steps": { "type": "array", "items": { "$ref": "#/$defs/text" }, "minItems": 1 },
+        "credential_free_steps": { "type": "array", "items": { "$ref": "#/$defs/text" }, "minItems": 1 },
+        "per_run": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agent_timeout_s", "tool_call_budget"],
+          "properties": {
+            "agent_timeout_s": { "type": "number", "exclusiveMinimum": 0 },
+            "tool_call_budget": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["live_default", "live_smoke", "skip_when_credentials_missing", "never_fail_workflow_on_live_result"],
+          "properties": {
+            "live_default": { "const": "off" },
+            "live_smoke": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["tasks", "arms", "replicates"],
+              "properties": {
+                "tasks": { "type": "integer", "minimum": 1 },
+                "arms": { "type": "integer", "minimum": 1, "maximum": 3 },
+                "replicates": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "skip_when_credentials_missing": { "const": true },
+            "never_fail_workflow_on_live_result": { "const": true }
+          }
+        },
+        "accounting": { "$ref": "#/$defs/text" },
+        "exhaustion_status": { "const": "budget_exhausted" }
+      }
+    }
+  }
+}
