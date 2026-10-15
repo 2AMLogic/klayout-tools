@@ -2085,6 +2085,25 @@ literal time or a `.param` reference. This error follows the same
 `Error: measure <name> ...` log format, so it is attached to the measurement's
 diagnostic in the same way.
 
+### `FIND ... AT=` at a `dc` sweep's end point
+
+ngspice interpolates `AT=` inside the swept axis. When the sweep step is not
+exactly representable in binary, the last sample accumulates rounding error and
+can land just short of the literal end point, so `AT=<hi>` fails with
+`out of interval` even though the interior points resolve. Verified on
+ngspice-46 through `klt sim` with `v(out)` on a 1k/1k divider:
+
+```
+dc args "V1 0 1 0.25"   AT=0 -> 0, AT=0.5 -> 0.25, AT=1 -> 0.5   ; works
+dc args "V1 0 1 0.1"    AT=0 -> 0, AT=0.5 -> 0.25, AT=1 -> error  ; out of interval
+```
+
+The failing measurement carries ngspice's text (`measurement 'hi' produced no
+value -- ngspice reported: out of interval`). `klt sim` does not rewrite the
+card. Either pick a step that lands exactly on the end point (a power-of-two
+fraction), or read the last sample from `options.waveforms` instead of using
+`AT=`.
+
 ### The expression must reduce to a single real scalar
 
 This is the one contract rule the tool cannot check up front. ngspice's
