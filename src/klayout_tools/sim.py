@@ -2074,21 +2074,14 @@ def _run_sim_corners(
 
     # Issue #2995: per-instance mismatch gating. Validated before any probe or
     # backend dispatch; the gated netlist copy is what local backends run.
-    dispatch_netlist_path = netlist_path
-    if monte_carlo_spec is not None and "instances" in monte_carlo_spec:
-        dispatch_netlist_path, instance_gating = _apply_mismatch_instance_gating(
-            netlist_path,
-            monte_carlo_spec,
-            monte_carlo_info,
-            models.get("pdk"),
-            backend=backend,
-            explicit_points=explicit_points_wire is not None,
-        )
-        if monte_carlo_info is not None:
-            monte_carlo_info = {
-                **monte_carlo_info,
-                "instance_mismatch": instance_gating,
-            }
+    dispatch_netlist_path, monte_carlo_info = _maybe_gate_instances(
+        netlist_path,
+        monte_carlo_spec,
+        monte_carlo_info,
+        models.get("pdk"),
+        backend=backend,
+        explicit_points=explicit_points_wire is not None,
+    )
 
     # Issue #2706: fail fast (before any probe or backend dispatch) when a
     # supply override targets a source with an explicit transient waveform.
@@ -3536,6 +3529,33 @@ def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
 # :func:`_expand_monte_carlo` for the seed-derivation contract and
 # docs/cli/sim.md's "Monte Carlo" section for the full request/response
 # shape.
+
+
+def _maybe_gate_instances(
+    netlist_path: str,
+    mc_spec: dict[str, Any] | None,
+    monte_carlo_info: dict[str, Any] | None,
+    pdk: str | None,
+    *,
+    backend: str,
+    explicit_points: bool,
+) -> tuple[str, dict[str, Any] | None]:
+    """Apply ``request.monte_carlo.instances`` when present (issue #2995):
+    returns ``(netlist_to_dispatch, monte_carlo_info)``, with the gating
+    report attached as ``instance_mismatch``; unchanged when absent."""
+    if mc_spec is None or "instances" not in mc_spec:
+        return netlist_path, monte_carlo_info
+    gated_path, gating = _apply_mismatch_instance_gating(
+        netlist_path,
+        mc_spec,
+        monte_carlo_info,
+        pdk,
+        backend=backend,
+        explicit_points=explicit_points,
+    )
+    if monte_carlo_info is not None:
+        monte_carlo_info = {**monte_carlo_info, "instance_mismatch": gating}
+    return gated_path, monte_carlo_info
 
 
 def _apply_mismatch_instance_gating(

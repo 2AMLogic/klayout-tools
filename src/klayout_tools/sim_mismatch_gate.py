@@ -120,21 +120,12 @@ def _logical_lines(text: str) -> list[tuple[int, int, str]]:
     return out
 
 
-def gate_netlist(
+def _scan_top_level(
     text: str,
-    include: list[str],
-    exclude: list[str],
-    switch: str,
-) -> tuple[str, list[dict[str, Any]]]:
-    """Rewrite ``text`` so only the selected top-level ``X`` instances keep
-    mismatch on. Returns ``(new_text, instance_report)``.
-
-    Selection: an instance is randomised when it matches ``include`` (or
-    ``include`` is empty) and does not match ``exclude``. Every other ``X``
-    instance is wrapped. Raises :class:`GateError` when a glob matches no
-    ``X`` instance, or matches a non-``X`` element.
-    """
-    lines = text.split("\n")
+) -> tuple[list[tuple[int, int, str, list[str]]], list[str]]:
+    """Top-level elements of ``text`` outside ``.subckt``/``.control`` blocks:
+    ``(x_instances, other_element_names)``, where each X instance is
+    ``(first_line, last_line, name, tokens)``."""
     in_subckt = 0
     in_control = False
     x_instances: list[tuple[int, int, str, list[str]]] = []
@@ -157,8 +148,17 @@ def gate_netlist(
             x_instances.append((first, last, tokens[0], tokens))
         else:
             other_names.append(tokens[0])
+    return x_instances, other_names
 
-    names = {name.lower(): name for _, _, name, _ in x_instances}
+
+def _check_globs_match(
+    include: list[str],
+    exclude: list[str],
+    x_names: list[str],
+    other_names: list[str],
+) -> None:
+    """Raise :class:`GateError` for a glob matching no top-level X instance."""
+    names = {n.lower() for n in x_names}
     other_lower = [n.lower() for n in other_names]
     for label, globs in (("include", include), ("exclude", exclude)):
         for glob in globs:
@@ -175,45 +175,52 @@ def gate_netlist(
                 "no top-level X instance of the request netlist"
             )
 
-    def randomised(name: str) -> bool:
-        low = name.lower()
-        if include and not any(fnmatch.fnmatchcase(low, g) for g in include):
-            return False
-        return not any(fnmatch.fnmatchcase(low, g) for g in exclude)
 
-    report: list[dict[str, Any]] = []
-    wrappers: list[str] = []
-    replacements: dict[int, tuple[int, str]] = {}
-    for first, last, name, tokens in x_instances:
-        body = tokens[1:]
-        params_at = next(
-            (k for k, t in enumerate(body) if t.lower() == "params:" or "=" in t),
-            len(body),
+def _is_randomised(name: str, include: list[str], exclude: list[str]) -> bool:
+    low = name.lower()
+    if include and not any(fnmatch.fnmatchcase(low, g) for g in include):
+        return False
+    return not any(fnmatch.fnmatchcase(low, g) for g in exclude)
+
+
+def _parse_instance(name: str, tokens: list[str]) -> tuple[list[str], str, list[str]]:
+    """Split an X instance into ``(nodes, model, body)`` where ``body`` is
+    every token after the instance name (nodes, model, then parameters)."""
+    body = tokens[1:]
+    params_at = next(
+        (k for k, t in enumerate(body) if t.lower() == "params:" or "=" in t),
+        len(body),
+    )
+    positional = body[:params_at]
+    if len(positional) < 2:
+        raise GateError(
+            f"cannot parse instance {name!r}: expected nodes followed by "
+            "a subcircuit name"
         )
-        positional = body[:params_at]
-        if len(positional) < 2:
-            raise GateError(
-                f"cannot parse instance {name!r}: expected nodes followed by "
-                "a subcircuit name"
-            )
-        model = positional[-1]
-        nodes = positional[:-1]
-        keep = randomised(name)
-        report.append({"instance": name, "model": model, "randomised": keep})
-        if keep:
-            continue
-        wrapper = "klt_mmoff_" + _SAFE_NAME_RE.sub("_", name)
-        pins = [f"p{k}" for k in range(len(nodes))]
-        wrappers += [
-            f".subckt {wrapper} {' '.join(pins)}",
-            f".param {switch}=0",
-            " ".join(
-                [f"X{name.lstrip('xX') or 'inner'}_klt", *pins, *body[len(nodes) :]]
-            ),
-            ".ends",
-        ]
-        replacements[first] = (last, " ".join([name, *nodes, wrapper]))
+    return positional[:-1], positional[-1], body
 
+
+def _wrap_instance(
+    name: str, nodes: list[str], body: list[str], switch: str
+) -> tuple[str, list[str]]:
+    """``(wrapper_name, wrapper_subckt_lines)`` moving the instance line
+    (parameters included) inside a subcircuit that zeroes ``switch``."""
+    wrapper = "klt_mmoff_" + _SAFE_NAME_RE.sub("_", name)
+    pins = [f"p{k}" for k in range(len(nodes))]
+    lines = [
+        f".subckt {wrapper} {' '.join(pins)}",
+        f".param {switch}=0",
+        " ".join([f"X{name.lstrip('xX') or 'inner'}_klt", *pins, *body[len(nodes) :]]),
+        ".ends",
+    ]
+    return wrapper, lines
+
+
+def _apply_replacements(
+    lines: list[str], replacements: dict[int, tuple[int, str]], wrappers: list[str]
+) -> str:
+    """Substitute the rewritten instance lines and append the wrapper
+    subcircuits before the final ``.end``."""
     out: list[str] = []
     i = 0
     while i < len(lines):
@@ -233,4 +240,36 @@ def gate_netlist(
             "* klt sim monte_carlo.instances: mismatch-off wrappers (#2995)",
             *wrappers,
         ]
-    return "\n".join(out), report
+    return "\n".join(out)
+
+
+def gate_netlist(
+    text: str,
+    include: list[str],
+    exclude: list[str],
+    switch: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Rewrite ``text`` so only the selected top-level ``X`` instances keep
+    mismatch on. Returns ``(new_text, instance_report)``.
+
+    Selection: an instance is randomised when it matches ``include`` (or
+    ``include`` is empty) and does not match ``exclude``. Every other ``X``
+    instance is wrapped. Raises :class:`GateError` when a glob matches no
+    ``X`` instance, or matches a non-``X`` element.
+    """
+    x_instances, other_names = _scan_top_level(text)
+    _check_globs_match(include, exclude, [x[2] for x in x_instances], other_names)
+
+    report: list[dict[str, Any]] = []
+    wrappers: list[str] = []
+    replacements: dict[int, tuple[int, str]] = {}
+    for first, last, name, tokens in x_instances:
+        nodes, model, body = _parse_instance(name, tokens)
+        keep = _is_randomised(name, include, exclude)
+        report.append({"instance": name, "model": model, "randomised": keep})
+        if keep:
+            continue
+        wrapper, wrapper_lines = _wrap_instance(name, nodes, body, switch)
+        wrappers += wrapper_lines
+        replacements[first] = (last, " ".join([name, *nodes, wrapper]))
+    return _apply_replacements(text.split("\n"), replacements, wrappers), report
