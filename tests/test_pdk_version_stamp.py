@@ -1,4 +1,4 @@
-"""Issue #3070: ``pdk._read_version`` fallbacks and the ``linked_trees`` key."""
+"""Issue #3070: ``pdk.read_version`` fallbacks and the ``linked_trees`` key."""
 
 from __future__ import annotations
 
@@ -43,17 +43,17 @@ def test_sources_unchanged(tmp_path):
     v = _variant(tmp_path / "v")
     (v / "SOURCES").write_text("open_pdks abc\n  magic def \n", encoding="utf-8")
     (v / ".fetched-version").write_text("1.0", encoding="utf-8")
-    assert pdk._read_version(str(v)) == "open_pdks abc; magic def"
+    assert pdk.read_version(str(v)) == "open_pdks abc; magic def"
 
 
 def test_none_when_nothing(tmp_path):
-    assert pdk._read_version(str(_variant(tmp_path / "v"))) is None
+    assert pdk.read_version(str(_variant(tmp_path / "v"))) is None
 
 
 def test_fetched_marker(tmp_path):
     v = _variant(tmp_path / "v")
     (v / ".fetched-version").write_text("v1.2.3\n", encoding="utf-8")
-    assert pdk._read_version(str(v)) == "fetched:v1.2.3"
+    assert pdk.read_version(str(v)) == "fetched:v1.2.3"
 
 
 @needs_git
@@ -61,9 +61,9 @@ def test_git_clean_and_dirty(tmp_path):
     v = _variant(tmp_path / "v")
     (v / "libs.tech" / "f").write_text("a", encoding="utf-8")
     head = _commit_all(v)
-    assert pdk._read_version(str(v)) == f"git:{head}"
+    assert pdk.read_version(str(v)) == f"git:{head}"
     (v / "libs.tech" / "f").write_text("b", encoding="utf-8")
-    assert pdk._read_version(str(v)) == f"git:{head}-dirty"
+    assert pdk.read_version(str(v)) == f"git:{head}-dirty"
 
 
 @needs_git
@@ -71,7 +71,7 @@ def test_git_at_pdk_root_parent(tmp_path):
     v = _variant(tmp_path / "root" / "v")
     (v / "f").write_text("a", encoding="utf-8")
     head = _commit_all(tmp_path / "root")
-    assert pdk._read_version(str(v)) == f"git:{head}"
+    assert pdk.read_version(str(v)) == f"git:{head}"
 
 
 @needs_git
@@ -79,9 +79,9 @@ def test_unrelated_enclosing_repo_ignored(tmp_path):
     (tmp_path / "klt.txt").write_text("a", encoding="utf-8")
     _commit_all(tmp_path)
     v = _variant(tmp_path / "pdks" / "deep" / "ihp")
-    assert pdk._read_version(str(v)) is None
+    assert pdk.read_version(str(v)) is None
     (v / ".fetched-version").write_text("r1", encoding="utf-8")
-    assert pdk._read_version(str(v)) == "fetched:r1"
+    assert pdk.read_version(str(v)) == "fetched:r1"
 
 
 def test_git_missing(tmp_path, monkeypatch):
@@ -91,7 +91,7 @@ def test_git_missing(tmp_path, monkeypatch):
         raise FileNotFoundError("git")
 
     monkeypatch.setattr(pdk.subprocess, "run", boom)
-    assert pdk._read_version(str(v)) is None
+    assert pdk.read_version(str(v)) is None
 
 
 def _info(root, name):

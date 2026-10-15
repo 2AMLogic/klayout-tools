@@ -435,7 +435,7 @@ def _probe_root(root_path: str) -> list[dict[str, Any]]:
         variants.append(
             {
                 "name": name,
-                "version": _read_version(variant_dir),
+                "version": read_version(variant_dir),
                 "_dir": variant_dir,
                 "_layout": layout,
             }
@@ -474,7 +474,7 @@ def _probe_flat_variant(root_path: str) -> list[dict[str, Any]]:
     return [
         {
             "name": name,
-            "version": _read_version(root_path),
+            "version": read_version(root_path),
             "_dir": root_path,
             "_layout": layout,
         }
@@ -516,7 +516,7 @@ def _compatibility_for(entry: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _read_version(variant_dir: str) -> str | None:
+def read_version(variant_dir: str) -> str | None:
     """Read the version stamp for a variant install, or ``None``.
 
     In order: (1) open_pdks' ``SOURCES`` file -- non-empty lines
@@ -571,6 +571,12 @@ def _git_version(variant_dir: str) -> str | None:
     a cache would go stale across runs that edit the tree.
     """
     real = os.path.realpath(variant_dir)
+    # A work tree rooted at ``real`` or its parent has a ``.git`` entry there
+    # (dir, or file for linked worktrees/submodules); skip the subprocess otherwise.
+    if not any(
+        os.path.exists(os.path.join(d, ".git")) for d in (real, os.path.dirname(real))
+    ):
+        return None
     top = _git_run(real, "rev-parse", "--show-toplevel")
     if top is None:
         return None

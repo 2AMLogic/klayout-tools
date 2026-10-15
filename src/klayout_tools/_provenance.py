@@ -501,7 +501,7 @@ def _linked_trees(pdk: dict[str, Any], deck_path: str | None) -> list[dict[str, 
     return [
         {
             "name": os.path.basename(tree),
-            "version": pdk_module._read_version(tree),
+            "version": pdk_module.read_version(tree),
         }
     ]
 
