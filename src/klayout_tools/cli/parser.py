@@ -2338,6 +2338,27 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--probe",
+        dest="probes",
+        action="append",
+        default=None,
+        metavar="name=ID,layer=ROLE,x=UM,y=UM",
+        help=(
+            "ask which extracted net lies under one point (issue #2986), as "
+            "'name=<id>,layer=<role>,x=<um>,y=<um>'; repeatable. x/y are "
+            "micrometres in the top cell's frame (the frame label positions "
+            "use). ROLE is the same vocabulary as --label-layer: `well`, "
+            "`poly`, or `metal<i>` (0-based, index-aligned with the deck's "
+            "metal stack). Answered on the extraction this command already "
+            "runs, so the net is the same one `nets[]` reports under "
+            "--def-net-names / --abstract-cells / --pins. The JSON "
+            "`probes[]` carries {name, layer, x_um, y_um, found, net, "
+            "cluster_id}; two probes on one net share `cluster_id`. A point "
+            "on empty space or inside a black-box region is `found: false`, "
+            "not an error. See docs/cli/extract.md's 'Point-to-net probes'."
+        ),
+    )
+    extract_parser.add_argument(
         "--defer-resistor-fixed-offset",
         dest="defer_resistor_fixed_offset",
         action="store_true",
