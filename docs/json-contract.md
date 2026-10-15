@@ -471,6 +471,12 @@ more specific `unanchored_evidence`. No `schema_version` bump. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10: bind them
 to an audited artifact".
 
+Issue #3044 adds an optional `provenance.input.paths` set form to that
+envelope and, on its citation, an additive `artifact_binding.members` list
+(`[{path, content_hash, status}]`; the item's `detail.artifact_binding.members`
+when unmet). Single-path citations are byte-identical to before. No
+`schema_version` bump.
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A

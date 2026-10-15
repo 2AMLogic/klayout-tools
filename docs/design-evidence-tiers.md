@@ -78,6 +78,11 @@ per item:
 - item 10: the repo-hygiene audit record, for example the CI workflow
   file or a checklist covering README, spec table and license.
 
+Where the claim is about a set of files (item 1's sources plus the derived
+netlist; item 9's or 10's several files), the envelope may bind the set with
+`provenance.input.paths` (issue #3044) so that editing any member turns the
+row stale; see [`docs/cli/signoff.md`](cli/signoff.md).
+
 A passing native envelope cited for one of these four is still accepted,
 for compatibility. Its citation carries no `artifact_binding`, which marks
 it as a cited pass the tool could not judge for relevance. See
