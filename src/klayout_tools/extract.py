@@ -10764,6 +10764,23 @@ def _corrected_resistor_r_ohm(
     return r_ohm
 
 
+def resistor_r_ohm_for_geometry(resistor: Any, l_um: float, w_um: float) -> float:
+    """The ``r_ohm`` ``klt extract`` reports for a ``resistor``
+    (:class:`~klayout_tools.decks.ResistorDevice`) of drawn ``l_um`` x
+    ``w_um`` micrometres: ``L / W * sheet_rho_ohm_sq`` run through
+    :func:`_corrected_resistor_r_ohm` with the deck's fixed offset, end term
+    and width offset (issue #2905). The one shared code path for the
+    ``klt lvs`` ``subckt-call`` reference side, so it cannot drift from the
+    layout side."""
+    return _corrected_resistor_r_ohm(
+        l_um / w_um * resistor.sheet_rho_ohm_sq,
+        w_um,
+        resistor.fixed_offset_ohm,
+        resistor.end_term_ohm_um,
+        resistor.width_offset_um,
+    )
+
+
 def apply_resistor_fixed_offset_corrections(
     netlist: kdb.Netlist, deck: ExtractionDeck
 ) -> None:
