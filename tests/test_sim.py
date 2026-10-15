@@ -12366,6 +12366,24 @@ def test_gf180_pdk_native_passives_report_inactive():
         assert sim._MISMATCH_ACTIVITY[("gf180mcu", fam)]["active"] is False
 
 
+def test_sky130_resistor_reports_mismatch_active(tmp_path):
+    """#3032: sky130 poly resistors carry a per-instance AGAUSS hook gated by
+    MC_MM_SWITCH, so the report is a curated `active: True`, not `None`."""
+    netlist = tmp_path / "r.spice"
+    netlist.write_text(
+        "XR1 a b 0 sky130_fd_pr__res_high_po_1p41 L=10\n"
+        "XR2 a c 0 sky130_fd_pr__res_high_po_1p41 L=10\n"
+    )
+    report = sim._mismatch_family_report(str(netlist), "sky130A")
+    assert [f["family"] for f in report] == ["resistor"]
+    assert report[0]["active"] is True
+    assert "MC_MM_SWITCH" in report[0]["note"]
+    # gf180 and unknown-PDK behaviour unchanged.
+    assert sim._MISMATCH_ACTIVITY[("gf180mcu", "resistor")]["active"] is False
+    unknown = sim._mismatch_family_report(str(netlist), "mystery")
+    assert unknown[0]["active"] is None
+
+
 # --- #2894: unknown supply_v key, timeout-budget hint ----------------------- #
 
 
