@@ -10,6 +10,7 @@ import sys
 
 from .. import arith_gen, netlist, netlist_batch, pdk_stackup, pex
 from ..equiv import SUPPORTED_SIM_BACKENDS
+from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
@@ -77,6 +78,13 @@ def _add_format_arg(
     to override for the few subcommands with non-standard format options.
     """
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
+
+
+def _parasitic_variant_arg(value: str) -> str:
+    """argparse ``type=`` for ``--parasitic-variant`` (issue #3056): a value
+    outside the closed grammar is a usage error (exit 2)."""
+    parse_parasitic_variants([value], argparse.ArgumentTypeError)
+    return value
 
 
 def _deck_names_str() -> str:
@@ -2017,6 +2025,25 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--parasitic-variant",
+        dest="parasitic_variants",
+        type=_parasitic_variant_arg,
+        action="append",
+        default=None,
+        metavar="VARIANT",
+        help=(
+            "drop parasitic elements at injection time (issue #3056); "
+            "repeatable and composable. One of drop-r:NET|* (short the "
+            "net's star legs into its hub -- no series R), "
+            "drop-c-ground:NET|* (omit the net's ground C), or "
+            "drop-c-coupling (omit every Ccc_* card). Requires "
+            "--parasitics. Anything else is a usage error; a NET matching "
+            "no net is reported in `warnings`. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitic-variant' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--mom-rlc-net",
         dest="mom_rlc_net",
         default=None,
@@ -2939,6 +2966,25 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "extract --distributed-rc`; requires --critical-net. Off by "
             "default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's '--distributed-rc' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--parasitic-variant",
+        dest="parasitic_variants",
+        type=_parasitic_variant_arg,
+        action="append",
+        default=None,
+        metavar="VARIANT",
+        help=(
+            "drop parasitic elements at injection time (issue #3056); "
+            "repeatable and composable. One of drop-r:NET|* (short the "
+            "net's star legs into its hub -- no series R), "
+            "drop-c-ground:NET|* (omit the net's ground C), or "
+            "drop-c-coupling (omit every Ccc_* card). Requires "
+            "--parasitics. Anything else is a usage error; a NET matching "
+            "no net is reported in `warnings`. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--parasitic-variant' section."
         ),
     )
     pex_parser.add_argument(
