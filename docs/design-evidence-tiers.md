@@ -78,6 +78,16 @@ per item:
 - item 10: the repo-hygiene audit record, for example the CI workflow
   file or a checklist covering README, spec table and license.
 
+For items 1 and 2, whose artifacts are usually *generated* (a netlist from
+its schematic, a stream from its generator), the attestation may also carry
+a regeneration claim (issue #2887): the generator command and the hash the
+attester's CI got by re-running it. The tool never runs the generator. It
+checks only that the claimed hash equals the bound artifact's, and renders
+`stale_artifact` when they differ, which means the committed artifact is not
+what its generator produces. This states freshness in the manifest instead
+of in a separate CI gate, but the regeneration itself remains the
+attester's word.
+
 A passing native envelope cited for one of these four is still accepted,
 for compatibility. Its citation carries no `artifact_binding`, which marks
 it as a cited pass the tool could not judge for relevance. See
