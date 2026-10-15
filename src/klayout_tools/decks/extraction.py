@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from .rules import RuleProvenance
 
@@ -1076,7 +1077,7 @@ class ExtractionDeck:
                     f"{where} label-layer role {role!r} override must be a "
                     f"(layer, datatype) pair of integers or None, got {layer!r}"
                 )
-        replacements: dict[str, object] = {}
+        replacements: dict[str, Any] = {}
         if "well" in overrides:
             replacements["well_label"] = overrides["well"]
         if "poly" in overrides:
