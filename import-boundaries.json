@@ -150,6 +150,7 @@
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_passive_regions",
+        "klayout_tools.extract_progress",
         "klayout_tools.extract_report",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_subcircuit",
