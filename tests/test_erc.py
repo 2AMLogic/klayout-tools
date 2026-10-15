@@ -8047,3 +8047,133 @@ def test_passive_only_cell_findings_only_and_pdk(tmp_path):
     with_pdk = run_erc(str(gds), str(spec), pdk="sky130")
     _assert_passive_report(with_pdk)
     assert with_pdk["erc_status"] == "clean"
+
+
+# --- --omit-antenna-tables: committable --findings-only output (issue #3011) --
+
+
+def _omit_pair(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+    full = run_erc(str(gds), str(spec), findings_only=True)
+    omitted = run_erc(str(gds), str(spec), findings_only=True, omit_antenna_tables=True)
+    return full, omitted
+
+
+def test_omit_antenna_tables_drops_gates_keeps_count(tmp_path):
+    full, omitted = _omit_pair(tmp_path)
+
+    assert full["gate_count"] > 0
+    assert omitted["gates"] == []
+    assert omitted["gate_count"] == full["gate_count"]
+    assert omitted["antenna_tables_omitted"] is True
+    assert full["antenna_tables_omitted"] is False
+
+
+def test_omit_antenna_tables_leaves_verdicts_identical(tmp_path):
+    full, omitted = _omit_pair(tmp_path)
+
+    for key in omitted:
+        if key in {"gates", "coverage", "antenna_tables_omitted"}:
+            continue
+        assert json.dumps(omitted[key], sort_keys=True) == json.dumps(
+            full[key], sort_keys=True
+        ), key
+    assert omitted["status"] == full["status"]
+
+
+def test_omit_antenna_tables_coverage_collapses_and_validates(tmp_path):
+    from klayout_tools.coverage import coverage_state, coverage_validation_error
+
+    full, omitted = _omit_pair(tmp_path)
+    cov = omitted["coverage"]
+
+    assert coverage_validation_error(cov) is None
+    assert coverage_state({"coverage": cov}) == coverage_state(
+        {"coverage": full["coverage"]}
+    )
+    assert len(full["coverage"]["skipped"]) > 1
+    assert [e["reason"] for e in cov["skipped"]] == ["findings_only"]
+    assert [e["reason"] for e in cov["inapplicable"]] == ["gate_reference_level"]
+    assert cov["checked"] == full["coverage"]["checked"] == []
+
+
+def test_omit_antenna_tables_without_findings_only_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match="--findings-only"):
+        run_erc(str(gds), str(spec), omit_antenna_tables=True)
+    assert (
+        main(["erc", str(gds), str(spec), "--omit-antenna-tables", "--format", "json"])
+        == 1
+    )
+
+
+def test_omit_antenna_tables_pdk_still_rejected(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match="--findings-only"):
+        run_erc(
+            str(gds),
+            str(spec),
+            pdk="sky130",
+            findings_only=True,
+            omit_antenna_tables=True,
+        )
+
+
+def test_omit_antenna_tables_cli_exit_code_and_signoff_shape(tmp_path, capsys):
+    from klayout_tools.signoff import _is_erc_shape
+
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    base = ["erc", str(gds), str(spec), "--findings-only", "--format", "json"]
+    code_full = main(base)
+    capsys.readouterr()
+    code_omit = main([*base, "--omit-antenna-tables"])
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert code_omit == code_full
+    assert envelope["antenna_tables_omitted"] is True
+    assert _is_erc_shape(envelope)
+
+
+def test_default_run_reports_antenna_tables_not_omitted(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+
+    assert report["antenna_tables_omitted"] is False
+    assert report["gates"]
+
+
+def test_omit_antenna_tables_no_gates_entry_survives(tmp_path):
+    layout, _top = _routed_tie_layout()
+    gds = tmp_path / "clean.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "clean.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=_routed_tie_entries()))
+
+    full = run_erc(str(gds), str(spec), findings_only=True)
+    omitted = run_erc(str(gds), str(spec), findings_only=True, omit_antenna_tables=True)
+
+    if full["gate_count"] == 0:
+        assert omitted["coverage"] == full["coverage"]
+        assert [e["reason"] for e in omitted["coverage"]["inapplicable"]] == [
+            "no_gates"
+        ]
+    assert omitted["status"] == full["status"]

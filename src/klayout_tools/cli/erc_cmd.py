@@ -58,6 +58,7 @@ def run(args: argparse.Namespace) -> int:
             pdk=args.pdk,
             deck=args.deck,
             findings_only=args.findings_only,
+            omit_antenna_tables=args.omit_antenna_tables,
         )
     except ErcError as exc:
         return emit_error("erc", str(exc), args.format)
@@ -130,6 +131,8 @@ def _print_text(report: dict) -> None:
     if deck_provenance is not None:
         print(f"deck: {deck_provenance['name']}")
     print(f"findings_only: {report['findings_only']}")
+    if report.get("antenna_tables_omitted"):
+        print("antenna_tables_omitted: True (--omit-antenna-tables)")
     print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
     _print_gate_count(report)
