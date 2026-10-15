@@ -75,6 +75,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   where the combined `.options seed` still varies per sample. Docs and the
   `_expand_monte_carlo` docstring now say so and name the working control
   (switch the deck's mismatch off). No seed derivation or JSON change.
+
+- **`options.initial_state` for `klt functional-verification`** (issue #2998,
+  part 2 of 2): a gate-level Icarus run can start every flop at `x`, or at a
+  seeded-random bit with one regression per seed
+  (`{"mode": "x" | "random", "seeds": [...], "netlist": "..."}`). The flop
+  list is derived from the netlist and cell models; effective seeds and the
+  per-seed runs are echoed in the new `environment.initial_state` field
+  (`null` otherwise) and each seeded test carries `initial_state_seed`.
+  Additive; no `schema_version` bump. Also fixes `klt reset-coverage` on the
+  real sky130 cell models, whose `input wire CLK` declarations hid every
+  asynchronous pin (every flop classified `no_async_pin`).
+
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

@@ -130,3 +130,27 @@ def test_cli_json_and_exit_codes(capsys):
         )
         == 1
     )
+
+
+def test_net_type_keywords_in_port_declarations_are_ignored(tmp_path):
+    """The real sky130 models declare every port as `input wire CLK` /
+    `output wire Q`; the net-type keyword must not become part of the pin
+    name (it hid every async pin, classifying all flops `no_async_pin`)."""
+    models = tmp_path / "models.v"
+    models.write_text(
+        "module sky130_fd_sc_hd__dfrtp_1 (Q, CLK, D, RESET_B);\n"
+        "  output wire Q; input wire CLK; input wire D; input wire RESET_B;\n"
+        "  wire buf_Q, RESET;\n"
+        "  not not0 (RESET, RESET_B);\n"
+        "  sky130_fd_sc_hd__udp_dff$PR_pp$PG$N dff0 (buf_Q, D, CLK, RESET);\n"
+        "  buf buf0 (Q, buf_Q);\n"
+        "endmodule\n"
+    )
+    netlist = tmp_path / "net.v"
+    netlist.write_text(
+        "module top (clk, rst_n, d, q);\n  input clk, rst_n, d; output q;\n"
+        "  sky130_fd_sc_hd__dfrtp_1 f (.CLK(clk), .D(d), .RESET_B(rst_n), .Q(q));\n"
+        "endmodule\n"
+    )
+    report = run_reset_coverage(str(netlist), [str(models)], "rst_n")
+    assert _by_inst(report)["f"]["status"] == "covered"
