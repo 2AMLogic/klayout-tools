@@ -27,6 +27,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   failures are `status: "error"` with a `measurement` diagnostic led by a
   `[cycle_mean_*]` reason token. `.meas AVG ... TRIG/TARG` and `FROM=<meas>`
   remain unsupported. See `docs/cli/sim.md`.
+- **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
+  vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
+  3.8.1) are now measured per local vertical width of each merged rectilinear
+  polygon, in integer database units. The deck grows from 232 to 234 rule
+  categories (`--expect-rule-categories 234`); both ids leave the "Not
+  implemented" list. Additive; no `schema_version` bump.
 - **`klt lvs` no longer folds one device class into another under
   `options.combine_devices`** (issue #3019): with two MiM classes stacked in
   parallel on one net pair, `layout.file` could report a wrong combined layout
@@ -37,6 +43,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   `device.combine_incomplete` (so `status` degrades to `inconclusive` instead
   of a false verdict). Additive; no `schema_version` bump. See
   `docs/cli/lvs.md`'s `device.combine_incomplete` section.
+
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
