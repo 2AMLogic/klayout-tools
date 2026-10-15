@@ -83,6 +83,7 @@ def run(args: argparse.Namespace) -> int:
             max_workers=args.max_workers,
             hosts=args.hosts,
             budget_s=args.budget_s,
+            capacity_wait_s=args.capacity_wait,
             resume=args.resume,
             plot_dir=args.plot,
             fail_fast_probe=args.fail_fast_probe,
@@ -130,6 +131,7 @@ def _run_batch_set(args: argparse.Namespace) -> int:
             ("--resume", args.resume),
             ("--plot", args.plot),
             ("--op-lint", getattr(args, "op_lint", False)),
+            ("--capacity-wait", args.capacity_wait is not None),
         )
         if value
     ]

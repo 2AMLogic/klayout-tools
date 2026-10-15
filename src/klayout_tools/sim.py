@@ -133,7 +133,7 @@ from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 #: helpers (self-aliased) so ``klayout_tools.sim.<name>`` resolves them too.
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
-from .sim_batch import _run_batch, _run_batch_fleet
+from .sim_batch import _run_batch, _run_batch_fleet, apply_capacity_wait_override
 from .sim_decks import run_deck_request
 from .sim_plot import render_waveform_svg
 
@@ -1418,6 +1418,7 @@ def run_sim(
     max_workers: int | None = None,
     hosts: int | None = None,
     budget_s: float | None = None,
+    capacity_wait_s: float | None = None,
     resume: bool | None = None,
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
@@ -1516,6 +1517,10 @@ def run_sim(
     submits one independent fleet *job* per shard (:func:`_run_batch_fleet`)
     -- the same per-shard slice contract, with the provisioning half owned
     by 2am's fleet rather than by this process.
+
+    ``capacity_wait_s`` (the ``--capacity-wait`` CLI flag) overrides
+    ``request.batch.capacity_wait_s`` -- how long a ``batch`` launch retries a
+    ``batch_no_capacity`` refusal (``0`` = one attempt); unread by other backends.
 
     ``budget_s`` bounds the **whole sweep's** wall-clock time, overriding the
     request's own ``options.wall_clock_budget_s`` when given (the
@@ -1660,6 +1665,7 @@ def run_sim(
             artifacts_dir=artifacts_dir,
             resume=resume,
             budget_s=budget_s,
+            capacity_wait_s=capacity_wait_s,
             plot_dir=plot_dir,
             fail_fast_probe=fail_fast_probe,
             fail_on_diagnostic=fail_on_diagnostic,
@@ -1671,6 +1677,7 @@ def run_sim(
         max_workers=max_workers,
         hosts=hosts,
         budget_s=budget_s,
+        capacity_wait_s=capacity_wait_s,
         resume=resume,
         plot_dir=plot_dir,
         fail_fast_probe=fail_fast_probe,
@@ -1689,6 +1696,7 @@ def _dispatch_deck_request(
     artifacts_dir: str | None,
     resume: bool | None,
     budget_s: float | None,
+    capacity_wait_s: float | None,
     plot_dir: str | None,
     fail_fast_probe: bool | None,
     fail_on_diagnostic: list[str] | tuple[str, ...] | None,
@@ -1741,6 +1749,7 @@ def _dispatch_deck_request(
             "--fail-on-diagnostic grades corner diagnostics, which "
             "deck-list requests do not produce"
         )
+    apply_capacity_wait_override(request, capacity_wait_s)
     return run_deck_request(
         request,
         request_dir=os.path.dirname(os.path.abspath(request_path)),
@@ -1758,6 +1767,7 @@ def _run_sim_corners(
     max_workers: int | None = None,
     hosts: int | None = None,
     budget_s: float | None = None,
+    capacity_wait_s: float | None = None,
     resume: bool | None = None,
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
@@ -1769,6 +1779,7 @@ def _run_sim_corners(
     are documented there. Kept as its own function so the deck dispatch
     in ``run_sim`` adds nothing to this sweep's own complexity budget."""
     request = load_request(request_path)
+    apply_capacity_wait_override(request, capacity_wait_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
     # field this run's own JSON response echoes (`netlist`,

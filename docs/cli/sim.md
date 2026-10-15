@@ -692,8 +692,15 @@ made. Things worth knowing:
   request-level `error.code` — its sibling shards' results are kept.
 - **Fan-out:** several requests can be submitted at once with `--batch-set`
   (below).
-- **There is no `--wait-for-capacity` CLI flag yet.** The request field is
-  the one control for now; a flag mirroring it is a possible follow-up.
+- **`--capacity-wait SECONDS` overrides the request field** from the command
+  line, so an unattended dispatcher can opt in without templating the request
+  JSON: `klt sim req.json --backend batch --capacity-wait 3600`. It takes the
+  same validation as the field (negative or non-finite is rejected before any
+  S3 write), `0` disables a wait the request file asked for, and omitting it
+  leaves `batch.capacity_wait_s` (default `0`) in force. Backends other than
+  `batch` never read it. Sharded runs apply it per shard launch, like the
+  field. It cannot be combined with `--batch-set` (set the field in each
+  request instead).
 
 ### Submitting a set of requests (`--batch-set`, [#2869](https://github.com/2AMLogic/klayout-tools/issues/2869))
 

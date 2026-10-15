@@ -842,6 +842,35 @@ def test_invalid_capacity_wait_is_rejected_before_any_s3_write(
     assert runner.calls == []  # not one byte uploaded
 
 
+def test_capacity_wait_flag_overrides_the_request_field(tmp_path):
+    request = {"batch": {"capacity_wait_s": 600}}
+    sb.apply_capacity_wait_override(request, 0)
+    assert request["batch"]["capacity_wait_s"] == 0
+    sb.apply_capacity_wait_override(request, 45.5)
+    assert request["batch"]["capacity_wait_s"] == 45.5
+
+    untouched = {"batch": {"capacity_wait_s": 600}}
+    sb.apply_capacity_wait_override(untouched, None)
+    assert untouched == {"batch": {"capacity_wait_s": 600}}
+
+    bare = {}
+    sb.apply_capacity_wait_override(bare, 30)
+    assert bare == {"batch": {"capacity_wait_s": 30}}
+
+
+@pytest.mark.parametrize("bad", [-1, float("inf"), float("nan")])
+def test_invalid_capacity_wait_flag_is_rejected_before_any_s3_write(
+    tmp_path, monkeypatch, bad
+):
+    runner = _install_fake_batch_transport(monkeypatch, runner=_FakeRunner())
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path)
+
+    with pytest.raises(sim.SimError, match="--capacity-wait"):
+        sim.run_sim(str(_write_request(tmp_path, request)), capacity_wait_s=bad)
+    assert runner.calls == []
+
+
 def test_poll_waits_through_running_and_interrupted_and_never_relaunches(tmp_path):
     runner = _FakeRunner()
     runner.queue("status.json", fake_completed(_status("running")))

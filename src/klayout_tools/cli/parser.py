@@ -657,6 +657,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--capacity-wait",
+        dest="capacity_wait",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "`batch` backend: retry a no-Spot-capacity refusal with backoff "
+            "for up to SECONDS before failing with `error.code: "
+            "batch_no_capacity` (default: the request's `batch.capacity_wait_"
+            "s`, else 0 = one attempt); 0 disables a request-file wait. "
+            "Unread by other backends; see docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--resume",
         dest="resume",
         action="store_true",

@@ -1389,6 +1389,31 @@ def _resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
     return float(value)
 
 
+def apply_capacity_wait_override(
+    request: dict[str, Any], capacity_wait_s: float | None
+) -> None:
+    """Fold the ``--capacity-wait`` CLI flag into ``request.batch`` in place,
+    overriding ``request.batch.capacity_wait_s`` (``0`` disables a wait the
+    request file asked for). ``None`` leaves the request untouched. The value
+    gets the request field's own validation, so a bad flag fails before any
+    S3 write; for a non-batch backend the resulting field is simply unread,
+    exactly as a ``batch`` block is.
+    """
+    from .sim import SimError
+
+    if capacity_wait_s is None:
+        return
+    batch_spec = dict(request.get("batch") or {})
+    batch_spec["capacity_wait_s"] = capacity_wait_s
+    try:
+        _resolve_capacity_wait_s(batch_spec)
+    except SimError as exc:
+        raise SimError(
+            str(exc).replace("request.batch.capacity_wait_s", "--capacity-wait")
+        ) from exc
+    request["batch"] = batch_spec
+
+
 # --------------------------------------------------------------------------- #
 # S3 / launch transport (every call through an injectable runner)
 # --------------------------------------------------------------------------- #
