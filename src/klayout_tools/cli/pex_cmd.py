@@ -130,6 +130,10 @@ def run(args: argparse.Namespace) -> int:
             # when the flag was never given, unchanged from every call site
             # that predates it.
             flatten_schematic=args.flatten_schematic,
+            # `--device-only-leg` (issue #3298): a parasitic-free third leg
+            # splitting `delta[]` into representation and parasitic parts.
+            # `False` when the flag was never given.
+            device_only_leg=args.device_only_leg,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
@@ -222,6 +226,22 @@ def _print_schematic_flatten(block: dict | None) -> None:
     )
 
 
+def _device_only_desc(row: dict) -> str:
+    """The ``--device-only-leg`` split of one delta row (issue #3298), or
+    nothing for a row that carries none."""
+    if "device_only_value" not in row:
+        return ""
+
+    def pct(value: float | None) -> str:
+        return f"{value:+.3f}%" if value is not None else "-"
+
+    return (
+        f"  device_only={row['device_only_value']!r}  "
+        f"representation={pct(row['representation_delta_pct'])}  "
+        f"parasitic={pct(row['parasitic_delta_pct'])}"
+    )
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `layout`/`netlist`/`reference_netlist` are the
     # `{path, scope}` shape `env_provenance.repo_relative_path` defines --
@@ -233,6 +253,13 @@ def _print_text(report: dict) -> None:
     print(f"reference_netlist: {render_path_field(report['reference_netlist'])}")
     # Additive (issue #2889): only printed when --flatten-schematic was given.
     _print_schematic_flatten(report.get("schematic_flatten"))
+    # Additive (issue #3298): only printed when --device-only-leg was given.
+    if "device_only_netlist" in report:
+        print(
+            f"device_only_netlist: {render_path_field(report['device_only_netlist'])}  "
+            f"device_cards={report['device_card_count']}  "
+            f"match={report['device_cards_match']}"
+        )
     print(f"status: {report['status']}")
     print(
         f"corners: {report['corner_count']}  "
@@ -310,4 +337,5 @@ def _print_text(report: dict) -> None:
             f"  {row['spec_row']} @ {row['corner_id']}  [{row['status']}]  "
             f"schematic={row['schematic_value']!r}  "
             f"extracted={row['extracted_value']!r}  delta={delta_desc}"
+            + _device_only_desc(row)
         )

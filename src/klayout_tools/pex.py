@@ -205,6 +205,7 @@ each row's comparison does and does not account for.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import copy
 import json
@@ -1392,13 +1393,51 @@ def _side_error(
     return error
 
 
+def _device_only_fields(
+    schematic_value: Any,
+    extracted_value: Any,
+    device_only_measurement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The additive ``--device-only-leg`` fields of one delta row (issue
+    #3298): the parasitic-free leg's own value and the two components of
+    ``delta_pct``, each by the same :func:`_delta_pct` rule -- representation
+    is device-only vs schematic, parasitic is extracted vs device-only, so
+    ``(1+r/100)(1+p/100) == 1+delta_pct/100`` for positive-valued
+    measurements. ``device_only_measurement`` is ``None`` when the leg
+    produced nothing for this row: every field is then ``null`` and
+    ``device_only_status`` is ``"error"``, leaving the row's own ``status``
+    and ``delta_pct`` untouched."""
+    value = (
+        device_only_measurement["value"]
+        if device_only_measurement is not None
+        else None
+    )
+    return {
+        "device_only_value": value,
+        "representation_delta_pct": _delta_pct(schematic_value, value),
+        "parasitic_delta_pct": _delta_pct(value, extracted_value),
+        "device_only_status": (
+            device_only_measurement["status"]
+            if device_only_measurement is not None
+            else "error"
+        ),
+    }
+
+
 def _build_delta_rows(
     *,
     spec_row_prefix: str | None,
     schematic_report: dict[str, Any],
     extracted_report: dict[str, Any],
+    device_only_report: dict[str, Any] | None = None,
+    device_only_leg: bool = False,
 ) -> list[dict[str, Any]]:
     schematic_index = _index_corner_measurements(schematic_report)
+    device_only_index = (
+        _index_corner_measurements(device_only_report)
+        if device_only_report is not None
+        else {}
+    )
     rows: list[dict[str, Any]] = []
     for corner in extracted_report["corners"]:
         corner_id = corner["corner_id"]
@@ -1407,20 +1446,18 @@ def _build_delta_rows(
             name = extracted_measurement["name"]
             spec_row = name if spec_row_prefix is None else f"{spec_row_prefix}.{name}"
             schematic_measurement = schematic_measurements.get(name)
+            schematic_value = (
+                schematic_measurement["value"]
+                if schematic_measurement is not None
+                else None
+            )
             row = {
                 "spec_row": spec_row,
                 "corner_id": corner_id,
-                "schematic_value": (
-                    schematic_measurement["value"]
-                    if schematic_measurement is not None
-                    else None
-                ),
+                "schematic_value": schematic_value,
                 "extracted_value": extracted_measurement["value"],
                 "delta_pct": _delta_pct(
-                    schematic_measurement["value"]
-                    if schematic_measurement is not None
-                    else None,
-                    extracted_measurement["value"],
+                    schematic_value, extracted_measurement["value"]
                 ),
                 "status": _row_status(schematic_measurement, extracted_measurement),
                 "schematic_status": _side_status(schematic_measurement),
@@ -1437,6 +1474,14 @@ def _build_delta_rows(
                     _side_error("schematic", schematic_report, corner_id)
                     if schematic_bad
                     else _side_error("extracted", extracted_report, corner_id)
+                )
+            if device_only_leg:
+                row.update(
+                    _device_only_fields(
+                        schematic_value,
+                        extracted_measurement["value"],
+                        device_only_index.get(corner_id, {}).get(name),
+                    )
                 )
             rows.append(row)
     return rows
@@ -1459,6 +1504,7 @@ def _unextracted_delta_rows(
     schematic_report: dict[str, Any],
     failure_message: str | None = None,
     failure_code: str | None = None,
+    device_only_leg: bool = False,
 ) -> list[dict[str, Any]]:
     """Delta rows for a testbench whose *extracted* side never produced a
     response at all (issue #1030's pin-count mismatch, surfaced as a
@@ -1475,29 +1521,30 @@ def _unextracted_delta_rows(
     for corner in schematic_report["corners"]:
         for measurement in corner["measurements"]:
             name = measurement["name"]
-            rows.append(
-                {
-                    "spec_row": name
-                    if spec_row_prefix is None
-                    else f"{spec_row_prefix}.{name}",
-                    "corner_id": corner["corner_id"],
-                    "schematic_value": measurement["value"],
-                    "extracted_value": None,
-                    "delta_pct": None,
-                    "status": "error",
-                    "schematic_status": _side_status(measurement),
-                    "extracted_status": "error",
-                    # Issue #3062: the extracted side has no report, so the
-                    # cause is the failure the caller recorded, if any.
-                    "error": _side_error(
-                        "extracted",
-                        None,
-                        corner["corner_id"],
-                        message=failure_message,
-                        code=failure_code,
-                    ),
-                }
-            )
+            row = {
+                "spec_row": name
+                if spec_row_prefix is None
+                else f"{spec_row_prefix}.{name}",
+                "corner_id": corner["corner_id"],
+                "schematic_value": measurement["value"],
+                "extracted_value": None,
+                "delta_pct": None,
+                "status": "error",
+                "schematic_status": _side_status(measurement),
+                "extracted_status": "error",
+                # Issue #3062: the extracted side has no report, so the
+                # cause is the failure the caller recorded, if any.
+                "error": _side_error(
+                    "extracted",
+                    None,
+                    corner["corner_id"],
+                    message=failure_message,
+                    code=failure_code,
+                ),
+            }
+            if device_only_leg:
+                row.update(_device_only_fields(measurement["value"], None, None))
+            rows.append(row)
     return rows
 
 
@@ -2092,7 +2139,7 @@ def _prepare_dut_swapped_request(
         models["lib"] = _resolve_relative(models["lib"], request_dir)
         swapped_request["models"] = models
     swapped_request["netlist"] = swapped_body_path
-    if side == "extracted":
+    if side in ("extracted", "device-only"):
         swapped_request["netlist_source"] = "extracted"
 
     swapped_request_path = os.path.join(work_dir, f"{label}.{side}-request.json")
@@ -2236,6 +2283,61 @@ def _flatten_schematic_dut(
     }
 
 
+_STAR_NODE_SUFFIX = re.compile(r"__t\d+(?=\s|$)")
+
+
+def _logical_cards(text: str) -> list[str]:
+    """``text``'s SPICE cards with ``+`` continuation lines joined and
+    comments dropped."""
+    cards: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("+") and cards:
+            cards[-1] += " " + line[1:].strip()
+        elif line.strip() and not line.startswith("*"):
+            cards.append(line.strip())
+    return cards
+
+
+def _device_only_parity(
+    parasitic_netlist: str, device_only_netlist: str
+) -> dict[str, Any]:
+    """Whether the parasitic-free extraction (issue #3298) carries the same
+    devices as the parasitic one, with the parasitic extraction's
+    per-terminal ``<net>__tN`` star nodes mapped back to ``<net>``: every
+    non-``R``/``C`` card must match as a multiset, and every ``R``/``C`` card
+    the device-only netlist has (a real resistor/capacitor device) must
+    also be in the parasitic one -- the parasitic ``R``/``C`` cards cannot be
+    told from real ones by name, so they are the only cards allowed to be
+    extra on that side. The leg is only a *device-only* leg if this holds, so
+    a divergence is reported rather than assumed away
+    (``device_cards_match: false``)."""
+
+    def cards(path: str, *, strip_star: bool) -> list[str]:
+        found = [
+            card
+            for card in _logical_cards(_read_text(path) or "")
+            if not card.startswith(".")
+        ]
+        if strip_star:
+            found = [_STAR_NODE_SUFFIX.sub("", card) for card in found]
+        return found
+
+    def active(found: list[str]) -> collections.Counter[str]:
+        return collections.Counter(c for c in found if c[0].upper() not in "RC")
+
+    parasitic_cards = cards(parasitic_netlist, strip_star=True)
+    device_only_cards = cards(device_only_netlist, strip_star=False)
+    passive_extra = collections.Counter(
+        c for c in device_only_cards if c[0].upper() in "RC"
+    ) - collections.Counter(c for c in parasitic_cards if c[0].upper() in "RC")
+    return {
+        "device_card_count": len(device_only_cards),
+        "device_cards_match": (
+            active(parasitic_cards) == active(device_only_cards) and not passive_extra
+        ),
+    }
+
+
 @output_lock.owns_run
 def run_pex(
     layout_path: str,
@@ -2263,6 +2365,7 @@ def run_pex(
     reference_netlist: str | None = None,
     measure_timeout_s: float | None = None,
     flatten_schematic: bool = False,
+    device_only_leg: bool = False,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
@@ -2449,6 +2552,20 @@ def run_pex(
     leaves every schematic-side run exactly as before this parameter
     existed: ``flatten_schematic: false``, ``schematic_flatten: null``.
 
+    **``device_only_leg`` (issue #3298)** adds a third, parasitic-free leg:
+    the same layout is extracted again with ``parasitics=False`` (no star
+    nodes, no ``R``/``C`` cards -- no text stripping, so nothing depends on
+    the ``<net>__tN`` naming), written beside the extracted netlist as
+    ``<name>.device-only<ext>``, and every testbench is re-run against it.
+    Each ``delta[]`` row then also carries ``device_only_value``,
+    ``representation_delta_pct`` (device-only vs schematic) and
+    ``parasitic_delta_pct`` (extracted vs device-only), separating
+    device-representation effects (fingers/units, AS/AD/PS/PD, dummies) from
+    parasitics; the result adds ``device_only_netlist``,
+    ``device_only_netlist_sha256``, ``device_card_count`` and
+    ``device_cards_match``. Without it the report is byte-identical.
+    Incompatible with ``measure_command`` (:class:`PexError`).
+
     **Output-directory ownership (issue #2770).** The run owns its artifact
     root (``artifacts_dir``, default ``.klt/pex/`` beside the layout) for its
     whole lifetime through :func:`klayout_tools.output_lock.hold_output_dir`,
@@ -2469,6 +2586,12 @@ def run_pex(
         measure_command, testbench_paths, reference_netlist, measure_timeout_s
     )
     command_mode = command is not None
+    if device_only_leg and command_mode:
+        raise PexError(
+            "--device-only-leg is not supported with --measure-command: the "
+            "third leg re-runs `klt sim` testbenches, which that mode does "
+            "not use"
+        )
 
     # Issue #1261: every input-path field this run's own JSON response
     # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`
@@ -2533,6 +2656,36 @@ def run_pex(
     # `{path, scope}` -- an absolute `extracted_netlist_path` does not leak
     # into this module's user-facing report.
     extracted_netlist_path = os.path.abspath(extract_report["netlist_path"])
+
+    # Issue #3298: the parasitic-free leg is the same extraction with
+    # `parasitics=False` -- the parasitics-only options (`critical_nets`,
+    # `distributed_rc`, `mom_rlc_*`) are not passed, as `run_extract` rejects
+    # them without parasitics.
+    device_only_netlist_path: str | None = None
+    device_only_parity: dict[str, Any] | None = None
+    if device_only_leg:
+        stem, ext = os.path.splitext(extracted_netlist_path)
+        device_only_netlist_path = f"{stem}.device-only{ext}"
+        try:
+            device_only_extract = run_extract(
+                layout_path,
+                deck_name,
+                output=device_only_netlist_path,
+                top=top,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+                parasitics=False,
+                deck_options=deck_options,
+                declared_pins=declared_pins,
+                rename_declared_pins=rename_declared_pins,
+                label_layers=label_layers,
+            )
+        except ExtractError as exc:
+            raise PexError(f"device-only extraction failed: {exc}") from exc
+        device_only_netlist_path = os.path.abspath(device_only_extract["netlist_path"])
+        device_only_parity = _device_only_parity(
+            extracted_netlist_path, device_only_netlist_path
+        )
 
     work_dir = (
         os.path.abspath(artifacts_dir)
@@ -2855,6 +3008,7 @@ def run_pex(
                     schematic_report=schematic_report,
                     failure_message=extracted_failure[0] if extracted_failure else None,
                     failure_code=extracted_failure[1] if extracted_failure else None,
+                    device_only_leg=device_only_leg,
                 )
             )
             testbenches_summary.append(
@@ -2891,10 +3045,32 @@ def run_pex(
                 extracted_netlist=extracted_netlist_path,
             )
 
+        # Issue #3298: the parasitic-free leg. A failure here costs only the
+        # device-only fields of this testbench's rows (`null`,
+        # `device_only_status: "error"`), never the run.
+        device_only_report: dict[str, Any] | None = None
+        if device_only_netlist_path is not None:
+            try:
+                device_only_report = run_sim(
+                    _prepare_dut_swapped_request(
+                        testbench_path=testbench_path,
+                        dut_netlist_path=device_only_netlist_path,
+                        work_dir=work_dir,
+                        label=label,
+                        side="device-only",
+                    ),
+                    artifacts_dir=os.path.join(work_dir, label, "device-only"),
+                    backend=backend,
+                )
+            except SimError:
+                device_only_report = None
+
         rows = _build_delta_rows(
             spec_row_prefix=spec_row_prefix,
             schematic_report=schematic_report,
             extracted_report=extracted_report,
+            device_only_report=device_only_report,
+            device_only_leg=device_only_leg,
         )
         delta.extend(rows)
         testbenches_summary.append(
@@ -3055,4 +3231,12 @@ def run_pex(
         "schematic_flatten": schematic_flatten,
         "provenance": extract_report["provenance"],
     }
+    if device_only_netlist_path is not None:
+        # Additive fields (issue #3298), present only under `--device-only-leg`
+        # so a run without it is byte-identical to before.
+        result["device_only_netlist"] = _report_path(
+            device_only_netlist_path, repo_root=repo_root
+        )
+        result["device_only_netlist_sha256"] = _content_id(device_only_netlist_path)
+        result.update(device_only_parity or {})
     return result
