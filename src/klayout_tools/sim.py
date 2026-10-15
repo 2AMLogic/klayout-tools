@@ -1915,6 +1915,9 @@ def _run_sim_corners(
     sim_steps.refuse_unsupported_options(
         analysis, want_waveforms=want_waveforms, plot_requested=plot_dir is not None
     )
+    capture_only = _capture_only_requested(
+        options, want_waveforms=want_waveforms, measurements_spec=measurements_spec
+    )
 
     max_workers = max_workers if max_workers is not None else options.get("max_workers")
     if max_workers is not None:
@@ -2482,7 +2485,7 @@ def _run_sim_corners(
                 entry, specs_by_name.get(entry["name"]), plots_by_corner
             )
 
-    coverage = _build_coverage(measurements_spec, corners)
+    coverage = _build_coverage(measurements_spec, corners, capture_only=capture_only)
     passed = sum(1 for c in corners if c["status"] == "pass")
     failed = sum(1 for c in corners if c["status"] == "fail")
     errored = sum(1 for c in corners if c["status"] == "error")
@@ -6972,11 +6975,55 @@ def _measurement_coverage(
     return checked, skipped, inapplicable
 
 
+def _capture_only_requested(
+    options: dict[str, Any],
+    *,
+    want_waveforms: bool,
+    measurements_spec: list[dict[str, Any]],
+) -> bool:
+    """Validate and return ``request.options.capture_only`` (issue #3158).
+
+    Absent means ``False``. ``true`` declares "capture the waveforms, check
+    nothing", so it only makes sense for a request that does capture them
+    (``options.waveforms`` or ``--plot``) and declares no measurements --
+    anything else would turn the flag into a general "suppress exit 4"
+    switch for a genuinely unchecked run, so it is a request error.
+    """
+    value = options.get("capture_only", False)
+    if not isinstance(value, bool):
+        raise SimError(
+            f"request.options.capture_only must be a boolean (got {value!r})"
+        )
+    if not value:
+        return False
+    if not want_waveforms:
+        raise SimError(
+            "request.options.capture_only requires options.waveforms: true "
+            "(or --plot): there is nothing to capture otherwise"
+        )
+    if measurements_spec:
+        raise SimError(
+            "request.options.capture_only conflicts with a non-empty "
+            "`measurements` list: declare measurements to be checked, or "
+            "none to capture waveforms only"
+        )
+    return True
+
+
 def _build_coverage(
     measurements_spec: list[dict[str, Any]],
     corners: list[dict[str, Any]],
+    *,
+    capture_only: bool = False,
 ) -> dict[str, Any]:
-    """Common checked-work v1 plus the existing simulation coverage counters."""
+    """Common checked-work v1 plus the existing simulation coverage counters.
+
+    ``capture_only`` (issue #3158) is the request's declared intent to
+    capture waveforms with no measurements: each corner that ran clean then
+    counts its capture as the checked work, and ``capture_only: true`` is
+    recorded on the block. A corner that did not pass stays a skip, so a run
+    failure is never waived.
+    """
     unrecognized: list[dict[str, Any]] = []
     limits_declared = 0
     measurements_with_limits = 0
@@ -6996,12 +7043,13 @@ def _build_coverage(
     inapplicable = []
     for corner_index, corner in enumerate(corners):
         if not measurements_spec:
-            skipped.append(
-                {
-                    "id": work_id("corner", corner_index, corner["corner_id"]),
-                    "reason": "no_requested_measurements",
-                }
-            )
+            corner_work = work_id("corner", corner_index, corner["corner_id"])
+            if capture_only and corner["status"] == "pass":
+                checked.append(corner_work + "/waveform_capture")
+            else:
+                skipped.append(
+                    {"id": corner_work, "reason": "no_requested_measurements"}
+                )
         for spec in measurements_spec:
             actual, missing, irrelevant = _measurement_coverage(
                 spec, corner, corner_index
@@ -7018,7 +7066,7 @@ def _build_coverage(
     if limits_declared and not measurements_with_limits and unrecognized:
         reasons.append(REASON_UNRECOGNIZED_LIMIT_KEYS)
 
-    return {
+    block = {
         "corners_simulated": len(corners),
         "measurements_declared": len(measurements_spec),
         "measurements_with_limits": measurements_with_limits,
@@ -7030,6 +7078,9 @@ def _build_coverage(
             nothing_checked_reasons=reasons,
         ),
     }
+    if capture_only:
+        block["capture_only"] = True
+    return block
 
 
 def _evaluate_limits(
