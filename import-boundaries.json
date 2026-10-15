@@ -431,6 +431,7 @@
         "klayout_tools.sim_energy",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_plot",
+        "klayout_tools.sim_portable",
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
