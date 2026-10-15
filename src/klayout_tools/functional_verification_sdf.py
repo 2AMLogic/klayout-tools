@@ -2026,6 +2026,14 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
     line an interleaved flush lands in, leaving every sibling intact and the
     gate firing on those.
 
+    The same applies to a line that matches the shape but also contains an
+    embedded cocotb log-line header (:data:`SDF_SPLICED_LOG_HEADER_RE`,
+    issue #2996): the splice landed after the locator -- inside the message,
+    or inside the path with the spliced-in line's own locator -- so the
+    message is cut (``TIM`` rather than ``TIMINGCHECK``) and equally
+    untrustworthy. Its orphaned tail (``INGCHECK not supported.``) carries no
+    marker and is already ignored.
+
     Every supplied transcript must be successfully read. Missing, unreadable,
     or incompletely read logs raise ``FunctionalVerificationError``: this scan
     gates affirmative annotation credit, so unavailable observation cannot be
@@ -2038,6 +2046,7 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
         SDF_DIAGNOSTIC_LINE_RE,
         SDF_DIAGNOSTIC_MARKERS,
         SDF_OMITTED_ANNOTATION_MARKER,
+        SDF_SPLICED_LOG_HEADER_RE,
         FunctionalVerificationError,
     )
 
@@ -2064,6 +2073,11 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
                 # Marker present, Icarus's own shape absent: a stdout splice,
                 # not a diagnostic (issue #1136). Untrustworthy in both
                 # directions, so it is counted in neither.
+                continue
+            if SDF_SPLICED_LOG_HEADER_RE.search(stripped):
+                # Well-formed head, but a cocotb log header is embedded in
+                # it: the same splice landing after the locator (issue
+                # #2996). Dropped from both buckets, as above.
                 continue
             benign_class = next(
                 (

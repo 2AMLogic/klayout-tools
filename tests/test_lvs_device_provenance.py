@@ -506,9 +506,9 @@ def test_golden_pair_sky130_res_high_po_r_ohm_matches_provenance_coefficient(
 ):
     """A drawn 6-square poly bar additionally marked with `psdm`/`rpm`
     extracts as `res_high_po` with `R = squares * sheet_rho_ohm_sq +
-    fixed_offset_ohm` -- the fixed head/end-effect correction issue #518
-    measured against the real PDK model -- computed directly from the
-    deck's own provenance-cited `res_high_po` entry (issue #867)."""
+    end_term_ohm_um / W + fixed_offset_ohm` -- the fixed head/end-effect
+    correction issue #518 measured against the real PDK model -- computed
+    directly from the deck's own provenance-cited `res_high_po` entry (issue #867)."""
     resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == "res_high_po")
     assert resistor.provenance.rule_id == "sky130_fd_pr__res_high_po_0p35"
 
@@ -520,7 +520,9 @@ def test_golden_pair_sky130_res_high_po_r_ohm_matches_provenance_coefficient(
     (device,) = report["devices"]
     assert device["class"] == "res_high_po"
     assert device["params"]["r_ohm"] == pytest.approx(
-        _RES_SQUARES * resistor.sheet_rho_ohm_sq + resistor.fixed_offset_ohm
+        _RES_SQUARES * resistor.sheet_rho_ohm_sq
+        + resistor.end_term_ohm_um  # W=1um, so `end_term_ohm_um / W` (#3049)
+        + resistor.fixed_offset_ohm
     )
 
 

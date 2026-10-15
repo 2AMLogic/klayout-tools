@@ -759,6 +759,34 @@ def _polyline_length_um(points: list[tuple[float, float]]) -> float:
     return total
 
 
+def _snap_jog_to_grid(value: float, lo: float, hi: float, grid_um: float) -> float:
+    """Snap a backbone jog coordinate onto ``grid_um`` (issue #3079).
+
+    Returns ``value`` unchanged (bit-identical) when ``grid_um <= 0`` or it is
+    already on the grid. Otherwise the nearest grid line is used, trying the
+    other neighbour when the nearest would cross a stub end -- i.e. flip which
+    side of ``[lo, hi]`` (the two stub-end coordinates) the jog sits on. When
+    neither neighbour keeps that relation (stubs closer than one grid step),
+    the unsnapped value is kept and the residual off-grid vertex is reported by
+    the caller's compose-time note.
+    """
+    if grid_um <= 0.0:
+        return value
+    ratio = value / grid_um
+    if abs(ratio - round(ratio)) < 1e-6:
+        return value
+    lo, hi = min(lo, hi), max(lo, hi)
+    floor_k = math.floor(ratio)
+    candidates = sorted((floor_k, floor_k + 1), key=lambda k: (abs(k - ratio), k))
+    for k in candidates:
+        snapped = k * grid_um
+        if (snapped >= lo - 1e-9) == (value >= lo - 1e-9) and (
+            snapped <= hi + 1e-9
+        ) == (value <= hi + 1e-9):
+            return snapped
+    return value
+
+
 def manhattan_backbone(
     a: tuple[float, float],
     dir_a_deg: int,
@@ -770,6 +798,7 @@ def manhattan_backbone(
     stub_b_um: float | None = None,
     waypoints: list[tuple[float, float]] | None = None,
     channel_offset_um: float = 0.0,
+    grid_um: float = 0.0,
 ) -> list[tuple[float, float]]:
     """Generate a two-pin Manhattan backbone from port ``a`` to port ``b``.
 
@@ -818,6 +847,16 @@ def manhattan_backbone(
     run against the resulting path and reject it exactly as they would any
     other backbone if it does not.
 
+    ``grid_um`` (#3079), when ``> 0``, snaps the derived jog coordinate
+    (``mx``/``my``, after ``channel_offset_um`` is added) onto the
+    manufacturing grid: the midpoint of two on-grid stub ends is half a grid
+    step off-grid whenever their sum is an odd multiple of the grid, which
+    ``klt drc`` reports as ``*.ongrid.1`` at every bend. The jog is a free
+    coordinate between the stubs, so the snap moves it by at most half a grid
+    step and never across a stub end (see :func:`_snap_jog_to_grid`).
+    Caller-supplied ``waypoints`` are used verbatim, never snapped. Default
+    ``0.0`` reproduces the unsnapped shape exactly.
+
     Returns the cleaned ordered ``(x, y)`` waypoint list (um). ``pya.Path``
     renders each interior corner as a square miter that fully fills the bend,
     so no separate bend-insertion pass is needed -- the corner *is* the bend.
@@ -851,9 +890,11 @@ def manhattan_backbone(
     mid: list[tuple[float, float]] = []
     if a_horizontal and b_horizontal:
         mx = (sa[0] + sb[0]) / 2.0 + channel_offset_um
+        mx = _snap_jog_to_grid(mx, sa[0], sb[0], grid_um)
         mid = [(mx, sa[1]), (mx, sb[1])]
     elif not a_horizontal and not b_horizontal:
         my = (sa[1] + sb[1]) / 2.0 + channel_offset_um
+        my = _snap_jog_to_grid(my, sa[1], sb[1], grid_um)
         mid = [(sa[0], my), (sb[0], my)]
     else:
         # One port faces x, the other y -> a single corner joins the stubs.
@@ -2336,6 +2377,7 @@ def route_two_pin(
     block_geometry_for: Any = None,
     cross_block_geometry_for: Any = None,
     channel_offset_um: float = 0.0,
+    grid_um: float = 0.0,
 ) -> dict[str, Any]:
     """Route one two-pin net and report the result.
 
@@ -2951,6 +2993,7 @@ def route_two_pin(
         stub_b_um=stub_b_um,
         waypoints=waypoints_um,
         channel_offset_um=channel_offset_um,
+        grid_um=grid_um,
     )
     margin_eps_um = 1e-6
 
@@ -3618,6 +3661,7 @@ def route_two_pin(
                 cross_block_width_um=cross_block_width_um,
                 block_geometry_for=block_geometry_for,
                 cross_block_geometry_for=cross_block_geometry_for,
+                grid_um=grid_um,
             )
             if retry["routed"]:
                 return retry
@@ -3787,6 +3831,7 @@ def route_two_pin(
                 cross_block_width_um=cross_block_width_um,
                 block_geometry_for=block_geometry_for,
                 cross_block_geometry_for=cross_block_geometry_for,
+                grid_um=grid_um,
             )
             if not retry["routed"]:
                 continue
@@ -3848,6 +3893,7 @@ def route_two_pin(
                 block_geometry_for=block_geometry_for,
                 cross_block_geometry_for=cross_block_geometry_for,
                 channel_offset_um=direction_sign * pitch_um * track_index,
+                grid_um=grid_um,
             )
             if not retry["routed"]:
                 continue
@@ -3959,6 +4005,7 @@ def route_bundle(
     cross_block_width_um: float | None = None,
     explicit_legs: list[dict[str, Any]] | None = None,
     geometry_for_layer: Any = None,
+    grid_um: float = 0.0,
 ) -> dict[str, Any]:
     """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
 
@@ -4343,6 +4390,7 @@ def route_bundle(
             waypoints_um=leg_waypoints_um,
             leg_conflict=leg_conflict,
             block_geometry_for=cross_block_geometry_for,
+            grid_um=grid_um,
         )
         if not retry["routed"]:
             return None
@@ -4434,6 +4482,7 @@ def route_bundle(
                 waypoints_um=leg_spec.get("waypoints_um"),
                 leg_conflict=leg_conflict,
                 block_geometry_for=override_geometry_for,
+                grid_um=grid_um,
             )
             reason = None if result["routed"] else result["reason"]
             if result["routed"] and leg_conflict is not None:
@@ -4477,6 +4526,7 @@ def route_bundle(
                 leg_conflict=leg_conflict,
                 block_geometry_for=block_geometry_for,
                 cross_block_geometry_for=cross_block_geometry_for,
+                grid_um=grid_um,
             )
             reason = None if result["routed"] else result["reason"]
             if result["routed"] and leg_conflict is not None:
@@ -4571,6 +4621,7 @@ def route_bundle(
             leg_conflict=leg_conflict,
             block_geometry_for=block_geometry_for,
             cross_block_geometry_for=cross_block_geometry_for,
+            grid_um=grid_um,
         )
         reason = None if result["routed"] else result["reason"]
         if result["routed"] and leg_conflict is not None:
