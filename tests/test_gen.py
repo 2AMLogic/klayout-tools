@@ -1560,6 +1560,28 @@ def test_mos_array_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
     assert any("voltage_flavor" in n for n in report["drc_hints"]["notes"])
 
 
+@pytest.mark.parametrize("name", ["native", "nvt"])
+def test_mos_array_voltage_flavor_native_on_sky130_names_unsupported_nvt(
+    tmp_path, both_pdk_root, name
+):
+    """sky130's native-Vt NMOS (`nfet_05v0_nvt`) is derived upstream from
+    hvi AND lvtn, which a single-marker `voltage_flavor` cannot express: the
+    note must name that flavour as unsupported rather than only reporting a
+    generic "no marker layer resolved" (issue #2912)."""
+    output = tmp_path / f"mos_array_voltage_flavor_{name}.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": {"voltage_flavor": name},
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is False
+    notes = report["drc_hints"]["notes"]
+    assert any("nfet_05v0_nvt" in n and "unsupported" in n for n in notes)
+
+
 def test_mos_array_voltage_flavor_unrecognised_name_notes_not_drawn(
     tmp_path, both_pdk_root
 ):

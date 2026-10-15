@@ -766,6 +766,17 @@ silently dropped. `voltage_flavor` is independent of `flavor`: requesting
 both `flavor="pfet"` and `voltage_flavor="medium_voltage"`/`"hv"`/`"hvi"`
 draws both the well and the marker with no conflict.
 
+**sky130's native-Vt NMOS (`sky130_fd_pr__nfet_05v0_nvt`) is unsupported
+(issue #2912).** `voltage_flavor="native"`/`"nvt"` on `sky130` draws no marker
+and the device extracts as a plain `nfet`; `drc_hints.notes` names the flavour
+as unsupported. The upstream `sky130.lvs` does not key it on one marker layer:
+`ngate_nvt = ngate_high_voltage.and(lvtn).not(areaid_ed).not(areaid_ce)`
+(`hvi` 75/20 AND `lvtn` 125/44), then `ngate_5p0v_nvt = ngate_nvt.not(areaid_le)
+.not_interacting(vpp)` → `nfet_05v0_nvt` (the `areaid_le` 3v3 variant is
+`nfet_03v3_nvt`), whereas `voltage_flavor` and the deck's `mos_flavours`
+express a single marker. Plan an explicit exclusion of such a device from the
+LVS comparison (see `lvs.md`, "Native-Vt NMOS is not supported on sky130").
+
 **Source/drain implant (issue #2580).** Only `gf180mcu`'s role-layer table
 declares the S/D implant roles (`"nplus"` 32/0 / `"pplus"` 31/0, issue
 #1577), so `gf180mcu` is the one family whose unit devices are drawn with a
