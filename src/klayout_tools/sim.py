@@ -89,7 +89,14 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, NamedTuple
 
-from . import env_provenance, output_lock, sim_crossings, sim_decks, sim_steps
+from . import (
+    env_provenance,
+    output_lock,
+    sim_crossings,
+    sim_decks,
+    sim_energy,
+    sim_steps,
+)
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -1034,6 +1041,8 @@ def _resolve_analysis_and_measurements(
     _validate_measurement_forms(measurements_spec)
     # Issue #2868: a crossings series is a transient-time quantity.
     sim_crossings.validate_crossings_context(measurements_spec, analysis)
+    # Issue #3033: an energy window is a transient-time quantity too.
+    sim_energy.validate_energy_context(measurements_spec, analysis)
     return analysis, measurements_spec
 
 
@@ -1158,13 +1167,35 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     has_spice = spec.get("spice") is not None
     has_expr = spec.get("expr") is not None
     has_crossings = sim_crossings.is_crossings(spec)
-    if name is None or not (has_spice or has_expr or has_crossings):
+    has_energy = sim_energy.is_energy(spec)
+    if name is None or not (has_spice or has_expr or has_crossings or has_energy):
         raise SimError(
             "each request.measurements[] entry requires 'name' and "
             "exactly one of 'spice' (a verbatim .meas card), 'expr' "
-            "(an ngspice expression evaluated after the analysis) or "
-            "'crossings' (a threshold-crossing time series)"
+            "(an ngspice expression evaluated after the analysis), "
+            "'crossings' (a threshold-crossing time series) or "
+            "'energy' (a source's energy over a transient window)"
         )
+    if has_energy:
+        # Issue #3033: a fourth, mutually exclusive form.
+        others = [
+            form
+            for form, present in (
+                ("spice", has_spice),
+                ("expr", has_expr),
+                ("crossings", has_crossings),
+            )
+            if present
+        ]
+        if others:
+            raise SimError(
+                f"measurement '{name}' declares 'energy' together with "
+                f"'{others[0]}': they are alternative forms of a measurement "
+                "-- declare exactly one (use a separate measurements[] entry "
+                "for the other)"
+            )
+        sim_energy.validate_energy_spec(name, spec["energy"])
+        return
     if has_crossings:
         # Issue #2868: a third, mutually exclusive form.
         if has_spice or has_expr:
@@ -2014,6 +2045,7 @@ def _run_sim_corners(
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
         ),
+        energy_declared=bool(sim_energy.energy_measurements(measurements_spec)),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -3932,11 +3964,11 @@ class _Checkpoint:
 
 
 def _refuse_xyce_control_block_measurements(
-    *, expr_declared: bool, crossings_declared: bool
+    *, expr_declared: bool, crossings_declared: bool, energy_declared: bool
 ) -> None:
     """The ``engine: "xyce"`` refusals for measurement forms that exist only
     as commands in klt's generated ngspice ``.control`` block (``expr``,
-    issue #2533; ``crossings``, issue #2868). Split out of
+    issue #2533; ``crossings``, issue #2868; ``energy``, issue #3033). Split out of
     :func:`_enforce_xyce_support_boundary` to keep that gate under the
     complexity limit."""
     if expr_declared:
@@ -3964,6 +3996,16 @@ def _refuse_xyce_control_block_measurements(
             "`.control` block, and the Xyce deck has none; use engine "
             "'ngspice'"
         )
+    if energy_declared:
+        # Issue #3033: the source current/voltage are dumped by ngspice
+        # `let`/`write` commands in the generated `.control` block -- same
+        # boundary as `crossings`.
+        raise SimError(
+            "measurements[].energy is not supported for engine 'xyce': the "
+            "source current and voltage are dumped by ngspice `let`/`write` "
+            "commands inside a `.control` block, and the Xyce deck has none; "
+            "use engine 'ngspice'"
+        )
 
 
 def _enforce_xyce_support_boundary(
@@ -3978,6 +4020,7 @@ def _enforce_xyce_support_boundary(
     save_mode_declared: bool = False,
     analysis_steps_declared: bool = False,
     crossings_declared: bool = False,
+    energy_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -4046,6 +4089,7 @@ def _enforce_xyce_support_boundary(
     _refuse_xyce_control_block_measurements(
         expr_declared=expr_measurements_declared,
         crossings_declared=crossings_declared,
+        energy_declared=energy_declared,
     )
     if save_mode_declared:
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
@@ -5207,6 +5251,8 @@ def _run_corner(
     # directory now, before it is cleaned up below -- so the reduced array is
     # what leaves the corner, on every backend, whatever `keep_artifacts` is.
     crossings = sim_crossings.extract_corner_crossings(measurements_spec, corner_dir)
+    # Issue #3033: same for the energy reduction.
+    energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -5216,6 +5262,7 @@ def _run_corner(
             is_xyce=is_xyce,
             save_mode=save_mode,
             crossings=crossings,
+            energy=energy,
         )
     )
     diagnostics.extend(measurement_diagnostics)
@@ -5352,6 +5399,7 @@ def _corner_measurement_results(
     is_xyce: bool,
     save_mode: str,
     crossings: dict[int, sim_crossings.CrossingsOutcome] | None = None,
+    energy: dict[int, sim_energy.EnergyOutcome] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
     from its harvested log values.
@@ -5360,7 +5408,8 @@ def _corner_measurement_results(
     ``crossings`` entry's extracted series (see
     :func:`klayout_tools.sim_crossings.extract_corner_crossings`); such an
     entry is graded by :func:`_crossings_measurement_result` instead of being
-    looked up in the log.
+    looked up in the log. ``energy`` (issue #3033) does the same for ``energy``
+    entries, graded by :func:`_energy_measurement_result`.
 
     An ``analysis_steps[]`` corner (issue #2482) is graded by
     :func:`klayout_tools.sim_steps.grade_step_measurements`, which adds the
@@ -5385,6 +5434,13 @@ def _corner_measurement_results(
         if sim_crossings.is_crossings(spec):
             result, extra = _crossings_measurement_result(
                 spec, (crossings or {}).get(position), save_mode=save_mode
+            )
+            measurement_results.append(result)
+            diagnostics.extend(extra)
+            continue
+        if sim_energy.is_energy(spec):
+            result, extra = _energy_measurement_result(
+                spec, (energy or {}).get(position), save_mode=save_mode
             )
             measurement_results.append(result)
             diagnostics.extend(extra)
@@ -5489,6 +5545,52 @@ def _crossings_measurement_result(
         "status": m_status,
         "margin": margin,
         "crossings": outcome.report(),
+    }
+    return result, grading_diagnostics
+
+
+def _energy_measurement_result(
+    spec: dict[str, Any],
+    outcome: sim_energy.EnergyOutcome | None,
+    *,
+    save_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """One ``energy`` measurement's response entry (issue #3033).
+
+    ``value`` is the net energy in joules -- a plain number, graded through
+    :func:`_grade_measurement_value` like any scalar -- and the
+    net/gross/recovered/charge breakdown rides the additive ``energy``
+    sibling. A source or voltage that did not resolve is an ordinary
+    ``status: "error"`` entry with a ``code: "measurement"`` diagnostic and
+    no ``energy`` member."""
+    name = spec["name"]
+    unit = spec.get("unit")
+    if outcome is None or outcome.error is not None:
+        message = (
+            outcome.error
+            if outcome is not None and outcome.error is not None
+            else f"measurement '{name}' produced no energy"
+        )
+        if save_mode == "netlist":
+            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
+        result = {
+            "name": name,
+            "value": None,
+            "unit": unit,
+            "status": "error",
+            "margin": None,
+        }
+        return result, [
+            {"severity": "error", "code": "measurement", "message": message}
+        ]
+    m_status, margin, grading_diagnostics = _grade_measurement_value(spec, outcome.net)
+    result = {
+        "name": name,
+        "value": outcome.net,
+        "unit": unit,
+        "status": m_status,
+        "margin": margin,
+        "energy": outcome.report(),
     }
     return result, grading_diagnostics
 
@@ -5824,6 +5926,12 @@ def _corner_deck_control_lines(
        vector. ``set filetype=ascii`` is emitted before the analysis when
        any are declared (the rawfile reader is ASCII-only). None of this
        appears without a crossings entry.
+    6. Per ``measurements[].energy`` entry (issue #3033), a ``let`` of the
+       voltage vector, a ``let`` of ``i(<source>)`` and one ``write
+       <corner_dir>/energy_<k>.raw`` of both
+       (:func:`klayout_tools.sim_energy.control_lines`), after the crossings
+       lines and before ``quit``; ``set filetype=ascii`` is emitted for them
+       too. None of this appears without an energy entry.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -5844,7 +5952,8 @@ def _corner_deck_control_lines(
         lines.extend(["quit", ".endc"])
         return lines
     crossings_lines = sim_crossings.control_lines(measurements_spec, corner_dir)
-    if raw_path is not None or crossings_lines:
+    energy_lines = sim_energy.control_lines(measurements_spec, corner_dir)
+    if raw_path is not None or crossings_lines or energy_lines:
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {analysis['args']}")
     if raw_path is not None:
@@ -5860,6 +5969,7 @@ def _corner_deck_control_lines(
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
     lines.extend(crossings_lines)
+    lines.extend(energy_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines
