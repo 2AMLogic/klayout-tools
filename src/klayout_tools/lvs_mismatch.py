@@ -1367,6 +1367,67 @@ def _has_interchangeable_terminals(device_class: Any) -> bool:
     return isinstance(device_class, passives)
 
 
+def _terminal_net_correspondence(
+    a: Any,
+    b: Any,
+    terminals_a: list[tuple[int, str]],
+    b_terminal_ids: list[int],
+    scope: Any,
+    paired: dict[_NetKey, _NetKey],
+    unpaired_layout: set[_NetKey],
+    unpaired_reference: set[_NetKey],
+    reference_declares_no_pins: bool,
+) -> tuple[set[_NetKey], set[_NetKey]] | None:
+    """The collateral nets of the terminal-by-terminal correspondence of
+    ``a``'s terminals onto ``b``'s ``b_terminal_ids``, or ``None``.
+
+    Hoisted out of :func:`_degraded_param_pair` to keep that function's
+    complexity under its ratchet baseline."""
+    explained_layout: set[_NetKey] = set()
+    explained_reference: set[_NetKey] = set()
+    for (terminal_id, _terminal_name), b_terminal_id in zip(
+        terminals_a, b_terminal_ids, strict=True
+    ):
+        net_a = a.net_for_terminal(terminal_id)
+        net_b = b.net_for_terminal(b_terminal_id)
+        if net_a is None and net_b is None:
+            continue
+        if net_a is None or net_b is None:
+            return None
+        key_a = (scope, net_a.expanded_name())
+        key_b = (scope, net_b.expanded_name())
+        if key_a in paired:
+            if paired[key_a] != key_b:
+                return None
+            continue
+        if key_a not in unpaired_layout or key_b not in unpaired_reference:
+            return None
+        # Both sides left this net unpaired. It corresponds only if the
+        # two are interchangeable: same number of top-level pins, and
+        # either the same name or -- for a net nothing but this one device
+        # touches (a dangling well/bulk net is the common case) --
+        # structurally identical, whatever it happens to be called on each
+        # side. A flat reference declares no pins at all, so it carries no
+        # pin information to compare the layout's pins against (issue
+        # #2946).
+        if net_a.pin_count() != net_b.pin_count() and not (
+            reference_declares_no_pins and net_b.pin_count() == 0
+        ):
+            return None
+        collateral = _net_is_explained_by_device(
+            net_a, a
+        ) and _net_is_explained_by_device(net_b, b)
+        if (
+            not collateral
+            and net_a.expanded_name().lower() != net_b.expanded_name().lower()
+        ):
+            return None
+        if collateral:
+            explained_layout.add(key_a)
+            explained_reference.add(key_b)
+    return explained_layout, explained_reference
+
+
 def _degraded_param_pair(
     logger: Any,
     excluded_parameters: ExcludedParameters | None = None,
@@ -1482,51 +1543,17 @@ def _degraded_param_pair(
     def correspond(
         b_terminal_ids: list[int],
     ) -> tuple[set[_NetKey], set[_NetKey]] | None:
-        """The collateral nets of the terminal-by-terminal correspondence of
-        ``a``'s terminals onto ``b``'s ``b_terminal_ids``, or ``None``."""
-        explained_layout: set[_NetKey] = set()
-        explained_reference: set[_NetKey] = set()
-        for (terminal_id, _terminal_name), b_terminal_id in zip(
-            terminals_a, b_terminal_ids, strict=True
-        ):
-            net_a = a.net_for_terminal(terminal_id)
-            net_b = b.net_for_terminal(b_terminal_id)
-            if net_a is None and net_b is None:
-                continue
-            if net_a is None or net_b is None:
-                return None
-            key_a = (scope, net_a.expanded_name())
-            key_b = (scope, net_b.expanded_name())
-            if key_a in paired:
-                if paired[key_a] != key_b:
-                    return None
-                continue
-            if key_a not in unpaired_layout or key_b not in unpaired_reference:
-                return None
-            # Both sides left this net unpaired. It corresponds only if the
-            # two are interchangeable: same number of top-level pins, and
-            # either the same name or -- for a net nothing but this one device
-            # touches (a dangling well/bulk net is the common case) --
-            # structurally identical, whatever it happens to be called on each
-            # side. A flat reference declares no pins at all, so it carries no
-            # pin information to compare the layout's pins against (issue
-            # #2946).
-            if net_a.pin_count() != net_b.pin_count() and not (
-                reference_declares_no_pins and net_b.pin_count() == 0
-            ):
-                return None
-            collateral = _net_is_explained_by_device(
-                net_a, a
-            ) and _net_is_explained_by_device(net_b, b)
-            if (
-                not collateral
-                and net_a.expanded_name().lower() != net_b.expanded_name().lower()
-            ):
-                return None
-            if collateral:
-                explained_layout.add(key_a)
-                explained_reference.add(key_b)
-        return explained_layout, explained_reference
+        return _terminal_net_correspondence(
+            a,
+            b,
+            terminals_a,
+            b_terminal_ids,
+            scope,
+            paired,
+            unpaired_layout,
+            unpaired_reference,
+            reference_declares_no_pins,
+        )
 
     terminal_ids = [terminal_id for terminal_id, _ in terminals_a]
     explained = correspond(terminal_ids)
