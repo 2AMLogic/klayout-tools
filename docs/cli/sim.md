@@ -3170,7 +3170,7 @@ ngspice receives only the combined `.options seed=<rndseed>`, which is
 derived from both components and so still changes per sample under
 `vary: "process"`. For such decks the working control is to switch the
 deck's own mismatch off (e.g. gf180mcu `sw_stat_mismatch=0`) and confirm
-sigma=0. This guards against a
+sigma=0. The control guards against a
 broken/no-op sampler that silently produces no variation at all (or
 variation from an unrelated source): the axis nobody asked to vary is
 provably pinned, not just "happens to look the same" this run. Two public
