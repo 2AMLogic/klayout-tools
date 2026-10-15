@@ -279,9 +279,26 @@ def _bent_request(signal: list, ret: list) -> dict:
     }
 
 
+# Measured orientation sensitivity of NEC2 on this geometry is 1.4-1.8%, and
+# changing the legacy stub's own segment count (1 -> 3) moves Z_sc by ~2.9%,
+# so 3% bounds NEC's discretisation noise while a wrong stub/connector
+# (missing wire, wrong endpoint) lands far outside it.
+STRAIGHT_CONTROL_TOLERANCE = 0.03
+
+
 def test_straight_control_matches_legacy_short_circuit(nec_point):
     """The straightened control is the legacy short-circuit geometry, so the
-    driving-point mode must reproduce the legacy `Z_sc`."""
+    driving-point mode must reproduce the legacy `Z_sc` to within NEC2's own
+    discretisation noise (`STRAIGHT_CONTROL_TOLERANCE`).
+
+    The two are not bit-identical because the bent contract traverses the
+    loop (return wire runs far -> near, antiparallel to the signal wire),
+    while the legacy script directs both long wires 0 -> L. Both
+    single-segment 40 um connectors sit next to 5 um segments, and NEC2's
+    junction treatment then makes `Im(Z_sc)` orientation-dependent: giving
+    the legacy geometry the same return direction moves it by ~1.8% and
+    reproduces this mode's value; giving it the same direction as legacy
+    matches to ~1e-9. See docs/design/mom-cross-validation.md."""
     result = _run_nec_request(
         _bent_request(
             [[0, 0, 0], [LENGTH_UM, 0, 0]],
@@ -301,7 +318,9 @@ def test_straight_control_matches_legacy_short_circuit(nec_point):
         1,
     ]
     assert math.isfinite(z_in.real) and math.isfinite(z_in.imag)
-    assert abs(z_in - z_sc) / abs(z_sc) < 0.01, f"control {z_in} vs legacy Z_sc {z_sc}"
+    assert abs(z_in - z_sc) / abs(z_sc) < STRAIGHT_CONTROL_TOLERANCE, (
+        f"control {z_in} vs legacy Z_sc {z_sc}"
+    )
     print(f"\nstraight control Z_in={z_in:.4f} ohm  legacy Z_sc={z_sc:.4f} ohm")
 
 

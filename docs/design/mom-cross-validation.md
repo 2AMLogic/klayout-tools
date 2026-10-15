@@ -345,6 +345,24 @@ legs (including a collapsed far connector or feed stub), signal/return paths
 sharing a vertex, non-positive `radius_um` / `frequency_hz` /
 `segment_size_um`, and bad `segments_per_leg`.
 
+**Straight-control agreement (measured).** On the shared benchmark the
+straightened control gives `Z_in = 1.63e-9 + 4.4488j` ohm against the legacy
+short-circuit `Z_sc = 1.63e-9 + 4.5103j` ohm: **1.36%** relative difference
+(CI, PyNEC). The cause was isolated by perturbing the *legacy* geometry:
+directing its return wire far → near (as the bent contract's loop traversal
+does) moves `Im(Z_sc)` by ~1.8% and reproduces this mode's value, while
+giving this mode the legacy's return direction matches the legacy to ~1e-9.
+So the mode's geometry is faithful; the residual is NEC2 orientation
+sensitivity at junctions with a single 40 µm connector next to 5 µm
+segments. The same instability shows in other knobs: changing the legacy
+stub from 1 to 3 segments moves `Z_sc` by ~2.9%, and a last-ulp change in the
+coordinates (`40e-6` vs `40*1e-6`) moves the control by ~0.3%. The control
+test therefore asserts agreement within **3%** (not 1%), a bound NEC's own
+discretisation noise stays under while a wrong connector/stub would not.
+Refining the connectors does not help (thin-wire kernel breaks down once
+segments approach the wire radius), so this is a limit of the oracle, not
+something the mode can tighten.
+
 **Tests.** `tests/test_mom_nec_bent_path.py` pins the translation with a fake
 `PyNEC` (no NEC2++ needed); `tests/test_mom_cross_validation.py` runs a
 straightened control (it must equal the legacy short-circuit `Z_sc`, same
