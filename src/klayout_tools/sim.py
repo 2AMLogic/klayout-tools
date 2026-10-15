@@ -231,6 +231,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
         "engine_killed",
+        "engine_aborted",
         "measurement",
         "unknown",
         # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
@@ -5231,8 +5232,10 @@ def _run_corner(
     diagnostics: list[dict[str, str]] = list(include_diagnostics)
     started = time.monotonic()
     timed_out = False
+    engine_aborted = False
     engine_version: str | None = None
     stdout_text = ""
+    stderr_text = ""
     engine_exit_code: int | None = None
     engine_killed_by_signal: str | None = None
     try:
@@ -5244,6 +5247,7 @@ def _run_corner(
             cwd=corner_dir,
         )
         stdout_text = completed.stdout or ""
+        stderr_text = completed.stderr or ""
         engine_exit_code, engine_killed_by_signal = _split_returncode(
             completed.returncode
         )
@@ -5279,6 +5283,8 @@ def _run_corner(
             }
         )
     else:
+        output_tail = _engine_output_tail(stderr_text, stdout_text, log_text)
+        tail_suffix = f"; last output:\n{output_tail}" if output_tail else ""
         if engine_killed_by_signal is not None:
             diagnostics.append(
                 {
@@ -5287,22 +5293,38 @@ def _run_corner(
                     "message": (
                         f"{engine_name} was killed by {engine_killed_by_signal} "
                         "(not by the harness timeout) -- e.g. the OOM killer, "
-                        "a host reaper, or a reclaimed worker"
+                        "a host reaper, or a reclaimed worker" + tail_suffix
                     ),
                 }
             )
-        diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
-        if engine_exit_code and not log_text and not os.path.exists(log_path):
+            engine_aborted = True
+        classified = _classify_engine_diagnostics(log_text, netlist_path, engine)
+        diagnostics.extend(classified)
+        if (
+            not engine_aborted
+            and engine_exit_code is not None
+            and not any(d["severity"] == "error" for d in classified)
+            and (
+                engine_exit_code != 0
+                or (bool(measurements_spec) and not log_text.strip())
+            )
+        ):
+            # Issue #3067: the engine ended abnormally (non-zero exit with no
+            # classifiable cause in its log, or a clean exit that left no
+            # log at all). Report that as the corner's cause instead of
+            # leaving only N consequential "produced no value" errors.
+            if engine_exit_code != 0:
+                what = f"exited with code {engine_exit_code}"
+            else:
+                what = "exited cleanly but wrote no log"
             diagnostics.append(
                 {
                     "severity": "error",
-                    "code": "unknown",
-                    "message": (
-                        f"{engine_name} exited with code {engine_exit_code} "
-                        "without writing its log (deck or log path not found?)"
-                    ),
+                    "code": "engine_aborted",
+                    "message": f"{engine_name} {what}" + tail_suffix,
                 }
             )
+            engine_aborted = True
 
     # Both engines fold a `.meas`/`.measure` card's name to lower-case in
     # their own report output (Xyce actually upper-cases, but
@@ -5331,6 +5353,13 @@ def _run_corner(
             crossings=crossings,
         )
     )
+    if engine_aborted:
+        # The abort is the cause; the per-measurement "produced no value"
+        # errors are its consequences (the measurement results themselves
+        # stay `error`), so they must not crowd `diagnostics[0]` (#3067).
+        measurement_diagnostics = [
+            d for d in measurement_diagnostics if d.get("code") != "measurement"
+        ]
     diagnostics.extend(measurement_diagnostics)
 
     # A recovered `singular_matrix`/`nonconvergence` classification (the
@@ -5440,6 +5469,21 @@ def _run_corner(
         **step_fields,
     }
     return corner, engine_version
+
+
+#: Lines of engine output quoted in an ``engine_killed``/``engine_aborted``
+#: diagnostic message (issue #3067).
+_ENGINE_TAIL_LINES = 20
+
+
+def _engine_output_tail(*sources: str) -> str:
+    """The last :data:`_ENGINE_TAIL_LINES` non-blank lines of the first
+    non-blank source (stderr, then stdout, then the engine log)."""
+    for text in sources:
+        lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+        if lines:
+            return "\n".join(lines[-_ENGINE_TAIL_LINES:])
+    return ""
 
 
 def _split_returncode(returncode: int) -> tuple[int | None, str | None]:

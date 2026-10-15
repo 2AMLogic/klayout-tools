@@ -2996,6 +2996,88 @@ def test_corner_timeout_and_launch_failure_leave_both_fields_null(
     assert corner["engine_killed_by_signal"] is None
 
 
+def _abort_corner(tmp_path, monkeypatch, *, keep_artifacts, log_text="", **stub):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+            "options": {"timeout_s": 5, "keep_artifacts": keep_artifacts},
+        },
+    )
+
+    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(log_text)
+        return fake_completed(
+            "** ngspice-99\n",
+            returncode=stub.get("returncode", 0),
+            stderr=stub.get("stderr", ""),
+        )
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+    (corner,) = sim.run_sim(str(request))["corners"]
+    return corner
+
+
+@pytest.mark.parametrize("keep_artifacts", [True, False])
+def test_corner_nonzero_exit_gets_engine_aborted_with_tail(
+    tmp_path, monkeypatch, keep_artifacts
+):
+    """Issue #3067: abnormal exit is the corner's primary diagnostic, with the
+    exit status and engine output tail; the measurement cascade is demoted."""
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=keep_artifacts,
+        returncode=3,
+        stderr="warn\nfatal: out of memory\n",
+    )
+    first = corner["diagnostics"][0]
+    assert first["code"] == "engine_aborted"
+    assert first["severity"] == "error"
+    assert "code 3" in first["message"]
+    assert "fatal: out of memory" in first["message"]
+    assert "measurement" not in [d["code"] for d in corner["diagnostics"]]
+    assert corner["engine_exit_code"] == 3
+    assert corner["status"] == "error"
+    assert "engine_aborted" in sim.DIAGNOSTIC_CODES
+
+
+def test_corner_clean_exit_with_empty_log_is_engine_aborted(tmp_path, monkeypatch):
+    corner = _abort_corner(tmp_path, monkeypatch, keep_artifacts=False)
+    assert corner["diagnostics"][0]["code"] == "engine_aborted"
+    assert "no log" in corner["diagnostics"][0]["message"]
+
+
+def test_corner_killed_demotes_measurement_cascade(tmp_path, monkeypatch):
+    corner = _abort_corner(
+        tmp_path, monkeypatch, keep_artifacts=False, returncode=-9, stderr="Killed\n"
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert codes == ["engine_killed"]
+    assert "Killed" in corner["diagnostics"][0]["message"]
+
+
+def test_corner_genuine_measurement_failure_is_not_engine_aborted(
+    tmp_path, monkeypatch
+):
+    corner = _abort_corner(
+        tmp_path,
+        monkeypatch,
+        keep_artifacts=False,
+        log_text="Circuit: x\nNo. of Data Rows : 10\n",
+    )
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "engine_aborted" not in codes
+    assert "measurement" in codes
+
+
 def test_split_returncode_unnamed_signal_falls_back():
     assert sim._split_returncode(-250) == (None, "SIG250")
     assert sim._split_returncode(3) == (3, None)
