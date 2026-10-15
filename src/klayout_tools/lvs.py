@@ -3317,8 +3317,43 @@ def _label_layers_replay(committed: dict[str, Any]) -> dict[str, Any]:
     return {"label_layers": dict(echoed)}
 
 
+def _logical_spice_cards(netlist_text: str) -> list[str]:
+    """Split ``netlist_text`` into lines, joining ``+`` continuations so a
+    wrapped card is one logical card."""
+    logical: list[str] = []
+    for raw in netlist_text.splitlines():
+        if raw.lstrip().startswith("+") and logical:
+            logical[-1] += " " + raw.lstrip()[1:]
+        else:
+            logical.append(raw)
+    return logical
+
+
+def _bare_resistor_x_card_name(
+    tokens: list[str], classes: Mapping[str, str]
+) -> str | None:
+    """``"<name> (<class>)"`` when ``tokens`` is a ``klt extract`` resistor
+    ``X`` card (``X<name> <net> <net> <net> <model> r=...``) naming one of
+    ``classes``; otherwise ``None``."""
+    if not tokens or tokens[0][0] not in "xX":
+        return None
+    # The model is the last token before the first `k=v` parameter.
+    first_param = next((i for i, tok in enumerate(tokens) if "=" in tok), len(tokens))
+    if first_param != 5:
+        return None
+    model = tokens[first_param - 1].upper()
+    if model not in classes:
+        return None
+    if not any(tok.lower().startswith("r=") for tok in tokens[first_param:]):
+        return None
+    return f"{tokens[0]} ({classes[model]})"
+
+
 def _reject_bare_resistor_x_cards(
-    netlist_text: str, netlist_path: str, reference_deck_name: str | None
+    netlist_text: str,
+    netlist_path: str,
+    reference_deck_name: str | None,
+    layout_deck_name: str | None,
 ) -> None:
     """Issue #3078: refuse a bare pre-extracted ``layout.netlist`` (no
     ``layout.deck``) carrying a ``klt extract`` resistor ``X`` card -- one
@@ -3328,7 +3363,7 @@ def _reject_bare_resistor_x_cards(
     subcircuit, the layout side has no resistor devices, and the compare
     reports a spurious ``mismatch``. Best-effort: an unresolvable
     ``reference.deck`` is left to the reference-side validation."""
-    if not reference_deck_name:
+    if layout_deck_name or not reference_deck_name:
         return
     try:
         classes = resistor_classes_for_deck(get_extraction_deck(reference_deck_name))
@@ -3336,31 +3371,11 @@ def _reject_bare_resistor_x_cards(
         return
     if not classes:
         return
-    # Join `+` continuation lines so a wrapped card is one logical card.
-    logical: list[str] = []
-    for raw in netlist_text.splitlines():
-        if raw.lstrip().startswith("+") and logical:
-            logical[-1] += " " + raw.lstrip()[1:]
-        else:
-            logical.append(raw)
-    offending: list[str] = []
-    for line in logical:
-        tokens = line.split()
-        if not tokens or tokens[0][0] not in "xX":
-            continue
-        # `X<name> <net> <net> <net> <model> <k=v>...`: the model is the
-        # last token before the first `k=v` parameter.
-        first_param = next(
-            (i for i, tok in enumerate(tokens) if "=" in tok), len(tokens)
-        )
-        if first_param != 5:
-            continue
-        model = tokens[first_param - 1].upper()
-        if model not in classes:
-            continue
-        if not any(tok.lower().startswith("r=") for tok in tokens[first_param:]):
-            continue
-        offending.append(f"{tokens[0]} ({classes[model]})")
+    offending = [
+        name
+        for line in _logical_spice_cards(netlist_text)
+        if (name := _bare_resistor_x_card_name(line.split(), classes))
+    ]
     if offending:
         raise LvsError(
             f"layout netlist '{netlist_path}' contains resistor X card(s) "
@@ -3674,10 +3689,12 @@ def _resolve_layout(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
     recovered_capacitor_classes = parse_capacitor_class_comments(layout_netlist_text)
-    if not layout_spec.get("deck"):
-        _reject_bare_resistor_x_cards(
-            layout_netlist_text, layout_netlist_path, reference_deck_name
-        )
+    _reject_bare_resistor_x_cards(
+        layout_netlist_text,
+        layout_netlist_path,
+        reference_deck_name,
+        layout_spec.get("deck"),
+    )
     # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
     # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
     # classes -- e.g. a MoM capacitor -- as a device of that class instead
