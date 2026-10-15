@@ -2660,11 +2660,7 @@ def _run_sim_corners(
             "checkpoint_retained": checkpoint_retained,
         }
 
-    budget_hint = _timeout_budget_hint(corners, timeout_s)
-    if budget_hint is not None:
-        # Additive/optional (issue #2894): only present when a unit timed out
-        # or came within 80% of `options.timeout_s`.
-        environment["timeout_budget_hint"] = budget_hint
+    _attach_timeout_budget_hint(environment, corners, timeout_s)
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -2775,6 +2771,18 @@ def _timeout_budget_hint(
             f"raise options.timeout_s (for example to {suggested}s) and re-run."
         ),
     }
+
+
+def _attach_timeout_budget_hint(
+    environment: dict[str, Any], corners: list[dict[str, Any]], timeout_s: float
+) -> None:
+    """Add ``environment["timeout_budget_hint"]`` when
+    :func:`_timeout_budget_hint` reports one (issue #2894). Additive/optional:
+    absent unless a unit timed out or came within 80% of ``options.timeout_s``.
+    Kept out of ``_run_sim_corners`` to hold its C901 complexity ratchet."""
+    hint = _timeout_budget_hint(corners, timeout_s)
+    if hint is not None:
+        environment["timeout_budget_hint"] = hint
 
 
 def _warn_pdk_ambiguity(resolution: dict[str, Any] | None) -> None:
