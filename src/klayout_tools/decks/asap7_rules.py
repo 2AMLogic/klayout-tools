@@ -400,6 +400,13 @@ _EXACT_EN = (
     "exact (==) or per-side paired enclosure ('5 & 2', '(5 & 5) | (5 & 0)') "
     "needs routing direction and a per-side enclosure predicate"
 )
+_LISD_EXACT_3 = (
+    "'== 3 nm on at least two opposite sides' is expressible without a routing "
+    "direction, but the literal '==' contradicts the pinned shipped cells (100 "
+    "V0 in 57 of 212 RVT cells are enclosed by LISD by more than 3 nm on every "
+    "opposite pair, e.g. 4 / 2 nm across and 27 / 36 nm along); the cells "
+    "satisfy only the 'at least 3 nm' reading, so the exact check is not shipped"
+)
 _EXACT_W = "exact width across the metal track needs the metal routing direction"
 _SADP_TRACK = (
     "defined against the routing tracks (adjacent tracks, number of tracks "
@@ -509,8 +516,7 @@ NOT_IMPLEMENTED: tuple[Asap7RuleGap, ...] = (
     Asap7RuleGap("V0.S.1", "Table 3.11.1", _TRACK, "#3147"),
     *_gaps(("V0.S.2", "V0.S.3", "V0.S.4"), "Table 3.11.1", _END_CAP, "#3147"),
     Asap7RuleGap("V0.M1.EN.1", "Table 3.11.1", _EXACT_EN, "#3147"),
-    Asap7RuleGap("V0.LISD.EN.2", "Table 3.11.2", _EXACT_EN, "#3147"),
-    Asap7RuleGap("V0.LISD.EN.3", "Table 3.11.2", _EXACT_EN, "#3147"),
+    *_gaps(("V0.LISD.EN.2", "V0.LISD.EN.3"), "Table 3.11.2", _LISD_EXACT_3, "#3147"),
     Asap7RuleGap("V0.LIG.EN.4", "Table 3.11.2", _ONE_SIDE, "#3147"),
     Asap7RuleGap(
         "V0.LIG.AUX.2",
