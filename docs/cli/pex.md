@@ -8,7 +8,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 ("PEX-aware post-layout sim flow for klt").
 
 ```
-klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--format text|json]
+klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--rename-declared-pins] [--label-layer <role>=<layer>/<datatype>]... [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--flatten-schematic] [--format text|json]
 klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
@@ -94,6 +94,11 @@ klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <
   joined net name. Requires `--pins`. Off by default — byte-identical to
   before this flag existed. The effective value is echoed as
   `extraction.rename_declared_pins`.
+- `--flatten-schematic` — flatten the schematic DUT to PDK leaf devices
+  before the schematic-side run (issue #2889) — the `klt pex` counterpart of
+  `klt lvs`'s `options.flatten_reference`. Off by default — byte-identical
+  to before this flag existed. See "Flattening a hierarchical schematic DUT
+  (`--flatten-schematic`)" below.
 - `--label-layer` — repeatable `<role>=<layer>/<datatype>`, passed through
   to `klt extract --label-layer` (issue #2686); see
   [`extract.md`](extract.md)'s "Overriding a deck's label layers" section.
@@ -612,8 +617,95 @@ multiset a genuine device-flavour swap would, without the two sides
 actually naming different devices. `model_mismatch`'s `detail` names this
 explicitly (rather than asserting the two sides are electrically unrelated)
 whenever the reference netlist is hierarchical; treat a hierarchical-shaped
-`detail` as inconclusive on its own and verify against a flattened
-reference before discarding the run's `delta[]` evidence.
+`detail` as inconclusive on its own and re-run with `--flatten-schematic`
+(below), which removes the hierarchy from the comparison, before discarding
+the run's `delta[]` evidence.
+
+## Flattening a hierarchical schematic DUT (`--flatten-schematic`)
+
+`klt pex` swaps only the testbench's single DUT `.include`, so the
+schematic leg runs whatever that file contains — normally a hierarchical
+netlist (user subcircuits instantiated from the top subcircuit), while the
+extracted leg is always flat. Besides the `model_mismatch` false positive
+above, that leaves every caller with a hierarchical design writing its own
+flattener. `--flatten-schematic` (issue #2889) does it once, up front:
+
+1. The one resolved schematic DUT is flattened by `klayout_tools.spice_flatten`
+   (SPICE text in, SPICE text out — not KLayout's in-process
+   `Netlist.flatten()`, so the result stays a simulable deck) and written to
+   `<outdir>/schematic-dut.flat.spice`. A relative `.include`/`.inc`/`.lib
+   <path>` inside the DUT file is rewritten to an absolute path against the
+   DUT's own directory, since the copy no longer sits next to it.
+2. Each testbench's schematic-side run uses a DUT-swapped copy
+   (`<outdir>/<label>.schematic-request.json` +
+   `<label>.schematic-dut-testbench.spice`) whose `.include` names that file
+   by absolute path; every other request field, including its own
+   `netlist_source`, is unchanged. In `--measure-command` mode the command is
+   handed the flattened netlist for the schematic side instead.
+3. `flat_dut_mismatch`, `pin_count_mismatch` and `model_mismatch` compare
+   the flattened netlist against the extraction.
+   `reference_netlist`/`reference_netlist_sha256` and
+   `testbenches[].schematic_netlist*` still name the caller's own DUT file.
+
+Flattening rules:
+
+- **Inlined:** every `X` card whose target is a `.subckt` defined in the DUT
+  file, recursively. **Kept:** each root `.subckt` (one nothing else
+  instantiates) plus the extracted top cell, with its header verbatim;
+  file-level cards outside any `.subckt` stay where they are.
+- **Leaf devices:** an `X` target with no definition in the file (a PDK
+  primitive such as `sky130_fd_pr__nfet_01v8`, defined by the model library
+  the testbench loads) is emitted as-is. SPICE text alone cannot tell a PDK
+  primitive from a missing user subcircuit, so every such name is listed in
+  `schematic_flatten.external_subckts` — check it for anything that is not a
+  PDK device. The flattener only sees subcircuits defined in the DUT file
+  itself: one pulled in through the DUT's own `.include`/`.lib` is not read,
+  so it stays an unflattened `X` call, appears in `external_subckts`, and
+  (if nothing else was inlined) the run reports `already_flat: true`.
+  (Departure from the issue's acceptance criteria, accepted in review: an
+  undefined `X` target is kept as an external leaf rather than failing with
+  `undefined_subckt`, because sky130 MOS devices are themselves `X` calls to
+  PDK-library subcircuits.)
+- **Names:** an inlined device `R1` reached through instances `X1` → `X2`
+  becomes `R.X1.X2.R1` (the leading element letter is kept); an internal node
+  `mid` becomes `X1.X2.mid`; pins map to the caller's nodes. Ground (`0`,
+  `gnd`) and `.global` nets are never renamed.
+- **Parameters:** header defaults, overridden by the instance's
+  `name=value` arguments (evaluated in the caller's scope), then body
+  `.param` cards, are substituted into the inlined cards' `name=value`
+  values and `{...}`/`'...'` expressions. As in ngspice, scoping is
+  hierarchical: a nested subcircuit also sees every parameter resolved on
+  its enclosing instances (its own defaults and arguments shadow them). A
+  root subcircuit's own parameters stay for ngspice to bind. An instance `m=` (when the subcircuit declares no
+  `m` parameter) is pushed down onto every inlined device.
+- **`.model` cards** inside an inlined subcircuit are hoisted to the
+  enclosing root, de-duplicated.
+- **Errors, never a partial flatten.** A recursion cycle, an `X` call whose
+  node count differs from the subcircuit's pin count, a card the flattener
+  cannot rename safely (a `B` source, polynomial `E`/`G`, transmission
+  line, `.ic`/`.nodeset`/`.include` inside a subcircuit, an `m=` multiplier
+  over a source), or unbalanced `.subckt`/`.ends` fail the run before
+  anything simulates, with `error.code` `schematic_flatten_cycle`,
+  `schematic_flatten_pin_count_mismatch`, `schematic_flatten_unsupported_card`
+  or `schematic_flatten_malformed`.
+
+The response reports it: `flatten_schematic: true` and
+
+```json
+"schematic_flatten": {
+  "netlist": { "path": ".klt/pex/schematic-dut.flat.spice", "scope": "repo" },
+  "netlist_sha256": "sha256:<64 hex>",
+  "subckts": ["BUF"],
+  "inlined_instances": 2,
+  "inlined_subckts": ["INV"],
+  "external_subckts": ["sky130_fd_pr__nfet_01v8", "sky130_fd_pr__pfet_01v8"],
+  "already_flat": false
+}
+```
+
+An already-flat DUT is still copied, run and reported (`already_flat:
+true`, `inlined_instances: 0`). Without the flag, `flatten_schematic` is
+`false` and `schematic_flatten` is `null`.
 
 ## The extracted network's own integrity report (issue #2764)
 
@@ -1027,6 +1119,8 @@ full `repo`/`external`/`absent` scope meanings.
   "pin_count_mismatch": null,
   "flat_dut_mismatch": null,
   "model_mismatch": null,
+  "flatten_schematic": false,
+  "schematic_flatten": null,
   "provenance": {
     "klt_version": "0.4.2",
     "klayout_version": "0.30.10",
@@ -1058,6 +1152,8 @@ full `repo`/`external`/`absent` scope meanings.
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
 | `flat_dut_mismatch`  | object \| null    | `null` unless the schematic DUT is netlisted flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction (issue #1255, Gap 2 — additive field). Same shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` objects, `ngspice_message` — always `null` here, no engine is ever invoked — and `detail`); mutually exclusive with `pin_count_mismatch` (the extracted side is never attempted when this fires). See "Flat schematic DUT vs `.SUBCKT`-wrapped extraction" above. |
 | `model_mismatch`     | object \| null    | `null` when the reference (schematic) and extracted netlists' `M`/`X`/`Q`/`D` device cards instantiate the same models/`.subckt`s the same number of times (issue #2402 — additive field). Non-`null` names the divergence: `reference_only`/`extracted_only` (model names unique to one side, by instance count), `counts` (each side's full per-model instance count), and a human-readable `detail`. Unlike `pin_count_mismatch`/`flat_dut_mismatch`, computed unconditionally (independent of whether the top-level pin lists match) and never skips the extracted-side simulation — it never changes `status`. See "A device-model divergence invalidates the comparison too" above. |
+| `flatten_schematic`  | boolean           | Issue #2889 (additive, always present). Echo of `--flatten-schematic` — `false` when not given. |
+| `schematic_flatten`  | object \| null    | Issue #2889 (additive). `null` unless `--flatten-schematic` was given. Otherwise the flattened schematic DUT the schematic leg ran: `netlist` (`{path, scope}`), `netlist_sha256` (`sha256:<hex>` of its exact bytes), `subckts` (root `.subckt` names kept), `inlined_instances`, `inlined_subckts`, `external_subckts` (undefined `X` targets kept as leaf devices — audit these) and `already_flat`. See "Flattening a hierarchical schematic DUT" above. |
 | `provenance`         | object            | The extraction's own shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). `deck` pins the extraction deck (name + `sha256:` content hash — the "deck version" this report pins); `input` pins `<layout>`. |
 
 ### `delta[]` entries
@@ -1111,7 +1207,7 @@ ownership".
 | Exit code | Meaning                                                                                     |
 | --------- | -------------------------------------------------------------------------------------------- |
 | `0`       | At least one actual comparison ran and every `delta[]` row passed.                                                                   |
-| `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one** or one that does not plausibly name the DUT (issue #1255, Gap 1), testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. For a `--measure-command` run (issue #2478): also a mis-combined invocation (`--measure-command` with a `<testbench>`, or without `--reference-netlist`; `--reference-netlist`/`--measure-timeout-s` without `--measure-command`), a `--reference-netlist` that is missing or is not a DUT, and any measurement-command failure — unrunnable, non-zero exit, timeout, non-JSON stdout, or a malformed measurement document. Documented error shape on stderr (`--format json`). |
+| `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one** or one that does not plausibly name the DUT (issue #1255, Gap 1), testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. For a `--measure-command` run (issue #2478): also a mis-combined invocation (`--measure-command` with a `<testbench>`, or without `--reference-netlist`; `--reference-netlist`/`--measure-timeout-s` without `--measure-command`), a `--reference-netlist` that is missing or is not a DUT, and any measurement-command failure — unrunnable, non-zero exit, timeout, non-JSON stdout, or a malformed measurement document. With `--flatten-schematic` (issue #2889): a schematic DUT the flattener refuses (cycle, `X`-call pin-count mismatch, unsupported card, unbalanced `.subckt`), classified as `error.code` `schematic_flatten_*`. Documented error shape on stderr (`--format json`). |
 | `3`       | Ran successfully; at least one `delta[]` row's `status` is `"fail"`.                           |
 | `4`       | No actual comparison ran (`status: "not_checked"`), or at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2). |
 
