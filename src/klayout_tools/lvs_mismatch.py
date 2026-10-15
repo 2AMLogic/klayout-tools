@@ -1016,6 +1016,9 @@ def _build_mismatches(
         # A class with actual instances that still has no counterpart is a
         # genuine gap and stays `error`.
         present_class = a if a is not None else b
+        class_name = getattr(present_class, "name", None)
+        class_suffix = f": '{class_name}'" if class_name else ""
+        class_device = {"layout": None, "reference": None, "class": class_name}
         present_netlist = layout_netlist if a is not None else reference_netlist
         instance_count = (
             _count_devices_of_class(present_netlist, present_class)
@@ -1029,8 +1032,9 @@ def _build_mismatches(
                     "warning",
                     "device class has no counterpart on the other side, but "
                     "no devices of this class were extracted either -- not "
-                    "a real topology mismatch",
+                    "a real topology mismatch" + class_suffix,
                     side,
+                    device=class_device,
                 )
             )
         else:
@@ -1038,8 +1042,9 @@ def _build_mismatches(
                 _mismatch(
                     CATEGORY_TOPOLOGY,
                     "error",
-                    "device class could not be mapped to a counterpart",
+                    "device class could not be mapped to a counterpart" + class_suffix,
                     side,
+                    device=class_device,
                 )
             )
 
