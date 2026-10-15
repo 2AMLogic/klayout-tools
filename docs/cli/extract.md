@@ -5441,6 +5441,19 @@ identifiers the same way (issue #1623). Without this, an escaped DEF
 identifier never matches its unescaped extraction-side counterpart, and
 the affected net silently gets no `*CONN` block at all.
 
+**Hierarchy divider (issue #2969).** The SPEF written here declares
+`*DIVIDER /`, so SPEF distinguishes `sub/_001_` (a hierarchical path) from
+`sub\/_001_` (a flat name containing a literal slash). Matching un-escapes
+both spellings to the same string, so the writer keeps the DEF's own
+spelling for every DEF-sourced name: a bare `/` in the DEF is written bare
+in `*D_NET`, `*I` and `*RES`/`*CAP` nodes, and an escaped `\/` stays
+escaped. Names with no DEF origin (and port names) keep the uniform
+escape-everything rule, `/` included. Whether a given OpenSTA netlist
+resolves the bare form is a property of that netlist (hierarchical vs.
+flattened with escaped names); the writer follows the DEF rather than
+guessing. Not yet measured against a live OpenSTA session — `sta` is not
+installed on the host this change was built on.
+
 **Every two-terminal `*RES`/coupling `*CAP` endpoint is a colon-scoped
 internal node, a `*CONN`-declared instance-pin identifier, or (for an
 unambiguously-named port net) the port's own bare name — never a bare
