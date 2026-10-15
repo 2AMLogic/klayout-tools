@@ -51,8 +51,9 @@ from .pdk_families import pdk_variant_family
 #: this is deliberately *not* applied universally, because lifting the pad
 #: also lifts the reported ``U<i>_G`` port (its ``y``, and with
 #: ``gate_contact`` the drawn contact/local-metal stack too), which would move
-#: every existing sky130/gf180mcu caller's gate port for no DRC benefit on
-#: those families (issues #461/#492/#781 pin that contract).
+#: every existing caller's gate port for no DRC benefit on families whose real
+#: deck does not need it (issues #461/#492/#781 pinned that contract; sky130
+#: and gf180mcu have since been moved deliberately, see their entries below).
 #:
 #: - ``sg13g2``: 0.1um, comfortably above ``klayout_tools.decks.sg13g2``'s
 #:   ``gatpoly.separation.activ.1`` (`5_8_gatpoly.drc` rule ``Gat.d``,
@@ -63,6 +64,15 @@ from .pdk_families import pdk_variant_family
 #:   constants keep over theirs. Landing the pad this way is also closer to
 #:   how a real device is drawn: the gate poly extends past the channel
 #:   (an endcap) rather than stopping dead on the diffusion edge.
+#: - ``sky130`` (issue #3115): 0.15um, above the PDK's own ``poly.4`` (poly
+#:   space to unrelated diffusion, 0.075um -- which this repo's curated
+#:   ``sky130`` deck does not transcribe, so ``klt drc --deck sky130`` never
+#:   saw the zero-distance pad overhang that Magic ``drc(full)`` flags for
+#:   every gate length below the 0.42um pad width) and above ``poly.8``'s
+#:   0.13um gate endcap (the stem now supplies it on the top edge, see
+#:   #2936). A real, deliberate geometry change like gf180mcu's: the landing
+#:   pad and the reported ``U<i>_G`` port move up by this amount; see
+#:   ``docs/cli/gen.md``.
 #: - ``gf180mcu`` (issue #1577): 0.35um, above gf180mcu's own real signoff
 #:   deck's ``PL.5a_LV``/``PL.5b_LV`` ("Space from field Poly2 to
 #:   unrelated/related COMP", 0.1um each) *and* their ``_MV`` (``Dualgate``
@@ -92,6 +102,7 @@ from .pdk_families import pdk_variant_family
 #:   pinned; see ``docs/cli/gen.md``'s ``mos_array`` gf180mcu note for the
 #:   full before/after.
 _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM: dict[str, float] = {
+    "sky130": 0.15,  # poly.4 (poly to unrelated diff) is 0.075um; poly.8 endcap 0.13um
     "sg13g2": 0.1,  # Gat.d (GatPoly space to Activ) is 0.07um
     "gf180mcu": 0.35,  # PL.5a_MV/PL.5b_MV (field Poly2 to COMP, MV) are 0.3um
 }
@@ -305,6 +316,25 @@ def _voltage_flavor_mark_margin_um(family: str) -> float:
     from .gen import WELL_ENCLOSURE_MARGIN_UM
 
     return _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
+
+
+#: Per-family nwell enclosure margin (um) of the n-tap guard ring (:data:`WELL_ENCLOSURE_MARGIN_UM`
+#: for a family absent here, byte-for-byte).
+#:
+#: ``sky130`` only (issue #3115): the PDK's ``diff/tap.10`` (nwell overlap of
+#: n-tap) is 0.18um, which this repo's curated sky130 deck does not
+#: transcribe; 0.2um clears it with headroom.
+_PDK_RING_WELL_MARGIN_UM: dict[str, float] = {
+    "sky130": 0.2,  # diff/tap.10 (nwell overlap of n-tap) is 0.18um
+}
+
+
+def _ring_well_margin_um(family: str) -> float:
+    """Return ``family``'s n-tap ring nwell enclosure margin (see
+    :data:`_PDK_RING_WELL_MARGIN_UM`), or :data:`WELL_ENCLOSURE_MARGIN_UM`."""
+    from .gen import WELL_ENCLOSURE_MARGIN_UM
+
+    return _PDK_RING_WELL_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
 
 
 #: A contact-to-contact edge gap (um) below this is *legal* under sky130's
@@ -3055,6 +3085,7 @@ def _ring_layer_params(
         "metal_layer": _role_layer_info(family, "metal"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
+        "ring_well_margin_um": _ring_well_margin_um(family),
         "ring_implant_layer": (
             ring_implant if ring_implant is not None else kdb.LayerInfo(0, 0)
         ),

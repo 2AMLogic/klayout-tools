@@ -344,6 +344,7 @@ _HIDDEN_PARAMS = {
     "well_tap_implant_present",
     "well_margin_resolved_um",
     "gate_pad_clearance_um",
+    "ring_well_margin_um",
     # `mos_array`/`diff_pair`/`esd_device`'s issue #1577 harness-computed
     # knobs -- resolved per PDK family exactly like `gate_pad_clearance_um`
     # above, never part of the request schema.

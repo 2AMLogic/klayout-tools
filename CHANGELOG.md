@@ -43,6 +43,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   Decks without `reset` are byte-identical; a non-boolean value is refused by
   name. `docs/cli/sim.md` now also states that steps otherwise share circuit
   and solver state. Additive; no `schema_version` bump.
+- **sky130 `mos_array`/`diff_pair` gate pad and guard-ring well clear the
+  PDK's Magic `poly.4` / `diff/tap.10`** (issue #3115): the gate landing pad
+  is now stood 0.15µm off the diffusion (stem of exactly the gate length) and
+  the n-tap ring's nwell extends 0.2µm past the ring. Reported `U<i>_G` ports
+  (and `core_h_um`) on sky130 move up by 0.15µm; other families' geometry is
+  unchanged, though PCell property metadata changes the committed example
+  GDS bytes. See `docs/cli/gen.md`.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
