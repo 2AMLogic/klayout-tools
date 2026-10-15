@@ -438,7 +438,7 @@ def _sd_implant_hints(
 
 
 def _mos_cap_ports(
-    info: dict[str, Any],
+    port_cells: list[tuple[str, dict[str, Any]]],
     unit: dict[str, Any],
     metal_layer: dict[str, Any],
     gate_layer: dict[str, Any],
@@ -449,15 +449,14 @@ def _mos_cap_ports(
     ports: list[dict[str, Any]] = []
     cap_x, cap_y = unit["sd_cap_xy"]
     gx, gy = unit["g_xy"]
-    for c in info["cells"]:
-        idx = c["idx"]
+    for prefix, c in port_cells:
         for suffix, layer, (px, py) in (
             ("SD", metal_layer, (cap_x, cap_y)),
             ("G", gate_layer, (gx, gy)),
         ):
             ports.append(
                 {
-                    "name": f"U{idx}_{suffix}",
+                    "name": f"{prefix}_{suffix}",
                     "net": None,
                     "layer": layer,
                     "x_um": c["x0_um"] + px,
@@ -470,7 +469,7 @@ def _mos_cap_ports(
 
 
 def _mos_series_ports(
-    info: dict[str, Any],
+    port_cells: list[tuple[str, dict[str, Any]]],
     unit: dict[str, Any],
     metal_layer: dict[str, Any],
     gate_layer: dict[str, Any],
@@ -481,8 +480,7 @@ def _mos_series_ports(
     seg_xy = unit["seg_xy"]
     gate_xy = unit["gate_xy"]
     last_seg = len(seg_xy) - 1
-    for c in info["cells"]:
-        idx = c["idx"]
+    for prefix, c in port_cells:
         for seg_idx, (sx, sy) in enumerate(seg_xy):
             letter = "S" if seg_idx % 2 == 0 else "D"
             if seg_idx == 0:
@@ -497,7 +495,7 @@ def _mos_series_ports(
                 direction_deg, width_um = 270, unit["g_width_um"]
             ports.append(
                 {
-                    "name": f"U{idx}_{letter}{seg_idx // 2}",
+                    "name": f"{prefix}_{letter}{seg_idx // 2}",
                     "net": None,
                     "layer": metal_layer,
                     "x_um": c["x0_um"] + sx,
@@ -509,7 +507,7 @@ def _mos_series_ports(
         for gate_idx, (gx, gy) in enumerate(gate_xy):
             ports.append(
                 {
-                    "name": f"U{idx}_G{gate_idx}",
+                    "name": f"{prefix}_G{gate_idx}",
                     "net": None,
                     "layer": gate_layer,
                     "x_um": c["x0_um"] + gx,
@@ -595,20 +593,28 @@ def _mos_array_describe(
         and not params["mos_cap"]
     )
 
+    # #2904: opt-in `dummy_ports` also reports the dummy units' S/D/G as
+    # `D<k>_*` (k = row-major, left-to-right order), so `gen-compose`
+    # connectivity can tie them off. Off by default -- `dummy` defaults to 1,
+    # so reporting them unconditionally would change every default array.
+    port_cells = [(f"U{c['idx']}", c) for c in info["cells"]]
+    if params.get("dummy_ports"):
+        ordered = sorted(info["dummy_cells"], key=lambda c: (c["row"], c["col"]))
+        port_cells += [(f"D{k}", c) for k, c in enumerate(ordered)]
+
     ports: list[dict[str, Any]] = []
     if params["mos_cap"]:
-        ports = _mos_cap_ports(info, unit, metal_layer, gate_layer)
+        ports = _mos_cap_ports(port_cells, unit, metal_layer, gate_layer)
     elif series_fingers:
-        ports = _mos_series_ports(info, unit, metal_layer, gate_layer)
+        ports = _mos_series_ports(port_cells, unit, metal_layer, gate_layer)
     else:
         sx, sy = unit["s_xy"]
         dx, dy = unit["d_xy"]
         gx, gy = unit["g_xy"]
-        for c in info["cells"]:
-            idx = c["idx"]
+        for prefix, c in port_cells:
             ports.append(
                 {
-                    "name": f"U{idx}_S",
+                    "name": f"{prefix}_S",
                     "net": None,
                     "layer": metal_layer,
                     "x_um": c["x0_um"] + sx,
@@ -619,7 +625,7 @@ def _mos_array_describe(
             )
             ports.append(
                 {
-                    "name": f"U{idx}_D",
+                    "name": f"{prefix}_D",
                     "net": None,
                     "layer": metal_layer,
                     "x_um": c["x0_um"] + dx,
@@ -630,7 +636,7 @@ def _mos_array_describe(
             )
             ports.append(
                 {
-                    "name": f"U{idx}_G",
+                    "name": f"{prefix}_G",
                     "net": None,
                     "layer": gate_layer,
                     "x_um": c["x0_um"] + gx,
