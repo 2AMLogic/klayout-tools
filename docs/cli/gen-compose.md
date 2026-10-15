@@ -385,6 +385,32 @@ cleanly.
   (e.g. two blocks whose actual pads happen to sit at the same coordinate
   by coincidence), which only a real netlist diff can distinguish.
 
+## Manufacturing-grid snapping of routed ports (#2932)
+
+Generators report a terminal port at the *midpoint* of its pad. When the pad's
+extent is an odd multiple of the PDK manufacturing grid (e.g. `w_um` 3.015 on
+sky130's 0.005 um grid, midpoint 1.5075), every via-drop cut, landing pad and
+backbone vertex centred there would be off-grid and fail `*.ongrid.1`, even
+though each block is clean alone. Any on-grid point inside the pad is
+electrically equivalent, so for every port named in a routed `connectivity[]`
+entry `gen-compose` applies this rule (only when `routing` is supplied):
+
+- The grid is the coarsest `ongrid` rule of the curated deck on the routing
+  layer or the port's own layer (no `ongrid` rule, no snapping).
+- Each axis is snapped independently, in the **composed** frame (block offset
+  included), to the nearest grid line. Along the port edge's tangential axis
+  (`y` for `direction_deg` 0/180, `x` for 90/270) the result is clamped to stay
+  inside the pad (`width_um`); the other neighbouring grid line is tried when
+  the nearest one is outside. Ports already on-grid are untouched
+  (byte-identical geometry, no note).
+- Each applied move adds a `drc_hints.notes[]` entry naming the block, port,
+  axis and the moved distance. A pad narrower than one grid step holds no
+  on-grid point: the port is left where it is and a note says so (expect
+  `*.ongrid.1` violations there).
+
+The change is additive (new note text only); reported block ports in the
+input are never modified.
+
 ## Known limitations (found during phase 3 bring-up, #196)
 
 Running the real 5T OTA case (below) surfaced gaps phases 1–2 did not

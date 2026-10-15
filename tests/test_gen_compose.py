@@ -16818,3 +16818,125 @@ def test_compose_sky130_same_layer_crossing_is_still_rejected(tmp_path, pdk_root
     met3 = layout.layer(70, 20)
     paths = [s for s in layout.cell("x33").shapes(met3).each() if s.is_path()]
     assert len(paths) == 1
+
+
+# ---------------------------------------------------------------------------
+# #2932: routed port attach points are snapped onto the manufacturing grid
+# ---------------------------------------------------------------------------
+
+
+def _snap_fixture(x_um, y_um, width_um, direction_deg=180, offset=(0.0, 0.0)):
+    ports = {
+        "P": {
+            "name": "P",
+            "x_um": x_um,
+            "y_um": y_um,
+            "width_um": width_um,
+            "direction_deg": direction_deg,
+            "layer": {"layer": 67, "datatype": 20},
+        }
+    }
+    blocks = {"b": {"ports": ports}}
+    connectivity = [{"net": "N", "pins": [{"block": "b", "port": "P"}]}]
+    offsets = {"b": {"x": offset[0], "y": offset[1]}}
+    return blocks, connectivity, offsets
+
+
+def _run_snap(blocks, connectivity, offsets, grid=0.005):
+    notes: list[str] = []
+    gen_compose._snap_routed_ports_to_grid(
+        connectivity, blocks, offsets, lambda _layer: grid, (68, 20), notes
+    )
+    return blocks["b"]["ports"]["P"], notes
+
+
+def test_snap_half_grid_port_moves_inside_pad_and_notes():
+    blocks, conn, offs = _snap_fixture(0.21, 1.5075, 3.015)
+    port, notes = _run_snap(blocks, conn, offs)
+    assert port["y_um"] == pytest.approx(1.51)
+    assert port["x_um"] == 0.21
+    pad_lo, pad_hi = 1.5075 - 3.015 / 2, 1.5075 + 3.015 / 2
+    assert pad_lo <= port["y_um"] <= pad_hi
+    assert len(notes) == 1
+    assert "block 'b' port 'P' y" in notes[0] and "0.0025" in notes[0]
+
+
+def test_snap_already_on_grid_is_untouched_and_silent():
+    blocks, conn, offs = _snap_fixture(0.21, 1.51, 3.01)
+    before = dict(blocks["b"]["ports"]["P"])
+    port, notes = _run_snap(blocks, conn, offs)
+    assert port == before
+    assert notes == []
+
+
+def test_snap_accounts_for_block_offset_and_negative_coordinates():
+    # Composed y = -2.0925 + 0.5 is half-grid; the snapped *composed* point
+    # must land on-grid, expressed back in the block's local frame.
+    blocks, conn, offs = _snap_fixture(0.2, -2.0925, 1.0, offset=(0.0, 0.5))
+    port, _notes = _run_snap(blocks, conn, offs)
+    composed = port["y_um"] + 0.5
+    assert composed / 0.005 == pytest.approx(round(composed / 0.005))
+    assert abs(composed - (-2.0925 + 0.5)) <= 0.0025 + 1e-9
+
+
+def test_snap_both_axes_and_finer_grid():
+    # direction 90 -> tangential axis is x; both axes off the 0.0005 grid.
+    blocks, conn, offs = _snap_fixture(0.10025, 0.20075, 1.0, direction_deg=90)
+    port, notes = _run_snap(blocks, conn, offs, grid=0.0005)
+    for key in ("x_um", "y_um"):
+        assert port[key] / 0.0005 == pytest.approx(round(port[key] / 0.0005))
+    assert len(notes) == 2
+
+
+def test_snap_clamps_to_pad_edge_and_reports_unsnappable_pad():
+    # Pad of exactly one grid step centred half a step off-grid: the only
+    # on-grid points are its two edges, both still inside the pad.
+    blocks, conn, offs = _snap_fixture(0.2, 1.0025, 0.005)
+    port, _notes = _run_snap(blocks, conn, offs)
+    assert 1.0 - 1e-9 <= port["y_um"] <= 1.005 + 1e-9
+    assert port["y_um"] / 0.005 == pytest.approx(round(port["y_um"] / 0.005))
+
+    # Pad narrower than a grid step holds no on-grid point: stays put + note.
+    blocks, conn, offs = _snap_fixture(0.2, 1.0025, 0.003)
+    port, notes = _run_snap(blocks, conn, offs)
+    assert port["y_um"] == 1.0025
+    assert len(notes) == 1 and "holds no on-grid point" in notes[0]
+
+
+def test_compose_half_grid_mos_array_port_is_drc_clean(tmp_path, pdk_root):
+    # The #2932 reproduction: w_um=3.015 puts U0_S/U1_S at y=1.5075.
+    arr = _gen_block(
+        tmp_path,
+        pdk_root,
+        "mos_array",
+        "arr",
+        w_um=3.015,
+        l_um=0.5,
+        rows=1,
+        cols=2,
+        dummy=0,
+        topology="array",
+    )
+    output = tmp_path / "snap_top.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "a", "generator_report": arr}],
+            "placement": {"strategy": "row", "order": ["a"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "S",
+                    "pins": [
+                        {"block": "a", "port": "U0_S"},
+                        {"block": "a", "port": "U1_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal2", "width_um": 0.3},
+            "options": {"cell_name": "snap_top", "output": str(output)},
+        }
+    )
+    assert report["nets"][0]["routed"] is True
+    notes = report["drc_hints"]["notes"]
+    assert any("snapped" in n and "port 'U0_S'" in n for n in notes)
+    assert run_drc(str(output), "sky130")["violation_count"] == 0

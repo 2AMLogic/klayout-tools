@@ -4219,6 +4219,48 @@ def test_run_sim_monte_carlo_family_mismatch_reports_gf180mcu_resistor_disabled(
     assert by_family["capacitor"] is None
 
 
+def test_run_sim_monte_carlo_family_mismatch_scans_include_closure(
+    tmp_path, monkeypatch
+):
+    """Issue #2928: a wrapper testbench whose devices live in an included
+    flat netlist reports the included families and discloses what was
+    scanned, including a PDK-rooted directive left unscanned."""
+    (tmp_path / "flat.spice").write_text(
+        "XM1 mid g out b nfet_03v3 L=1u W=1u\nXR1 vdd mid res_xpoly_1p1000pl W=1\n"
+    )
+    (tmp_path / "body.spice").write_text(
+        ".include flat.spice\n.include $NOPE_PDK_ROOT/models.spice\nVdd vdd 0 DC 1\n"
+    )
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"pdk": "gf180mcuC"},
+            "monte_carlo": {"n": 2, "seed": 1, "vary": "mismatch"},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    mc_env = sim.run_sim(str(request))["environment"]["monte_carlo"]
+
+    by_family = {e["family"]: e["active"] for e in mc_env["family_mismatch"]}
+    assert by_family == {"mosfet": True, "resistor": False}
+    scan = mc_env["family_mismatch_scan"]
+    assert len(scan["scanned"]) == 2
+    assert scan["scanned"][1].endswith("flat.spice")
+    assert [n["reason"] for n in scan["not_scanned"]] == ["env_var"]
+
+
+def test_mismatch_family_report_single_file_has_no_scan_block(tmp_path):
+    body = tmp_path / "body.spice"
+    body.write_text("XM1 a b c d nfet_03v3\n")
+    scan: dict = {}
+    report = sim._mismatch_family_report(str(body), "gf180mcuC", scan=scan)
+    assert [e["family"] for e in report] == ["mosfet"]
+    assert len(scan["scanned"]) == 1 and scan["not_scanned"] == []
+
+
 # --------------------------------------------------------------------------- #
 # Monte Carlo statistics rollup (#349)
 # --------------------------------------------------------------------------- #
@@ -12084,3 +12126,114 @@ def test_run_sim_relative_artifacts_dir_is_absolutised(tmp_path, monkeypatch):
         for arg in cmd:
             if arg.startswith(("out", "./out")):
                 raise AssertionError(f"relative path in command: {arg}")
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2926: $VAR / ~ in the netlist body's own .include targets
+# --------------------------------------------------------------------------- #
+
+
+def _inc_netlist(tmp_path, include_line):
+    body = tmp_path / "body.cir"
+    body.write_text(f"* env include\n{include_line}\nV1 x 0 1\n")
+    return str(body)
+
+
+def test_expand_netlist_includes_set_var(tmp_path, monkeypatch):
+    (tmp_path / "inc.sp").write_text("R9 x 0 1k\n")
+    monkeypatch.setenv("INCDIR", str(tmp_path))
+    out_dir = tmp_path / "corner"
+    out_dir.mkdir()
+    for directive in (".include", ".inc", ".INCLUDE"):
+        body = _inc_netlist(tmp_path, f"{directive} $INCDIR/inc.sp")
+        path, diags = sim._expand_netlist_includes(body, str(out_dir))
+        assert diags == []
+        assert path != body
+        text = open(path).read()
+        assert f"{directive} {tmp_path}/inc.sp" in text
+        assert "$INCDIR" not in text
+
+
+def test_expand_netlist_includes_quoted_and_braced(tmp_path, monkeypatch):
+    monkeypatch.setenv("INCDIR", str(tmp_path))
+    body = _inc_netlist(tmp_path, '.include "${INCDIR}/inc.sp"')
+    path, diags = sim._expand_netlist_includes(body, str(tmp_path))
+    assert diags == []
+    assert f'.include "{tmp_path}/inc.sp"' in open(path).read()
+
+
+def test_expand_netlist_includes_tilde(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    body = _inc_netlist(tmp_path, ".include ~/inc.sp")
+    path, diags = sim._expand_netlist_includes(body, str(tmp_path))
+    assert diags == []
+    assert f".include {tmp_path}/inc.sp" in open(path).read()
+
+
+def test_expand_netlist_includes_unset_var_named_diagnostic(tmp_path, monkeypatch):
+    monkeypatch.delenv("NOPE_INCDIR", raising=False)
+    body = _inc_netlist(tmp_path, ".include $NOPE_INCDIR/inc.sp")
+    path, diags = sim._expand_netlist_includes(body, str(tmp_path))
+    assert path == body
+    (diag,) = diags
+    assert diag["code"] == "missing_include"
+    assert diag["severity"] == "error"
+    assert "NOPE_INCDIR" in diag["message"]
+    assert "line 2" in diag["message"]
+    assert body in diag["message"]
+
+
+def test_expand_netlist_includes_plain_netlist_untouched(tmp_path):
+    body = _inc_netlist(tmp_path, ".include inc.sp")
+    assert sim._expand_netlist_includes(body, str(tmp_path)) == (body, [])
+
+
+def test_classify_diagnostics_missing_include_ngspice42_wording():
+    diagnostics = sim._classify_diagnostics("Error: .include filename missing\n")
+    assert "missing_include" in [d["code"] for d in diagnostics]
+
+
+def _write_inc_request(tmp_path):
+    (tmp_path / "inc.sp").write_text("R9 x 0 1k\n")
+    body = _inc_netlist(tmp_path, ".include $INCDIR/inc.sp")
+    request = tmp_path / "req.json"
+    request.write_text(
+        json.dumps(
+            {
+                "netlist": body,
+                "analysis": {"kind": "op", "args": ""},
+                "measurements": [{"name": "i1", "expr": "-i(v1)", "unit": "A"}],
+                "options": {"timeout_s": 30},
+            }
+        )
+    )
+    return str(request)
+
+
+@_SKIP_NO_NGSPICE
+def test_local_backend_expands_env_include(tmp_path, monkeypatch):
+    """Issue #2926: `.include $INCDIR/...` loads on the local backend."""
+    monkeypatch.setenv("INCDIR", str(tmp_path))
+    report = sim.run_sim(_write_inc_request(tmp_path), backend="local")
+    (corner,) = report["corners"]
+    assert corner["status"] == "pass"
+    assert corner["measurements"][0]["value"] == pytest.approx(1e-3)
+
+
+@_SKIP_NO_NGSPICE
+def test_local_backend_unset_env_include_is_named_not_measurement_only(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("INCDIR", raising=False)
+    report = sim.run_sim(_write_inc_request(tmp_path), backend="local")
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "missing_include" in codes
+    # ngspice may add its own classified missing_include too (wording varies by
+    # version), so look for the named up-front one rather than requiring one.
+    assert any(
+        "INCDIR" in d["message"] and "line 2" in d["message"]
+        for d in corner["diagnostics"]
+        if d["code"] == "missing_include"
+    )

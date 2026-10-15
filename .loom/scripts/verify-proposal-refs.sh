@@ -15,14 +15,19 @@
 #   1. `path`, `path:L`, `path:L1-L2` references — backticked or bare — whose
 #      first path segment matches a real top-level entry of `origin/main`
 #      (a "recognized top-level dir/file"). Existence is checked with
-#      `git ls-tree -r origin/main --name-only`; line ranges are checked
-#      against `git show origin/main:<path> | wc -l`.
-#   2. `name.ext:L` / `name.ext:L1-L2` references — backticked or bare —
-#      resolved by unique basename in origin/main's tree. Missing names and
-#      ambiguous names (with candidate paths) are reported explicitly.
-#      Basenames require a line suffix; ordinary filenames in prose and
-#      version numbers are not citations. Qualified paths are checked once.
-#   3. "<N> tracked `<pattern>` files" claims (N as a digit or one..ten
+#      `git ls-tree -r origin/main --name-only`; line ranges are checked by
+#      `loom-daemon git-blob-lines --range`, which follows a `120000` (symlink)
+#      tree entry to the document it points at before counting (#8656) — a
+#      dangling link is reported as BROKEN SYMLINK and is NOT a miss, because
+#      an unreadable file is an inconclusive check rather than a disproof.
+#   1b. LOCAL (klayout-tools #2128): `name.ext:L` / `name.ext:L1-L2`
+#      references -- backticked or bare -- resolved by unique basename in
+#      origin/main's tree. Missing and ambiguous basenames (with candidate
+#      paths) are reported explicitly. Basenames require a line suffix and an
+#      extension that occurs on a tracked basename, so prose filenames,
+#      version numbers and bare host:port strings are not citations.
+#      Qualified paths are checked once.
+#   2. "<N> tracked `<pattern>` files" claims (N as a digit or one..ten
 #      spelled out) — checked against `git ls-files -- <pattern>`.
 #
 # Every miss is listed; the script exits non-zero if there is at least one.
@@ -70,6 +75,30 @@ if ! git -C "$WORKSPACE" rev-parse --verify origin/main >/dev/null 2>&1; then
     exit 2
 fi
 
+# --- Line-range checking is `loom-daemon git-blob-lines --range` (#8656).
+#
+# This used to be `git show "origin/main:$path" | wc -l` inline. That reads the
+# path THROUGH GIT, and since #7842 every `.loom/docs/*.md` with a
+# `defaults/docs/` counterpart is a SYMLINK on origin/main (tree mode 120000) —
+# so the read returned the link-target STRING, `wc -l` measured the link, and
+# every genuinely in-range citation under `.loom/docs/` was reported as a miss.
+# Since this script BLOCKS FILING, that pushed proposers away from citing the
+# installed doc paths at all.
+#
+# The subcommand follows a 120000 entry to its real blob (bounded hops; the
+# target is relative to the LINK'S OWN directory; normalization is lexical,
+# because the path lives in a commit rather than the working tree), then
+# answers the range question against THAT blob. It also distinguishes the two
+# failures the old one-liner conflated: an out-of-range span is a disproof (a
+# miss), while an unreadable target is an INCONCLUSIVE check and must never
+# block filing — the same distinction #8593 established for Champion.
+#
+# shellcheck source=lib/locate-daemon-bin.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/locate-daemon-bin.sh"
+# requires-daemon: git-blob-lines >= 0.19.307   #8656 — the symlink-aware line-range check; a resolved binary predating this subcommand fails clap's own "unrecognized subcommand" per citation (visible on stderr) and every line range is SKIPPED, never silently passed as in-range, because the alternative is the symlink-blind `git show | wc -l` this replaced
+DAEMON_BIN="$(loom_resolve_self_daemon_bin)"
+[[ -n "$DAEMON_BIN" ]] || echo "WARNING: no loom-daemon binary resolved — line ranges will NOT be checked (inconclusive, never a miss); path existence and tracked-file claims are unaffected" >&2
+
 MISSES=()
 CHECKED_PATHS=0
 CHECKED_CLAIMS=0
@@ -89,9 +118,14 @@ CHECKED_CLAIMS=0
 # This still filters out ordinary prose that merely contains a slash
 # ("and/or", "his/her", "3/4", date-like "2026/09/14") because those first
 # segments match neither list.
-declare -A TOP_LEVEL
+# A newline-delimited string, not `declare -A` (bash 4+; macOS ships 3.2 --
+# #7751). This is a pure SET whose only consumer is the whole-word membership
+# test in is_recognized_top() below, so a leading/trailing-newline-delimited
+# string plus a bash `case` glob is an exact substitute -- and it spawns no
+# subprocess per lookup, unlike a `grep -qxF` over the same data.
+TOP_LEVEL_NL=$'\n'
 while IFS= read -r entry; do
-    [[ -n "$entry" ]] && TOP_LEVEL["$entry"]=1
+    [[ -n "$entry" ]] && TOP_LEVEL_NL="${TOP_LEVEL_NL}${entry}"$'\n'
 done < <(git -C "$WORKSPACE" ls-tree --name-only origin/main)
 
 for generic in \
@@ -112,72 +146,76 @@ for generic in \
     hardware layout verification sim rtl tb firmware fw benches hdl \
     .github .loom .claude .gitea
 do
-    TOP_LEVEL["$generic"]=1
+    TOP_LEVEL_NL="${TOP_LEVEL_NL}${generic}"$'\n'
 done
 
 is_recognized_top() {
     local first="${1%%/*}"
-    [[ -n "${TOP_LEVEL[$first]:-}" ]]
+    # Anchored on both delimiters so "doc" never matches inside "docs".
+    case "$TOP_LEVEL_NL" in
+        *$'\n'"$first"$'\n'*) return 0 ;;
+    esac
+    return 1
 }
 
 # --- Extract path / path:L / path:L1-L2 references (backticked or bare).
-# Slash-qualified paths retain the recognized-top-level filter. Bare
-# basenames require an extension starting with a letter and a line suffix,
-# so prose filenames and version numbers do not become citations. The
-# leading boundary excludes suffixes of paths and scheme-qualified URL
-# host:port strings; a bare (schemeless) host:port mention is excluded
-# separately below, by requiring the "extension" to be one that actually
-# occurs on a tracked basename in origin/main (see KNOWN_EXTENSIONS).
+# Requires at least one '/' so bare prose (version numbers, "e.g.", "and/or")
+# never matches; a directory component is exactly what "under a recognized
+# top-level dir" means.
 PATH_RE='[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+(:[0-9]+(-[0-9]+)?)?'
+# LOCAL (klayout-tools #2128): bare basename citations. The leading boundary
+# excludes suffixes of paths and scheme-qualified URL host:port strings.
 BASENAME_RE='(^|[^A-Za-z0-9_./:-])[A-Za-z0-9_.-]+\.[A-Za-z][A-Za-z0-9_-]*:[0-9]+(-[0-9]+)?'
 
-# Populated once via a plain command substitution (NOT inside a pipe) so the
-# assignment survives for the whole script (#1863). A prior version cached
-# this lazily inside a full_tree() helper called as `full_tree | grep ...`;
-# piping into a command forks a subshell for the left side, so that lazy
-# assignment never survived past the one pipeline it ran in — forcing a
-# fresh `git ls-tree` subprocess per path reference instead of reusing one
-# cached listing.
+# Whole-tree membership, as a newline-delimited SET tested with a bash `case`
+# glob -- deliberately NOT `full_tree | grep -qFx "$path"` (#7736, #7771).
 #
-# Matching against the cache also avoids piping it into grep at all (see the
-# membership test below): `full_tree | grep -qFx "$path"` has a second,
-# independent bug under `set -o pipefail` (line 39) — `grep -q` exits as
-# soon as it finds a match, and if that happens before the writer finishes
-# emitting the full (tens-of-KB) listing, the writer is killed by SIGPIPE
-# and its non-zero exit status becomes the pipeline's exit status, even
-# though grep itself matched. That intermittently reported a real,
-# existing path (most reliably ones sorting early, like top-level `docs/`
-# entries) as MISSING, depending on scheduler/buffering timing. A
-# here-string (`<<<`) has no separate writer process to race, so it can't
-# be interrupted by the reader's early exit.
-FULL_TREE_CACHE="$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"
+# Under the `set -o pipefail` above, `grep -qFx` exits the moment it matches,
+# closing the pipe while the producer is still writing a tree listing far
+# larger than the 64K pipe buffer. The producer takes SIGPIPE (141), pipefail
+# reports the PIPELINE as failed, and `if ! ...` then records a `MISSING FILE`
+# miss for a path that is demonstrably present -- a silent wrong answer, not a
+# flake (#7771). The same pipe also surfaced as "printf: write error: Broken
+# pipe" noise in CI (#7736). A `case` test has no pipe, no subprocess, and no
+# exit status to misreport; it mirrors is_recognized_top() above, and the
+# candidate paths are drawn from [A-Za-z0-9_.-/:] only, so no glob
+# metacharacter can reach the pattern side.
+FULL_TREE_NL=""
+full_tree_contains() {
+    if [[ -z "$FULL_TREE_NL" ]]; then
+        FULL_TREE_NL=$'\n'"$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"$'\n'
+    fi
+    case "$FULL_TREE_NL" in
+        *$'\n'"$1"$'\n'*) return 0 ;;
+    esac
+    return 1
+}
 
-# Extensions that actually occur on a tracked basename in origin/main.
-# BASENAME_RE's `\.[A-Za-z][A-Za-z0-9_-]*:[0-9]+` shape is indistinguishable
-# from a bare (schemeless) host:port mention with a letter-leading TLD, e.g.
-# `svc.internal.io:8443` — "io" parses as an extension and "8443" as a line
-# number just as readily as a real `name.ext:L` citation does. Restricting
-# candidates to extensions this tree actually uses is self-scoping (no
-# hardcoded allowlist to maintain across repos) and correct by construction:
-# an extension that appears on zero tracked files can never resolve to a
-# real basename anyway, so treating it as a citation only ever produces a
-# false MISSING FILE.
-declare -A KNOWN_EXTENSIONS
+# LOCAL (klayout-tools #2128): extensions that occur on a tracked basename in
+# origin/main, as a newline-delimited set (no `declare -A`, bash 3.2; #7751).
+# A bare `svc.internal.io:8443` parses exactly like `name.ext:L`; an extension
+# no tracked file carries can never resolve, so it is not a citation.
+full_tree_contains "" || true
+KNOWN_EXT_NL=$'\n'
 while IFS= read -r tree_path; do
     base="${tree_path##*/}"
     if [[ "$base" == *.* && "$base" != .* ]]; then
-        KNOWN_EXTENSIONS["${base##*.}"]=1
+        case "$KNOWN_EXT_NL" in
+            *$'\n'"${base##*.}"$'\n'*) ;;
+            *) KNOWN_EXT_NL="${KNOWN_EXT_NL}${base##*.}"$'\n' ;;
+        esac
     fi
-done <<< "$FULL_TREE_CACHE"
+done <<< "$FULL_TREE_NL"
 
-# One alternation consumes a qualified path as a whole, never again as its
-# basename suffix. Strip a basename's leading delimiter before deduplication.
-mapfile -t CANDIDATES < <(
-    grep -oE "$PATH_RE|$BASENAME_RE" "$BODY_FILE" |
-        sed -E 's/^[^A-Za-z0-9_.-]//' | sort -u
-)
+# One alternation consumes a qualified path whole, never again as its
+# basename suffix; strip a basename's leading delimiter before dedup.
+CANDIDATES=()
+while IFS= read -r _cand; do
+    [[ -n "$_cand" ]] || continue
+    CANDIDATES+=("$_cand")
+done < <(grep -oE "$PATH_RE|$BASENAME_RE" "$BODY_FILE" | sed -E 's/^[^A-Za-z0-9_.-]//' | sort -u)
 
-for raw_candidate in "${CANDIDATES[@]}"; do
+for raw_candidate in ${CANDIDATES[@]+"${CANDIDATES[@]}"}; do
     # Strip trailing sentence punctuation the character class can't exclude
     # (e.g. "...pdk.py:185." at the end of a sentence).
     candidate="$raw_candidate"
@@ -196,15 +234,20 @@ for raw_candidate in "${CANDIDATES[@]}"; do
     if [[ "$path" == */* ]]; then
         is_recognized_top "$path" || continue
     else
-        [[ -n "${KNOWN_EXTENSIONS[${path##*.}]:-}" ]] || continue
+        # LOCAL (klayout-tools #2128): a bare basename needs a known extension.
+        case "$KNOWN_EXT_NL" in
+            *$'\n'"${path##*.}"$'\n'*) ;;
+            *) continue ;;
+        esac
     fi
     CHECKED_PATHS=$((CHECKED_PATHS + 1))
 
+    # LOCAL (klayout-tools #2128): resolve a bare basename to its unique path.
     if [[ "$path" != */* ]]; then
         matches=()
         while IFS= read -r tree_path; do
-            [[ "${tree_path##*/}" == "$path" ]] && matches+=("$tree_path")
-        done <<< "$FULL_TREE_CACHE"
+            [[ -n "$tree_path" && "${tree_path##*/}" == "$path" ]] && matches+=("$tree_path")
+        done <<< "$FULL_TREE_NL"
         if (( ${#matches[@]} == 0 )); then
             MISSES+=("MISSING FILE: \`$path\` has no matching basename on origin/main")
             continue
@@ -215,26 +258,33 @@ for raw_candidate in "${CANDIDATES[@]}"; do
         path="${matches[0]}"
     fi
 
-    if ! grep -qFx "$path" <<< "$FULL_TREE_CACHE"; then
+    if ! full_tree_contains "$path"; then
         MISSES+=("MISSING FILE: \`$path\` does not exist on origin/main")
         continue
     fi
 
-    if [[ -n "$lines" ]]; then
-        start="${lines%%-*}"
-        end="${lines##*-}"
-        total=$(git -C "$WORKSPACE" show "origin/main:$path" | wc -l | tr -d ' ')
-        if (( start > total )) || (( end > total )); then
-            MISSES+=("BAD LINE RANGE: \`$candidate\` — origin/main:$path has only $total lines")
-        fi
+    # Exit 1 => out of range (a miss, text already rendered, naming the
+    # RESOLVED path). Exit 10 => unreadable, already reported on stderr and
+    # deliberately NOT a miss. Anything else (0, or no binary) => nothing.
+    if [[ -n "$lines" && -n "$DAEMON_BIN" ]]; then
+        miss=$("$DAEMON_BIN" git-blob-lines "$path" --rev origin/main --workspace "$WORKSPACE" --range "$lines" --cite "$candidate")
+        (( $? == 1 )) && MISSES+=("$miss")
     fi
 done
 
 # --- "<N> tracked `<pattern>` files" claims, e.g. "six tracked `.pyc` files".
-declare -A NUM_WORDS=(
-    [one]=1 [two]=2 [three]=3 [four]=4 [five]=5
-    [six]=6 [seven]=7 [eight]=8 [nine]=9 [ten]=10
-)
+# A `case`, not `declare -A` (bash 4+; #7751). For a fixed literal word->number
+# table this is arguably clearer than either array form, and it keeps the
+# "unknown word yields empty" contract the caller already relies on.
+num_word() {
+    case "$1" in
+        one) printf '1' ;;   two) printf '2' ;;   three) printf '3' ;;
+        four) printf '4' ;;  five) printf '5' ;;  six) printf '6' ;;
+        seven) printf '7' ;; eight) printf '8' ;; nine) printf '9' ;;
+        ten) printf '10' ;;
+        *) : ;;
+    esac
+}
 
 TRACKED_RE='([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten)[[:space:]]+tracked[[:space:]]+`([^`]+)`[[:space:]]+files?'
 
@@ -246,7 +296,7 @@ while IFS= read -r line; do
         if [[ "$count_raw" =~ ^[0-9]+$ ]]; then
             claimed="$count_raw"
         else
-            claimed="${NUM_WORDS[$count_raw]:-}"
+            claimed="$(num_word "$count_raw")"
         fi
         [[ -z "$claimed" ]] && continue
 
