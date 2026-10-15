@@ -36,6 +36,7 @@ docs/
     deck.md
     design-centering.md
     draw.md
+    diff.md
     drc.md
     economy.md
     env-provenance.md
