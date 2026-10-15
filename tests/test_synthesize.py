@@ -5665,7 +5665,9 @@ def test_memory_mapping_production_script_has_no_evidence_passes(tmp_path, monke
     # ``tee -o <path>`` arguments carry a random run directory.
     words = set(re.split(r"[\s;]+", evidence_text))
     assert "run-854c2957aabc47319f036781e1b0a79e" in evidence_text
-    assert "abc" not in words and "dfflibmap" not in words
+    # abc9 is an ABC mapping pass too; the whole-word match must still catch it.
+    assert not any(re.fullmatch(r"abc9?", w) for w in words)
+    assert "dfflibmap" not in words
     assert "write_verilog" not in words
 
 
