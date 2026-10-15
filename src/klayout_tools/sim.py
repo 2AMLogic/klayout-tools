@@ -232,6 +232,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "engine_killed",
         "measurement",
         "unknown",
+        # Waveform JSON conversion skipped over options.waveform_max_bytes
+        # (issue #3211); always a warning.
+        "waveform_too_large",
         # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
         # by `sim_steps.grade_step_measurements`: a step whose analysis
         # produced no plot, and a result whose inputs produced no value.
@@ -253,6 +256,10 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
 #: disqualified it (issue #2492) -- so the report says *why* a corner that
 #: produced perfectly good-looking numbers is not being reported as a pass.
 INCONCLUSIVE_DIAGNOSTIC_CODE = "inconclusive"
+
+#: The warning :func:`_run_corner` attaches when ``waveform.raw`` exceeds
+#: ``options.waveform_max_bytes`` and the JSON conversion is skipped (#3211).
+WAVEFORM_TOO_LARGE_CODE = "waveform_too_large"
 
 #: The marker diagnostic :func:`_grade_measurement_value` attaches to a
 #: measurement whose value fell outside its declared
@@ -1389,6 +1396,106 @@ def _validate_save_mode(options: dict[str, Any]) -> tuple[str, bool]:
     return value, True
 
 
+#: Default for ``options.waveform_max_bytes`` (issue #3211): the largest
+#: ``waveform.raw`` klt will convert to the ``waveform.raw.json`` artifact.
+#: The conversion materializes the whole ASCII rawfile in memory, so an
+#: unbounded transient can be OOM-killed with no diagnostic; above this size
+#: the corner keeps its measurements and gets a ``waveform_too_large`` warning.
+DEFAULT_WAVEFORM_MAX_BYTES = 1024**3
+
+
+def _validate_waveform_max_bytes(options: dict[str, Any]) -> int | None:
+    """Validate ``options.waveform_max_bytes`` (issue #3211).
+
+    Returns the cap in bytes (:data:`DEFAULT_WAVEFORM_MAX_BYTES` when the key
+    is omitted); an explicit ``null`` disables the guard and returns ``None``.
+    """
+    if "waveform_max_bytes" not in options:
+        return DEFAULT_WAVEFORM_MAX_BYTES
+    value = options["waveform_max_bytes"]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise SimError(
+            "options.waveform_max_bytes must be a positive integer byte count "
+            f"or null to disable the guard (got {json.dumps(value, default=repr)})"
+        )
+    return value
+
+
+def _validate_save_vectors(
+    options: dict[str, Any], save_mode: str
+) -> tuple[tuple[str, ...], bool]:
+    """Validate ``options.save_vectors`` (issue #3211).
+
+    Returns ``(vectors, declared)``: the de-duplicated, lower-cased vector
+    names (ngspice folds vector names to lower case) and whether the request
+    declared the key -- the latter is what the Xyce support boundary refuses.
+    """
+    if "save_vectors" not in options:
+        return (), False
+    value = options["save_vectors"]
+    if not isinstance(value, list) or not value:
+        raise SimError(
+            "options.save_vectors must be a non-empty array of ngspice vector "
+            'names (e.g. ["v(out)", "i(vdd)"])'
+        )
+    vectors: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip() or len(entry.split()) != 1:
+            raise SimError(
+                "options.save_vectors entries must be non-empty vector-name "
+                "strings without whitespace"
+            )
+        name = entry.strip().lower()
+        if name not in vectors:
+            vectors.append(name)
+    if save_mode != DEFAULT_SAVE_MODE:
+        raise SimError(
+            "options.save_vectors and options.save_mode "
+            f'"{save_mode}" are mutually exclusive: save_vectors replaces the '
+            'generated `save all`, which save_mode "netlist" already suppresses'
+        )
+    return tuple(vectors), True
+
+
+#: A ``v(...)``/``i(...)`` token (optionally with ngspice's derivative prefix,
+#: e.g. ``vdb(out)``, ``vm(a,b)``) in a measurement's ``spice``/``expr``/
+#: ``crossings.signal`` text -- the vectors ``options.save_vectors`` must keep
+#: resident for that measurement to resolve.
+_SAVE_TOKEN_RE = re.compile(r"\b([vi][a-z]{0,2})\(([^()]*)\)", re.IGNORECASE)
+
+
+def _required_save_vectors(
+    save_vectors: tuple[str, ...], measurements_spec: list[dict[str, Any]]
+) -> list[str]:
+    """``options.save_vectors`` plus every ``v(x)``/``i(x)`` vector the
+    declared measurements reference, de-duplicated, in first-seen order.
+
+    Only the parenthesized forms are detected; a measurement that names a
+    vector bare (``out`` rather than ``v(out)``) must list it in
+    ``save_vectors`` itself.
+    """
+    vectors = list(save_vectors)
+    for spec in measurements_spec:
+        crossings = spec.get("crossings")
+        texts = [spec.get("spice"), spec.get("expr")]
+        if isinstance(crossings, dict):
+            texts.append(crossings.get("signal"))
+        for text in texts:
+            if not isinstance(text, str):
+                continue
+            for prefix, args in _SAVE_TOKEN_RE.findall(text):
+                kind = prefix[0].lower()
+                for arg in args.split(","):
+                    arg = arg.strip().lower()
+                    if arg:
+                        vector = f"{kind}({arg})"
+                        if vector not in vectors:
+                            vectors.append(vector)
+    return vectors
+
+
 def _own_persistent_roots(
     ownership: contextlib.ExitStack,
     artifacts_dir: str,
@@ -1968,6 +2075,10 @@ def _run_sim_corners(
     # request document (see `_build_remote_request`), so only the local
     # backends receive the resolved value below.
     save_mode, save_mode_declared = _validate_save_mode(options)
+    # Issue #3211: same up-front validation; off-host workers re-read both
+    # from the forwarded request document.
+    save_vectors, save_vectors_declared = _validate_save_vectors(options, save_mode)
+    waveform_max_bytes = _validate_waveform_max_bytes(options)
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
     # check -- never blocks the sweep, only surfaces an advisory string. See
@@ -2010,6 +2121,7 @@ def _run_sim_corners(
         osdi_preload_declared=bool(osdi_preload),
         expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
         save_mode_declared=save_mode_declared,
+        save_vectors_declared=save_vectors_declared,
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
         crossings_declared=bool(
             sim_crossings.crossings_measurements(measurements_spec)
@@ -2150,6 +2262,7 @@ def _run_sim_corners(
             osdi_preload=osdi_preload,
             corner_section_libs=corner_section_libs,
             save_mode=save_mode,
+            save_vectors=save_vectors,
         )
         pre_completed, loaded_engine_version = _load_checkpoint(
             checkpoint_path, fingerprint
@@ -2255,6 +2368,8 @@ def _run_sim_corners(
             "ngspice_init": ngspice_init_lines,
             "osdi_preload": osdi_preload,
             "save_mode": save_mode,
+            "save_vectors": save_vectors,
+            "waveform_max_bytes": waveform_max_bytes,
         }
         if backend not in _OFFHOST_BACKENDS
         else {"request_dir": request_dir}
@@ -3847,6 +3962,7 @@ def _checkpoint_fingerprint(
     osdi_preload: tuple[str, ...] = (),
     corner_section_libs: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    save_vectors: tuple[str, ...] = (),
 ) -> str:
     """A SHA-256 fingerprint of everything that determines what a sweep's
     corners actually run -- the basis for deciding whether an on-disk
@@ -3885,6 +4001,9 @@ def _checkpoint_fingerprint(
         # Only keyed in off the default, so an existing checkpoint stays
         # valid for a request that omits the option.
         payload["save_mode"] = save_mode
+    if save_vectors:
+        # Issue #3211: the saved vector set decides which measurements resolve.
+        payload["save_vectors"] = list(save_vectors)
     if corner_section_libs:
         # Issue #2522: a corner's per-section libraries determine its device
         # models exactly as `models.lib` does, so editing one must invalidate
@@ -4032,6 +4151,7 @@ def _enforce_xyce_support_boundary(
     osdi_preload_declared: bool = False,
     expr_measurements_declared: bool = False,
     save_mode_declared: bool = False,
+    save_vectors_declared: bool = False,
     analysis_steps_declared: bool = False,
     crossings_declared: bool = False,
 ) -> None:
@@ -4114,6 +4234,14 @@ def _enforce_xyce_support_boundary(
             "`.control` block, which the Xyce deck does not have; use "
             "engine 'ngspice' or omit options.save_mode"
         )
+    if save_vectors_declared:
+        # Issue #3211: `save_vectors` rewrites the ngspice `save` card.
+        raise SimError(
+            "options.save_vectors is not supported for engine 'xyce': it "
+            "replaces the `save all` card in klt's generated ngspice "
+            "`.control` block, which the Xyce deck does not have; use "
+            "engine 'ngspice' or omit options.save_vectors"
+        )
 
 
 def _run_local(
@@ -4139,6 +4267,8 @@ def _run_local(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    save_vectors: tuple[str, ...] = (),
+    waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -4220,6 +4350,8 @@ def _run_local(
             ngspice_init=ngspice_init,
             osdi_preload=osdi_preload,
             save_mode=save_mode,
+            save_vectors=save_vectors,
+            waveform_max_bytes=waveform_max_bytes,
         )
         corners.append(result)
         if version is not None:
@@ -4363,6 +4495,8 @@ def _run_local_parallel(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    save_vectors: tuple[str, ...] = (),
+    waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -4473,6 +4607,8 @@ def _run_local_parallel(
                     ngspice_init=ngspice_init,
                     osdi_preload=osdi_preload,
                     save_mode=save_mode,
+                    save_vectors=save_vectors,
+                    waveform_max_bytes=waveform_max_bytes,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -4985,6 +5121,7 @@ def _prepare_corner_run(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    save_vectors: tuple[str, ...] = (),
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
 
@@ -5038,6 +5175,7 @@ def _prepare_corner_run(
             raw_path=raw_path,
             osdi_preload=osdi_preload,
             save_mode=save_mode,
+            save_vectors=save_vectors,
         )
         _write_spiceinit(corner_dir, ngspice_init)
         command = [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path]
@@ -5142,6 +5280,8 @@ def _run_corner(
     ngspice_init: tuple[str, ...] = (),
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    save_vectors: tuple[str, ...] = (),
+    waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
     classify the result.
@@ -5211,6 +5351,7 @@ def _run_corner(
         ngspice_init=ngspice_init,
         osdi_preload=osdi_preload,
         save_mode=save_mode,
+        save_vectors=save_vectors,
     )
 
     diagnostics: list[dict[str, str]] = list(include_diagnostics)
@@ -5363,8 +5504,31 @@ def _run_corner(
             artifacts["log"] = log_path
         if raw_path is not None and os.path.isfile(raw_path):
             artifacts["raw"] = raw_path
+            raw_size = os.path.getsize(raw_path)
             try:
-                artifacts["waveform"] = _parse_and_persist_waveform(raw_path)
+                if waveform_max_bytes is not None and raw_size > waveform_max_bytes:
+                    # Issue #3211: converting parses the whole ASCII rawfile
+                    # into memory; past the cap that risks an OOM SIGKILL
+                    # with no diagnostic. Keep the raw file and every
+                    # measurement; only the JSON conversion is skipped.
+                    diagnostics.append(
+                        {
+                            "severity": "warning",
+                            "code": WAVEFORM_TOO_LARGE_CODE,
+                            "message": (
+                                f"waveform.raw is {raw_size} bytes, over "
+                                f"options.waveform_max_bytes ({waveform_max_bytes}); "
+                                "skipped the waveform.raw.json conversion (the raw "
+                                "file is kept at artifacts.raw, measurements are "
+                                "unaffected). To shrink it, set options.save_vectors "
+                                "to the signals you need, widen the tran step "
+                                "(tstep/tmax in analysis.args), shorten tstop, or "
+                                "raise/disable options.waveform_max_bytes"
+                            ),
+                        }
+                    )
+                else:
+                    artifacts["waveform"] = _parse_and_persist_waveform(raw_path)
             except (SimError, ValueError) as exc:
                 # Generic defensive catch, not expected in normal operation:
                 # `parse_ascii_rawfile` understands both plain-real (`tran`/
@@ -5778,6 +5942,7 @@ def _write_corner_deck(
     raw_path: str | None,
     osdi_preload: tuple[str, ...] = (),
     save_mode: str = DEFAULT_SAVE_MODE,
+    save_vectors: tuple[str, ...] = (),
 ) -> None:
     """Generate the corner-specific ngspice deck: an optional Monte Carlo
     seed card, ``.lib``/``.include``/``.temp``, the request's verbatim
@@ -5833,6 +5998,7 @@ def _write_corner_deck(
             raw_path=raw_path,
             osdi_preload=osdi_preload,
             save_mode=save_mode,
+            save_vectors=save_vectors,
             corner_dir=os.path.dirname(os.path.abspath(deck_path)),
         )
     )
@@ -5850,6 +6016,7 @@ def _corner_deck_control_lines(
     raw_path: str | None,
     osdi_preload: tuple[str, ...],
     save_mode: str = DEFAULT_SAVE_MODE,
+    save_vectors: tuple[str, ...] = (),
     corner_dir: str = ".",
 ) -> list[str]:
     """The ``.control``/``.endc`` block of :func:`_write_corner_deck`'s
@@ -5934,7 +6101,13 @@ def _corner_deck_control_lines(
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
     if save_mode == DEFAULT_SAVE_MODE and (measurements_spec or raw_path is not None):
-        lines.append("save all")
+        if save_vectors:
+            lines.append(
+                "save "
+                + " ".join(_required_save_vectors(save_vectors, measurements_spec))
+            )
+        else:
+            lines.append("save all")
     for key, value in sorted(point.supply_v.items()):
         lines.append(f"alter {key}={value}")
     if sim_steps.is_steps_analysis(analysis):
