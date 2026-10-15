@@ -108,6 +108,7 @@ from .remote_launcher import (
 )
 from .sim_remote import (
     _build_remote_request,
+    _points_to_push,
     _rewrite_remote_artifact_paths,
     _run_sharded,
     _unrun_corner_report,
@@ -2606,7 +2607,7 @@ def _run_batch_job(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        explicit_points=explicit_points,
+        explicit_points=_points_to_push(request, corner_points, explicit_points),
     )
     # The `batch` block is submit-side configuration (bucket, profile, the
     # launch script's path on *this* host); it is meaningless on the job
