@@ -1803,6 +1803,33 @@ def _dispatch_deck_request(
     )
 
 
+def _is_lost_shard_corner(corner: dict[str, Any]) -> bool:
+    """True when a corner report is a synthesized ``lost_shard`` (never ran)."""
+    return any(diag["code"] == "lost_shard" for diag in corner["diagnostics"])
+
+
+def _record_batch_checkpoint(
+    checkpoint: Any,
+    backend: str,
+    corners_new: list[dict[str, Any]],
+    engine_version: Any,
+) -> None:
+    """Record a ``batch`` run's returned corner reports into the checkpoint.
+
+    Issue #3367: `_run_batch` collects a shard's reports in one
+    ``report.json``, so there is nothing to record incrementally; record the
+    returned set after dispatch. A ``lost_shard`` corner never ran (Spot
+    capacity loss), so it is left out and stays outstanding for the next
+    ``--resume``; a corner that ran and genuinely errored is recorded exactly
+    as the local backends do. A no-op without a checkpoint or off ``batch``.
+    """
+    if checkpoint is None or backend != "batch":
+        return
+    for corner in corners_new:
+        if not _is_lost_shard_corner(corner):
+            checkpoint.record(corner["corner_id"], corner, engine_version)
+
+
 def _run_sim_corners(
     request_path: str,
     *,
@@ -2412,16 +2439,7 @@ def _run_sim_corners(
             measurements_spec=measurements_spec,
         )
 
-    if checkpoint is not None and backend == "batch":
-        # Issue #3367: `_run_batch` collects a shard's reports in one
-        # `report.json`, so there is nothing to record incrementally; record
-        # the returned set here instead. A `lost_shard` corner never ran
-        # (Spot capacity loss), so it is left out and stays outstanding for
-        # the next `--resume`; a corner that ran and genuinely errored is
-        # recorded exactly as the local backends do.
-        for corner in corners_new:
-            if not any(d["code"] == "lost_shard" for d in corner["diagnostics"]):
-                checkpoint.record(corner["corner_id"], corner, backend_engine_version)
+    _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
 
     if resume:
         # Reassemble the full corner list in the request's own order: a
@@ -2474,11 +2492,7 @@ def _run_sim_corners(
     # holding the rest must outlive this run. Kept out of `corners_skipped`
     # (the reported `environment.budget.corners_skipped`) to leave that
     # field's meaning unchanged.
-    corners_lost = sum(
-        1
-        for corner in corners
-        if any(diag["code"] == "lost_shard" for diag in corner["diagnostics"])
-    )
+    corners_lost = sum(1 for corner in corners if _is_lost_shard_corner(corner))
 
     # Issue #2491: a top-level rollup of every `corners[].diagnostics[]`
     # entry -- including one downgraded to `severity: "warning"` by
