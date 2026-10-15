@@ -3225,7 +3225,7 @@ def _validate_power(
     }
 
 
-def _validate_tapcell(tapcell: Any, cell_library: str) -> int | float | None:
+def _validate_tapcell(tapcell: Any, cell_library: str | None) -> int | float | None:
     """Validate ``request.power.tapcell`` (issue #3051); return its
     ``distance_um`` override, or ``None`` when ``tapcell`` is omitted."""
     if tapcell is None:
