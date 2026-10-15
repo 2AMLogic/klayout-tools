@@ -231,7 +231,11 @@ SG13G2's own LVS deck extracts them through a custom Ruby
 terminal pins distinguished by drawn bounding-box/area filters — that this
 engine's `BipolarDevice`/stock-`DeviceExtractorBJT3Transistor` model cannot
 faithfully express. See `src/klayout_tools/decks/sg13g2.py`'s "SiGe HBTs —
-investigated, declined" docstring section for the full finding.
+investigated, declined" docstring section for the full finding. The marker
+gap alone is closed: `BipolarDevice.marker` accepts a derived `LayerExpr`
+(AND/NOT of drawn layers, nestable) since issue #2860. The pin size filters,
+the substrate terminal and the terminal-interaction terminals are still open
+(#2861–#2863), so this deck declares no bipolars yet.
 
 ² The remaining metal resistors (`res_metal3` and up) are a different kind
 of gap from the rest of this row: their own recognition (populating

@@ -1143,6 +1143,29 @@ collector layer (the vertical bipolar's collector is the substrate itself),
 so the collector terminal is tied to the deck's global substrate net
 (`vsubs` by default), mirroring the NMOS-body wiring above.
 
+**Derived markers (issue #2860).** `BipolarDevice.marker` is either one drawn
+`(layer, datatype)` pair — the form both curated entries above use — or a
+`LayerExpr`: a frozen boolean tree of drawn pairs and nested `LayerExpr`
+nodes, with `op` `"and"` (intersect every operand) or `"not"` (the first
+operand minus every later one). It exists for PDKs whose recognition mark
+is not one drawn layer, e.g. IHP SG13G2's NPN marker:
+
+```python
+from klayout_tools.decks import LayerExpr
+
+pwell = LayerExpr.not_(PWELL_ALLOWED, NWELL, DIGISUB_GAP, name="pwell")
+npn_mk = LayerExpr.and_(TRANS, pwell, PTAP_HOLES, name="npn_mk")
+```
+
+`extract.py` evaluates the expression to a region and uses it exactly where
+it would use a drawn marker layer. Every leaf layer counts as read by the
+deck, so none of them is reported in `ignored_layers`. A leaf missing from
+the layout reads as empty. A single-operand expression recognises exactly
+what the bare pair does. No curated deck uses the derived form yet: SG13G2's
+HBTs also need size-filtered pins, a substrate terminal and
+terminal-interaction terminals (#2861–#2863). `klt deck devices` reports a
+derived marker as `marker_expression` (see [`deck.md`](deck.md)).
+
 **Base-terminal net resolution — inherits the "PMOS body" limitation
 above.** Because `BipolarDevice.base` reuses the deck's own `nwell` layer
 (the very layer used for PMOS body recognition), the base terminal's net is
