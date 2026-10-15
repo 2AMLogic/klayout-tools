@@ -553,6 +553,14 @@
         "klayout_tools.cli.yield_sensitivity_cmd",
         "klayout_tools.yield_sensitivity"
       ]
+    },
+    "yield_threshold": {
+      "kind": "verb",
+      "description": "`klt yield-threshold` implementation: probit threshold fit plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.yield_threshold_cmd",
+        "klayout_tools.probit"
+      ]
     }
   },
   "allowed_group_edges": [
@@ -1100,6 +1108,11 @@
       "consumer": "yield_samples",
       "exporter": "yield",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "yield_threshold",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter emits through the shared envelope in cli/output.py (issue #2976), as every verb does."
     },
     {
       "consumer": "yield_sensitivity",

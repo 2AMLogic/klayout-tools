@@ -63,6 +63,7 @@ from . import (
     yield_cmd,
     yield_samples_cmd,
     yield_sensitivity_cmd,
+    yield_threshold_cmd,
 )
 from .color import add_color_args
 
@@ -304,6 +305,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_yield_campaign_parser(subparsers)
 
     _add_yield_sensitivity_parser(subparsers)
+
+    _add_yield_threshold_parser(subparsers)
 
     _add_design_centering_parser(subparsers)
 
@@ -1267,6 +1270,79 @@ def _add_yield_samples_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(parser)
     parser.set_defaults(func=yield_samples_cmd.run)
+
+
+def _add_yield_threshold_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``yield-threshold`` verb (issue #2976).
+
+    Probit fit of a binary outcome against a swept stimulus: the threshold
+    distribution of a comparator/latch/trip point. Pure Python; needs no
+    native extension.
+    """
+    parser = subparsers.add_parser(
+        "yield-threshold",
+        help=(
+            "per-sample (stimulus, binary outcome) records -> probit threshold "
+            "mean/sigma with profile-likelihood CIs, per corner"
+        ),
+        description=(
+            "Fit P(decided high | stimulus) = Phi((stimulus - mu) / sigma) to "
+            "per-sample binary outcomes, per corner (issue #2976): the "
+            "input-referred offset of a comparator, latch or trip point is never "
+            "observed directly, only through which way each sample decided. "
+            "Reports mu/sigma with profile-likelihood confidence intervals, "
+            "per-stimulus proportions with Clopper-Pearson intervals, a "
+            "chi-square goodness of fit and, with --target-error-rate, the "
+            "stimulus at that error rate (flagged extrapolated beyond what the "
+            "sample count resolves). Degenerate data (one outcome, separation, "
+            "fewer than 2 stimulus levels) yields null estimates and a "
+            "fit.status, never a fabricated sigma. See docs/cli/yield-threshold.md."
+        ),
+    )
+    parser.add_argument(
+        "records",
+        help=(
+            'path to the records JSON document: {"corners": [{"name", '
+            '"records": [{"stimulus", "outcome"}]}]} or a flat '
+            '{"records": [...]} with an optional per-record "corner"'
+        ),
+    )
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="two-sided confidence level for every interval (default: 0.95)",
+    )
+    parser.add_argument(
+        "--target-error-rate",
+        dest="target_error_rate",
+        type=float,
+        default=None,
+        metavar="RATE",
+        help=(
+            "also report the stimulus at which the wrong-decision rate reaches "
+            "RATE (0 < RATE < 0.5), flagged extrapolated when RATE is below "
+            "what the sample count resolves"
+        ),
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help=(
+            "derive each record's outcome from its numeric `value` against "
+            "this threshold instead of reading a given `outcome`"
+        ),
+    )
+    parser.add_argument(
+        "--outcome-when",
+        dest="outcome_when",
+        choices=["above", "below"],
+        default="above",
+        help="with --threshold: decided high when value is above (default) or below it",
+    )
+    _add_format_arg(parser)
+    parser.set_defaults(func=yield_threshold_cmd.run)
 
 
 def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
