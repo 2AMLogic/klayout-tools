@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` declarative timed stimulus and resolved-backend provenance**
+  (issue #2977): a request may declare `stimulus.signals[]` (per-signal
+  event lists with level, optional transition time and skew). `klt sim`
+  validates them up front (coded errors `stimulus_*`), expands them into
+  PWL sources in every corner deck, and echoes the schedule as applied in
+  `environment.stimulus`. Every corner-sweep report also gains
+  `environment.backend` (`resolved`, `source`, `requested`) so a `local`
+  run under `KLT_SIM_BACKEND=batch` is detectable. **Additive contract
+  change:** two new optional `environment` members, no `schema_version`
+  bump. A runner older than this change ignores the `stimulus` key (client
+  capability check tracked in #2877). `docs/cli/sim.md` also names `klt
+  0.7.0` as the first release that reads `$KLT_SIM_BACKEND`.
 - **ASAP7 DRC deck checks `V9.PAD.EN.2` and `V9.AUX.1`** (issue #3156): the
   V8 enclosure-by-M9 and inside-M8-and-M9 rules carry over to V9 with PAD
   (DRM section 3.19 preamble), reading PAD (mask 96, GDS 96/0) by layer

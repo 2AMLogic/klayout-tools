@@ -5838,6 +5838,10 @@ def _stripped_report(report: dict) -> dict:
     byte-exact-fixture caveat)."""
     clone = json.loads(json.dumps(report))
     clone["environment"].pop("engine_version", None)
+    # `environment.backend.source` (issue #2977) records how the backend was
+    # chosen (flag/request/default), which differs by design between runs
+    # that otherwise execute identically.
+    clone["environment"].pop("backend", None)
     for corner in clone["corners"]:
         corner.pop("runtime_s", None)
     return clone
