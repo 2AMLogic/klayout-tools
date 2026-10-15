@@ -1353,11 +1353,12 @@ def _validate_batch_pdk_variant(request: dict[str, Any], region: str | None) -> 
     except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
         return
     published = [image.get("pdk_variants") for image in images]
-    if not published or any(variants is None for variants in published):
+    listed: list[list[str]] = [v for v in published if v is not None]
+    if not listed or len(listed) != len(published):
         return
-    if any(str(pdk) in variants for variants in published):
+    if any(str(pdk) in variants for variants in listed):
         return
-    carried = sorted({v for variants in published for v in variants})
+    carried = sorted({v for variants in listed for v in variants})
     raise SimError(
         f"backend 'batch': PDK variant {str(pdk)!r} is not shipped by the fleet "
         f"image the AMI manifest publishes (it carries: {', '.join(carried)}) "
