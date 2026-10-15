@@ -628,8 +628,10 @@ accepted anything:
   name). Flat extraction also emits intra-standard-cell nodes the
   gate-level design never has, so this ratio is expected to sit below 1
   even on a perfectly-correlated run.
-- `design_nets_annotated`/`design_nets_total` — design-side: how many of
-  the nets OpenSTA times are actually named by the SPEF.
+- `design_nets_annotated`/`design_nets_total` — design-side **name-match
+  count**: how many of the nets OpenSTA times are named by the SPEF. It is
+  not evidence that parasitics were applied to the timing; the
+  machine-checkable signal for that is `annotation_complete` (below).
 - `design_nets_missing_sample` — a capped sample (at most 20) of the
   design's own net names (`get_full_name`'s spelling — never SPEF's
   backslash-escaped one) that did **not** correlate against the SPEF's
@@ -640,7 +642,10 @@ accepted anything:
   nets — a non-empty list here is a symptom to investigate, not a full
   accounting.
 
-**This pair alone is not proof of annotation.** It is measured *before*
+**This pair alone is not proof of annotation, and is a name-match count
+only.** Read `annotation_complete` (the four-check verdict below) instead; it
+is what `klt signoff`'s opt-in `require_annotation_complete` evidence key
+gates on ([`signoff.md`](signoff.md)). The pair is measured *before*
 `read_spef`, using `get_nets` — a different name resolver than the SPEF
 reader's own. It answers "does the SPEF name the nets this design has", not
 "did `read_spef` accept them". The three checks below answer the latter.
