@@ -3080,6 +3080,42 @@ def _worst_paths(
     )
 
 
+def _apply_port_record(
+    parts: list[str],
+    line: str,
+    directions: dict[str, str],
+    port_rows: dict[str, list[dict[str, Any]]],
+) -> str | None:
+    """Fold one ``DIR``/``PATH``/``ERROR`` record into ``directions`` /
+    ``port_rows``; return a failure reason when the record is bad, else
+    ``None``."""
+    kind, port = parts[0], parts[1]
+    if kind == "ERROR":
+        return "engine path introspection failed: " + "\t".join(parts[2:]).strip()
+    if kind == "DIR":
+        if len(parts) != 3 or not parts[2]:
+            return f"malformed port record: {line!r}"
+        directions[port] = "inout" if parts[2] == "bidirect" else parts[2]
+        return None
+    if len(parts) != 7 or parts[2] not in ("max", "min") or not all(parts[3:]):
+        return f"malformed port path record: {line!r}"
+    try:
+        slack_s = float(parts[4])
+    except ValueError:
+        return f"malformed port path slack: {line!r}"
+    if slack_s != slack_s or abs(slack_s) == float("inf"):
+        return f"non-finite port path slack: {line!r}"
+    port_rows[parts[2]].append(
+        {
+            "engine_check_role": parts[3],
+            "slack_ns": slack_s * 1e9,
+            "startpoint": parts[5],
+            "endpoint": parts[6],
+        }
+    )
+    return None
+
+
 def _parse_port_path_rows(
     stdout: str, ports: list[str]
 ) -> dict[str, tuple[str | None, dict[str, list[dict[str, Any]]] | None, str | None]]:
@@ -3099,41 +3135,14 @@ def _parse_port_path_rows(
     failures: dict[str, str] = {}
     for line in block.splitlines():
         parts = line.split("\t")
-        kind = parts[0]
-        if kind not in ("DIR", "PATH", "ERROR") or len(parts) < 2:
+        if parts[0] not in ("DIR", "PATH", "ERROR") or len(parts) < 2:
             continue
         port = parts[1]
         if port not in rows or port in failures:
             continue
-        if kind == "ERROR":
-            failures[port] = (
-                "engine path introspection failed: " + "\t".join(parts[2:]).strip()
-            )
-        elif kind == "DIR":
-            if len(parts) != 3 or not parts[2]:
-                failures[port] = f"malformed port record: {line!r}"
-            else:
-                directions[port] = "inout" if parts[2] == "bidirect" else parts[2]
-        else:
-            if len(parts) != 7 or parts[2] not in ("max", "min") or not all(parts[3:]):
-                failures[port] = f"malformed port path record: {line!r}"
-                continue
-            try:
-                slack_s = float(parts[4])
-            except ValueError:
-                failures[port] = f"malformed port path slack: {line!r}"
-                continue
-            if slack_s != slack_s or abs(slack_s) == float("inf"):
-                failures[port] = f"non-finite port path slack: {line!r}"
-                continue
-            rows[port][parts[2]].append(
-                {
-                    "engine_check_role": parts[3],
-                    "slack_ns": slack_s * 1e9,
-                    "startpoint": parts[5],
-                    "endpoint": parts[6],
-                }
-            )
+        failure = _apply_port_record(parts, line, directions, rows[port])
+        if failure is not None:
+            failures[port] = failure
     parsed: dict[
         str, tuple[str | None, dict[str, list[dict[str, Any]]] | None, str | None]
     ] = {}
