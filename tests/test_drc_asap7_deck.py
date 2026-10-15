@@ -67,7 +67,10 @@ _LYP_ENTRY_RE = re.compile(r"<name>(\S+) drawing - (\d+)/(\d+)</name>")
 _FAMILY_RE = re.compile(
     r"^\{(?P<names>[^}]*)\}\.each do \|name,[^|]*\|\n(?P<body>.*?)^end$", re.M | re.S
 )
-_TEMPLATED_RE = re.compile(r'output\("#\{name\}\.([^"]+)",\s*"Table')
+_TEMPLATED_RE = re.compile(r'output\("(?:SRAM\.)?#\{name\}\.([^"]+)",\s*"Table')
+#: The SRAM-variant templated ids (``"SRAM.#{name}.<suffix>"``) expand to
+#: ``SRAM.<NAME>.<suffix>``, not ``<NAME>.SRAM...``.
+_SRAM_TEMPLATED_RE = re.compile(r'output\("SRAM\.#\{name\}\.([^"]+)"')
 #: The rule families the deck must declare, by DRM section.
 _FAMILIES = (
     ("NSELECT", "PSELECT", "SLVT", "LVT", "SRAMVT"),
@@ -139,11 +142,16 @@ def test_deck_declares_exactly_the_declared_ids():
     for block in _FAMILY_RE.finditer(text):
         names = tuple(re.findall(r'"(\w+)"\s*=>', block["names"]))
         suffixes = _TEMPLATED_RE.findall(block["body"])
+        sram = set(_SRAM_TEMPLATED_RE.findall(block["body"]))
         assert names and suffixes, block.group(0)[:80]
         assert len(suffixes) == len(set(suffixes)), names
         families.append(names)
         in_families += len(suffixes)
-        expanded += [f"{name}.{suffix}" for name in names for suffix in suffixes]
+        expanded += [
+            f"SRAM.{name}.{suffix}" if suffix in sram else f"{name}.{suffix}"
+            for name in names
+            for suffix in suffixes
+        ]
     # No templated output outside a recognised family loop.
     assert len(_TEMPLATED_RE.findall(text)) == in_families
     assert sorted(families) == sorted(_FAMILIES)
