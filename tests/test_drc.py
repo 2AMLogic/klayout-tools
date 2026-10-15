@@ -7093,6 +7093,257 @@ def test_run_drc_sg13g2_activ_enclosing_cont_clean(tmp_path):
     assert report["violation_count"] == 0
 
 
+# --- issue #2688: `Cnt.c`'s `.join(activ_mask)` + square-contact selection --
+
+
+def _sg13g2_cnt_c_layout(
+    dbu: float = 0.001,
+    *,
+    drawing: list | None = None,
+    mask: list | None = None,
+    cont: list | None = None,
+):
+    """A one-cell sg13g2 stream drawing the given boxes (each an
+    ``(l, b, r, t)`` tuple in **nanometres**, rescaled to ``dbu``) on
+    Activ.drawing (1/0), Activ.mask (1/20), and Cont.drawing (6/0). A
+    ``None`` list leaves that layer out of the stream entirely."""
+    scale = 0.001 / dbu
+    layout = kdb.Layout()
+    layout.dbu = dbu
+    top = layout.create_cell("TOP")
+    for layer, boxes in (((1, 0), drawing), ((1, 20), mask), ((6, 0), cont)):
+        if boxes is None:
+            continue
+        index = layout.layer(*layer)
+        for box in boxes:
+            top.shapes(index).insert(kdb.Box(*(round(v * scale) for v in box)))
+    return layout
+
+
+def test_sg13g2_cnt_c_rule_models_activ_mask_join_and_square_contacts():
+    """Deck shape (#2688): `activ.enclosing.cont.1` keeps its id, reporting
+    layer, threshold and `Cnt.c` provenance, and now reads the
+    Activ.drawing + Activ.mask union against square contacts only."""
+    (rule,) = [r for r in get_deck("sg13g2") if r.id == "activ.enclosing.cont.1"]
+    assert (rule.layer, rule.other_layer) == ((1, 0), (6, 0))
+    assert (rule.check, rule.threshold_dbu) == ("enclosing", 70)
+    assert rule.provenance.rule_id == "Cnt.c"
+    assert rule.provenance.source_path.endswith("feol/5_14_cont.drc")
+    assert rule.derived_layer is not None
+    assert rule.derived_layer.mode == "union"
+    assert {rule.derived_layer.base, rule.derived_layer.intersect_with} == {
+        (1, 0),
+        (1, 20),
+    }
+    assert rule.other_layer_selection == "squares"
+
+
+def _cnt_c_count(report) -> int:
+    return report["rule_counts"].get("activ.enclosing.cont.1", 0)
+
+
+@pytest.mark.parametrize("dbu", [0.001, 0.0005])
+def test_run_drc_sg13g2_cnt_c_mask_only_enclosure_is_clean(tmp_path, dbu):
+    """A square contact enclosed (>= 0.07 um) solely by Activ.mask (1/20),
+    with no Activ.drawing anywhere in the stream, passes -- the HBT-PCell
+    case that reported a false positive before #2688 dropped
+    `.join(activ_mask)` -- and the rule is actually *evaluated*, not skipped
+    for its absent `layer`."""
+    layout = _sg13g2_cnt_c_layout(
+        dbu, mask=[(0, 0, 1000, 1000)], cont=[(400, 400, 560, 560)]
+    )
+    path = tmp_path / "mask_only.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert _cnt_c_count(report) == 0
+    assert "activ.enclosing.cont.1" in report["coverage"]["rules_checked"]
+    assert "activ.enclosing.cont.1" not in report["coverage"]["rules_skipped"]
+    assert "1/20" in report["coverage"]["deck_layers"]
+
+
+def test_run_drc_sg13g2_cnt_c_enclosure_assembled_across_both_layers(tmp_path):
+    """A contact whose 0.07 um margin is supplied partly by Activ.drawing and
+    partly by an abutting Activ.mask shape passes: neither layer alone
+    encloses it, their join does."""
+    layout = _sg13g2_cnt_c_layout(
+        drawing=[(0, 0, 500, 1000)],
+        mask=[(500, 0, 1000, 1000)],
+        cont=[(420, 420, 580, 580)],  # straddles the 1/0 | 1/20 seam
+    )
+    path = tmp_path / "assembled.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert _cnt_c_count(report) == 0
+
+
+@pytest.mark.parametrize("dbu", [0.001, 0.0005])
+@pytest.mark.parametrize("layer", ["drawing", "mask"])
+def test_run_drc_sg13g2_cnt_c_threshold_on_either_layer(tmp_path, dbu, layer):
+    """For an evaluated square contact, exactly 0.07 um of enclosure passes
+    and 0.06 um fails -- whichever Activ layer supplies it, at more than one
+    layout dbu."""
+    exact = _sg13g2_cnt_c_layout(
+        dbu, **{layer: [(0, 0, 1000, 1000)]}, cont=[(770, 400, 930, 560)]
+    )
+    short = _sg13g2_cnt_c_layout(
+        dbu, **{layer: [(0, 0, 1000, 1000)]}, cont=[(780, 400, 940, 560)]
+    )
+    exact.write(str(tmp_path / "exact.gds"))
+    short.write(str(tmp_path / "short.gds"))
+
+    assert _cnt_c_count(run_drc(str(tmp_path / "exact.gds"), "sg13g2")) == 0
+    report = run_drc(str(tmp_path / "short.gds"), "sg13g2")
+    assert _cnt_c_count(report) == 1
+    (violation,) = [
+        v for v in report["violations"] if v["rule"] == "activ.enclosing.cont.1"
+    ]
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "Activ.drawing"  # stable reporting identity
+
+
+def test_run_drc_sg13g2_cnt_c_mask_contact_escaping_still_flagged(tmp_path):
+    """The #318 zero-overlap escape term still applies to the joined region:
+    a square contact half outside an Activ.mask window is reported."""
+    layout = _sg13g2_cnt_c_layout(
+        mask=[(0, 0, 1000, 1000)], cont=[(920, 400, 1080, 560)]
+    )
+    path = tmp_path / "escape.gds"
+    layout.write(str(path))
+
+    assert _cnt_c_count(run_drc(str(path), "sg13g2")) >= 1
+
+
+def test_run_drc_sg13g2_cnt_c_no_activ_at_all_is_inapplicable(tmp_path):
+    """Cont with neither Activ.drawing nor Activ.mask in the stream: the
+    union's region is empty, so the rule is skipped and classified as
+    inapplicable (no geometry it could have flagged) -- not run, not
+    silently counted as checked."""
+    layout = _sg13g2_cnt_c_layout(cont=[(400, 400, 560, 560)])
+    path = tmp_path / "no_activ.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert _cnt_c_count(report) == 0
+    assert "activ.enclosing.cont.1" in report["coverage"]["rules_skipped"]
+    assert {
+        "id": "activ.enclosing.cont.1",
+        "reason": "no_applicable_geometry",
+    } in report["coverage"]["inapplicable"]
+
+
+def test_run_drc_sg13g2_cnt_c_ignores_contact_bars(tmp_path):
+    """A contact *bar* (non-square merged Cont) is outside `Cnt.c`'s
+    `cont_sq` selection: neither its short margin nor its partial escape is
+    reported by this rule, while a square contact with the same short
+    margin is."""
+    bar = _sg13g2_cnt_c_layout(
+        drawing=[(0, 0, 2000, 1000)],
+        cont=[(1880, 400, 2040, 900)],  # 0.16 x 0.50 um bar, escapes right edge
+    )
+    abutting = _sg13g2_cnt_c_layout(
+        drawing=[(0, 0, 2000, 1000)],
+        # two abutting 0.16um squares merge into one 0.16 x 0.32 bar
+        cont=[(1900, 400, 2060, 560), (1900, 560, 2060, 720)],
+    )
+    square = _sg13g2_cnt_c_layout(
+        drawing=[(0, 0, 2000, 1000)], cont=[(1830, 400, 1990, 560)]
+    )
+    for name, layout in (("bar", bar), ("abutting", abutting), ("square", square)):
+        layout.write(str(tmp_path / f"{name}.gds"))
+
+    assert _cnt_c_count(run_drc(str(tmp_path / "bar.gds"), "sg13g2")) == 0
+    assert _cnt_c_count(run_drc(str(tmp_path / "abutting.gds"), "sg13g2")) == 0
+    assert _cnt_c_count(run_drc(str(tmp_path / "square.gds"), "sg13g2")) == 1
+
+
+def test_run_drc_sg13g2_cnt_c_hierarchy_and_source_unchanged(tmp_path):
+    """Through the public runner on a hierarchical stream: a mask-enclosed
+    contact inside an instanced child cell passes, a short one is reported
+    (attributed to the child), and the input file is byte-identical after
+    the run -- the union is computed in memory, never written back."""
+    import hashlib
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    good = layout.create_cell("GOOD")
+    bad = layout.create_cell("BAD")
+    mask = layout.layer(1, 20)
+    cont = layout.layer(6, 0)
+    good.shapes(mask).insert(kdb.Box(0, 0, 1000, 1000))
+    good.shapes(cont).insert(kdb.Box(400, 400, 560, 560))
+    bad.shapes(mask).insert(kdb.Box(0, 0, 1000, 1000))
+    bad.shapes(cont).insert(kdb.Box(790, 400, 950, 560))  # 0.05 um margin
+    top.insert(kdb.CellInstArray(good.cell_index(), kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(good.cell_index(), kdb.Trans(5000, 0)))
+    top.insert(kdb.CellInstArray(bad.cell_index(), kdb.Trans(0, 5000)))
+    path = tmp_path / "hier.gds"
+    layout.write(str(path))
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    report = run_drc(str(path), "sg13g2", top="TOP")
+
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    cnt_c = [v for v in report["violations"] if v["rule"] == "activ.enclosing.cont.1"]
+    assert len(cnt_c) == 1
+    assert cnt_c[0]["source_cell"] == "BAD"
+    reloaded = kdb.Layout()
+    reloaded.read(str(path))
+    assert reloaded.find_layer(1, 0) is None  # nothing copied onto Activ.drawing
+
+
+def test_run_drc_rejects_bad_other_layer_selection(tmp_path, monkeypatch):
+    """An unknown `other_layer_selection`, a selection with no
+    `other_layer`, or a `"union"` derived layer with no `intersect_with` is
+    a deck-authoring mistake reported with the rule id (#2688)."""
+    from klayout_tools.decks import DerivedLayer, DrcRule
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    path = tmp_path / "any.gds"
+    layout.write(str(path))
+
+    bad_rules = [
+        DrcRule(
+            id="bad.selection",
+            description="synthetic",
+            layer=(1, 0),
+            other_layer=(6, 0),
+            check="enclosing",
+            threshold_dbu=70,
+            other_layer_selection="circles",
+        ),
+        DrcRule(
+            id="bad.selection.no_other",
+            description="synthetic",
+            layer=(1, 0),
+            check="width",
+            threshold_dbu=70,
+            other_layer_selection="squares",
+        ),
+        DrcRule(
+            id="bad.union",
+            description="synthetic",
+            layer=(1, 0),
+            other_layer=(6, 0),
+            check="enclosing",
+            threshold_dbu=70,
+            derived_layer=DerivedLayer(base=(1, 0), sized_by_um=0.0, mode="union"),
+        ),
+    ]
+    for rule in bad_rules:
+        _patch_synthetic_deck(monkeypatch, [rule])
+        with pytest.raises(DrcError, match=rule.id):
+            run_drc(str(path), "synthetic")
+
+
 def test_run_drc_sg13g2_gatpoly_enclosing_cont_violation(tmp_path):
     """A Cont shape hanging off the edge of its GatPoly landing region by
     less than the 70 dbu (0.07 um) `gatpoly.enclosing.cont.1` margin trips
@@ -7803,6 +8054,13 @@ _SG13CMOS5L_FIXED_SIZE_CUT_RULES = [
     ("topvia1.width.1", (125, 0), "TopVia1.drawing", 420),
 ]
 
+_SG13CMOS5L_CUT_LANDINGS = {
+    (19, 0): [(8, 0), (10, 0)],
+    (29, 0): [(10, 0), (30, 0)],
+    (49, 0): [(30, 0), (50, 0)],
+    (125, 0): [(50, 0), (126, 0)],
+}
+
 _SG13CMOS5L_FIXED_SIZE_CUT_BOUNDARY_CASES = [
     (rule_id, layer, layer_name, case_id, box, expected)
     for rule_id, layer, layer_name, size_dbu in _SG13CMOS5L_FIXED_SIZE_CUT_RULES
@@ -7831,6 +8089,11 @@ def test_run_drc_sg13cmos5l_fixed_size_cut_boundaries(
     cut = layout.layer(*layer)
     layout.set_info(cut, kdb.LayerInfo(layer[0], layer[1], layer_name))
     top.shapes(cut).insert(cut_box)
+    if expected_count == 0:
+        # Required containment (#2726): a cut with no landing is itself a
+        # violation, so the "clean" cases draw both adjacent conductors.
+        for conductor in _SG13CMOS5L_CUT_LANDINGS[layer]:
+            top.shapes(layout.layer(*conductor)).insert(cut_box.enlarged(900, 900))
     path = tmp_path / f"{rule_id}_{case_id}.gds"
     layout.write(str(path))
 
@@ -8845,6 +9108,38 @@ def test_eval_gate_does_not_pass_a_partial_drc_run(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Required containment for single-population cuts (issue #2726)
+# --------------------------------------------------------------------------- #
+
+_VIA_STACK = [
+    # (cut, lower conductor, upper conductor, lower rule id, upper rule id)
+    ((19, 0), (8, 0), (10, 0), "metal1.enclosing.via1.1", "metal2.enclosing.via1.1"),
+    ((29, 0), (10, 0), (30, 0), "metal2.enclosing.via2.1", "metal3.enclosing.via2.1"),
+    ((49, 0), (30, 0), (50, 0), "metal3.enclosing.via3.1", "metal4.enclosing.via3.1"),
+    (
+        (125, 0),
+        (50, 0),
+        (126, 0),
+        "metal4.enclosing.topvia1.1",
+        "topmetal1.enclosing.topvia1.1",
+    ),
+]
+# Cut sized per the fixed-size rule; landings enlarge it generously so no
+# width/enclosure margin defect can substitute for the containment finding.
+_CUT_SIZE = {(19, 0): 190, (29, 0): 190, (49, 0): 190, (125, 0): 420}
+
+
+def _contain_layout(tmp_path, name, shapes, dbu=0.001, extra_cell=None):
+    layout = kdb.Layout()
+    layout.dbu = dbu
+    top = layout.create_cell("TOP")
+    for layer, box in shapes:
+        top.shapes(layout.layer(*layer)).insert(box)
+    path = tmp_path / name
+    layout.write(str(path))
+    return str(path)
+
+
 # Rule listing and selection (issue #2768): `--list-rules` and `--rules`.
 #
 # A three-rule synthetic deck: `a.width.1`/`b.width.1` each fail on a seeded
@@ -8886,6 +9181,289 @@ def _selection_layout(tmp_path, *, narrow_a: bool = True, narrow_b: bool = True)
     path = tmp_path / f"selection_{int(narrow_a)}{int(narrow_b)}.gds"
     layout.write(str(path))
     return str(path)
+
+
+def _rule_hits(report, rule_id):
+    return [v for v in report["violations"] if v["rule"] == rule_id]
+
+
+@pytest.mark.parametrize("cut,lower,upper,lower_id,upper_id", _VIA_STACK)
+@pytest.mark.parametrize("side", ["lower", "upper"])
+@pytest.mark.parametrize("mode", ["disjoint", "absent"])
+def test_sg13cmos5l_via_stack_requires_both_landings(
+    tmp_path, cut, lower, upper, lower_id, upper_id, side, mode
+):
+    size = _CUT_SIZE[cut]
+    cut_box = kdb.Box(0, 0, size, size)
+    good = cut_box.enlarged(900, 900)
+    far = kdb.Box(50_000, 0, 51_000, 1_000)
+    conductor = lower if side == "lower" else upper
+    other = upper if side == "lower" else lower
+    rule_id = lower_id if side == "lower" else upper_id
+    shapes = [(cut, cut_box), (other, good)]
+    if mode == "disjoint":
+        shapes.append((conductor, far))
+    path = _contain_layout(tmp_path, f"{rule_id}_{mode}.gds", shapes)
+
+    report = run_drc(path, "sg13cmos5l")
+
+    hits = _rule_hits(report, rule_id)
+    assert hits and report["status"] == "violations"
+    bbox = hits[0]["bbox"]
+    assert (bbox["left"], bbox["bottom"], bbox["right"], bbox["top"]) == (
+        0,
+        0,
+        size,
+        size,
+    )
+    assert rule_id in report["coverage"]["rules_checked"]
+    assert rule_id not in report["coverage"]["rules_skipped"]
+    # The opposite landing's rule is satisfied.
+    other_id = upper_id if side == "lower" else lower_id
+    assert not _rule_hits(report, other_id)
+    if mode == "absent":
+        assert (
+            f"{conductor[0]}/{conductor[1]}" not in report["coverage"]["layers_checked"]
+        )
+    assert main(["drc", path, "--deck", "sg13cmos5l"]) == 3
+
+
+@pytest.mark.parametrize("cut,lower,upper,lower_id,upper_id", _VIA_STACK)
+def test_sg13cmos5l_via_stack_contained_cut_is_clean(
+    tmp_path, cut, lower, upper, lower_id, upper_id
+):
+    size = _CUT_SIZE[cut]
+    cut_box = kdb.Box(0, 0, size, size)
+    path = _contain_layout(
+        tmp_path,
+        "ok.gds",
+        [
+            (cut, cut_box),
+            (lower, cut_box.enlarged(900, 900)),
+            (upper, cut_box.enlarged(900, 900)),
+        ],
+    )
+    report = run_drc(path, "sg13cmos5l")
+    assert not _rule_hits(report, lower_id) and not _rule_hits(report, upper_id)
+    assert main(["drc", path, "--deck", "sg13cmos5l"]) == 0
+
+
+def test_sg13cmos5l_via1_original_reproducer(tmp_path):
+    cut = (19, 0)
+    for name, m1, rule_id in (
+        ("a_partial", kdb.Box(-100, -100, 150, 150), "metal1.enclosing.via1.1"),
+        ("b_none", kdb.Box(5000, 0, 5500, 500), "metal1.enclosing.via1.1"),
+    ):
+        path = _contain_layout(
+            tmp_path,
+            f"{name}.gds",
+            [
+                (cut, kdb.Box(0, 0, 190, 190)),
+                ((10, 0), kdb.Box(-55, -55, 245, 245)),
+                ((8, 0), m1),
+            ],
+        )
+        report = run_drc(path, "sg13cmos5l")
+        assert _rule_hits(report, rule_id), name
+        assert report["status"] == "violations"
+        assert main(["drc", path, "--deck", "sg13cmos5l"]) == 3
+
+
+def _containment_deck(monkeypatch, threshold=0, require=True, check="enclosing"):
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="m.enclosing.v.1",
+                description="synthetic containment",
+                layer=(30, 0),
+                other_layer=(31, 0),
+                check=check,
+                threshold_dbu=threshold,
+                require_containment=require,
+            )
+        ],
+    )
+
+
+def _synthetic_hits(path):
+    return _rule_hits(run_drc(path, "synthetic"), "m.enclosing.v.1")
+
+
+def test_containment_edge_only_sliver_partial_and_hole(tmp_path, monkeypatch):
+    _containment_deck(monkeypatch)
+    cut = kdb.Box(0, 0, 100, 100)
+    cases = {
+        "edge_only": kdb.Box(-100, 0, 0, 100),
+        "sliver": kdb.Box(-100, 0, 1, 100),
+        "partial": kdb.Box(-100, -100, 50, 200),
+    }
+    for name, metal in cases.items():
+        path = _contain_layout(
+            tmp_path, f"{name}.gds", [((31, 0), cut), ((30, 0), metal)]
+        )
+        assert _synthetic_hits(path), name
+    # Hole under the cut.
+    holed = kdb.Region(kdb.Box(-200, -200, 300, 300)) - kdb.Region(
+        kdb.Box(20, 20, 80, 80)
+    )
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(31, 0)).insert(kdb.Box(30, 30, 70, 70))
+    top.shapes(layout.layer(30, 0)).insert(holed)
+    layout.write(str(tmp_path / "hole.gds"))
+    assert _synthetic_hits(str(tmp_path / "hole.gds"))
+
+
+def test_containment_exact_boundary_abutting_and_dbu(tmp_path, monkeypatch):
+    _containment_deck(monkeypatch)
+    for dbu in (0.001, 0.005):
+        cut = kdb.Box(0, 0, 100, 100)
+        exact = _contain_layout(
+            tmp_path, f"exact_{dbu}.gds", [((31, 0), cut), ((30, 0), cut)], dbu=dbu
+        )
+        assert not _synthetic_hits(exact)
+        # Abutting conductor halves form one region: no artificial seam.
+        abut = _contain_layout(
+            tmp_path,
+            f"abut_{dbu}.gds",
+            [
+                ((31, 0), cut),
+                ((30, 0), kdb.Box(-10, -10, 50, 110)),
+                ((30, 0), kdb.Box(50, -10, 110, 110)),
+            ],
+            dbu=dbu,
+        )
+        assert not _synthetic_hits(abut)
+        part = _contain_layout(
+            tmp_path,
+            f"part_{dbu}.gds",
+            [((31, 0), cut), ((30, 0), kdb.Box(0, 0, 99, 100))],
+            dbu=dbu,
+        )
+        assert _synthetic_hits(part)
+
+
+def test_containment_margin_deficient_and_exact(tmp_path, monkeypatch):
+    _containment_deck(monkeypatch, threshold=10)
+    cut = kdb.Box(0, 0, 100, 100)
+    ok = _contain_layout(
+        tmp_path, "m_ok.gds", [((31, 0), cut), ((30, 0), cut.enlarged(10, 10))]
+    )
+    assert not _synthetic_hits(ok)
+    bad = _contain_layout(
+        tmp_path, "m_bad.gds", [((31, 0), cut), ((30, 0), cut.enlarged(9, 9))]
+    )
+    assert _synthetic_hits(bad)
+
+
+def test_containment_conductor_only_in_other_cell_and_hierarchy(tmp_path, monkeypatch):
+    _containment_deck(monkeypatch)
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    other = layout.create_cell("OTHER")
+    child = layout.create_cell("CHILD")
+    cut = kdb.Box(0, 0, 100, 100)
+    child.shapes(layout.layer(31, 0)).insert(cut)
+    top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(1000, 0)))
+    other.shapes(layout.layer(30, 0)).insert(kdb.Box(-500, -500, 5000, 5000))
+    top.shapes(layout.layer(30, 0)).insert(kdb.Box(0, 0, 10, 10))
+    path = str(tmp_path / "h.gds")
+    layout.write(path)
+    # Conductor drawn only in OTHER (not under TOP): the hierarchical cut fails.
+    assert run_drc(path, "synthetic", top="TOP")["status"] == "violations"
+    # Conductor placed under TOP covering the instance: clean.
+    top.shapes(layout.layer(30, 0)).insert(kdb.Box(900, -100, 1200, 200))
+    layout.write(path)
+    assert not _synthetic_hits(path)
+
+
+def test_containment_absent_cut_no_finding_and_absent_conductor_checked(
+    tmp_path, monkeypatch
+):
+    _containment_deck(monkeypatch)
+    only_metal = _contain_layout(
+        tmp_path, "nocut.gds", [((30, 0), kdb.Box(0, 0, 10, 10))]
+    )
+    report = run_drc(only_metal, "synthetic")
+    assert not report["violations"]
+    assert "m.enclosing.v.1" not in report["coverage"]["rules_checked"]
+    only_cut = _contain_layout(
+        tmp_path, "nometal.gds", [((31, 0), kdb.Box(0, 0, 10, 10))]
+    )
+    report = run_drc(only_cut, "synthetic")
+    assert len(_rule_hits(report, "m.enclosing.v.1")) == 1
+    assert report["coverage"]["rules_checked"] == ["m.enclosing.v.1"]
+    assert report["coverage"]["rules_skipped"] == []
+
+
+def test_containment_enclosed_form(tmp_path, monkeypatch):
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="v.enclosed.m.1",
+                description="synthetic",
+                layer=(31, 0),
+                other_layer=(30, 0),
+                check="enclosed",
+                threshold_dbu=0,
+                require_containment=True,
+            )
+        ],
+    )
+    path = _contain_layout(tmp_path, "enc.gds", [((31, 0), kdb.Box(0, 0, 10, 10))])
+    assert _rule_hits(run_drc(path, "synthetic"), "v.enclosed.m.1")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"check": "width", "other_layer": None},
+        {"check": "enclosing", "other_layer": None},
+        {"check": "separation", "other_layer": (31, 0)},
+    ],
+)
+def test_containment_malformed_declaration_fails_even_without_layers(
+    tmp_path, monkeypatch, kwargs
+):
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="bad.1",
+                description="bad",
+                layer=(30, 0),
+                threshold_dbu=0,
+                require_containment=True,
+                **kwargs,
+            )
+        ],
+    )
+    path = _contain_layout(tmp_path, "bare.gds", [((99, 0), kdb.Box(0, 0, 10, 10))])
+    with pytest.raises(DrcError, match="require_containment"):
+        run_drc(path, "synthetic")
+
+
+def test_legacy_enclosing_unchanged_without_opt_in(tmp_path, monkeypatch):
+    """Two-population cut: a diffusion contact with no overlap against the
+    poly rule is not rejected when containment is not enabled; a fully
+    disjoint cut stays invisible to the legacy interaction-scoped term."""
+    _containment_deck(monkeypatch, require=False)
+    path = _contain_layout(
+        tmp_path,
+        "legacy.gds",
+        [((31, 0), kdb.Box(0, 0, 100, 100)), ((30, 0), kdb.Box(5000, 0, 5500, 500))],
+    )
+    assert not _synthetic_hits(path)
+    gf = get_deck("gf180mcu")
+    assert not any(getattr(r, "require_containment", False) for r in gf)
 
 
 @pytest.fixture

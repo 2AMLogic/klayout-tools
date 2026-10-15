@@ -14,6 +14,16 @@ issue's scope.
 
 ## `commands/loom/champion-epic.md`
 
+> **RETIRED 2026-10-15** (2AMLogic/2am#4345, operator ruling Q5 option 1).
+> The pin is dropped and the file carries installed upstream (v0.19.1160).
+> Re-checked against rjwalters/loom `7e4d69c7a`: conditions 1-3 below are met
+> by Step 2.75 (#6601), the unrevised-epic cap (#5865, default 2) and
+> `OPERATOR_RULED` (#7921), and condition 4 holds — all four guard suites pass
+> on the upstream file and fail on the old pinned one. One accepted change: a
+> human comment alone no longer un-parks a held epic; removing the hold label
+> is the release, matching the post-#11795 hold taxonomy. The rest of this
+> section is kept as the historical record.
+
 Checked **2026-10-09** against `rjwalters/loom` @
 `4487a6a0114498e9e2d44a24259702593a2f4db0` (upstream `main`; the last commit
 touching `defaults/.claude/commands/loom/champion-epic.md` is `dc87ce9e`,
@@ -33,6 +43,11 @@ provides:
   unrevised rejection loops by escalating to `loom:operator-only` (#520).
 - **Human override detection** - a later human comment (#766) or a bare
   `loom:operator-only` label removal (#774) suppresses re-escalation.
+
+2am#4345 (2026-10-14): `loom:operator-only` is retired into `loom:operator`
+(rjwalters/loom#11795), so the pinned file now escalates to, checks for and
+watches removals of `loom:operator`. The 2026-10-09 snapshot below predates
+that rename.
 
 #2500 additionally hand-ported upstream's Step 0 / Step 0a / Step 0.5 into the
 pinned copy (#2494).
@@ -113,6 +128,28 @@ verified one. Drop the pin only when all of these hold:
 
 Alternatively, keep the local section and retire the whole-file pin once the
 upstream section-preservation mechanism below ships.
+
+## `scripts/verify-proposal-refs.sh` (+ its test)
+
+Checked **2026-10-15** against `rjwalters/loom` tag `v0.19.1160`
+(2AMLogic/2am#4345 pin audit). The pin's original reason, #1898 (SIGPIPE race
+and subshell cache bug, #1863/#1881), is **upstream** (#7736/#7771,
+`full_tree_contains`) and no longer justifies it.
+
+### Protected local behavior
+
+#2128 (`d0b770ad`): bare `name.ext:L` citations are verified. A basename with
+a known extension is resolved to a unique tracked path and its line range
+checked; no match reports MISSING, several matches report AMBIGUOUS. The
+known-extension filter keeps prose and host:port strings out. Fixtures 6-9b
+and the bare-sibling case in `test-verify-proposal-refs.sh` assert it; 17
+local cases fail against upstream's script.
+
+### Conditions to retire the pin
+
+Upstream resolves bare `name.ext:L` citations, with unique-basename
+resolution and MISSING/AMBIGUOUS reporting, and the local fixtures pass
+against the upstream script.
 
 ## Upstream proposal: section-scoped resync (PROPOSED, not shipped)
 

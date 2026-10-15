@@ -1166,6 +1166,28 @@ itself; a lateral collector ring wholly outside that body is not
 attributable through the stock extractor. No shipped deck declares a
 relation yet (`sg13g2`'s `pnpMPA` still needs the gaps tracked in
 #2860–#2862/#2864).
+**Derived markers (issue #2860).** `BipolarDevice.marker` is either one drawn
+`(layer, datatype)` pair — the form both curated entries above use — or a
+`LayerExpr`: a frozen boolean tree of drawn pairs and nested `LayerExpr`
+nodes, with `op` `"and"` (intersect every operand) or `"not"` (the first
+operand minus every later one). It exists for PDKs whose recognition mark
+is not one drawn layer, e.g. IHP SG13G2's NPN marker:
+
+```python
+from klayout_tools.decks import LayerExpr
+
+pwell = LayerExpr.not_(PWELL_ALLOWED, NWELL, DIGISUB_GAP, name="pwell")
+npn_mk = LayerExpr.and_(TRANS, pwell, PTAP_HOLES, name="npn_mk")
+```
+
+`extract.py` evaluates the expression to a region and uses it exactly where
+it would use a drawn marker layer. Every leaf layer counts as read by the
+deck, so none of them is reported in `ignored_layers`. A leaf missing from
+the layout reads as empty. A single-operand expression recognises exactly
+what the bare pair does. No curated deck uses the derived form yet: SG13G2's
+HBTs also need size-filtered pins, a substrate terminal and
+terminal-interaction terminals (#2861–#2863). `klt deck devices` reports a
+derived marker as `marker_expression` (see [`deck.md`](deck.md)).
 
 **Base-terminal net resolution — inherits the "PMOS body" limitation
 above.** Because `BipolarDevice.base` reuses the deck's own `nwell` layer
@@ -2600,9 +2622,9 @@ micrometres.
 naming the option.
 None of them has a FinFET implementation. ASAP7 DRC is the separate
 DRC-DSL deck `src/klayout_tools/decks/asap7.drc` (issue #2760; see
-[`docs/cli/drc.md`](drc.md)), and `klt lvs` refuses a FinFET deck (see
-[`docs/cli/lvs.md`](lvs.md)) until its reference reader preserves `nfin`
-(issue #2813).
+[`docs/cli/drc.md`](drc.md)), and `klt lvs` compares a FinFET deck with an
+`nfin`-preserving reference reader (issue #2813; see
+[`docs/cli/lvs.md`](lvs.md), "FinFET decks").
 
 ### Verification status
 
@@ -2619,7 +2641,11 @@ DRC-DSL deck `src/klayout_tools/decks/asap7.drc` (issue #2760; see
   net to `VDD` and `vsubs` to `VSS` by name, which is a comparison-side
   assumption. 11 cells draw parallel series stacks the CDL folds into one
   wider stack. 6 differ from their CDL only in series order. Both groups are
-  LVS-comparison questions, tracked in #2813.
+  LVS-comparison questions, resolved in #2813: `klt lvs` passes 191 cells with
+  an explicit, disclosed bulk policy; the 11 folded-stack cells are listed as
+  unsupported and the 6 series-order cells are adjudicated as a
+  reference-vs-layout topology difference (see `docs/cli/lvs.md`, "Pinned
+  ASAP7 RVT corpus").
 - **Simulation is not verified.** The fleet host's ngspice-46 build rejects
   the ASAP7 `level = 72` BSIM-CMG cards, and no OSDI BSIM-CMG module is
   available. Simulating extracted ASAP7 netlists is tracked in #2814.

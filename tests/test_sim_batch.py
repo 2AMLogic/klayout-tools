@@ -2846,6 +2846,10 @@ def _run_job_cmd_with_fake_klt(tmp_path, spec, klt_script):
             "EDA_INPUT_DIR": str(tmp_path),
             "PATH": f"{bin_dir}:/usr/bin:/bin",
         },
+        # Anything the job (or a payload it wrongly evaluates) writes with a
+        # relative path lands in the test's own directory, never the
+        # checkout pytest runs from (issue #3153).
+        cwd=tmp_path,
         capture_output=True,
         text=True,
     )
@@ -2853,9 +2857,19 @@ def _run_job_cmd_with_fake_klt(tmp_path, spec, klt_script):
 
 
 def _fake_klt(version_line: str) -> str:
+    """A fake runner `klt` whose `--version` prints ``version_line``
+    verbatim. The line goes through a quoted heredoc, so shell
+    metacharacters in it reach the job command's preflight as data instead
+    of running inside this fixture's own shell (issue #3153)."""
+    assert "KLT_VERSION_EOF" not in version_line
     return (
         "#!/bin/bash\n"
-        f'if [ "$1" = "--version" ]; then echo "{version_line}"; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then\n'
+        "cat <<'KLT_VERSION_EOF'\n"
+        f"{version_line}\n"
+        "KLT_VERSION_EOF\n"
+        "exit 0\n"
+        "fi\n"
         'touch "@MARKER@"; echo \'{"corners": []}\'; exit 0\n'
     )
 
@@ -2932,12 +2946,252 @@ def test_warn_mode_runs_the_simulation_despite_skew(tmp_path):
 
 
 def test_hostile_runner_version_output_cannot_break_the_envelope(tmp_path):
+    hostile = 'klt 1.0" ; touch x ; "'
     proc, out_dir, marker = _run_job_cmd_with_fake_klt(
-        tmp_path, _init_spec(tmp_path), _fake_klt('klt 1.0" ; touch x ; "')
+        tmp_path, _init_spec(tmp_path), _fake_klt(hostile)
     )
     assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
     json.loads((out_dir / "report.json").read_text())  # still valid JSON
-    json.loads((out_dir / "runner_identity.json").read_text())
+    identity = json.loads((out_dir / "runner_identity.json").read_text())
+    # The fixture delivered the hostile text to the preflight (which strips
+    # the quoting characters) rather than running it itself.
+    assert "touch x" in identity["runner_klt_version"]
+    # The payload reached the preflight as data and was never evaluated:
+    # no `x` in the job's working directory, nor in the checkout.
+    assert not (tmp_path / "x").exists()
+    assert not (REPO_ROOT / "x").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Major.minor version gate (issue #3184)
+# --------------------------------------------------------------------------- #
+
+_SHA = "99b4efb148bb23b5e9206680c43ea7a5fab7a3f1"
+
+
+@pytest.mark.parametrize(
+    ("version", "release"),
+    [
+        ("0.7.0", "0.7.0"),
+        ("0.7.0+gabc123", "0.7.0"),
+        ("0.7.0+gabc123.dirty", "0.7.0"),
+        ("0.7.0+unknown", "0.7.0"),
+        ("0.7.1.dev3+gabc123", "0.7.1"),
+        ("0.7.0rc1", "0.7.0"),
+        ("10.20", "10.20"),
+        ("7", "7"),
+        ("", None),
+        ("+gabc123", None),
+        ("dirty", None),
+        (".7.0", None),
+        ("0..7", None),
+    ],
+)
+def test_release_segment(version, release):
+    assert sb._release_segment(version) == release
+
+
+@pytest.mark.parametrize(
+    ("version", "gate"),
+    [
+        ("0.7.0", "0.7"),
+        ("0.7.3", "0.7"),
+        ("0.7.0+gabc123.dirty", "0.7"),
+        ("0.7.1.dev212+gabc123", "0.7"),
+        ("0.7.0.dev0+unknown", "0.7"),
+        ("0.8.0.dev5+gabc123", "0.8"),
+        ("10.20", "10.20"),
+        ("1.2.3.4", "1.2"),
+        ("7", None),
+        ("7+gabc123", None),
+        ("", None),
+        ("dirty", None),
+        ("0..7", None),
+    ],
+)
+def test_runner_gate_release_is_major_minor(version, gate):
+    assert sb._runner_gate_release(version) == gate
+
+
+def _gate_spec(tmp_path, client_version, **kwargs):
+    return sb._build_batch_job_spec(
+        {"models": {}, "options": {}},
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=True,
+        client_version=client_version,
+        **kwargs,
+    )
+
+
+#: (runner, client) pairs the gate must let through: same major.minor.
+_GATE_MATCHES = [
+    ("0.7.0", "0.7.0"),
+    ("0.7.0", "0.7.0+gabc123"),
+    ("0.7.0+gabc123", "0.7.0"),
+    ("0.7.0", "0.7.1.dev212+gabc123"),
+    ("0.7.0", "0.7.0+gabc123.dirty"),
+    ("0.7.0", "0.7.0.dev0+unknown"),
+    ("0.7.0", "0.7.3"),
+    ("0.7.3", "0.7.0"),
+    ("0.7.0rc1", "0.7.0"),
+]
+
+#: (runner, client) pairs the gate must reject with exit 87.
+_GATE_MISMATCHES = [
+    ("0.7.0", "0.8.0"),
+    ("0.8.0", "0.7.0"),
+    ("0.7.0", "0.8.0.dev5+gabc123"),
+    ("0.7.3", "0.8.0.dev5+gabc123"),
+    ("0.8.0+gdef456", "0.7.0+gabc123"),
+    ("1.7.0", "0.7.0"),
+]
+
+
+@pytest.mark.parametrize(("runner", "client"), _GATE_MATCHES)
+def test_same_major_minor_passes_the_preflight(tmp_path, runner, client):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+    identity = json.loads((out_dir / "runner_identity.json").read_text())
+    assert identity == {"runner_klt_version": runner, "client_klt_version": client}
+
+
+@pytest.mark.parametrize(("runner", "client"), _GATE_MISMATCHES)
+def test_different_major_minor_is_rejected_with_both_full_strings(
+    tmp_path, runner, client
+):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+    assert runner in error["message"] and client in error["message"]
+
+
+@pytest.mark.parametrize("runner", ["dirty", "+gabc123", "v", "..1", "7", "7+gabc"])
+def test_runner_version_without_major_minor_is_unknown(tmp_path, runner):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, "0.7.0"), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_UNKNOWN_CODE
+    assert (
+        json.loads((out_dir / "runner_identity.json").read_text())["runner_klt_version"]
+        == runner
+    )
+
+
+@pytest.mark.parametrize("version", ["+gabc123", "dirty", "v1.0", "7", "7+gabc123"])
+def test_client_version_without_major_minor_cannot_be_pinned(tmp_path, version):
+    with pytest.raises(sim.SimError, match="cannot be pinned"):
+        _gate_spec(tmp_path, version)
+
+
+@pytest.mark.parametrize(
+    ("runner", "client", "status"),
+    [
+        *((runner, client, "match") for runner, client in _GATE_MATCHES),
+        *((runner, client, "mismatch") for runner, client in _GATE_MISMATCHES),
+        ("dirty", "0.7.0", "unknown"),
+        ("7", "0.7.0", "unknown"),
+        ("0.7.0", "7", "unknown"),
+    ],
+)
+def test_runner_identity_compares_major_minor(
+    tmp_path, monkeypatch, runner, client, status
+):
+    _pin_client_version(monkeypatch, client)
+    (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+        json.dumps({"runner_klt_version": runner, "client_klt_version": client})
+    )
+    fields = sb._read_runner_identity(str(tmp_path))
+    assert fields["runner_klt_version"] == runner
+    assert fields["client_klt_version"] == client
+    assert fields["runner_compatibility"] == status
+    assert ("runner_compatibility_warning" in fields) == (status != "match")
+
+
+# The version strings klt actually produces come from _version_scheme.render;
+# these tests pin the gate to that scheme, so a change to either is visible.
+_RENDERED_MATCHES_070 = [
+    # post-tag git checkout: the next patch's dev build
+    dict(commit=_SHA, tag=None, dirty=False, released=True, distance=212),
+    # dirty tree sitting on v0.7.0
+    dict(commit=_SHA, tag="v0.7.0", dirty=True, released=True, distance=0),
+    # clean tree on v0.7.0 (the bare release)
+    dict(commit=_SHA, tag="v0.7.0", dirty=False, released=True, distance=0),
+    # no git facts
+    dict(commit=None, tag=None, dirty=None, released=None, distance=None),
+]
+
+
+@pytest.mark.parametrize("facts", _RENDERED_MATCHES_070)
+def test_rendered_0_7_builds_match_a_0_7_0_runner(tmp_path, monkeypatch, facts):
+    from klayout_tools import _version_scheme
+
+    client = _version_scheme.render("0.7.0", **facts)
+    assert sb._runner_gate_release(client) == "0.7"
+    proc, _out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+    _pin_client_version(monkeypatch, client)
+    (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+        json.dumps({"runner_klt_version": "0.7.0", "client_klt_version": client})
+    )
+    assert sb._read_runner_identity(str(tmp_path))["runner_compatibility"] == "match"
+
+
+def test_rendered_post_tag_dev_build_is_0_7_1_dev_and_matches(tmp_path):
+    from klayout_tools import _version_scheme
+
+    client = _version_scheme.render("0.7.0", _SHA, None, False, True, 212)
+    assert client == f"0.7.1.dev212+g{_SHA[:12]}"
+    proc, _out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        # dev build of the untagged next minor
+        dict(commit=_SHA, tag=None, dirty=False, released=False, distance=5),
+        # the next minor's release
+        dict(commit=_SHA, tag="v0.8.0", dirty=False, released=True, distance=0),
+    ],
+)
+def test_rendered_next_minor_build_mismatches_a_0_7_0_runner(
+    tmp_path, monkeypatch, facts
+):
+    from klayout_tools import _version_scheme
+
+    client = _version_scheme.render("0.8.0", **facts)
+    assert sb._runner_gate_release(client) == "0.8"
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _gate_spec(tmp_path, client), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+    _pin_client_version(monkeypatch, client)
+    (tmp_path / sb.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+        json.dumps({"runner_klt_version": "0.7.0", "client_klt_version": client})
+    )
+    fields = sb._read_runner_identity(str(tmp_path))
+    assert fields["runner_compatibility"] == "mismatch"
 
 
 # --------------------------------------------------------------------------- #
@@ -3884,3 +4138,413 @@ def test_sharded_batch_run_merges_each_shards_crossings_series(tmp_path, monkeyp
         "tt_1.800_2",
     ]
     assert all(corner["measurements"] == [_crossings_entry()] for corner in corners)
+
+
+# --------------------------------------------------------------------------- #
+# Pre-launch runner version check from the AMI manifest (issue #2851)
+# --------------------------------------------------------------------------- #
+
+_PRELAUNCH_CLIENT = "0.7.1.dev3+gabc1234"
+
+
+def _image(region: str = "us-east-1", pdk: str = "sky130A", **runner) -> dict:
+    image = {
+        "pdk": pdk,
+        "region": region,
+        "ami_id": "ami-0123456789abcdef0",
+        "pdk_snapshot": f"{pdk}-2026.10.01",
+        "ngspice_version": "46",
+        "built_at": "2026-10-01T00:00:00Z",
+    }
+    image.update(runner)
+    return image
+
+
+def _publish_manifest(tmp_path: Path, monkeypatch, images: list[dict]) -> Path:
+    """Point `$KLT_AMI_MANIFEST` at a manifest holding `images`, so the
+    pre-launch check never reads the host's own manifests."""
+    path = tmp_path / "ami-manifest.json"
+    path.write_text(json.dumps({"schema_version": 1, "images": images}))
+    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(path))
+    return path
+
+
+def _prelaunch_run(tmp_path, monkeypatch, images, **batch_overrides):
+    """`run_sim` on a 3-corner batch request against a fake transport,
+    with the client pinned to `_PRELAUNCH_CLIENT` and the manifest pinned to
+    `images`. Returns the fake runner (raises whatever `run_sim` raises)."""
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, images)
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {
+        "report.json": _sim_report(
+            corner_ids=("tt_1.800_-40", "tt_1.800_27", "tt_1.800_125")
+        )
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path, corners={"temperature_c": [-40, 27, 125]})
+    request["batch"].update(batch_overrides)
+    path = _write_request(tmp_path, request)
+    runner.report = sim.run_sim(str(path))
+    return runner
+
+
+def test_prelaunch_mismatch_under_enforce_refuses_with_zero_submit_or_launch(
+    tmp_path, monkeypatch
+):
+    images = [_image(klt_version="0.5.0", klt_ref="3a75c3ae705b")]
+    runner = _FakeRunner()
+    monkeypatch.setattr(sb, "_run_subprocess", runner)
+    with pytest.raises(sim.SimError) as excinfo:
+        _prelaunch_run(tmp_path, monkeypatch, images)
+
+    assert excinfo.value.code == sb.BATCH_RUNNER_MISMATCH_CODE
+    message = str(excinfo.value)
+    # Both full build strings, plus the publication provenance.
+    assert "klt 0.5.0" in message
+    assert _PRELAUNCH_CLIENT in message
+    assert "3a75c3ae705b" in message
+    assert "no instance was launched" in message
+    assert 'runner_version_check to "warn"' in message
+
+
+def test_prelaunch_mismatch_is_one_top_level_cli_error_and_no_call(
+    tmp_path, monkeypatch, capsys
+):
+    from klayout_tools.cli import main
+
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.5.0")])
+    runner = _install_fake_batch_transport(monkeypatch, runner=_FakeRunner())
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path, corners={"temperature_c": [-40, 27, 125]})
+    path = _write_request(tmp_path, request)
+
+    assert main(["sim", str(path), "--format", "json"]) == 1
+
+    envelope = _error_envelope(capsys.readouterr().err)
+    assert envelope["error"]["code"] == "batch_runner_version_mismatch"
+    assert "corners" not in envelope  # no per-corner batch_job_failed
+    assert runner.calls == []
+
+
+def test_prelaunch_matching_release_segment_proceeds(tmp_path, monkeypatch):
+    # 0.7.0 runner vs a 0.7.1.dev3+g<sha> client: same major.minor (#3184).
+    runner = _prelaunch_run(
+        tmp_path, monkeypatch, [_image(klt_version="0.7.0", klt_ref="v0.7.0")]
+    )
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+    assert len(runner.report["corners"]) == 3
+
+
+def test_prelaunch_mismatch_under_warn_submits_with_a_warning(
+    tmp_path, monkeypatch, capsys
+):
+    runner = _prelaunch_run(
+        tmp_path,
+        monkeypatch,
+        [_image(klt_version="0.5.0")],
+        runner_version_check="warn",
+    )
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+    err = capsys.readouterr().err
+    assert "klt 0.5.0" in err
+    assert "submitting anyway" in err
+
+
+def test_prelaunch_legacy_entry_falls_back_to_the_runner_side_preflight(
+    tmp_path, monkeypatch
+):
+    uploaded: list[dict] = []
+    real_runner = _FakeRunner()
+
+    def _capture(argv, timeout_s):
+        joined = " ".join(argv)
+        if "job.json" in joined and " cp " in f" {joined} ":
+            source = argv[argv.index("cp") + 1]
+            if os.path.isfile(source):
+                uploaded.append(json.loads(Path(source).read_text()))
+        return real_runner(argv, timeout_s)
+
+    real_runner.default = fake_completed(_status("done"))
+    real_runner.outputs = {"report.json": _sim_report()}
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image()])  # no klt_version
+    monkeypatch.setattr(sb, "_run_subprocess", _capture)
+    monkeypatch.setattr(sb.time, "sleep", real_runner.sleep)
+    _write_body(tmp_path)
+    sim.run_sim(str(_write_request(tmp_path, _batch_request(tmp_path))))
+
+    assert len(real_runner.argvs_matching("launch", "--apply")) == 1
+    # The #2719 runner-side gate is still in the job command, unchanged.
+    assert uploaded and sb.BATCH_RUNNER_MISMATCH_CODE in json.dumps(uploaded[0])
+
+
+@pytest.mark.parametrize(
+    "images",
+    [
+        [],  # nothing published for this (pdk, region)
+        [_image(klt_version="not-a-version")],  # unreadable -> unknown
+        [_image(region="us-west-2", klt_version="0.5.0")],  # other region only
+    ],
+)
+def test_prelaunch_unknown_publication_proceeds(tmp_path, monkeypatch, images):
+    runner = _prelaunch_run(tmp_path, monkeypatch, images)
+    assert len(runner.argvs_matching("launch", "--apply")) == 1
+
+
+def test_prelaunch_unpinned_region_refuses_only_when_every_image_mismatches(
+    tmp_path, monkeypatch
+):
+    config = _config(tmp_path, region=None)
+    request = {"models": {"pdk": "sky130A"}}
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+
+    _publish_manifest(
+        tmp_path,
+        monkeypatch,
+        [
+            _image(region="us-east-1", klt_version="0.5.0"),
+            _image(region="us-west-2", klt_version="0.7.0"),
+        ],
+    )
+    assert sb._assess_published_runner(request, config)["status"] == "match"
+
+    _publish_manifest(
+        tmp_path,
+        monkeypatch,
+        [
+            _image(region="us-east-1", klt_version="0.5.0"),
+            _image(region="us-west-2"),  # legacy: unknown
+        ],
+    )
+    assert sb._assess_published_runner(request, config)["status"] == "unknown"
+
+    _publish_manifest(
+        tmp_path,
+        monkeypatch,
+        [
+            _image(region="us-east-1", klt_version="0.5.0"),
+            _image(region="us-west-2", klt_version="0.6.2"),
+        ],
+    )
+    assessment = sb._assess_published_runner(request, config)
+    assert assessment["status"] == "mismatch"
+    assert "0.5.0" in assessment["message"] and "0.6.2" in assessment["message"]
+
+
+def test_prelaunch_uses_the_latest_build_per_region(tmp_path, monkeypatch):
+    """An older entry for the same (pdk, region) is audit trail, exactly as
+    for `resolve_ami`: only the newest build is compared."""
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    old = _image(klt_version="0.7.0")
+    new = {**_image(klt_version="0.5.0"), "built_at": "2026-10-12T00:00:00Z"}
+    _publish_manifest(tmp_path, monkeypatch, [old, new])
+    assessment = sb._assess_published_runner(
+        {"models": {"pdk": "sky130A"}}, _config(tmp_path)
+    )
+    assert assessment["status"] == "mismatch"
+
+
+def test_prelaunch_missing_manifest_is_unknown_not_an_error(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    monkeypatch.setenv(rl.AMI_MANIFEST_ENV_VAR, str(tmp_path / "absent.json"))
+    monkeypatch.setattr(rl, "USER_MANIFEST_PATH", tmp_path / "absent-user.json")
+    monkeypatch.setattr(rl, "DEFAULT_MANIFEST_PATH", tmp_path / "absent-default.json")
+    assessment = sb._assess_published_runner(
+        {"models": {"pdk": "sky130A"}}, _config(tmp_path)
+    )
+    assert assessment["status"] == "unknown"
+
+
+def test_prelaunch_sharded_request_refuses_once_with_zero_calls(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.5.0")])
+    runner = _install_fake_batch_transport(monkeypatch, runner=_FakeRunner())
+    assessed: list[int] = []
+    real_assess = sb._assess_published_runner
+
+    def _counting(request, config):
+        assessed.append(1)
+        return real_assess(request, config)
+
+    monkeypatch.setattr(sb, "_assess_published_runner", _counting)
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._run_batch_fleet(
+            corner_points=_corner_points(4),
+            netlist_path=str(_write_body(tmp_path)),
+            timeout_s=30.0,
+            keep_artifacts=False,
+            want_waveforms=False,
+            artifacts_dir=str(tmp_path / "artifacts"),
+            request=_batch_request(tmp_path),
+            hosts=3,
+            measurements_spec=_measurements_spec(),
+        )
+    assert excinfo.value.code == sb.BATCH_RUNNER_MISMATCH_CODE
+    assert assessed == [1]
+    assert runner.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Engine-log surfacing: `missing_include` through the batch path (#2882)
+# --------------------------------------------------------------------------- #
+
+_PDK_INCLUDE = "/home/ubuntu/.volare/gf180mcuD/libs.tech/ngspice/design.ngspice"
+
+
+def _include_error_log(target: str) -> str:
+    """A canned runner `ngspice.log` whose run died on a missing include."""
+    return (
+        "Circuit: * runner deck\n"
+        f"Error: Could not find include file {target}\n"
+        "    While reading /var/tmp/eda-job-1/inputs/netlist.cir\n"
+        "ERROR: fatal error in ngspice, exit(1)\n"
+    )
+
+
+def _errored_report_without_include_code(artifact_log: str | None = None) -> str:
+    """An exit-4 report from an older runner `klt`: errored corner with only
+    the generic `measurement` diagnostic, as the issue reports."""
+    report = json.loads(_sim_report())
+    corner = report["corners"][0]
+    corner["status"] = "error"
+    corner["diagnostics"] = [
+        {
+            "severity": "error",
+            "code": "measurement",
+            "message": "measurement m1 produced no value",
+        }
+    ]
+    corner["artifacts"]["log"] = artifact_log
+    report.update(status="error", passed=0, errored=1)
+    return json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        _PDK_INCLUDE,  # absolute submitting-host PDK path
+        "design.ngspice",  # relative include
+        "$PDK_ROOT/gf180mcuD/libs.tech/ngspice/design.ngspice",  # $PDK_ROOT form
+    ],
+)
+def test_log_with_missing_include_classifies_naming_the_file(target):
+    found = sb._missing_include_diagnostic(_include_error_log(target))
+    assert found is not None
+    assert found["code"] == "missing_include"
+    assert target in found["message"]
+
+
+def test_exit_4_batch_job_surfaces_missing_include_from_retrieved_log(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
+    runner.outputs = {
+        "report.json": _errored_report_without_include_code(remote_log),
+        "artifacts/tt_1.800_27/ngspice.log": _include_error_log(_PDK_INCLUDE),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    codes = [d["code"] for d in corners[0]["diagnostics"]]
+    assert codes == ["measurement", "missing_include"]
+    assert _PDK_INCLUDE in corners[0]["diagnostics"][1]["message"]
+
+
+def test_report_already_carrying_missing_include_is_not_duplicated(
+    tmp_path, monkeypatch
+):
+    report = json.loads(_errored_report_without_include_code())
+    report["corners"][0]["diagnostics"].append(
+        {"severity": "error", "code": "missing_include", "message": "from runner"}
+    )
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="4"))
+    runner.outputs = {
+        "report.json": json.dumps(report),
+        "artifacts/tt_1.800_27/ngspice.log": _include_error_log(_PDK_INCLUDE),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    corners, _, _ = sb._run_batch_job(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+
+    codes = [d["code"] for d in corners[0]["diagnostics"]]
+    assert codes.count("missing_include") == 1
+    assert corners[0]["diagnostics"][-1]["message"] == "from runner"
+
+
+def test_failed_job_with_log_but_no_report_carries_tail_and_missing_include(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.outputs = {
+        "report.json": "",
+        "artifacts/tt/ngspice.log": _include_error_log(_PDK_INCLUDE),
+    }
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner, points=2)
+
+    for corner in corners:
+        codes = [d["code"] for d in corner["diagnostics"]]
+        assert codes == ["batch_job_failed", "missing_include"]
+        message = corner["diagnostics"][0]["message"]
+        assert "ngspice.log tail:" in message
+        assert _PDK_INCLUDE in message
+        assert _PDK_INCLUDE in corner["diagnostics"][1]["message"]
+
+
+def test_failed_job_without_a_log_states_it_was_unavailable(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(
+        _status("failed", exit_code="1", detail="job command exited 1")
+    )
+    runner.outputs = {"report.json": ""}
+
+    corners, _, _ = _run_failed_job(tmp_path, monkeypatch, runner)
+
+    diagnostic = corners[0]["diagnostics"][0]
+    assert diagnostic["code"] == "batch_job_failed"
+    assert "engine log unavailable" in diagnostic["message"]
+    assert [d["code"] for d in corners[0]["diagnostics"]] == ["batch_job_failed"]
+
+
+def test_engine_log_tail_is_bounded(tmp_path):
+    (tmp_path / "ngspice.log").write_text("noise line\n" * 5000)
+    note, found = sb._engine_log_note(str(tmp_path))
+    assert found is None
+    assert len(note) < sb._BATCH_ENGINE_LOG_TAIL_CHARS + 100

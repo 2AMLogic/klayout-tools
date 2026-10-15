@@ -1262,6 +1262,24 @@ sweep, role-runner and epic dispatch surfaces strip them from any child that
 cannot use them. Contract, per-runtime mapping and the red line:
 [`llm-gateway.md`](llm-gateway.md).
 
+### Weighted per-stage, per-attempt draw (`runtimes.roleDraw`, issue #11726)
+
+`runtimes.roleDraw.<role>` replaces the ordered `rolePreference` list for a
+stage with a seeded, weighted draw per attempt, for example
+`"judge": [{"attempt": 1, "draw": {"claude/opus": 80, "claude/fable": 10,
+"codex": 10}}, {"attempt": 2, "draw": {"claude/fable": 100}}]`, plus
+`runtimes.excludeProviders` to drop a runtime from every table on a host. The
+draw orders the candidates by weight and runs the walk below over that order,
+so admission, availability, the launch-failure hold and the ceiling apply
+unchanged, and an unavailable candidate is excluded with the rest
+renormalised. A failed or blocked role tick moves the role to the next
+attempt's table. A role with no table keeps `rolePreference`; an operator pin
+still wins. A candidate key is `<runtime>[:<profile>][/<model-or-profile>]`:
+`claude` ≡ the `"claude"` entry, `opencode:zai-flash` ≡
+`{"runtime":"opencode","modelProfile":"zai-flash"}`, and `claude/opus` adds a
+`--model` pin. The full contract, the per-tier merge, telemetry and `loom-daemon
+roles draw --explain` are in [role-draw.md](role-draw.md).
+
 ### Ordered runtime preference with fall-through (issue #8436)
 
 The precedence chain above is **static**: it picks a runtime without asking
@@ -2180,9 +2198,21 @@ drains it to the OTLP queue and retires the file. Journals are written only
 when the workspace exports traces (an `otlp` exporter is configured);
 otherwise observe records are dropped.
 
-Not in this slice (tracked on #11300): marking the pool from the live 429,
-loopback proxying of uncontained launches, and injecting the OpenCode base URL
-through `XDG_CONFIG_HOME`.
+**Live seat marking.** A 429 or quota-exhaustion response is classified at the
+proxy and bad-marks the launch's pool account at once (`bad_mark_at_proxy`),
+before the harness's own retry ladder runs out. The mark is model-class-scoped,
+its cooldown comes from the response's reset text or the account's configured
+window, and a per-launch guard only ever escalates (a bare 429, then a quota
+exhaustion), so one launch writes each level once. A launch with no pool
+account (an explicit env credential) is never marked. See
+[`token-pool.md` § "API-key account pool"](token-pool.md#api-key-account-pool-for-native-harnesses-zaiopencode-pi-kimi--84018563).
+
+**Uncontained native launches and OpenCode.** Slice 3 shipped the loopback-only
+proxy for uncontained native launches and the `credentialProxy.baseUrlConfig`
+injection of the proxy URL into the launch's provisioned OpenCode config (see
+the sections above). The remaining #11300 item is operator-run: a 48 h canary on
+one seat, checking the Z.ai Plan Overview page for a risk notice, before any
+fleet rollout.
 
 ### Containerized dispatch mode for Claude sweeps (issue #7429, epic #6896 Phase 3)
 

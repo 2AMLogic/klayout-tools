@@ -1251,7 +1251,8 @@ def test_stubbed_run_forwards_defines_and_includes_to_build(tmp_path, monkeypatc
 
     run_functional_verification(request_path)
 
-    assert runner.build_kwargs["defines"] == defines
+    assert runner.build_kwargs["defines"] == {"FUNCTIONAL": "1"}
+    assert runner.build_kwargs["build_args"] == ["-DUSE_POWER_PINS"]
     assert runner.build_kwargs["includes"] == [str(include_dir.resolve())]
 
 
@@ -1955,7 +1956,8 @@ def test_functional_define_without_sdf_is_untouched(tmp_path, monkeypatch):
     report = run_functional_verification(request_path)
 
     assert report["environment"]["sdf"] is None
-    assert runner.build_kwargs["defines"] == {"FUNCTIONAL": None}
+    assert runner.build_kwargs["defines"] == {}
+    assert runner.build_kwargs["build_args"] == ["-DFUNCTIONAL"]
 
 
 @pytest.mark.parametrize("version", ["12.0", "11.0", "12.0 (stable)"])
@@ -5779,3 +5781,30 @@ def test_cli_mutations_text_format_includes_summary(tmp_path, monkeypatch, capsy
     assert "mutations:" in out
     assert "[killed] #1" in out
     assert "[survived] #2" in out
+
+
+def test_valueless_define_is_passed_as_build_arg_not_serialised(tmp_path):
+    """Issue #2884: cocotb 2.x raises TypeError on a ``None`` define value, so
+    ``{"FUNCTIONAL": null}`` must reach the simulator as ``-DFUNCTIONAL``."""
+    captured: dict = {}
+
+    class _Runner:
+        def build(self, **kwargs):
+            captured.update(kwargs)
+
+    runner_module = types.SimpleNamespace(get_runner=lambda engine: _Runner())
+    fv._run_build(
+        runner_module,
+        engine="icarus",
+        sources=[],
+        hdl_toplevel="top",
+        build_dir=str(tmp_path),
+        build_args=["-g2012"],
+        defines={"FUNCTIONAL": None, "MODE": "x"},
+        includes=[],
+        timescale=("1ns", "1ps"),
+        parameters={},
+        log_path=str(tmp_path / "build.log"),
+    )
+    assert captured["defines"] == {"MODE": "x"}
+    assert captured["build_args"] == ["-g2012", "-DFUNCTIONAL"]

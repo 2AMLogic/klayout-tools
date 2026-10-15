@@ -281,6 +281,10 @@ JSON, in the same corner order**, for the same request; the backend only
 changes how fast (and where) the sweep runs. An unsupported name is an
 application error (exit 1), exactly like an unsupported `engine`.
 
+Every backend also accepts **deck-list requests** (a request with a `decks`
+list — pre-composed caller-owned decks transported, not re-composed; see
+"Pre-composed decks" below), with the same backend semantics.
+
 **Host default — `$KLT_SIM_BACKEND`.** Precedence is `--backend` >
 `request.backend` > `$KLT_SIM_BACKEND` > `local`. A fleet host that must not
 run SPICE grids itself sets it in its daemon environment (2am#1004: the AWS
@@ -589,6 +593,26 @@ What differs from `remote` is *who acquires the machine*:
 }
 ```
 
+**PDK-root includes resolve on the runner.** A `.include` in the
+netlist body that resolves under the PDK root (`models.pdk_root`, else
+`$PDK_ROOT`) is **not** staged or rewritten: the PDK is baked into the
+runner image, so the same path must exist at the same PDK root *on the
+runner*. A body that includes
+`/home/<you>/.volare/<pdk>/libs.tech/ngspice/design.ngspice` fails on a
+runner whose image keeps that PDK elsewhere (or lacks it) with ngspice's
+`Could not find include file ...`. Prefer a PDK-root-relative include
+(`$PDK_ROOT/...`) or a path under the runner's PDK root. Includes *outside*
+the PDK root are staged from the submitting host. When the runner cannot
+resolve an include, the per-corner `diagnostics[]` carries a
+`missing_include` entry naming the file (when the engine log is retrieved,
+which needs `keep_artifacts`), not only `measurement ... produced no value`.
+A job that fails without a usable report states `engine log unavailable`
+in its `batch_job_failed` message, or carries the tail of the retrieved
+`ngspice.log`. Which PDK locations a given runner image provides, and its
+`klt` version, are fleet concerns owned by
+[2AMLogic/2am](https://github.com/2AMLogic/2am) (see also
+[#2851](https://github.com/2AMLogic/klayout-tools/issues/2851)).
+
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `batch.provision_script_path` | string, required (or `$KLT_BATCH_PROVISION_SCRIPT`) | Path to 2am's `infra/aws/batch-fleet-provision.sh` on *this* host. Resolution order: this field, then `$KLT_BATCH_PROVISION_SCRIPT`, then an error naming both — never a guessed path into a sibling checkout. An unresolvable script is an error raised **before any S3 write**, mirroring `remote.ssh_key_path`'s own early check. |
@@ -598,7 +622,7 @@ What differs from `remote` is *who acquires the machine*:
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
-| `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`); see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
+| `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
 | `batch.job_ceiling_check` | `"warn"` \| `"enforce"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`. Any other value is rejected before any S3 write. |
@@ -932,12 +956,36 @@ report a pass. Policy: **reject before simulating**.
 - Every job command starts with a client-generated shell preflight that uses
   only `klt --version` (so it works on images that predate any new request
   key). It records the runner's build string in `outputs/runner_identity.json`
-  and compares it with the client's `klt --version` by **exact string
-  equality**. Anything else is not treated as compatible: a numerically newer
-  runner, a development build (`+g<sha>`, `.dirty`, `+unknown`) against a
-  release, or an unparseable/absent version.
-- On a mismatch (`batch_runner_version_mismatch`) or an unreadable runner
-  version (`batch_runner_version_unknown`) the preflight writes a klt error
+  and compares it with the client's `klt --version` by **major.minor**
+  ([#3184](https://github.com/2AMLogic/klayout-tools/issues/3184)): the
+  first two components of the release segment, which is the version with its
+  PEP 440 local part (`+...`) and any pre/dev/post suffix removed. Patch
+  releases, `.devN` builds and `+g<sha>` local builds all count as the same
+  version as their major.minor. The strings klt produces are:
+
+  | build | `klt --version` | major.minor | against a `0.7.0` runner |
+  |---|---|---|---|
+  | clean tree on the `v0.7.0` tag | `0.7.0` | `0.7` | match |
+  | any commit after `v0.7.0` | `0.7.1.devN+g<sha>` | `0.7` | match |
+  | either of the above, uncommitted changes | `...+g<sha>.dirty` | `0.7` | match |
+  | no git facts | `0.7.0.dev0+unknown` | `0.7` | match |
+  | patch release | `0.7.3` | `0.7` | match (either direction) |
+  | next minor, released or in development | `0.8.0`, `0.8.0.devN+g<sha>` | `0.8` | **mismatch, exit 87** |
+
+  A version whose release segment has fewer than two components (for
+  example `7`) has no major.minor and counts as unknown. Both full build
+  strings are kept in `runner_identity.json`, the mismatch message and
+  `environment.remote`.
+
+  The rule depends on a release discipline: **a change that breaks the
+  runner contract ships in a minor release, never a patch, and every minor
+  release is published to PyPI and gets a rebaked runner image.** The
+  accepted cost is that a dev client can send request keys that the runner's
+  release of the same minor does not have; such changes belong in the next
+  minor.
+- On a mismatch (`batch_runner_version_mismatch`) or a runner version that is
+  absent or has no major.minor (`batch_runner_version_unknown`) the
+  preflight writes a klt error
   envelope to `report.json` and exits `87` **without running `klt sim`**. The
   client recovers it through the normal failed-job path, so every unit gets a
   `batch_job_failed` diagnostic with `runner_code` set to the code above, the
@@ -946,13 +994,14 @@ report a pass. Policy: **reject before simulating**.
   `hosts > 1`, so mixed-version shards stay distinguishable) always carries
   `runner_klt_version` (the runner's own version, or `null` when it could not
   be established -- never the client's), `client_klt_version`, and
-  `runner_compatibility` (`match` / `mismatch` / `unknown`). A non-`match`
+  `runner_compatibility` (`match` / `mismatch` / `unknown`; `unknown` also
+  when either version has no major.minor). A non-`match`
   value also carries `runner_compatibility_warning`. The report's
   `provenance.klt_version` stays the client's.
 - `batch.runner_version_check` (`"enforce"`, default, or `"warn"`) selects the
   behavior. `warn` runs the simulation anyway and only reports the skew in
-  `environment.remote`; use it deliberately (for example a development client
-  against a release image), because it is detection after execution and does
+  `environment.remote`; use it deliberately (for example a client on a newer
+  release than the image), because it is detection after execution and does
   not guarantee request options were honored.
 
 ```json
@@ -968,11 +1017,90 @@ report a pass. Policy: **reject before simulating**.
 }
 ```
 
-Limits: version identity does not prove equivalent behavior between two
-differently built copies that share one version string. **Remediation:**
-update the runner image to the client's `klt` build, or submit from a client
-matching the image. Jobs that never reach a terminal state (`batch_poll_timeout`)
+Limits: a major.minor match does not prove equivalent behavior between two
+builds of one minor (a `0.7.1.devN+g<sha>` client or a `0.7.3` release can
+carry changes the `0.7.0` runner lacks; by the release discipline above, none
+of them may break the runner contract). **Remediation** on a mismatch:
+update the runner image to the client's minor, or submit from a client of the
+image's minor. Jobs that never reach a terminal state (`batch_poll_timeout`)
 report `runner_klt_version: null` and `runner_compatibility: "unknown"`.
+
+#### Pre-launch check from the AMI manifest ([#2851](https://github.com/2AMLogic/klayout-tools/issues/2851))
+
+The runner-side preflight only runs once a Spot instance has booted. To catch
+a known mismatch before that, the client also checks the runner `klt` that
+the **AMI manifest** publishes. This is the same `remote-sim-ami-manifest.json`
+that `remote` resolves its AMI from, found by the same search order:
+`request.remote.ami_manifest` is not consulted here, so the order is
+`$KLT_AMI_MANIFEST`, then `~/.config/klt/remote-sim-ami-manifest.json`, then
+the packaged `data/` copy. See
+[`docs/schemas/remote-sim-ami-manifest.schema.json`](../schemas/remote-sim-ami-manifest.schema.json).
+
+- **Source.** Each manifest entry may carry `klt_version` (the build string
+  the image's `klt --version` reports, without `klt `) and `klt_ref` (the git
+  ref it was installed from, for audit only).
+  `scripts/aws/build-remote-sim-ami.sh` publishes both for every new or
+  copied image. `klt_ref` is the pinned `--klt-ref` that the build installs
+  `klayout-tools` from, and `klt_version` is what that install reported on
+  the build instance. The script refuses to publish an image whose version
+  it could not read. `--emit-manifest-entry <ami_id> <klt_version>` prints
+  the entry a build would write, with no AWS call. Entries written before
+  #2851 have neither field, which means unknown.
+- **Which images.** For each `(pdk, region)` pair, the check uses the most
+  recently built entry, the same entry `resolve_ami()` would pick. Only the
+  request's `models.pdk` is considered (every PDK when it names none), and
+  only `batch.region` (every region when none is configured, because the
+  fleet chooses its own Spot pool).
+- **Rule.** The check uses the same major.minor release-segment comparison
+  as the runner-side gate (#3184, table above), so the two can never
+  disagree. It reports a mismatch only when **every** candidate image
+  publishes a `klt_version` and none of them matches the client.
+- **`enforce` (default).** A known mismatch fails the whole request once,
+  before any S3 write or launch call. It exits `1` with a top-level
+  `error.code` of `batch_runner_version_mismatch` (the existing code). The
+  message names every candidate image with its full `klt_version` and
+  `klt_ref`, plus the client's full version. No instance is launched, no
+  report or `corners[]` is produced, and there are no per-corner
+  `batch_job_failed` diagnostics. A sharded (`hosts > 1`) request is checked
+  once, not once per shard.
+- **`warn`.** Prints the same message to stderr and submits as before. The
+  runner-side preflight then runs in its `warn` mode.
+- **Unknown.** If no manifest is found, no image is published for the
+  request, any candidate is a legacy entry without `klt_version`, a version
+  is unreadable, or the candidates disagree, nothing is refused locally. The
+  request is submitted unchanged and the runner-side preflight above
+  decides, exactly as before #2851. No historical manifest entry becomes
+  unusable.
+- **Discovering the runner version before submit.** Read the manifest:
+  `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref}'
+  "${KLT_AMI_MANIFEST:-$HOME/.config/klt/remote-sim-ami-manifest.json}"`.
+  For a given pair, the entry with the latest `built_at` is the one in use.
+- **Limit.** A manifest `klt_version` is publication metadata, not proof of
+  the bytes a job executes. The fleet's own launch configuration, not this
+  repository, decides which image boots. That is why a `match` or `unknown`
+  still goes through the runner-side preflight, and why
+  `environment.remote.runner_klt_version` (what the job actually ran) stays
+  the authoritative record.
+
+**When the client is newer than the runner.** If the image is a different
+minor from your client, either:
+
+1. **Rebuild or publish a runner image** of your client's minor. Run
+   `scripts/aws/build-remote-sim-ami.sh` with a matching `--klt-ref`, or have
+   the fleet image rebuilt. This is the supported fix.
+2. **Submit from a client of the image's minor.** Released `klt 0.5.0` has
+   no `batch` backend at all ("unsupported backend 'batch'"). So against a
+   `0.5.x` image, no client can both submit and pass the gate. Option 1 is
+   the only clean path there.
+3. **Set `request.batch.runner_version_check: "warn"`** to run anyway. This
+   is an informed override, not a compatibility guarantee. The older runner
+   may reject or silently ignore request options it does not know, and the
+   run can still report a pass. Field-level compatibility under `warn` is
+   tracked in [#2901](https://github.com/2AMLogic/klayout-tools/issues/2901),
+   and the request-feature minimum-version registry in
+   [#2877](https://github.com/2AMLogic/klayout-tools/issues/2877). Check
+   `environment.remote.runner_compatibility` and
+   `runner_compatibility_warning` in the result.
 
 ### Worker-observed environment (`worker_environment`, [#2834](https://github.com/2AMLogic/klayout-tools/issues/2834))
 
@@ -1102,6 +1230,154 @@ network), but a *live* run does.
 The same 5-corner ring-oscillator matrix as `examples/sim-remote/`, with
 `backend: "batch"` — the live-run report slot is deliberately empty until
 those 2am prerequisites are done.
+
+## Pre-composed decks (`decks` requests)
+
+`klt sim`'s off-host backends are the sanctioned route to off-host
+simulation capacity, but the corner contract above has klt *compose* each
+per-corner deck itself from `corners.*`, `analysis` and `measurements[]`.
+A verification harness that already renders its own decks (PDK `.lib`
+section selection, derived `.meas` expressions, per-point `.param`s,
+`.save` retention lists) and mints its own evidence from the raw logs needs
+the **transport, not the corner engine**: re-expressing the campaign as a
+corner request would mint a *different* artifact from the one its existing
+evidence was minted by ([#2804](https://github.com/2AMLogic/klayout-tools/issues/2804),
+re-filing #2464).
+
+A request carrying a **`decks` list** is a deck-list request: klt runs each
+deck verbatim with `ngspice -b`, in an isolated directory, and returns each
+unit's raw stdout/stderr and declared output files. There is no corner
+expansion, no deck composition, no measurement parsing, and no pass/fail
+grading of the circuit — the caller diffs its own evidence. All four
+backends accept deck-list requests (`local`, `local-parallel`, `remote`,
+`batch`); the off-host ones push the deck closure and run the *same* deck
+runner on the worker (`klt sim … --backend local-parallel` there lands back
+in the deck path), exactly as corner jobs do.
+
+```json
+{
+  "backend": "batch",
+  "models": { "pdk": "sky130A" },
+  "decks": [
+    {
+      "id": "tt_27c_3v30",
+      "deck": "rendered/tt_27c_3v30.spice",
+      "inputs": ["dut.spice"],
+      "outputs": ["out/measure.raw"],
+      "timeout_s": 3600
+    }
+  ],
+  "options": { "max_workers": 4 }
+}
+```
+
+### Request fields
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `decks[]` | array\<object\>, required | The units to run. Each entry: `id`, `deck`, optional `inputs[]`, `outputs[]`, `timeout_s`. Every rejectable condition below fails before any upload, SSH push, or fleet launch (exit 1). |
+| `decks[].id` | string, required | Unique unit identifier; doubles as the unit's directory name under `outdir`, so it must be a single path segment (no `/`, no `..`). |
+| `decks[].deck` | string, required | Path to the pre-composed deck. Relative paths resolve against the request file's directory. **Shipped byte-for-byte** — never rewritten. |
+| `decks[].inputs[]` | array\<string \| {path, name}\> | Extra input files copied into the unit directory. A bare string lands at its basename; the object form names the destination explicitly. Destinations must be relative and traversal-free. |
+| `decks[].outputs[]` | array\<string\> | Unit-relative paths the deck is expected to write (parent directories are created up front). After the run each is reported as present (`outputs`) or absent (`missing_outputs`) — a missing output is evidence, never a silent drop. Outputs must not name a staged input. |
+| `decks[].timeout_s` | number | Per-unit wall-clock budget. Defaults to `options.timeout_s`, then `120` (the corner default). Exceeding it kills the engine; whatever it emitted first is kept. |
+| `engine` | string | Must be `"ngspice"` (the default). Deck transport composes and grades nothing, so there is no `xyce` deck path. |
+| `models.pdk` / `models.pdk_root` | string | Image selection for `remote`/`batch` — the same field, semantics, and validation as corner requests (`remote` refuses to provision without `models.pdk`; `batch` validates it against the published fleet images). Independent of any corner axis; PDK model files stay on the image. |
+| `options.timeout_s` | number | Default per-unit timeout (see `decks[].timeout_s`). |
+| `options.max_workers` | integer | Worker-pool size for `local-parallel`; overridable with `--max-workers`, capped by `$KLT_SIM_MAX_WORKERS`, same as corners. |
+| `options.ngspice_binary` | string | Same resolution rules as corners (issue #2423). Interpreted on the *executing* host. |
+| `remote.*` / `batch.*` | object | The same backend blocks corner requests carry; only read for the matching backend. `remote.hosts` sharding is refused for deck requests — one off-host job runs the whole list across its own worker pool. |
+
+A deck-list request must not also declare `netlist`, `corners`, `analysis`,
+`analysis_steps`, `measurements`, `monte_carlo`, `exclude`, or
+`netlist_source` — a document declaring both is ambiguous about what
+should run, so it is rejected by name.
+
+The corner-only CLI knobs are likewise refused for deck requests:
+`--hosts`, `--resume`, `--budget-s`, `--plot`, `--fail-fast-probe`, and
+`--fail-on-diagnostic`.
+
+### Preservation and isolation
+
+- **Deck bytes are preserved.** Unlike the corner path — whose stager
+  rewrites `.include` directives to flat staged names — a deck ships
+  byte-for-byte (the unit's `deck_sha256` hashes exactly what the engine
+  read). The deck's `.include`/`.inc` closure — and the file of every
+  `.lib <file> <section>` model reference — is staged instead at each
+  target's *declared relative path* inside the unit directory, so the
+  unmodified directives resolve there. A target that cannot be staged that
+  way — an absolute path outside the PDK roots, a `..`-climbing relative,
+  a file that resolves nowhere on the submitting host — is a named error
+  before any billable launch. `$VAR`-bearing and PDK-rooted targets stay
+  the executing host's to resolve, exactly as in the corner path (and are
+  listed in the unit's `host_resolved`; the executing host expands `$VAR`/`~`
+  in them before running the engine). Staged files are followed
+  recursively, bounded by the same 64-file / 32 MiB caps as corner
+  staging. A one-token `.lib <section>` … `.endl` *definition* names no
+  file and is left alone; any other `.lib` shape (no arguments, more than
+  two, unbalanced quotes) is rejected by name.
+- **Units are isolated.** Each unit runs in its own directory
+  (`<outdir>/<id>/`), recreated fresh every run. Its deck, declared
+  inputs, and staged closure are copied there under the declared names, so
+  two units may share filenames freely. `stdout.bin` and `stderr.bin` at
+  the unit root are reserved for the captured streams: no deck, input,
+  staged include, or declared output may claim them. `ngspice -b <deck>`
+  runs with the unit directory as `cwd` — the invocation a local `ngspice -b` in the
+  caller's own harness would be.
+- **Streams are evidence, untouched.** Each unit's engine stdout and
+  stderr are captured as separate **binary** files (`stdout.bin`,
+  `stderr.bin`) with no decoding, stripping, or normalization.
+  Byte-for-byte means preserving what the worker's engine emitted:
+  equality with a separate local run requires matching engine build,
+  inputs, and environment — paths, banners, and timing can differ. klt
+  never normalizes logs to manufacture equality.
+
+### Response
+
+The report carries `"mode": "decks"` so a consumer can tell it from a
+corner report at a glance. `schema_version` is `klt sim`'s own (versioned
+per command, see [`docs/json-contract.md`](../json-contract.md)); the deck
+report is the additive `mode: "decks"` shape under that version. Stream
+and output paths are **relative to `outdir`** (which is absolute on the
+machine that assembled the report — the caller's, after an off-host run's
+collection), so a unit's evidence is `<outdir>/<id>/stdout.bin` and so
+on, under any backend.
+
+Every `<outdir>/<id>/` reflects only the current run, on every backend.
+`outdir` is reused across runs (the default `.klt/sim` always is), so an
+off-host run never merges into it: each unit directory is cleared, then
+replaced by the tree this run collected from the instance or the fleet.
+A unit whose tree did not come back has no directory, and its declared
+outputs are listed in `missing_outputs`. A previous run's files are never
+reported as this run's evidence. Content of `outdir` that is not a unit
+directory of the request is left alone.
+
+| Field | Description |
+| ----- | ----------- |
+| `mode` | `"decks"` |
+| `status` | `"pass"` when every unit exited 0 within its timeout; `"error"` otherwise. klt never grades the deck's electrical result. |
+| `unit_count` / `passed` / `errored` / `timed_out` | Counts over `units[]`. |
+| `units[]` | One entry per deck, in request order: `id`, `status` (`"pass"` / `"error"` / `"timeout"`), `exit_code` (`null` when the engine never launched), `timed_out`, `duration_s`, `engine_version` (best-effort from the engine's own stdout banner — recorded per unit and top-level as engine identity), `deck` (unit-relative name as run), `deck_sha256`, `stdout`, `stderr`, `outputs`, `missing_outputs`, `host_resolved` (include targets left to the executing host), `diagnostics[]` (`timeout`, `engine_exit`, `engine_not_found`; off-host job failures carry `batch_job_failed` / `batch_job_timeout` / `batch_poll_timeout`, with the job's own klt error envelope attached where one was recoverable, or `remote_job_failed` when the `remote` backend's SSH run fails — the unit trees already written on the instance are pulled back before teardown, so `stdout`/`stderr`/`outputs` point at whatever evidence was recovered and the message says which streams came back). |
+| `outdir` | Absolute path of the artifacts directory on the reporting host. |
+| `environment` | `engine`, `engine_version`, `ngspice_binary`, `klt_version`, `max_workers`; off-host runs add `remote` — the same block corner reports carry (`provider`, `instance_id`/`instance_type`, `job_id`/`bucket` for batch, `runner_klt_version` identity, ...). |
+
+### Exit codes (deck mode)
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Every unit ran to completion with engine exit 0 (`status: "pass"`). |
+| `1` | Failed to run at all — bad deck list, unstageable include, unsupported engine/image selection, backend failure before or during dispatch. |
+| `2` | Usage error (argparse), as always. |
+| `4` | At least one unit errored or timed out (`status: "error"`) — the run is incomplete. Per-unit exit codes, streams, and missing-output lists say which and why. |
+
+Exit `3` cannot arise: deck requests carry no graded measurements. Gate on
+the payload's `status` field, not the exit code.
+
+**Worked shape:** render your decks, list them, submit. A paired
+re-take campaign points `models.pdk` at the same image the original record
+used and diffs the returned `stdout.bin`/`outputs` against its own
+evidence — the artifact is the one its harness mints, not one klt
+re-composed.
 
 ## Sequential (adaptive) campaigns on the batch backend
 
@@ -2227,12 +2503,22 @@ netlist's resolved include closure**, not just the netlist file
   to S3. Previously such a deck was shipped anyway and came back as a full
   set of `error`/`unavailable_measurement` corners indistinguishable from a
   real regression.
-- Two classes of include are deliberately **left verbatim**, because the
-  *executing* host owns their resolution: a target naming an environment
-  variable (`$PDK_ROOT/...`), and a target resolving under the PDK root the
+- Two classes of include are deliberately **left verbatim** when staging,
+  because the *executing* host owns their resolution: a target naming an
+  environment variable (`$PDK_ROOT/...`), and a target resolving under the PDK root the
   request already forwards (`models.pdk_root`, else this host's `$PDK_ROOT`)
   — the model library is baked into the fleet image and is never pushed per
   job (see "Remote backend" above).
+- **`$VAR`/`~` in `.include`/`.inc` targets are expanded on the executing
+  host** (every backend, including `local`), when the per-corner deck is
+  composed -- ngspice itself never expands environment variables in include
+  paths. The netlist body's include lines are rewritten into a copy beside
+  the corner deck (`${VAR}`, quoted targets and `~` are handled; includes
+  inside included files are not followed). A variable that is unset on the
+  executing host yields a `missing_include` diagnostic naming the netlist,
+  line and variable; an include ngspice itself fails to load (`Could not
+  find include file ...`, or ngspice 42's `.include filename missing`) also
+  carries `missing_include`.
 - `.lib` cards in the netlist are not followed: `.lib` is the model-library
   channel, which `models`/`models.pdk` resolve on the executing host by
   default (see "Model library resolution" below) — or, with
@@ -2406,6 +2692,103 @@ fails with `Unable to find definition of model …` and every corner errors.
 
 `klt characterize` forwards its own `options.osdi_preload` to this option
 (see [`characterize.md`](characterize.md)).
+
+## ASAP7 FinFET (BSIM-CMG) simulation
+
+Netlists from `klt extract --deck asap7` (FinFET, geometry-counted `NFIN`)
+simulate in ngspice with the ASAP7 BSIM-CMG models once ngspice has a
+BSIM-CMG OSDI module
+([#2814](https://github.com/2AMLogic/klayout-tools/issues/2814)). Stock
+ngspice has no BSIM-CMG: the pinned PDK's `level = 72` cards fail with
+`Only MOS device levels ... are supported in this binary`.
+
+**Provisioning.** `scripts/fetch-asap7-sim-toolchain.sh` (see
+[`pdks/README.md`](../../pdks/README.md)) fetches the CMC BSIM-CMG 111.0.0
+Verilog-A source (dwarning/VA-Models commit `6099b4e1...`, tarball sha256
+`357d6956...`), compiles it with the same pinned OpenVAF-Reloaded
+(`osdi_0.4-153-g2e066436`) as the SG13G2 flow, and load-verifies the module
+in the `ngspice` on `PATH` (`pre_osdi` + `devhelp` must list `bsimcmg_va`).
+It needs ngspice >= 44 built with OSDI and, for the pinned compiler, Linux
+x86-64 (elsewhere set `OPENVAF_R_BIN`). The `.osdi` lands in the ignored
+`pdks/asap7-sim/osdi/`; nothing fetched or built is tracked.
+
+**Card adaptation** (`klayout_tools.asap7_bsimcmg`, pure text-to-text):
+
+- `adapt_model_cards` rewrites `.model nmos_rvt nmos level = 72 ...` as
+  `.model nmos_rvt bsimcmg_va type=1 ...` (`type=-1` for pmos) and drops
+  `level` and `version` (the Verilog-A module has neither; the cards say
+  `version = 107`, the module is 111.0.0). All other parameters are carried
+  over verbatim. The module does not know `coremod`, `capmod` and `nseg`;
+  ngspice reports them as `unrecognized parameter ... - ignored`, so those
+  three have no effect. `corner_library` wraps the TT/FF/SS cards as
+  `.lib tt|ff|ss` sections, so `models.lib` plus `corners.process` makes a
+  multi-corner run an ordinary `klt sim` sweep.
+- `adapt_extracted_netlist` turns `M<name> d g s b <model> L=.. W=.. NFIN=..`
+  into the OSDI element `N<name> d g s b <model> L=.. NFIN=..`. BSIM-CMG has
+  no `W` (width is quantised by the fin count), so it is dropped; `NFIN` is
+  the **total** fin count and is passed through unchanged (an `NF=`/`FINGERS=`/
+  `AS`/`AD`/`PS`/`PD` on the card is refused, since BSIM-CMG's `NF` would
+  multiply `NFIN`). KLayout's `\$11` / `VDD$1` names become `11` / `VDD_1`.
+  The extractor's `M` card (`finfet_card`) is unchanged: it stays the
+  CDL-shaped card LVS compares. Measured: `NFIN=6` draws exactly twice the
+  drain current of `NFIN=3`.
+- The extracted cell's separate `VDD`/`VDD$1` (tap vs. source) and
+  `vsubs`/`VSS` pins are distinct nets; the testbench ties them.
+
+**Request.**
+
+```json
+"models": {"lib": "asap7_bsimcmg.lib"},
+"corners": {"process": ["tt", "ff", "ss"], "supply_v": {"vdd": [0.7]}, "temperature_c": [25]},
+"options": {"osdi_preload": ["pdks/asap7-sim/osdi/bsimcmg.osdi"]}
+```
+
+**Prerequisite failures are errors, never passes.** Without the module (or
+with an ngspice that cannot load it) every corner is `status: "error"` with
+a `prerequisite missing: ...` diagnostic naming the capability:
+`unsupported_model_level` (the `level = 72` line above),
+`osdi_abi_mismatch` (`NGSPICE only supports OSDI v0.3 but ...`, ngspice <
+44) or `osdi_load_failed` (`Library x.osdi couldn't be loaded`). A missing
+`.osdi` file is refused up front (`osdi_preload file not found`). The
+`unsupported_model_level` diagnostic suppresses the follow-on
+`model_bin_range` code, which would misattribute the failure to a width bin.
+`tests/test_asap7_bsimcmg_sim.py` skips with the missing capability named
+when the corpus, the module or a loading ngspice is absent.
+
+**Verification status (2026-10-13).** Verified end to end on a Linux x86-64
+host with ngspice-46 (KLU, OSDI ABI 0.4) after `scripts/fetch-pdks.sh` and
+`scripts/fetch-asap7-sim-toolchain.sh`; Xyce was not used. Provenance:
+
+| Item | Value |
+|------|-------|
+| Simulator | ngspice-46, `pre_osdi` + `devhelp` load of `bsimcmg_va` verified by the fetch script |
+| Compiler | OpenVAF-Reloaded `osdi_0.4-153-g2e066436` (sha256 `9c570bf8...`) |
+| Model source | BSIM-CMG 111.0.0, dwarning/VA-Models `6099b4e1`, tarball sha256 `357d6956...` |
+| Compiled module | `pdks/asap7-sim/osdi/bsimcmg.osdi`, sha256 `4e755d14e901a84600124be5cb73e36302117b6cfc694e52ffc17640945cd9e3` (also in `environment.osdi_preload`) |
+| Model cards | lambdapdk 0.2.17 `7nm_{TT,FF,SS}_160803.pm`, TT sha256 `684708eec0f7d5960be1df6a045de811c8dd2d6b0e1ed7d0f805a3f697f262fc` |
+
+Command: `pytest tests/test_asap7_bsimcmg_sim.py` (the extracted
+`INVx1_ASAP7_75t_R` / `NAND2xp5_ASAP7_75t_R` from `asap7sc7p5t_28_R.gds.gz`
+via `klt extract --deck asap7`, adapted, then `klt sim` transient with
+`options.osdi_preload`; Vdd = 0.7 V, 25 C, 1 fF load, input rising edge at
+~110 ps). Both extracted `M` cards (`L`, total `NFIN`, no `AS/AD/PS/PD`/`NF`)
+were accepted by the BSIM-CMG instance parameter set without changing
+`finfet_card`. Observed results (`tpd_fall` is input 50% to output 50% falling):
+
+| Cell | Corner | `vout_low` (V) | `vout_high` (V) | `tpd_fall` (ps) |
+|------|--------|----------------|-----------------|-----------------|
+| INVx1 | TT | 1.06e-7 | 0.7000 | 9.18 |
+| INVx1 | FF | 1.18e-7 | 0.7000 | 8.06 |
+| INVx1 | SS | 9.30e-8 | 0.7000 | 10.45 |
+| NAND2xp5 | TT | 2.84e-7 | 0.69996 | 11.82 |
+| NAND2xp5 | FF | 3.17e-7 | 0.69996 | 10.18 |
+| NAND2xp5 | SS | 2.51e-7 | 0.69995 | 13.93 |
+
+Rail-to-rail swing and the FF < TT < SS delay ordering hold for both
+topologies. This run executed locally through `klt sim` (the report's
+`environment.remote` was null); it is a six-simulation functional check, not
+a corner grid. A stock ngspice without the module still produces the
+`unsupported_model_level` diagnostic above.
 
 ## Corner axes
 
@@ -2755,6 +3138,18 @@ family's mismatch is structurally active in the selected PDK deck:
   ]
 }
 ```
+
+The family list is built from the netlist's whole `.include`/`.inc`
+closure (the same set recorded under `environment.netlist_closure`), not only
+the top-level file, so a wrapper testbench reports the families its included
+flat netlist instantiates (issue #2928). When the closure is more than the
+lone top-level file, or part of it could not be scanned, an additive
+`environment.monte_carlo.family_mismatch_scan` object discloses
+`scanned` (repo-relative file paths) and `not_scanned` (`{target, reason}`:
+`env_var`/`pdk_root` directives left to the executing host, `unreadable`, or
+`unresolved: ...` when the closure could not be resolved and only the
+top-level file was scanned). Families defined only behind a user `.subckt`
+call whose body is in an unscanned file are not expanded.
 
 - **`active: true`** — this family's per-instance mismatch is structurally
   live in the selected deck under the request's global mismatch
@@ -3106,6 +3501,9 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
+| `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
+| `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
+| `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |
 | `engine_killed`    | The engine process died from a signal the harness did not send (OOM killer, host reaper, reclaimed worker). `corners[].engine_killed_by_signal` names it (issue #2848). Always `error`; accepted by `options.fail_on_diagnostic`. A harness `timeout` is never reported this way. |
 | `measurement`      | A declared `.meas` produced no value (missing, not a `"fail"` — see below). |
@@ -3672,6 +4070,7 @@ the *response* echoes back.
 | `options.ngspice_init`   | array\<string\>   | Issue #2520. Lines materialized as a `.spiceinit` file inside each corner's own artifact directory (`cwd=` for that corner's `ngspice` invocation), most commonly `["set ngbehavior=hsa"]` to select a compatibility mode for vendor decks written in HSPICE style. Defaults to unset — no `.spiceinit` is written (no behavior change). `engine: "ngspice"` only; accepted-and-ignored for `"xyce"`. See "ngspice's working directory, and `.spiceinit` compatibility mode" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
+| `decks[]`                | array\<object\>   | Issue #2804. **Deck-list request**: declares pre-composed caller-owned ngspice decks to transport, instead of the corner matrix above. When present, `netlist`/`corners`/`analysis`/`measurements` and friends must be absent, and the report takes the deck shape (`mode: "decks"`). Per-unit fields (`id`, `deck`, `inputs`, `outputs`, `timeout_s`) and the preservation/isolation contract are documented in "Pre-composed decks" above. |
 
 ### Response
 
@@ -3970,11 +4369,11 @@ and platform scope: [json-contract.md](../json-contract.md)
 
 | Code | Meaning                                                                    |
 | ---- | ---------------------------------------------------------------------------- |
-| `0`  | Checked at least one measurement/bound and no corner or rollup failed. Aggregate `status` is `"pass"` (nothing requested was skipped) or `"pass_partial"` (issue #2109 — every executed check passed, but `coverage.skipped` is nonempty).                                                         |
+| `0`  | Checked at least one measurement/bound and no corner or rollup failed. Aggregate `status` is `"pass"` (nothing requested was skipped) or `"pass_partial"` (issue #2109 — every executed check passed, but `coverage.skipped` is nonempty). For a **deck-list request** ("Pre-composed decks" above): every unit ran to completion with engine exit 0.                                                         |
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
-| `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
-| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), at least one corner errored (aggregate `status: "error"`), or at least one corner was graded `"inconclusive"` (aggregate `status: "inconclusive"` — `options.fail_on_diagnostic` named a code the solve emitted, issue #2492, or a measured value fell outside a declared `options.node_voltage_bounds`/`measurements[].plausible_range`, issue #2493; see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
+| `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. Cannot arise for a deck-list request (no graded measurements). |
+| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), at least one corner errored (aggregate `status: "error"`), or at least one corner was graded `"inconclusive"` (aggregate `status: "inconclusive"` — `options.fail_on_diagnostic` named a code the solve emitted, issue #2492, or a measured value fell outside a declared `options.node_voltage_bounds`/`measurements[].plausible_range`, issue #2493; see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. For a **deck-list request**: at least one unit errored or timed out — per-unit exit codes, streams, and missing-output lists say which and why. |
 
 Under `--op-lint` the same four codes keep the same *meanings* against that
 mode's own verdict: `0` ran with no `error`-severity finding (a

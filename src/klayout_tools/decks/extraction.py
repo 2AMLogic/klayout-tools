@@ -4,7 +4,8 @@ dataclasses an :class:`ExtractionDeck` composes.
 Split out of ``decks/__init__.py`` (issue #1821) as a self-contained
 domain: :class:`ResistorDevice`/:class:`ResistorFlavour`,
 :class:`MOSFlavour`, :class:`ExtractionDeck` itself,
-:class:`BipolarDevice`/:class:`TerminalRelation`,
+:class:`BipolarDevice` (with its :class:`LayerExpr` derived-marker form) and
+:class:`TerminalRelation`,
 :class:`CapacitorDevice`/:class:`CapacitorFlavour`,
 :class:`MomCapacitorDevice`, and :class:`DiodeDevice` -- the curated device
 tables ``klt extract`` matches drawn geometry against to recognise
@@ -772,7 +773,7 @@ class ExtractionDeck:
         for bipolar in self.bipolars:
             layers.add(bipolar.base)
             layers.add(bipolar.emitter)
-            layers.add(bipolar.marker)
+            layers.update(layer_operand_leaves(bipolar.marker))
             layers.update(bipolar.emitter_requires)
             layers.update(bipolar.emitter_excludes)
             # `filter(None, ...)` rather than two `is not None` branches so
@@ -1113,6 +1114,140 @@ class TerminalRelation:
                 f"(expected one of: {', '.join(TERMINAL_RELATION_OPS)})"
             )
 
+#: The two boolean operators a :class:`LayerExpr` node may apply (issue
+#: #2860). ``"and"`` intersects every operand; ``"not"`` subtracts every
+#: operand after the first from the first.
+LAYER_EXPR_OPS = frozenset({"and", "not"})
+
+
+@dataclass(frozen=True)
+class LayerExpr:
+    """A derived device-recognition layer: a boolean expression over drawn
+    ``(layer, datatype)`` pairs and other :class:`LayerExpr` nodes (issue
+    #2860).
+
+    Some PDKs do not draw their device-recognition mark as one literal
+    layer. IHP SG13G2's NPN marker is a three-operand boolean, one operand of
+    which is itself derived (``bjt_derivations.lvs`` /
+    ``general_derivations.lvs`` in the PDK's own KLayout LVS runset)::
+
+        npn_mk = trans_drw.and(pwell).and(ptap_holes)
+        pwell  = pwell_allowed.not(nwell_drw).not(digisub_gap)
+
+    A ``LayerExpr`` tree expresses exactly that, as plain frozen data (so a
+    deck stays hashable and comparable like every other deck dataclass)::
+
+        pwell = LayerExpr.not_(PWELL_ALLOWED, NWELL, DIGISUB_GAP, name="pwell")
+        npn_mk = LayerExpr.and_(TRANS, pwell, PTAP_HOLES, name="npn_mk")
+
+    ``op`` is one of :data:`LAYER_EXPR_OPS`:
+
+    - ``"and"`` -- the intersection of every operand.
+    - ``"not"`` -- the first operand minus every later operand (``a - b - c``).
+
+    A single-operand node of either kind is just that operand, so
+    ``LayerExpr.and_((82, 44))`` recognises exactly what the bare ``(82, 44)``
+    pair does. ``OR`` is deliberately not offered: no curated PDK marker needs
+    it yet, and without it every leaf has one unambiguous polarity (see
+    :meth:`required_layers` / :meth:`excluded_layers`).
+
+    ``name`` is an optional human-readable label for the derived layer (the
+    PDK runset's own variable name, e.g. ``"pwell"``/``"npn_mk"``). It has no
+    effect on evaluation; ``klt deck devices`` reports it.
+
+    This is distinct from :class:`~klayout_tools.decks.rules.DerivedLayer`,
+    which is a fixed-mode, exactly-two-layer derivation for DRC rule scoping
+    (sized intersection / whole-polygon selection) and cannot nest. Today
+    only :attr:`BipolarDevice.marker` accepts a ``LayerExpr``; ``extract.py``
+    evaluates it with :func:`klayout_tools._layout.region_expr`.
+    """
+
+    op: str
+    operands: tuple[tuple[int, int] | LayerExpr, ...]
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if self.op not in LAYER_EXPR_OPS:
+            raise ValueError(
+                f"LayerExpr op must be one of {sorted(LAYER_EXPR_OPS)}, got {self.op!r}"
+            )
+        if not self.operands:
+            raise ValueError("LayerExpr needs at least one operand")
+        for operand in self.operands:
+            if isinstance(operand, LayerExpr):
+                continue
+            if (
+                isinstance(operand, tuple)
+                and len(operand) == 2
+                and all(
+                    isinstance(part, int) and not isinstance(part, bool)
+                    for part in operand
+                )
+            ):
+                continue
+            raise ValueError(
+                "LayerExpr operands must be (layer, datatype) int pairs or "
+                f"LayerExpr nodes, got {operand!r}"
+            )
+
+    @classmethod
+    def and_(cls, *operands: tuple[int, int] | LayerExpr, name: str = "") -> LayerExpr:
+        """The intersection of ``operands``."""
+        return cls("and", tuple(operands), name)
+
+    @classmethod
+    def not_(
+        cls,
+        base: tuple[int, int] | LayerExpr,
+        *subtract: tuple[int, int] | LayerExpr,
+        name: str = "",
+    ) -> LayerExpr:
+        """``base`` minus every layer in ``subtract``."""
+        return cls("not", (base, *subtract), name)
+
+    def _leaves(self, negated: bool) -> list[tuple[tuple[int, int], bool]]:
+        """Every leaf in first-mention order, paired with whether it sits
+        under an odd number of subtractions."""
+        out: list[tuple[tuple[int, int], bool]] = []
+        for index, operand in enumerate(self.operands):
+            flipped = negated ^ (self.op == "not" and index > 0)
+            if isinstance(operand, LayerExpr):
+                out.extend(operand._leaves(flipped))
+            else:
+                out.append((operand, flipped))
+        return out
+
+    def leaf_layers(self) -> tuple[tuple[int, int], ...]:
+        """Every drawn ``(layer, datatype)`` this expression reads, deduped,
+        in first-mention order -- the set a deck must register as read
+        (:attr:`ExtractionDeck.device_recognition_layers`), or extraction
+        would evaluate the expression over layers it never loaded."""
+        return tuple(dict.fromkeys(leaf for leaf, _ in self._leaves(False)))
+
+    def required_layers(self) -> tuple[tuple[int, int], ...]:
+        """The leaves that must be drawn for the expression to be non-empty
+        (an even number of subtractions above them), in first-mention order."""
+        return tuple(
+            dict.fromkeys(leaf for leaf, negated in self._leaves(False) if not negated)
+        )
+
+    def excluded_layers(self) -> tuple[tuple[int, int], ...]:
+        """The leaves whose presence removes area from the expression (an odd
+        number of subtractions above them), in first-mention order."""
+        return tuple(
+            dict.fromkeys(leaf for leaf, negated in self._leaves(False) if negated)
+        )
+
+
+def layer_operand_leaves(
+    operand: tuple[int, int] | LayerExpr,
+) -> tuple[tuple[int, int], ...]:
+    """The drawn layers ``operand`` reads: itself for a bare pair, or
+    :meth:`LayerExpr.leaf_layers` for an expression."""
+    if isinstance(operand, LayerExpr):
+        return operand.leaf_layers()
+    return (operand,)
+
 
 @dataclass(frozen=True)
 class BipolarDevice:
@@ -1140,6 +1275,16 @@ class BipolarDevice:
     region, and only diffusion inside *that* scoped base region becomes an
     emitter; an ordinary PMOS-only nwell drawn elsewhere in the layout is
     never misrecognised as a bipolar base.
+
+    ``marker`` is either a bare ``(layer, datatype)`` pair -- one drawn
+    layer, the form both sky130 and gf180mcu use -- or a :class:`LayerExpr`
+    (issue #2860) for a PDK whose recognition mark is itself a boolean of
+    several drawn layers, possibly nested (IHP SG13G2's ``npn_mk = trans &
+    (pwell_allowed - nwell - digisub_gap) & ptap_holes``). ``extract.py``
+    evaluates the expression to a region and uses it exactly where it would
+    use the drawn marker layer, and every leaf layer of the expression
+    counts as read (:attr:`ExtractionDeck.device_recognition_layers`). A
+    bare pair means exactly what it always has.
 
     ``collector`` is ``None`` when the PDK's vertical bipolar has no drawn
     collector layer of its own (collector formed by the substrate -- true
@@ -1253,7 +1398,7 @@ class BipolarDevice:
 
     base: tuple[int, int]
     emitter: tuple[int, int]
-    marker: tuple[int, int]
+    marker: tuple[int, int] | LayerExpr
     collector: tuple[int, int] | None = None
     emitter_requires: tuple[tuple[int, int], ...] = ()
     emitter_excludes: tuple[tuple[int, int], ...] = ()

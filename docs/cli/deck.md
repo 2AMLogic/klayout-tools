@@ -398,6 +398,7 @@ field by field, which two separate passes on a real design had to do
       "name": "diode_pd2nw_06v0",
       "kind": "diode",
       "marker": { "layer": 115, "datatype": 5, "name": "diode_mk" },
+      "marker_expression": null,
       "marker_gated": true,
       "predicate_gated": true,
       "terminals": [
@@ -441,7 +442,15 @@ field by field, which two separate passes on a real design had to do
 - `kind` — the recognition family: `mos`, `bipolar`, `capacitor`,
   `mom_capacitor`, `resistor`, `diode`.
 - `marker` — the class's device-recognition marker layer, or `null` for a
-  markerless (drawn-geometry-only) class.
+  markerless (drawn-geometry-only) class or one whose marker is derived.
+- `marker_expression` — `null` unless the marker is a derived `LayerExpr`
+  (issue #2860; today only `BipolarDevice.marker` accepts one, and no
+  built-in deck uses it). Then it is `{op, name, operands}`: `op` is `"and"`
+  or `"not"` (first operand minus the rest), `name` is the derived layer's
+  label or `null`, and each operand is a layer object or another node of the
+  same shape. Its leaves are folded into `required_layers` (leaves under an
+  even number of `"not"` subtractions) and `excluded_layers` (an odd
+  number), and `marker_gated` is `true`.
 - `marker_gated` / `predicate_gated` — booleans, so "which classes need
   something beyond their own conductor/diffusion geometry" is answerable by
   filtering rather than by reading prose. **Marker- and predicate-gated

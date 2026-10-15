@@ -145,6 +145,7 @@ from ._annotation import is_reserved_annotation_layer
 from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import load_layout, resolve_top_cell
 from ._layout import region as _region
+from ._layout import region_expr as _region_expr
 from ._layout import texts as _texts
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
@@ -7285,7 +7286,9 @@ def _bipolar_legacy_regions(
 
     dropped = 0
     bipolar_base_layer = _region(layout, top_cell, bipolar.base)
-    bipolar_marker = _region(layout, top_cell, bipolar.marker)
+    # `marker` may be a derived `LayerExpr` (issue #2860), not only one drawn
+    # layer; `_region_expr` reads a bare pair exactly as `_region`.
+    bipolar_marker = _region_expr(layout, top_cell, bipolar.marker)
     bipolar_emitter_layer = _region(layout, top_cell, bipolar.emitter)
     bipolar_base = bipolar_base_layer & bipolar_marker
     if not dummy.is_empty():
@@ -7326,7 +7329,7 @@ def _bipolar_terminal_candidates(
     minus ``dummy``; the emitter's further narrowed by
     ``emitter_requires``/``emitter_excludes``. A ``None`` collector has no
     candidate (and no key)."""
-    marker = _region(layout, top_cell, bipolar.marker)
+    marker = _region_expr(layout, top_cell, bipolar.marker)
     if not dummy.is_empty():
         marker = marker - dummy
     layers = {"base": bipolar.base, "emitter": bipolar.emitter}
@@ -7370,7 +7373,7 @@ def _bipolar_relation_regions(
     """
     import klayout.db as kdb
 
-    base_candidate = _region(layout, top_cell, bipolar.base) & _region(
+    base_candidate = _region(layout, top_cell, bipolar.base) & _region_expr(
         layout, top_cell, bipolar.marker
     )
     dropped = 0 if dummy.is_empty() else _count_dummy_dropped(base_candidate, dummy)

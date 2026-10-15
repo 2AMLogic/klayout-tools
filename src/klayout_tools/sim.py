@@ -89,7 +89,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, NamedTuple
 
-from . import env_provenance, output_lock, sim_crossings, sim_steps
+from . import env_provenance, output_lock, sim_crossings, sim_decks, sim_steps
 
 #: `remote_fleet`/`remote_transport`/`RemoteLauncher`/`RemoteLaunchError` are
 #: not called directly from this module's own code any more (that code moved
@@ -134,6 +134,7 @@ from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch import _run_batch, _run_batch_fleet
+from .sim_decks import run_deck_request
 from .sim_plot import render_waveform_svg
 
 #: The remaining names below are not called directly from this module's own
@@ -222,6 +223,10 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "netlist",
         "model_bin_range",
         "no_such_vector",
+        # Missing-capability prerequisites (issue #2814).
+        "unsupported_model_level",
+        "osdi_abi_mismatch",
+        "osdi_load_failed",
         # Per-corner run outcomes synthesized by `_run_corner` itself.
         "timeout",
         "engine_killed",
@@ -541,8 +546,64 @@ def _detect_device_families(netlist_text: str) -> list[str]:
     return families
 
 
+def _mismatch_scan_closure(
+    request: dict[str, Any] | None, netlist_path: str, repo_root: str | None
+) -> tuple[list[tuple[str, str]], list[dict[str, str]]]:
+    """Files ``family_mismatch`` scans (issue #2928): the top-level netlist
+    plus its resolved ``.include``/``.inc`` closure (same resolver as
+    ``environment.netlist_closure``). Returns ``([(report_path, abs_path)],
+    not_scanned)``; ``not_scanned`` lists directives left to the executing
+    host (``env_var``/``pdk_root``) or the whole closure when it cannot be
+    resolved -- the top-level file is still scanned in that case."""
+    from . import env_provenance
+
+    top = (
+        env_provenance.repo_relative_path(netlist_path, repo_root=repo_root),
+        netlist_path,
+    )
+    try:
+        staged = sim_staging.stage_netlist(
+            netlist_path,
+            netlist_staged_name="netlist.cir",
+            roots=sim_staging.host_resolved_roots(request or {}),
+        )
+    except sim_staging.IncludeStagingError as exc:
+        return (
+            [(_scan_label(top[0], netlist_path), netlist_path)],
+            [{"target": "<include closure>", "reason": f"unresolved: {exc}"}],
+        )
+    files: list[tuple[str, str]] = []
+    for item in staged.files:
+        source = item.source_path or item.local_path
+        # stage_netlist always sets one of the two (source_path whenever
+        # content rewrote the file, local_path otherwise).
+        assert source is not None
+        info = env_provenance.repo_relative_path(source, repo_root=repo_root)
+        files.append((_scan_label(info, source), source))
+    not_scanned = [
+        {"target": target, "reason": reason}
+        for target, reason in staged.host_resolved_detail
+    ]
+    return files, not_scanned
+
+
+def _scan_label(info: dict[str, Any], source: str = "") -> str:
+    """Report label for a scanned file: repo-relative path, else
+    ``<scope>/<basename>`` (never an absolute external path, like other
+    report fields)."""
+    return (
+        info.get("path")
+        or f"<{info.get('scope', 'external')}>/{os.path.basename(source)}"
+    )
+
+
 def _mismatch_family_report(
-    netlist_path: str, pdk_variant: str | None
+    netlist_path: str,
+    pdk_variant: str | None,
+    *,
+    request: dict[str, Any] | None = None,
+    repo_root: str | None = None,
+    scan: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Per-device-family mismatch-activity report for a ``monte_carlo.vary``
     request that includes ``"mismatch"`` (issue #355).
@@ -558,16 +619,32 @@ def _mismatch_family_report(
     ``active: None`` ("not independently verified"), never a guessed
     ``True``/``False``.
     """
-    try:
-        with open(netlist_path, encoding="utf-8") as handle:
-            netlist_text = handle.read()
-    except OSError:
-        netlist_text = ""
+    # Issue #2928: scan the whole `.include` closure, not just the top-level
+    # file, so a wrapper testbench reports the families its included flat
+    # netlist actually instantiates. When ``scan`` is passed it is filled
+    # with ``{"scanned": [...], "not_scanned": [...]}`` for the caller.
+    files, not_scanned = _mismatch_scan_closure(request, netlist_path, repo_root)
+    families: list[str] = []
+    seen_families: set[str] = set()
+    for _label, path in files:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
+        except (OSError, UnicodeDecodeError):
+            not_scanned.append({"target": _label, "reason": "unreadable"})
+            continue
+        for family in _detect_device_families(text):
+            if family not in seen_families:
+                seen_families.add(family)
+                families.append(family)
+    if scan is not None:
+        scan["scanned"] = [label for label, _ in files]
+        scan["not_scanned"] = not_scanned
 
     pdk_family = pdk_variant_family(pdk_variant) if pdk_variant else None
 
     report: list[dict[str, Any]] = []
-    for family in _detect_device_families(netlist_text):
+    for family in families:
         entry = _MISMATCH_ACTIVITY.get((pdk_family, family)) if pdk_family else None
         if entry is not None:
             report.append(
@@ -699,7 +776,10 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # is the more specific reading of the same class of failure.
         "missing_include",
         re.compile(
-            r"^\s*Error:\s*Could not find include file",
+            # The second form is ngspice 42's wording for the same failure
+            # (`.include filename missing`, issue #2926).
+            r"^\s*Error:\s*Could not find include file"
+            r"|^\s*(?:Error:\s*)?\.inc(?:lude)?\s+filename\s+missing",
             re.IGNORECASE | re.MULTILINE,
         ),
     ),
@@ -734,6 +814,37 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
+        # ngspice's own text when a `.model ... level = N` card names a MOS
+        # level this binary was not built with, e.g. ASAP7's BSIM-CMG
+        # `level = 72` on a stock ngspice (`Only MOS device levels
+        # 1-6,8-10,14,49,54-58,60,68,73 are supported in this binary`,
+        # issue #2814). It is a missing *capability*, not a netlist or bin
+        # problem, so it gets its own code and (see `_classify_diagnostics`)
+        # suppresses the misleading `model_bin_range` follow-on error.
+        "unsupported_model_level",
+        re.compile(
+            r"^.*Only MOS device levels .* supported in this binary",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
+        # ngspice rejecting a compiled `.osdi` whose OSDI ABI it cannot
+        # load, e.g. `NGSPICE only supports OSDI v0.3 but "x.osdi" targets
+        # v0.4!` (ngspice < 44 against an OpenVAF-Reloaded module).
+        "osdi_abi_mismatch",
+        re.compile(r"NGSPICE only supports OSDI v\d+\.\d+ but", re.IGNORECASE),
+    ),
+    (
+        # `Error: Library <x>.osdi couldn't be loaded!` -- the module file is
+        # unreadable or not a shared library this ngspice can dlopen (wrong
+        # platform, or built against another OSDI runtime).
+        "osdi_load_failed",
+        re.compile(
+            r"^Error:\s*Library\s+.*\.osdi\s+couldn't be loaded",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
         # ngspice's own diagnostic when a BSIM model card's per-instance
         # width *bin range* is exceeded, e.g. gf180mcu's undocumented
         # ~100 um ceiling on `nfet_06v0`/`pfet_06v0` (issue #1214). The raw
@@ -749,6 +860,30 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
 )
+
+
+#: Prerequisite messages (issue #2814) for the capability diagnostics: they
+#: name the missing capability instead of leaving the caller to decode
+#: ngspice's raw line. ``{raw}`` is ngspice's own line, kept verbatim.
+_PREREQUISITE_MESSAGES: dict[str, str] = {
+    "unsupported_model_level": (
+        "prerequisite missing: this ngspice build cannot run the model "
+        "card's MOS level (BSIM-CMG `level = 72` needs a compiled OSDI "
+        "module declared in options.osdi_preload; see docs/cli/sim.md "
+        '"ASAP7 FinFET (BSIM-CMG) simulation") -- ngspice said: {raw}'
+    ),
+    "osdi_abi_mismatch": (
+        "prerequisite missing: ngspice cannot load the OSDI module's ABI "
+        "(an OpenVAF-Reloaded module needs ngspice >= 44; see "
+        "scripts/fetch-asap7-sim-toolchain.sh) -- ngspice said: {raw}"
+    ),
+    "osdi_load_failed": (
+        "prerequisite missing: ngspice could not load the OSDI module "
+        "(wrong platform or OSDI ABI; rebuild it with "
+        "scripts/fetch-asap7-sim-toolchain.sh on this host's ngspice) -- "
+        "ngspice said: {raw}"
+    ),
+}
 
 
 class SimError(Exception):
@@ -816,6 +951,14 @@ def load_request(request_path: str) -> dict[str, Any]:
     ``schema`` field (see this module's docstring).
     """
     request = _load_request_json(request_path, SimError)
+    # Deck-list requests (issue #2804) carry `decks` instead of a corner
+    # request's netlist/analysis; their shape is validated by the deck
+    # subsystem (sim_decks.plan_deck_units), so the corner request's
+    # required fields do not apply here.
+    if "decks" in request:
+        if not isinstance(request.get("decks"), list) or not request["decks"]:
+            raise SimError("request.decks must be a non-empty list of deck objects")
+        return request
     request = validate_request_shape(
         request,
         "request file",
@@ -1244,7 +1387,27 @@ def run_sim(
     fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
-    """Run the PVT corner matrix declared by the request at ``request_path``.
+    """Run the request at ``request_path`` and return its report.
+
+    ``run_sim`` dispatches over two request kinds (docs/cli/sim.md):
+
+    - **Corner requests** (the default): a ``netlist`` plus a
+      ``corners``/``analysis``/``measurements`` matrix -- the PVT corner
+      sweep this verb has always run. The full parameter documentation
+      below applies to these.
+    - **Deck-list requests** (issue #2804): a ``decks`` list of
+      caller-composed ngspice decks, transported -- never composed,
+      parsed, or graded -- to the selected backend. Same parameters,
+      minus the corner-only ones: ``--hosts``/``--resume``/
+      ``--budget-s``/``--plot``/``--fail-fast-probe``/
+      ``--fail-on-diagnostic`` are refused by name (see
+      :func:`klayout_tools.sim_decks.run_deck_request` and
+      docs/cli/sim.md's "Pre-composed decks" section, which also
+      documents the deck report's shape).
+
+    The corner sweep itself lives in :func:`_run_sim_corners`, unchanged
+    by the deck dispatch -- this wrapper only routes between the two
+    request kinds, so the sweep's own complexity budget is untouched.
 
     ``artifacts_dir`` overrides where per-corner logs/rawfiles are written
     when ``options.keep_artifacts`` is true; it defaults to a ``.klt/sim/``
@@ -1444,6 +1607,130 @@ def run_sim(
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
     """
+    request = load_request(request_path)
+    # Issue #2892: the engine runs with ``cwd=<corner dir>``, so a relative
+    # ``artifacts_dir`` baked into the command line would resolve against the
+    # corner dir and ngspice would never find its deck. Absolutise once here.
+    if artifacts_dir is not None:
+        artifacts_dir = os.path.abspath(artifacts_dir)
+    if sim_decks.DECKS_FIELD in request:
+        return _dispatch_deck_request(
+            request,
+            request_path=request_path,
+            backend=backend,
+            max_workers=max_workers,
+            hosts=hosts,
+            artifacts_dir=artifacts_dir,
+            resume=resume,
+            budget_s=budget_s,
+            plot_dir=plot_dir,
+            fail_fast_probe=fail_fast_probe,
+            fail_on_diagnostic=fail_on_diagnostic,
+        )
+    return _run_sim_corners(
+        request_path,
+        artifacts_dir=artifacts_dir,
+        backend=backend,
+        max_workers=max_workers,
+        hosts=hosts,
+        budget_s=budget_s,
+        resume=resume,
+        plot_dir=plot_dir,
+        fail_fast_probe=fail_fast_probe,
+        fail_on_diagnostic=fail_on_diagnostic,
+        _ownership=_ownership,
+    )
+
+
+def _dispatch_deck_request(
+    request: dict[str, Any],
+    *,
+    request_path: str,
+    backend: str | None,
+    max_workers: int | None,
+    hosts: int | None,
+    artifacts_dir: str | None,
+    resume: bool | None,
+    budget_s: float | None,
+    plot_dir: str | None,
+    fail_fast_probe: bool | None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None,
+) -> dict[str, Any]:
+    """Route a deck-list request to :mod:`klayout_tools.sim_decks`,
+    resolving the backend exactly as the corner path does (flag >
+    request field > ``$KLT_SIM_BACKEND``, host defaults stepping
+    aside) and refusing the corner-only flags by name: a deck request
+    has no corner machinery for them to act on, so silently ignoring
+    one would mislead the caller about what ran."""
+    resolved_backend, from_host_default = resolve_backend(backend, request)
+    if resolved_backend not in SUPPORTED_BACKENDS:
+        source = f" (from ${BACKEND_ENV})" if from_host_default else ""
+        raise SimError(
+            f"unsupported backend '{resolved_backend}'{source} "
+            f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
+        )
+    # A deck request's engine is always ngspice (plan_deck_units
+    # enforces it), so the host-default's ngspice-only condition holds.
+    resolved_backend = _yield_host_default_backend(
+        resolved_backend, from_host_default, reason_ok=True
+    )
+    if hosts is not None and hosts != 1:
+        raise SimError(
+            "--hosts/remote.hosts sharding is not supported for "
+            "deck-list requests -- one off-host job runs the whole deck "
+            "list across its own worker pool (options.max_workers)"
+        )
+    if resume:
+        raise SimError(
+            "--resume/options.resume is not supported for deck-list requests"
+        )
+    if budget_s is not None:
+        raise SimError(
+            "--budget-s/options.wall_clock_budget_s is not supported for "
+            "deck-list requests -- bound each unit with decks[].timeout_s "
+            "instead"
+        )
+    if plot_dir is not None:
+        raise SimError(
+            "--plot writes waveform artifacts, which deck-list requests do not produce"
+        )
+    if fail_fast_probe:
+        raise SimError(
+            "--fail-fast-probe calibrates the corner engine, which "
+            "deck-list requests do not run"
+        )
+    if fail_on_diagnostic:
+        raise SimError(
+            "--fail-on-diagnostic grades corner diagnostics, which "
+            "deck-list requests do not produce"
+        )
+    return run_deck_request(
+        request,
+        request_dir=os.path.dirname(os.path.abspath(request_path)),
+        backend=resolved_backend,
+        max_workers=max_workers,
+        artifacts_dir=artifacts_dir,
+    )
+
+
+def _run_sim_corners(
+    request_path: str,
+    *,
+    artifacts_dir: str | None = None,
+    backend: str | None = None,
+    max_workers: int | None = None,
+    hosts: int | None = None,
+    budget_s: float | None = None,
+    resume: bool | None = None,
+    plot_dir: str | None = None,
+    fail_fast_probe: bool | None = None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
+    _ownership: contextlib.ExitStack | None = None,
+) -> dict[str, Any]:
+    """The corner-sweep body of :func:`run_sim` -- every parameter, the
+    request/response contract, and the deck-list dispatch alternative
+    are documented there. Kept as its own function so the deck dispatch
+    in ``run_sim`` adds nothing to this sweep's own complexity budget."""
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
@@ -1660,6 +1947,7 @@ def run_sim(
 
     if artifacts_dir is None:
         artifacts_dir = os.path.join(request_dir, ".klt", "sim")
+    artifacts_dir = os.path.abspath(artifacts_dir)
 
     # Orphan safety (issue #473): capture the sweep's own parent PID once, up
     # front. `os.getppid()` changes the moment the launching process exits --
@@ -1715,12 +2003,20 @@ def run_sim(
             # varies mismatch. Never claims a hard-zero-mismatch family
             # (e.g. gf180mcu's poly resistor) was sampled just because the
             # request's global mismatch switch/section was engaged.
-            monte_carlo_info = {
-                **monte_carlo_info,
-                "family_mismatch": _mismatch_family_report(
-                    netlist_path, models.get("pdk")
-                ),
-            }
+            family_scan: dict[str, Any] = {}
+            family_report = _mismatch_family_report(
+                netlist_path,
+                models.get("pdk"),
+                request=request,
+                repo_root=repo_root,
+                scan=family_scan,
+            )
+            monte_carlo_info = {**monte_carlo_info, "family_mismatch": family_report}
+            # Issue #2928: additive disclosure of what was scanned, only
+            # when the closure is more than the lone top-level file or some
+            # part of it could not be scanned (simple requests unchanged).
+            if len(family_scan["scanned"]) > 1 or family_scan["not_scanned"]:
+                monte_carlo_info["family_mismatch_scan"] = family_scan
         quantiles, k_sigma = _validate_mc_statistics_spec(monte_carlo_spec)
         monte_carlo_stats = {"quantiles": quantiles, "k_sigma": k_sigma}
         # Echo only what the request actually declared, so a sampling-only
@@ -4421,6 +4717,125 @@ def _validate_supply_override_targets(
         )
 
 
+_NETLIST_INCLUDE_RE = re.compile(
+    r"^(?P<lead>\s*\.inc(?:lude)?\s+)(?P<target>\"[^\"]*\"|'[^']*'|\S+)(?P<tail>.*)$",
+    re.IGNORECASE,
+)
+
+
+def _split_include_target(match: re.Match[str]) -> tuple[str, str]:
+    """Return ``(quote, target)`` for an ``_NETLIST_INCLUDE_RE`` match."""
+    raw = match.group("target")
+    quote = raw[0] if raw[0] in "\"'" else ""
+    return quote, (raw[1:-1] if quote else raw)
+
+
+def _unset_include_diagnostic(
+    netlist_path: str, number: int, target: str, expanded: str
+) -> dict[str, str]:
+    unset = sorted(set(re.findall(r"\$\{?(\w+)\}?", expanded)))
+    return {
+        "severity": "error",
+        "code": "missing_include",
+        "message": (
+            f"{netlist_path} line {number}: .include target "
+            f"{target!r} names environment variable(s) "
+            f"{', '.join(unset) or '?'} that are not set on this "
+            "host, so ngspice cannot load it"
+        ),
+    }
+
+
+def _expand_include_line(
+    line: str, number: int, netlist_path: str
+) -> tuple[str | None, dict[str, str] | None]:
+    """Expand ``$VAR``/``~`` in one line's ``.include`` target.
+
+    Returns ``(rewritten_line, diagnostic)``: ``rewritten_line`` is ``None``
+    when the line is left as written (not an include, nothing to expand, or
+    an unset variable -- the latter also yields a diagnostic)."""
+    match = _NETLIST_INCLUDE_RE.match(line)
+    if match is None:
+        return None, None
+    quote, target = _split_include_target(match)
+    if "$" not in target and not target.startswith("~"):
+        return None, None
+    expanded = os.path.expandvars(target)
+    if "$" in expanded:
+        return None, _unset_include_diagnostic(netlist_path, number, target, expanded)
+    expanded = os.path.expanduser(expanded)
+    if not quote and any(ch.isspace() for ch in expanded):
+        quote = '"'
+    return (
+        f"{match.group('lead')}{quote}{expanded}{quote}{match.group('tail')}",
+        None,
+    )
+
+
+def _absolutize_relative_include(line: str, base: str) -> str:
+    """Rewrite a relative ``.include`` target that resolves beside the
+    original netlist (``base``) to its absolute path."""
+    match = _NETLIST_INCLUDE_RE.match(line)
+    if match is None:
+        return line
+    quote, target = _split_include_target(match)
+    if not target or os.path.isabs(target):
+        return line
+    candidate = os.path.join(base, target)
+    if not os.path.isfile(candidate):
+        return line
+    q = quote or ('"' if any(c.isspace() for c in candidate) else "")
+    return f"{match.group('lead')}{q}{candidate}{q}{match.group('tail')}"
+
+
+def _expand_netlist_includes(
+    netlist_path: str, corner_dir: str
+) -> tuple[str, list[dict[str, str]]]:
+    """Expand ``$VAR``/``~`` in the netlist body's own ``.include``/``.inc``
+    targets on the *executing* host (issue #2926).
+
+    ngspice does not expand environment variables in include paths, so a
+    ``$PDK_ROOT/...`` include (which off-host backends deliberately leave
+    verbatim for the executing host) would otherwise fail to load. Uses the
+    same ``os.path.expandvars``/``expanduser`` semantics as
+    ``sim_staging`` (an unset variable stays as ``$``). Returns
+    ``(netlist_path_to_include, diagnostics)``: the original path unchanged
+    when no include needs expanding; otherwise a rewritten copy under
+    ``corner_dir`` (relative targets that resolve beside the original
+    netlist are made absolute so the copy keeps their meaning). A target
+    whose variable is unset is left as written and yields a
+    ``missing_include`` diagnostic naming the file, line and variable.
+    """
+    try:
+        with open(netlist_path, encoding="utf-8", errors="surrogateescape") as fh:
+            text = fh.read()
+    except OSError:
+        return netlist_path, []
+    if "$" not in text and "~" not in text:
+        return netlist_path, []
+    out: list[str] = []
+    diagnostics: list[dict[str, str]] = []
+    changed = False
+    for number, line in enumerate(text.split("\n"), start=1):
+        rewritten_line, diagnostic = _expand_include_line(line, number, netlist_path)
+        if diagnostic is not None:
+            diagnostics.append(diagnostic)
+        if rewritten_line is None:
+            out.append(line)
+            continue
+        out.append(rewritten_line)
+        changed = True
+    if not changed:
+        return netlist_path, diagnostics
+    # Keep other relative includes meaning what they meant beside the original.
+    base = os.path.dirname(os.path.abspath(netlist_path))
+    final = [_absolutize_relative_include(line, base) for line in out]
+    rewritten = os.path.join(corner_dir, "netlist.expanded.cir")
+    with open(rewritten, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        fh.write("\n".join(final))
+    return rewritten, diagnostics
+
+
 def _prepare_corner_run(
     *,
     corner_dir: str,
@@ -4645,9 +5060,12 @@ def _run_corner(
     else:
         corner_dir = _tmp_work_dir()
 
+    run_netlist_path, include_diagnostics = _expand_netlist_includes(
+        netlist_path, corner_dir
+    )
     command, log_path, raw_path, deck_path = _prepare_corner_run(
         corner_dir=corner_dir,
-        netlist_path=netlist_path,
+        netlist_path=run_netlist_path,
         models_lib=models_lib,
         point=point,
         analysis=analysis,
@@ -4660,7 +5078,7 @@ def _run_corner(
         save_mode=save_mode,
     )
 
-    diagnostics: list[dict[str, str]] = []
+    diagnostics: list[dict[str, str]] = list(include_diagnostics)
     started = time.monotonic()
     timed_out = False
     engine_version: str | None = None
@@ -4724,6 +5142,17 @@ def _run_corner(
                 }
             )
         diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
+        if engine_exit_code and not log_text and not os.path.exists(log_path):
+            diagnostics.append(
+                {
+                    "severity": "error",
+                    "code": "unknown",
+                    "message": (
+                        f"{engine_name} exited with code {engine_exit_code} "
+                        "without writing its log (deck or log path not found?)"
+                    ),
+                }
+            )
 
     # Both engines fold a `.meas`/`.measure` card's name to lower-case in
     # their own report output (Xyce actually upper-cases, but
@@ -6064,7 +6493,13 @@ def _classify_diagnostics(
             continue
         message = _line_containing(log_text, match.start())
         if code == "model_bin_range":
+            if any(d["code"] == "unsupported_model_level" for d in diagnostics):
+                # The follow-on "could not find a valid modelname" is a
+                # consequence of the rejected model level, not a bin range.
+                continue
             message = _diagnose_modelname_error(netlist_path) or message
+        elif code in _PREREQUISITE_MESSAGES:
+            message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
 
