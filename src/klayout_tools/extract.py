@@ -45,7 +45,9 @@ family/deck pairing has no curated table entry is an :class:`ExtractError`
 naming what was tried -- never a silent fallback to the bare ``M``-card
 form. When ``--pdk``/``--pdk-root`` are omitted, the written SPICE is
 unchanged from before #209 (the bare ``M``-card form, byte-identical to the
-existing golden tests).
+existing golden tests). That bare form is not mismatch-capable: it skips any
+statistical-mismatch expressions a PDK keeps in the subcircuit wrapper, so
+extract with ``--pdk`` before running Monte Carlo.
 
 Device recognition: each deck's ``active``/``poly``/``nwell`` layers extract
 NMOS (``active - nwell``) and PMOS (``active & nwell``) via KLayout's native

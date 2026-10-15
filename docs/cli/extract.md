@@ -4159,6 +4159,17 @@ sky130 and gf180mcu both ship their primitive MOS device as a SPICE
 built-in `nmos`/`pmos` model — so this `M` card cannot bind a real PDK model
 library at all.
 
+**The bare `M` card is also not mismatch-capable.** A PDK that puts its
+statistical-mismatch expressions in the device subckt wrapper's body (e.g.
+gf180mcu's `sw_stat_mismatch`-gated `delvto`/`mulu0` terms) has them skipped
+by this form: the card instantiates the raw class label, never the wrapper.
+A netlist that simulates identically at the nominal point is then silently
+mismatch-free under `klt sim` Monte Carlo (every draw returns bit-identical
+measurements, with no diagnostic from klt or ngspice; see `docs/cli/sim.md`
+§ `family_mismatch`). Do not adapt the bare card by rewriting the class name
+by hand — extract with `--pdk` (below) so each device is written as the
+wrapper `X` call instead.
+
 **When a PDK resolves now**, each extracted device is written as an `X`
 subcircuit call against the resolved PDK's real device library instead:
 
