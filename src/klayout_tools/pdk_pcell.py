@@ -509,11 +509,7 @@ def _load_libraries(
         new_names = set(kdb.Library.library_names()) - before
         if new_names:
             registered_by_sibling.update(
-                other
-                for other in packages
-                if other != package
-                and other in sys.modules
-                and other not in modules_before
+                _siblings_imported_by(packages, package, modules_before)
             )
         elif package not in registered_by_sibling:
             failure = _instantiate_library_classes(module, package, kdb)
@@ -531,16 +527,37 @@ def _load_libraries(
 
     # A later package's registration may have replaced an earlier library of
     # the same name; re-resolve so no destroyed handle is handed out.
+    loaded = _reresolve_handles(loaded, kdb)
+
+    loaded.sort(key=lambda entry: entry["library"])
+    _LOAD_MEMO[memo_key] = (loaded, unavailable)
+    return loaded, unavailable
+
+
+def _siblings_imported_by(
+    packages: list[str], package: str, modules_before: set[str]
+) -> set[str]:
+    """Return the other ``packages`` first imported as a side effect of
+    importing ``package`` (``modules_before`` is ``sys.modules`` beforehand)."""
+    return {
+        other
+        for other in packages
+        if other != package and other in sys.modules and other not in modules_before
+    }
+
+
+def _reresolve_handles(loaded: list[dict[str, Any]], kdb: Any) -> list[dict[str, Any]]:
+    """Re-fetch each library's live handle, dropping any no longer registered.
+
+    A later package's registration may have replaced an earlier library of the
+    same name, destroying the handle taken for it.
+    """
     live: list[dict[str, Any]] = []
     for entry in loaded:
         handle = kdb.Library.library_by_name(entry["library"])
         if handle is not None:
             live.append({**entry, "handle": handle})
-    loaded = live
-
-    loaded.sort(key=lambda entry: entry["library"])
-    _LOAD_MEMO[memo_key] = (loaded, unavailable)
-    return loaded, unavailable
+    return live
 
 
 def _apply_sys_path_hint(lib_dir: str, package: str) -> None:
