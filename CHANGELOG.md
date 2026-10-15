@@ -23,6 +23,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   convention, and `klt erc --deck sg13g2`'s auto-detected device cuts agree
   with extraction. `klt deck devices` gains an additive `topology` field on
   `resistor` entries.
+- **Bipolar markers can be derived layer expressions** (issue #2860):
+  `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
+  of drawn layers that can nest, as well as a bare `(layer, datatype)`
+  pair. This is the deck-model piece SG13G2's NPN marker needs
+  (`trans & (pwell_allowed - nwell - digisub_gap) & ptap_holes`). No
+  built-in deck uses it yet, so sky130/gf180mcu extraction is unchanged.
+  **Additive contract change:** every `klt deck devices`
+  `device_classes[]` entry gains `marker_expression`. It is `null` unless
+  the marker is derived. For a derived marker, `marker` is `null`,
+  `marker_gated` is `true`, and the leaves are folded into
+  `required_layers`/`excluded_layers`. `schema_version` is unchanged.
+
 - **mypy baseline ratchet and `py.typed`** (issue #3221): `mypy` (pinned in the
   `dev` extra) now runs in CI against `type-baseline.json` via
   `scripts/check_type_baseline.py`; the package ships `py.typed`. See

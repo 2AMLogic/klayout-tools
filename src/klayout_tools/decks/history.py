@@ -522,12 +522,20 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
     - ``kind`` -- the recognition family (``"mos"``, ``"bipolar"``,
       ``"capacitor"``, ``"mom_capacitor"``, ``"resistor"``, ``"diode"``).
     - ``marker`` -- the class's device-recognition marker layer, or ``None``
-      for a markerless (geometry-driven) class.
+      for a markerless (geometry-driven) class or one whose marker is a
+      derived expression.
+    - ``marker_expression`` -- ``None`` unless the marker is a derived
+      :class:`~klayout_tools.decks.LayerExpr` (issue #2860), in which case
+      it is ``{op, name, operands}`` with each operand a layer object or a
+      nested node of the same shape. Its leaves are folded into
+      ``required_layers`` (under an even number of ``"not"`` subtractions)
+      or ``excluded_layers`` (under an odd number).
     - ``marker_gated`` / ``predicate_gated`` -- booleans, so "which classes
       need something beyond their own conductor/diffusion geometry" is
       answerable by filtering rather than by prose. ``marker_gated`` is
-      ``marker is not None``; ``predicate_gated`` is ``True`` when any
-      terminal declares a non-empty ``requires``.
+      ``True`` when ``marker`` or ``marker_expression`` is set;
+      ``predicate_gated`` is ``True`` when any terminal declares a non-empty
+      ``requires``.
     - ``terminals`` -- one entry per recognised terminal, each
       ``{name, layer, requires, excludes}``. ``layer`` is ``None`` for a
       terminal formed by the substrate rather than by a drawn mask (e.g.
@@ -620,11 +628,29 @@ def _terminal_entry(
     }
 
 
+def _marker_expression_entry(
+    expr: Any, layer_names: dict[tuple[int, int], str]
+) -> dict[str, Any]:
+    """A :class:`~klayout_tools.decks.LayerExpr` as :func:`deck_devices`'
+    ``marker_expression`` object (issue #2860): ``{op, name, operands}``,
+    each operand either a layer object or another such node."""
+    return {
+        "op": expr.op,
+        "name": expr.name or None,
+        "operands": [
+            _layer_entry(operand, layer_names)
+            if isinstance(operand, tuple)
+            else _marker_expression_entry(operand, layer_names)
+            for operand in expr.operands
+        ],
+    }
+
+
 def _device_class_entry(
     *,
     name: str,
     kind: str,
-    marker: tuple[int, int] | None,
+    marker: Any,
     terminals: list[dict[str, Any]],
     layer_names: dict[tuple[int, int], str],
     provenance: Any = None,
@@ -645,8 +671,20 @@ def _device_class_entry(
             return
         bucket.append(entry)
 
-    marker_entry = _layer_entry(marker, layer_names)
-    add(required, marker_entry)
+    marker_expression: dict[str, Any] | None = None
+    if marker is None or isinstance(marker, tuple):
+        marker_entry = _layer_entry(marker, layer_names)
+        add(required, marker_entry)
+    else:
+        # A derived `LayerExpr` marker (issue #2860): no single layer to
+        # report as `marker`, so the tree goes in `marker_expression` and its
+        # leaves feed the flattened unions by polarity.
+        marker_entry = None
+        marker_expression = _marker_expression_entry(marker, layer_names)
+        for pair in marker.required_layers():
+            add(required, _layer_entry(pair, layer_names))
+        for pair in marker.excluded_layers():
+            add(excluded, _layer_entry(pair, layer_names))
     predicate_gated = False
     for terminal in terminals:
         add(required, terminal["layer"])
@@ -660,7 +698,8 @@ def _device_class_entry(
         "name": name,
         "kind": kind,
         "marker": marker_entry,
-        "marker_gated": marker_entry is not None,
+        "marker_expression": marker_expression,
+        "marker_gated": marker_entry is not None or marker_expression is not None,
         "predicate_gated": predicate_gated,
         "terminals": terminals,
         "required_layers": required,
