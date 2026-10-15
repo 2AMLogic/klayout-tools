@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
+  cycles** (issue #2947): a fourth measurement form
+  `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
+  time-weighted (trapezoidal) mean of `signal` between the first and
+  `cycles`-th-after reference edge at or after `from`, edges linearly
+  interpolated. `value` stays a scalar (so `limits`/`plausible_range`/Monte
+  Carlo/coverage apply); the window rides an additive `cycle_mean`
+  `{t_start, t_end, cycles_used}` sibling -- no `schema_version` bump. Reduced
+  inside the corner run, so `remote`/`batch` work with
+  `keep_artifacts: false`. Refused for `engine: "xyce"` and `analysis_steps[]`;
+  failures are `status: "error"` with a `measurement` diagnostic led by a
+  `[cycle_mean_*]` reason token. `.meas AVG ... TRIG/TARG` and `FROM=<meas>`
+  remain unsupported. See `docs/cli/sim.md`.
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
