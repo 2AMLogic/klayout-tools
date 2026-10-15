@@ -1641,6 +1641,68 @@ def test_parameter_tolerance_absorbs_the_minimal_cell_degraded_pairing(tmp_path)
     assert "net.unmatched" not in report["category_counts"]
 
 
+# Issue #2946: a layout that declares a device-less pin (`x`, ports that lead
+# to circuitry not drawn yet) against a flat pin-less reference. The capacitor's
+# own net `d` is a pin on the layout side and not on the reference side, which
+# used to veto the degraded-pair recovery.
+_PINNED_CAP_LAYOUT_SPICE = """
+.SUBCKT top a b c d x
+M1 a b c c pfet L=1U W=512U
+C1 d a {cap} cap_cmim
+.ENDS top
+"""
+
+_FLAT_CAP_REFERENCE_SPICE = """
+M1 a b c c pfet L=1U W=512U
+C1 a d {cap} cap_cmim
+.END
+"""
+
+
+def _pinned_cap_report(tmp_path, layout_cap, reference_cap, reference=None):
+    layout_path = _write(
+        tmp_path / "lay.spice", _PINNED_CAP_LAYOUT_SPICE.format(cap=layout_cap)
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        reference or _FLAT_CAP_REFERENCE_SPICE.format(cap=reference_cap),
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {"netlist": reference_path},
+        "options": {"parameter_tolerance": 0.001},
+    }
+    return run_lvs(_write_request(tmp_path / "request.json", request))
+
+
+def test_parameter_tolerance_applies_with_a_device_less_pin_and_flat_reference(
+    tmp_path,
+):
+    report = _pinned_cap_report(tmp_path, "100.011P", "100P")
+
+    assert report["status"] == "match"
+    assert report["category_counts"][lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED] == 1
+    assert "device.unmatched" not in report["category_counts"]
+    assert "net.unmatched" not in report["category_counts"]
+
+
+def test_parameter_tolerance_device_less_pin_out_of_tolerance_still_mismatches(
+    tmp_path,
+):
+    report = _pinned_cap_report(tmp_path, "150P", "100P")
+
+    assert report["status"] == "mismatch"
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+
+
+def test_parameter_tolerance_device_less_pin_never_masks_a_rewired_device(tmp_path):
+    rewired = _FLAT_CAP_REFERENCE_SPICE.format(cap="100P").replace("C1 a d", "C1 b d")
+    report = _pinned_cap_report(tmp_path, "100.011P", None, reference=rewired)
+
+    assert report["status"] == "mismatch"
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+
+
 def test_parameter_tolerance_minimal_cell_out_of_tolerance_still_mismatches(tmp_path):
     """Negative control for the degraded path: a 100% delta is untouched, and
     the issue #282 recovery still reports it the way it does today."""
