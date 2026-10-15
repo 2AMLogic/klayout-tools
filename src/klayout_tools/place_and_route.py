@@ -539,6 +539,14 @@ echoes exactly what was applied (``power.straps[].spacing_um``,
 caller's ``connects[]`` tuned (see :func:`_pdn_connect_spec`/
 :func:`_pdn_connects_applied`).
 
+``tapcell.distance_um`` (issue #3051, optional) overrides the per-library
+``tapcell -distance`` pitch in :data:`_TAPCELL_CELLS`; omitted, the Tcl is
+byte-identical to before. It is a placement input, **not** evidence of any
+diffusion-to-tap boundary distance -- measure the resulting stream. The
+effective pitch is echoed as ``power.tapcell_distance_um``. A
+:data:`_NO_TAPCELL_LIBRARIES` library emits no ``tapcell`` call, so an
+override there is rejected rather than silently ignored.
+
 ``preset`` (issue #2123) closes the gap those two fields left open from the
 other side. Being *able* to express a platform's PDN config is not the same
 as not having to transcribe it: the working blocks callers arrived at were
@@ -592,6 +600,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
@@ -2521,13 +2530,17 @@ def run_place_and_route(
             "ground_net": None,
             "tapcell_master": None,
             "endcap_master": None,
+            "tapcell_distance_um": None,
             "filler_masters": [],
             "straps": [],
             "connects": [],
             "row_rail": row_rail_info,
         }
     else:
-        tap_master, endcap_master, _distance_um = _tapcell_masters(cell_library)
+        tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
+        tapcell_distance_um = power.get("tapcell_distance_um")
+        if tapcell_distance_um is None:
+            tapcell_distance_um = table_distance_um
         power_info = {
             "preset": power["preset"],
             "pdn": True,
@@ -2536,6 +2549,7 @@ def run_place_and_route(
             "ground_net": power["ground_net"],
             "tapcell_master": tap_master,
             "endcap_master": endcap_master,
+            "tapcell_distance_um": tapcell_distance_um,
             "filler_masters": (
                 list(_FILLER_CELLS[cell_library]) if target_stage == "route" else []
             ),
@@ -3194,10 +3208,50 @@ def _validate_power(
                 }
             )
 
+    # `tapcell.distance_um` (issue #3051) -> `tapcell -distance` -- overrides
+    # the per-library pitch in `_TAPCELL_CELLS`. Optional; omitted (the
+    # default, `None`) falls back to the table value, so the emitted Tcl is
+    # byte-for-byte unchanged. It is a placement input, not evidence of any
+    # diffusion-to-tap distance. A `_NO_TAPCELL_LIBRARIES` library emits no
+    # `tapcell` line, so an override there is rejected rather than silently
+    # ignored.
+    tapcell = power.get("tapcell")
+    tapcell_distance_um: int | float | None = None
+    if tapcell is not None:
+        if not isinstance(tapcell, dict):
+            raise PlaceAndRouteError(
+                "request.power.tapcell must be a JSON object when given "
+                "(request.power.tapcell.distance_um is its only field)"
+            )
+        unknown = sorted(set(tapcell) - {"distance_um"})
+        if unknown:
+            raise PlaceAndRouteError(
+                f"request.power.tapcell has unknown key(s) {unknown}; "
+                "only distance_um is supported"
+            )
+        tapcell_distance_um = tapcell.get("distance_um")
+        if (
+            not isinstance(tapcell_distance_um, (int, float))
+            or isinstance(tapcell_distance_um, bool)
+            or not math.isfinite(tapcell_distance_um)
+            or tapcell_distance_um <= 0
+        ):
+            raise PlaceAndRouteError(
+                "request.power.tapcell.distance_um is required and must be a "
+                "positive number"
+            )
+        if cell_library in _NO_TAPCELL_LIBRARIES:
+            raise PlaceAndRouteError(
+                f"request.power.tapcell.distance_um cannot be honored: "
+                f"standard-cell library '{cell_library}' has no tap/endcap "
+                "cells, so no tapcell call is emitted"
+            )
+
     return {
         "preset": preset_name,
         "power_net": power_net,
         "ground_net": ground_net,
+        "tapcell_distance_um": tapcell_distance_um,
         "straps": validated_straps,
         "connects": validated_connects,
     }
@@ -4312,16 +4366,21 @@ def _tapcell_masters(cell_library: str) -> tuple[str | None, str | None, int | N
     return _TAPCELL_CELLS[cell_library]
 
 
-def _tapcell_lines(cell_library: str) -> list[str]:
+def _tapcell_lines(
+    cell_library: str, distance_um: int | float | None = None
+) -> list[str]:
     """The ``request.power`` ``tapcell`` Tcl for ``cell_library`` -- one
     line, or **none at all** for a library in
     :data:`_NO_TAPCELL_LIBRARIES` (issue #2441), which has no tap/endcap
     masters to place. ``-endcap_master`` is appended only for a library
-    whose :data:`_TAPCELL_CELLS` entry names one.
+    whose :data:`_TAPCELL_CELLS` entry names one. ``distance_um`` (issue
+    #3051) overrides the table pitch; ``None`` keeps the table value.
     """
-    tap_master, endcap_master, distance_um = _tapcell_masters(cell_library)
+    tap_master, endcap_master, table_distance_um = _tapcell_masters(cell_library)
     if tap_master is None:
         return []
+    if distance_um is None:
+        distance_um = table_distance_um
     call = f"tapcell -distance {distance_um} -tapcell_master {tap_master}"
     if endcap_master is not None:
         call += f" -endcap_master {endcap_master}"
@@ -4380,7 +4439,7 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
     # No `tapcell` line at all on a library that ships no tap/endcap cells
     # (issue #2441) -- everything below is unchanged for it, since nothing
     # in the global-connect/PDN sequence depends on `tapcell` having run.
-    lines: list[str] = _tapcell_lines(cell_library)
+    lines: list[str] = _tapcell_lines(cell_library, power.get("tapcell_distance_um"))
 
     for net_role, pin_pattern, is_primary in _POWER_PIN_PATTERNS[cell_library]:
         net = power_net if net_role == "power" else ground_net
