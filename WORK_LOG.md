@@ -4,6 +4,11 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-14
 
+- **PR #3268**: fix(sim): expand $VAR/~ in .include targets on the executing host
+- **Issue #2926** (closed): klt sim: $VAR .include targets are documented as executing-host-resolved but are never expanded, and fail as 'measurement produced no value'
+- **PR #3272**: gen-compose: snap routed port attach points onto the manufacturing grid
+- **Issue #2932** (closed): gen-compose: via-drop stacks and backbones are centred on off-grid port positions, producing *.ongrid.1 violations
+- **PR #3264**: fix(loom): replace retired label names in pinned Loom files (2am#4345)
 - **PR #3261**: feat(sim): surface missing_include and engine-log tail for batch jobs
 - **PR #2795**: drc: model sg13g2 Cnt.c activ_mask join and square-contact selection
 - **Issue #2882** (closed): Friction: klt sim batch jobs fail with 'Could not find include file <host PDK path>/libs.tech/ngspice/design.ngspice' on the fleet (client 0.6.0 past the version gate)
