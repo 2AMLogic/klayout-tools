@@ -2234,7 +2234,19 @@ def _apply_sdf_physical_only_drop(
 # ---------------------------------------------------------------------------
 
 
-def run_functional_verification(request: str) -> dict[str, Any]:
+def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
+    """Directory run artifacts are written to: ``output_dir`` (relative paths
+    resolve against the cwd, not the request directory) or, by default,
+    ``<request_dir>/.klt/functional-verification``.
+    """
+    if output_dir:
+        return os.path.abspath(output_dir)
+    return os.path.join(request_dir, ".klt", "functional-verification")
+
+
+def run_functional_verification(
+    request: str, output_dir: str | None = None
+) -> dict[str, Any]:
     """Run the cocotb regression declared by ``request``.
 
     ``request`` accepts the same three forms every other ``klt`` request
@@ -2256,6 +2268,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     and kept, never deleted.
     """
     request_doc, request_dir = load_request_arg(request)
+    output_dir = _resolve_output_dir(request_dir, output_dir)
 
     engine = request_doc.get("engine", DEFAULT_ENGINE)
     if engine not in SUPPORTED_ENGINES:
@@ -2286,7 +2299,6 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
     parameters = _resolve_parameters(request_doc.get("parameters"))
 
-    output_dir = os.path.join(request_dir, ".klt", "functional-verification")
     build_dir = os.path.join(output_dir, f"sim_build_{engine}")
     try:
         os.makedirs(output_dir, exist_ok=True)
@@ -2720,7 +2732,7 @@ def _write_mutant_combined_log(
 
 
 def run_functional_verification_with_mutations(
-    request: str, proposals_path: str
+    request: str, proposals_path: str, output_dir: str | None = None
 ) -> dict[str, Any]:
     """Run ``klt functional-verification --mutations`` end to end (issue
     #1592, spike section 3): the unmodified baseline run from
@@ -2828,7 +2840,7 @@ def run_functional_verification_with_mutations(
     parameters = _resolve_parameters(request_doc.get("parameters"))
     build_args = list(user_build_args)
 
-    output_dir = os.path.join(request_dir, ".klt", "functional-verification")
+    output_dir = _resolve_output_dir(request_dir, output_dir)
     mutants_dir = os.path.join(output_dir, "mutants")
     try:
         os.makedirs(mutants_dir, exist_ok=True)
@@ -2840,7 +2852,7 @@ def run_functional_verification_with_mutations(
     # The baseline-must-pass gate (spike §3d): the exact same request the
     # caller already used for an ordinary (non-mutation) run, reused
     # unchanged -- see `docs/design/mutation-testing-spike.md` §3a.
-    baseline = run_functional_verification(request)
+    baseline = run_functional_verification(request, output_dir)
     if baseline["status"] != "pass":
         failing_names = ", ".join(
             test["name"] for test in baseline["tests"] if test["status"] == "failed"
