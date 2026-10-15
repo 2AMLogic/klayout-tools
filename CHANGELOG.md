@@ -345,6 +345,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   a layout circuit, and `gate-level-verilog` references are unaffected.
   **Additive contract change**; `schema_version` is unchanged.
 
+- **`klt sim` native noise measurements** (issue #2938): a
+  `measurements[]` entry may declare `noise: {quantity: "inoise"|"onoise",
+  at_hz | band_hz}` to read a spot density or a band-integrated rms value
+  from a `noise` analysis without `expr` or the `noise1.` plot prefix.
+  **Additive contract change:** a new optional measurement form; runners
+  older than this release reject it (see `docs/cli/sim.md`).
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

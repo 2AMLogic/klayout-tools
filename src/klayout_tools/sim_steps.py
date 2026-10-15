@@ -166,6 +166,17 @@ def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
         )
 
 
+def _refuse_noise(spec: dict[str, Any]) -> None:
+    """Issue #2938: a ``noise`` measurement reads one noise analysis'
+    spectrum plot; no per-step equivalent is implemented."""
+    if spec.get("noise") is not None:
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'noise' is not supported "
+            "with analysis_steps -- use the scalar analysis "
+            '(kind "noise") for a noise-spectrum measurement'
+        )
+
+
 def is_steps_analysis(analysis: dict[str, Any]) -> bool:
     """Whether a resolved ``analysis`` object is a step sequence."""
     return analysis.get("kind") == STEPS_KIND and "steps" in analysis
@@ -383,6 +394,7 @@ def _resolve_step_measurements(
         _validate_measurement_form(spec)
         _refuse_crossings(spec)
         _refuse_cycle_mean(spec)
+        _refuse_noise(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
             raise _error(
@@ -573,6 +585,7 @@ def _resolve_derived_measurements(
         name = spec["name"]
         _refuse_crossings(spec)
         _refuse_cycle_mean(spec)
+        _refuse_noise(spec)
         if spec.get("spice") is not None:
             raise _error(
                 f"measurement {name!r}: with analysis_steps, a top-level "

@@ -99,6 +99,7 @@ from . import (
     sim_energy,
     sim_injected,
     sim_mismatch_gate,
+    sim_noise,
     sim_portable,
     sim_steps,
     sim_transfer_meas,
@@ -1215,7 +1216,10 @@ def _resolve_analysis_and_measurements(
     sim_cycle_mean.validate_cycle_mean_context(measurements_spec, analysis)
     # Issue #2923: and a transfer metric is an AC-sweep quantity.
     sim_transfer_meas.validate_transfer_context(measurements_spec, analysis)
-    return analysis, measurements_spec
+    # Issue #2938: a `noise` entry is lowered to an `expr` (plus helper
+    # lines) so everything downstream treats it as one.
+    sim_noise.validate_noise_context(measurements_spec, analysis)
+    return analysis, sim_noise.lower_measurements(measurements_spec, analysis)
 
 
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
@@ -1507,6 +1511,30 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     has_crossings = sim_crossings.is_crossings(spec)
     has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
     has_energy = sim_energy.is_energy(spec)
+    if sim_noise.is_noise(spec):
+        # Issue #2938: a fourth, mutually exclusive form.
+        if (
+            has_spice
+            or has_expr
+            or has_crossings
+            or has_cycle_mean
+            or has_energy
+            or name is None
+        ):
+            raise SimError(
+                f"measurement '{name}' declares 'noise' together with "
+                "another form (or has no name): declare a 'name' and "
+                "exactly one of 'spice', 'expr', 'crossings', 'cycle_mean', "
+                "'energy' or 'noise'"
+            )
+        sim_noise.validate_noise_spec(name, spec["noise"])
+        if not _EXPR_MEAS_NAME_RE.match(str(name)):
+            raise SimError(
+                f"measurement '{name}' cannot be declared with 'noise': its "
+                "name becomes an ngspice vector name, so it must match "
+                "[A-Za-z_][A-Za-z0-9_]* (no dots, no leading digit)"
+            )
+        return
     if name is None or not (
         has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
     ):
@@ -1517,7 +1545,8 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
             "'crossings' (a threshold-crossing time series) or "
             "'cycle_mean' (a mean over whole reference cycles) or "
             "'energy' (a source's energy over a transient window) or "
-            "'transfer' (an AC return-ratio metric)"
+            "'transfer' (an AC return-ratio metric) or "
+            "'noise' (a spot/band-integrated noise-spectrum value)"
         )
     if _validate_rawfile_form(
         name,
@@ -1637,7 +1666,11 @@ def _expr_measurements(
     ``let`` lines are emitted in, so a later expression may reference an
     earlier one's name (verified against ngspice 46: ``let b = a * 2`` after
     ``let a = ...`` resolves)."""
-    return [spec for spec in measurements_spec if spec.get("expr") is not None]
+    return [
+        spec
+        for spec in measurements_spec
+        if spec.get("expr") is not None or sim_noise.is_noise(spec)
+    ]
 
 
 def _validate_fail_on_diagnostic(value: Any) -> tuple[str, ...]:
@@ -8399,6 +8432,7 @@ def _corner_deck_control_lines(
         # is unchanged) so bare names resolve while totals stay bare too.
         lines.extend(f"let {vec} = noise1.{vec}" for vec in NOISE_SPECTRUM_VECTORS)
     for spec in expr_specs:
+        lines.extend(spec.get("expr_prelude", ()))
         lines.append(f"let {spec['name']} = {spec['expr']}")
         lines.append(f"print {spec['name']}")
     lines.extend(crossings_lines)
