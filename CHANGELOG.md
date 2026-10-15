@@ -206,6 +206,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   now reports `unverified` (and emits `device.body_unverified`), matching the
   inline-extraction verdict. Inline-extraction results are unchanged.
 
+- **sky130 two-adjacent-edges enclosure rules** (issue #3316): new
+  `DrcRule.check` kind `"enclosing_adjacent"` (a cut is flagged once when two
+  adjacent edges are both enclosed by less than the threshold, as in
+  `sky130A_mr.drc`) and four sky130 rules using it: `met1.enclosing_adjacent.via.1`
+  (`via.5a`), `met2.enclosing_adjacent.via.1` (`m2.5`),
+  `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
+  (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
+  deck hash changes).
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

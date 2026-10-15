@@ -237,7 +237,7 @@ also the order a `--rules` subset executes in.
   "mode": "list_rules",
   "deck": "sky130",
   "engine": "curated",
-  "rule_count": 138,
+  "rule_count": 142,
   "groups": {
     "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
     "scope": { "m1": 5, "poly": 1, "...": 0 }
@@ -319,7 +319,7 @@ A `--rules` run adds one top-level block, `rule_selection`, relative to the
   "selectors": ["met1.*"],
   "selected": ["met1.width.1", "met1.space.1", "met1.enclosing.mcon.1", "..."],
   "omitted": ["poly.width.1", "diff.width.1", "..."],
-  "deck_rule_count": 138,
+  "deck_rule_count": 142,
   "subset": true
 }
 ```
@@ -359,7 +359,7 @@ in either envelope aggregation or numbered-citation grading — see
 Before signoff, re-run without `--rules`.
 
 The text form adds one line, e.g.
-`rule selection: 5 of 136 rules (131 omitted; partial run) -- selectors: met1.*`,
+`rule selection: 5 of 142 rules (137 omitted; partial run) -- selectors: met1.*`,
 and does not list `not_selected` rules one per line under "skipped requested
 rules".
 
@@ -815,6 +815,25 @@ interacts at all) — a residual gap tracked as a known limitation, since
 closing it fully requires compound/connectivity-scoped layer expressions
 this engine does not evaluate (see "Coverage" below).
 
+### `"enclosing_adjacent"`: the two-adjacent-edges enclosure rules
+
+`sky130A_mr.drc` pairs each primary cut-enclosure rule with a larger one that
+applies to two *adjacent* edges (`via.5a`, `m2.5`, `via2.5`, `via3.5`). The
+curated deck models them with `check="enclosing_adjacent"`, which follows the
+runset exactly: the cut edges enclosed by less than the threshold
+(`enclosing_check(..., projection).second_edges`) are tested for a corner,
+and every cut touching a corner is one violation (reported as a polygon, once
+per cut). So a cut is **legal** when its short sides are one side or two
+*opposite* sides, and **flagged** when two adjacent sides are both short.
+A cut with no facing metal edge at all is not reported here; the primary
+`enclosing` rule already reports an escape.
+
+`via2.5` is applied to met2 (`met2.enclosing_adjacent.via2.1`): the official
+rule's message says "m3" but its code reads `m2.enclosing(via2, ...)`.
+`li.5` stays on its zero-margin floor: the official rule is scoped to
+contacts outside `areaid:ce`, which the curated deck does not model, so a
+corner check on all `licon1` would flag legal core cells.
+
 ### Required containment for single-population cuts (`require_containment`, issue #2726)
 
 The zero-overlap escape term above is deliberately scoped with
@@ -1244,7 +1263,7 @@ single-layer kind.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 138
+design rule manual (which spans hundreds of rules). It currently covers 142
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `tap` (issue #2321), `rpm`/`urpm` marker width (issue #3030),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
@@ -1272,13 +1291,14 @@ Broken down by check kind:
 | `space`      |    13 |
 | `isolated`   |     1 |
 | `enclosing`  |    17 |
+| `enclosing_adjacent` | 4 |
 | `separation` |     2 |
 | `area`       |    10 |
 | `ongrid`     |    38 |
 | `angle`      |    37 |
-| **total**    |**138**|
+| **total**    |**142**|
 
-(`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
+(`enclosing_adjacent` is the four two-adjacent-edges enclosure rules, issue #3316 — see "`enclosing_adjacent`" below. `isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
 `met{1..5}.holes_area.1` holes-area rules, issue #1976 — see the next
 paragraph. `ongrid`/`angle` are the `OFFGRID` group, issue #2642 — the
@@ -3154,7 +3174,8 @@ carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
 `licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
 (38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
-so 117 of its 136 rules are covered.
+and #3316's four `enclosing_adjacent` rules cite `via.5a`/`m2.5`/`via2.5`/`via3.5`,
+so 123 of its 142 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 
