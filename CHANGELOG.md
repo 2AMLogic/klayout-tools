@@ -48,7 +48,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   Verilog netlist as reset-covered or unreset (machine-readable reason code),
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
-
+- **sky130 gate-poly endcap is checked and drawn** (issue #2936): the curated
+  `sky130` deck gains `poly.endcap.diff.1` (the PDK's `poly.8`, 0.13 µm poly
+  extension past diffusion at a gate), so `klt drc --deck sky130` no longer
+  returns `clean` for gates whose poly ends flush with the diffusion. It
+  needs a new `DerivedLayer` mode, `"gate_endcap"`. `klt gen mos_array`/
+  `diff_pair`/`esd_device` now draw a 0.15 µm endcap at both gate ends on
+  sky130 (units are 0.15 µm taller at the bottom; the PCells gain a
+  `top_endcap_um` parameter). The deck grows from 136 to 137 rules. Committed
+  sky130 example layouts (`examples/design-pipeline` S7-S9, `dogbone-terminal`)
+  were regenerated.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`

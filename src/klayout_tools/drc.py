@@ -150,6 +150,7 @@ _DERIVED_LAYER_MODES = {
     "not_interacting",
     "holes",
     "union",
+    "gate_endcap",
 }
 
 # Every `DrcRule.other_layer_selection` value `run_drc()` knows how to apply
@@ -395,7 +396,8 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     elif rule.derived_layer is not None:
         layers = {rule.derived_layer.base}
         if rule.derived_layer.intersect_with is not None and (
-            rule.derived_layer.mode in ("sized_intersection", "overlapping")
+            rule.derived_layer.mode
+            in ("sized_intersection", "overlapping", "gate_endcap")
         ):
             layers.add(rule.derived_layer.intersect_with)
     else:
@@ -491,6 +493,23 @@ def _derived_region(
         # with no holes at all derives an empty region, which is simply
         # nothing to report -- not an error.
         return base_region.merged().holes()
+    if derived.mode == "gate_endcap":
+        # Endcap probe zones (#2936), e.g. sky130's `poly.8`: the part of
+        # each `base` (diffusion) edge that lies under or flush with an
+        # `intersect_with` (poly) shape is a gate end edge; extend it
+        # outward by `sized_by_um`. Only the *outer* side is probed, so poly
+        # that merely abuts the diffusion from outside never reads as a
+        # gate. The rule pairs this region with `check="enclosed"`,
+        # `other_layer=<poly>` and a zero threshold: whatever part of a probe
+        # zone is not covered by poly is the missing endcap. A flush poly
+        # edge is collinear with the diffusion edge, which `inside_part`
+        # alone excludes, hence the explicit edge AND.
+        base_edges = base_region.merged().edges()
+        poly_region = intersect_region.merged()
+        gate_end_edges = (
+            base_edges.inside_part(poly_region) + (base_edges & poly_region.edges())
+        ).merged()
+        return gate_end_edges.extended(0, 0, size_dbu, 0, False)
     if derived.mode == "union":
         # Boolean join of both inputs (#2688), e.g. sg13g2's `Cnt.c`
         # enclosing region `activ.join(activ_mask)`. `_run_check` merges it

@@ -228,7 +228,7 @@ also the order a `--rules` subset executes in.
   "mode": "list_rules",
   "deck": "sky130",
   "engine": "curated",
-  "rule_count": 136,
+  "rule_count": 137,
   "groups": {
     "check": { "angle": 37, "area": 10, "enclosing": 17, "...": 0 },
     "scope": { "m1": 5, "poly": 1, "...": 0 }
@@ -310,7 +310,7 @@ A `--rules` run adds one top-level block, `rule_selection`, relative to the
   "selectors": ["met1.*"],
   "selected": ["met1.width.1", "met1.space.1", "met1.enclosing.mcon.1", "..."],
   "omitted": ["poly.width.1", "diff.width.1", "..."],
-  "deck_rule_count": 136,
+  "deck_rule_count": 137,
   "subset": true
 }
 ```
@@ -350,7 +350,7 @@ in either envelope aggregation or numbered-citation grading — see
 Before signoff, re-run without `--rules`.
 
 The text form adds one line, e.g.
-`rule selection: 5 of 136 rules (131 omitted; partial run) -- selectors: met1.*`,
+`rule selection: 5 of 137 rules (132 omitted; partial run) -- selectors: met1.*`,
 and does not list `not_selected` rules one per line under "skipped requested
 rules".
 
@@ -1228,7 +1228,7 @@ single-layer kind.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 136
+design rule manual (which spans hundreds of rules). It currently covers 137
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `tap` (issue #2321),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
@@ -1256,18 +1256,31 @@ Broken down by check kind:
 | `space`      |    13 |
 | `isolated`   |     1 |
 | `enclosing`  |    17 |
+| `enclosed`   |     1 |
 | `separation` |     2 |
 | `area`       |    10 |
 | `ongrid`     |    38 |
 | `angle`      |    37 |
-| **total**    |**136**|
+| **total**    |**137**|
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
 `met{1..5}.holes_area.1` holes-area rules, issue #1976 — see the next
 paragraph. `ongrid`/`angle` are the `OFFGRID` group, issue #2642 — the
 angle count is one short of the grid count because one layer,
-`areaid.rfdiode`, is grid-checked but not angle-checked by the source deck.)
+`areaid.rfdiode`, is grid-checked but not angle-checked by the source deck.
+`enclosed` is `poly.endcap.diff.1`, issue #2936 — see below.)
+
+`poly.endcap.diff.1` (issue #2936) transcribes `poly.8` ("min. poly extention
+gate (endcap)", 0.13 µm): gate poly must extend at least 0.13 µm past the
+diffusion edge at every transistor, along the full gate width. It uses the
+`DerivedLayer(mode="gate_endcap")` derivation (`diff` edges under or flush
+with `poly`, pushed 0.13 µm outward) paired with `check="enclosed"` and a zero
+threshold, so a *flush* gate end — the case the source `.lydrc`'s own
+`enclosing(...).without_area(0)` drops — is reported. Not checked: the
+SRAM-core 0.11 µm variant and `poly.7` (diffusion extension past poly,
+0.25 µm). `klt gen mos_array`/`diff_pair` draw 0.15 µm endcaps on sky130 so
+generated devices stay clean.
 
 `nwell.width.1`/`nwell.space.1` (issue #1420) close this deck's original
 gap on the well layer: before these two rules, `DECK` had *zero* rules
@@ -2787,7 +2800,7 @@ carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
 compound rule), issue #2594's `licon1.width.1`/`mcon.width.1` cite
 `licon.1`/`ct.1`, and every one of issue #2642's 75 `OFFGRID`-group rules
 (38 `ongrid` + 37 `angle`) cites its own `x.1b`/`x.3a`/`x.2`/`x.2c` source id,
-so 117 of its 136 rules are covered.
+so 118 of its 137 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 
