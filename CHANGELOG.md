@@ -31,6 +31,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   of a false verdict). Additive; no `schema_version` bump. See
   `docs/cli/lvs.md`'s `device.combine_incomplete` section.
 
+- **`klt pex` `model_mismatch.kind`** (issue #3054): the `model_mismatch`
+  block gains an additive `kind` field, `"model_set"` when `reference_only`
+  or `extracted_only` is non-empty and `"count_only"` when the model sets are
+  identical and only instance counts differ (typically a multi-finger layout
+  against a one-instance-per-device schematic). A `count_only` `detail` is
+  now neutral and names finger/multiplier decomposition as the usual cause
+  instead of claiming the sides "instantiate different device models". The
+  block is still non-`null` in both cases; `model_set` output is unchanged.
+  Additive; no `schema_version` bump.
+
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
