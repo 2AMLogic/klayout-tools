@@ -59,6 +59,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from .functional_verification_sdf_rename import _sdf_unresolvable_pin_tokens
+
 
 def _reject_sdf_with_functional_models(
     sdf: dict[str, str] | None, defines: dict[str, str | None]
@@ -1850,28 +1852,34 @@ def _drop_sdf_bit_selected_bus_iopaths(
 # `$sdf_annotate` ever sees a scope argument. This is a genuine Icarus
 # upstream limitation -- guarded here with a clear, request-validation-time
 # error instead of a bare `vvp` assertion abort/core dump.
+#
+# Issue #2897 follow-up (re-verified live, Icarus 13.0): an escaped `.` is
+# mis-split under *either* DIVIDER, so canonicalizing the header to `/` does
+# not help (still aborts); renaming the escaped *instance* to a plain
+# identifier in build-dir copies of the SDF and netlist does. That rename
+# lives in `functional_verification_sdf_rename.py` and runs first, so the
+# guard below now only fires for the residual pin/top-level-port shape.
 # --------------------------------------------------------------------------- #
 
 
 def _reject_sdf_escaped_divider_interconnects(sdf_path: str) -> None:
     """Fail loud, before any build artifact is written, when ``sdf_path``
-    has an ``INTERCONNECT`` entry whose endpoint is an escaped identifier
-    containing a literal occurrence of the file's own ``DIVIDER`` character
-    -- the shape that crashes Icarus's ``$sdf_annotate`` outright (issue
-    #1890; see the module comment above for the confirmed root cause).
+    has an ``INTERCONNECT`` endpoint whose *pin or top-level port* (the
+    endpoint's final path component) is an escaped identifier containing a
+    literal ``.`` or the file's own ``DIVIDER`` character -- the shape that
+    crashes Icarus's ``$sdf_annotate`` outright (issue #1890; see the
+    module comment above for the confirmed root cause).
 
-    Only ``INTERCONNECT`` entries are scanned: the same escaped identifier
-    used as a plain ``CELL``/``(INSTANCE ...)`` field for an ``IOPATH``
-    entry does not crash (it fails to resolve, a separate and non-fatal
-    diagnostic :func:`_scan_sdf_diagnostics` already surfaces) -- confirmed
-    live, and consistent with the root cause being specific to
-    ``INTERCONNECT``'s own path-splitting code.
+    Narrowed by issue #2897: the same shape in an *instance* component (a
+    flattened ``generate`` array's ``g\\[0\\]\\.sub\\.u1``, the common case)
+    is no longer rejected -- ``functional_verification_sdf_rename``'s
+    ``_rename_sdf_escaped_divider_instances`` renames it to a plain
+    identifier in build-dir copies of the SDF and netlist instead. A
+    pin/port is never renamed (the testbench reaches top-level ports by
+    name), so only that residual shape still lands here.
 
-    Never raises on a malformed/unreadable SDF file -- that is
-    :func:`_split_sdf_bus_port_interconnects` and the simulator's own
-    parser's job to report; this function only adds a *narrower*,
-    *earlier* diagnosis for the one shape that would otherwise reach a
-    bare abort.
+    Never raises on a malformed/unreadable SDF file -- that is the
+    simulator's own parser's job to report.
     """
     from .functional_verification import FunctionalVerificationError
 
@@ -1881,67 +1889,22 @@ def _reject_sdf_escaped_divider_interconnects(sdf_path: str) -> None:
     except OSError:
         return
 
-    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
-    divider = divider_match.group(1) if divider_match else "."
-    # The two SDF-legal divider characters are `.` and `/` -- anything else
-    # in a `(DIVIDER ...)` header is not a shape this crash's mechanism
-    # (escaping *the* divider character) can apply to.
-    if divider not in (".", "/"):
-        return
-    escaped_divider_re = re.compile(r"\\" + re.escape(divider))
-
-    offenders: list[str] = []
-    for cell_match in re.finditer(r"\(CELL\b", text):
-        cell_start = cell_match.start()
-        try:
-            cell_end = _sdf_matching_paren(text, cell_start) + 1
-        except Exception:
-            continue
-        cell_text = text[cell_start:cell_end]
-        delay_match = re.search(r"\(DELAY\b", cell_text)
-        if delay_match is None:
-            continue
-        delay_start = cell_start + delay_match.start()
-        try:
-            delay_end = _sdf_matching_paren(text, delay_start) + 1
-            delay_type_spans = _sdf_top_level_clauses(
-                text, delay_start + 1, delay_end - 1
-            )
-        except Exception:
-            continue
-        for type_start, type_end in delay_type_spans:
-            entry_spans = _sdf_top_level_clauses(text, type_start + 1, type_end - 1)
-            for entry_start, entry_end in entry_spans:
-                entry_text = text[entry_start:entry_end]
-                interconnect_match = re.match(
-                    r"\(INTERCONNECT\s+(\S+)\s+(\S+)", entry_text
-                )
-                if interconnect_match is None:
-                    continue
-                for token in interconnect_match.groups():
-                    if escaped_divider_re.search(token):
-                        offenders.append(token)
-
+    offenders = _sdf_unresolvable_pin_tokens(text)
     if not offenders:
         return
 
     examples = ", ".join(sorted(set(offenders))[:3])
     raise FunctionalVerificationError(
-        "options.sdf: this SDF has an INTERCONNECT entry naming an escaped "
-        f"identifier that contains a literal '{divider}' -- the file's own "
-        f"DIVIDER character (e.g. {examples}). This is a known Icarus "
-        "Verilog upstream limitation, not something klt's generated "
-        "$sdf_annotate wrapper can work around: Icarus's INTERCONNECT path "
-        "splitter does not honor the backslash-escape on that character, "
-        "which crashes vvp outright ('ERROR: NULL handle passed to "
-        "vpi_scan.', SIGABRT) rather than failing to resolve the entry. "
-        "This shape is produced whenever synthesis/place-and-route "
-        "flattens a `generate` block array of sub-modules into one escaped "
-        "Verilog identifier (e.g. Yosys 'flatten', OpenROAD's post-route "
-        "write_verilog/write_sdf) -- avoid flattening that hierarchy "
-        "before generating the SDF this option consumes, or annotate a "
-        "netlist whose corresponding generate-block instances are not "
-        "collapsed into one escaped identifier"
+        "options.sdf: this SDF has an INTERCONNECT entry whose pin or "
+        "top-level port is an escaped identifier containing a literal '.' "
+        f"or the file's own DIVIDER character (e.g. {examples}). This is a "
+        "known Icarus Verilog upstream limitation: Icarus's INTERCONNECT "
+        "path splitter does not honor the backslash-escape on that "
+        "character, which crashes vvp outright ('ERROR: NULL handle passed "
+        "to vpi_scan.', SIGABRT). klt renames an *instance* name of this "
+        "shape to a plain identifier automatically (issue #2897), but not a "
+        "pin or top-level port name, which the testbench addresses directly "
+        "-- rename that port in the netlist and SDF to a plain identifier"
     )
 
 

@@ -2277,12 +2277,20 @@ _ESCAPED_DIVIDER_INTERCONNECT_SDF = """\
 def test_sdf_option_rejects_escaped_divider_interconnect_identifier(
     tmp_path, monkeypatch
 ):
-    """The load-bearing regression for issue #1890: an `INTERCONNECT`
-    endpoint whose escaped identifier contains a literal `.` (the file's own
-    `DIVIDER` character) is rejected up front with a clear message, instead
-    of reaching `$sdf_annotate` and crashing `vvp` with a bare `SIGABRT`."""
+    """The load-bearing regression for issue #1890, narrowed by issue
+    #2897: an `INTERCONNECT` endpoint whose *pin/top-level port* is an
+    escaped identifier containing a literal `.` is still rejected up front
+    with a clear message, instead of reaching `$sdf_annotate` and crashing
+    `vvp` with a bare `SIGABRT`. (An escaped-divider *instance* -- the
+    fixture's `g\\[0\\]\\.sub\\/x` -- is renamed instead; see
+    `tests/test_functional_verification_sdf_escaped_divider.py`.)"""
     _setup_inputs(tmp_path)
-    _write(tmp_path / "route.sdf", _ESCAPED_DIVIDER_INTERCONNECT_SDF)
+    _write(
+        tmp_path / "route.sdf",
+        _ESCAPED_DIVIDER_INTERCONNECT_SDF.replace(
+            "(INTERCONNECT a ", "(INTERCONNECT a\\.b "
+        ),
+    )
     request_path = _write_request(
         tmp_path / "request.json",
         _base_request(options={"coverage": False, "sdf": {"file": "route.sdf"}}),
@@ -2291,29 +2299,64 @@ def test_sdf_option_rejects_escaped_divider_interconnect_identifier(
 
     with pytest.raises(
         FunctionalVerificationError,
-        match=r"escaped identifier that contains a literal '\.'",
+        match=r"pin or top-level port is an escaped identifier",
     ):
         run_functional_verification(request_path)
 
 
 @pytest.mark.parametrize(
+    ("divider", "interconnect_line"),
+    [
+        # An escaped `.` in a bare top-level port.
+        (".", "      (INTERCONNECT a\\.b u1.a (0.100:0.100:0.100))\n"),
+        # An escaped `.` in a cell pin.
+        (".", "      (INTERCONNECT a u1.p\\.q (0.100:0.100:0.100))\n"),
+        # An escaped `.` under `DIVIDER /` (issue #2897: Icarus mis-splits
+        # an escaped `.` whatever the declared divider).
+        ("/", "      (INTERCONNECT a u1/p\\.q (0.100:0.100:0.100))\n"),
+        # An escaped occurrence of the file's own `/` divider.
+        ("/", "      (INTERCONNECT a u1/p\\/q (0.100:0.100:0.100))\n"),
+    ],
+)
+def test_reject_sdf_escaped_divider_interconnects_catches_pin_shapes(
+    tmp_path, divider, interconnect_line
+):
+    """Unit-level: every escaped-divider shape left in an endpoint's final
+    (pin/port) component is caught -- the one shape issue #2897's instance
+    rename does not rewrite."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        "(DELAYFILE\n"
+        '  (SDFVERSION "3.0")\n'
+        '  (DESIGN "gcd")\n'
+        f"  (DIVIDER {divider})\n"
+        "  (TIMESCALE 1ns)\n"
+        "  (CELL\n"
+        '    (CELLTYPE "gcd")\n'
+        "    (INSTANCE)\n"
+        "    (DELAY (ABSOLUTE\n" + interconnect_line + "    ))\n"
+        "  )\n"
+        ")\n",
+    )
+    with pytest.raises(FunctionalVerificationError, match="pin or top-level port"):
+        fv._reject_sdf_escaped_divider_interconnects(sdf_path)
+
+
+@pytest.mark.parametrize(
     "interconnect_line",
     [
-        # `.` alone (no brackets) -- one of the issue's own bisected shapes.
+        # `.` alone (no brackets) -- one of #1890's own bisected shapes.
         "      (INTERCONNECT a g\\.sub.a (0.100:0.100:0.100))\n",
-        # The combined shape from the issue's own minimal reproduction.
+        # The combined shape from #1890's own minimal reproduction.
         "      (INTERCONNECT a g\\[0\\]\\.sub\\/x.a (0.100:0.100:0.100))\n",
     ],
 )
-def test_reject_sdf_escaped_divider_interconnects_catches_both_dot_shapes(
+def test_reject_sdf_escaped_divider_interconnects_admits_instance_shapes(
     tmp_path, interconnect_line
 ):
-    """Unit-level: both bisected shapes that embed a literal `.` are caught,
-    not just the combined shape -- the issue's own bisection notes that
-    either special character alone is sufficient to crash Icarus, but only
-    the literal `.` (the file's `DIVIDER` character) is the actual trigger
-    (see the module comment above `_reject_sdf_escaped_divider_interconnects`
-    for the confirmed root cause)."""
+    """Issue #2897: an escaped-divider *instance* component is no longer
+    rejected -- the run renames it to a plain identifier in build-dir copies
+    instead (see `functional_verification_sdf_rename.py`)."""
     sdf_path = _write(
         tmp_path / "route.sdf",
         "(DELAYFILE\n"
@@ -2328,8 +2371,7 @@ def test_reject_sdf_escaped_divider_interconnects_catches_both_dot_shapes(
         "  )\n"
         ")\n",
     )
-    with pytest.raises(FunctionalVerificationError, match="literal '\\.'"):
-        fv._reject_sdf_escaped_divider_interconnects(sdf_path)
+    fv._reject_sdf_escaped_divider_interconnects(sdf_path)  # must not raise
 
 
 def test_reject_sdf_escaped_divider_interconnects_admits_escaped_bracket_alone(
@@ -3543,12 +3585,14 @@ from cocotb.triggers import Timer
 
 
 @cocotb.test()
-async def test_never_reached(dut):
-    """This test body is never reached -- options.sdf's own request-
-    validation gate (issue #1890) must reject the request before cocotb
-    ever elaborates the design."""
+async def test_runs_annotated(dut):
+    """Issue #2897: reached -- the escaped-divider instance is renamed in
+    build-dir copies, so `vvp` no longer aborts and the design simulates."""
     dut.a.value = 0
     await Timer(5, unit="ns")
+    dut.a.value = 1
+    await Timer(5, unit="ns")
+    assert dut.y.value == 1
 '''
 
 
@@ -3579,15 +3623,16 @@ def _generate_flattened_sdf_text() -> str:
 @pytest.mark.skipif(
     not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
 )
-def test_integration_real_icarus_escaped_divider_interconnect_fails_loud_not_a_crash(
+def test_integration_real_icarus_escaped_divider_interconnect_annotates_not_a_crash(
     tmp_path,
 ):
     """Issue #1890's own scenario, end to end against the real toolchain: a
     `generate`-flattened-style escaped identifier (`\\g[0].sub/x`) in an
     `INTERCONNECT` entry used to crash `vvp` outright (`ERROR: NULL handle
-    passed to vpi_scan.`, SIGABRT/core dump). It must now be rejected as a
-    clear `FunctionalVerificationError` at request-validation time, before
-    `iverilog`/`vvp` ever run at all."""
+    passed to vpi_scan.`, SIGABRT/core dump), and #1890 then rejected it up
+    front. Issue #2897: it now annotates and simulates, with the instance
+    renamed to a plain identifier in build-dir copies and the rename
+    reported as `environment.sdf.renamed`."""
     tmp_path.joinpath("gen_flat_top.v").write_text(
         _GENERATE_FLATTENED_DUT_V, encoding="utf-8"
     )
@@ -3603,11 +3648,16 @@ def test_integration_real_icarus_escaped_divider_interconnect_fails_loud_not_a_c
         },
     )
 
-    with pytest.raises(
-        FunctionalVerificationError,
-        match=r"escaped identifier that contains a literal '\.'",
-    ):
-        run_functional_verification(request_path)
+    report = run_functional_verification(request_path)
+
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["annotated"] is True
+    assert sdf["partial"] is False
+    assert sdf["renamed"] == [{"from": "g[0].sub/x", "to": "g_0__sub_x"}]
+    # The caller's own inputs are untouched.
+    assert "\\g[0].sub/x " in (tmp_path / "gen_flat_top.v").read_text()
+    assert _generate_flattened_sdf_text() == (tmp_path / "route.sdf").read_text()
 
 
 # --------------------------------------------------------------------------- #
