@@ -24,11 +24,11 @@ therefore recognised by a positive subcircuit-name match alone, not a
 carried-parameter heuristic; its only carried call-site parameter is an
 optional ``mult``, mapped onto the plain-element ``Q`` card's ``NE``
 (KLayout's own ``DeviceClassBJT3Transistor`` natively represents multiple
-parallel emitters via ``NE`` -- unlike MOS/resistor's ``nf``/``m``/``mult``,
+parallel emitters via ``NE`` -- unlike resistor's ``nf``/``m``/``mult``,
 which the curated plain-element form cannot represent at all and rejects,
 see below, ``mult`` on a bipolar call is carried, not rejected).
-Resistor/capacitor still reject ``nf``/``m``/``mult`` > 1 exactly like MOS
-(neither ``DeviceClassResistor`` nor ``DeviceClassCapacitor`` has an
+Resistor/capacitor reject ``nf``/``m``/``mult`` > 1 (MOS expands ``nf``/``m``
+instead; neither ``DeviceClassResistor`` nor ``DeviceClassCapacitor`` has an
 ``NE``-equivalent multiplicity parameter to carry it onto).
 
 **The gap this closes.** ``klt lvs``'s reference netlist must use the
@@ -89,7 +89,7 @@ plausible netlist that compares clean when it shouldn't). So:
   silent metres assumption -- previously, a unitless-and-scaled schematic
   export silently mis-scaled every device geometry by ``1e6`` with no
   diagnostic (see :func:`_parse_um`).
-- ``nf``/``m``/``mult`` > 1 (a multi-finger / multiplied device the curated
+- resistor/capacitor ``nf``/``m``/``mult`` > 1 (a multi-finger / multiplied device the curated
   plain-element resistor/capacitor forms cannot represent) is **rejected**
   with a specific error naming the device and value, never silently
   dropped or misinterpreted. Bipolar's ``mult`` is the one exception --
@@ -98,12 +98,15 @@ plausible netlist that compares clean when it shouldn't). So:
   call is *expanded*, not rejected -- into ``nf`` parallel unit-width plain
   ``M`` cards (deterministic ``<instance>_f0``, ``<instance>_f1``, ...
   naming), the same shape a real drawn multi-finger layout extracts as
-  (see :func:`_expand_mos_fingers`). MOS's ``m``/``mult`` (a *whole-device*
-  replication count, a different real-world knob from finger-folding --
-  gf180mcu spells it ``m``, sky130 ``mult``, never both on the same call)
-  is still rejected exactly like resistor/capacitor's -- expanding it would
-  need the same per-finger-width verification ``nf`` just received, and
-  nothing here has done that yet.
+  (see :func:`_expand_mos_fingers`). **MOS's instance multiplier ``m`` is
+  expanded too (issue #3123)**: ``m=N`` becomes ``N`` parallel plain ``M``
+  cards (``<instance>_m0`` ... ; ``nf*m`` cards named ``<instance>_m0_f0``
+  ... when combined with ``nf``), total width ``m*W``, reconciled against a
+  drawn N-unit layout by ``options.combine_devices``. MOS's ``mult`` is
+  ignored (it must still be numeric): verified against the sky130 model
+  subckt, ``mult`` only enters the mismatch-sigma expressions
+  (``sqrt(l*w*mult)``) and is never forwarded to the device card, so only
+  ``m`` changes the nominal device. ``m`` must be a positive integer.
 - **A resistor/capacitor call supplying only one of its two geometry
   parameters is not automatically an error (issue #2459).** Some PDKs ship
   a *fixed-geometry device-flavour wrapper* -- its own separately-named
@@ -178,10 +181,12 @@ _DEVICE_LIKE_PARAMS = _CARRIED_PARAMS + ("r_length", "r_width", "c_length", "c_w
 #: ``exclude``), so a resistor/capacitor ``nf>1`` is still a hard error.
 _MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
 
-#: The multiplicity parameter :func:`_reject_multiplicity` never rejects for
-#: a MOS call -- :func:`_convert_mos_card` excludes it because
-#: :func:`_resolve_finger_count` handles it instead (issue #1487).
-_MOS_EXCLUDED_MULTIPLICITY_PARAMS = ("nf",)
+#: The multiplicity parameters :func:`_reject_multiplicity` never rejects for
+#: a MOS call -- :func:`_convert_mos_card` excludes them because
+#: :func:`_resolve_finger_count` (``nf``, issue #1487),
+#: :func:`_resolve_multiplier` (``m``, issue #3123) and
+#: :func:`_check_mos_mult` (``mult``, mismatch-only) handle them instead.
+_MOS_EXCLUDED_MULTIPLICITY_PARAMS = ("nf", "m", "mult")
 
 #: Terminal count of the curated capacitor primitive, used the same way
 #: :data:`_MOS_TERMINALS` is for MOS -- a hard, named error on a mismatched
@@ -553,6 +558,8 @@ def _convert_mos_card(
         )
 
     finger_count = _resolve_finger_count(instance, subckt_name, params)
+    multiplier = _resolve_multiplier(instance, subckt_name, params)
+    _check_mos_mult(instance, subckt_name, params)
     _reject_multiplicity(
         instance,
         subckt_name,
@@ -575,13 +582,13 @@ def _convert_mos_card(
         params["w"], device=instance, param="w", geometry_style=geometry_style
     )
 
-    if finger_count == 1:
+    if finger_count == 1 and multiplier == 1:
         return (
             f"{instance} {' '.join(nodes)} {lookup.device_class} "
             f"L={_format_um(l_um)} W={_format_um(w_um)}"
         )
     return _expand_mos_fingers(
-        instance, nodes, lookup.device_class, l_um, w_um, finger_count
+        instance, nodes, lookup.device_class, l_um, w_um, finger_count, multiplier
     )
 
 
@@ -592,31 +599,84 @@ def _resolve_finger_count(
     returning the number of physical gate fingers to expand into (issue
     #1487).
 
-    Unlike ``m``/``mult`` (a *whole-device* replication count -- still
-    rejected outright by :func:`_reject_multiplicity`), ``nf`` describes a
-    single real device folded into ``nf`` physical gate fingers -- a shape
-    the curated plain-element MOS class cannot represent directly, but
-    *can* be represented faithfully as ``nf`` separate unit-width plain
-    ``M`` cards (see :func:`_expand_mos_fingers`). ``nf`` must be a
-    positive integer -- there is no way to fold a fractional or negative
-    number of physical gate fingers, so a non-integer value is still a
-    hard error (never silently rounded).
+    ``nf`` describes a single real device folded into ``nf`` physical gate
+    fingers -- a shape the curated plain-element MOS class cannot represent
+    directly, but *can* be represented faithfully as ``nf`` separate
+    unit-width plain ``M`` cards (see :func:`_expand_mos_fingers`). ``nf``
+    must be a positive integer -- there is no way to fold a fractional or
+    negative number of physical gate fingers, so a non-integer value is
+    still a hard error (never silently rounded).
     """
-    if "nf" not in params:
+    return _resolve_positive_int(
+        instance,
+        subckt_name,
+        params,
+        "nf",
+        "to expand into that many parallel plain-element gate fingers",
+    )
+
+
+def _resolve_multiplier(instance: str, subckt_name: str, params: dict[str, str]) -> int:
+    """Parse and validate a MOS call's instance multiplier ``m`` (default
+    ``1`` when absent), returning the number of parallel whole-device
+    copies to expand into (issue #3123).
+
+    ``m`` is the SPICE instance multiplier (``N`` identical devices in
+    parallel), which is exactly what ``N`` parallel plain ``M`` cards
+    represent -- reconciled against a drawn N-unit layout by
+    ``options.combine_devices``. Same positive-integer rule as ``nf``.
+
+    ``mult`` is deliberately *not* a multiplier here: in the sky130 model
+    subckt it only enters the mismatch-sigma expressions
+    (``sqrt(l*w*mult)``) and is never forwarded to the device card as
+    ``m``, so it does not change the nominal device and is ignored (but
+    still must be numeric -- see :func:`_check_mos_mult`).
+    """
+    return _resolve_positive_int(
+        instance,
+        subckt_name,
+        params,
+        "m",
+        "to expand into that many parallel plain-element devices",
+    )
+
+
+def _check_mos_mult(instance: str, subckt_name: str, params: dict[str, str]) -> None:
+    """Require a MOS call's mismatch-only ``mult`` (issue #3123) to be
+    numeric when present; its value never changes the converted devices."""
+    if "mult" not in params:
+        return
+    try:
+        float(params["mult"])
+    except ValueError as exc:
+        raise NormalizeError(
+            f"device '{instance}' (subcircuit '{subckt_name}'): "
+            f"parameter 'mult' value '{params['mult']}' is not numeric"
+        ) from exc
+
+
+def _resolve_positive_int(
+    instance: str,
+    subckt_name: str,
+    params: dict[str, str],
+    name: str,
+    purpose: str,
+) -> int:
+    """Shared positive-integer parse for MOS ``nf`` / ``m`` (default 1)."""
+    if name not in params:
         return 1
-    raw = params["nf"]
+    raw = params[name]
     try:
         value = float(raw)
     except ValueError as exc:
         raise NormalizeError(
             f"device '{instance}' (subcircuit '{subckt_name}'): "
-            f"parameter 'nf' value '{raw}' is not numeric"
+            f"parameter '{name}' value '{raw}' is not numeric"
         ) from exc
     if value <= 0 or value != int(value):
         raise NormalizeError(
-            f"device '{instance}' (subcircuit '{subckt_name}'): nf={raw} "
-            "must be a positive integer to expand into that many parallel "
-            "plain-element gate fingers"
+            f"device '{instance}' (subcircuit '{subckt_name}'): "
+            f"{name}={raw} must be a positive integer {purpose}"
         )
     return int(value)
 
@@ -628,13 +688,19 @@ def _expand_mos_fingers(
     l_um: float,
     w_um: float,
     finger_count: int,
+    multiplier: int = 1,
 ) -> str:
     """Expand one folded ``nf``-finger MOS call into ``finger_count``
     parallel unit-width plain-element ``M`` cards, one line per finger,
-    joined by newlines (issue #1487).
+    joined by newlines (issue #1487); an instance multiplier ``m`` (issue
+    #3123) replicates that whole set ``multiplier`` times, so the result is
+    ``finger_count * multiplier`` cards, each ``w_um / finger_count`` wide
+    (``w_um`` is per ``m`` copy: total width is ``multiplier * w_um``).
 
-    Deterministic ``<instance>_f0``, ``<instance>_f1``, ... naming (``f``
-    for "finger", 0-indexed) -- so device identity is stable across runs,
+    Deterministic naming -- ``<instance>_f0``, ``<instance>_f1``, ... (``f``
+    for "finger", 0-indexed) when only ``nf`` folds; ``<instance>_m0``, ...
+    (``m`` for "multiplier copy") when only ``m`` replicates; and
+    ``<instance>_m0_f0``, ... when both -- so device identity is stable across runs,
     which is what keeps ``klt lvs``'s device-pairing/association from
     churning between repeated conversions of the same source netlist.
 
@@ -656,11 +722,18 @@ def _expand_mos_fingers(
     the way it already reconciles a genuinely hand-split reference pair.
     """
     w_finger_um = w_um / finger_count
-    lines = [
-        f"{instance}_f{i} {' '.join(nodes)} {device_class} "
-        f"L={_format_um(l_um)} W={_format_um(w_finger_um)}"
-        for i in range(finger_count)
-    ]
+    lines = []
+    for j in range(multiplier):
+        for i in range(finger_count):
+            parts = []
+            if multiplier > 1:
+                parts.append(f"m{j}")
+            if finger_count > 1:
+                parts.append(f"f{i}")
+            lines.append(
+                f"{instance}_{'_'.join(parts)} {' '.join(nodes)} {device_class} "
+                f"L={_format_um(l_um)} W={_format_um(w_finger_um)}"
+            )
     return "\n".join(lines)
 
 
@@ -964,9 +1037,9 @@ def _reject_multiplicity(
     :func:`_convert_bipolar_card`).
 
     ``exclude`` (issue #1487) skips a named parameter entirely -- the MOS
-    call site passes ``_MOS_EXCLUDED_MULTIPLICITY_PARAMS`` (``("nf",)``)
-    because :func:`_convert_mos_card` already resolved and validated ``nf``
-    itself via :func:`_resolve_finger_count` (expanded, not rejected);
+    call site passes ``_MOS_EXCLUDED_MULTIPLICITY_PARAMS``
+    because :func:`_convert_mos_card` already resolved and validated
+    ``nf``/``m``/``mult`` itself (expanded or ignored, not rejected);
     resistor/capacitor call sites pass no ``exclude``, so their own ``nf``
     is still rejected exactly as before.
     """
