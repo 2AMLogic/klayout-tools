@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **ASAP7 DRC deck checks `V9.PAD.EN.2` and `V9.AUX.1`** (issue #3156): the
+  V8 enclosure-by-M9 and inside-M8-and-M9 rules carry over to V9 with PAD
+  (DRM section 3.19 preamble), reading PAD (mask 96, GDS 96/0) by layer
+  number since the pinned `asap7.lyp` has no entry for it. The deck grows
+  from 234 to 236 rule categories (`--expect-rule-categories 236`).
+  `M8.S.4`-`M8.S.8` / `M9.S.4`-`M9.S.8` stay under "Not implemented", now
+  with the reason that Fig. 3.18.1's width-class reading still contradicts
+  `S.1`. Additive; no `schema_version` bump.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
