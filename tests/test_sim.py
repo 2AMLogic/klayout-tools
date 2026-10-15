@@ -4740,6 +4740,59 @@ def test_run_sim_monte_carlo_family_mismatch_reports_gf180mcu_resistor_disabled(
     assert by_family["capacitor"] is False
 
 
+@pytest.mark.parametrize(
+    "section, expected",
+    [
+        ("mos_tt_mismatch", True),
+        ("mos_tt", False),
+        ("mos_tt_stat", False),
+        (None, None),
+    ],
+)
+def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
+    tmp_path, monkeypatch, section, expected
+):
+    """Issue #2961: sg13g2 MOS subcircuit calls classify as `mosfet` (not
+    `other`) and `active` follows whether the selected section is a
+    `*_mismatch` one; unknown section -> `None`."""
+    (tmp_path / "body.spice").write_text(
+        "Vdd vdd 0 DC 1.2\n"
+        "XM1 mid g out b sg13_lv_nmos L=0.13u W=1u\n"
+        "XM2 mid g vdd vdd sg13_hv_pmos L=0.45u W=1u\n"
+    )
+    spec: dict = {
+        "netlist": "body.spice",
+        "models": {"pdk": "ihp-sg13g2"},
+        "monte_carlo": {"n": 2, "seed": 1, "vary": "mismatch"},
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+    }
+    if section is not None:
+        spec["models"]["lib"] = str(tmp_path / "corner.lib")
+        spec["corners"] = {"process": [section]}
+        (tmp_path / "corner.lib").write_text(f".lib {section}\n.endl {section}\n")
+    request = _write_request(tmp_path, spec)
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    family_mismatch = report["environment"]["monte_carlo"]["family_mismatch"]
+    by_family = {entry["family"]: entry["active"] for entry in family_mismatch}
+    assert by_family == {"mosfet": expected}
+
+
+@pytest.mark.parametrize(
+    "line, family",
+    [
+        ("XM1 d g s b sg13_lv_nmos L=1u W=1u", "mosfet"),
+        ("XM1 d g s b sg13_hv_pmos L=1u W=1u", "mosfet"),
+        ("XC1 a b sg13_lv_nmoscap W=1u", "capacitor"),
+        ("XQ1 c b e npn13G2", "bipolar"),
+    ],
+)
+def test_classify_device_family_sg13g2_subckts(line, family):
+    assert sim._classify_device_family("X", line) == family
+
+
 def test_run_sim_monte_carlo_family_mismatch_scans_include_closure(
     tmp_path, monkeypatch
 ):
