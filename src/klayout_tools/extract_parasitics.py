@@ -61,6 +61,7 @@ finished importing, avoids that entirely.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._layout import region as _region
@@ -75,7 +76,72 @@ from .parasitic_integrity import (
 from .pdk_models import equivalent_rectangle_um
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import klayout.db as kdb
+
+
+@dataclass(frozen=True)
+class ParasiticVariants:
+    """Parsed ``--parasitic-variant`` request (issue #3056).
+
+    ``drop_r``/``drop_c_ground`` hold escaped net names (the spelling the
+    report uses) or :data:`ALL_NETS` for the ``*`` wildcard. ``raw`` is the
+    request as given, echoed back verbatim in the report.
+    """
+
+    raw: tuple[str, ...] = ()
+    drop_r: frozenset[str] = frozenset()
+    drop_c_ground: frozenset[str] = frozenset()
+    drop_c_coupling: bool = False
+
+    def drops_r(self, net: str) -> bool:
+        return ALL_NETS in self.drop_r or net in self.drop_r
+
+    def drops_c_ground(self, net: str) -> bool:
+        return ALL_NETS in self.drop_c_ground or net in self.drop_c_ground
+
+    def named_nets(self) -> frozenset[str]:
+        return (self.drop_r | self.drop_c_ground) - {ALL_NETS}
+
+
+#: ``*`` wildcard of the ``drop-r:``/``drop-c-ground:`` variant verbs.
+ALL_NETS = "*"
+
+#: Closed grammar of ``--parasitic-variant`` (issue #3056).
+PARASITIC_VARIANT_GRAMMAR = "drop-r:NET|*, drop-c-ground:NET|*, drop-c-coupling"
+
+
+def parse_parasitic_variants(
+    raw: Sequence[str] | None, error: type[Exception]
+) -> ParasiticVariants | None:
+    """Parse repeated ``--parasitic-variant`` values (issue #3056); ``None``
+    when none were given. Anything outside the closed grammar raises
+    ``error`` (the calling command's own error class)."""
+    if not raw:
+        return None
+    drop_r: set[str] = set()
+    drop_c_ground: set[str] = set()
+    drop_c_coupling = False
+    for item in raw:
+        verb, sep, net = item.partition(":")
+        if verb == "drop-c-coupling" and not sep:
+            drop_c_coupling = True
+        elif verb == "drop-r" and sep and net:
+            drop_r.add(net)
+        elif verb == "drop-c-ground" and sep and net:
+            drop_c_ground.add(net)
+        else:
+            raise error(
+                f"unknown --parasitic-variant {item!r} -- expected one of: "
+                f"{PARASITIC_VARIANT_GRAMMAR}"
+            )
+    return ParasiticVariants(
+        raw=tuple(raw),
+        drop_r=frozenset(drop_r),
+        drop_c_ground=frozenset(drop_c_ground),
+        drop_c_coupling=drop_c_coupling,
+    )
 
 
 #: ngspice's own hierarchy separator (issue #2145). A node token containing
@@ -1917,6 +1983,7 @@ def _inject_parasitics(
     distributed_rc_nets: frozenset[str] | None = None,
     mom_rlc_inductor: tuple[str, float] | None = None,
     record_slice_topology: bool = False,
+    variants: ParasiticVariants | None = None,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net (or a distributed
     multi-segment ladder for a caller-declared subset, see below), plus one
@@ -1986,6 +2053,15 @@ def _inject_parasitics(
     function), and every ladder position moving its terminal onto a brand
     new leg would leave ``net`` with nothing attached to it at all, silently
     orphaning that pin inside the written ``.SUBCKT`` body.
+
+    ``variants`` (issue #3056, ``klt extract --parasitic-variant``) -- ``None``
+    emits the network exactly as described. Otherwise: ``drop-r`` leaves a
+    lumped net's device terminals on the hub (no leg nets, no series
+    resistor; the Gamma-shunt fallback gets no resistor either) and counts
+    zero resistance for it; ``drop-c-ground`` omits the net's ground
+    capacitor (and any ``--mom-rlc-inductance-nh`` inductor in series with
+    it); ``drop-c-coupling`` omits every ``cc_*`` card. A net on the
+    distributed ladder is left untouched by ``drop-r``/``drop-c-ground``.
 
     After every ``parasitic_nets`` entry has its hub established, one
     two-terminal ``C`` card is created per ``coupled_pairs`` entry, directly
@@ -2181,6 +2257,9 @@ def _inject_parasitics(
         )
         r_total_ohm = max(entry["resistance_ohm"], _MIN_PARASITIC_R_OHM)
         c_farad = entry["capacitance_ff"] * 1e-15
+        net_escaped = spice_safe_net_name(entry["net"])
+        drop_r = variants is not None and variants.drops_r(net_escaped)
+        drop_c = variants is not None and variants.drops_c_ground(net_escaped)
 
         # Snapshot before mutating: moving a terminal off `net` below changes
         # what `net.each_terminal()` would yield mid-iteration.
@@ -2326,6 +2405,17 @@ def _inject_parasitics(
             for i, (term_ref, weight) in enumerate(
                 zip(terminal_refs, weights, strict=True)
             ):
+                if drop_r:
+                    # `drop-r` (issue #3056): the terminal stays on the hub.
+                    terminal_reports.append(
+                        {
+                            "device": term_ref.device().expanded_name(),
+                            "terminal": term_ref.terminal_def().name,
+                            "leg_net": spice_safe_net_name(hub_name),
+                            "resistance_ohm": 0.0,
+                        }
+                    )
+                    continue
                 leg_name = _unique_net_name(
                     entry["net"], existing_names, suffix=f"__t{i}"
                 )
@@ -2365,19 +2455,26 @@ def _inject_parasitics(
             # geometry with nothing electrically attached) -- fall back to
             # the pre-#592 Gamma-shunt so the net's capacitance still has
             # somewhere to attach.
-            hub_name = _unique_net_name(entry["net"], existing_names)
-            existing_names.add(hub_name)
-            hub = circuit.create_net(hub_name)
-            _tag_slice_origin(hub, origin_id, record_slice_topology)
+            if drop_r:
+                # `drop-r` (issue #3056): no series R, so no fresh node.
+                hub_name = entry["net"]
+                hub = net
+            else:
+                hub_name = _unique_net_name(entry["net"], existing_names)
+                existing_names.add(hub_name)
+                hub = circuit.create_net(hub_name)
+                _tag_slice_origin(hub, origin_id, record_slice_topology)
 
-            hub_uid = integ.add_node(spice_safe_net_name(hub_name), origin_id)
-            c_ground_uid = hub_uid
-            r_dev = circuit.create_device(res_class, instance_name)
-            r_dev.connect_terminal("A", net)
-            r_dev.connect_terminal("B", hub)
-            r_dev.set_parameter("R", r_total_ohm)
-            total_r_count += 1
-            integ.add_resistor(instance_name, net_uid, hub_uid, r_total_ohm, origin_id)
+                hub_uid = integ.add_node(spice_safe_net_name(hub_name), origin_id)
+                c_ground_uid = hub_uid
+                r_dev = circuit.create_device(res_class, instance_name)
+                r_dev.connect_terminal("A", net)
+                r_dev.connect_terminal("B", hub)
+                r_dev.set_parameter("R", r_total_ohm)
+                total_r_count += 1
+                integ.add_resistor(
+                    instance_name, net_uid, hub_uid, r_total_ohm, origin_id
+                )
 
         net_inductance_nh = 0.0
         if rc_model == "lumped":
@@ -2394,6 +2491,7 @@ def _inject_parasitics(
             # `distributed_rc_nets` above (issue #1162).
             if (
                 mom_rlc_inductor is not None
+                and not drop_c
                 and spice_safe_net_name(entry["net"]) == mom_rlc_inductor[0]
             ):
                 net_inductance_nh = mom_rlc_inductor[1]
@@ -2418,18 +2516,19 @@ def _inject_parasitics(
             # `_distributed_rc_segments`'s docstring) -- creating a second,
             # hub-level capacitor here would double-count the net's
             # capacitance.
-            c_dev = circuit.create_device(cap_class, instance_name)
-            c_dev.connect_terminal("A", c_ground_node)
-            c_dev.connect_terminal("B", ground)
-            c_dev.set_parameter("C", c_farad)
-            net_c_count = 1
-            integ.add_ground_capacitor(
-                instance_name,
-                c_ground_uid,
-                ground_uid,
-                _emitted_capacitance_ff(c_dev),
-                origin_id,
-            )
+            if not drop_c:
+                c_dev = circuit.create_device(cap_class, instance_name)
+                c_dev.connect_terminal("A", c_ground_node)
+                c_dev.connect_terminal("B", ground)
+                c_dev.set_parameter("C", c_farad)
+                net_c_count = 1
+                integ.add_ground_capacitor(
+                    instance_name,
+                    c_ground_uid,
+                    ground_uid,
+                    _emitted_capacitance_ff(c_dev),
+                    origin_id,
+                )
 
         # Marks this net's coupling/ground-capacitor attachment point (issue
         # #2245) -- the star's centre (`net` itself), the ladder's middle leg,
@@ -2439,8 +2538,13 @@ def _inject_parasitics(
         _tag_slice_hub(hub, origin_id, record_slice_topology)
         hub_by_net[entry["net"]] = hub
         hub_uid_by_net[entry["net"]] = hub_uid
-        total_r += r_total_ohm
-        total_c_ff += entry["capacitance_ff"]
+        # `--parasitic-variant` (issue #3056): what this net's network
+        # actually carries. Both are no-ops (`False`) on the distributed path.
+        r_dropped = drop_r and rc_model == "lumped"
+        c_dropped = drop_c and rc_model == "lumped"
+        emitted_c_ff = 0.0 if c_dropped else entry["capacitance_ff"]
+        total_r += 0.0 if r_dropped else r_total_ohm
+        total_c_ff += emitted_c_ff
         total_c_count += net_c_count
         # Issue #2764: declare this net's emitted topology to the integrity
         # checker -- required terminals (the per-terminal leg nodes, in
@@ -2451,7 +2555,8 @@ def _inject_parasitics(
             spice_safe_net_name(entry["net"]),
             rc_model,
             tuple(leg_uids),
-            entry["capacitance_ff"],
+            emitted_c_ff,
+            network_dropped=r_dropped and c_dropped,
         )
         report_nets.append(
             {
@@ -2521,7 +2626,9 @@ def _inject_parasitics(
     # hub, since a pair can name either side in either order (issue #760).
     total_cc_ff = 0.0
     cc_count = 0
-    for pair in coupled_pairs:
+    for pair in (
+        () if variants is not None and variants.drop_c_coupling else coupled_pairs
+    ):
         hub_a = hub_by_net.get(pair["net_a"])
         hub_b = hub_by_net.get(pair["net_b"])
         if hub_a is None or hub_b is None:
