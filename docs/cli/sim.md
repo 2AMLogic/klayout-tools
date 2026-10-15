@@ -852,6 +852,26 @@ made. Things worth knowing:
 - **There is no `--wait-for-capacity` CLI flag yet.** The request field is
   the one control for now; a flag mirroring it is a possible follow-up.
 
+### Submit receipt and client termination ([#3065](https://github.com/2AMLogic/klayout-tools/issues/3065))
+
+Right after `launch` succeeds — before the first poll — the client writes
+`batch-receipt.json` into the artifacts directory (`options.artifacts_dir`,
+default `<request dir>/.klt/sim`; a sharded run writes
+`batch-receipt-<job-id>.json` per shard). It holds `job_id`, `bucket`,
+`jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256` and
+`state`. `state` is `null` until the job reaches a terminal state, so a receipt
+that still has `state: null` means the client died (or timed out polling) while
+the job was in flight — the job id there is the one to look up before
+resubmitting. A receipt that cannot be written is a stderr warning, not a
+failed sweep. `--format json` stdout is unchanged.
+
+**Terminating the client does not cancel the job.** The fleet has no cancel
+primitive, so a SIGINT/SIGTERM during the wait prints one stderr line naming
+the job id, bucket and region and stating that the job is left running, then
+exits nonzero with `error.code: "batch_client_interrupted"`. The receipt stays
+in place with `state: null`. Previous signal handlers are restored after the
+wait, and signals outside the wait behave as before.
+
 ### Submitting a set of requests (`--batch-set`, [#2869](https://github.com/2AMLogic/klayout-tools/issues/2869))
 
 A campaign of N independent `backend: batch` requests can be submitted in one
