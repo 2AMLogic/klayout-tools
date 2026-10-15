@@ -1649,6 +1649,23 @@ three gaps directly, as an extension of `local`/`local-parallel` (and any
   recomputed this run; `checkpoint_retained` is `false` once a run finishes
   with every corner accounted for (the file is then deleted).
 
+## Timeout-budget hint
+
+Issue [#2894](https://github.com/2AMLogic/klayout-tools/issues/2894): when
+any unit carries a `timeout` diagnostic, or ran for at least 80% of
+`options.timeout_s`, the report gains an additive, optional
+`environment.timeout_budget_hint` object (absent otherwise; no existing
+field changes):
+
+```json
+{"max_unit_runtime_s": 490.2, "timeout_s": 600, "suggested_timeout_s": 1200,
+ "units_timed_out": 2, "message": "..."}
+```
+
+It states that the failure is a per-unit time budget, not a netlist problem,
+and suggests a larger `options.timeout_s` (twice the larger of the two
+numbers, rounded up to a whole minute).
+
 ## Timeout-budget preflight
 
 Issue [#1686](https://github.com/2AMLogic/klayout-tools/issues/1686): a
@@ -2067,6 +2084,25 @@ matched to a missing measurement is reported once as a corner-level
 literal time or a `.param` reference. This error follows the same
 `Error: measure <name> ...` log format, so it is attached to the measurement's
 diagnostic in the same way.
+
+### `FIND ... AT=` at a `dc` sweep's end point
+
+ngspice interpolates `AT=` inside the swept axis. When the sweep step is not
+exactly representable in binary, the last sample accumulates rounding error and
+can land just short of the literal end point, so `AT=<hi>` fails with
+`out of interval` even though the interior points resolve. Verified on
+ngspice-46 through `klt sim` with `v(out)` on a 1k/1k divider:
+
+```
+dc args "V1 0 1 0.25"   AT=0 -> 0, AT=0.5 -> 0.25, AT=1 -> 0.5   ; works
+dc args "V1 0 1 0.1"    AT=0 -> 0, AT=0.5 -> 0.25, AT=1 -> error  ; out of interval
+```
+
+The failing measurement carries ngspice's text (`measurement 'hi' produced no
+value -- ngspice reported: out of interval`). `klt sim` does not rewrite the
+card. Either pick a step that lands exactly on the end point (a power-of-two
+fraction), or read the last sample from `options.waveforms` instead of using
+`AT=`.
 
 ### The expression must reduce to a single real scalar
 
@@ -3047,6 +3083,11 @@ a corner grid. A stock ngspice without the module still produces the
   looking for an element of that name; if any reference cannot be resolved
   and read, the key is not rejected (an unresolved declaration is never
   assumed absent). Hierarchical names are never treated as parameters.
+  **Unknown keys (#2894).** A key that names no element and no `.param` in
+  the fully resolved netlist closure (a typo; matching is case-insensitive)
+  is rejected with a `SimError` naming the key, because `alter` on it would
+  address nothing. Not rejected when any `.include`/`.lib` reference cannot
+  be resolved, nor for hierarchical keys such as `x1.vdd`.
   **Scalar sources only.** ngspice's `alter` silently has no effect on an
   independent voltage source with an explicit transient waveform
   (`PWL`/`PULSE`/`SIN`/`EXP`/`SFFM`/`AM`), so `klt sim` rejects such a request
@@ -3623,7 +3664,8 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `code`             | Detected from                                                              |
 | ------------------ | --------------------------------------------------------------------------- |
 | `singular_matrix`  | A `Warning: singular matrix` line.                                          |
-| `nonconvergence`   | Iteration-limit / gmin-stepping / source-stepping / time-step-too-small text. |
+| `timestep_too_small` | ngspice's own transient abort, `Timestep too small; time = <t>, timestep = <dt>: trouble with node "<node>"` (issue [#2918](https://github.com/2AMLogic/klayout-tools/issues/2918)). Carries additional `time_s` (number \| null: simulation time of the abort), `timestep_s` (number \| null: the timestep ngspice had shrunk to) and `node` (string \| null: the node/branch ngspice blamed, e.g. `"vctl#branch"`) fields — each `null` when ngspice's line omitted that part — repeated in `message`. Surfaced from the log the classifier already reads, so `keep_artifacts` is not needed to see it. Always `error`, **never** downgraded by the stepping-recovery rule below: it is a terminal abort, not recovery narration. Previously such a run surfaced only as one `measurement` diagnostic per `.meas`. See "Known limitation: `trnoise()` with non-DC control sources" below for the commonest trigger. |
+| `nonconvergence`   | Iteration-limit / gmin-stepping / source-stepping / time-step-too-small text (Xyce's `Time step too small`; ngspice's own `Timestep too small` abort is `timestep_too_small` above). |
 | `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
@@ -3690,7 +3732,8 @@ ngspice's own `simulation(s) aborted` trailer is absent from the log; a
 corner with no `measurements[]` declared, a measurement that produced no
 value, or that trailer keeps `singular_matrix`/`nonconvergence` at
 `severity: "error"` and the corner at `status: "error"`, exactly as before.
-`netlist`/`timeout`/`measurement`/`unknown` are never downgraded.
+`netlist`/`timeout`/`measurement`/`unknown`/`timestep_too_small` are never
+downgraded.
 
 A downgraded diagnostic still counts: `diagnostic_counts` (issue #2491, see
 the top-level fields table above) rolls up every `corners[].diagnostics[]`
@@ -3713,6 +3756,49 @@ error. Declare the quantity as a `measurements[].expr` expression instead (the
 first-class answer — see "Measurements that are not `.meas` cards" above), or
 use `analysis.kind: "tran"` with a short single-step transient and
 `.meas tran ... at=<t>` to read back an operating-point-like value.
+
+### Known limitation: `trnoise()` with non-DC control sources
+
+A transient whose deck contains ngspice `trnoise()` voltage sources cannot
+in practice also contain a control stimulus that is quiet and then changes
+— a gated enable (`PWL`, one-shot `PULSE`, `EXP`, or a B-source on `time`)
+or a finite supply ramp. ngspice (42 and 46 both reproduce, local or batch
+backend alike) aborts at the first noise sample-clock edge with
+`Timestep too small; time = <first sample edge>, timestep = 5e-23: trouble
+with node "<some vsource>#branch"` (issue
+[#2918](https://github.com/2AMLogic/klayout-tools/issues/2918)). This is an
+engine limitation — the source breakpoints collide with `trnoise`'s
+sampling — not something `klt sim` can work around. Observed:
+
+- the identical deck with the `trnoise()` sources replaced by plain `dc 0`
+  sources runs to completion;
+- the identical deck with **zero-amplitude** `trnoise(0 ...)` (source still
+  present) **still aborts**;
+- a noise-free, always-oscillating dummy circuit added to keep the global
+  timestep small does not help;
+- the same noisy deck with **every control source a bare DC source** (the
+  circuit self-starting from the `uic` all-zero state) **runs to
+  completion**.
+
+So stochastic transient noise and any stimulus that is not DC from t = 0
+are mutually exclusive in practice: characterising a noisy circuit after an
+enable edge or during a supply ramp is not currently supported. What `klt
+sim` does guarantee is that the abort is *visible*: the corner (or Monte
+Carlo unit) is `status: "error"` with a `timestep_too_small` diagnostic
+carrying `time_s`/`node` (see the table above), and when the request's
+netlist contains `trnoise` the message points here. Note also that ngspice
+generates no device/resistor noise in a transient at all — only the
+explicit `trnoise()`/`trrandom()` sources contribute; see issue
+[#2985](https://github.com/2AMLogic/klayout-tools/issues/2985) for that
+coverage disclosure.
+
+**Counting aborted Monte Carlo units.** `statistics.<measurement>.errored`
+stays a per-measurement count of unextractable samples, whatever the cause;
+the per-cause split is already in the top-level `diagnostic_counts.by_code`
+(issue #2491), so `diagnostic_counts.by_code.timestep_too_small` is the
+number of units whose transient aborted, distinguishable from units whose
+measurement merely produced no value (`measurement` without
+`timestep_too_small`). No separate `statistics` counter is added for it.
 
 ### Grading a recovered diagnostic as inconclusive (`options.fail_on_diagnostic`)
 
@@ -4369,7 +4455,7 @@ corner-sweep rollup fields above are declared.
 | `engine_killed_by_signal` | string \| null | Additive (issue #2848): the signal name (e.g. `"SIGKILL"`) when the engine process was killed by a signal the harness did not send; such a corner also carries an `engine_killed` error diagnostic. `null` otherwise, including on a harness `timeout`. |
 | `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. Additive/optional (issue #2482, `analysis_steps[]` requests only): a step-scoped entry also carries `step` (its source step's name; its `name` is `<step>.<measurement>`), and any entry computed from other results carries `derived_from` (the `name`s of its inputs, in first-reference order). Absent for every scalar-`analysis` request. Additive/optional (issue #2868): an entry declared with `crossings` carries `value` = the crossing count and a `crossings` object `{times, edges, truncated}` (see "Threshold-crossing time series" above); absent on every other entry and when no series was extracted. Additive/optional (issue #3033): an entry declared with `energy` carries `value` = the net energy (J) and an `energy` object `{net, gross, recovered, charge, from, to}` (see "Source energy over a transient window" above); absent on every other entry and when nothing was extracted. |
 | `steps`          | array\<object\>  | Additive/optional (issue #2482): present only on a corner of an `analysis_steps[]` request that was dispatched to the engine — one `{name, kind, status}` per declared step, in declaration order, `status` `"ok"` when that step's analysis produced its own plot and `"error"` otherwise (it failed, or the run was killed before reaching it). Absent for scalar-`analysis` requests and for corners that never started (`budget_exceeded`, `orphaned`, …). |
-| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. Every other code is always `"error"`. Empty for a clean run. |
+| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. Every other code is always `"error"`. A few codes carry additional code-specific fields beside these three (additive, no `schema_version` bump): `timeout_budget_unreachable`'s `reached_s`/`fraction`, `timestep_too_small`'s `time_s`/`timestep_s`/`node` (issue #2918). Empty for a clean run. |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
 

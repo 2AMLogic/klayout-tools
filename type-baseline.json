@@ -2153,7 +2153,7 @@
     {
       "file": "src/klayout_tools/lvs.py",
       "code": "no-redef",
-      "message": "Name \"reason\" already defined on line 8439",
+      "message": "Name \"reason\" already defined on line 8628",
       "count": 1
     },
     {
