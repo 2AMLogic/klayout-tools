@@ -45,6 +45,7 @@ from . import (
     precheck_cmd,
     render_cmd,
     report_cmd,
+    reset_coverage_cmd,
     ring_check_cmd,
     signoff_cmd,
     sim_cmd,
@@ -223,6 +224,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_precheck_parser(subparsers)
 
     _add_socket_check_parser(subparsers)
+
+    _add_reset_coverage_parser(subparsers)
 
     _add_lef_abstract_parser(subparsers)
 
@@ -5178,6 +5181,51 @@ def _add_precheck_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(precheck_parser)
     precheck_parser.set_defaults(func=precheck_cmd.run)
+
+
+def _add_reset_coverage_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``reset-coverage`` verb: unreset state elements of a netlist."""
+    reset_parser = subparsers.add_parser(
+        "reset-coverage",
+        help="list state elements of a gate-level netlist an async reset does not reach",
+        description=(
+            "Classify every sequential cell and hard macro of a flat "
+            "gate-level Verilog netlist: reset/set from the named reset port "
+            "through only buffers/inverters with the right polarity, or "
+            "unreset with a machine-readable reason. A --waivers file "
+            "justifies unreset elements; an unwaived element or a waiver "
+            "naming no unreset element fails (exit 3). Read-only, headless. "
+            "See docs/cli/reset-coverage.md."
+        ),
+    )
+    reset_parser.add_argument("netlist", help="path to a flat gate-level Verilog netlist")
+    reset_parser.add_argument(
+        "--cell-models",
+        required=True,
+        action="append",
+        metavar="FILE",
+        help="PDK functional Verilog cell-model file (repeatable)",
+    )
+    reset_parser.add_argument(
+        "--reset-port", required=True, help="name of the reset port of the top module"
+    )
+    reset_parser.add_argument(
+        "--reset-polarity",
+        choices=("low", "high"),
+        default="low",
+        help="level at which the reset port is asserted (default: low)",
+    )
+    reset_parser.add_argument(
+        "--top", default=None, help="top module (required when the netlist has several)"
+    )
+    reset_parser.add_argument(
+        "--waivers",
+        default=None,
+        metavar="FILE",
+        help="JSON waiver file: {\"waivers\": [{\"instance\", \"justification\", \"reason\"?}]}",
+    )
+    _add_format_arg(reset_parser)
+    reset_parser.set_defaults(func=reset_coverage_cmd.run)
 
 
 def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:

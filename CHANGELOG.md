@@ -26,6 +26,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   source engine limitation that commonly triggers it. Additive; no
   `schema_version` bump.
 
+- **`klt reset-coverage`** (issue #2998, part 1 of 2): a read-only verb that
+  classifies every sequential cell and hard macro of a flat gate-level
+  Verilog netlist as reset-covered or unreset (machine-readable reason code),
+  with a waiver file (fail on an unwaived element and on a stale waiver).
+  `options.initial_state` for `functional-verification` follows separately.
+
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
