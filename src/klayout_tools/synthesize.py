@@ -30,9 +30,10 @@ in-process -- there is no Python binding for Yosys the way ``klayout.db``
 already is for ``klt lvs``/``klt extract``.
 
 Liberty resolution reuses ``klayout_tools.pdk.find_pdk``/
-``list_cell_libraries`` -- the same ``libs_ref`` discovery ``klt pdk``/
-``klt cells`` already use (Yosys survey section 0) -- **no new PDK-fetch
-mechanism**. ``request.pdk`` carries only ``cell_library``/``corner`` (no
+``klayout_tools.pdk_cells.list_cell_libraries`` -- the same ``libs_ref``
+discovery ``klt pdk``/``klt cells`` already use (Yosys survey section 0) --
+**no new PDK-fetch mechanism**. ``request.pdk`` carries only
+``cell_library``/``corner`` (no
 ``variant``/``root``): the resolved PDK install is whatever ``find_pdk()``'s
 own default search order (``$PDK_ROOT``/``$PDK``, then the ciel/volare
 stores, then the conventional prefixes) finds, exactly as ``klt pdk find``
@@ -50,7 +51,7 @@ matching ``klt drc``'s existing "deck requires an asset the resolved install
 doesn't ship" posture (the Yosys survey's own open question, resolved here).
 When ``request.pdk.corner`` is omitted, the nominal (typical-process,
 room-temperature) corner ``klt pdk cells``' own ``nominal_corner`` selection
-already picks is used, via :func:`klayout_tools.pdk.list_cell_libraries`.
+already picks is used, via :func:`klayout_tools.pdk_cells.list_cell_libraries`.
 
 ``timing`` carries ABC's own ``stime -p`` critical-path estimate (issue
 #807, Epic #704 Phase 1a). The Yosys survey section 3.5/3.6 finding stands
