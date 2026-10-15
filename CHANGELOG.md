@@ -75,6 +75,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   where the combined `.options seed` still varies per sample. Docs and the
   `_expand_monte_carlo` docstring now say so and name the working control
   (switch the deck's mismatch off). No seed derivation or JSON change.
+
+- **`klt netlist --backend batch` file selection and failure diagnostics**
+  (issue #3282): repeatable `--batch-include <glob>` / `--batch-exclude
+  <glob>` narrow the uploaded git-tracked set without narrowing
+  `--batch-root`. A failed job whose `stderr.log` holds no klt envelope now
+  adds `error.remote_stderr_tail`, `remote_exit_code`, `remote_state` and
+  `harness_log` to the error envelope (additive; `schema_version` unchanged).
+
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
