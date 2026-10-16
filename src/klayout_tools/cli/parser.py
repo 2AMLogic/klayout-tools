@@ -51,6 +51,7 @@ from . import (
     signoff_cmd,
     sim_cmd,
     sim_merge_cmd,
+    sim_plan_cmd,
     size_cmd,
     socket_check_cmd,
     sta_cmd,
@@ -287,6 +288,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_sim_parser(subparsers)
 
     _add_sim_merge_parser(subparsers)
+    _add_sim_plan_parser(subparsers)
 
     _add_pex_parser(subparsers)
 
@@ -909,6 +911,35 @@ def _add_sim_merge_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(merge_parser)
     merge_parser.set_defaults(func=sim_merge_cmd.run)
+
+
+def _add_sim_plan_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``sim-plan`` verb (issue #3423).
+
+    The producer side of ``sim-merge``: splits one request by process corner
+    into shard requests plus the manifest ``sim-merge`` consumes. See
+    docs/cli/sim.md "Planning shards".
+    """
+    plan_parser = subparsers.add_parser(
+        "sim-plan",
+        help="split a klt sim request into per-process shards and a sim-merge manifest",
+        description=(
+            "Write one request per corners.process entry plus the shard "
+            "manifest for `klt sim-merge`, next to the source request. The "
+            "manifest's corner ids come from the same expansion `klt sim` "
+            "runs. Monte Carlo and deck-list requests are refused. See "
+            "docs/cli/sim.md 'Planning shards'."
+        ),
+    )
+    plan_parser.add_argument("request", help="klt sim request JSON to split")
+    plan_parser.add_argument(
+        "--axis",
+        choices=["process"],
+        default="process",
+        help="axis to shard by (default: process)",
+    )
+    _add_format_arg(plan_parser)
+    plan_parser.set_defaults(func=sim_plan_cmd.run)
 
 
 def _add_size_parser(subparsers: argparse._SubParsersAction) -> None:

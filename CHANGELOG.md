@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` declarative timed stimulus and resolved-backend provenance**
+  (issue #2977): a request may declare `stimulus.signals[]` (per-signal
+  event lists with level, optional transition time and skew). `klt sim`
+  validates them up front (coded errors `stimulus_*`), expands them into
+  PWL sources in every corner deck, and echoes the schedule as applied in
+  `environment.stimulus`. Every corner-sweep report also gains
+  `environment.backend` (`resolved`, `source`, `requested`) so a `local`
+  run under `KLT_SIM_BACKEND=batch` is detectable. **Additive contract
+  change:** two new optional `environment` members, no `schema_version`
+  bump. A runner older than this change ignores the `stimulus` key (client
+  capability check tracked in #2877). `docs/cli/sim.md` also names `klt
+  0.7.0` as the first release that reads `$KLT_SIM_BACKEND`.
 - **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
   (issue #3017): when `options.combine_devices` folds N>1 series primitives of
   a resistor class with a nonzero head term (`fixed_offset_ohm` +
@@ -91,6 +103,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `exclude[].options` selects rungs. Additive: a request without the field is
   byte-identical. Off-host workers must echo it (`options_unsupported_worker`);
   Xyce and `--op-lint` refuse it.
+- **`klt sim-plan` plans mergeable shards** (issue #3423): splits one `klt sim`
+  request by `corners.process` entry and writes the per-shard requests plus the
+  `klt sim-merge` manifest next to it. Manifest `corners` come from the same
+  `_expand_corners` expansion `klt sim` runs, output is byte-deterministic, and
+  Monte Carlo, deck-list and `corners.units` requests, a missing or
+  single-entry process axis, and a shard emptied by `exclude` are refused
+  (exit `1`). Additive: new verb, no `schema_version` bump. See
+  `docs/cli/sim.md` "Planning shards".
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -112,8 +132,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   duplicate, unexpected or mismatching report, or a changed request, is
   refused with its own exit code (`5`-`10`, `status: "refused"` payload).
   Additive: new verb, new `merge` block, no `schema_version` bump. See
-  `docs/cli/sim.md` "Merging per-request reports". Shard planning is not
-  included.
+  `docs/cli/sim.md` "Merging per-request reports". Shard planning is
+  `klt sim-plan`.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck

@@ -1422,7 +1422,7 @@
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
       "code": "attr-defined",
       "message": "\"_MosArrayPCell\" has no attribute \"TypeBoolean\"",
-      "count": 9
+      "count": 10
     },
     {
       "file": "src/klayout_tools/gen_pcells/mos_array.py",
