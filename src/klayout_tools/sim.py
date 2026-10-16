@@ -5131,34 +5131,38 @@ def _enforce_xyce_support_boundary(
         cycle_mean_declared=cycle_mean_declared,
         transfer_declared=transfer_declared,
     )
-    if save_mode_declared:
+    for declared, message in (
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
         # `.control` block carries `save all`; the Xyce deck has no control
         # block and no generated save card to suppress. Refused by name,
         # even for "all", rather than silently accepted with no effect.
-        raise SimError(
+        (
+            save_mode_declared,
             "options.save_mode is not supported for engine 'xyce': it "
             "controls the `save all` card in klt's generated ngspice "
             "`.control` block, which the Xyce deck does not have; use "
-            "engine 'ngspice' or omit options.save_mode"
-        )
-    if save_vectors_declared:
+            "engine 'ngspice' or omit options.save_mode",
+        ),
         # Issue #3211: `save_vectors` rewrites the ngspice `save` card.
-        raise SimError(
+        (
+            save_vectors_declared,
             "options.save_vectors is not supported for engine 'xyce': it "
             "replaces the `save all` card in klt's generated ngspice "
             "`.control` block, which the Xyce deck does not have; use "
-            "engine 'ngspice' or omit options.save_vectors"
-        )
-    if ngspice_options_declared:
+            "engine 'ngspice' or omit options.save_vectors",
+        ),
         # Issue #3111: the names are ngspice `.options` solver controls; the
         # Xyce deck has its own `.options` namespaces, so they are refused
         # by name rather than silently mapped or dropped.
-        raise SimError(
+        (
+            ngspice_options_declared,
             "options.ngspice_options is not supported for engine 'xyce': "
             "its names are ngspice solver `.options`; use engine 'ngspice' "
-            "or omit options.ngspice_options"
-        )
+            "or omit options.ngspice_options",
+        ),
+    ):
+        if declared:
+            raise SimError(message)
 
 
 def _run_local(
@@ -6257,6 +6261,48 @@ def _grade_corner(
     return "pass"
 
 
+def _persist_waveform_artifact(
+    raw_path: str,
+    raw_size: int,
+    waveform_max_bytes: int | None,
+    analysis: dict[str, Any],
+    diagnostics: list[dict[str, Any]],
+    noise_fields: dict[str, str],
+) -> str | None:
+    """Convert ``raw_path`` to its ``waveform.raw.json`` artifact and return
+    that path, or ``None`` when ``raw_size`` is over ``waveform_max_bytes``
+    (issue #3211): converting parses the whole ASCII rawfile into memory, so
+    past the cap a ``waveform_too_large`` warning is appended instead. For a
+    ``noise`` analysis the converted waveform also sets
+    ``noise_fields["noise_representation"]`` (issue #3006).
+    """
+    if waveform_max_bytes is not None and raw_size > waveform_max_bytes:
+        # Keep the raw file and every measurement; only the JSON conversion
+        # is skipped.
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": WAVEFORM_TOO_LARGE_CODE,
+                "message": (
+                    f"waveform.raw is {raw_size} bytes, over "
+                    f"options.waveform_max_bytes ({waveform_max_bytes}); "
+                    "skipped the waveform.raw.json conversion (the raw "
+                    "file is kept at artifacts.raw, measurements are "
+                    "unaffected). To shrink it, set options.save_vectors "
+                    "to the signals you need, widen the tran step "
+                    "(tstep/tmax in analysis.args), shorten tstop, or "
+                    "raise/disable options.waveform_max_bytes"
+                ),
+            }
+        )
+        return None
+    waveform_path = _parse_and_persist_waveform(raw_path)
+    if analysis.get("kind") == "noise":
+        with open(waveform_path, encoding="utf-8") as fh:
+            noise_fields["noise_representation"] = noise_representation(json.load(fh))
+    return waveform_path
+
+
 def _run_corner(
     *,
     point: CornerPoint,
@@ -6563,35 +6609,16 @@ def _run_corner(
             artifacts["raw"] = raw_path
             raw_size = os.path.getsize(raw_path)
             try:
-                if waveform_max_bytes is not None and raw_size > waveform_max_bytes:
-                    # Issue #3211: converting parses the whole ASCII rawfile
-                    # into memory; past the cap that risks an OOM SIGKILL
-                    # with no diagnostic. Keep the raw file and every
-                    # measurement; only the JSON conversion is skipped.
-                    diagnostics.append(
-                        {
-                            "severity": "warning",
-                            "code": WAVEFORM_TOO_LARGE_CODE,
-                            "message": (
-                                f"waveform.raw is {raw_size} bytes, over "
-                                f"options.waveform_max_bytes ({waveform_max_bytes}); "
-                                "skipped the waveform.raw.json conversion (the raw "
-                                "file is kept at artifacts.raw, measurements are "
-                                "unaffected). To shrink it, set options.save_vectors "
-                                "to the signals you need, widen the tran step "
-                                "(tstep/tmax in analysis.args), shorten tstop, or "
-                                "raise/disable options.waveform_max_bytes"
-                            ),
-                        }
-                    )
-                else:
-                    waveform_path = _parse_and_persist_waveform(raw_path)
+                waveform_path = _persist_waveform_artifact(
+                    raw_path,
+                    raw_size,
+                    waveform_max_bytes,
+                    analysis,
+                    diagnostics,
+                    noise_fields,
+                )
+                if waveform_path is not None:
                     artifacts["waveform"] = waveform_path
-                    if analysis.get("kind") == "noise":
-                        with open(waveform_path, encoding="utf-8") as fh:
-                            noise_fields["noise_representation"] = noise_representation(
-                                json.load(fh)
-                            )
             except (SimError, ValueError) as exc:
                 # Generic defensive catch, not expected in normal operation:
                 # `parse_ascii_rawfile` understands both plain-real (`tran`/
