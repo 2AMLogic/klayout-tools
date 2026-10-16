@@ -3,7 +3,7 @@
 Enumerate the layers of a GDSII or OASIS layout stream.
 
 ```
-klt layers <file> [--top <cell>] [--flattened] [--include-text] [--format text|json]
+klt layers <file> [--top <cell>] [--flattened] [--include-text] [--deck <name>] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
@@ -27,6 +27,14 @@ klt layers <file> [--top <cell>] [--flattened] [--include-text] [--format text|j
   per layer, `text_count` (flattened text-label occurrence count) and
   `texts` (the distinct text strings that occur, each with its own
   flattened occurrence count).
+- `--deck` — opt-in. A built-in deck name (`sky130`, `gf180mcu`, `sg13g2`,
+  `sg13cmos5l`) whose layer-name table fills each entry's `name` where the
+  stream carries none (a name the stream does carry is never overridden), and
+  adds a top-level `deck` object `{"name", "content_hash"}` — the same
+  `sha256:` hash `klt deck rules` reports — pinning the table used. An unknown
+  deck exits `1` through the standard error envelope. Omitting `--deck` leaves
+  the report byte-identical. Layers absent from the deck's table keep
+  `name: null`. Purely additive — `schema_version` stays `1`.
 - `--format` — `text` (default, a human-readable aligned table) or `json`.
 
 The command runs fully headless via KLayout's batch database API
@@ -79,6 +87,7 @@ fields (purely additive — `schema_version` stays `1`):
 | `dbu_um`         | number (float)  | Database unit in micrometres (e.g. `0.001` = 1 nm).                |
 | `layer_count`    | integer         | Number of entries in `layers` (i.e. `len(layers)`).                |
 | `layers`         | array\<object\> | One entry per layer in the stream's layer table (see below).       |
+| `deck`           | object          | *(`--deck` only)* `{"name": str, "content_hash": str \| null}` of the deck whose table filled `name`. |
 
 ### `layers[]` entries
 

@@ -58,6 +58,8 @@ def run(args: argparse.Namespace) -> int:
             pdk=args.pdk,
             deck=args.deck,
             findings_only=args.findings_only,
+            omit_antenna_tables=args.omit_antenna_tables,
+            compact=args.compact,
         )
     except ErcError as exc:
         return emit_error("erc", str(exc), args.format)
@@ -107,6 +109,36 @@ def _print_declared_nets(report: dict) -> None:
             )
 
 
+def _print_gate_count(report: dict) -> None:
+    """The gate count line, plus a note when it is zero (issue #2896).
+
+    A passive-only cell has no transistor gate, so the antenna half has
+    nothing to grade; say so rather than leaving a bare ``gates: 0``.
+    """
+    print(f"gates: {report['gate_count']}")
+    if not report["gate_count"]:
+        print("  (no transistor gate in this cell; antenna checks not applicable)")
+
+
+def _print_antenna_tables_omitted(report: dict) -> None:
+    """The ``--omit-antenna-tables`` note, printed only when the flag was used."""
+    if report.get("antenna_tables_omitted"):
+        print("antenna_tables_omitted: True (--omit-antenna-tables)")
+
+
+def _print_compact_note(report: dict) -> None:
+    """The ``--compact`` note (issue #2965), printed only when the payload
+    carries the top-level ``compact`` block."""
+    compact = report.get("compact")
+    if compact is None:
+        return
+    print(
+        f"  (--compact: per-gate rows omitted; "
+        f"{compact['antenna_levels_skipped']} antenna levels skipped "
+        f"for {compact['skipped_reason']})"
+    )
+
+
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
@@ -119,9 +151,11 @@ def _print_text(report: dict) -> None:
     if deck_provenance is not None:
         print(f"deck: {deck_provenance['name']}")
     print(f"findings_only: {report['findings_only']}")
+    _print_antenna_tables_omitted(report)
     print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
-    print(f"gates: {report['gate_count']}")
+    _print_gate_count(report)
+    _print_compact_note(report)
 
     for gate in report["gates"]:
         print()

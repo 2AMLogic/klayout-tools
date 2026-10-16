@@ -37,6 +37,10 @@ klt = "klayout_tools.cli:main"
 dev = [
     "pytest>=8.0",
     "ruff>=0.14",
+    # Type-check ratchet (issue #3221): scripts/check_type_baseline.py.
+    # Pinned to a major so diagnostics (and thus type-baseline.json) stay
+    # stable between releases.
+    "mypy>=2.4,<3",
     # Lets tests/test_mcp_server.py run its stdio round-trip in CI. Dev-only:
     # the test importorskip()s `mcp`, so the suite also passes without it.
     "mcp>=2.0,<3",
@@ -329,6 +333,37 @@ path = "hatch_build.py"
 testpaths = ["tests"]
 addopts = "-q"
 
+[tool.mypy]
+# Baseline-ratchet type check (issue #3221); see scripts/check_type_baseline.py
+# and docs/type-checking.md. Not `strict`: the baseline records today's
+# diagnostics and the ratchet only blocks new ones.
+files = ["src"]
+python_version = "3.10"
+ignore_missing_imports = false
+show_error_codes = true
+show_column_numbers = true
+pretty = false
+
+# KLayout's Python bindings ship no usable type information.
+[[tool.mypy.overrides]]
+module = ["pya", "pya.*", "klayout", "klayout.*"]
+ignore_missing_imports = true
+
+# Stricter bar for the JSON-contract envelope modules: they must stay fully
+# annotated (and are why `src/klayout_tools/py.typed` ships, issue #3221).
+[[tool.mypy.overrides]]
+module = ["klayout_tools.cli.output", "klayout_tools.signoff_envelopes"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+# Optional-extra / stub-less third parties that are legitimately absent or
+# untyped in the dev environment (cocotb is the `functional-verification`
+# extra; jsonschema ships no inline types). Without this they would surface
+# as import-not-found / import-untyped, which the ratchet refuses to baseline.
+[[tool.mypy.overrides]]
+module = ["cocotb", "cocotb.*", "cocotb_tools", "cocotb_tools.*", "jsonschema", "jsonschema.*"]
+ignore_missing_imports = true
+
 [tool.ruff]
 target-version = "py310"
 src = ["src", "tests"]
@@ -361,6 +396,21 @@ select = [
     "I",   # isort (import order)
     "UP",  # pyupgrade
     "B",   # flake8-bugbear
+    # flake8-bandit: explicit high-signal subset (NOT blanket "S"). S101
+    # (assert), S603/S607 (subprocess by design) and S105 (false-positive
+    # "password" strings) stay off as pure noise (issue #3222).
+    "S102",  # exec
+    "S108",  # hardcoded /tmp
+    "S202",  # tarfile extractall
+    "S301",  # pickle
+    "S307",  # eval
+    "S310",  # urlopen scheme
+    "S314",  # stdlib xml parsing
+    "S324",  # weak hashes
+    "S506",  # unsafe yaml load
+    "S602",  # subprocess shell=True
+    "S604",  # shell=True call
+    "S605",  # os.system-style shell
 ]
 
 [tool.ruff.lint.mccabe]
@@ -388,3 +438,9 @@ max-complexity = 10
 # reviewer can diff against the origin unmodified -- reflowing them to satisfy
 # this repo's 88-column style would itself be an undisclosed change.
 "src/klayout_tools/_vendor/mutation_variants.py" = ["E501"]
+# Security rules (issue #3222) target shipped code. Tests, examples and research
+# scripts parse repo-controlled/just-built files and use throwaway "/tmp/..."
+# string fixtures that are never opened, so S108/S314/S202 are pure noise there.
+"tests/**" = ["S108", "S202", "S314"]
+"examples/**" = ["S108", "S314"]
+"scripts/**" = ["S108", "S314"]

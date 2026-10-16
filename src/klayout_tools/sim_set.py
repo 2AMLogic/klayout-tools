@@ -8,7 +8,14 @@ flight at once, the rest queue) and aggregates the outcomes. Everything
 else is unchanged and reused -- each request runs through
 :func:`klayout_tools.sim.run_sim` with ``backend="batch"``, so the
 capacity-refusal backoff/jitter is :func:`klayout_tools.sim_batch.launch_job`'s
-own (``request.batch.capacity_wait_s``); there is no second retry loop here.
+own (``request.batch.capacity_wait_s``). The only retry here is the opt-in
+``capacity_retries`` (issue #3520): a request whose submit came back refused
+with a capacity code (and nothing else) is re-run, bounded, after a
+``capacity_wait_s``-style backoff; any other failure is never retried.
+
+While the set runs, ``<dir>/set-manifest.json`` maps every request to its
+output directory, status and (once known) job id, rewritten on each
+transition, so a client killed mid-set can re-associate what it started.
 
 Set mode **never falls back to local ngspice**: the backend is forced to
 ``batch``, and a request that fails is reported as an ``error`` entry, not
@@ -23,12 +30,15 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .output_lock import OutputLockError
 from .sim import SimError, run_sim
+from .sim_batch import BATCH_CONCURRENCY_CAP_CODE, BATCH_NO_CAPACITY_CODE
 
 SET_SCHEMA_VERSION = 1
 
@@ -37,6 +47,18 @@ DEFAULT_MAX_IN_FLIGHT = 4
 
 #: Name of the per-request report written into each request's own directory.
 REPORT_FILENAME = "report.json"
+
+#: Name of the incrementally-updated request -> directory/job map (issue #3520).
+MANIFEST_FILENAME = "set-manifest.json"
+
+#: Schema version of the manifest file.
+MANIFEST_SCHEMA_VERSION = 1
+
+#: Refusal codes ``capacity_retries`` re-submits; every other code is terminal.
+CAPACITY_CODES = frozenset({BATCH_NO_CAPACITY_CODE, BATCH_CONCURRENCY_CAP_CODE})
+
+#: Base backoff (seconds) between capacity retries; doubles per attempt.
+CAPACITY_RETRY_BACKOFF_S = 5.0
 
 
 def _request_dirs(paths: list[str], outdir: str | None) -> list[str]:
@@ -79,12 +101,56 @@ def _entry_exit_code(status: str) -> int:
     return 0
 
 
+class _Manifest:
+    """Thread-safe, atomically rewritten ``set-manifest.json``."""
+
+    def __init__(self, path: str, paths: list[str], dirs: list[str]) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._entries: list[dict[str, Any]] = [
+            {
+                "index": i,
+                "request": request,
+                "dir": dirs[i],
+                "status": "pending",
+                "job_id": None,
+                "job_ids": [],
+                "attempts": 0,
+            }
+            for i, request in enumerate(paths)
+        ]
+        self._flush()
+
+    def update(self, index: int, **fields: Any) -> None:
+        with self._lock:
+            self._entries[index].update(fields)
+            self._flush()
+
+    def _flush(self) -> None:
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        tmp = f"{self.path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "schema_version": MANIFEST_SCHEMA_VERSION,
+                    "requests": self._entries,
+                },
+                handle,
+                indent=2,
+            )
+            handle.write("\n")
+        os.replace(tmp, self.path)
+
+
 def _run_one(
     index: int,
     path: str,
     directory: str,
     run: Callable[..., dict[str, Any]],
     run_kwargs: dict[str, Any],
+    manifest: _Manifest | None = None,
+    capacity_retries: int = 0,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "index": index,
@@ -96,13 +162,24 @@ def _run_one(
         "report": None,
         "error": None,
     }
-    try:
-        report = run(path, artifacts_dir=directory, backend="batch", **run_kwargs)
-    except (SimError, OutputLockError) as exc:
-        entry["error"] = {"message": str(exc), "code": getattr(exc, "code", None)}
-        return entry
-    except Exception as exc:  # one request must never sink its siblings
-        entry["error"] = {"message": f"{type(exc).__name__}: {exc}", "code": None}
+    attempt = 0
+    while True:
+        attempt += 1
+        if manifest:
+            manifest.update(index, status="running", attempts=attempt)
+        try:
+            report = run(path, artifacts_dir=directory, backend="batch", **run_kwargs)
+            break
+        except (SimError, OutputLockError) as exc:
+            code = getattr(exc, "code", None)
+            if code in CAPACITY_CODES and attempt <= capacity_retries:
+                sleep(CAPACITY_RETRY_BACKOFF_S * 2 ** (attempt - 1))
+                continue
+            entry["error"] = {"message": str(exc), "code": code}
+        except Exception as exc:  # one request must never sink its siblings
+            entry["error"] = {"message": f"{type(exc).__name__}: {exc}", "code": None}
+        if manifest:
+            manifest.update(index, status="error")
         return entry
 
     os.makedirs(directory, exist_ok=True)
@@ -118,6 +195,10 @@ def _run_one(
         job_ids=job_ids,
         report=report_path,
     )
+    if manifest:
+        manifest.update(
+            index, status=entry["status"], job_id=entry["job_id"], job_ids=job_ids
+        )
     return entry
 
 
@@ -127,20 +208,41 @@ def run_sim_set(
     outdir: str | None = None,
     max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
     run: Callable[..., dict[str, Any]] = run_sim,
+    capacity_retries: int = 0,
+    sleep: Callable[[float], None] = time.sleep,
     **run_kwargs: Any,
 ) -> dict[str, Any]:
     """Run ``request_paths`` with at most ``max_in_flight`` in flight; return
-    the aggregate envelope. Per-request failures are entries, never raised."""
+    the aggregate envelope. Per-request failures are entries, never raised.
+
+    ``capacity_retries`` (default 0: off) re-submits a request refused with a
+    capacity code up to that many more times, with doubling backoff."""
     if not request_paths:
         raise SimError("--batch-set needs at least one request file")
     if isinstance(max_in_flight, bool) or max_in_flight < 1:
         raise SimError(f"--max-in-flight must be >= 1 (got {max_in_flight!r})")
+    if isinstance(capacity_retries, bool) or capacity_retries < 0:
+        raise SimError(f"--capacity-retries must be >= 0 (got {capacity_retries!r})")
 
     dirs = _request_dirs(request_paths, outdir)
+    manifest_dir = outdir if outdir is not None else os.path.dirname(dirs[0])
+    manifest = _Manifest(
+        os.path.join(manifest_dir, MANIFEST_FILENAME), request_paths, dirs
+    )
     workers = min(max_in_flight, len(request_paths))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
-            pool.submit(_run_one, i, path, dirs[i], run, run_kwargs)
+            pool.submit(
+                _run_one,
+                i,
+                path,
+                dirs[i],
+                run,
+                run_kwargs,
+                manifest,
+                capacity_retries,
+                sleep,
+            )
             for i, path in enumerate(request_paths)
         ]
         requests = [future.result() for future in futures]

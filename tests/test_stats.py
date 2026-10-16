@@ -5,7 +5,9 @@ no dependency on an external corpus.
 """
 
 import json
+from pathlib import Path
 
+import jsonschema
 import klayout.db as kdb
 import pytest
 
@@ -143,6 +145,8 @@ def test_stats_report_empty_layout(tmp_path):
     assert report["total"] == {
         "area_um2": 0.0,
         "density": 0.0,
+        "merged_area_um2": 0.0,
+        "merged_density": 0.0,
         "polygon_count": 0,
         "vertex_count": 0,
         "flattened_polygon_count": 0,
@@ -387,7 +391,9 @@ def test_json_contract(tmp_path, capsys):
         "bbox_um",
         "total",
         "layers",
+        "density_windows",
     }
+    assert data["density_windows"] is None
     assert data["schema_version"] == 1
     assert isinstance(data["file"], str)
     assert isinstance(data["dbu_um"], float)
@@ -403,11 +409,14 @@ def test_json_contract(tmp_path, capsys):
     assert set(data["total"].keys()) == {
         "area_um2",
         "density",
+        "merged_area_um2",
+        "merged_density",
         "polygon_count",
         "vertex_count",
         "flattened_polygon_count",
         "flattened_vertex_count",
     }
+    assert isinstance(data["total"]["merged_area_um2"], float)
     assert isinstance(data["total"]["flattened_polygon_count"], int)
     assert isinstance(data["total"]["flattened_vertex_count"], int)
     assert isinstance(data["layers"], list)
@@ -418,6 +427,8 @@ def test_json_contract(tmp_path, capsys):
             "name",
             "area_um2",
             "density",
+            "merged_area_um2",
+            "merged_density",
             "polygon_count",
             "vertex_count",
             "flattened_polygon_count",
@@ -431,6 +442,66 @@ def test_json_contract(tmp_path, capsys):
     # Sorted ascending by (layer, datatype).
     pairs = [(e["layer"], e["datatype"]) for e in data["layers"]]
     assert pairs == sorted(pairs)
+
+
+_SCHEMA = json.loads(
+    (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "schemas"
+        / "stats-response.schema.json"
+    ).read_text()
+)
+
+
+def _assert_conforms_and_requires(payload: dict, drop: list) -> None:
+    """The real payload validates, and deleting each required field breaks it."""
+    jsonschema.Draft202012Validator.check_schema(_SCHEMA)
+    jsonschema.validate(payload, _SCHEMA, cls=jsonschema.Draft202012Validator)
+    for path in drop:
+        broken = json.loads(json.dumps(payload))
+        target = broken
+        for key in path[:-1]:
+            target = target[key]
+        del target[path[-1]]
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, _SCHEMA, cls=jsonschema.Draft202012Validator)
+
+
+def test_json_response_schema(tmp_path, capsys):
+    """Real `--format json` output with and without --per-layer validates
+    against the shipped response schema."""
+    path = tmp_path / "design.oas"
+    _make_layout().write(str(path))
+
+    assert main(["stats", str(path), "--per-layer", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    _assert_conforms_and_requires(
+        data,
+        [
+            ["schema_version"],
+            ["file"],
+            ["dbu_um"],
+            ["top_cell"],
+            ["bbox_um"],
+            ["total"],
+            ["layers"],
+        ]
+        + [
+            ["bbox_um", "height"],
+            ["total", "area_um2"],
+            ["total", "flattened_vertex_count"],
+        ]
+        + [
+            ["layers", 0, k]
+            for k in ("layer", "datatype", "name", "area_um2", "annotation")
+        ],
+    )
+
+    assert main(["stats", str(path), "--format", "json"]) == 0
+    plain = json.loads(capsys.readouterr().out)
+    assert plain["layers"] is None
+    _assert_conforms_and_requires(plain, [["layers"], ["total", "density"]])
 
 
 def test_json_without_per_layer_has_null_layers(tmp_path, capsys):
@@ -488,3 +559,142 @@ def test_stats_report_annotation_range_boundaries(tmp_path, layer, datatype, exp
         e for e in report["layers"] if (e["layer"], e["datatype"]) == (layer, datatype)
     )
     assert entry["annotation"] is expected
+
+
+def _write_boxes(tmp_path, boxes, layer=(1, 0), name="boxes.gds"):
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    idx = layout.layer(*layer)
+    for box in boxes:
+        top.shapes(idx).insert(box)
+    path = tmp_path / name
+    layout.write(str(path))
+    return str(path)
+
+
+def test_merged_area_overlap_repro(tmp_path):
+    path = _write_boxes(
+        tmp_path, [kdb.Box(0, 0, 3000, 2000), kdb.Box(1000, 0, 3000, 1000)]
+    )
+    report = stats_report(path, per_layer=True)
+    entry = report["layers"][0]
+    assert entry["area_um2"] == pytest.approx(8.0)
+    assert entry["merged_area_um2"] == pytest.approx(6.0)
+    assert report["total"]["merged_area_um2"] == pytest.approx(6.0)
+    assert entry["merged_density"] == pytest.approx(1.0)
+
+
+def test_merged_area_equals_raw_for_disjoint_array(tmp_path):
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    leaf = layout.create_cell("LEAF")
+    leaf.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    top.insert(
+        kdb.CellInstArray(
+            leaf.cell_index(),
+            kdb.Trans(),
+            kdb.Vector(2000, 0),
+            kdb.Vector(0, 2000),
+            3,
+            2,
+        )
+    )
+    path = tmp_path / "array.gds"
+    layout.write(str(path))
+    total = stats_report(str(path))["total"]
+    assert total["area_um2"] == pytest.approx(6.0)
+    assert total["merged_area_um2"] == pytest.approx(6.0)
+
+
+def test_merged_area_ignores_texts(tmp_path):
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    idx = layout.layer(1, 0)
+    top.shapes(idx).insert(kdb.Box(0, 0, 1000, 1000))
+    top.shapes(idx).insert(kdb.Text("x", 0, 0))
+    path = tmp_path / "t.gds"
+    layout.write(str(path))
+    assert stats_report(str(path))["total"]["merged_area_um2"] == pytest.approx(1.0)
+
+
+def test_density_windows_half_covered(tmp_path):
+    # The layer-2 box stretches the bbox to 10x10 um; layer 1 covers the left half.
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 5000, 10000))
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 5000, 10000))
+    top.shapes(layout.layer(2, 0)).insert(kdb.Box(0, 0, 10000, 10000))
+    path = tmp_path / "half.gds"
+    layout.write(str(path))
+    report = stats_report(str(path), density_window=5.0, window_layers=[(1, 0)])
+    dw = report["density_windows"]
+    assert dw["window_count"] == 4
+    (layer,) = dw["layers"]
+    fractions = {(w["ix"], w["iy"]): w["fraction"] for w in layer["windows"]}
+    assert fractions == {(0, 0): 1.0, (0, 1): 1.0, (1, 0): 0.0, (1, 1): 0.0}
+    assert [(w["iy"], w["ix"]) for w in layer["windows"]] == [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+    ]
+    assert layer["summary"]["max"] == 1.0
+    assert layer["summary"]["min"] == 0.0
+    assert layer["summary"]["mean"] == 0.5
+
+
+def test_density_windows_clipped_edges_and_overlap_counted_once(tmp_path):
+    # bbox 6x4 um, window 4 um -> second column is 2 um wide (clipped).
+    path = _write_boxes(
+        tmp_path,
+        [kdb.Box(0, 0, 6000, 4000), kdb.Box(4000, 0, 6000, 2000)],
+    )
+    layer = stats_report(path, density_window=4.0)["density_windows"]["layers"][0]
+    assert [w["fraction"] for w in layer["windows"]] == [1.0, 1.0]
+    assert layer["windows"][1]["bbox_um"]["width"] == 2.0
+    assert layer["windows"][1]["area_um2"] == pytest.approx(8.0)
+
+
+def test_density_windows_excludes_annotation_and_honours_window_layer(tmp_path):
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    for lay in (1, 2, 994):
+        top.shapes(layout.layer(lay, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    path = tmp_path / "ann.gds"
+    layout.write(str(path))
+    default = stats_report(str(path), density_window=1.0)["density_windows"]
+    assert [e["layer"] for e in default["layers"]] == [1, 2]
+    picked = stats_report(str(path), density_window=1.0, window_layers=[(2, 0)])[
+        "density_windows"
+    ]
+    assert [e["layer"] for e in picked["layers"]] == [2]
+
+
+def test_density_window_invalid_and_capped(tmp_path):
+    path = _write_boxes(tmp_path, [kdb.Box(0, 0, 10000, 10000)])
+    for bad in (0.0, -1.0, 0.0001):
+        with pytest.raises(StatsError):
+            stats_report(path, density_window=bad)
+    with pytest.raises(StatsError, match="limit"):
+        stats_report(path, density_window=0.01)
+
+
+def test_density_window_cli_json_and_deterministic(tmp_path, capsys):
+    path = _write_boxes(tmp_path, [kdb.Box(0, 0, 2000, 2000)])
+    argv = [
+        "stats",
+        path,
+        "--density-window",
+        "1",
+        "--window-layer",
+        "1/0",
+        "--format",
+        "json",
+    ]
+    assert main(argv) == 0
+    first = capsys.readouterr().out
+    assert main(argv) == 0
+    assert capsys.readouterr().out == first
+    data = json.loads(first)
+    assert data["density_windows"]["layers"][0]["summary"]["mean"] == 1.0
+    assert main(["stats", path, "--window-layer", "bad", "--density-window", "1"]) == 1

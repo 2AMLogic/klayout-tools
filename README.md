@@ -107,6 +107,7 @@ klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
+klt tap-distance design.gds --subject '65/20' --taps '65/44' --max-distance-um 15  # every diffusion point within a Euclidean distance of a tap
 klt components design.gds --conductors '[{"name":"m1","layer":[68,20]}]'  # connected components, no deck
 klt clip design.gds --cell SUBCELL -o subcell.gds  # write a bbox region or named cell's subtree out as its own stream
 klt stats design.gds --per-layer         # densities, bbox, polygon counts
@@ -119,6 +120,7 @@ klt yield mc.json --limits spec.json     # MC sample set + spec limits -> yield 
 klt yield-samples mc.json --negative-control bad.json --format json  # two MC sim reports -> yield sample set carrying a negative control
 klt yield-campaign spec.json             # launch + manage the MC campaign itself, sharded via klt sim, then yield's own pipeline unmodified
 klt yield-sensitivity campaign.json      # campaign parameter draws + output values -> ranked contribution to the spread (Rust core)
+klt yield-threshold records.json         # comparator/latch (stimulus, binary outcome) records -> probit threshold mu/sigma with CIs, per corner
 klt design-centering request.json        # yield-sensitivity ranking + sized device -> re-centering candidates
 klt layout-metrics design.gds            # normalized layout.json per block
 klt kb search bandgap                    # query the circuit-design knowledge base

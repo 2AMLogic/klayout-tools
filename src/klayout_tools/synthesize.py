@@ -30,9 +30,10 @@ in-process -- there is no Python binding for Yosys the way ``klayout.db``
 already is for ``klt lvs``/``klt extract``.
 
 Liberty resolution reuses ``klayout_tools.pdk.find_pdk``/
-``list_cell_libraries`` -- the same ``libs_ref`` discovery ``klt pdk``/
-``klt cells`` already use (Yosys survey section 0) -- **no new PDK-fetch
-mechanism**. ``request.pdk`` carries only ``cell_library``/``corner`` (no
+``klayout_tools.pdk_cells.list_cell_libraries`` -- the same ``libs_ref``
+discovery ``klt pdk``/``klt cells`` already use (Yosys survey section 0) --
+**no new PDK-fetch mechanism**. ``request.pdk`` carries only
+``cell_library``/``corner`` (no
 ``variant``/``root``): the resolved PDK install is whatever ``find_pdk()``'s
 own default search order (``$PDK_ROOT``/``$PDK``, then the ciel/volare
 stores, then the conventional prefixes) finds, exactly as ``klt pdk find``
@@ -50,7 +51,7 @@ matching ``klt drc``'s existing "deck requires an asset the resolved install
 doesn't ship" posture (the Yosys survey's own open question, resolved here).
 When ``request.pdk.corner`` is omitted, the nominal (typical-process,
 room-temperature) corner ``klt pdk cells``' own ``nominal_corner`` selection
-already picks is used, via :func:`klayout_tools.pdk.list_cell_libraries`.
+already picks is used, via :func:`klayout_tools.pdk_cells.list_cell_libraries`.
 
 ``timing`` carries ABC's own ``stime -p`` critical-path estimate (issue
 #807, Epic #704 Phase 1a). The Yosys survey section 3.5/3.6 finding stands
@@ -208,7 +209,7 @@ import uuid
 from typing import Any
 
 from . import env_provenance
-from ._paths import _load_request_json, validate_request_shape
+from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
@@ -227,6 +228,7 @@ from ._report_verify import (
     load_committed_report,
     strip_keys,
 )
+from ._verilog_params import chparam_lines, validate_parameters
 from .equiv import EquivError, run_equiv
 from .pdk_cells import resolve_liberty_for_cell_library
 from .restructure import RestructureError, restructure_for_timing
@@ -921,6 +923,25 @@ def _baseline_ref_fallback(resolved_path: str, *, repo_root: str | None) -> str:
     )
 
 
+#: Top-level request keys ``klt synthesize`` reads (issue #3466). ``schema``
+#: is an inert, unvalidated tag user-authored requests commonly carry.
+_ALLOWED_REQUEST_KEYS = frozenset(
+    {
+        "schema",
+        "engine",
+        "sources",
+        "hdl_toplevel",
+        "pdk",
+        "constraints",
+        "structural",
+        "baseline",
+        "arithmetic",
+        "run_id",
+        "parameters",
+    }
+)
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt synthesize`` request JSON file.
 
@@ -931,12 +952,19 @@ def load_request(request_path: str) -> dict[str, Any]:
     input, never emitted by this tool).
     """
     request = _load_request_json(request_path, SynthesizeError)
-    return validate_request_shape(
+    request = validate_request_shape(
         request,
         "request file",
         error_cls=SynthesizeError,
         required_fields=("sources", "hdl_toplevel", "pdk"),
     )
+    # Issue #3466: an unrecognised top-level key used to be dropped in
+    # silence, so a misspelt or unsupported field produced a plausible
+    # default-configuration result. Reject it instead (`_comment` exempt).
+    _reject_unknown_keys(
+        request, _ALLOWED_REQUEST_KEYS, request_path, "", SynthesizeError
+    )
+    return request
 
 
 def run_synthesize(
@@ -1046,6 +1074,9 @@ def run_synthesize(
         raise SynthesizeError("request.hdl_toplevel must be a non-empty string")
     if re.search(r"[/\\\x00]", hdl_toplevel):
         raise SynthesizeError("request.hdl_toplevel must not contain path separators")
+    parameters = validate_parameters(
+        request.get("parameters"), SynthesizeError, "request.parameters"
+    )
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -1101,6 +1132,9 @@ def run_synthesize(
             "content_hash": _combined_content_hash(resolved_sources),
             "role": INPUT_ROLE_SOURCE,
         }
+    # Issue #3466: record which elaboration this is, so two parameterisations
+    # of the same sources are distinguishable in provenance.
+    provenance["parameters"] = dict(parameters)
     output_dir = _create_run_directory(request_dir, request)
 
     script_path = os.path.join(output_dir, f"synth_{hdl_toplevel}.ys")
@@ -1144,6 +1178,7 @@ def run_synthesize(
             engine_options=engine_options,
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
+            parameters=parameters,
         )
 
     # Issue #1844: `repo_root` is threaded into this run's own script so
@@ -1185,6 +1220,7 @@ def run_synthesize(
         adder_techmap_path=adder_techmap_path,
         repo_root=repo_root,
         pdk_root=pdk_info["root"],
+        parameters=parameters,
     )
 
     # `cwd=repo_root` is what makes the relative paths `_write_script` just
@@ -1241,6 +1277,7 @@ def run_synthesize(
         adder_sources=adder_sources,
         adder_techmap_path=adder_techmap_path,
         repo_root=repo_root,
+        parameters=parameters,
     )
 
     equivalence = None
@@ -1252,6 +1289,7 @@ def run_synthesize(
             netlist_path=netlist_path,
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
+            parameters=parameters,
         )
 
     sta, sta_unavailable_reason = _read_sta_timing(
@@ -1271,6 +1309,7 @@ def run_synthesize(
             max_iterations=restructure_max_iterations,
             equiv_timeout_s=equiv_timeout_s,
             repo_root=repo_root,
+            parameters=parameters,
         )
 
     response: dict[str, Any] = {
@@ -1278,6 +1317,10 @@ def run_synthesize(
         "engine": engine,
         "engine_version": engine_version,
         "hdl_toplevel": hdl_toplevel,
+        # Issue #3466: the top-level parameter overrides this run elaborated
+        # with (`{}` when none). Additive field, no `schema_version` bump
+        # (docs/json-contract.md).
+        "parameters": dict(parameters),
         "run_id": os.path.basename(output_dir),
         "status": "ok",
         "instance_count": module_stats["num_cells"],
@@ -1294,6 +1337,10 @@ def run_synthesize(
         "leakage_power_nw": leakage_power_nw,
         "leakage_by_type_nw": leakage_by_type_nw,
         "timing": timing,
+        # Issue #2883: which clock constraints the request carried and that
+        # `timing.delay_target_ps` is ONE global ABC target (never per-clock).
+        # Additive field, no `schema_version` bump (docs/json-contract.md).
+        "clock_targets": _describe_clock_targets(constraints, delay_target_ps),
         "sta": sta,
         # Issue #2628: *why* `sta` is `null`, so a caller can tell "STA
         # unavailable here -- install the optional extension and retry" from
@@ -1459,6 +1506,7 @@ def _verify_synthesis_equivalence(
     liberty_path: str,
     timeout_s: float | None,
     request_filename: str | None = None,
+    parameters: dict[str, int | str] | None = None,
 ) -> dict[str, Any]:
     """The ``verify_equivalence`` gate :func:`run_synthesize` calls after a
     successful synthesis: reuses :func:`klayout_tools.equiv.run_equiv`'s
@@ -1495,7 +1543,7 @@ def _verify_synthesis_equivalence(
         synthesize_output_dir,
         request_filename or f"equiv_request_{hdl_toplevel}.json",
     )
-    equiv_request = {
+    equiv_request: dict[str, Any] = {
         "gold": {"sources": resolved_sources, "top": hdl_toplevel},
         "gate": {
             "sources": [netlist_path],
@@ -1503,6 +1551,9 @@ def _verify_synthesis_equivalence(
             "liberty": liberty_path,
         },
     }
+    if parameters:
+        # Issue #3466: the gold RTL must be elaborated like the synthesis was.
+        equiv_request["gold"]["parameters"] = dict(parameters)
     try:
         with open(equiv_request_path, "w", encoding="utf-8") as handle:
             json.dump(equiv_request, handle, indent=2)
@@ -1576,6 +1627,7 @@ def _run_timing_restructuring(
     max_iterations: int | None,
     equiv_timeout_s: float | None,
     repo_root: str | None = None,
+    parameters: dict[str, int | str] | None = None,
 ) -> dict[str, Any]:
     """The ``restructure_timing`` gate :func:`run_synthesize` calls after the
     ``sta`` stage: runs
@@ -1657,6 +1709,7 @@ def _run_timing_restructuring(
             liberty_path=liberty_path,
             timeout_s=equiv_timeout_s,
             request_filename=f"equiv_request_{hdl_toplevel}_restructured.json",
+            parameters=parameters,
         )
 
     # Issue #1844: `restructured_netlist_path` is `restructure_for_timing`'s
@@ -1745,9 +1798,79 @@ def _resolve_liberty(
     )
 
 
+def _resolve_clocks(constraints: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The validated ``constraints.clocks`` list as ``[{port, period_ns}]``
+    (issue #2883), empty when omitted/``null``.
+
+    Each entry must be an object with a non-empty string ``port`` (unique
+    across the list) and a positive numeric ``period_ns``. Unknown entry keys
+    and a non-array / empty list are errors -- a request that means to
+    constrain several clocks but expresses it wrongly must not be silently
+    downgraded, exactly as for ``clock_period_ns``.
+    """
+    if not constraints:
+        return []
+    raw = constraints.get("clocks")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not raw:
+        raise SynthesizeError(
+            "request.constraints.clocks must be a non-empty array of "
+            "{port, period_ns} objects or null"
+        )
+    clocks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        where = f"request.constraints.clocks[{index}]"
+        clock = _validate_clock_entry(entry, where)
+        port = clock["port"]
+        if port in seen:
+            raise SynthesizeError(f"{where}.port '{port}' is listed more than once")
+        seen.add(port)
+        clocks.append(clock)
+    return clocks
+
+
+def _validate_clock_entry(entry: Any, where: str) -> dict[str, Any]:
+    """One validated ``constraints.clocks`` entry as ``{port, period_ns}``
+    (issue #2883).
+
+    Checks the entry in isolation -- object shape, no unknown keys, a
+    non-empty string ``port`` and a positive numeric ``period_ns``. The
+    list-level checks (array type, non-empty, unique ports) stay in
+    :func:`_resolve_clocks`. ``where`` prefixes every error message.
+    """
+    if not isinstance(entry, dict):
+        raise SynthesizeError(f"{where} must be a {{port, period_ns}} object")
+    unknown = sorted(set(entry) - {"port", "period_ns"})
+    if unknown:
+        raise SynthesizeError(
+            f"{where} has unknown key(s): {', '.join(map(str, unknown))} "
+            "(allowed: port, period_ns)"
+        )
+    port = entry.get("port")
+    if not isinstance(port, str) or not port.strip():
+        raise SynthesizeError(f"{where}.port must be a non-empty string")
+    period = entry.get("period_ns")
+    if isinstance(period, bool) or not isinstance(period, (int, float)):
+        raise SynthesizeError(
+            f"{where}.period_ns must be a positive number (nanoseconds)"
+        )
+    if period <= 0:
+        raise SynthesizeError(f"{where}.period_ns must be greater than zero")
+    return {"port": port, "period_ns": period}
+
+
 def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
-    """``constraints.clock_period_ns`` as an integer picosecond ABC delay
-    target (``abc -D``), or ``None`` when the request does not supply one.
+    """The integer picosecond ABC delay target (``abc -D``) derived from
+    ``constraints``, or ``None`` when the request does not supply one.
+
+    Precedence (issue #2883): an explicit ``constraints.clock_period_ns`` is
+    the global target; otherwise, when ``constraints.clocks`` is given, the
+    *tightest* (smallest) listed ``period_ns`` -- ABC takes a single global
+    ``-D``, so the conservative choice is the one that cannot under-target
+    any listed domain. See :func:`_describe_clock_targets` for the envelope
+    echo of which one was used.
 
     ``None``/omitted is a deliberate, documented state, not an oversight
     (``docs/cli/synthesize.md``): the run still gets ``-constr`` -- so ABC's
@@ -1762,8 +1885,11 @@ def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
     """
     if not constraints:
         return None
+    clocks = _resolve_clocks(constraints)
     clock_period_ns = constraints.get("clock_period_ns")
     if clock_period_ns is None:
+        if clocks:
+            return int(round(min(c["period_ns"] for c in clocks) * 1000))
         return None
     if isinstance(clock_period_ns, bool) or not isinstance(
         clock_period_ns, (int, float)
@@ -1777,6 +1903,34 @@ def _resolve_delay_target_ps(constraints: dict[str, Any] | None) -> int | None:
             "request.constraints.clock_period_ns must be greater than zero"
         )
     return int(round(clock_period_ns * 1000))
+
+
+def _describe_clock_targets(
+    constraints: dict[str, Any] | None, delay_target_ps: int | None
+) -> dict[str, Any]:
+    """The response's ``clock_targets`` object (issue #2883): which clock
+    constraints the request carried and how the single ABC delay target was
+    derived from them.
+
+    ``abc -D`` is one global number, so per-clock periods are *never*
+    individually enforced; ``per_clock_enforced`` is always ``false`` and
+    ``delay_target_basis`` names where ``delay_target_ps`` came from:
+    ``"none"``, ``"clock_period_ns"`` or ``"min_clocks_period_ns"``.
+    """
+    clocks = _resolve_clocks(constraints)
+    explicit = (constraints or {}).get("clock_period_ns") is not None
+    if explicit:
+        basis = "clock_period_ns"
+    elif clocks:
+        basis = "min_clocks_period_ns"
+    else:
+        basis = "none"
+    return {
+        "clocks": clocks,
+        "delay_target_ps": delay_target_ps,
+        "delay_target_basis": basis,
+        "per_clock_enforced": False,
+    }
 
 
 def _write_constr(constr_path: str, driving_cell: str, load_ff: float) -> None:
@@ -2114,6 +2268,7 @@ def _write_script(
     adder_techmap_path: str | None = None,
     repo_root: str | None = None,
     pdk_root: str | None = None,
+    parameters: dict[str, int | str] | None = None,
 ) -> str:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
@@ -2272,6 +2427,9 @@ def _write_script(
         f"read_verilog {_script_path_text(path, repo_root=repo_root)}"
         for path in sources
     ]
+    # Issue #3466: top-level parameter overrides apply between the reads and
+    # `hierarchy`, so elaboration sees the overridden value.
+    lines += chparam_lines(parameters or {}, hdl_toplevel)
     lines.append(f"hierarchy -check -top {hdl_toplevel}")
     if adder_techmap_path is not None:
         lines += ["proc", "opt_expr", "opt_clean"]
@@ -3461,6 +3619,30 @@ def _synthesize_provenance_hashes(
     return input_hash, _content_hash(liberty_path)
 
 
+def _synthesize_request_parameters(request_path: str) -> dict[str, int | str]:
+    """The validated ``parameters`` override of the request at
+    ``request_path`` (``{}`` when absent) -- what ``--check`` compares against
+    the committed report's recorded ``parameters`` (issue #3466)."""
+    return validate_parameters(
+        load_request(request_path).get("parameters"),
+        SynthesizeError,
+        "request.parameters",
+    )
+
+
+def _parameters_check(recorded: Any, current: dict[str, int | str]) -> dict[str, Any]:
+    """Cheap-mode comparison entry for the ``parameters`` override (issue
+    #3466). A report that predates the field recorded no override, so an
+    absent ``parameters`` counts as ``{}``."""
+    expected = {} if recorded is None else recorded
+    return {
+        "field": "parameters",
+        "expected": expected,
+        "actual": current,
+        "match": expected == current,
+    }
+
+
 def check_synthesize_report(
     report_path: str,
     request_path: str,
@@ -3508,6 +3690,10 @@ def check_synthesize_report(
             "provenance.deck.content_hash",
             get_path(committed, ("provenance", "deck", "content_hash")),
             deck_hash,
+        ),
+        _parameters_check(
+            get_path(committed, ("parameters",)),
+            _synthesize_request_parameters(request_path),
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)

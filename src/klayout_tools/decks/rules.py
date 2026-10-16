@@ -43,9 +43,8 @@ class DerivedLayer:
     "``Metal4`` must enclose every ``Via4`` by the MiM margin" check has
     nothing to do with routing vias at all.
 
-    ``mode`` selects *which* derivation is applied (see the three values
-    below). The default, ``"sized_intersection"``, is the original
-    (issue #345) one:
+    ``mode`` selects *which* derivation is applied (see the values below).
+    The default, ``"sized_intersection"``, is the original (issue #345) one:
     ``intersect_with_region.interacting(base_region) & base_region.sized(sized_by_um)``
     -- i.e. only shapes of ``intersect_with`` that already touch the *unsized*
     ``base`` region somewhere, clipped to ``base``'s oversized outline. This
@@ -146,12 +145,77 @@ class DerivedLayer:
     express a holes-area rule like ``m1.7``: the checked "region" becomes
     each hole polygon, and the area threshold applies to each one
     individually, exactly matching ``with_area``'s official semantics.
+
+    **``"union"`` mode (issue #2688).** A fourth need, and the first one
+    that *enlarges* the checked region rather than scoping it down: a DRM
+    rule whose enclosing region is the boolean ``join`` of two drawn layers.
+    sg13g2's ``Cnt.c`` measures Cont enclosure against
+    ``act_nsram.join(activ_mask)`` -- ``Activ.drawing`` (1/0) **or**
+    ``Activ.mask`` (1/20), the latter being how IHP's own HBT PCell
+    (``npn13G2``) draws its emitter/base contact windows. ``"union"``
+    derives ``base_region + intersect_with_region`` (``Region.__add__``,
+    i.e. a ``join``; the checked side is merged before measuring, see
+    ``drc.py``'s ``_run_check``). ``sized_by_um`` is unused (conventionally
+    ``0.0``).
+
+    This is why a dropped ``join`` term is not interchangeable with a
+    dropped ``not`` term when approximating a compound official rule: for
+    an enclosing/overlap region, omitting ``.not(X)`` only widens the
+    rule's *scope* (conservative -- more geometry is held to the threshold),
+    but omitting ``.join(X)`` shrinks the enclosing region itself, so
+    geometry the official rule passes is reported as under-enclosed (an
+    unsound false positive in the PDK's own PCells, which the caller cannot
+    edit). Transcribe ``join`` terms with this mode rather than dropping
+    them.
+
+    Because the two inputs are alternatives rather than a scope, a
+    ``"union"`` rule is skipped only when **both** ``base`` and
+    ``intersect_with`` are absent from the stream: a mask-only layout (no
+    ``base`` geometry at all) is still fully checked against
+    ``intersect_with`` alone, and vice versa. ``intersect_with`` is
+    required for this mode.
+
+    **``"gate_endcap"`` mode (issue #2936).** A rule on how far one layer
+    must *extend past* another's edge where the two cross -- sky130's
+    ``poly.8`` ("min. poly extention gate (endcap)", 0.13 um), the poly
+    beyond a diffusion edge at a transistor. No enclosing/space primitive
+    expresses it: measuring the gate (``poly & diff``) against poly also
+    reports the gate's long sides, which are coincident with poly's own
+    edges. ``"gate_endcap"`` derives, instead, the *probe zones*: each
+    ``base`` (diffusion) edge segment lying under or flush with
+    ``intersect_with`` (poly) is a gate end edge, and the zone is that edge
+    pushed outward by ``sized_by_um`` (the required extension). Pair it
+    with ``check="enclosed"``, ``other_layer=<the poly layer>`` and
+    ``threshold_dbu=0``: the engine's outside-region term then reports
+    exactly the part of each zone poly fails to cover, including a flush
+    (zero-extension) end. Orientation-free (a rotated gate works the same),
+    and poly that merely abuts a diffusion from outside is not a gate.
+
+    **Well-context partition (issue #3484).** Any mode above can be followed
+    by a second, optional stage that keeps only the part of the derived
+    region that is ``"near"`` or ``"far"`` from a *context* region:
+    ``context_layers`` are joined (boolean OR) and oversized by
+    ``context_sized_by_um``, then the derived region is split by whole
+    polygon with ``interacting`` (``context="near"``) or ``not_interacting``
+    (``context="far"``). This is how a rule pair expresses gf180mcu's
+    ``NP.3``/``PP.5`` well-distance splits -- e.g. a ``PCOMP`` (``Comp`` AND
+    ``Pplus``) is held to the strict 0.16 um when it comes within 0.429 um
+    of an ``Nwell``/``Dnwell`` and to the relaxed value otherwise -- without
+    a third chained derivation. The two halves are an exact complement of
+    each other, so a polygon is never checked against neither or both.
+    Context layers absent from the stream contribute an empty region (every
+    polygon is then ``"far"``) and never cause the rule to be skipped.
+    Whole-polygon selection errs strict: a polygon that is only partly
+    within reach of the context is entirely ``"near"``.
     """
 
     base: tuple[int, int]
     sized_by_um: float
     intersect_with: tuple[int, int] | None = None
     mode: str = "sized_intersection"
+    context_layers: tuple[tuple[int, int], ...] = ()
+    context_sized_by_um: float = 0.0
+    context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -241,11 +305,40 @@ class RuleProvenance:
 
 
 @dataclass(frozen=True)
+class CompCoverageSpec:
+    """Descriptor for ``DrcRule(check="comp_coverage")`` (issue #3587): the
+    checked layer (``DrcRule.layer``) minus every ``covered_by_any`` layer,
+    with a *whole* checked polygon exempted when it interacts with any
+    ``exempt_markers`` polygon -- gf180mcu's ``DF.12``: ``comp.not_interacting
+    (schottky_diode).not(nplus).not(pplus)``.
+
+    Every named layer other than the checked one may be absent from a stream:
+    it is read as an empty region, never as a reason to skip the rule (an
+    unimplanted COMP is exactly the violation). Why this is a typed descriptor
+    rather than a :class:`DerivedLayer` mode: see
+    ``docs/design/gf180mcu-comp-checks-spike.md`` section 7.
+    """
+
+    covered_by_any: tuple[tuple[int, int], ...]
+    exempt_markers: tuple[tuple[int, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.covered_by_any:
+            raise ValueError("covered_by_any must name at least one layer")
+
+    def layers(self) -> tuple[tuple[int, int], ...]:
+        """Every non-checked layer this spec reads, in declaration order."""
+        return (*self.covered_by_any, *self.exempt_markers)
+
+
+@dataclass(frozen=True)
 class DrcRule:
     """One rule in a DRC deck.
 
     ``layer`` and ``other_layer`` are ``(layer, datatype)`` pairs. ``check``
-    selects which ``klayout.db.Region`` check primitive to run:
+    selects which ``klayout.db.Region`` check primitive to run (or, for
+    ``"comp_coverage"`` -- issue #3587 -- a region rule described by
+    ``region_spec``, see :class:`CompCoverageSpec`):
     ``"width"`` / ``"space"`` / ``"notch"`` / ``"isolated"`` are single-layer
     checks; ``"separation"`` / ``"enclosing"`` / ``"enclosed"`` / ``"overlap"``
     are two-layer checks and require ``other_layer``; ``"area"``, ``"density"``,
@@ -571,6 +664,30 @@ class DrcRule:
     rules on ``dualgate``/``v5_xtor`` either. Defaults to ``False`` -- the
     conservative value every pre-existing rule keeps, so the gate's
     behaviour is unchanged for them.
+
+    ``other_layer_selection`` (issue #2688) narrows the ``other_layer``
+    side of a two-layer rule to a whole-polygon sub-population of that
+    drawn layer, the same way a ``.not(...)``-free official selector does.
+    The only supported value is ``"squares"``: ``other_layer``'s *merged*
+    polygons filtered by ``klayout.db.Region.squares()`` -- the complement
+    of the DRC-DSL ``non_squares`` selector sg13g2's runset uses to split
+    square contacts from contact bars (``contbar = cont_nseal.non_squares;
+    cont_sq = cont_nseal.not(contbar)``, ``ihp-sg13g2.drc``). A contact bar
+    (or any non-square merged contact shape) is therefore neither measured
+    for margin nor reported by the #318 zero-overlap escape term of a rule
+    using this selection -- matching ``Cnt.c``, which never applied to
+    bars (those are ``CntB.*``'s job). ``None`` (the default, every
+    pre-existing rule) reads ``other_layer``'s full drawn shapes exactly as
+    before this field existed. Any other value is a deck-authoring mistake
+    :func:`~klayout_tools.drc.run_drc` rejects loudly with the rule id.
+
+    ``layer_selection`` (issues #2943, #3139) is the same ``"squares"``
+    selector applied to the rule's own primary ``layer`` (``cont_sq`` for
+    sg13g2's ``Cnt.a``/``Cnt.b``): contact bars, and rows of abutting
+    contacts that merge into a strip, are left to the ``CntB.*`` family
+    rather than measured as one oversized contact. ``None`` (the default)
+    checks the full drawn layer as before; it cannot be combined with
+    ``derived_layer``.
     """
 
     id: str
@@ -594,6 +711,9 @@ class DrcRule:
     voltage_independent: bool = False
     requires_any_layer: tuple[tuple[int, int], ...] | None = None
     require_containment: bool = False
+    other_layer_selection: str | None = None
+    layer_selection: str | None = None
+    region_spec: CompCoverageSpec | None = None
 
 
 class UnknownDeckError(Exception):

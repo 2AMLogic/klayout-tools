@@ -14,9 +14,9 @@
 //!
 //! **Consumers.** The static PEEC solve (`geometry::discretize_bars` ->
 //! `peec`, issue #2729) consumes an [`OrientedPath`] as a series L/R model.
-//! The retarded full-wave sweep (#2730) does not yet: a single mixed-axis
-//! winding is still rejected by `classify_bars` (via
-//! `classify_full_wave_bars`) on every `frequencies_hz` request.
+//! The retarded full-wave sweep (#2730,
+//! `classify_full_wave_bars` -> `fullwave`) meshes the path's legs with
+//! segment-local direction, length and radius.
 //!
 //! The full contract -- contact rules, tolerance, corner-volume ownership,
 //! canonical orientation, collinear subdivision, and every rejected case -- is
@@ -47,9 +47,8 @@
 //!   permutation.
 
 // Some items (`reversed`, `vertices_um`, ...) are exercised only by this
-// module's tests until #2730 (retarded coupling) consumes them -- see the
-// module docs. Without this, `cargo clippy -- -D warnings` would fail on the
-// not-yet-consumed API.
+// module's tests. Without this, `cargo clippy -- -D warnings` would fail on
+// the not-otherwise-consumed API.
 #![allow(dead_code)]
 
 use super::{
@@ -1376,14 +1375,14 @@ mod tests {
             }
             other => panic!("expected an oriented path, got {other:?}"),
         }
-        // The static PEEC discretisation now accepts it as a series winding
-        // (#2729); the full-wave consumer keeps its explicit mixed-axis
-        // rejection until #2730 lands.
+        // Both the static PEEC discretisation (#2729) and the full-wave
+        // classification (#2730) accept it as a series winding.
         let conductors = [spiral];
         let layout = discretize_bars(&conductors, 1.0).unwrap();
         assert_eq!(layout.series_segments.len(), 8);
-        let e = classify_full_wave_bars(&conductors).err().unwrap();
-        assert!(e.contains("same current-flow axis"), "{e}");
+        let fw = classify_full_wave_bars(&conductors).unwrap();
+        assert_eq!(fw.windings[0].as_ref().unwrap().segments.len(), 8);
+        assert!(fw.shared_axial_span.is_none());
     }
 
     #[test]

@@ -681,6 +681,47 @@ stable.
   integration coverage, not by a sky130 CI fixture (PDK-scale gate-level
   runs stay out of CI for the same cost reasons §1 recorded).
 
+### 3.9 `ifnone` edge-sensitive modpaths do not exist in Icarus (2026-10-14, issue #2885)
+
+The gf180mcu standard-cell models declare every non-unate arc (XOR/XNOR
+inputs, MUX select, half-adder sum) *only* as `ifnone` edge-sensitive paths,
+`ifnone (posedge A1 => (Z:A1)) = (1.0,1.0);` plus its `negedge` twin. A
+post-route SDF from OpenSTA's `write_sdf` carries two unqualified
+`(IOPATH A1 Z ...)` entries per such pin, one per unateness sense, and Icarus
+13.0 reports each as `SDF ERROR: ...: Unable to match ModPath A1 -> Z`.
+
+Reproduced live with raw `iverilog -gspecify`/`vvp`, the mechanism is **not**
+an edge-qualifier mismatch between SDF and model:
+
+- Icarus prints `sorry: ifnone with an edge-sensitive path is not supported.`
+  for each such path at elaboration and **discards** it — the cell has no
+  `A1 -> Z` modpath at all, and the arc simulates with no module-path delay
+  whether or not an SDF is annotated.
+- Rewriting the SDF to `(IOPATH (posedge A1) Z ...)`/`(IOPATH (negedge A1)
+  Z ...)` fails identically (`Unable to match ModPath posedge A1 -> Z`).
+- Removing `ifnone` from the model makes the paths elaborate and the
+  unqualified `IOPATH` match them (an unqualified `IOPATH` matches every edge
+  of a modpath), but one edge-sensitive modpath holds one `(rise, fall)`
+  pair while the SDF carries two (the arc's two unateness senses), so the
+  last entry would silently time the other sense too.
+- Arcs that *also* carry a supported path — a plain, `if (...)`-conditional,
+  or non-`ifnone` edge-sensitive one (gf180mcu MUX data inputs, `xor3`,
+  `addf`, the scan flops) — annotate normally; only arcs whose *every* path is
+  `ifnone` + edge-sensitive fail. Against the full `gf180mcu_fd_sc_mcu7t5v0`
+  library that is 12 of 229 cells (`xor2`, `xnor2`, `mux2`, `addh` in three
+  drive strengths each); a 4-cell SDF with 14 such entries went from 14
+  `SDF ERROR`s to 0 after the drop below.
+
+**Consequence.** `klt functional-verification` drops exactly those `IOPATH`
+entries before annotation, decided from the request's own cell models, and
+reports them as the `iopath_ifnone_edge_modpath` `environment.sdf.dropped`
+class with an `arcs` list naming every affected `{celltype, from, to}` — the
+drop cannot change simulated timing relative to annotating (there is no
+modpath to land on), but the named arcs run without their characterised
+delay, and the response says so. See
+[`docs/cli/functional-verification.md`](../cli/functional-verification.md)
+§"SDF back-annotation".
+
 ---
 
 ## 4. Follow-on sketch (§4.3, Icarus half)

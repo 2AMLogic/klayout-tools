@@ -13,6 +13,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import jsonschema
 import klayout.db as kdb
 import pytest
 
@@ -684,6 +685,7 @@ def test_json_contract(tmp_path, capsys):
         "rules_checked",
         "rules_skipped",
         "voltage_domain_warnings",
+        "unchecked_rules",
         "deck_scope",
         # Issue #1996: the shared vacuous-verdict convention
         # (`klayout_tools.coverage`), emitted alongside the pre-existing
@@ -709,6 +711,10 @@ def test_json_contract(tmp_path, capsys):
                 assert set(entry.keys()) == {"marker", "description"}
                 assert isinstance(entry["marker"], str)
                 assert isinstance(entry["description"], str)
+        elif key == "unchecked_rules":
+            for entry in field:
+                assert set(entry.keys()) == {"rule", "layer", "description"}
+                assert all(isinstance(v, str) for v in entry.values())
         else:
             assert all(isinstance(v, str) for v in field)
     # A run that produced violations plainly checked something.
@@ -1133,6 +1139,19 @@ def test_run_drc_gf180mcu_dualgate_marker_no_warning_without_overlap(tmp_path):
     assert report["coverage"]["voltage_domain_warnings"] == []
 
 
+def _exempt_gf180mcu_comp_from_df12(layout: kdb.Layout) -> None:
+    """Draw a Schottky-diode marker (241/0) over every `Comp` shape so the
+    deck's `comp.coverage.1` (`DF.12`, issue #3587: Comp without Nplus/Pplus
+    is forbidden) exempts it whole. For fixtures that exercise *other* rules
+    on bare `Comp`; no other rule reads the marker."""
+    top = layout.top_cell()
+    comp = layout.find_layer(22, 0)
+    box = kdb.Region(top.begin_shapes_rec(comp)).bbox().enlarged(100, 100)
+    marker = layout.layer(241, 0)
+    layout.set_info(marker, kdb.LayerInfo(241, 0))
+    top.shapes(marker).insert(box)
+
+
 def _make_gf180mcu_comp_layout(
     *, width_dbu: int, gap_dbu: int | None = None, dualgate: bool
 ) -> kdb.Layout:
@@ -1159,6 +1178,7 @@ def _make_gf180mcu_comp_layout(
         draw(22, 0, kdb.Box(width_dbu + gap_dbu, 0, right, 4000))
     if dualgate:
         draw(55, 0, kdb.Box(-1000, -1000, right + 1000, 5000))
+    _exempt_gf180mcu_comp_from_df12(layout)
     return layout
 
 
@@ -1509,6 +1529,7 @@ def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:
     layout.set_info(metal1, kdb.LayerInfo(34, 0, "Metal1"))
     top.shapes(metal1).insert(kdb.Box(3000, 0, 3300, 2000))
 
+    _exempt_gf180mcu_comp_from_df12(layout)
     return layout
 
 
@@ -1588,6 +1609,7 @@ def test_run_drc_gf180mcu_nwell_enclosing_comp_violation(tmp_path):
     top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 2000))
     # 300 dbu margin on 3 sides, only 50 dbu (< 120) margin on the right.
     top.shapes(comp).insert(kdb.Box(300, 300, 1950, 1700))
+    _exempt_gf180mcu_comp_from_df12(layout)
     path = tmp_path / "nwell_enclosing_violation.gds"
     layout.write(str(path))
 
@@ -1612,6 +1634,7 @@ def test_run_drc_gf180mcu_nwell_enclosing_comp_clean(tmp_path):
     layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
     top.shapes(nwell).insert(kdb.Box(0, 0, 2000, 2000))
     top.shapes(comp).insert(kdb.Box(300, 300, 1700, 1700))  # 300 dbu margin >= 120
+    _exempt_gf180mcu_comp_from_df12(layout)
     path = tmp_path / "nwell_enclosing_clean.gds"
     layout.write(str(path))
 
@@ -1636,6 +1659,7 @@ def test_run_drc_gf180mcu_bjt_separation_violation(tmp_path):
     layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
     top.shapes(bjt).insert(kdb.Box(0, 0, 500, 500))
     top.shapes(comp).insert(kdb.Box(550, 0, 1000, 500))  # 50 dbu gap < 100
+    _exempt_gf180mcu_comp_from_df12(layout)
     path = tmp_path / "bjt_separation_violation.gds"
     layout.write(str(path))
 
@@ -1660,6 +1684,7 @@ def test_run_drc_gf180mcu_bjt_separation_clean(tmp_path):
     layout.set_info(comp, kdb.LayerInfo(22, 0, "Comp"))
     top.shapes(bjt).insert(kdb.Box(0, 0, 500, 500))
     top.shapes(comp).insert(kdb.Box(600, 0, 1000, 500))  # 100 dbu gap == threshold
+    _exempt_gf180mcu_comp_from_df12(layout)
     path = tmp_path / "bjt_separation_clean.gds"
     layout.write(str(path))
 
@@ -4343,6 +4368,16 @@ def test_run_drc_gf180mcu_implant_space_to_opposite_comp(
     layer_num, datatype = _IMPLANT_LAYERS[implant]
     rule_id = f"{implant}.space.{rule_suffix}.1"
 
+    # `nplus.space.pcomp.1` is the near-well half of the NP.3 split (issue
+    # #3484): without an Nwell within 0.429um the PCOMP is held to the relaxed
+    # 0.08um (`nplus.space.pcomp.far.1`), so this fixture draws one 0.3um
+    # below the diffusion to keep exercising the strict 0.16um.
+    well = (
+        [(21, 0, "Nwell", kdb.Box(-500, -3000, 1500, -300))]
+        if implant == "nplus"
+        else []
+    )
+
     def build(gap):
         return _gf180mcu_implant_layout(
             [
@@ -4360,6 +4395,7 @@ def test_run_drc_gf180mcu_implant_space_to_opposite_comp(
                     kdb.Box(1000 + gap, 0, 2000 + gap, 4000),
                 ),
             ]
+            + well
         )
 
     violate_path = tmp_path / f"{rule_id}.violate.gds"
@@ -4538,20 +4574,21 @@ def test_run_drc_gf180mcu_pplus_enclosing_comp_still_fires_with_nwell_present(
 ):
     """Negative control for the #2634 fix: the exact same under-threshold
     PCOMP extension still trips `pplus.enclosing.comp.1` once an `Nwell`
-    shape is present *anywhere* in the layout -- `requires_any_layer` only
+    shape is present near the tap -- `requires_any_layer` only
     skips a layout with no well context at all; it does not blanket-disable
     the rule."""
     layout = _gf180mcu_implant_layout(
         [
             (22, 0, "Comp", kdb.Box(0, 0, 400, 1000)),
             (31, 0, "Pplus", kdb.Box(-20, -20, 420, 1020)),
-            # Elsewhere in the same layout, not touching this tap -- an
-            # ordinary Nwell shape (e.g. a PMOS well drawn elsewhere in the
-            # same cell/array).
-            (21, 0, "Nwell", kdb.Box(5000, 5000, 10000, 10000)),
+            # An ordinary Nwell shape (e.g. a PMOS well drawn in the same
+            # cell/array) within 0.429um of the tap, so the strict `PP.5dii`
+            # 0.16um applies (issue #3484: a tap further away is held to the
+            # relaxed `PP.5di` 0.02um on `pplus.enclosing.comp.far.1`).
+            (21, 0, "Nwell", kdb.Box(700, -2000, 5000, 3000)),
         ]
     )
-    path = tmp_path / "pplus_enclosing_comp_with_distant_nwell.gds"
+    path = tmp_path / "pplus_enclosing_comp_with_nearby_nwell.gds"
     layout.write(str(path))
 
     report = run_drc(str(path), "gf180mcu")
@@ -4560,11 +4597,98 @@ def test_run_drc_gf180mcu_pplus_enclosing_comp_still_fires_with_nwell_present(
     assert report["rule_counts"]["pplus.enclosing.comp.1"] >= 1
 
 
-def test_run_drc_gf180mcu_no_implant_geometry_stays_clean(tmp_path):
-    """The issue's own false-positive guard: a layout that draws no implant
-    at all (`Comp` + `Poly2` only) still reports `status: clean`, and every
-    one of the ten implant rules is recorded in `coverage.rules_skipped`
-    rather than silently evaluated against an empty region."""
+def _gf180mcu_tap_shapes(nwell_gap_dbu):
+    """A PDK endcap/filltie-style substrate tap (issue #3484): `Comp` enclosed
+    by `Pplus` by 0.08um, an `Nplus` 0.08um from the tap, and an `Nwell`
+    `nwell_gap_dbu` from the tap's right edge (`None` = no well drawn)."""
+    shapes = [
+        (22, 0, "Comp", kdb.Box(0, 0, 400, 1000)),
+        (31, 0, "Pplus", kdb.Box(-80, -80, 480, 1080)),
+        (32, 0, "Nplus", kdb.Box(-1500, -100, -80, 1100)),
+    ]
+    if nwell_gap_dbu is not None:
+        left = 400 + nwell_gap_dbu
+        shapes.append((21, 0, "Nwell", kdb.Box(left, -2000, left + 4000, 3000)))
+    return shapes
+
+
+_TAP_WELL_CONTEXT_RULES = ("nplus.space.pcomp.1", "pplus.enclosing.comp.1")
+
+
+@pytest.mark.parametrize("nwell_gap_dbu", [None, 480, 430])
+def test_run_drc_gf180mcu_far_from_well_tap_is_not_flagged(tmp_path, nwell_gap_dbu):
+    """Issue #3484: a tap more than 0.429um from any Nwell (or with no well
+    at all) is held to the relaxed NP.3cii 0.08um / PP.5di 0.02um values, so
+    the 0.08um margins of an unmodified PDK endcap/filltie tap are clean."""
+    path = tmp_path / "far_tap.gds"
+    _gf180mcu_implant_layout(_gf180mcu_tap_shapes(nwell_gap_dbu)).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    for rule_id in _TAP_WELL_CONTEXT_RULES:
+        assert rule_id not in report["rule_counts"], report["rule_counts"]
+        assert f"{rule_id[:-2]}.far.1" not in report["rule_counts"]
+    far = {"nplus.space.pcomp.far.1", "pplus.enclosing.comp.far.1"}
+    assert far <= set(report["coverage"]["rules_checked"])
+
+
+@pytest.mark.parametrize("nwell_gap_dbu", [300, 429])
+def test_run_drc_gf180mcu_near_well_tap_still_flagged(tmp_path, nwell_gap_dbu):
+    """Strict side preserved (issue #3484): the same 0.08um margins on a tap
+    within 0.429um of an Nwell (429 = exactly touching the guard band) still
+    trip both strict rules, and the relaxed ones do not apply."""
+    path = tmp_path / "near_tap.gds"
+    _gf180mcu_implant_layout(_gf180mcu_tap_shapes(nwell_gap_dbu)).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    for rule_id in _TAP_WELL_CONTEXT_RULES:
+        assert report["rule_counts"].get(rule_id, 0) >= 1, report["rule_counts"]
+    assert "nplus.space.pcomp.far.1" not in report["rule_counts"]
+    assert "pplus.enclosing.comp.far.1" not in report["rule_counts"]
+
+
+def test_run_drc_gf180mcu_tap_inside_dnwell_stays_strict(tmp_path):
+    """The DNWELL branches are not relaxed (issue #3484): a tap drawn inside
+    a Dnwell is held to the strict values even with no Nwell nearby."""
+    shapes = _gf180mcu_tap_shapes(None) + [
+        (12, 0, "Dnwell", kdb.Box(-3000, -3000, 3000, 4000))
+    ]
+    path = tmp_path / "dnwell_tap.gds"
+    _gf180mcu_implant_layout(shapes).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    for rule_id in _TAP_WELL_CONTEXT_RULES:
+        assert report["rule_counts"].get(rule_id, 0) >= 1, report["rule_counts"]
+
+
+def test_run_drc_gf180mcu_far_tap_below_relaxed_value_still_flagged(tmp_path):
+    """The relaxed values are real thresholds, not waivers: a far tap whose
+    Pplus extends only 0.01um (< 0.02) and whose Nplus is 0.05um (< 0.08)
+    away trips the far rules."""
+    shapes = [
+        (22, 0, "Comp", kdb.Box(0, 0, 400, 1000)),
+        (31, 0, "Pplus", kdb.Box(-10, -10, 410, 1010)),
+        (32, 0, "Nplus", kdb.Box(-1500, -100, -50, 1100)),
+    ]
+    path = tmp_path / "far_tap_under.gds"
+    _gf180mcu_implant_layout(shapes).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["rule_counts"].get("nplus.space.pcomp.far.1", 0) >= 1
+    assert report["rule_counts"].get("pplus.enclosing.comp.far.1", 0) >= 1
+    for rule_id in _TAP_WELL_CONTEXT_RULES:
+        assert rule_id not in report["rule_counts"]
+
+
+def test_run_drc_gf180mcu_no_implant_geometry_skips_implant_rules(tmp_path):
+    """A layout that draws no implant at all (`Comp` + `Poly2` only) does not
+    evaluate the implant rules against empty regions: every one of the ten
+    implant rules is recorded in `coverage.rules_skipped`. Since #3587 the
+    only finding is `DF.12` (`comp.coverage.1`) itself -- unimplanted `Comp`
+    is exactly what that rule forbids."""
     path = tmp_path / "no_implant.gds"
     _gf180mcu_implant_layout(
         [
@@ -4575,7 +4699,7 @@ def test_run_drc_gf180mcu_no_implant_geometry_stays_clean(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["status"] == "clean", report["rule_counts"]
+    assert report["rule_counts"] == {"comp.coverage.1": 1}, report["rule_counts"]
     skipped = set(report["coverage"]["rules_skipped"])
     for implant in ("nplus", "pplus"):
         for suffix in ("width.1", "space.1", "enclosing.poly2.1", "enclosing.comp.1"):
@@ -5933,7 +6057,7 @@ def test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc():
         assert rule.provenance.source_repo == "fossi-foundation/open-pdks"
         assert rule.provenance.source_path == "sky130/klayout/sky130A_mr.drc"
         assert rule.provenance.rule_id == source_rule_id
-        assert rule.provenance.commit == "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        assert rule.provenance.commit == "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 def test_sky130_deck_check_kind_breakdown():
@@ -5943,20 +6067,25 @@ def test_sky130_deck_check_kind_breakdown():
     `licon1.width.1`/`mcon.width.1`, the minimum halves of the two fixed-size
     cut rules `licon.1`/`ct.1`; #2642 adds the source deck's whole `OFFGRID`
     group -- 38 `ongrid` + 37 `angle`, see `tests/test_drc_offgrid.py` for why
-    the angle count is one short of the grid count): 136 rules total -- 18
-    `width`, 13 `space`, 1 `isolated`, 17 `enclosing`, 2 `separation`,
-    10 `area`, 38 `ongrid`, 37 `angle`. Fails loudly (at the exact number that
-    changed) if a future rule addition/removal drifts from that table without
-    updating it."""
+    the angle count is one short of the grid count; #3030 adds
+    `rpm.width.1`/`urpm.width.1`; #2936 adds `poly.endcap.diff.1`, the first
+    `enclosed` rule; #3316 adds the 4 `enclosing_adjacent` rules): 143 rules
+    total -- 20 `width`, 13 `space`, 1 `isolated`, 17 `enclosing`,
+    1 `enclosed`, 4 `enclosing_adjacent`, 2 `separation`, 10 `area`,
+    38 `ongrid`, 37 `angle`. Fails loudly (at the exact number that changed)
+    if a future rule addition/removal drifts from that table without updating
+    it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 136
+    assert len(deck) == 143
     counts = Counter(rule.check for rule in deck)
     assert counts == {
-        "width": 18,
+        "width": 20,
         "space": 13,
         "isolated": 1,
         "enclosing": 17,
+        "enclosed": 1,
+        "enclosing_adjacent": 4,
         "separation": 2,
         "area": 10,
         "ongrid": 38,
@@ -6008,8 +6137,8 @@ def test_sky130_area_rules_cite_pinned_sky130a_mr_drc():
         assert rule.provenance.source_path == "sky130/klayout/sky130A_mr.drc"
         assert rule.provenance.rule_id == source_rule_id
         # sky130.py's own `_OPEN_PDKS_COMMIT` -- the pinned open_pdks revision
-        # of the volare sky130A install every other sky130 rule cites.
-        assert rule.provenance.commit == "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        # of the ciel sky130A install every other sky130 rule cites.
+        assert rule.provenance.commit == "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 # --- nwell.width.1 / nwell.space.1 (issue #1420) ------------------------
@@ -7093,6 +7222,257 @@ def test_run_drc_sg13g2_activ_enclosing_cont_clean(tmp_path):
     assert report["violation_count"] == 0
 
 
+# --- issue #2688: `Cnt.c`'s `.join(activ_mask)` + square-contact selection --
+
+
+def _sg13g2_cnt_c_layout(
+    dbu: float = 0.001,
+    *,
+    drawing: list | None = None,
+    mask: list | None = None,
+    cont: list | None = None,
+):
+    """A one-cell sg13g2 stream drawing the given boxes (each an
+    ``(l, b, r, t)`` tuple in **nanometres**, rescaled to ``dbu``) on
+    Activ.drawing (1/0), Activ.mask (1/20), and Cont.drawing (6/0). A
+    ``None`` list leaves that layer out of the stream entirely."""
+    scale = 0.001 / dbu
+    layout = kdb.Layout()
+    layout.dbu = dbu
+    top = layout.create_cell("TOP")
+    for layer, boxes in (((1, 0), drawing), ((1, 20), mask), ((6, 0), cont)):
+        if boxes is None:
+            continue
+        index = layout.layer(*layer)
+        for box in boxes:
+            top.shapes(index).insert(kdb.Box(*(round(v * scale) for v in box)))
+    return layout
+
+
+def test_sg13g2_cnt_c_rule_models_activ_mask_join_and_square_contacts():
+    """Deck shape (#2688): `activ.enclosing.cont.1` keeps its id, reporting
+    layer, threshold and `Cnt.c` provenance, and now reads the
+    Activ.drawing + Activ.mask union against square contacts only."""
+    (rule,) = [r for r in get_deck("sg13g2") if r.id == "activ.enclosing.cont.1"]
+    assert (rule.layer, rule.other_layer) == ((1, 0), (6, 0))
+    assert (rule.check, rule.threshold_dbu) == ("enclosing", 70)
+    assert rule.provenance.rule_id == "Cnt.c"
+    assert rule.provenance.source_path.endswith("feol/5_14_cont.drc")
+    assert rule.derived_layer is not None
+    assert rule.derived_layer.mode == "union"
+    assert {rule.derived_layer.base, rule.derived_layer.intersect_with} == {
+        (1, 0),
+        (1, 20),
+    }
+    assert rule.other_layer_selection == "squares"
+
+
+def _cnt_c_count(report) -> int:
+    return report["rule_counts"].get("activ.enclosing.cont.1", 0)
+
+
+@pytest.mark.parametrize("dbu", [0.001, 0.0005])
+def test_run_drc_sg13g2_cnt_c_mask_only_enclosure_is_clean(tmp_path, dbu):
+    """A square contact enclosed (>= 0.07 um) solely by Activ.mask (1/20),
+    with no Activ.drawing anywhere in the stream, passes -- the HBT-PCell
+    case that reported a false positive before #2688 dropped
+    `.join(activ_mask)` -- and the rule is actually *evaluated*, not skipped
+    for its absent `layer`."""
+    layout = _sg13g2_cnt_c_layout(
+        dbu, mask=[(0, 0, 1000, 1000)], cont=[(400, 400, 560, 560)]
+    )
+    path = tmp_path / "mask_only.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert _cnt_c_count(report) == 0
+    assert "activ.enclosing.cont.1" in report["coverage"]["rules_checked"]
+    assert "activ.enclosing.cont.1" not in report["coverage"]["rules_skipped"]
+    assert "1/20" in report["coverage"]["deck_layers"]
+
+
+def test_run_drc_sg13g2_cnt_c_enclosure_assembled_across_both_layers(tmp_path):
+    """A contact whose 0.07 um margin is supplied partly by Activ.drawing and
+    partly by an abutting Activ.mask shape passes: neither layer alone
+    encloses it, their join does."""
+    layout = _sg13g2_cnt_c_layout(
+        drawing=[(0, 0, 500, 1000)],
+        mask=[(500, 0, 1000, 1000)],
+        cont=[(420, 420, 580, 580)],  # straddles the 1/0 | 1/20 seam
+    )
+    path = tmp_path / "assembled.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert _cnt_c_count(report) == 0
+
+
+@pytest.mark.parametrize("dbu", [0.001, 0.0005])
+@pytest.mark.parametrize("layer", ["drawing", "mask"])
+def test_run_drc_sg13g2_cnt_c_threshold_on_either_layer(tmp_path, dbu, layer):
+    """For an evaluated square contact, exactly 0.07 um of enclosure passes
+    and 0.06 um fails -- whichever Activ layer supplies it, at more than one
+    layout dbu."""
+    exact = _sg13g2_cnt_c_layout(
+        dbu, **{layer: [(0, 0, 1000, 1000)]}, cont=[(770, 400, 930, 560)]
+    )
+    short = _sg13g2_cnt_c_layout(
+        dbu, **{layer: [(0, 0, 1000, 1000)]}, cont=[(780, 400, 940, 560)]
+    )
+    exact.write(str(tmp_path / "exact.gds"))
+    short.write(str(tmp_path / "short.gds"))
+
+    assert _cnt_c_count(run_drc(str(tmp_path / "exact.gds"), "sg13g2")) == 0
+    report = run_drc(str(tmp_path / "short.gds"), "sg13g2")
+    assert _cnt_c_count(report) == 1
+    (violation,) = [
+        v for v in report["violations"] if v["rule"] == "activ.enclosing.cont.1"
+    ]
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "Activ.drawing"  # stable reporting identity
+
+
+def test_run_drc_sg13g2_cnt_c_mask_contact_escaping_still_flagged(tmp_path):
+    """The #318 zero-overlap escape term still applies to the joined region:
+    a square contact half outside an Activ.mask window is reported."""
+    layout = _sg13g2_cnt_c_layout(
+        mask=[(0, 0, 1000, 1000)], cont=[(920, 400, 1080, 560)]
+    )
+    path = tmp_path / "escape.gds"
+    layout.write(str(path))
+
+    assert _cnt_c_count(run_drc(str(path), "sg13g2")) >= 1
+
+
+def test_run_drc_sg13g2_cnt_c_no_activ_at_all_is_inapplicable(tmp_path):
+    """Cont with neither Activ.drawing nor Activ.mask in the stream: the
+    union's region is empty, so the rule is skipped and classified as
+    inapplicable (no geometry it could have flagged) -- not run, not
+    silently counted as checked."""
+    layout = _sg13g2_cnt_c_layout(cont=[(400, 400, 560, 560)])
+    path = tmp_path / "no_activ.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sg13g2")
+
+    assert _cnt_c_count(report) == 0
+    assert "activ.enclosing.cont.1" in report["coverage"]["rules_skipped"]
+    assert {
+        "id": "activ.enclosing.cont.1",
+        "reason": "no_applicable_geometry",
+    } in report["coverage"]["inapplicable"]
+
+
+def test_run_drc_sg13g2_cnt_c_ignores_contact_bars(tmp_path):
+    """A contact *bar* (non-square merged Cont) is outside `Cnt.c`'s
+    `cont_sq` selection: neither its short margin nor its partial escape is
+    reported by this rule, while a square contact with the same short
+    margin is."""
+    bar = _sg13g2_cnt_c_layout(
+        drawing=[(0, 0, 2000, 1000)],
+        cont=[(1880, 400, 2040, 900)],  # 0.16 x 0.50 um bar, escapes right edge
+    )
+    abutting = _sg13g2_cnt_c_layout(
+        drawing=[(0, 0, 2000, 1000)],
+        # two abutting 0.16um squares merge into one 0.16 x 0.32 bar
+        cont=[(1900, 400, 2060, 560), (1900, 560, 2060, 720)],
+    )
+    square = _sg13g2_cnt_c_layout(
+        drawing=[(0, 0, 2000, 1000)], cont=[(1830, 400, 1990, 560)]
+    )
+    for name, layout in (("bar", bar), ("abutting", abutting), ("square", square)):
+        layout.write(str(tmp_path / f"{name}.gds"))
+
+    assert _cnt_c_count(run_drc(str(tmp_path / "bar.gds"), "sg13g2")) == 0
+    assert _cnt_c_count(run_drc(str(tmp_path / "abutting.gds"), "sg13g2")) == 0
+    assert _cnt_c_count(run_drc(str(tmp_path / "square.gds"), "sg13g2")) == 1
+
+
+def test_run_drc_sg13g2_cnt_c_hierarchy_and_source_unchanged(tmp_path):
+    """Through the public runner on a hierarchical stream: a mask-enclosed
+    contact inside an instanced child cell passes, a short one is reported
+    (attributed to the child), and the input file is byte-identical after
+    the run -- the union is computed in memory, never written back."""
+    import hashlib
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    good = layout.create_cell("GOOD")
+    bad = layout.create_cell("BAD")
+    mask = layout.layer(1, 20)
+    cont = layout.layer(6, 0)
+    good.shapes(mask).insert(kdb.Box(0, 0, 1000, 1000))
+    good.shapes(cont).insert(kdb.Box(400, 400, 560, 560))
+    bad.shapes(mask).insert(kdb.Box(0, 0, 1000, 1000))
+    bad.shapes(cont).insert(kdb.Box(790, 400, 950, 560))  # 0.05 um margin
+    top.insert(kdb.CellInstArray(good.cell_index(), kdb.Trans(0, 0)))
+    top.insert(kdb.CellInstArray(good.cell_index(), kdb.Trans(5000, 0)))
+    top.insert(kdb.CellInstArray(bad.cell_index(), kdb.Trans(0, 5000)))
+    path = tmp_path / "hier.gds"
+    layout.write(str(path))
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    report = run_drc(str(path), "sg13g2", top="TOP")
+
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    cnt_c = [v for v in report["violations"] if v["rule"] == "activ.enclosing.cont.1"]
+    assert len(cnt_c) == 1
+    assert cnt_c[0]["source_cell"] == "BAD"
+    reloaded = kdb.Layout()
+    reloaded.read(str(path))
+    assert reloaded.find_layer(1, 0) is None  # nothing copied onto Activ.drawing
+
+
+def test_run_drc_rejects_bad_other_layer_selection(tmp_path, monkeypatch):
+    """An unknown `other_layer_selection`, a selection with no
+    `other_layer`, or a `"union"` derived layer with no `intersect_with` is
+    a deck-authoring mistake reported with the rule id (#2688)."""
+    from klayout_tools.decks import DerivedLayer, DrcRule
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    path = tmp_path / "any.gds"
+    layout.write(str(path))
+
+    bad_rules = [
+        DrcRule(
+            id="bad.selection",
+            description="synthetic",
+            layer=(1, 0),
+            other_layer=(6, 0),
+            check="enclosing",
+            threshold_dbu=70,
+            other_layer_selection="circles",
+        ),
+        DrcRule(
+            id="bad.selection.no_other",
+            description="synthetic",
+            layer=(1, 0),
+            check="width",
+            threshold_dbu=70,
+            other_layer_selection="squares",
+        ),
+        DrcRule(
+            id="bad.union",
+            description="synthetic",
+            layer=(1, 0),
+            other_layer=(6, 0),
+            check="enclosing",
+            threshold_dbu=70,
+            derived_layer=DerivedLayer(base=(1, 0), sized_by_um=0.0, mode="union"),
+        ),
+    ]
+    for rule in bad_rules:
+        _patch_synthetic_deck(monkeypatch, [rule])
+        with pytest.raises(DrcError, match=rule.id):
+            run_drc(str(path), "synthetic")
+
+
 def test_run_drc_sg13g2_gatpoly_enclosing_cont_violation(tmp_path):
     """A Cont shape hanging off the edge of its GatPoly landing region by
     less than the 70 dbu (0.07 um) `gatpoly.enclosing.cont.1` margin trips
@@ -7491,8 +7871,22 @@ def _fixed_size_cut_boundary_cases(size_dbu):
     ]
 
 
+# `cont.width.1` measures square contacts only (`cont_sq`, issues #2943/
+# #3139): an elongated Cont shape is a contact bar -- `CntB.*`'s, not
+# `Cnt.a`'s -- so the bar case is clean there, unlike the via/TopVia rules.
+_SG13G2_SQUARE_ONLY_RULES = {"cont.width.1"}
+
 _SG13G2_FIXED_SIZE_CUT_BOUNDARY_CASES = [
-    (rule_id, layer, layer_name, case_id, box, expected)
+    (
+        rule_id,
+        layer,
+        layer_name,
+        case_id,
+        box,
+        0
+        if (rule_id in _SG13G2_SQUARE_ONLY_RULES and case_id == "above_max_bar")
+        else expected,
+    )
     for rule_id, layer, layer_name, size_dbu in _SG13G2_FIXED_SIZE_CUT_RULES
     for case_id, box, expected in _fixed_size_cut_boundary_cases(size_dbu)
 ]
@@ -7528,6 +7922,79 @@ def test_run_drc_sg13g2_fixed_size_cut_boundaries(
     for violation in reported:
         assert violation["check"] == "width"
         assert violation["layer"] == layer_name
+
+
+def _cont_layout(tmp_path, name, boxes):
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    cont = layout.layer(6, 0)
+    layout.set_info(cont, kdb.LayerInfo(6, 0, "Cont.drawing"))
+    for box in boxes:
+        top.shapes(cont).insert(box)
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    "name,boxes,expected",
+    [
+        # Abutting legal 0.16 um contacts merge into one 0.64 x 0.16 strip --
+        # a contact row, not an oversized contact (issue #3139).
+        ("row_of_four", [kdb.Box(i * 160, 0, (i + 1) * 160, 160) for i in range(4)], 0),
+        ("row_of_two", [kdb.Box(0, 0, 160, 160), kdb.Box(160, 0, 320, 160)], 0),
+        # Contacts that touch only at a corner stay separate legal squares.
+        ("corner_touch", [kdb.Box(0, 0, 160, 160), kdb.Box(160, 160, 320, 320)], 0),
+        # Isolated squares are still measured on both bounds.
+        ("oversized_square", [kdb.Box(0, 0, 200, 200)], 1),
+        ("undersized_square", [kdb.Box(0, 0, 120, 120)], 2),
+    ],
+)
+def test_run_drc_sg13g2_cont_width_ignores_contact_rows(
+    name, boxes, expected, tmp_path
+):
+    """`cont.width.1` is evaluated on square merged Cont polygons only, so a
+    row of abutting legal contacts (as drawn inside the PDK's own npn13G2/
+    rsil cells) is clean while an isolated off-size square is still flagged."""
+    report = run_drc(_cont_layout(tmp_path, name, boxes), "sg13g2")
+    assert report["rule_counts"].get("cont.width.1", 0) == expected
+
+
+def test_run_drc_rejects_bad_layer_selection(tmp_path, monkeypatch):
+    """An unknown `layer_selection`, or one combined with `derived_layer`,
+    is a deck-authoring mistake reported with the rule id."""
+    from klayout_tools.decks import DerivedLayer, DrcRule
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box(0, 0, 1000, 1000))
+    path = tmp_path / "any.gds"
+    layout.write(str(path))
+
+    bad_rules = [
+        DrcRule(
+            id="bad.layer_selection",
+            description="synthetic",
+            layer=(1, 0),
+            check="width",
+            threshold_dbu=70,
+            layer_selection="circles",
+        ),
+        DrcRule(
+            id="bad.layer_selection.derived",
+            description="synthetic",
+            layer=(1, 0),
+            check="width",
+            threshold_dbu=70,
+            layer_selection="squares",
+            derived_layer=DerivedLayer(base=(1, 0), sized_by_um=0.0, mode="union"),
+        ),
+    ]
+    for rule in bad_rules:
+        _patch_synthetic_deck(monkeypatch, [rule])
+        with pytest.raises(DrcError, match=rule.id):
+            run_drc(str(path), "synthetic")
 
 
 def test_run_drc_sg13g2_fixed_size_cut_rules_declare_both_bounds():
@@ -9631,3 +10098,506 @@ def test_rerun_rejects_a_malformed_recorded_selection(selection, tmp_path, monke
 
     with pytest.raises(DrcError, match="rule_selection.selectors"):
         rerun_drc_report(str(report_path))
+
+
+def _sky130_gate_layout(tmp_path, *, bottom_dbu, top_dbu, rotated=False, name="g"):
+    """A 1.34 x 1.0 um diff crossed by one 0.5 um poly gate whose ends extend
+    `bottom_dbu`/`top_dbu` past the diffusion (`rotated` swaps the axes)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    diff, poly = layout.layer(65, 20), layout.layer(66, 20)
+    if rotated:
+        top.shapes(diff).insert(kdb.Box(0, 0, 1000, 1340))
+        top.shapes(poly).insert(kdb.Box(-bottom_dbu, 420, 1000 + top_dbu, 920))
+    else:
+        top.shapes(diff).insert(kdb.Box(0, 0, 1340, 1000))
+        top.shapes(poly).insert(kdb.Box(420, -bottom_dbu, 920, 1000 + top_dbu))
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return str(path)
+
+
+def _endcap_count(report):
+    return report["rule_counts"].get("poly.endcap.diff.1", 0)
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_run_drc_sky130_poly_endcap_flush_gate_is_flagged(tmp_path, rotated):
+    """The reported defect (#2936): poly ending flush with the diffusion at
+    both ends is no longer `clean` -- one violation per gate end."""
+    path = _sky130_gate_layout(tmp_path, bottom_dbu=0, top_dbu=0, rotated=rotated)
+    report = run_drc(path, "sky130")
+    assert report["status"] == "violations"
+    assert _endcap_count(report) == 2
+    assert {v["rule"] for v in report["violations"]} == {"poly.endcap.diff.1"}
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_run_drc_sky130_poly_endcap_minimum_is_clean(tmp_path, rotated):
+    """Exactly the 0.13 um minimum on both ends passes (the rule is a
+    minimum, `poly.8`'s `>= 0.13`), including a rotated gate."""
+    path = _sky130_gate_layout(tmp_path, bottom_dbu=130, top_dbu=130, rotated=rotated)
+    assert _endcap_count(run_drc(path, "sky130")) == 0
+
+
+def test_run_drc_sky130_poly_endcap_one_dbu_short_or_one_side_only(tmp_path):
+    """129 dbu on one end and a flush other end each flag exactly that end."""
+    short = run_drc(
+        _sky130_gate_layout(tmp_path, bottom_dbu=129, top_dbu=130, name="s"),
+        "sky130",
+    )
+    assert _endcap_count(short) == 1
+    flush_top = run_drc(
+        _sky130_gate_layout(tmp_path, bottom_dbu=130, top_dbu=0, name="f"),
+        "sky130",
+    )
+    assert _endcap_count(flush_top) == 1
+
+
+def test_run_drc_sky130_poly_endcap_ignores_poly_that_only_abuts_diff(tmp_path):
+    """Poly merely touching a diffusion edge from outside is not a gate: no
+    endcap violation (it is another rule's business)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(65, 20)).insert(kdb.Box(0, 0, 1340, 1000))
+    top.shapes(layout.layer(66, 20)).insert(kdb.Box(420, 1000, 920, 1500))
+    path = tmp_path / "abut.gds"
+    layout.write(str(path))
+    assert _endcap_count(run_drc(str(path), "sky130")) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Response schema conformance (issue #3003): docs/schemas/drc-response.schema.json
+# --------------------------------------------------------------------------- #
+
+_SCHEMA_DIR = REPO_ROOT / "docs" / "schemas"
+_KLAYOUT_STUB_RDB = """<?xml version="1.0" encoding="utf-8"?>
+<report-database>
+ <description>stub</description>
+ <categories>
+  <category><name>W.1</name><description>min width</description></category>
+ </categories>
+ <cells><cell><name>TOP</name></cell></cells>
+ <items>
+  <item>
+   <category>'W.1'</category>
+   <cell>TOP</cell>
+   <values><value>edge-pair: (0,0;0,1)|(0.2,1;0.2,0)</value></values>
+  </item>
+ </items>
+</report-database>
+"""
+
+
+def _drc_response_validator() -> jsonschema.Draft202012Validator:
+    from referencing import Registry, Resource
+
+    schema = json.loads((_SCHEMA_DIR / "drc-response.schema.json").read_text())
+    coverage = json.loads((_SCHEMA_DIR / "coverage.schema.json").read_text())
+    registry = Registry().with_resource(
+        coverage["$id"], Resource.from_contents(coverage)
+    )
+    return jsonschema.Draft202012Validator(schema, registry=registry)
+
+
+def _klayout_engine_report(tmp_path, monkeypatch, **kwargs):
+    """A real `--engine klayout` report, with only the `klayout` launch
+    stubbed (other subprocess calls, e.g. `git`, run for real)."""
+    import subprocess
+
+    import klayout_tools.drc as drc_module
+    from helpers.subprocess_fakes import fake_completed
+    from klayout_tools.drc import run_drc_klayout_engine
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kw):
+        report_args = [a for a in cmd if isinstance(a, str) and a.startswith("report=")]
+        if not report_args:
+            return real_run(cmd, *args, **kw)
+        Path(report_args[0].split("=", 1)[1]).write_text(
+            _KLAYOUT_STUB_RDB, encoding="utf-8"
+        )
+        return fake_completed()
+
+    monkeypatch.setattr(drc_module.subprocess, "run", fake_run)
+    gds = tmp_path / "k.gds"
+    _make_clean_layout().write(str(gds))
+    deck = tmp_path / "deck.lydrc"
+    deck.write_text("# stub deck\n", encoding="utf-8")
+    return run_drc_klayout_engine(str(gds), str(deck), **kwargs)
+
+
+def test_drc_response_schema_is_valid_and_pins_version():
+    validator = _drc_response_validator()
+    jsonschema.Draft202012Validator.check_schema(validator.schema)
+    assert validator.schema["properties"]["schema_version"]["const"] == 2
+
+
+def test_drc_response_schema_validates_curated_reports(tmp_path):
+    validator = _drc_response_validator()
+    violation = tmp_path / "violation.gds"
+    clean = tmp_path / "clean.gds"
+    _make_violation_layout().write(str(violation))
+    _make_clean_layout().write(str(clean))
+
+    reports = {
+        "violations": run_drc(str(violation), "sky130"),
+        "clean": run_drc(str(clean), "sky130"),
+        "clean_partial": run_drc(str(clean), "sky130", rules=["poly.*"]),
+    }
+    for status, report in reports.items():
+        assert report["status"] == status
+        validator.validate(report)
+    assert "rule_selection" in reports["clean_partial"]
+    assert reports["violations"]["violations"]
+
+
+def test_drc_response_schema_validates_not_checked_report(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "empty.gds"
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "not_checked"
+    validator.validate(report)
+
+
+def test_drc_response_schema_validates_klayout_engine_report(tmp_path, monkeypatch):
+    validator = _drc_response_validator()
+
+    report = _klayout_engine_report(tmp_path, monkeypatch, expected_rule_categories=1)
+
+    assert report["engine"] == "klayout"
+    assert report["status"] == "violations"
+    assert report["coverage_assertion"]["kind"] == "expected_rule_categories"
+    validator.validate(report)
+
+    named = _klayout_engine_report(
+        tmp_path, monkeypatch, expected_rule_category_names=["W.1"]
+    )
+    assert named["coverage_assertion"]["kind"] == "expected_rule_category_names"
+    validator.validate(named)
+
+    unasserted = _klayout_engine_report(tmp_path, monkeypatch)
+    assert "coverage_assertion" not in unasserted
+    validator.validate(unasserted)
+
+
+def test_drc_response_schema_validates_list_rules_listing():
+    from klayout_tools.drc import list_deck_rules
+
+    validator = _drc_response_validator()
+    listing = list_deck_rules("sky130")
+
+    assert "status" not in listing
+    validator.validate(listing)
+    # The listing is its own branch: without `mode` it is neither shape.
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate({k: v for k, v in listing.items() if k != "mode"})
+
+
+def test_drc_response_schema_rejects_missing_required_field(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    for field in (
+        "schema_version",
+        "file",
+        "deck",
+        "dbu_um",
+        "status",
+        "violation_count",
+        "rule_counts",
+        "metrics",
+        "violations",
+        "coverage",
+        "provenance",
+    ):
+        broken = {k: v for k, v in report.items() if k != field}
+        with pytest.raises(jsonschema.ValidationError):
+            validator.validate(broken)
+
+
+def test_drc_response_schema_rejects_bad_values(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    for bad in (
+        {**report, "schema_version": 1},
+        {**report, "status": "pass"},
+        {**report, "violations": [{**report["violations"][0], "bbox": {"left": 0}}]},
+    ):
+        with pytest.raises(jsonschema.ValidationError):
+            validator.validate(bad)
+
+
+def test_drc_response_schema_accepts_additive_unknown_fields(tmp_path):
+    validator = _drc_response_validator()
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    report = run_drc(str(path), "sky130")
+
+    extended = {
+        **report,
+        "future_field": {"anything": [1, 2]},
+        "coverage": {**report["coverage"], "future_coverage_field": True},
+        "provenance": {**report["provenance"], "future_provenance_field": "x"},
+        "violations": [{**report["violations"][0], "future_violation_field": 1}],
+    }
+    validator.validate(extended)
+
+
+# ---------------------------------------------------------------------------
+# rule-scoped cell waivers: --waivers / waivers_file (#3483)
+# ---------------------------------------------------------------------------
+
+_WAIVED_CELL = "sky130_fd_sc_hd__inv_2"
+
+
+def _waivers_file(tmp_path, entries, name="waivers.json") -> str:
+    path = tmp_path / name
+    path.write_text(json.dumps({"waivers": entries}))
+    return str(path)
+
+
+def _hier_gds(tmp_path) -> str:
+    path = tmp_path / "hier.gds"
+    _make_hierarchical_violation_layout().write(str(path))
+    return str(path)
+
+
+def _waiver(cell=_WAIVED_CELL, rule="poly.width.1", justification="library cell"):
+    return {"cell": cell, "rule": rule, "justification": justification}
+
+
+def test_waivers_move_matching_markers_to_waived(tmp_path):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(tmp_path, [_waiver()])
+
+    report = run_drc(gds, "sky130", waivers_file=waivers)
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+    assert report["violations"] == []
+    assert report["rule_counts"] == {}
+    assert report["metrics"]["drc__error__count"] == 0
+    assert report["waived_count"] == 3
+    assert report["waived_rule_counts"] == {"poly.width.1": 3}
+    assert report["unused_waivers"] == []
+    for entry in report["waived"]:
+        assert entry["rule"] == "poly.width.1"
+        assert entry["source_cell"] == _WAIVED_CELL
+        assert entry["waiver_justification"] == "library cell"
+        assert "bbox" in entry
+    assert report["provenance"]["waivers"]["file"] == waivers
+    assert report["provenance"]["waivers"]["content_hash"].startswith("sha256:")
+
+
+def test_waivers_do_not_apply_to_other_rule_or_cell(tmp_path):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(
+        tmp_path,
+        [_waiver(rule="poly.space.1"), _waiver(cell="block_a")],
+    )
+
+    report = run_drc(gds, "sky130", waivers_file=waivers)
+
+    assert report["status"] == "violations"
+    assert report["violation_count"] == 3
+    assert report["waived_count"] == 0
+    assert report["waived"] == []
+    assert len(report["unused_waivers"]) == 2
+
+
+def test_waivers_glob_rule_and_unused_listing(tmp_path):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(
+        tmp_path, [_waiver(rule="poly.*"), _waiver(cell="never_placed")]
+    )
+
+    report = run_drc(gds, "sky130", waivers_file=waivers)
+
+    assert report["status"] == "clean"
+    assert report["waived_count"] == 3
+    assert [w["cell"] for w in report["unused_waivers"]] == ["never_placed"]
+
+
+def test_waivers_never_waive_unattributed_marker(tmp_path):
+    path = tmp_path / "flat.gds"
+    _make_violation_layout().write(str(path))
+    waivers = _waivers_file(tmp_path, [_waiver(cell="TOP", rule="*")])
+
+    report = run_drc(str(path), "sky130", waivers_file=waivers)
+
+    assert report["status"] == "violations"
+    assert report["waived_count"] == 0
+
+
+def test_without_waivers_report_has_no_waiver_fields(tmp_path):
+    report = run_drc(_hier_gds(tmp_path), "sky130")
+
+    for key in ("waived", "waived_count", "waived_rule_counts", "unused_waivers"):
+        assert key not in report
+    assert "waivers" not in report["provenance"]
+
+
+@pytest.mark.parametrize(
+    "doc, message",
+    [
+        ({"waivers": []}, "non-empty 'waivers' list"),
+        ({"nope": 1}, "non-empty 'waivers' list"),
+        ({"waivers": [{"rule": "r", "justification": "j"}]}, "'cell'"),
+        ({"waivers": [{"cell": "c", "justification": "j"}]}, "'rule'"),
+        ({"waivers": [{"cell": "c", "rule": "r"}]}, "'justification'"),
+        ({"waivers": [{"cell": "c", "rule": "r", "justification": " "}]}, "justif"),
+        (
+            {"waivers": [{"cell": "c", "rule": "r", "justification": "j", "x": 1}]},
+            "unknown",
+        ),
+    ],
+)
+def test_malformed_waivers_file_is_rejected(tmp_path, doc, message):
+    gds = _hier_gds(tmp_path)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(doc))
+
+    with pytest.raises(DrcError, match=message):
+        run_drc(gds, "sky130", waivers_file=str(path))
+
+
+def test_unreadable_and_non_json_waivers_file_rejected(tmp_path):
+    gds = _hier_gds(tmp_path)
+    with pytest.raises(DrcError, match="could not read"):
+        run_drc(gds, "sky130", waivers_file=str(tmp_path / "missing.json"))
+    broken = tmp_path / "broken.json"
+    broken.write_text("{")
+    with pytest.raises(DrcError, match="not valid JSON"):
+        run_drc(gds, "sky130", waivers_file=str(broken))
+
+
+def test_cli_waivers_flag_and_request_field_agree(tmp_path, capsys):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(tmp_path, [_waiver()])
+    request_path = tmp_path / "drc.request.json"
+    request_path.write_text(
+        json.dumps(_drc_request_document(Path(gds), waivers_file="waivers.json"))
+    )
+
+    code, flag_report = _run_drc_json(
+        capsys, [gds, "--deck", "sky130", "--waivers", waivers]
+    )
+    request_code, request_report = _run_drc_json(capsys, [str(request_path)])
+
+    assert code == request_code == 0
+    assert flag_report["waived_count"] == request_report["waived_count"] == 3
+    assert request_report["provenance"]["waivers"]["file"] == str(
+        tmp_path / "waivers.json"
+    )
+
+
+def test_cli_waivers_rejected_with_klayout_engine(tmp_path, capsys):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(tmp_path, [_waiver()])
+    message = _drc_error_message(
+        capsys,
+        [gds, "--engine", "klayout", "--deck-file", waivers, "--waivers", waivers],
+    )
+    assert "--waivers is not supported with --engine klayout" in message
+
+
+def test_waived_report_check_and_rerun_replay_waivers(tmp_path):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(tmp_path, [_waiver()])
+    report = run_drc(gds, "sky130", waivers_file=waivers)
+    report_path = tmp_path / "waived.drc.json"
+    _write_report(report_path, report)
+
+    assert rerun_drc_report(str(report_path))["status"] == "match"
+    assert check_drc_report(str(report_path))["status"] == "match"
+
+    Path(waivers).write_text(json.dumps({"waivers": [_waiver(justification="edited")]}))
+    checked = check_drc_report(str(report_path))
+    assert checked["status"] == "drifted"
+    assert rerun_drc_report(str(report_path))["status"] == "drifted"
+
+
+# --- sky130 two-adjacent-edges enclosure (`enclosing_adjacent`, #3316) -------
+#
+# `sky130A_mr.drc` flags a cut when two *adjacent* edges are both enclosed by
+# less than the threshold (a corner of short edges); one short side, or two
+# opposite short sides, is legal. Verified against the official runset on the
+# same geometry, so these pin its semantics, not the wording of the issue.
+_ADJACENT_RULES = [
+    # (rule id, metal layer, cut layer, threshold dbu)
+    ("met1.enclosing_adjacent.via.1", (68, 20), (68, 44), 85),
+    ("met2.enclosing_adjacent.via.1", (69, 20), (68, 44), 85),
+    ("met2.enclosing_adjacent.via2.1", (69, 20), (69, 44), 85),
+    ("met3.enclosing_adjacent.via3.1", (70, 20), (70, 44), 90),
+]
+
+
+def _adjacent_layout(metal, cut, margins) -> kdb.Layout:
+    """A 150 dbu cut at the origin; ``margins`` = (left, bottom, right, top)."""
+    left, bottom, right, top_m = margins
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(*cut)).insert(kdb.Box(0, 0, 150, 150))
+    top.shapes(layout.layer(*metal)).insert(
+        kdb.Box(-left, -bottom, 150 + right, 150 + top_m)
+    )
+    return layout
+
+
+@pytest.mark.parametrize(("rule_id", "metal", "cut", "thr"), _ADJACENT_RULES)
+@pytest.mark.parametrize(
+    ("label", "margins", "violations"),
+    [
+        ("two adjacent sides long, others short", ("L", "L", "S", "S"), 1),
+        ("two opposite sides long, others short", ("L", "S", "L", "S"), 0),
+        ("all sides short", ("S", "S", "S", "S"), 1),
+        ("all sides long", ("L", "L", "L", "L"), 0),
+        ("one side short", ("L", "L", "L", "S"), 0),
+    ],
+)
+def test_enclosing_adjacent_sky130(
+    tmp_path, rule_id, metal, cut, thr, label, margins, violations
+):
+    values = {"L": thr, "S": thr - 30}
+    layout = _adjacent_layout(metal, cut, tuple(values[m] for m in margins))
+    path = tmp_path / "adj.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130", rules=[rule_id])
+
+    assert report["violation_count"] == violations, label
+    assert report["rule_counts"] == ({rule_id: 1} if violations else {})
+
+
+def test_enclosing_adjacent_one_violation_per_cut(tmp_path):
+    """Three short sides meet at two corners; the cut is reported once."""
+    layout = _adjacent_layout((68, 20), (68, 44), (85, 55, 55, 55))
+    path = tmp_path / "adj3.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130", rules=["met1.enclosing_adjacent.via.1"])
+
+    assert report["violation_count"] == 1
+
+
+def test_enclosing_adjacent_requires_other_layer():
+    rule = next(
+        r for r in get_deck("sky130") if r.id == "met1.enclosing_adjacent.via.1"
+    )
+    assert rule.check == "enclosing_adjacent"
+    assert rule.other_layer is not None

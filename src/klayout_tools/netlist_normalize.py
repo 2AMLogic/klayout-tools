@@ -24,11 +24,11 @@ therefore recognised by a positive subcircuit-name match alone, not a
 carried-parameter heuristic; its only carried call-site parameter is an
 optional ``mult``, mapped onto the plain-element ``Q`` card's ``NE``
 (KLayout's own ``DeviceClassBJT3Transistor`` natively represents multiple
-parallel emitters via ``NE`` -- unlike MOS/resistor's ``nf``/``m``/``mult``,
+parallel emitters via ``NE`` -- unlike resistor's ``nf``/``m``/``mult``,
 which the curated plain-element form cannot represent at all and rejects,
 see below, ``mult`` on a bipolar call is carried, not rejected).
-Resistor/capacitor still reject ``nf``/``m``/``mult`` > 1 exactly like MOS
-(neither ``DeviceClassResistor`` nor ``DeviceClassCapacitor`` has an
+Resistor/capacitor reject ``nf``/``m``/``mult`` > 1 (MOS expands ``nf``/``m``
+instead; neither ``DeviceClassResistor`` nor ``DeviceClassCapacitor`` has an
 ``NE``-equivalent multiplicity parameter to carry it onto).
 
 **The gap this closes.** ``klt lvs``'s reference netlist must use the
@@ -89,8 +89,9 @@ plausible netlist that compares clean when it shouldn't). So:
   silent metres assumption -- previously, a unitless-and-scaled schematic
   export silently mis-scaled every device geometry by ``1e6`` with no
   diagnostic (see :func:`_parse_um`).
-- ``nf``/``m``/``mult`` > 1 (a multi-finger / multiplied device the curated
-  plain-element resistor/capacitor forms cannot represent) is **rejected**
+- resistor/capacitor ``nf``/``m``/``mult`` > 1 (a multi-finger / multiplied
+  device the curated plain-element resistor/capacitor forms cannot
+  represent) is **rejected**
   with a specific error naming the device and value, never silently
   dropped or misinterpreted. Bipolar's ``mult`` is the one exception --
   carried onto ``NE``, not rejected (see "Device family coverage" above).
@@ -98,12 +99,15 @@ plausible netlist that compares clean when it shouldn't). So:
   call is *expanded*, not rejected -- into ``nf`` parallel unit-width plain
   ``M`` cards (deterministic ``<instance>_f0``, ``<instance>_f1``, ...
   naming), the same shape a real drawn multi-finger layout extracts as
-  (see :func:`_expand_mos_fingers`). MOS's ``m``/``mult`` (a *whole-device*
-  replication count, a different real-world knob from finger-folding --
-  gf180mcu spells it ``m``, sky130 ``mult``, never both on the same call)
-  is still rejected exactly like resistor/capacitor's -- expanding it would
-  need the same per-finger-width verification ``nf`` just received, and
-  nothing here has done that yet.
+  (see :func:`_expand_mos_fingers`). **MOS's instance multiplier ``m`` is
+  expanded too (issue #3123)**: ``m=N`` becomes ``N`` parallel plain ``M``
+  cards (``<instance>_m0`` ... ; ``nf*m`` cards named ``<instance>_m0_f0``
+  ... when combined with ``nf``), total width ``m*W``, reconciled against a
+  drawn N-unit layout by ``options.combine_devices``. MOS's ``mult`` is
+  ignored (it must still be numeric): verified against the sky130 model
+  subckt, ``mult`` only enters the mismatch-sigma expressions
+  (``sqrt(l*w*mult)``) and is never forwarded to the device card, so only
+  ``m`` changes the nominal device. ``m`` must be a positive integer.
 - **A resistor/capacitor call supplying only one of its two geometry
   parameters is not automatically an error (issue #2459).** Some PDKs ship
   a *fixed-geometry device-flavour wrapper* -- its own separately-named
@@ -131,7 +135,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import NamedTuple
 
 from ._paths import _fold_spice_continuations
@@ -178,10 +182,12 @@ _DEVICE_LIKE_PARAMS = _CARRIED_PARAMS + ("r_length", "r_width", "c_length", "c_w
 #: ``exclude``), so a resistor/capacitor ``nf>1`` is still a hard error.
 _MULTIPLICITY_PARAMS = ("nf", "m", "mult", "mf")
 
-#: The multiplicity parameter :func:`_reject_multiplicity` never rejects for
-#: a MOS call -- :func:`_convert_mos_card` excludes it because
-#: :func:`_resolve_finger_count` handles it instead (issue #1487).
-_MOS_EXCLUDED_MULTIPLICITY_PARAMS = ("nf",)
+#: The multiplicity parameters :func:`_reject_multiplicity` never rejects for
+#: a MOS call -- :func:`_convert_mos_card` excludes them because
+#: :func:`_resolve_finger_count` (``nf``, issue #1487),
+#: :func:`_resolve_multiplier` (``m``, issue #3123) and
+#: :func:`_check_mos_mult` (``mult``, mismatch-only) handle them instead.
+_MOS_EXCLUDED_MULTIPLICITY_PARAMS = ("nf", "m", "mult")
 
 #: Terminal count of the curated capacitor primitive, used the same way
 #: :data:`_MOS_TERMINALS` is for MOS -- a hard, named error on a mismatched
@@ -340,9 +346,17 @@ def _parse_um(
     """
     match = _NUMBER_RE.match(raw_value.strip())
     if match is None:
+        symbols = sorted(set(_IDENT_RE.findall(raw_value)) - {"e", "E"})
+        hint = (
+            f" (unresolved symbol(s) {', '.join(repr(n) for n in symbols)}: not "
+            "defined by a .subckt header default or .param line in this "
+            "netlist, or the expression uses unsupported syntax)"
+            if symbols
+            else ""
+        )
         raise NormalizeError(
             f"device '{device}': parameter '{param.upper()}' value "
-            f"'{raw_value}' is not a plain numeric literal -- the "
+            f"'{raw_value}' is not a plain numeric literal{hint} -- the "
             "plain-element form cannot carry an expression; write an explicit "
             "geometric value (e.g. L=0.5u)"
         )
@@ -378,6 +392,192 @@ def _parse_um(
     return metres * 1e6
 
 
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUM_TOKEN_RE = re.compile(r"(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?[a-zA-Z]*")
+
+#: ``{<subckt-name or "">: {<param>: <raw value>}}`` -- the ``.param`` lines
+#: (scope ``""``) and ``.subckt`` header defaults found in one netlist.
+ParamScopes = dict[str, dict[str, str]]
+
+
+class _Unresolved(Exception):
+    """An expression names a symbol it cannot resolve, or uses syntax outside
+    the restricted evaluator; ``symbol`` is the offending name/token."""
+
+    def __init__(self, symbol: str) -> None:
+        super().__init__(symbol)
+        self.symbol = symbol
+
+
+def _collect_param_scopes(lines: list[str]) -> ParamScopes:
+    """Gather ``.param`` assignments and ``.subckt`` header ``key=value``
+    defaults, keyed by the enclosing subcircuit name (``""`` = top level)."""
+    scopes: ParamScopes = {"": {}}
+    current = ""
+    for line in lines:
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if lowered.startswith(".subckt"):
+            tokens = _tokenize(stripped)
+            if len(tokens) >= 2:
+                current = tokens[1].lower()
+                scopes.setdefault(current, {}).update(_split_params(tokens[2:])[1])
+        elif lowered.startswith(".ends"):
+            current = ""
+        elif lowered.startswith(".param"):
+            tokens = _tokenize(stripped)
+            scopes.setdefault(current, {}).update(_split_params(tokens[1:])[1])
+    return scopes
+
+
+class _ExprEvaluator:
+    """Restricted SPICE arithmetic: ``+ - * /``, parentheses, unary sign,
+    engineering suffixes and identifiers looked up through ``lookup``. No
+    function calls. ``scaled`` records whether any literal carried a
+    suffix/exponent, so the caller can keep the result unambiguous."""
+
+    def __init__(self, text: str, lookup: Callable[[str], tuple[float, bool]]) -> None:
+        self.text = text
+        self.pos = 0
+        self.lookup = lookup
+        self.scaled = False
+
+    def parse(self) -> float:
+        value = self._sum()
+        self._skip()
+        if self.pos != len(self.text):
+            raise _Unresolved(self.text[self.pos :])
+        return value
+
+    def _skip(self) -> None:
+        while self.pos < len(self.text) and self.text[self.pos].isspace():
+            self.pos += 1
+
+    def _peek(self) -> str:
+        self._skip()
+        return self.text[self.pos] if self.pos < len(self.text) else ""
+
+    def _sum(self) -> float:
+        value = self._product()
+        while self._peek() in ("+", "-"):
+            op = self.text[self.pos]
+            self.pos += 1
+            rhs = self._product()
+            value = value + rhs if op == "+" else value - rhs
+        return value
+
+    def _product(self) -> float:
+        value = self._unary()
+        while self._peek() in ("*", "/"):
+            op = self.text[self.pos]
+            self.pos += 1
+            rhs = self._unary()
+            if op == "/" and rhs == 0:
+                raise _Unresolved("/0")
+            value = value * rhs if op == "*" else value / rhs
+        return value
+
+    def _unary(self) -> float:
+        if self._peek() in ("+", "-"):
+            sign = self.text[self.pos]
+            self.pos += 1
+            value = self._unary()
+            return -value if sign == "-" else value
+        return self._atom()
+
+    def _atom(self) -> float:
+        char = self._peek()
+        if char == "(":
+            self.pos += 1
+            value = self._sum()
+            if self._peek() != ")":
+                raise _Unresolved("(")
+            self.pos += 1
+            return value
+        number = _NUM_TOKEN_RE.match(self.text, self.pos)
+        if number is not None:
+            self.pos = number.end()
+            match = _NUMBER_RE.match(number.group(0))
+            if match is None:
+                raise _Unresolved(number.group(0))
+            suffix = match.group(2).lower()
+            multiplier = 1.0
+            for name, factor in _SPICE_SUFFIXES:
+                if suffix.startswith(name):
+                    multiplier = factor
+                    break
+            if suffix or "e" in match.group(1).lower():
+                self.scaled = True
+            return float(match.group(1)) * multiplier
+        ident = _IDENT_RE.match(self.text, self.pos)
+        if ident is None:
+            raise _Unresolved(self.text[self.pos : self.pos + 1] or "<end>")
+        self.pos = ident.end()
+        if self._peek() == "(":
+            raise _Unresolved(f"{ident.group(0)}(...)")
+        value, scaled = self.lookup(ident.group(0))
+        self.scaled = self.scaled or scaled
+        return value
+
+
+def _resolve_value(
+    raw: str,
+    chain: list[dict[str, str]],
+    active: tuple[str, ...] = (),
+) -> tuple[float, bool]:
+    """Evaluate ``raw`` (``'a*b'``, ``{a+b}``, ``lacc``) looking each name up
+    in ``chain`` (first dict that defines it wins). Returns
+    ``(value, scaled)``; raises :class:`_Unresolved`."""
+    text = raw.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+    elif len(text) >= 2 and text[0] == "{" and text[-1] == "}":
+        text = text[1:-1]
+
+    def lookup(name: str) -> tuple[float, bool]:
+        key = name.lower()
+        if key in active:
+            raise _Unresolved(name)
+        for candidate in chain:
+            if key in candidate:
+                return _resolve_value(candidate[key], chain, (*active, key))
+        raise _Unresolved(name)
+
+    evaluator = _ExprEvaluator(text, lookup)
+    return evaluator.parse(), evaluator.scaled
+
+
+def _resolve_params(
+    params: dict[str, str], subckt_scope: str, scopes: ParamScopes
+) -> dict[str, str]:
+    """Replace each non-literal ``params`` value with the plain literal it
+    resolves to, looking names up in the enclosing ``.subckt``'s header
+    defaults / ``.param`` lines, then the top-level ``.param`` lines (a
+    sibling call parameter is not a symbol, as in SPICE). A value that is
+    already a plain number, or that cannot be resolved (a function call, an
+    unknown name), is left as written so the consumer that actually reads
+    that parameter reports it by name (see :func:`_parse_um`); parameters
+    nobody reads (``ad``/``as``/...) therefore never fail the conversion."""
+    chain = [scopes.get(subckt_scope, {}), scopes[""]]
+    out: dict[str, str] = {}
+    for key, raw in params.items():
+        if _NUMBER_RE.match(raw.strip()):
+            out[key] = raw
+            continue
+        try:
+            value, scaled = _resolve_value(raw, chain)
+        except _Unresolved:
+            out[key] = raw
+            continue
+        if scaled:
+            out[key] = f"{value:.12e}"
+        elif value == int(value):
+            out[key] = str(int(value))
+        else:
+            out[key] = repr(value)
+    return out
+
+
 def _split_params(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
     """Split an ``X`` card's tokens (after the instance name) into its
     leading positional tokens (nodes + subcircuit name) and its
@@ -411,11 +611,19 @@ def _convert_x_card(
     geometry_style: str | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
     custom_device_classes: Mapping[str, str] | None = None,
+    param_scopes: ParamScopes | None = None,
+    subckt_scope: str = "",
 ) -> str:
     """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
     ``C``/``Q`` line, or return it unchanged if it is not a recognised device
     call (issue #1130 extends the original #280 MOS-only conversion to
     resistor, capacitor, and bipolar).
+
+    ``param_scopes``/``subckt_scope`` (issue #2953) carry the netlist's
+    ``.param``/``.subckt``-default symbols and the enclosing ``.subckt``'s
+    name: a call-site value that is an identifier or simple expression
+    (``L=lacc``, ``W='w*2'``) is resolved to a literal before any geometry is
+    parsed (see :func:`_resolve_params`).
 
     ``subckt_to_binding`` maps a device subcircuit name to its curated
     :class:`~klayout_tools.pdk_models.DeviceLookup`. When ``None`` (no deck /
@@ -469,6 +677,8 @@ def _convert_x_card(
     positional, params = _split_params(rest)
     if not positional:
         return line
+    if param_scopes is not None:
+        params = _resolve_params(params, subckt_scope, param_scopes)
 
     subckt_name = positional[-1]
     nodes = positional[:-1]
@@ -553,6 +763,8 @@ def _convert_mos_card(
         )
 
     finger_count = _resolve_finger_count(instance, subckt_name, params)
+    multiplier = _resolve_multiplier(instance, subckt_name, params)
+    _check_mos_mult(instance, subckt_name, params)
     _reject_multiplicity(
         instance,
         subckt_name,
@@ -575,13 +787,13 @@ def _convert_mos_card(
         params["w"], device=instance, param="w", geometry_style=geometry_style
     )
 
-    if finger_count == 1:
+    if finger_count == 1 and multiplier == 1:
         return (
             f"{instance} {' '.join(nodes)} {lookup.device_class} "
             f"L={_format_um(l_um)} W={_format_um(w_um)}"
         )
     return _expand_mos_fingers(
-        instance, nodes, lookup.device_class, l_um, w_um, finger_count
+        instance, nodes, lookup.device_class, l_um, w_um, finger_count, multiplier
     )
 
 
@@ -592,31 +804,84 @@ def _resolve_finger_count(
     returning the number of physical gate fingers to expand into (issue
     #1487).
 
-    Unlike ``m``/``mult`` (a *whole-device* replication count -- still
-    rejected outright by :func:`_reject_multiplicity`), ``nf`` describes a
-    single real device folded into ``nf`` physical gate fingers -- a shape
-    the curated plain-element MOS class cannot represent directly, but
-    *can* be represented faithfully as ``nf`` separate unit-width plain
-    ``M`` cards (see :func:`_expand_mos_fingers`). ``nf`` must be a
-    positive integer -- there is no way to fold a fractional or negative
-    number of physical gate fingers, so a non-integer value is still a
-    hard error (never silently rounded).
+    ``nf`` describes a single real device folded into ``nf`` physical gate
+    fingers -- a shape the curated plain-element MOS class cannot represent
+    directly, but *can* be represented faithfully as ``nf`` separate
+    unit-width plain ``M`` cards (see :func:`_expand_mos_fingers`). ``nf``
+    must be a positive integer -- there is no way to fold a fractional or
+    negative number of physical gate fingers, so a non-integer value is
+    still a hard error (never silently rounded).
     """
-    if "nf" not in params:
+    return _resolve_positive_int(
+        instance,
+        subckt_name,
+        params,
+        "nf",
+        "to expand into that many parallel plain-element gate fingers",
+    )
+
+
+def _resolve_multiplier(instance: str, subckt_name: str, params: dict[str, str]) -> int:
+    """Parse and validate a MOS call's instance multiplier ``m`` (default
+    ``1`` when absent), returning the number of parallel whole-device
+    copies to expand into (issue #3123).
+
+    ``m`` is the SPICE instance multiplier (``N`` identical devices in
+    parallel), which is exactly what ``N`` parallel plain ``M`` cards
+    represent -- reconciled against a drawn N-unit layout by
+    ``options.combine_devices``. Same positive-integer rule as ``nf``.
+
+    ``mult`` is deliberately *not* a multiplier here: in the sky130 model
+    subckt it only enters the mismatch-sigma expressions
+    (``sqrt(l*w*mult)``) and is never forwarded to the device card as
+    ``m``, so it does not change the nominal device and is ignored (but
+    still must be numeric -- see :func:`_check_mos_mult`).
+    """
+    return _resolve_positive_int(
+        instance,
+        subckt_name,
+        params,
+        "m",
+        "to expand into that many parallel plain-element devices",
+    )
+
+
+def _check_mos_mult(instance: str, subckt_name: str, params: dict[str, str]) -> None:
+    """Require a MOS call's mismatch-only ``mult`` (issue #3123) to be
+    numeric when present; its value never changes the converted devices."""
+    if "mult" not in params:
+        return
+    try:
+        float(params["mult"])
+    except ValueError as exc:
+        raise NormalizeError(
+            f"device '{instance}' (subcircuit '{subckt_name}'): "
+            f"parameter 'mult' value '{params['mult']}' is not numeric"
+        ) from exc
+
+
+def _resolve_positive_int(
+    instance: str,
+    subckt_name: str,
+    params: dict[str, str],
+    name: str,
+    purpose: str,
+) -> int:
+    """Shared positive-integer parse for MOS ``nf`` / ``m`` (default 1)."""
+    if name not in params:
         return 1
-    raw = params["nf"]
+    raw = params[name]
     try:
         value = float(raw)
     except ValueError as exc:
         raise NormalizeError(
             f"device '{instance}' (subcircuit '{subckt_name}'): "
-            f"parameter 'nf' value '{raw}' is not numeric"
+            f"parameter '{name}' value '{raw}' is not numeric"
         ) from exc
     if value <= 0 or value != int(value):
         raise NormalizeError(
-            f"device '{instance}' (subcircuit '{subckt_name}'): nf={raw} "
-            "must be a positive integer to expand into that many parallel "
-            "plain-element gate fingers"
+            f"device '{instance}' (subcircuit '{subckt_name}'): "
+            f"{name}={raw} must be a positive integer {purpose}"
         )
     return int(value)
 
@@ -628,13 +893,19 @@ def _expand_mos_fingers(
     l_um: float,
     w_um: float,
     finger_count: int,
+    multiplier: int = 1,
 ) -> str:
     """Expand one folded ``nf``-finger MOS call into ``finger_count``
     parallel unit-width plain-element ``M`` cards, one line per finger,
-    joined by newlines (issue #1487).
+    joined by newlines (issue #1487); an instance multiplier ``m`` (issue
+    #3123) replicates that whole set ``multiplier`` times, so the result is
+    ``finger_count * multiplier`` cards, each ``w_um / finger_count`` wide
+    (``w_um`` is per ``m`` copy: total width is ``multiplier * w_um``).
 
-    Deterministic ``<instance>_f0``, ``<instance>_f1``, ... naming (``f``
-    for "finger", 0-indexed) -- so device identity is stable across runs,
+    Deterministic naming -- ``<instance>_f0``, ``<instance>_f1``, ... (``f``
+    for "finger", 0-indexed) when only ``nf`` folds; ``<instance>_m0``, ...
+    (``m`` for "multiplier copy") when only ``m`` replicates; and
+    ``<instance>_m0_f0``, ... when both -- so device identity is stable across runs,
     which is what keeps ``klt lvs``'s device-pairing/association from
     churning between repeated conversions of the same source netlist.
 
@@ -656,11 +927,18 @@ def _expand_mos_fingers(
     the way it already reconciles a genuinely hand-split reference pair.
     """
     w_finger_um = w_um / finger_count
-    lines = [
-        f"{instance}_f{i} {' '.join(nodes)} {device_class} "
-        f"L={_format_um(l_um)} W={_format_um(w_finger_um)}"
-        for i in range(finger_count)
-    ]
+    lines = []
+    for j in range(multiplier):
+        for i in range(finger_count):
+            parts = []
+            if multiplier > 1:
+                parts.append(f"m{j}")
+            if finger_count > 1:
+                parts.append(f"f{i}")
+            lines.append(
+                f"{instance}_{'_'.join(parts)} {' '.join(nodes)} {device_class} "
+                f"L={_format_um(l_um)} W={_format_um(w_finger_um)}"
+            )
     return "\n".join(lines)
 
 
@@ -964,9 +1242,9 @@ def _reject_multiplicity(
     :func:`_convert_bipolar_card`).
 
     ``exclude`` (issue #1487) skips a named parameter entirely -- the MOS
-    call site passes ``_MOS_EXCLUDED_MULTIPLICITY_PARAMS`` (``("nf",)``)
-    because :func:`_convert_mos_card` already resolved and validated ``nf``
-    itself via :func:`_resolve_finger_count` (expanded, not rejected);
+    call site passes ``_MOS_EXCLUDED_MULTIPLICITY_PARAMS``
+    because :func:`_convert_mos_card` already resolved and validated
+    ``nf``/``m``/``mult`` itself (expanded or ignored, not rejected);
     resistor/capacitor call sites pass no ``exclude``, so their own ``nf``
     is still rejected exactly as before.
     """
@@ -1388,6 +1666,8 @@ def convert_reference_netlist(
     geometry_style = geometry_style_for_family(deck) if deck is not None else None
     custom_device_classes = _resolve_custom_device_classes(deck)
     logical_lines = _merge_continuations(text.splitlines())
+    param_scopes = _collect_param_scopes(logical_lines)
+    subckt_scope = ""
 
     placeholder_value_classes: dict[str, str] = {}
     out: list[str] = []
@@ -1396,6 +1676,12 @@ def convert_reference_netlist(
         if not stripped or stripped.startswith("*"):
             out.append(line)
             continue
+        lowered = stripped.lower()
+        if lowered.startswith(".subckt"):
+            tokens = _tokenize(stripped)
+            subckt_scope = tokens[1].lower() if len(tokens) >= 2 else ""
+        elif lowered.startswith(".ends"):
+            subckt_scope = ""
         first = stripped.split(None, 1)[0]
         if first and first[0] in "Xx":
             out.append(
@@ -1406,6 +1692,8 @@ def convert_reference_netlist(
                     geometry_style,
                     placeholder_value_classes,
                     custom_device_classes,
+                    param_scopes,
+                    subckt_scope,
                 )
             )
         else:
@@ -1425,6 +1713,19 @@ def normalize_reference_netlist(
     behaviour, for callers that do not need the conversion metadata.
     """
     return convert_reference_netlist(text, deck=deck, device_map=device_map).text
+
+
+def defined_subckt_names(text: str) -> set[str]:
+    """The upper-cased name of every ``.subckt`` defined in SPICE ``text``
+    (issue #2952) -- upper-cased because ``NetlistSpiceReader`` reads circuit
+    names back that way, so a caller can compare against
+    ``kdb.Circuit.name`` directly. ``.include``-d files are not followed."""
+    defined: set[str] = set()
+    for line in _merge_continuations(text.splitlines()):
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].lower() == ".subckt":
+            defined.add(parts[1].upper())
+    return defined
 
 
 def detect_subckt_call_devices(text: str) -> list[str]:

@@ -11,7 +11,8 @@ the antenna + ERC signoff epic
 
 ```
 klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
-                      [--findings-only] [--format text|json]
+                      [--findings-only [--omit-antenna-tables]]
+                      [--format text|json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -43,6 +44,18 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
   finding is identical to a full run; the antenna half reports `null`
   accumulation fields and `"unchecked"` verdicts. Mutually exclusive with
   `--pdk` (exit 1). See "Findings-only runs" below.
+- `--omit-antenna-tables` — valid only with `--findings-only` (otherwise exit
+  1): drop the all-`unchecked` `gates[]` array and collapse the antenna
+  `coverage` entries to one aggregate entry per category, so the report of a
+  dense layout is small enough to commit verbatim (issue
+  [#3011](https://github.com/2AMLogic/klayout-tools/issues/3011)). Sets
+  `antenna_tables_omitted: true`; every verdict and the exit code are
+  unchanged.
+- `--compact` — with `--findings-only`, summarise the per-gate scaffolding
+  as counts instead of listing it (issue
+  [#2965](https://github.com/2AMLogic/klayout-tools/issues/2965)). Requires
+  `--findings-only` (exit 1 otherwise). See "Compact findings-only
+  reports" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
@@ -2223,9 +2236,11 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
   validation). A successful, but not unconditional, result: read
   `erc_coverage.skipped` for which tie, and which of the four.
 - `"not_checked"` is a reachable token of the shared rollup vocabulary,
-  listed for completeness: `erc_coverage` always grades at least one gate
-  (a run with no gate net at all is exit 1), so a successful run reports
-  one of the three above.
+  listed for completeness: `erc_coverage` grades at least one gate, or --
+  on a passive-only cell with no transistor gate (issue #2896) -- at least
+  one declared `nets[]`/`ties[]` entry (a run with no gate net *and* no
+  declared `nets[]`/`ties[]` is exit 1), so a successful run reports one
+  of the three above.
 
 **Which one to gate on.** Gate a connectivity/structural-supply CI check on
 `erc_status`; gate an antenna check on `status`. Do not derive either from
@@ -2315,6 +2330,63 @@ either way.)
 The flag is **opt-in and inert by default**: an invocation that does not
 pass it produces exactly the report it always did, `findings_only: false`
 included, with no field newly nullable.
+
+**Committing the report: `--omit-antenna-tables` (issue #3011).** On a dense
+layout a `--findings-only` report is still large (the issue measured ~20 MB
+for ~8000 gates), and most of it carries no information: `gates[]` (every
+level `unchecked`, every area `null`) and the antenna `coverage` block
+(every entry `skipped: findings_only`). Add `--omit-antenna-tables` to emit
+the tool's own output without them, rather than projecting keys away
+afterwards:
+
+```bash
+klt erc routed.gds supply.erc.json --findings-only --omit-antenna-tables --format json
+```
+
+- `gates` is `[]`; `gate_count` is still the real gate count.
+- `antenna_tables_omitted` is `true`.
+- `coverage` (antenna scope) keeps its shape and passes the common coverage
+  validation, but the per-gate/per-level `skipped` entries become a single
+  entry (id `antenna:[]`, reason `findings_only`) and the
+  `gate_reference_level` `inapplicable` entries a single entry (id
+  `antenna:["gate_reference_level"]`). A `no_gates` entry is kept as is.
+  `coverage_state` is unchanged.
+- `status`, `erc_status`, `erc_findings`, `erc_finding_count`,
+  `erc_coverage`, `nets`, `provenance` and the exit code are identical to the
+  same run without the flag — the roll-up is computed before the projection.
+- `klt signoff` still recognises the envelope as an ERC report (a `gates`
+  list plus `gate_role`) and grades it the same.
+
+Passing `--omit-antenna-tables` without `--findings-only` is a clean exit-1
+error: a full run's `gates[]` carries real measurements.
+
+### Compact findings-only reports
+
+On a large macro a findings-only envelope is dominated by fields that are
+null by construction (`gates[].levels[]`, one `coverage.skipped` record per
+(gate, level), one `erc.floating_gate` checked id per gate). `--compact`
+(issue #2965) summarises them:
+
+- `gates` stays a **list** but is empty (`klt signoff`'s ERC classifier keys
+  on `gates` being a list); `gate_count` still carries the count.
+- A top-level `compact` object is added:
+  `{gate_count, antenna_levels_skipped, antenna_reference_levels,
+  floating_gate_checked, skipped_reason}` (`skipped_reason` is
+  `"findings_only"`).
+- `coverage.skipped` holds one aggregate record (id `antenna:["levels"]`,
+  reason `findings_only`) and `coverage.inapplicable` one
+  (`antenna:["gate_reference_levels"]`, reason `gate_reference_level`)
+  instead of one per gate/level — declined work is still disclosed, never
+  silently empty. A zero-gate cell reports `no_gates` exactly as before.
+- `erc_coverage.checked` carries a single `erc.floating_gate:[]` id in place
+  of one per gate (present iff a gate exists, so the roll-up is unchanged).
+  Every other `erc_coverage` entry — ties, nets, assertions — is untouched.
+
+`nets`, `erc_findings`, `erc_status`, `status` and `provenance` are
+identical to the non-compact findings-only run. `--compact` without
+`--findings-only` is a clean exit-1 error: a full-antenna run's per-gate rows
+carry real verdicts, so there is nothing null to summarise. Default output
+(no `--compact`) is byte-identical to before; the `compact` key is absent.
 
 ## JSON schema (the contract)
 
@@ -2510,8 +2582,10 @@ forward regardless (a `diode_insertion` remedy):
 | `spec`           | string          | The spec file path exactly as provided.                                                          |
 | `pdk`            | string \| null  | The `--pdk` value exactly as provided; `null` if omitted.                                        |
 | `findings_only`  | boolean         | (issue #2219) Whether `--findings-only` was passed — i.e. whether the per-gate antenna accumulation was skipped. `false` for every ordinary run. When `true`, `levels[].step_area_um2`/`cumulative_area_um2`/`antenna_ratio` are `null` and every level is in `coverage.skipped` for reason `findings_only` — see "Findings-only runs" above. |
+| `compact`        | object          | (issue #2965) Present **only** with `--findings-only --compact`: counts replacing the omitted per-gate rows — see "Compact findings-only reports" above. Absent otherwise. |
 | `gate_role`      | string          | The `stackup[0].name` value — the gate-role layer's own name.                                    |
-| `gate_count`     | integer         | `len(gates)`.                                                                                     |
+| `gate_count`     | integer         | The number of gates; `0` on a passive-only cell (issue #2896). Equals `len(gates)` except under `--omit-antenna-tables`, where `gates` is `[]`.                                                                                     |
+| `antenna_tables_omitted` | boolean | (issue #3011) Whether `--omit-antenna-tables` was passed: `gates` is `[]` and the antenna `coverage` entries are collapsed. `false` for every other run — see "Findings-only runs" above. |
 | `gates`          | array\<object\> | One entry per net with nonzero area on the gate-role layer — see below.                          |
 | `gates[].gate_id`| string          | `"gate<index>"`, ascending in internal net-id order (stable within one run, not guaranteed stable across `klt`/KLayout versions). |
 | `gates[].net`    | string \| null  | The net's own label text, if any `stackup` role's `label_layer` carries one; `null` if unlabelled. |
@@ -2573,7 +2647,9 @@ actually compared against a limit. Missing PDK or level limits are skipped
 (`missing_antenna_pdk`/`missing_antenna_limit`), as is every non-gate level
 of a `--findings-only` run (`findings_only`, issue #2219 — the caller
 declined the accumulation, the same shape of caller-side skip as omitting
-`--pdk`); the gate reference level is inapplicable.
+`--pdk`); the gate reference level is inapplicable. A cell with no gate at all
+(passive-only, issue #2896) records one inapplicable entry, id `antenna:[]`,
+reason `no_gates` -- independent of `--pdk`/`--findings-only`.
 
 `erc_coverage.scope` is `connectivity`, and grades the `erc_findings` rules,
 which need no `--pdk` at all. One checked ID per subject actually checked:
@@ -2591,8 +2667,17 @@ never skipped —
 an undeclared rule must not make this scope partial, and the distinction is
 what lets a consumer tell "no supply was declared, so `erc.supply_short`
 was never computed" from "the declared supplies came back clean" off the
-envelope alone. The gate scope is never empty: a run in which no net
-carries gate-role geometry is exit 1, not a zero-coverage report.
+envelope alone. A passive-only cell (issue #2896: poly resistors, MoM/MiM
+capacitors, no transistor gate -- including a gate-poly body excluded by
+`active_layer` or a `--deck` device carve-out) with `nets[]`/`ties[]`
+declared runs the connectivity rules as usual and reports `gate_count: 0`,
+`gates: []`; the antenna scope then carries one **inapplicable** entry
+with reason `no_gates` (never skipped: no antenna work was requested that
+failed to run). Top-level `status` is then `not_checked`/exit 4 (zero
+antenna levels graded, the shared rollup), or `violations` if a
+connectivity finding exists; read `erc_status`/`erc_coverage` for the
+connectivity verdict. A run with no gate and no declared `nets[]`/`ties[]`
+asked for nothing gradable and is exit 1, not a zero-coverage report.
 
 A disclosure that names `undeclared_classes` (issue #2541) additionally
 records one `erc.missing_tie:["<class>"]` **inapplicable** entry per named
@@ -2712,7 +2797,7 @@ retain exit 1 and the stderr error envelope.
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
 | `0` | `status: "clean"` (at least one antenna level was graded, with no antenna or connectivity finding) or `status: "clean_partial"` (every graded level passed, but some requested antenna work was skipped — #2115). |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, `--findings-only` together with `--pdk`, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, `--findings-only` together with `--pdk`, an ambiguous top cell (pass `--top`), or no gate net (no gate-role geometry overlapping `active_layer`, after `--deck` carve-outs, or a wrong gate-poly layer number) **and** no `nets[]`/`ties[]` declared to check instead. A passive-only cell that does declare `nets[]`/`ties[]` is not an error (issue #2896). |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
 | `3` | Antenna or connectivity violations. |
 | `4` | No actual antenna checks; `status: "not_checked"` — including every `--findings-only` run, which skips them by request. |
@@ -2796,3 +2881,5 @@ ingestion harness exists is a natural follow-on.
   geometric, whole-cell (not net-aware) approximation of an antenna check
   that predates this connectivity model; `klt erc` is the net-aware
   successor this document's "Coverage" section anticipates.
+
+See also [`klt tap-distance`](tap-distance.md) for a Euclidean distance bound from subject geometry to qualifying taps (latch-up / tie spacing), which `ties[]` does not express.
