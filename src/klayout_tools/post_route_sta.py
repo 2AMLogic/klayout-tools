@@ -328,6 +328,12 @@ _PARASITIC_ANNOTATION_END = "===KLT_STA_PARASITIC_ANNOTATION_END==="
 _FLOATING_DRIVERS_BEGIN = "===KLT_STA_FLOATING_DRIVERS_BEGIN==="
 _FLOATING_DRIVERS_END = "===KLT_STA_FLOATING_DRIVERS_END==="
 _FLOATING_DRIVER_PREFIX = "KLT_FLOATING_DRIVER"
+#: Brackets the leaf output pins whose net carries no other instance pin
+#: (issue #3668) -- evidence only, never a gate: such a net may still reach a
+#: port, so a driver on it is not "floating". See :func:`_parse_driver_nets`.
+_DRIVER_NETS_BEGIN = "===KLT_STA_DRIVER_NETS_BEGIN==="
+_DRIVER_NETS_END = "===KLT_STA_DRIVER_NETS_END==="
+_DRIVER_NET_PREFIX = "KLT_DRIVER_NET"
 #: Upper bound on how many driver pins each ``*_driver_sample`` field echoes
 #: -- a diagnostic sample, same style as ``design_nets_missing_sample``.
 _DRIVER_SAMPLE_LIMIT = 20
@@ -1579,11 +1585,21 @@ def _spef_annotation_block(
         and unannotated_pins is not None
         and len(unannotated_pins) == unannotated_drivers
     ):
-        floating_set = set(floating_pins)
-        floating_unannotated = [p for p in unannotated_pins if p in floating_set]
+        floating_set = {_pin_key(p) for p in floating_pins}
+        floating_unannotated = [
+            p for p in unannotated_pins if _pin_key(p) in floating_set
+        ]
     gating_unannotated = unannotated_drivers
     if unannotated_drivers is not None and floating_unannotated is not None:
         gating_unannotated = unannotated_drivers - len(floating_unannotated)
+    driver_detail = (
+        _driver_detail(
+            _timed_sample(unannotated_pins, floating_unannotated),
+            _parse_driver_nets(stdout),
+        )
+        if floating_unannotated is not None
+        else None
+    )
 
     reasons: list[str] = []
     design_nets_missing_sample: list[str] = []
@@ -1606,10 +1622,14 @@ def _spef_annotation_block(
             "unannotated ones"
         )
     if gating_unannotated:
-        reasons.append(
+        reason = (
             f"report_parasitic_annotation found {gating_unannotated} driver(s) "
             "with no parasitics attached after read_spef"
         )
+        if driver_detail:
+            first = driver_detail[0]
+            reason += f" (first: {first['pin']}, {first['net_status']})"
+        reasons.append(reason)
 
     annotation_complete = not reasons
     annotation_warning = None
@@ -1641,6 +1661,7 @@ def _spef_annotation_block(
         "unannotated_driver_sample": (
             _timed_sample(unannotated_pins, floating_unannotated)
         ),
+        "unannotated_driver_detail": driver_detail,
         "partially_unannotated_driver_sample": (
             partial_pins[:_DRIVER_SAMPLE_LIMIT] if partial_pins is not None else None
         ),
@@ -2919,6 +2940,22 @@ def _parasitic_annotation_lines() -> list[str]:
         "  }",
         "} klt_floating_drivers_msg",
         f'puts "{_FLOATING_DRIVERS_END}"',
+        f'puts "{_DRIVER_NETS_BEGIN}"',
+        "catch {",
+        "  foreach klt_pin [get_pins -hierarchical *] {",
+        '    if {[get_property $klt_pin direction] eq "output"} {',
+        "      set klt_nets [get_nets -quiet -of_objects $klt_pin]",
+        "      if {[llength $klt_nets] == 1} {",
+        "        set klt_n [llength [get_pins -quiet -of_objects $klt_nets]]",
+        "        if {$klt_n <= 1} {",
+        f'          puts "{_DRIVER_NET_PREFIX} [get_full_name $klt_pin] $klt_n '
+        '[get_full_name $klt_nets]"',
+        "        }",
+        "      }",
+        "    }",
+        "  }",
+        "} klt_driver_nets_msg",
+        f'puts "{_DRIVER_NETS_END}"',
     ]
 
 
@@ -3567,6 +3604,31 @@ def _parse_floating_drivers(stdout: str) -> list[str] | None:
     ]
 
 
+def _pin_key(pin: str) -> str:
+    """Spelling-insensitive pin key: ``report_parasitic_annotation`` may print
+    escaped bus brackets (``a\\[0\\]/Z``) where ``get_full_name`` does not."""
+    return pin.replace("\\", "")
+
+
+def _parse_driver_nets(stdout: str) -> dict[str, tuple[int, str]] | None:
+    """``{pin_key: (net_pin_count, net_name)}`` for output pins on a net with
+    at most one instance pin (issue #3668), or ``None`` when the block is
+    absent."""
+    block = _extract_block(stdout, _DRIVER_NETS_BEGIN, _DRIVER_NETS_END)
+    if block is None:
+        return None
+    prefix = _DRIVER_NET_PREFIX + " "
+    rows: dict[str, tuple[int, str]] = {}
+    for line in block.splitlines():
+        line = line.strip()
+        if not line.startswith(prefix):
+            continue
+        parts = line[len(prefix) :].split(" ", 2)
+        if len(parts) == 3 and parts[1].isdigit():
+            rows[_pin_key(parts[0])] = (int(parts[1]), parts[2])
+    return rows
+
+
 def _timed_sample(
     unannotated_pins: list[str] | None, floating: list[str] | None
 ) -> list[str] | None:
@@ -3574,8 +3636,33 @@ def _timed_sample(
     ones that gate. ``None`` when the pin listing is unavailable."""
     if unannotated_pins is None:
         return None
-    skip = set(floating or [])
-    return [p for p in unannotated_pins if p not in skip][:_DRIVER_SAMPLE_LIMIT]
+    skip = {_pin_key(p) for p in floating or []}
+    return [p for p in unannotated_pins if _pin_key(p) not in skip][
+        :_DRIVER_SAMPLE_LIMIT
+    ]
+
+
+def _driver_detail(
+    sample: list[str] | None, driver_nets: dict[str, tuple[int, str]] | None
+) -> list[dict[str, Any]] | None:
+    """Per-pin account of the gating unannotated drivers: which pin, and what
+    its net looks like (``single_pin_net`` = no other instance pin on it, so
+    an unconnected or port-only net; otherwise ``net_with_other_pins``).
+    ``None`` when the pin listing is unavailable."""
+    if sample is None:
+        return None
+    nets = driver_nets or {}
+    detail: list[dict[str, Any]] = []
+    for pin in sample:
+        found = nets.get(_pin_key(pin))
+        detail.append(
+            {
+                "pin": pin,
+                "net_status": "single_pin_net" if found else "net_with_other_pins",
+                "net": found[1] if found else None,
+            }
+        )
+    return detail
 
 
 def _electrical_class(

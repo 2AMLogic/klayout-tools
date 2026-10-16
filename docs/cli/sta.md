@@ -815,12 +815,22 @@ reader's own. It answers "does the SPEF name the nets this design has", not
 - `unannotated_driver_sample` — capped sample (at most 20) of the unannotated
   drivers that are *not* floating, i.e. the ones that gate. `null` when pins
   cannot be listed.
+- `unannotated_driver_detail` (issue #3668) — one `{pin, net_status, net}`
+  entry per pin in `unannotated_driver_sample`, saying *why* it lacks
+  parasitics as far as the netlist shows: `net_status` is `single_pin_net`
+  (the pin's net has no other instance pin — an unconnected stub or a net
+  that only reaches a port; `net` names it) or `net_with_other_pins` (a real
+  net the SPEF failed to cover; `net` is `null`). Evidence only: a
+  `single_pin_net` driver still gates, because its net may reach a timed
+  port. `null` when pins cannot be listed. Pin names are matched
+  spelling-insensitively (escape backslashes ignored) between OpenSTA's
+  unannotated listing and the floating-pin query.
 - `partially_unannotated_driver_sample` — capped sample (at most 20) of the
   partially unannotated driver pins, so a caller can judge whether the count
   is real missing parasitics or a counting artefact. `null` when pins cannot
   be listed.
 
-All four fields are additive; none of the existing fields changed meaning
+All the fields above are additive; none of the existing fields changed meaning
 except that `unannotated_driver_count` now gates net of the floating drivers.
 
 ### Verdict
