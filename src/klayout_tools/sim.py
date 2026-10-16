@@ -4990,6 +4990,31 @@ def _refuse_xyce_control_block_measurements(
         )
 
 
+def _refuse_xyce_alter_corner_axes(corners_spec: dict[str, Any]) -> None:
+    """The ``engine: "xyce"`` refusals for corner axes that are applied with
+    ngspice's ``alter`` control command (``supply_v``; ``variants``, issue
+    #3252). Split out of :func:`_enforce_xyce_support_boundary` to keep that
+    gate under the complexity limit."""
+    if corners_spec.get("supply_v") or any(
+        isinstance(unit, dict) and unit.get("supply_v")
+        for unit in corners_spec.get("units") or []
+    ):
+        raise SimError(
+            "engine 'xyce' does not support corners.supply_v: Xyce has "
+            "no netlist equivalent of ngspice's `alter` control command, "
+            "so per-corner supply rails cannot be patched into the deck "
+            "-- leave corners.supply_v unset (fixed supply, hardcoded in "
+            "the netlist body) or use engine 'ngspice'"
+        )
+    if corners_spec.get("variants"):
+        raise SimError(
+            "engine 'xyce' does not support corners.variants: variant "
+            "sources are applied with ngspice's `alter` control command, "
+            "which Xyce has no netlist equivalent of -- leave "
+            "corners.variants unset or use engine 'ngspice'"
+        )
+
+
 def _enforce_xyce_support_boundary(
     *,
     engine: str,
@@ -5036,24 +5061,7 @@ def _enforce_xyce_support_boundary(
             f"local-parallel), not '{backend}' -- the remote/batch "
             "provisioning path pins the ngspice toolchain"
         )
-    if corners_spec.get("supply_v") or any(
-        isinstance(unit, dict) and unit.get("supply_v")
-        for unit in corners_spec.get("units") or []
-    ):
-        raise SimError(
-            "engine 'xyce' does not support corners.supply_v: Xyce has "
-            "no netlist equivalent of ngspice's `alter` control command, "
-            "so per-corner supply rails cannot be patched into the deck "
-            "-- leave corners.supply_v unset (fixed supply, hardcoded in "
-            "the netlist body) or use engine 'ngspice'"
-        )
-    if corners_spec.get("variants"):
-        raise SimError(
-            "engine 'xyce' does not support corners.variants: variant "
-            "sources are applied with ngspice's `alter` control command, "
-            "which Xyce has no netlist equivalent of -- leave "
-            "corners.variants unset or use engine 'ngspice'"
-        )
+    _refuse_xyce_alter_corner_axes(corners_spec)
     if monte_carlo_declared:
         raise SimError(
             "engine 'xyce' does not implement monte_carlo sampling -- "
