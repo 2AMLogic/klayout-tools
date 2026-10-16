@@ -89,6 +89,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   `_expand_monte_carlo` docstring now say so and name the working control
   (switch the deck's mismatch off). No seed derivation or JSON change.
 
+- **`klt netlist --backend batch` file selection and failure diagnostics**
+  (issue #3282): repeatable `--batch-include <glob>` / `--batch-exclude
+  <glob>` narrow the uploaded git-tracked set without narrowing
+  `--batch-root`. A failed job whose `stderr.log` holds no klt envelope now
+  adds `error.remote_stderr_tail`, `remote_exit_code`, `remote_state` and
+  `harness_log` to the error envelope (additive; `schema_version` unchanged).
+
 - **`options.initial_state` for `klt functional-verification`** (issue #2998,
   part 2 of 2): a gate-level Icarus run can start every flop at `x`, or at a
   seeded-random bit with one regression per seed

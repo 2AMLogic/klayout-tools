@@ -5625,6 +5625,33 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     netlist_parser.add_argument(
+        "--batch-include",
+        dest="batch_include",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: upload only the git-tracked "
+            "files under the batch root matching this root-relative glob "
+            "(a bare directory name selects everything under it; '*' also "
+            "crosses '/'). The schematic and a project --rcfile must match, "
+            "or the run is refused"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-exclude",
+        dest="batch_exclude",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: leave the files matching this "
+            "root-relative glob out of the upload (applied after "
+            "--batch-include). The schematic and a project --rcfile cannot "
+            "be excluded"
+        ),
+    )
+    netlist_parser.add_argument(
         "--xschem-binary",
         dest="xschem_binary",
         default=netlist.DEFAULT_XSCHEM_BINARY,
