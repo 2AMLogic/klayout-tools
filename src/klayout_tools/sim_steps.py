@@ -15,7 +15,9 @@ shipped as one.
 
 - a stable unique ``name`` (an ngspice-vector-safe identifier),
 - an ``analysis`` (``kind`` + ``args``, exactly like the scalar form),
-- optional ``alter`` source-value overrides applied before that solve, and
+- optional ``alter`` source-value overrides applied before that solve,
+- optional ``reset: true`` -- start the step from a freshly parsed circuit
+  (ngspice ``reset``; issue #3103), and
 - optional step-scoped ``measurements[]`` (``expr`` or a ``.meas`` card whose
   analysis type matches the step's own ``kind``).
 
@@ -244,12 +246,21 @@ def _resolve_step(
             "case-insensitively): step names must be unique"
         )
     kind, args = _resolve_step_analysis(raw.get("analysis"), name)
-    return {
+    resolved: dict[str, Any] = {
         "name": name,
         "kind": kind,
         "args": args,
         "alter": _resolve_alter(raw.get("alter"), name),
     }
+    reset = raw.get("reset")
+    if reset is not None:
+        if not isinstance(reset, bool):
+            raise _error(f"step {name!r}: reset must be a boolean (got {reset!r})")
+        if reset:
+            # Only present when true, so a no-reset sequence resolves (and
+            # fingerprints) exactly as before.
+            resolved["reset"] = True
+    return resolved
 
 
 def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
@@ -697,16 +708,25 @@ def _format_value(value: float) -> str:
 
 
 def control_lines(
-    analysis: dict[str, Any], measurements_spec: list[dict[str, Any]]
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    reset_prefix: list[str] | None = None,
 ) -> list[str]:
     """The step-sequence body of the generated ``.control`` block -- placed
     after the corner's own ``alter`` cards and before ``quit``. See this
-    module's docstring for why each line exists."""
+    module's docstring for why each line exists.
+
+    ``reset_prefix`` is the corner prefix (``save all`` and the corner's
+    ``supply_v`` ``alter`` cards) re-emitted after ``reset`` for a step with
+    ``reset: true``, since ``reset`` reverts both."""
     lines: list[str] = []
     spectrum_needed = {
         name for spec in measurements_spec for name in spec.get("spectrum_steps", [])
     }
     for index, step in enumerate(analysis["steps"]):
+        if step.get("reset"):
+            lines.append("reset")
+            lines.extend(reset_prefix or [])
         for target, value in step["alter"]:
             lines.append(f"alter {target}={_format_value(value)}")
         lines.append("setplot new")
