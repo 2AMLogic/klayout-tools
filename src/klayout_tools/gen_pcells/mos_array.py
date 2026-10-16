@@ -144,6 +144,11 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         # Declared via ``self.param("mfg_grid_um", ...)`` below; the
         # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
         mfg_grid_um: float
+        voltage_flavor_mark_layer: kdb.LayerInfo
+        voltage_flavor_mark_present: bool
+        voltage_flavor_mark_margin_um: float
+        voltage_flavor_extra_mark_layer: kdb.LayerInfo
+        voltage_flavor_extra_mark_present: bool
 
         def __init__(self) -> None:
             super().__init__()
