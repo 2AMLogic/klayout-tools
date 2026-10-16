@@ -1135,6 +1135,41 @@ def _label_layers_from_report(
     return overrides or None
 
 
+def _spef_warnings(
+    def_net_connections: Any,
+    def_pins: Any,
+    declared_pins: Any,
+    skipped_nets: Sequence[str],
+) -> list[str]:
+    """Warnings for the ``--spef`` writer (issue #3257 gaps A and C)."""
+    out: list[str] = []
+    # Gap A: DEF connectivity without a declared-port set leaves every
+    # labelled net a bare-name port, which OpenSTA cannot attach
+    # (`STA-1656`). A warning only -- the SPEF bytes are unchanged.
+    if def_net_connections and def_pins is None and declared_pins is None:
+        out.append(
+            "--def-net-connections without --def-pins/--pins: every "
+            "labelled net is written as a top-level port, so OpenSTA "
+            "read_spef cannot attach the nets (bare-name port hubs, "
+            "STA-1656) and timing stays identical to an unannotated "
+            "run. Pass --def-pins <routed.def> (or --pins) to declare "
+            "only the real ports."
+        )
+    # Gap C: same-named floating nets omitted from the SPEF.
+    if skipped_nets:
+        shown = ", ".join(skipped_nets[:5])
+        more = len(skipped_nets) - 5
+        out.append(
+            f"--spef: omitted *D_NET blocks for {len(skipped_nets)} "
+            "duplicate-named net(s) with no DEF net (floating cell "
+            f"outputs / unrouted supplies): {shown}"
+            + (f", ... (+{more} more)" if more > 0 else "")
+            + ". Same-named *D_NET blocks are rejected by OpenSTA "
+            "(STA-1650) and attach to no driver."
+        )
+    return out
+
+
 def _staged(name: str, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
     """Call ``func`` as timed stage ``name`` (issue #3181)."""
     with stage(name):
@@ -3359,7 +3394,7 @@ def run_extract(
             raise ExtractError(
                 f"cannot create output directory {spef_out_dir}: {exc}"
             ) from exc
-        _write_spef(
+        spef_skipped_nets = _write_spef(
             spef_path,
             design_name=top_cell_name,
             klt_version=_klt_version(),
@@ -3369,6 +3404,11 @@ def run_extract(
             # the routed DEF's own `NETS` section -- `None` (the default)
             # falls back to the pre-#961 port-only behavior.
             net_instance_pins=def_net_connections,
+        )
+        warnings.extend(
+            _spef_warnings(
+                def_net_connections, def_pins, declared_pins, spef_skipped_nets
+            )
         )
 
     # Issue #1503: every synthesized substrate identity `_tie_substrate_nets_

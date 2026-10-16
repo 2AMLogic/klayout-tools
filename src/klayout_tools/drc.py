@@ -152,6 +152,9 @@ _DERIVED_LAYER_MODES = {
     "union",
 }
 
+# Every `DerivedLayer.context` value (issue #3484); `None` = no partition.
+_DERIVED_CONTEXTS = {None, "near", "far"}
+
 # Every `DrcRule.other_layer_selection` value `run_drc()` knows how to apply
 # (issue #2688) -- validated per rule for the same "fail loudly, never
 # silently check a different population" reason as `_DERIVED_LAYER_MODES`.
@@ -471,6 +474,44 @@ def _cell_region_or_empty(cell: Any, layer_index: int | None) -> Any:
 
 
 def _derived_region(
+    rule: DrcRule,
+    base_region: Any,
+    intersect_region: Any,
+    dbu: float,
+    context_region: Any | None = None,
+) -> Any:
+    """Build the checked region for a ``derived_layer`` rule, then apply its
+    optional well-context partition (issue #3484, see ``DerivedLayer``):
+    ``context_region`` is the already-joined (unsized) union of
+    ``derived_layer.context_layers``, oversized here by ``context_sized_by_um``
+    and used to keep only the whole polygons ``interacting`` with it
+    (``"near"``) or ``not_interacting`` with it (``"far"``)."""
+    region = _derived_region_unscoped(rule, base_region, intersect_region, dbu)
+    derived = rule.derived_layer
+    if derived is None or derived.context is None or context_region is None:
+        return region
+    size_dbu = round(derived.context_sized_by_um / dbu)
+    ctx = context_region.sized(size_dbu) if size_dbu else context_region
+    if derived.context == "near":
+        return region.interacting(ctx)
+    return region.not_interacting(ctx)
+
+
+def _context_region(cell: Any, layout: Any, rule: DrcRule) -> Any | None:
+    """Join of ``rule.derived_layer.context_layers`` in ``cell`` (absent
+    layers contribute nothing), or ``None`` when the rule has no context."""
+    import klayout.db as kdb
+
+    derived = rule.derived_layer
+    if derived is None or derived.context is None:
+        return None
+    region = kdb.Region()
+    for layer in derived.context_layers:
+        region += _cell_region_or_empty(cell, layout.find_layer(*layer))
+    return region.merged()
+
+
+def _derived_region_unscoped(
     rule: DrcRule, base_region: Any, intersect_region: Any, dbu: float
 ) -> Any:
     """Build the checked region for a ``derived_layer`` rule (#345, marker-
@@ -882,6 +923,17 @@ def list_deck_rules(deck_name: str) -> dict[str, Any]:
                     "base": _fmt_layer(derived.base),
                     "intersect_with": _fmt_layer(derived.intersect_with),
                     "sized_by_um": derived.sized_by_um,
+                    **(
+                        {}
+                        if derived.context is None
+                        else {
+                            "context": derived.context,
+                            "context_layers": [
+                                _fmt_layer(c) for c in derived.context_layers
+                            ],
+                            "context_sized_by_um": derived.context_sized_by_um,
+                        }
+                    ),
                 },
                 "scope": rule.scope or None,
             }
@@ -1443,6 +1495,7 @@ def run_drc(
                     base_region,
                     _cell_region_or_empty(cell, intersect_index),
                     layout.dbu,
+                    _context_region(cell, layout, rule),
                 )
             else:
                 region = _select_primary_region(
@@ -2329,6 +2382,18 @@ def _validate_derived_layer(rule: DrcRule) -> None:
     ):
         raise DrcError(
             f"rule '{rule.id}': derived_layer mode 'union' requires intersect_with"
+        )
+    if derived is not None and derived.context not in _DERIVED_CONTEXTS:
+        raise DrcError(
+            f"rule '{rule.id}': unknown derived_layer context "
+            f"'{derived.context}' (known: near, far, or unset)"
+        )
+    if derived is not None and (derived.context is None) == bool(
+        derived.context_layers
+    ):
+        raise DrcError(
+            f"rule '{rule.id}': derived_layer context and context_layers "
+            "must be set together"
         )
 
 

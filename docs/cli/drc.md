@@ -977,7 +977,7 @@ reports a `comp.width.mv.1` violation, while the identical stripe drawn
 
 Two properties of the selection are load-bearing, and both are transcribed
 verbatim from the PDK's own executable deck
-(`libs.tech/klayout/drc/rule_decks/comp.drc`: `comp_56v =
+(`libs.tech/klayout/tech/drc/rule_decks/comp.rb`, formerly `drc/rule_decks/comp.drc`: `comp_56v =
 comp.overlapping(dualgate)`, `comp_3p3v =
 comp.not_interacting(v5_xtor).not_interacting(dualgate)`):
 
@@ -1363,8 +1363,9 @@ planned until the precondition at the end of this note is met. The reasoning
 comes from reading what the open PDKs' own density decks actually do, in the
 same pinned install this deck's rule values are verified against
 (`fossi-foundation/open-pdks` at
-`c6d73a35f524070e85faff4a6a9eef49553ebc2b`, i.e. `volare enable sky130
-c6d73a35f524070e85faff4a6a9eef49553ebc2b`):
+`f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`, i.e. `ciel enable --pdk sky130
+f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`; the density decks are byte-identical to
+the earlier `c6d73a3` build's):
 
 - **`sky130A_mr.drc` — the deck this repo transcribes from — contains no
   density rules at all.** The only density-shaped rules anywhere in its
@@ -1562,10 +1563,11 @@ enclosure checks as executable rule-deck code. That is no longer true of a
 current PDK build: the conductor-over-cut enclosure rules added in issue
 #551 (`CO.6`, `V1.3a`, `Vn.3b`/`Vn.4a` — see the next paragraph) are
 re-derived from a real fetched install's own
-`libs.tech/klayout/drc/rule_decks/{contact,via1,via2,via3,via4}.drc`
-(`volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b`, the same
-open_pdks build this repo already cites for gf180mcu's LVS-derived
-extraction deck), and each cites both its DRM rule id and the executable
+`libs.tech/klayout/tech/drc/rule_decks/{contact,via}.rb`
+(`ciel enable --pdk gf180mcu f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`;
+re-verified against that tree 2026-10-16, thresholds unchanged from the
+earlier `c6d73a3` build's `drc/rule_decks/{contact,via1,via2,via3,via4}.drc`.
+gf180mcu's LVS-derived extraction deck still cites `c6d73a3` until #3540), and each cites both its DRM rule id and the executable
 statement it was re-derived from. The same install's `comp.drc` (issue
 #1110's `_LV`/`_MV` voltage-split rules) and `{nplus,pplus}.drc` (issue
 #2369's `NP.3a`/`NP.5a`/`NP.5b` and `PP.*` mirrors, whose `PCOMP`/`NCOMP`/
@@ -1662,6 +1664,24 @@ to the butting-edge/`euclidian`-metric approximations above). Its mirror,
 sub-cases -- "(1) inside LVPWELL (2) outside Nwell and DNWELL" -- both
 resolve to the same 0.16 µm regardless of well context, verified the same
 way.
+
+**Well-distance split of the `PCOMP` rules (issue #3484).** The flat 0.16 µm
+used to flag the substrate tap of every unmodified gf180mcu PDK
+`endcap`/`filltie` cell (`Pplus` 0.08 µm beyond the tap, `Nplus` 0.08 µm
+away, ~0.48 µm from the cell's `Nwell`), so a placed-and-routed digital macro
+could never reach a clean DRC. `nplus.space.pcomp.1` and
+`pplus.enclosing.comp.1` now cover only the *near-well* half of the official
+split -- a `PCOMP` (`Comp` AND `Pplus`) that comes within 0.429 µm of an
+`Nwell` or interacts with a `Dnwell` (guard band grown with
+`DerivedLayer.context`), at the strict 0.16 µm -- and two new rules,
+`nplus.space.pcomp.far.1` (`NP.3cii`, 0.08 µm) and
+`pplus.enclosing.comp.far.1` (`PP.5di`, 0.02 µm), cover the exact complement
+(including layouts that draw no well at all). The relaxation is applied only
+where the context is positively identified: selection is whole-polygon (a
+`PCOMP` only partly within reach stays strict), and the `DNWELL`/`LVPWELL`
+branches (`NP.3bii`, `PP.5ci`) are **not** relaxed -- anything within reach of
+a `Dnwell` stays on the strict near rule. The mirrored `pplus.space.ncomp.1`
+and `nplus.enclosing.comp.1` keep the flat strict value.
 
 The DRM's two MiM capacitor rules scoped to the "virtual bottom plate" —
 `MIMTM.1` (minimum bottom-plate spacing to other bottom-plate-or-routing

@@ -707,6 +707,18 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help=(
+            "validate the request and print its expansion (resolved "
+            "backend/engine, corner ids, per-sample Monte Carlo seeds, "
+            "staged model files, unknown-key warnings) without running "
+            "ngspice or touching SSH/S3/EC2; exits 1 on any validation "
+            "failure. Corner/Monte Carlo requests only. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--fail-fast-probe",
         dest="fail_fast_probe",
         action="store_true",
@@ -5803,6 +5815,20 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "'findings_only'. Gate on erc_status, as any --pdk-less run "
             "already must. Mutually exclusive with --pdk (a limit table "
             "with nothing to grade) -- passing both exits 1."
+        ),
+    )
+    erc_parser.add_argument(
+        "--omit-antenna-tables",
+        action="store_true",
+        help=(
+            "with --findings-only, drop the all-'unchecked' gates[] array "
+            "(gate_count keeps the real count) and collapse the antenna "
+            "coverage's per-gate skipped/gate_reference_level entries to "
+            "one aggregate entry each, so a dense layout's report is small "
+            "enough to commit verbatim (issue #3011). Sets "
+            "antenna_tables_omitted: true; every verdict, erc_findings and "
+            "the exit code are identical to the same run without it. "
+            "Requires --findings-only -- passing it alone exits 1."
         ),
     )
     _add_format_arg(erc_parser)
