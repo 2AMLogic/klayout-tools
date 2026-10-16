@@ -117,7 +117,7 @@ def _stub_ngspice(monkeypatch, log_text: str) -> list[str]:
     record the deck text each invocation was handed."""
     decks: list[str] = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         decks.append(Path(cmd[cmd.index("-b") + 1]).read_text())
         Path(cmd[cmd.index("-o") + 1]).write_text(log_text)
         return fake_completed("** ngspice-46\n")
