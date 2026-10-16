@@ -14,6 +14,15 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
+  `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
+  3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
+  now builds a minimal conductor-connectivity model (transistor source/drain
+  ACTIVE split at the GATE, SDT, LISD, LIG, GATE, V0, M1-M9 and V1-V9) and
+  judges spacing on it; the substrate and WELL are not modelled. The deck
+  grows from 234 to 238 rule categories (`--expect-rule-categories 238`); the
+  four ids leave the "Not implemented" list. The pinned shipped-cell
+  regression needed no new deviation. Additive; no `schema_version` bump.
 - **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
   cycles** (issue #2947): a fourth measurement form
   `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
@@ -129,6 +138,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   Additive; no `schema_version` bump. Also fixes `klt reset-coverage` on the
   real sky130 cell models, whose `input wire CLK` declarations hid every
   asynchronous pin (every flop classified `no_async_pin`).
+
+- **`klt functional-verification` missing-cocotb error names the real
+  remedy** (issue #3102): the message now includes the failing interpreter
+  (`sys.executable`) and the tool-install route (`klayout-tools[functional-verification] @ <url>`
+  on the `uv tool install` / `pipx install` / `uvx --from` spec), and
+  qualifies `pip install cocotb`. **Additive contract change:** that error
+  carries `error.code == "missing_optional_dependency"`; no `schema_version`
+  bump.
 
 - **`klt lvs` `body_verification` no longer reports a false `"verified"`
   for `layout.netlist` + `layout.deck`** (issue #3177): the body

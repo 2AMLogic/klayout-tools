@@ -5,7 +5,7 @@
 #
 #   klt drc <layout.gds> --engine klayout \
 #       --deck-file src/klayout_tools/decks/asap7.drc \
-#       --expect-rule-categories 234 --format json
+#       --expect-rule-categories 238 --format json
 #
 # or directly:
 #
@@ -43,9 +43,11 @@
 # (Table 3.12.1), V1-V3 (Table 3.13.1), M4-M7 (Tables 3.14.1-3.14.2,
 # 3.16.1-3.16.2), V4-V7 (Tables 3.15.1, 3.17.1), M8-M9 (Tables
 # 3.18.1-3.18.2) and V8-V9 (Table 3.19.1), and applies
-# GEOMETRY.NONORTHOGONAL to every BEOL drawing layer. Rules that need
-# routing-track assignment, net connectivity, mask colouring or the PAD
-# layer are not checked. DRM rules not implemented here, and rules only
+# GEOMETRY.NONORTHOGONAL to every BEOL drawing layer. The four FEOL/MOL
+# "not on the same net" spacings (ACTIVE.S.2A, LIG.LISD.S.6 / S.7,
+# LIG.SDT.S.8, #3084) run on a minimal conductor-connectivity model. Rules
+# that need routing-track assignment, the via-level net comparison (V4-V7
+# S.2), mask colouring or the PAD layer are not checked. DRM rules not implemented here, and rules only
 # approximated, are listed with reasons in asap7_rules.py and
 # docs/cli/drc.md.
 #
@@ -397,6 +399,79 @@ inside_or_on(vert(lig_ns), gate)
   .output("LIG.GATE.AUX.1", "Table 3.10.2: LIG (outside SRAMDRC) vertical edge may not lie inside, or coincide with, GATE")
 vert(lig_ns).enclosing(vert(gate_nc), 1.nm, projection)
   .output("LIG.GATE.EX.1", "Table 3.10.3: min extension of LIG (outside SRAMDRC) over GATE (not cut by GCUT) on both sides 1 nm")
+
+# --------------------------------------------------------------------------
+# Net-aware spacing (#3084): ACTIVE.S.2A, LIG.LISD.S.6/S.7, LIG.SDT.S.8
+# --------------------------------------------------------------------------
+# The minimum conductor model these four "not on the same net" rules need.
+# Two shapes are on one net when a chain of overlapping (or touching) shapes
+# joins them through these layers, and through nothing else:
+#
+#   transistor source/drain ACTIVE -- SDT -- LISD -- LIG -- GATE (not cut)
+#   LISD, LIG -- V0 -- M1 -- V1 -- M2 -- ... -- M9 -- V9
+#
+# A source/drain region is ACTIVE of a transistor (ACTIVE the GATE crosses)
+# minus the GATE, so a channel never joins the regions on either side of it;
+# GATE touches only LIG. ACTIVE polygons no GATE crosses (taps) are not
+# source/drain regions and are left out. Layers that merely overlap with no
+# contact between them (M1 over LISD without a V0, LIG over ACTIVE, ...) make
+# no connection. The substrate and WELL are not modelled, and a shape that
+# reaches no other conductor is a net of its own, so it counts as "different".
+xtor_active = active.interacting(active & gate_nc)
+sd_active = xtor_active - gate_nc
+connect(sd_active, sdt)
+connect(sdt, lisd)
+connect(lisd, lig)
+connect(lig, gate_nc)
+connect(lisd, v0)
+connect(lig, v0)
+connect(v0, m1)
+connect(m1, v1)
+connect(v1, m2)
+connect(m2, v2)
+connect(v2, m3)
+connect(m3, v3)
+connect(v3, m4)
+connect(m4, v4)
+connect(v4, m5)
+connect(m5, v5)
+connect(v5, m6)
+connect(m6, v6)
+connect(v6, m7)
+connect(m7, v7)
+connect(v7, m8)
+connect(m8, v8)
+connect(v8, m9)
+connect(m9, v9)
+sd_active_nets = sd_active.nets
+sdt_nets = sdt.nets
+lisd_nets = lisd.nets
+lig_nets = lig.nets
+
+# ACTIVE.S.2A: horizontal spacing between the source/drain regions of two
+# different transistors on different nets. The gap is measured between
+# ACTIVE polygons like ACTIVE.S.2B (Fig. 3.5.2): a facing pair is kept only
+# when nothing of ACTIVE lies between the two edges, which drops the pair of
+# regions either side of one GATE (a single transistor, drawn in one ACTIVE).
+# Each pair's marker is judged on its own (raw): merged, the markers of the
+# pairs either side of a GATE would touch a real gap's and hide it.
+# Note 2 says the foundry deck also checks vertical spacing in error; only
+# horizontal spacing is checked here.
+s2a_pairs = sd_active_nets.space(92.nm, projection, props_ne).with_angle(90)
+s2a_pairs.polygons.raw.not_overlapping(active)
+  .output("ACTIVE.S.2A", "Table 3.5.1: min horizontal spacing between ACTIVE forming source/drain regions (of different transistors) on different nets 92 nm")
+
+# LIG.LISD.S.6 / LIG.SDT.S.8: spacing in any direction between a LIG polygon
+# and a LISD (SDT) polygon on a different net.
+lig_nets.separation(lisd_nets, 14.nm, euclidian, props_ne)
+  .output("LIG.LISD.S.6", "Table 3.10.1: min spacing between LIG and LISD not on the same net 14 nm")
+lig_nets.separation(sdt_nets, 14.nm, euclidian, props_ne)
+  .output("LIG.SDT.S.8", "Table 3.10.1: min spacing between LIG and SDT not on the same net 14 nm")
+# LIG.LISD.S.7: the corner-to-corner case, with the longer 15 nm distance.
+# As for M1.S.6, "corner-to-corner" is Euclidean spacing between edges whose
+# projections onto each other overlap by less than one database unit.
+lig_nets.separation(lisd_nets, 15.nm, euclidian, projection_limits(nil, 0.25.nm), props_ne)
+  .output("LIG.LISD.S.7", "Table 3.10.1: min corner-to-corner spacing between LISD and LIG not on the same net 15 nm")
 
 # --------------------------------------------------------------------------
 # Tables 3.11.1 / 3.11.2 -- V0 (width, connectivity and LIG overlap area)

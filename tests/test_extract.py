@@ -14333,13 +14333,11 @@ def test_gf180mcu_parasitics_metals_covers_full_stack():
     assert m2.cap_perim_ff_um == pytest.approx(0.033298)
 
     # Metal5 (index 4, top metal of this 5-level stack): sheet from the
-    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit
-    # (`resist (allm5)/metal5    60`, 60 milliohm/sq), the non-thick-metal
-    # `else` branch -- not the generic templated gf180mcu.tech's
-    # THICKMET1P1 row (40 milliohm/sq), which a prior curation (#571)
-    # mistakenly used (corrected by #572).
+    # resolved, pre-built gf180mcuD.tech for the pinned PDK commit f6eeac7
+    # (`resist (allm5)/metal5    40`, 40 milliohm/sq; it read 60 at the
+    # earlier c6d73a3 pin -- issue #3540).
     m5 = gf180mcu.PARASITICS.metals[4]
-    assert m5.sheet_res_ohm_sq == pytest.approx(0.06)
+    assert m5.sheet_res_ohm_sq == pytest.approx(0.04)
     assert m5.cap_area_ff_um2 == pytest.approx(0.005798)
     assert m5.cap_perim_ff_um == pytest.approx(0.030386)
 
@@ -25068,3 +25066,250 @@ def test_consecutive_runs_give_identical_netlist_sha256(tmp_path):
     first = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
     second = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
     assert first["netlist_sha256"] == second["netlist_sha256"]
+
+
+# --------------------------------------------------------------------------- #
+# `--probe`: point-to-net queries on the run's own extraction (issue #2986)
+# --------------------------------------------------------------------------- #
+
+
+def _probe(name, layer, x, y):
+    return {"name": name, "layer": layer, "x": x, "y": y}
+
+
+def _probe_by_name(report):
+    return {entry["name"]: entry for entry in report["probes"]}
+
+
+def test_probes_absent_reports_an_empty_array(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(path, "sky130", output=str(tmp_path / "inv.spice"))
+
+    assert report["probes"] == []
+
+
+def test_probe_same_net_shares_cluster_id_and_different_net_differs(tmp_path):
+    """The two drain pads both carry the label `Y` but are distinct nets, so
+    only `cluster_id` -- the `nets[].net_id` -- tells them apart."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv.spice"),
+        probes=[
+            _probe("nmos_drain", "metal0", 1.8, 0.5),
+            _probe("nmos_drain_edge", "metal0", 2.0, 0.5),
+            _probe("pmos_drain", "metal0", 1.8, 2.5),
+            _probe("gate", "poly", 1.0, 1.0),
+        ],
+    )
+
+    probes = _probe_by_name(report)
+    assert [entry["name"] for entry in report["probes"]] == [
+        "nmos_drain",
+        "nmos_drain_edge",
+        "pmos_drain",
+        "gate",
+    ]
+    assert probes["nmos_drain"] == {
+        "name": "nmos_drain",
+        "layer": "metal0",
+        "x_um": 1.8,
+        "y_um": 0.5,
+        "found": True,
+        "net": "Y",
+        "cluster_id": probes["nmos_drain"]["cluster_id"],
+    }
+    assert probes["nmos_drain_edge"]["cluster_id"] == probes["nmos_drain"]["cluster_id"]
+    assert probes["pmos_drain"]["net"] == "Y"
+    assert probes["pmos_drain"]["cluster_id"] != probes["nmos_drain"]["cluster_id"]
+    assert probes["gate"]["net"] == "A"
+    # Every reported cluster_id is a real nets[].net_id carrying that name.
+    by_id = {net["net_id"]: net["name"] for net in report["nets"]}
+    for entry in report["probes"]:
+        assert by_id[entry["cluster_id"]] == entry["net"]
+
+
+def test_probe_on_empty_space_is_not_found_not_an_error(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv.spice"),
+        probes=[
+            _probe("void", "metal0", 50.0, 50.0),
+            _probe("neg", "metal0", -5, -4.0),
+        ],
+    )
+
+    for entry in report["probes"]:
+        assert entry["found"] is False
+        assert entry["net"] is None
+        assert entry["cluster_id"] is None
+
+
+def test_probe_inside_a_black_box_region_is_not_found(tmp_path):
+    layout = _make_inverter_layout()
+    # Reserved annotation layer (issue #289) over the NMOS drain pad.
+    layout.cell("TOP").shapes(layout.layer(990, 0)).insert(
+        kdb.Box(1500, 100, 2100, 900)
+    )
+    path = _write_gds(layout, tmp_path / "bb.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "bb.spice"),
+        probes=[
+            _probe("masked", "metal0", 1.8, 0.5),
+            _probe("open", "metal0", 1.8, 2.5),
+        ],
+    )
+
+    probes = _probe_by_name(report)
+    assert probes["masked"]["found"] is False
+    assert probes["open"]["net"] == "Y"
+
+
+def test_probe_under_def_net_names_reports_the_def_name(tmp_path):
+    """The issue's case: the DEF name replaces the label, so a wire joined to
+    the renamed net and one that is not give different `cluster_id`s and the
+    renamed one reports the DEF name."""
+    layout_path = _inverter_with_def_net_property(tmp_path)
+
+    report = run_extract(
+        layout_path,
+        "sky130",
+        output=str(tmp_path / "def.spice"),
+        def_net_names=True,
+        probes=[
+            _probe("joined", "metal0", 1.8, 0.5),
+            _probe("other", "metal0", 1.8, 2.5),
+        ],
+    )
+
+    probes = _probe_by_name(report)
+    assert probes["joined"]["net"] == "_019_"
+    assert probes["other"]["net"] == "Y"
+    assert probes["joined"]["cluster_id"] != probes["other"]["cluster_id"]
+
+
+def test_probe_with_abstract_cells_does_not_crash(tmp_path):
+    path = _write_gds(_make_abstract_cells_layout(), tmp_path / "abstract.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "abstract.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+        probes=[_probe("a1", "metal1", 1.8, 0.5), _probe("a2", "metal1", 6.8, 0.5)],
+    )
+
+    probes = _probe_by_name(report)
+    assert probes["a1"]["net"] == "INST1_A"
+    assert probes["a2"]["net"] == "INST2_A"
+
+
+def test_probe_with_declared_pins_reports_the_final_net_name(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "inv.spice"),
+        declared_pins=frozenset({"A", "Y"}),
+        probes=[_probe("gate", "poly", 1.0, 1.0)],
+    )
+
+    by_id = {net["net_id"]: net["name"] for net in report["nets"]}
+    (entry,) = report["probes"]
+    assert by_id[entry["cluster_id"]] == entry["net"] == "A"
+
+
+def test_probe_unknown_role_lists_available_roles(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    with pytest.raises(ExtractError) as excinfo:
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "inv.spice"),
+            probes=[_probe("bad", "metal99", 0.0, 0.0)],
+        )
+
+    message = str(excinfo.value)
+    assert "metal99" in message
+    assert "available:" in message
+    assert "metal0" in message
+
+
+def test_probe_cli_flag_emits_probes_and_request_document_matches(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    output = tmp_path / "inv.spice"
+
+    argv_code, argv_report = _run_extract_json(
+        capsys,
+        [
+            path,
+            "--deck",
+            "sky130",
+            "-o",
+            str(output),
+            "--probe",
+            "name=nd,layer=metal0,x=1.8,y=0.5",
+            "--probe",
+            "name=void,layer=metal0,x=50,y=-4.0",
+        ],
+    )
+    request = _extract_request_document(path, output)
+    request["probes"] = [
+        {"name": "nd", "layer": "metal0", "x": 1.8, "y": 0.5},
+        "name=void,layer=metal0,x=50,y=-4.0",
+    ]
+    request_path = tmp_path / "extract.request.json"
+    request_path.write_text(json.dumps(request))
+    request_code, request_report = _run_extract_json(capsys, [str(request_path)])
+
+    assert argv_code == request_code == 0
+    assert [entry["name"] for entry in argv_report["probes"]] == ["nd", "void"]
+    assert argv_report["probes"][0]["net"] == "Y"
+    assert argv_report["probes"][1]["found"] is False
+    argv_report.pop("timing"), request_report.pop("timing")
+    assert request_report == argv_report
+
+
+@pytest.mark.parametrize(
+    "specs",
+    [
+        ["layer=metal0,x=1,y=1"],  # missing name
+        ["name=a,layer=metal0,x=1"],  # missing y
+        ["name=a,layer=metal0,x=one,y=1"],  # non-numeric
+        ["name=a,layer=metal0,x=1,y=1,z=3"],  # unknown key
+        ["name=a,layer=metal0,x=1,x=2,y=1"],  # repeated key
+        ["nonsense"],
+        ["name=a,layer=metal0,x=1,y=1", "name=a,layer=poly,x=2,y=2"],  # duplicate name
+    ],
+)
+def test_probe_malformed_spec_is_an_application_error(tmp_path, capsys, specs):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    argv = [path, "--deck", "sky130"]
+    for spec in specs:
+        argv += ["--probe", spec]
+
+    message = _extract_error_message(capsys, argv)
+
+    assert "--probe" in message
+
+
+def test_probe_bad_role_via_cli_exits_one(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+
+    message = _extract_error_message(
+        capsys,
+        [path, "--deck", "sky130", "--probe", "name=a,layer=bogus,x=0,y=0"],
+    )
+
+    assert "bogus" in message and "available:" in message

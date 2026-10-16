@@ -1241,6 +1241,7 @@ def run_extract(
     substrate_spreading_net: str | None = None,
     hierarchical_cells: Sequence[str] = (),
     no_netlist: bool = False,
+    probes: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -1584,6 +1585,13 @@ def run_extract(
     ``mom_net`` above follows. ``None`` (the default) skips this entirely --
     byte-identical to before this feature existed, and the block is then
     ``null``.
+
+    ``probes`` (``klt extract --probe``, issue #2986) is a sequence of
+    ``{"name", "layer", "x", "y"}`` point queries (``x``/``y`` in um, the top
+    cell's frame; ``layer`` one of the deck's label roles ``well``/``poly``/
+    ``metal<i>``) answered on this run's own extraction -- no second pass --
+    into the response's ``probes`` array. An unknown role is an
+    :class:`ExtractError`; a point on no extracted net is ``found: false``.
 
     ``def_net_names`` (``klt extract --def-net-names``, issue #951, Epic #700
     Phase 3) names each routed net from the **DEF net name** KLayout's LEF/DEF
@@ -1953,6 +1961,17 @@ def run_extract(
             # caller's own role -> [layer, datatype] (or `null`) mapping
             # otherwise -- issue #2656.
             "label_layers": {<role>: [int, int] | None, ...} | None,
+            # `--probe` point-to-net results, request order, `[]` when none
+            # was given -- issue #2986.
+            "probes": [
+                {
+                    "name": str, "layer": str, "x_um": float, "y_um": float,
+                    "found": bool,
+                    "net": str | None,  # a `nets[].name`
+                    "cluster_id": int | None,  # that net's `nets[].net_id`
+                },
+                ...
+            ],
             "pdk": {
                 "variant": str,
                 # {path, scope} (issue #1376), never a raw path -- see
@@ -2660,6 +2679,7 @@ def run_extract(
     hierarchy_placements: dict[int, Any] = {}
     subcircuit_info: dict[str, Any] = {}
     missing_flavour_markers: list[dict[str, Any]] = []
+    probe_results: list[dict[str, Any]] = []
 
     (
         netlist,
@@ -2713,6 +2733,8 @@ def run_extract(
         # `--pdk-root` resolved one above.
         pdk_info=pdk_info,
         missing_flavour_markers=missing_flavour_markers,
+        probes=probes,
+        probe_results=probe_results,
     )
 
     # `--subcircuit` (issue #2245), layout-dependent half: both rejections
@@ -3604,6 +3626,11 @@ def run_extract(
         # report replays the same purposes instead of drifting on every net
         # name at once. See run_extract's `label_layers` docstring paragraph.
         "label_layers": _describe_label_layers(label_layers),
+        # Additive field (issue #2986): one entry per `--probe`, in request
+        # order; always present, `[]` when none was given. `net`/`cluster_id`
+        # are the final `nets[].name`/`nets[].net_id` of the net under the
+        # point, both `null` when `found` is false. See `_evaluate_probes`.
+        "probes": probe_results,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -4532,6 +4559,8 @@ def extract_netlist_from_layout(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
+    probes: Sequence[Mapping[str, Any]] = (),
+    probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
     parasitics_top_cell_only: bool = False,
@@ -4801,6 +4830,7 @@ def extract_netlist_from_layout(
             "--abstract-cell-lef": bool(abstract_cell_lef_paths),
             "--mom-net": mom_net is not None,
             "--def-net-names": def_net_names,
+            "--probe": bool(probes),
             "--critical-net": bool(critical_nets),
             "--parasitics-net": bool(parasitics_nets),
             "--def-pins": bool(def_pins),
@@ -4812,6 +4842,8 @@ def extract_netlist_from_layout(
             "--pdk": pdk_info is not None,
         },
     )
+
+    _validate_probes(deck, probes)
 
     # `--hierarchical-cells` (issue #2722): selection validated against the
     # live hierarchy (absent / top / unreachable) before any
@@ -4980,6 +5012,8 @@ def extract_netlist_from_layout(
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
         substrate_spreading_net=substrate_spreading_net,
+        probes=probes,
+        probe_results=probe_results,
     )
 
     # `klt extract --substrate-spreading <net>` (issue #2561): the closed-form
@@ -5853,6 +5887,89 @@ def _probe_named_net(
     return False
 
 
+def _probe_regions(
+    role: str,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+) -> list[kdb.Region]:
+    """The conductor region(s) a ``--probe`` ``layer`` ``role`` addresses --
+    the same role -> region pairing :func:`_label_probe_targets` uses for
+    labels (``well`` -> ``nwell``/``tap``, ``poly``, ``metal<i>``)."""
+    if role == "well":
+        return [nwell, tap]
+    if role == "poly":
+        return [poly]
+    return [metals[int(role[len("metal") :])]]
+
+
+def _validate_probes(deck: ExtractionDeck, probes: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse a ``--probe`` whose ``layer`` is not one of ``deck``'s roles
+    (issue #2986), quoting the available ones the way ``--label-layer`` does."""
+    roles = deck.label_layer_roles
+    for probe in probes:
+        if probe["layer"] not in roles:
+            raise ExtractError(
+                f"--probe {probe['name']!r}: deck has no layer role "
+                f"{probe['layer']!r} (available: {', '.join(roles)})"
+            )
+
+
+def _evaluate_probes(
+    l2n: kdb.LayoutToNetlist,
+    final_circuit: kdb.Circuit | None,
+    probes: Sequence[Mapping[str, Any]],
+    dbu: float,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+) -> list[dict[str, Any]]:
+    """``--probe`` point-to-net results (issue #2986), in request order.
+
+    Runs on the live ``l2n`` after every rename/purge pass, so ``net`` is the
+    final ``nets[].name`` and ``cluster_id`` the final ``nets[].net_id``. A
+    probe is ``found`` only when the net under the point is one of
+    ``final_circuit``'s nets -- empty space, a masked black-box region and a
+    floating wire the purge removed all report ``found: false``.
+    """
+    import klayout.db as kdb
+
+    final_ids = (
+        {net.cluster_id for net in final_circuit.each_net()}
+        if final_circuit is not None
+        else set()
+    )
+    results: list[dict[str, Any]] = []
+    for probe in probes:
+        point = kdb.Point(round(probe["x"] / dbu), round(probe["y"] / dbu))
+        net = next(
+            (
+                hit
+                for region in _probe_regions(probe["layer"], poly, nwell, tap, metals)
+                if (hit := l2n.probe_net(region, point)) is not None
+            ),
+            None,
+        )
+        if net is not None and net.cluster_id not in final_ids:
+            net = None
+        results.append(
+            {
+                "name": probe["name"],
+                "layer": probe["layer"],
+                "x_um": probe["x"],
+                "y_um": probe["y"],
+                "found": net is not None,
+                "net": None
+                if net is None
+                else spice_safe_net_name(net.expanded_name()),
+                "cluster_id": None if net is None else net.cluster_id,
+            }
+        )
+    return results
+
+
 def _unnamed_label_positions(
     l2n: kdb.LayoutToNetlist,
     layout: kdb.Layout,
@@ -6278,6 +6395,25 @@ def _purge_preserving_named_nets(netlist: kdb.Netlist) -> None:
         if net.pin_count() == 0:
             pin = circuit.create_pin(net_name)
             circuit.connect_pin(pin, net)
+
+
+def _recognised_capacitor_top_regions(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[str, kdb.Region]:
+    """Each drawn ``CapacitorDevice``'s top-plate marker region, keyed by
+    device name (issue #3021) -- what ``_compute_parasitics`` masks out of the
+    vertical-overlap pass for that capacitor's own plate nets. Capacitors with
+    no marker drawn are omitted, so a capacitor-free layout yields ``{}``.
+    """
+    regions: dict[str, kdb.Region] = {}
+    for capacitor in deck.capacitors:
+        top_region, bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        if top_region.is_empty() or bottom_region.is_empty():
+            continue
+        regions[capacitor.name] = top_region
+    return regions
 
 
 def _purge_truly_floating_nets(netlist: kdb.Netlist) -> None:
@@ -7732,6 +7868,8 @@ def _extract_netlist(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
+    probes: Sequence[Mapping[str, Any]] = (),
+    probe_results: list[dict[str, Any]] | None = None,
     critical_nets: frozenset[str] | None = None,
     parasitics_nets: frozenset[str] | None = None,
     parasitics_top_cell_only: bool = False,
@@ -9856,6 +9994,12 @@ def _extract_netlist(
             # geometry (resistor bodies, gates) cut out of them and so no
             # longer show where a conductor abuts a device at all.
             via_index=via_index,
+            # Issue #3021: recognised MiM top-plate footprints, so the
+            # vertical-overlap pass does not charge coupling on top of the
+            # device's own capacitance inside them.
+            capacitor_top_regions=_recognised_capacitor_top_regions(
+                layout, top_cell, deck
+            ),
         )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as
@@ -9937,6 +10081,24 @@ def _extract_netlist(
         if final_circuit_for_labels is not None
         else {}
     )
+
+    # `--probe` (issue #2986): point-to-net queries against this same live
+    # `l2n`, after every rename/purge pass, reported through the
+    # `probe_results` out-parameter so this function's return tuple stays
+    # unchanged.
+    if probes and probe_results is not None:
+        probe_results.extend(
+            _evaluate_probes(
+                l2n,
+                final_circuit_for_labels,
+                probes,
+                layout.dbu,
+                poly,
+                nwell,
+                tap,
+                metals,
+            )
+        )
 
     # Issue #1666: per-device GDS-level instance attribution, keyed by
     # `Device.id()` -- unlike `net_label_positions` this needs no live `l2n`

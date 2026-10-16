@@ -1817,6 +1817,42 @@ def _read_status(
     return status if isinstance(status, dict) else None
 
 
+#: Coarse cadence of the stderr heartbeat :func:`poll_status` prints while a
+#: job's state is unchanged (issue #2978). A state change prints at once.
+BATCH_HEARTBEAT_INTERVAL_S = 300.0
+
+#: ``BatchError.code`` for ``--attach`` to a job id with no ``job.json`` in
+#: the bucket (never submitted, wrong bucket/profile, or already expired).
+BATCH_UNKNOWN_JOB_CODE = "batch_unknown_job"
+
+
+def _heartbeat(job_id: str, state: str | None, elapsed_s: float) -> None:
+    """One progress line on stderr (never stdout: ``--format json`` stdout
+    must stay byte-identical, issue #2978)."""
+    sys.stderr.write(
+        f"klt sim: batch job {job_id} state={state or 'no status.json yet'} "
+        f"elapsed={elapsed_s:.0f}s\n"
+    )
+    sys.stderr.flush()
+
+
+def job_exists(
+    config: BatchConfig,
+    job_id: str,
+    *,
+    runner: remote_transport.CommandRunner | None = None,
+) -> bool:
+    """Whether ``<prefix>/job.json`` exists, i.e. the job was really
+    submitted (issue #2978)."""
+    run = runner if runner is not None else _run_subprocess
+    argv = _aws_argv(config, "s3", "cp", f"{job_uri(config, job_id)}/job.json", "-")
+    try:
+        result = run(argv, _BATCH_AWS_TIMEOUT_S)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise BatchError(f"job.json lookup could not complete: {exc}") from exc
+    return result.returncode == 0
+
+
 def poll_status(
     config: BatchConfig,
     job_id: str,
@@ -1824,6 +1860,7 @@ def poll_status(
     runner: remote_transport.CommandRunner | None = None,
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
+    heartbeat: bool = False,
 ) -> dict[str, Any]:
     """Poll ``status.json`` until the job reaches a terminal state
     (:data:`BATCH_TERMINAL_STATES`) and return that status document.
@@ -1838,10 +1875,18 @@ def poll_status(
     (the caller reports unrun corners rather than a failed sweep), and
     :class:`BatchError` on a state outside the documented set -- a contract
     violation, surfaced loudly rather than waited on forever.
+
+    With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, ``klt netlist``
+    does not, so its stderr stays a bare JSON envelope), a heartbeat line
+    (job id, last observed state, elapsed) goes to **stderr** on every state
+    change and otherwise every :data:`BATCH_HEARTBEAT_INTERVAL_S`
+    (issue #2978).
     """
     run = runner if runner is not None else _run_subprocess
     started = monotonic()
     last_state: str | None = None
+    beat_state: str | None = None
+    beat_at: float | None = None
     while True:
         status = _read_status(config, job_id, run)
         if status is not None:
@@ -1862,6 +1907,13 @@ def poll_status(
                 f"{last_state or 'no status.json yet'})",
                 last_state=last_state,
             )
+        if heartbeat and (
+            beat_at is None
+            or last_state != beat_state
+            or elapsed - beat_at >= BATCH_HEARTBEAT_INTERVAL_S
+        ):
+            _heartbeat(job_id, last_state, elapsed)
+            beat_state, beat_at = last_state, elapsed
         sleep(config.poll_interval_s)
 
 
@@ -2753,6 +2805,7 @@ def _run_batch_job(
     runner: remote_transport.CommandRunner | None = None,
     sleep: Any = time.sleep,
     request_dir: str | None = None,
+    attach: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -2770,7 +2823,32 @@ def _run_batch_job(
     overrun returns *unrun corner reports* rather than raising; only a
     transport failure (a failed upload/launch/collect, an unreadable report,
     an undocumented status state) raises :class:`BatchError`.
+
+    ``attach=True`` (issue #2978) resumes an *existing* ``job_id``: nothing
+    is staged, submitted or launched -- the job must already have a
+    ``job.json`` (else :data:`BATCH_UNKNOWN_JOB_CODE`) and the call goes
+    straight to polling and collecting. A job Spot-reclaimed mid-run is
+    still waited on, never re-launched (see :func:`poll_status`).
     """
+    if attach:
+        if not job_exists(config, job_id, runner=runner):
+            raise BatchError(
+                f"no batch job {job_id!r} in bucket {config.bucket!r} under "
+                f"prefix {config.jobs_prefix!r} (never submitted, wrong "
+                "bucket/profile/region, or expired)",
+                code=BATCH_UNKNOWN_JOB_CODE,
+            )
+        return _poll_and_collect(
+            config=config,
+            job_id=job_id,
+            corner_points=corner_points,
+            keep_artifacts=keep_artifacts,
+            artifacts_dir=artifacts_dir,
+            request=request,
+            measurements_spec=measurements_spec,
+            runner=runner,
+            sleep=sleep,
+        )
     spec = _prepare_batch_job_spec(
         request,
         netlist_path,
@@ -2784,8 +2862,41 @@ def _run_batch_job(
     )
     submit_job(config, job_id, spec, runner=runner)
     launch_job(config, job_id, runner=runner)
+    # Issue #2978: name the job on stderr the moment it exists, so a caller
+    # killed by an outer wall-clock limit knows what it orphaned.
+    sys.stderr.write(
+        f"klt sim: batch job {job_id} launched; "
+        f"re-attach with `klt sim <request> --backend batch --attach {job_id}`\n"
+    )
+    sys.stderr.flush()
+    return _poll_and_collect(
+        config=config,
+        job_id=job_id,
+        corner_points=corner_points,
+        keep_artifacts=keep_artifacts,
+        artifacts_dir=artifacts_dir,
+        request=request,
+        measurements_spec=measurements_spec,
+        runner=runner,
+        sleep=sleep,
+    )
+
+
+def _poll_and_collect(
+    *,
+    config: BatchConfig,
+    job_id: str,
+    corner_points: list[CornerPoint],
+    keep_artifacts: bool,
+    artifacts_dir: str,
+    request: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    runner: remote_transport.CommandRunner | None,
+    sleep: Any,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """The wait-and-collect tail shared by a fresh submit and ``--attach``."""
     try:
-        status = poll_status(config, job_id, runner=runner, sleep=sleep)
+        status = poll_status(config, job_id, runner=runner, sleep=sleep, heartbeat=True)
     except BatchPollTimeout as exc:
         return (
             _poll_timeout_corners(corner_points, measurements_spec, exc),
@@ -2875,6 +2986,7 @@ def _run_batch(
     checkpoint: _Checkpoint | None = None,
     probe_abort: dict[str, Any] | None = None,
     request_dir: str | None = None,
+    attach_job_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
     batch fleet as one job and collect its report back out of S3.
@@ -2911,6 +3023,11 @@ def _run_batch(
     the default ``"warn"`` submits it with a stderr warning, and either way
     the assessment is reported as ``environment.remote.job_ceiling``. The
     ``hosts > 1`` path (:func:`_run_batch_fleet`) is unchanged.
+
+    ``attach_job_id`` (issue #2978) re-attaches to that already-submitted job
+    instead of submitting a new one: no job-ceiling assessment, no upload, no
+    launch. The request supplies the corner list and measurement grading, so
+    it must be the request the job was submitted from.
     """
     from .sim import SimError
 
@@ -2920,6 +3037,24 @@ def _run_batch(
     config = _resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
+    if attach_job_id is not None:
+        try:
+            return _run_batch_job(
+                config=config,
+                job_id=attach_job_id,
+                corner_points=corner_points,
+                netlist_path=netlist_path,
+                timeout_s=timeout_s,
+                keep_artifacts=keep_artifacts,
+                want_waveforms=want_waveforms,
+                artifacts_dir=artifacts_dir,
+                request=request,
+                measurements_spec=measurements_spec,
+                request_dir=request_dir,
+                attach=True,
+            )
+        except BatchError as exc:
+            raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
     # Issue #2833: assess the one job against the fleet's whole-job ceiling
     # before `submit_job`'s first S3 write, so an "enforce" refusal can never
     # leave a partial contract or launch a billable job.
@@ -3048,6 +3183,7 @@ __all__ = [
     "BATCH_JOB_TOOL",
     "BATCH_CONCURRENCY_CAP_CODE",
     "BATCH_NO_CAPACITY_CODE",
+    "BATCH_UNKNOWN_JOB_CODE",
     "BATCH_NETLIST_FILENAME",
     "BATCH_REPORT_FILENAME",
     "BATCH_RUNNER_IDENTITY_FILENAME",
@@ -3064,6 +3200,7 @@ __all__ = [
     "BatchJobSpec",
     "BatchPollTimeout",
     "collect_outputs",
+    "job_exists",
     "job_uri",
     "launch_job",
     "new_job_id",
