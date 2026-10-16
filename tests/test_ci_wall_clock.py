@@ -1702,6 +1702,69 @@ def test_fetcher_never_uses_a_run_from_before_the_pool_change(
     assert payload["dropped_stale_runs"] == 5  # four retired + one undated
 
 
+def test_fetcher_finds_baselines_when_main_is_mostly_cancelled(
+    tmp_path: Path,
+) -> None:
+    """#3575: merge bursts cancel most `main` runs, so the newest-20 `completed`
+    listing can hold fewer than `min_samples` usable runs even though plenty
+    exist in the window. The fetcher must ask for usable conclusions directly."""
+    repo = "owner/name"
+    current = _wf_run(
+        900, "current", "main", "2026-10-16T12:00:00Z", "2026-10-16T12:20:00Z"
+    )
+    cancelled = []
+    for i in range(15):
+        run = _wf_run(
+            700 + i,
+            f"c{i}",
+            "main",
+            f"2026-10-16T11:{i:02d}:00Z",
+            f"2026-10-16T11:{i:02d}:30Z",
+        )
+        run["conclusion"] = "cancelled"
+        cancelled.append(run)
+    usable = [
+        _wf_run(
+            800 + i,
+            f"u{i}",
+            "main",
+            f"2026-10-1{i}T09:00:00Z",
+            f"2026-10-1{i}T09:20:00Z",
+        )
+        for i in range(1, 7)
+    ]
+    usable[0]["conclusion"] = "failure"
+    # The 20-run `completed` page: 15 cancelled + only the newest usable one.
+    completed = [*cancelled, usable[-1]]
+    base = f"repos/{repo}/actions/workflows/ci.yml/runs"
+    cutoff = quote(">=2026-10-02T12:00:00Z")
+    baseline_path, peer_path = _listing_paths(repo, ">=2026-10-02T12:00:00Z")
+    job = _jobs_api({"Tests": ("2026-10-10T09:00:00Z", "2026-10-10T09:05:00Z")})
+    responses: dict = {
+        f"repos/{repo}/actions/runs/900": current,
+        baseline_path: {"workflow_runs": completed},
+        peer_path: {"workflow_runs": []},
+        f"{base}?branch=main&status=success&per_page=20&created={cutoff}": {
+            "workflow_runs": usable[1:][::-1]
+        },
+        f"{base}?branch=main&status=failure&per_page=20&created={cutoff}": {
+            "workflow_runs": usable[:1]
+        },
+    }
+    for run in usable:
+        responses[f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100"] = job
+    _, payload = _run_fetcher(
+        tmp_path,
+        responses,
+        _fetch_budget(tmp_path, max_age_days=14),
+        "--baseline-runs",
+        "15",
+    )
+    baselines = [e for e in payload["runs"] if "baseline" in e["roles"]]
+    assert {e["run_id"] for e in baselines} == {r["id"] for r in usable}
+    assert len(baselines) >= 5
+
+
 def test_the_repo_budget_file_pins_the_2624_pool_change() -> None:
     """The shipped cutoff must be at or after #2624's merge -- the moment
     ci.yml left Blacksmith for GitHub-hosted runners."""
