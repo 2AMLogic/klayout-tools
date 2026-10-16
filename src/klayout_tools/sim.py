@@ -3938,7 +3938,13 @@ def _expand_corners(
 
     ``corners.supply_v``'s keys sweep together by index (same-length arrays;
     rails move as a set), matching the spike's documented semantics.
+
+    ``corners.units`` (issue #2993) is the alternative, non-crossing form: an
+    explicit list of points executed exactly as given -- see
+    :func:`_expand_corner_units`.
     """
+    if "units" in corners_spec:
+        return _expand_corner_units(corners_spec, exclude_spec)
     raw_processes: list[Any] = corners_spec.get("process") or [None]
     processes: list[tuple[str | None, list[str] | None, list[str | None] | None]] = [
         (None, None, None) if raw is None else _parse_process_entry(raw)
@@ -3974,6 +3980,100 @@ def _expand_corners(
                 if not _is_excluded(point, exclude_spec):
                     points.append(point)
     return points
+
+
+_CORNER_UNIT_KEYS = ("process", "temperature_c", "supply_v")
+_CORNER_UNIT_CROSSED_KEYS = ("process", "supply_v", "temperature_c")
+
+
+def _is_plain_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _expand_corner_units(
+    corners_spec: dict[str, Any], exclude_spec: list[dict[str, Any]]
+) -> list[CornerPoint]:
+    """Expand ``corners.units`` -- an explicit, non-crossed point list.
+
+    Each record is ``{process?, temperature_c?, supply_v?: {key: number}}``
+    and becomes exactly one :class:`CornerPoint`, in record order. Omitted
+    axes collapse to the same defaults as the crossed form (``process=None``,
+    ``supply_v={}``, ``temperature_c=27``) and ``process`` accepts the same
+    string-or-bundle forms (:func:`_parse_process_entry`), so a unit that
+    names the same coordinates as a crossed point yields an identical
+    ``corner_id`` and checkpoint/``--resume`` reuse works across both forms.
+
+    Mutually exclusive with the crossed axes and with ``exclude`` (a unit
+    list is already the exact set wanted). Duplicates are judged on
+    ``corner_id``, so two records that differ only below its 3-decimal supply
+    formatting are refused rather than silently merged.
+    """
+    for key in _CORNER_UNIT_CROSSED_KEYS:
+        if key in corners_spec:
+            raise SimError(
+                f"corners.units cannot be combined with corners.{key}: units "
+                "are executed as given, not crossed"
+            )
+    if exclude_spec:
+        raise SimError(
+            "corners.units cannot be combined with exclude: list only the units to run"
+        )
+    units = corners_spec["units"]
+    if not isinstance(units, list) or not units:
+        raise SimError("corners.units must be a non-empty array of objects")
+
+    points: list[CornerPoint] = []
+    seen: dict[str, int] = {}
+    for index, record in enumerate(units):
+        point = _parse_corner_unit(record, f"corners.units[{index}]")
+        corner_id = point.corner_id
+        if corner_id in seen:
+            raise SimError(
+                f"corners.units[{index}] duplicates corners.units[{seen[corner_id]}] "
+                f"(both resolve to corner_id '{corner_id}')"
+            )
+        seen[corner_id] = index
+        points.append(point)
+    return points
+
+
+def _parse_corner_unit(record: Any, where: str) -> CornerPoint:
+    """Validate one ``corners.units`` record and build its :class:`CornerPoint`."""
+    if not isinstance(record, dict):
+        raise SimError(f"{where} must be an object")
+    unknown = sorted(set(record) - set(_CORNER_UNIT_KEYS))
+    if unknown:
+        raise SimError(
+            f"{where} has unknown key(s) {', '.join(unknown)} "
+            f"(supported: {', '.join(_CORNER_UNIT_KEYS)})"
+        )
+    raw_process = record.get("process")
+    process, sections, section_libs = (
+        (None, None, None) if raw_process is None else _parse_process_entry(raw_process)
+    )
+    temperature_c = record.get("temperature_c", 27)
+    if not _is_plain_number(temperature_c):
+        raise SimError(f"{where}.temperature_c must be a number")
+    return CornerPoint(
+        process,
+        _parse_unit_supply_v(record.get("supply_v") or {}, where),
+        temperature_c,
+        process_sections=sections,
+        process_section_libs=section_libs,
+    )
+
+
+def _parse_unit_supply_v(supply_v: Any, where: str) -> dict[str, Any]:
+    """Require a ``corners.units`` ``supply_v`` to be rail -> scalar number."""
+    if not isinstance(supply_v, dict):
+        raise SimError(f"{where}.supply_v must be an object of scalar numbers")
+    for rail, value in supply_v.items():
+        if not _is_plain_number(value):
+            raise SimError(
+                f"{where}.supply_v.{rail} must be a scalar number "
+                "(arrays are only valid in the crossed corners.supply_v form)"
+            )
+    return dict(supply_v)
 
 
 def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool:
@@ -4720,7 +4820,10 @@ def _enforce_xyce_support_boundary(
             f"local-parallel), not '{backend}' -- the remote/batch "
             "provisioning path pins the ngspice toolchain"
         )
-    if corners_spec.get("supply_v"):
+    if corners_spec.get("supply_v") or any(
+        isinstance(unit, dict) and unit.get("supply_v")
+        for unit in corners_spec.get("units") or []
+    ):
         raise SimError(
             "engine 'xyce' does not support corners.supply_v: Xyce has "
             "no netlist equivalent of ngspice's `alter` control command, "

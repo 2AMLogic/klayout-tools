@@ -1357,7 +1357,7 @@ The stack is emitted top-down in text (the way a cross-section is drawn) and
 `klt pdk em-limits` (above) is a pure live parse and deliberately owns no
 table — the install's own files are the only place its data is stated. That
 is **not** true here. Verified against a real volare-fetched `sky130A`
-(`open_pdks c6d73a3`): the tech LEFs carry `THICKNESS`, `RESISTANCE RPERSQ`
+(`open_pdks f6eeac7`): the tech LEFs carry `THICKNESS`, `RESISTANCE RPERSQ`
 and (on cut layers) a per-cut `RESISTANCE`, but carry **no elevation and no
 dielectric constant at all**. The `CAPACITANCE CPERSQDIST`/`EDGECAPACITANCE`
 values they do carry already bake geometry and permittivity together into

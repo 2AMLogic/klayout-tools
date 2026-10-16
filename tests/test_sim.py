@@ -13194,6 +13194,103 @@ def test_monte_carlo_block_has_no_absent_key_unless_optional(tmp_path, monkeypat
     assert "absent" not in report["measurements"][0]["monte_carlo"]
 
 
+
+# corners.units -- explicit, non-crossed unit list (issue #2993)
+# --------------------------------------------------------------------------- #
+
+
+def test_expand_corners_units_match_crossed_ids_in_record_order():
+    crossed = sim._expand_corners(
+        {
+            "process": ["tt", "ss"],
+            "supply_v": {"vdd": [1.62, 1.98]},
+            "temperature_c": [-40, 125],
+        },
+        [],
+    )
+    wanted = [crossed[5], crossed[0]]
+    units = [
+        {
+            "process": p.process,
+            "temperature_c": p.temperature_c,
+            "supply_v": dict(p.supply_v),
+        }
+        for p in wanted
+    ]
+
+    points = sim._expand_corners({"units": units}, [])
+
+    assert [p.corner_id for p in points] == [p.corner_id for p in wanted]
+
+
+def test_expand_corners_units_sparse_set_is_not_crossed():
+    units = [
+        {"process": "tt", "supply_v": {"vdd": 1.8, "vin": 0.001 * i}}
+        for i in range(810)
+    ]
+    assert len(sim._expand_corners({"units": units}, [])) == 810
+
+
+def test_expand_corners_units_defaults_and_bundle():
+    bundle = {"name": "b", "sections": ["s1", "s2"]}
+    points = sim._expand_corners(
+        {"units": [{"temperature_c": 85}, {"process": bundle}]}, []
+    )
+
+    assert points[0].corner_id == "default/novdd/85C"
+    assert points[1].corner_id == "b/novdd/27C"
+    assert points[1].process_sections == ["s1", "s2"]
+
+
+@pytest.mark.parametrize(
+    ("corners", "exclude", "match"),
+    [
+        ({"units": [{}], "process": ["tt"]}, [], "corners.process"),
+        ({"units": [{}], "supply_v": {"vdd": [1]}}, [], "corners.supply_v"),
+        ({"units": [{}], "temperature_c": [27]}, [], "corners.temperature_c"),
+        ({"units": [{}]}, [{"process": "tt"}], "exclude"),
+        ({"units": []}, [], "non-empty"),
+        ({"units": {"a": 1}}, [], "non-empty"),
+        ({"units": ["tt"]}, [], "must be an object"),
+        ({"units": [{"supply_v": {"vdd": [1.0, 2.0]}}]}, [], "scalar"),
+        ({"units": [{"supply_v": {"vdd": True}}]}, [], "scalar"),
+        ({"units": [{"temperature_c": "hot"}]}, [], "temperature_c"),
+        ({"units": [{"bogus": 1}]}, [], "unknown key"),
+        ({"units": [{"process": "tt"}, {"process": "tt"}]}, [], "duplicates"),
+        (
+            {"units": [{"supply_v": {"vdd": 0.1004}}, {"supply_v": {"vdd": 0.1001}}]},
+            [],
+            "duplicates",
+        ),
+    ],
+)
+def test_expand_corners_units_validation(corners, exclude, match):
+    with pytest.raises(sim.SimError, match=match):
+        sim._expand_corners(corners, exclude)
+
+
+def test_expand_corners_units_compose_with_monte_carlo():
+    points = sim._expand_corners({"units": [{"process": "tt"}, {"process": "ss"}]}, [])
+    expanded, info = sim._expand_monte_carlo(
+        points, {"n": 3, "seed": 7, "vary": "mismatch"}
+    )
+
+    assert len(expanded) == 6
+    assert [p.sample_index for p in expanded] == [0, 1, 2, 0, 1, 2]
+    assert info["n"] == 3
+
+
+def test_xyce_boundary_refuses_supply_in_units():
+    with pytest.raises(sim.SimError, match="corners.supply_v"):
+        sim._enforce_xyce_support_boundary(
+            engine="xyce",
+            backend="local",
+            corners_spec={"units": [{"supply_v": {"vdd": 1.8}}]},
+            monte_carlo_declared=False,
+            fail_fast_probe=False,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # noise_representation (issue #3006)
 # --------------------------------------------------------------------------- #
