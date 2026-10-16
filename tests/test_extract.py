@@ -8216,8 +8216,8 @@ def test_sky130_precision_implant_mask_extracts_own_flavour(
     assert device["nets"]["w"] == get_extraction_deck("sky130").substrate_net
 
 
-def _make_sky130_res_high_po_layout(l_um: float) -> kdb.Layout:
-    """A `w=1um` `res_high_po`-marked poly bar with a `l_um`-long marked
+def _make_sky130_res_high_po_layout(l_um: float, w_um: float = 1.0) -> kdb.Layout:
+    """A `w_um` (default 1um) `res_high_po`-marked poly bar with a `l_um`-long marked
     (resistive) segment and a contacted, labelled 3um head at each end --
     the parametrised sibling of `_make_poly_resistor_layout`'s fixed 6um
     marked segment, used by
@@ -8240,17 +8240,19 @@ def _make_sky130_res_high_po_layout(l_um: float) -> kdb.Layout:
     l_nm = int(round(l_um * 1000))
     head_nm = int(round(head_um * 1000))
     total_nm = int(round(total_um * 1000))
+    w_nm = int(round(w_um * 1000))
+    mid_nm = w_nm // 2
 
-    draw(66, 20, kdb.Box(0, 0, total_nm, 1000))  # poly.drawing
-    marked = kdb.Box(head_nm, 0, head_nm + l_nm, 1000)
+    draw(66, 20, kdb.Box(0, 0, total_nm, w_nm))  # poly.drawing
+    marked = kdb.Box(head_nm, 0, head_nm + l_nm, w_nm)
     draw(66, 13, marked)  # poly.res
     draw(86, 20, marked.enlarged(200, 200))  # rpm
     draw(94, 20, marked.enlarged(200, 200))  # psdm
 
     for x, name in ((head_nm // 2, "RA"), (total_nm - head_nm // 2, "RB")):
-        draw(66, 44, kdb.Box(x - 100, 400, x + 100, 600))  # licon1.drawing
-        draw(67, 20, kdb.Box(x - 400, 200, x + 400, 800))  # li1.drawing
-        label(67, 5, name, x, 500)  # li1.pin
+        draw(66, 44, kdb.Box(x - 100, mid_nm - 100, x + 100, mid_nm + 100))  # licon1
+        draw(67, 20, kdb.Box(x - 400, mid_nm - 300, x + 400, mid_nm + 300))  # li1
+        label(67, 5, name, x, mid_nm)  # li1.pin
 
     return layout
 
@@ -8289,6 +8291,55 @@ def test_sky130_res_high_po_fixed_offset_matches_pdk_model_card(tmp_path, l_um):
     assert device["params"]["r_ohm"] > l_um / 1.0 * 319.8
 
 
+# ngspice `sky130_fd_pr__res_high_po` (tt, 27 C) total resistance, measured
+# for issue #3049 -- see `decks/sky130.py`'s provenance note.
+_RES_HIGH_PO_MODEL_OHM = {
+    (0.69, 5.0): 2880.58,
+    (0.69, 35.0): 17009.9,
+    (1.41, 1.0): 508.199,
+    (1.41, 10.0): 2580.96,
+    (1.41, 35.0): 8338.63,
+    (2.85, 10.0): 1282.23,
+    (5.73, 5.0): 355.968,
+}
+
+
+@pytest.mark.parametrize(("w_um", "l_um"), sorted(_RES_HIGH_PO_MODEL_OHM))
+def test_sky130_res_high_po_tracks_pdk_model_at_other_widths(tmp_path, w_um, l_um):
+    """Issue #3049: at `w != 1um` the head term is width-normalized
+    (`end_term_ohm_um / w`), so `r_ohm` stays near the PDK model value the
+    old constant `379.7` ohm offset overstated by ~4-5 % at `w=1.41um`. The
+    curated `ResistorDevice` fields cannot match the model exactly across
+    widths; the residual documented in `decks/sky130.py` is under 2.1 %."""
+    path = _write_gds(
+        _make_sky130_res_high_po_layout(l_um, w_um),
+        tmp_path / f"res_high_po_{w_um}_{l_um}.gds",
+    )
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / f"res_high_po_{w_um}_{l_um}.spice")
+    )
+
+    (device,) = report["devices"]
+    assert device["params"]["w_um"] == pytest.approx(w_um)
+    r_ohm = device["params"]["r_ohm"]
+    (res_high_po,) = [
+        r for r in get_extraction_deck("sky130").resistors if r.name == "res_high_po"
+    ]
+    expected = (
+        res_high_po.sheet_rho_ohm_sq * l_um / w_um
+        + res_high_po.end_term_ohm_um / w_um
+        + res_high_po.fixed_offset_ohm
+    )
+    assert r_ohm == pytest.approx(expected, rel=1e-6)
+    assert r_ohm == pytest.approx(_RES_HIGH_PO_MODEL_OHM[(w_um, l_um)], rel=0.021)
+    # Regression for the issue's own case: the pre-#3049 constant offset gave
+    # a `w=1.41um`, `l=10um` value ~4 % above the model.
+    old_r_ohm = 324.827244 * l_um / w_um + 379.705147
+    assert abs(r_ohm / _RES_HIGH_PO_MODEL_OHM[(w_um, l_um)] - 1) < abs(
+        old_r_ohm / _RES_HIGH_PO_MODEL_OHM[(w_um, l_um)] - 1
+    )
+
+
 def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
     """`ResistorDevice.fixed_offset_ohm` defaults to `0.0` (issue #518): a
     deck entry that does not set it (mirroring every deck's own field before
@@ -8303,7 +8354,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
     uncorrected_deck = dataclasses.replace(
         deck,
         resistors=tuple(
-            dataclasses.replace(r, fixed_offset_ohm=0.0)
+            dataclasses.replace(r, fixed_offset_ohm=0.0, end_term_ohm_um=0.0)
             if r.name == "res_high_po"
             else r
             for r in deck.resistors
@@ -14876,6 +14927,152 @@ def test_cli_parasitics_net_flag_json(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# --parasitic-variant (issue #3056)
+# ---------------------------------------------------------------------------
+
+
+def _cards(report):
+    return [
+        ln.split()[0]
+        for ln in Path(report["netlist_path"]).read_text().splitlines()
+        if ln and ln[0] in "RCL"
+    ]
+
+
+def _variant_run(tmp_path, variants, *, layout=None, name="v", **kwargs):
+    path = _write_gds(layout or _make_inverter_layout(), tmp_path / f"{name}.gds")
+    return run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / f"{name}.spice"),
+        parasitics=True,
+        parasitic_variants=variants,
+        **kwargs,
+    )
+
+
+def test_parasitic_variant_absent_is_byte_identical(tmp_path):
+    base = _variant_run(tmp_path, None, name="a")
+    empty = _variant_run(tmp_path, [], name="b")
+    assert "parasitic_variant" not in base["parasitics"]
+    assert Path(base["netlist_path"]).read_text().replace("a.", "x.") == Path(
+        empty["netlist_path"]
+    ).read_text().replace("b.", "x.")
+    assert base["parasitics"] == empty["parasitics"]
+
+
+def test_parasitic_variant_drop_r_net_shorts_legs_into_hub(tmp_path):
+    base = _variant_run(tmp_path, None, name="a")
+    dropped = _variant_run(tmp_path, ["drop-r:Y"], name="b")
+    base_cards, cards = _cards(base), _cards(dropped)
+    y_legs = re.compile(r"RY(_dup\d+)?_t\d+")
+    assert any(y_legs.fullmatch(c) for c in base_cards)
+    assert not any(y_legs.fullmatch(c) for c in cards)
+    # Ground C and every other net's cards are untouched.
+    assert "CY" in cards
+    assert [c for c in base_cards if not y_legs.fullmatch(c)] == cards
+    by_net = {n["net"]: n for n in dropped["parasitics"]["nets"]}
+    assert all(t["leg_net"] == "Y" for t in by_net["Y"]["terminals"])
+    assert dropped["parasitics"]["parasitic_variant"] == ["drop-r:Y"]
+    assert dropped["warnings"] == base["warnings"]
+
+
+def test_parasitic_variant_drop_c_ground_and_wildcards_compose(tmp_path):
+    base = _variant_run(tmp_path, None, name="a")
+    one = _variant_run(tmp_path, ["drop-c-ground:Y"], name="b")
+    assert "CY" not in _cards(one)
+    assert any(c.startswith("RY_t") for c in _cards(one))
+    none_r = _variant_run(tmp_path, ["drop-r:*"], name="c")
+    assert not any(c.startswith("R") and "_t" in c for c in _cards(none_r))
+    assert none_r["parasitics"]["r_count"] == 0
+    both = _variant_run(tmp_path, ["drop-r:*", "drop-c-ground:*"], name="d")
+    assert both["parasitics"]["c_count"] == 0
+    assert both["parasitics"]["total_capacitance_ff"] == 0
+    assert base["parasitics"]["c_count"] > 0
+
+
+def test_parasitic_variant_drop_c_coupling(tmp_path):
+    layout = _make_lateral_coupling_layout()
+    base = _variant_run(tmp_path, None, layout=layout, name="a", critical_nets=["VIC"])
+    dropped = _variant_run(
+        tmp_path,
+        ["drop-c-coupling"],
+        layout=layout,
+        name="b",
+        critical_nets=["VIC"],
+    )
+    assert any(c.startswith("Ccc_") for c in _cards(base))
+    assert not any(c.startswith("Ccc_") for c in _cards(dropped))
+    assert dropped["parasitics"]["cc_count"] == 0
+    assert dropped["parasitics"]["total_coupling_capacitance_ff"] == 0
+
+
+def test_parasitic_variant_gamma_shunt_drop_r(tmp_path):
+    layout = _make_lateral_coupling_layout()
+    base = _variant_run(tmp_path, None, layout=layout, name="a")
+    dropped = _variant_run(tmp_path, ["drop-r:VIC"], layout=layout, name="b")
+    assert "RVIC" in _cards(base)
+    assert "RVIC" not in _cards(dropped)
+    assert "CVIC" in _cards(dropped)
+
+
+def test_parasitic_variant_keeps_network_integrity_clean(tmp_path):
+    for variants in (
+        ["drop-r:*"],
+        ["drop-c-ground:*"],
+        ["drop-r:*", "drop-c-ground:*", "drop-c-coupling"],
+    ):
+        report = _variant_run(tmp_path, variants, name="b")
+        integrity = report["parasitics"]["integrity"]
+        assert integrity["nets_with_findings"] == 0, variants
+        assert integrity["orphan_nodes"] == 0, variants
+        assert integrity["capacitance_mismatches"] == 0, variants
+
+
+def test_parasitic_variant_unmatched_net_is_a_warning(tmp_path):
+    report = _variant_run(tmp_path, ["drop-r:NOPE"], name="a")
+    assert any("NOPE" in w and "--parasitic-variant" in w for w in report["warnings"])
+
+
+def test_parasitic_variant_rejects_unknown_verb_and_missing_parasitics():
+    with pytest.raises(ExtractError, match="unknown --parasitic-variant"):
+        run_extract(
+            "/nonexistent.gds",
+            "sky130",
+            parasitics=True,
+            parasitic_variants=["drop-l:Y"],
+        )
+    with pytest.raises(ExtractError, match="--parasitic-variant requires"):
+        run_extract("/nonexistent.gds", "sky130", parasitic_variants=["drop-r:Y"])
+
+
+def test_cli_parasitic_variant_usage_errors_exit_2(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            ["extract", path, "--deck", "sky130", "--parasitics"]
+            + ["--parasitic-variant", "bogus"]
+        )
+    assert excinfo.value.code == 2
+    code = main(
+        ["extract", path, "--deck", "sky130", "--parasitic-variant", "drop-r:*"]
+        + ["--format", "json"]
+    )
+    assert code == 2
+
+
+def test_cli_parasitic_variant_json(tmp_path, capsys):
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+    code = main(
+        ["extract", path, "--deck", "sky130", "--parasitics", "--format", "json"]
+        + ["--parasitic-variant", "drop-r:Y", "--parasitic-variant", "drop-c-coupling"]
+    )
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["parasitics"]["parasitic_variant"] == ["drop-r:Y", "drop-c-coupling"]
+
+
+# ---------------------------------------------------------------------------
 # Top-cell-only hierarchy split (--parasitics-top-cell-only, issue #1704 --
 # the implementation half of the design spike in #1702,
 # docs/design/parasitics-hierarchy-attribution-spike.md)
@@ -19863,6 +20060,81 @@ def test_def_net_instance_pins_empty_when_file_missing(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _divider_report(net):
+    return {
+        "nets": [
+            {
+                "net": net,
+                "hub_net": net,
+                "capacitance_ff": 1.5,
+                "resistance_ohm": 0.0,
+                "terminals": [{"leg_net": "leg_$1_G", "resistance_ohm": 5.0}],
+                "coupled": [],
+            },
+        ]
+    }
+
+
+def test_spef_preserves_def_hierarchy_divider_and_escaped_slash(tmp_path):
+    """Issue #2969: a bare `/` in the DEF (hierarchy divider) is emitted bare
+    in `*I`/`*RES`/`*D_NET`; an escaped `\\/` (literal slash, the #1623 shape)
+    keeps its backslash; escaped brackets keep theirs."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def_path = tmp_path / "h.def"
+    def_path.write_text(
+        "NETS 2 ;\n"
+        "- sub/n1 ( sub/_001_ A ) ( g_slice\\[0\\].u\\/_08_ Y ) ;\n"
+        "- flat\\/n2 ( u3 A ) ;\n"
+        "END NETS\n"
+    )
+    pins = def_net_instance_pins(str(def_path))
+    # Equality against plain str is unchanged by the spelling carrier.
+    assert pins["sub/n1"] == (("sub/_001_", "A"), ("g_slice[0].u/_08_", "Y"))
+
+    report = {
+        "nets": [
+            _divider_report("sub/n1")["nets"][0],
+            _divider_report("flat/n2")["nets"][0],
+        ]
+    }
+    out = tmp_path / "h.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=report,
+        port_names=[],
+        net_instance_pins=pins,
+    )
+    text = out.read_text()
+    assert "*D_NET sub/n1 " in text
+    assert "*I sub/_001_:A B" in text
+    assert "1 sub/n1:1 sub/n1:2 5.000000" in text
+    assert "2 sub/n1:1 sub/_001_:A 0.000000" in text
+    assert "*I g_slice\\[0\\]\\.u\\/_08_:Y B" in text
+    assert "*D_NET flat\\/n2 " in text
+
+
+def test_spef_names_without_def_origin_are_unchanged(tmp_path):
+    """Issue #2969 regression: plain-str names keep `_spef_name` escaping,
+    including `/`."""
+    from klayout_tools.extract_spef import _write_spef
+
+    out = tmp_path / "p.spef"
+    _write_spef(
+        str(out),
+        design_name="top",
+        klt_version="0.0.0",
+        parasitics_report=_divider_report("a/b"),
+        port_names=[],
+        net_instance_pins={"a/b": (("sub/u", "A"),)},
+    )
+    text = out.read_text()
+    assert "*D_NET a\\/b " in text
+    assert "*I sub\\/u:A B" in text
+
+
 def test_spef_conn_emits_instance_pin_entries_and_zero_ohm_legs(tmp_path):
     """`net_instance_pins` adds one `*I <inst>:<pin> B` `*CONN` entry per
     connection (alongside any `*P` port entry) and wires each into the RC
@@ -24287,6 +24559,7 @@ def test_no_netlist_writes_nothing_and_reports_null(tmp_path):
     assert not (tmp_path / "inv.spice").exists()
     assert result["netlist_path"] is None
     assert result["netlist_sha256"] is None
+    assert result["netlist_normalized_sha256"] is None
     for key in ("status", "device_count", "net_count", "device_counts"):
         assert result[key] == normal[key]
 
@@ -24297,6 +24570,7 @@ def test_default_still_writes_next_to_input(tmp_path):
     assert result["netlist_path"] == str(tmp_path / "inv.spice")
     assert (tmp_path / "inv.spice").is_file()
     assert isinstance(result["netlist_sha256"], str)
+    assert isinstance(result["netlist_normalized_sha256"], str)
 
 
 def test_no_netlist_cli_json_and_text(tmp_path, capsys):
@@ -24346,3 +24620,48 @@ def test_no_netlist_with_spef_still_works(tmp_path):
     )
     assert result["netlist_path"] is None
     assert not (tmp_path / "inv.spice").exists()
+
+
+def _anon_connectivity(first: int, second: int):
+    """A two-device report fragment whose two anonymous nets are numbered
+    ``first``/``second`` -- the only thing varied between builds (#3407)."""
+    a, b = f"\\${first}", f"\\${second}"
+    devices = [
+        {"name": "M1", "nets": {"D": a, "G": "IN", "S": "VSS"}},
+        {"name": "M2", "nets": {"D": b, "G": a, "S": "VSS"}},
+    ]
+    nets = [
+        {"name": "IN", "net_id": 1},
+        {"name": a, "net_id": first},
+        {"name": b, "net_id": second},
+        {"name": "VSS", "net_id": 4},
+    ]
+    return devices, nets
+
+
+def test_normalized_netlist_hash_ignores_anonymous_net_numbering():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    base = _normalized_netlist_sha256(*_anon_connectivity(3, 7))
+    renumbered = _normalized_netlist_sha256(*_anon_connectivity(81, 12))
+    assert base == renumbered
+
+
+def test_normalized_netlist_hash_detects_connectivity_change():
+    from klayout_tools.extract import _normalized_netlist_sha256
+
+    devices, nets = _anon_connectivity(3, 7)
+    base = _normalized_netlist_sha256(devices, nets)
+    devices[1]["nets"]["G"] = "IN"  # rewire M2's gate off the anonymous net
+    assert _normalized_netlist_sha256(devices, nets) != base
+
+
+def test_normalized_netlist_hash_is_stable_across_reruns(tmp_path):
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    a = run_extract(path, "sky130", output=str(tmp_path / "a.spice"))
+    b = run_extract(path, "sky130", output=str(tmp_path / "b.spice"))
+    assert a["netlist_normalized_sha256"] == b["netlist_normalized_sha256"]
+    assert len(a["netlist_normalized_sha256"]) == 64
+    other = _write_gds(_make_series_resistor_chain_layout(), tmp_path / "chain.gds")
+    c = run_extract(other, "sky130", output=str(tmp_path / "c.spice"))
+    assert c["netlist_normalized_sha256"] != a["netlist_normalized_sha256"]

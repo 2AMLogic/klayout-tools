@@ -1347,9 +1347,91 @@ def _net_is_explained_by_device(net: Any, device: Any) -> bool:
     )
 
 
+def _has_interchangeable_terminals(device_class: Any) -> bool:
+    """True for KLayout's built-in two-terminal passives, whose terminals the
+    SPICE reader declares equivalent (the Python API has no getter for
+    ``DeviceClass.equivalent_terminal_id``, so the class type stands in)."""
+    import klayout.db as db
+
+    passives = tuple(
+        getattr(db, name)
+        for name in (
+            "DeviceClassCapacitor",
+            "DeviceClassCapacitorWithBulk",
+            "DeviceClassResistor",
+            "DeviceClassResistorWithBulk",
+            "DeviceClassInductor",
+        )
+        if hasattr(db, name)
+    )
+    return isinstance(device_class, passives)
+
+
+def _terminal_net_correspondence(
+    a: Any,
+    b: Any,
+    terminals_a: list[tuple[int, str]],
+    b_terminal_ids: list[int],
+    scope: Any,
+    paired: dict[_NetKey, _NetKey],
+    unpaired_layout: set[_NetKey],
+    unpaired_reference: set[_NetKey],
+    reference_declares_no_pins: bool,
+) -> tuple[set[_NetKey], set[_NetKey]] | None:
+    """The collateral nets of the terminal-by-terminal correspondence of
+    ``a``'s terminals onto ``b``'s ``b_terminal_ids``, or ``None``.
+
+    Hoisted out of :func:`_degraded_param_pair` to keep that function's
+    complexity under its ratchet baseline."""
+    explained_layout: set[_NetKey] = set()
+    explained_reference: set[_NetKey] = set()
+    for (terminal_id, _terminal_name), b_terminal_id in zip(
+        terminals_a, b_terminal_ids, strict=True
+    ):
+        net_a = a.net_for_terminal(terminal_id)
+        net_b = b.net_for_terminal(b_terminal_id)
+        if net_a is None and net_b is None:
+            continue
+        if net_a is None or net_b is None:
+            return None
+        key_a = (scope, net_a.expanded_name())
+        key_b = (scope, net_b.expanded_name())
+        if key_a in paired:
+            if paired[key_a] != key_b:
+                return None
+            continue
+        if key_a not in unpaired_layout or key_b not in unpaired_reference:
+            return None
+        # Both sides left this net unpaired. It corresponds only if the
+        # two are interchangeable: same number of top-level pins, and
+        # either the same name or -- for a net nothing but this one device
+        # touches (a dangling well/bulk net is the common case) --
+        # structurally identical, whatever it happens to be called on each
+        # side. A flat reference declares no pins at all, so it carries no
+        # pin information to compare the layout's pins against (issue
+        # #2946).
+        if net_a.pin_count() != net_b.pin_count() and not (
+            reference_declares_no_pins and net_b.pin_count() == 0
+        ):
+            return None
+        collateral = _net_is_explained_by_device(
+            net_a, a
+        ) and _net_is_explained_by_device(net_b, b)
+        if (
+            not collateral
+            and net_a.expanded_name().lower() != net_b.expanded_name().lower()
+        ):
+            return None
+        if collateral:
+            explained_layout.add(key_a)
+            explained_reference.add(key_b)
+    return explained_layout, explained_reference
+
+
 def _degraded_param_pair(
     logger: Any,
     excluded_parameters: ExcludedParameters | None = None,
+    exact_differences: bool = False,
 ) -> _DegradedParamPair | None:
     """Detect the minimal-circuit degradation issue #282 describes and return
     the device pair behind it, or ``None``.
@@ -1399,6 +1481,14 @@ def _degraded_param_pair(
     loosens nothing structural: device identity here is proven by the
     terminal-by-terminal *net* correspondence, not by any name.
 
+    ``exact_differences`` swaps that last epsilon test for a bare ``!=``. The
+    tolerance snap pass sets it (issue #2946): ``_PARAM_ABS_EPSILON`` is an
+    absolute floor sized for micron-scale parameters, so it swallows any
+    farad-scale capacitance difference (``100.011P`` vs ``100P`` is ``1.1e-14``)
+    and the pair was never recovered, however wide the declared tolerance.
+    :func:`_tolerated_device_pair` already uses ``!=`` for the same reason, and
+    the comparer itself had already refused the pair.
+
     The verdict is untouched either way: ``compare()`` already said
     "mismatch" and still does. This only decides which entry the caller reads
     first.
@@ -1447,42 +1537,32 @@ def _degraded_param_pair(
 
     paired, unpaired_layout, unpaired_reference = _net_correspondence(logger)
     scope = scopes[0]
-    explained_layout: set[_NetKey] = set()
-    explained_reference: set[_NetKey] = set()
+    circuit_b = b.circuit()
+    reference_declares_no_pins = circuit_b is not None and circuit_b.pin_count() == 0
 
-    for terminal_id, _terminal_name in terminals_a:
-        net_a = a.net_for_terminal(terminal_id)
-        net_b = b.net_for_terminal(terminal_id)
-        if net_a is None and net_b is None:
-            continue
-        if net_a is None or net_b is None:
-            return None
-        key_a = (scope, net_a.expanded_name())
-        key_b = (scope, net_b.expanded_name())
-        if key_a in paired:
-            if paired[key_a] != key_b:
-                return None
-            continue
-        if key_a not in unpaired_layout or key_b not in unpaired_reference:
-            return None
-        # Both sides left this net unpaired. It corresponds only if the two
-        # are interchangeable: same number of top-level pins, and either the
-        # same name or -- for a net nothing but this one device touches (a
-        # dangling well/bulk net is the common case) -- structurally
-        # identical, whatever it happens to be called on each side.
-        if net_a.pin_count() != net_b.pin_count():
-            return None
-        collateral = _net_is_explained_by_device(
-            net_a, a
-        ) and _net_is_explained_by_device(net_b, b)
-        if (
-            not collateral
-            and net_a.expanded_name().lower() != net_b.expanded_name().lower()
-        ):
-            return None
-        if collateral:
-            explained_layout.add(key_a)
-            explained_reference.add(key_b)
+    def correspond(
+        b_terminal_ids: list[int],
+    ) -> tuple[set[_NetKey], set[_NetKey]] | None:
+        return _terminal_net_correspondence(
+            a,
+            b,
+            terminals_a,
+            b_terminal_ids,
+            scope,
+            paired,
+            unpaired_layout,
+            unpaired_reference,
+            reference_declares_no_pins,
+        )
+
+    terminal_ids = [terminal_id for terminal_id, _ in terminals_a]
+    explained = correspond(terminal_ids)
+    if explained is None and _has_interchangeable_terminals(class_a):
+        # Issue #2946: `C1 d a` against `C1 a d` is the same capacitor.
+        explained = correspond(terminal_ids[::-1])
+    if explained is None:
+        return None
+    explained_layout, explained_reference = explained
 
     if not any(
         _param_pair_is_comparable(
@@ -1492,7 +1572,9 @@ def _degraded_param_pair(
             class_name=class_a.name,
             excluded_parameters=excluded_parameters,
         )
-        and _values_differ(a.parameter(param.id()), b.parameter(param.id()))
+        and _param_values_differ(
+            a.parameter(param.id()), b.parameter(param.id()), exact_differences
+        )
         for param in params_a
     ):
         return None
@@ -1572,6 +1654,12 @@ def _classify_param_mismatch(
             )
         )
     return entries
+
+
+def _param_values_differ(a_value: float, b_value: float, exact: bool) -> bool:
+    """:func:`_values_differ`, or a bare ``!=`` when ``exact`` -- see
+    :func:`_degraded_param_pair`'s ``exact_differences``."""
+    return a_value != b_value if exact else _values_differ(a_value, b_value)
 
 
 def _values_differ(a_value: float, b_value: float) -> bool:
@@ -1846,7 +1934,7 @@ def _collect_tolerance_snaps(
       ``"match"`` however wide the tolerance.
     """
     pairs: list[tuple[Any, Any]] = list(getattr(logger, "param_mismatches", ()) or ())
-    degraded = _degraded_param_pair(logger, excluded_parameters)
+    degraded = _degraded_param_pair(logger, excluded_parameters, exact_differences=True)
     if degraded is not None:
         pairs.append((degraded.layout_device, degraded.reference_device))
 
