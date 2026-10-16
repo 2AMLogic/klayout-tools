@@ -226,6 +226,18 @@ def _print_schematic_flatten(block: dict | None) -> None:
     )
 
 
+def _print_device_only_leg(report: dict) -> None:
+    """One ``device_only_netlist:`` line (issue #3298), or nothing when
+    ``--device-only-leg`` was not given."""
+    if "device_only_netlist" not in report:
+        return
+    print(
+        f"device_only_netlist: {render_path_field(report['device_only_netlist'])}  "
+        f"device_cards={report['device_card_count']}  "
+        f"match={report['device_cards_match']}"
+    )
+
+
 def _device_only_desc(row: dict) -> str:
     """The ``--device-only-leg`` split of one delta row (issue #3298), or
     nothing for a row that carries none."""
@@ -254,12 +266,7 @@ def _print_text(report: dict) -> None:
     # Additive (issue #2889): only printed when --flatten-schematic was given.
     _print_schematic_flatten(report.get("schematic_flatten"))
     # Additive (issue #3298): only printed when --device-only-leg was given.
-    if "device_only_netlist" in report:
-        print(
-            f"device_only_netlist: {render_path_field(report['device_only_netlist'])}  "
-            f"device_cards={report['device_card_count']}  "
-            f"match={report['device_cards_match']}"
-        )
+    _print_device_only_leg(report)
     print(f"status: {report['status']}")
     print(
         f"corners: {report['corner_count']}  "

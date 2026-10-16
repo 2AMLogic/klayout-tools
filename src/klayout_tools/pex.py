@@ -2338,6 +2338,111 @@ def _device_only_parity(
     }
 
 
+def _reject_device_only_in_command_mode(
+    device_only_leg: bool, command_mode: bool
+) -> None:
+    """``--device-only-leg`` re-runs ``klt sim`` testbenches (issue #3298),
+    which ``--measure-command`` mode does not use."""
+    if device_only_leg and command_mode:
+        raise PexError(
+            "--device-only-leg is not supported with --measure-command: the "
+            "third leg re-runs `klt sim` testbenches, which that mode does "
+            "not use"
+        )
+
+
+def _extract_device_only_leg(
+    device_only_leg: bool,
+    extracted_netlist_path: str,
+    layout_path: str,
+    deck_name: str,
+    *,
+    top: str | None,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    deck_options: Any,
+    declared_pins: Any,
+    rename_declared_pins: bool,
+    label_layers: Any,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The parasitic-free leg's netlist path and its parity against the
+    parasitic extraction (issue #3298), or ``(None, None)`` without
+    ``--device-only-leg``. It is the same extraction with
+    ``parasitics=False`` -- the parasitics-only options (``critical_nets``,
+    ``distributed_rc``, ``mom_rlc_*``) are not passed, as ``run_extract``
+    rejects them without parasitics."""
+    if not device_only_leg:
+        return None, None
+    stem, ext = os.path.splitext(extracted_netlist_path)
+    try:
+        device_only_extract = run_extract(
+            layout_path,
+            deck_name,
+            output=f"{stem}.device-only{ext}",
+            top=top,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            parasitics=False,
+            deck_options=deck_options,
+            declared_pins=declared_pins,
+            rename_declared_pins=rename_declared_pins,
+            label_layers=label_layers,
+        )
+    except ExtractError as exc:
+        raise PexError(f"device-only extraction failed: {exc}") from exc
+    netlist_path = os.path.abspath(device_only_extract["netlist_path"])
+    return netlist_path, _device_only_parity(extracted_netlist_path, netlist_path)
+
+
+def _run_device_only_sim(
+    device_only_netlist_path: str | None,
+    *,
+    testbench_path: str,
+    work_dir: str,
+    label: str,
+    backend: Any,
+) -> dict[str, Any] | None:
+    """One testbench re-run against the parasitic-free netlist (issue #3298),
+    or ``None`` without the leg. A failure here costs only the device-only
+    fields of this testbench's rows (``null``, ``device_only_status:
+    "error"``), never the run."""
+    if device_only_netlist_path is None:
+        return None
+    try:
+        return run_sim(
+            _prepare_dut_swapped_request(
+                testbench_path=testbench_path,
+                dut_netlist_path=device_only_netlist_path,
+                work_dir=work_dir,
+                label=label,
+                side="device-only",
+            ),
+            artifacts_dir=os.path.join(work_dir, label, "device-only"),
+            backend=backend,
+        )
+    except SimError:
+        return None
+
+
+def _device_only_result_fields(
+    device_only_netlist_path: str | None,
+    device_only_parity: dict[str, Any] | None,
+    *,
+    repo_root: Any,
+) -> dict[str, Any]:
+    """Additive report fields (issue #3298), present only under
+    ``--device-only-leg`` so a run without it is byte-identical to before."""
+    if device_only_netlist_path is None:
+        return {}
+    return {
+        "device_only_netlist": _report_path(
+            device_only_netlist_path, repo_root=repo_root
+        ),
+        "device_only_netlist_sha256": _content_id(device_only_netlist_path),
+        **(device_only_parity or {}),
+    }
+
+
 @output_lock.owns_run
 def run_pex(
     layout_path: str,
@@ -2586,12 +2691,7 @@ def run_pex(
         measure_command, testbench_paths, reference_netlist, measure_timeout_s
     )
     command_mode = command is not None
-    if device_only_leg and command_mode:
-        raise PexError(
-            "--device-only-leg is not supported with --measure-command: the "
-            "third leg re-runs `klt sim` testbenches, which that mode does "
-            "not use"
-        )
+    _reject_device_only_in_command_mode(device_only_leg, command_mode)
 
     # Issue #1261: every input-path field this run's own JSON response
     # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`
@@ -2657,35 +2757,19 @@ def run_pex(
     # into this module's user-facing report.
     extracted_netlist_path = os.path.abspath(extract_report["netlist_path"])
 
-    # Issue #3298: the parasitic-free leg is the same extraction with
-    # `parasitics=False` -- the parasitics-only options (`critical_nets`,
-    # `distributed_rc`, `mom_rlc_*`) are not passed, as `run_extract` rejects
-    # them without parasitics.
-    device_only_netlist_path: str | None = None
-    device_only_parity: dict[str, Any] | None = None
-    if device_only_leg:
-        stem, ext = os.path.splitext(extracted_netlist_path)
-        device_only_netlist_path = f"{stem}.device-only{ext}"
-        try:
-            device_only_extract = run_extract(
-                layout_path,
-                deck_name,
-                output=device_only_netlist_path,
-                top=top,
-                pdk_variant=pdk_variant,
-                pdk_root=pdk_root,
-                parasitics=False,
-                deck_options=deck_options,
-                declared_pins=declared_pins,
-                rename_declared_pins=rename_declared_pins,
-                label_layers=label_layers,
-            )
-        except ExtractError as exc:
-            raise PexError(f"device-only extraction failed: {exc}") from exc
-        device_only_netlist_path = os.path.abspath(device_only_extract["netlist_path"])
-        device_only_parity = _device_only_parity(
-            extracted_netlist_path, device_only_netlist_path
-        )
+    device_only_netlist_path, device_only_parity = _extract_device_only_leg(
+        device_only_leg,
+        extracted_netlist_path,
+        layout_path,
+        deck_name,
+        top=top,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        deck_options=deck_options,
+        declared_pins=declared_pins,
+        rename_declared_pins=rename_declared_pins,
+        label_layers=label_layers,
+    )
 
     work_dir = (
         os.path.abspath(artifacts_dir)
@@ -3045,25 +3129,13 @@ def run_pex(
                 extracted_netlist=extracted_netlist_path,
             )
 
-        # Issue #3298: the parasitic-free leg. A failure here costs only the
-        # device-only fields of this testbench's rows (`null`,
-        # `device_only_status: "error"`), never the run.
-        device_only_report: dict[str, Any] | None = None
-        if device_only_netlist_path is not None:
-            try:
-                device_only_report = run_sim(
-                    _prepare_dut_swapped_request(
-                        testbench_path=testbench_path,
-                        dut_netlist_path=device_only_netlist_path,
-                        work_dir=work_dir,
-                        label=label,
-                        side="device-only",
-                    ),
-                    artifacts_dir=os.path.join(work_dir, label, "device-only"),
-                    backend=backend,
-                )
-            except SimError:
-                device_only_report = None
+        device_only_report = _run_device_only_sim(
+            device_only_netlist_path,
+            testbench_path=testbench_path,
+            work_dir=work_dir,
+            label=label,
+            backend=backend,
+        )
 
         rows = _build_delta_rows(
             spec_row_prefix=spec_row_prefix,
@@ -3231,12 +3303,9 @@ def run_pex(
         "schematic_flatten": schematic_flatten,
         "provenance": extract_report["provenance"],
     }
-    if device_only_netlist_path is not None:
-        # Additive fields (issue #3298), present only under `--device-only-leg`
-        # so a run without it is byte-identical to before.
-        result["device_only_netlist"] = _report_path(
-            device_only_netlist_path, repo_root=repo_root
+    result.update(
+        _device_only_result_fields(
+            device_only_netlist_path, device_only_parity, repo_root=repo_root
         )
-        result["device_only_netlist_sha256"] = _content_id(device_only_netlist_path)
-        result.update(device_only_parity or {})
+    )
     return result
