@@ -62,10 +62,13 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         report = run_place_and_route(
-            args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
+            args.request,
+            pdk_variant=args.pdk,
+            pdk_root=args.pdk_root,
+            backend=args.backend,
         )
     except PlaceAndRouteError as exc:
-        return emit_error("place-and-route", str(exc), args.format)
+        return _emit_flow_error(exc, args.format)
     except OutputLockError as exc:
         return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 
@@ -94,6 +97,14 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _emit_flow_error(exc: PlaceAndRouteError, fmt: str) -> int:
+    """``emit_error`` carrying the batch backend's ``code``/``details``
+    (issue #3518); both are ``None`` for every local failure."""
+    return emit_error(
+        "place-and-route", str(exc), fmt, code=exc.code, details=exc.details
+    )
+
+
 def _run_check(args: argparse.Namespace) -> int:
     """`--check <report>` (and `--rerun`): verify committed flow evidence
     against the request still on disk (issue #2224).
@@ -109,6 +120,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 args.request,
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
+                backend=args.backend,
             )
         else:
             result = check_place_and_route_report(
@@ -118,7 +130,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 pdk_root=args.pdk_root,
             )
     except PlaceAndRouteError as exc:
-        return emit_error("place-and-route", str(exc), args.format)
+        return _emit_flow_error(exc, args.format)
     except OutputLockError as exc:
         return emit_error("place-and-route", str(exc), args.format, code=exc.code)
 

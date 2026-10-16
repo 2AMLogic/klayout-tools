@@ -22,6 +22,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   `mismatch`. It now exits 1 with an error naming `layout.deck` as the fix;
   the same request with `layout.deck` still matches, and netlists without
   such cards (or without `reference.deck`) behave as before.
+- **`klt place-and-route --backend batch`: run `pdk.rebuild_corners` units on
+  the Spot batch fleet** (issue #3518): `--backend` / the request's `backend` /
+  `$KLT_SIM_BACKEND` (`klt sim`'s precedence) submits one `sim_batch` job per
+  corner and collects each into `.klt/place-and-route/<corner>/`. A single-unit
+  request stays local under a host default; a failed submit or unit is a
+  `failed` `corner_runs` entry (`error_code`, `job_id`), never a local run.
+  The aggregated report gains `environment.{backend,remote.fleet[]}` and
+  `corner_runs[].job_id`/`error_code` (batch runs only). Additive; no
+  `schema_version` bump.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
