@@ -2497,9 +2497,17 @@ EXTRACTION_DECK = ExtractionDeck(
     # is the key `pdk_models.py`'s `_MOS_MODEL_FLAVOURS[("sky130", "sky130")]`
     # table binds to those two real subcircuit names under `--pdk` -- see
     # that module's docstring for the verified-provenance citation.
+    #
+    # `exclude_markers=((125, 44),)` (issue #2912): upstream's 5V-HV gate is
+    # `ngate_high_voltage.not(lvtn)` -- hvi AND lvtn is the native-Vt
+    # (`nfet_05v0_nvt`) recipe (`ngate_nvt = ngate_high_voltage.and(lvtn)...`,
+    # sky130.lvs ~L1212-1226, volare sky130A; line numbers are a 2026-10-14
+    # snapshot), not a g5v0d10v5 device. Such islands stay on the default
+    # split (and warn) until a native-Vt class exists (#3599).
     mos_flavours=(
         MOSFlavour(
             marker=(75, 20),  # hvi.drawing
+            exclude_markers=((125, 44),),  # lvtn.drawing
             flavour="hvi",
             description="sky130 5V-gate/10.5V-drain thick-oxide domain (hvi 75/20)",
             nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_g5v0d10v5"),

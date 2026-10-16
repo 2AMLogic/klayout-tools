@@ -10460,6 +10460,43 @@ def test_sky130_deck_declares_hvi_mos_flavour():
     assert flavour.flavour == "hvi"
 
 
+def test_sky130_extract_hvi_plus_lvtn_not_bound_to_g5v0d10v5(tmp_path):
+    """Issue #2912: hvi AND lvtn is sky130's native-Vt recipe, not a
+    5V-HV gate (upstream `ngate_5p0v_hv` does `.not(lvtn)`). It must not bind
+    `sky130_fd_pr__nfet_g5v0d10v5`; it falls to the default flavour with an
+    explicit warning, while hvi-only still binds g5v0d10v5."""
+    layout = _make_sky130_hvi_mos_layout(hvi_overlap=True)
+    layout.top_cell().shapes(layout.layer(125, 44)).insert(
+        kdb.Box(-500, -500, 2500, 1500)
+    )
+    path = _write_gds(layout, tmp_path / "nvt_recipe.gds")
+    root = _make_pdk_install(tmp_path, "sky130A")
+
+    report = run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "nvt_recipe.spice"),
+    )
+
+    assert report["device_counts"] == {"nfet": 1}
+    text = Path(report["netlist_path"]).read_text()
+    assert "sky130_fd_pr__nfet_g5v0d10v5" not in text
+    assert "sky130_fd_pr__nfet_01v8" in text
+    assert any("which excludes them from that flavour" in w for w in report["warnings"])
+
+
+def test_sky130_extract_hvi_only_has_no_exclusion_warning(tmp_path):
+    path = _write_gds(
+        _make_sky130_hvi_mos_layout(hvi_overlap=True), tmp_path / "hv_only.gds"
+    )
+    report = run_extract(path, "sky130")
+    assert not any(
+        "which excludes them from that flavour" in w for w in report["warnings"]
+    )
+
+
 def _make_sky130_straddling_hvi_mos_layout() -> kdb.Layout:
     """One sky130 NMOS (`_draw_sky130_nmos`) with an `hvi` (75/20) marker
     overlapping only *part* of its active geometry -- the source pad is

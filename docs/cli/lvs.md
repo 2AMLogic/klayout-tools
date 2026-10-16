@@ -611,6 +611,10 @@ and `klt gen mos_array` cannot draw it (see `gen.md`, `voltage_flavor`).
 Mapping it with `reference.device_map` onto the plain `nfet` class would
 compare a device of the wrong type and is not an honest workaround — exclude
 the native device from the comparison explicitly instead.
+A native device drawn with the upstream recipe (`hvi` AND `lvtn`) extracts as
+the default `nfet` flavour with an explicit `klt extract` warning; it is never
+bound to `sky130_fd_pr__nfet_g5v0d10v5` (the deck's `hvi` flavour excludes
+`lvtn`).
 
 **`sg13g2`'s `rfcmim` was the one live case of that gap** (issue #1470, now
 closed). Derivation binds the *declared class* name as its own subcircuit
