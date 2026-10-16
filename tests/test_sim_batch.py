@@ -963,6 +963,55 @@ def test_poll_timeout_raises_batch_poll_timeout_with_last_state(tmp_path):
     assert excinfo.value.last_state == "running"
 
 
+def test_poll_reports_each_state_change_once(tmp_path):
+    runner = _FakeRunner()
+    runner.queue("status.json", fake_completed(returncode=1, stderr="404"))
+    for state in ("running", "running", "interrupted", "running", "done"):
+        runner.queue("status.json", fake_completed(_status(state)))
+    seen: list[str] = []
+
+    sb.poll_status(
+        _config(tmp_path),
+        "job-1",
+        runner=runner,
+        sleep=runner.sleep,
+        on_state=seen.append,
+    )
+    assert seen == ["running", "interrupted", "running", "done"]
+
+
+def test_poll_never_started_job_raises_before_the_serial_budget(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(returncode=1, stderr="404")
+    clock = iter([0.0, 0.0, 900.0, 1800.0, 1800.0])
+
+    with pytest.raises(sb.BatchPollTimeout, match="never started") as excinfo:
+        sb.poll_status(
+            _config(tmp_path, poll_timeout_s=36000.0),
+            "job-1",
+            runner=runner,
+            sleep=runner.sleep,
+            monotonic=lambda: next(clock),
+        )
+    assert excinfo.value.last_state is None
+
+
+def test_poll_started_job_keeps_the_serial_budget(tmp_path):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+    clock = iter([0.0, 0.0, 1900.0, 5000.0, 9000.0])
+
+    with pytest.raises(sb.BatchPollTimeout, match="did not reach") as excinfo:
+        sb.poll_status(
+            _config(tmp_path, poll_timeout_s=6000.0),
+            "job-1",
+            runner=runner,
+            sleep=runner.sleep,
+            monotonic=lambda: next(clock),
+        )
+    assert excinfo.value.last_state == "running"
+
+
 def test_poll_rejects_an_undocumented_state(tmp_path):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("confused"))

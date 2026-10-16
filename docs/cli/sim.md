@@ -1525,6 +1525,17 @@ A `done` job (or exit 3/4) whose collection fails still raises as before. A
 running), so no recovery is attempted. Raw logs are never copied into the
 JSON; use the retained artifacts below.
 
+While a job is waiting, `klt sim` writes one progress line per state change
+to **stderr** (never stdout, so the JSON report is unchanged):
+`klt sim: batch job <job_id>: submitted` / `launched` / `running` /
+`interrupted` / the terminal state. Unchanged polls print nothing. A sharded
+request (`remote.hosts` > 1) prints one such stream per shard; the job ids
+tell them apart. A job that has published no `status.json` 1800s after
+launch (instance never launched or booted, e.g. a saturated fleet cap) ends
+as `batch_poll_timeout` saying it never started, instead of waiting out the
+serial `batch.poll_timeout_s` budget; a job whose `status.json` appeared
+keeps that budget.
+
 A job killed at the fleet's whole-job ceiling is the common `timeout` case.
 Its `report.json` is truncated or missing, so every unit stays
 `batch_job_timeout`. The client never parses a partial report, and it never
@@ -4690,7 +4701,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `lost_shard`       | The corner's `hosts > 1` shard never returned (Epic #375). See "Fleet sharding" above. |
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
-| `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal. The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
+| `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
 | `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
 | `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |

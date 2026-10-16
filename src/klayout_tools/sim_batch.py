@@ -2146,6 +2146,11 @@ def job_exists(
     return result.returncode == 0
 
 
+def _report_progress(job_id: str, state: str) -> None:
+    """One per-job progress line on stderr (stdout carries the JSON report)."""
+    print(f"klt sim: batch job {job_id}: {state}", file=sys.stderr, flush=True)
+
+
 def poll_status(
     config: BatchConfig,
     job_id: str,
@@ -2154,6 +2159,7 @@ def poll_status(
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
     heartbeat: bool = False,
+    on_state: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Poll ``status.json`` until the job reaches a terminal state
     (:data:`BATCH_TERMINAL_STATES`) and return that status document.
@@ -2164,8 +2170,16 @@ def poll_status(
     ``reconcile`` re-launches the job -- a client that also re-launched
     would double-spend the shared fleet budget.
 
+    ``on_state`` is called once per *change* of observed state (including a
+    flip back, e.g. ``interrupted`` -> ``running``); unchanged and unreadable
+    polls do not call it.
+
     Raises :class:`BatchPollTimeout` once ``config.poll_timeout_s`` elapses
-    (the caller reports unrun corners rather than a failed sweep), and
+    (the caller reports unrun corners rather than a failed sweep) -- or
+    once :data:`_BATCH_PROVISION_SLACK_S` passes with no ``status.json`` ever
+    observed, so a job that never launched does not wait out the (possibly
+    hours-long) serial budget. ``last_state`` is ``None`` in that case.
+    Raises
     :class:`BatchError` on a state outside the documented set -- a contract
     violation, surfaced loudly rather than waited on forever.
 
@@ -2183,7 +2197,10 @@ def poll_status(
     while True:
         status = _read_status(config, job_id, run)
         if status is not None:
-            last_state = str(status.get("state") or "")
+            new_state = str(status.get("state") or "")
+            if on_state is not None and new_state != last_state:
+                on_state(new_state)
+            last_state = new_state
             if last_state in BATCH_TERMINAL_STATES:
                 return status
             if last_state not in BATCH_WAITING_STATES:
@@ -2193,6 +2210,17 @@ def poll_status(
                     f"{', '.join(BATCH_WAITING_STATES + BATCH_TERMINAL_STATES)})"
                 )
         elapsed = monotonic() - started
+        if (
+            last_state is None
+            and elapsed >= _BATCH_PROVISION_SLACK_S
+            and elapsed < config.poll_timeout_s
+        ):
+            raise BatchPollTimeout(
+                f"job {job_id} never started: no status.json after "
+                f"{_BATCH_PROVISION_SLACK_S:g}s (last observed state: "
+                "no status.json yet)",
+                last_state=None,
+            )
         if elapsed >= config.poll_timeout_s:
             raise BatchPollTimeout(
                 f"job {job_id} did not reach a terminal state within "
@@ -3077,6 +3105,7 @@ def _run_batch_job(
         "client_collected_at": None,
     }
     submit_job(config, job_id, spec, runner=runner)
+    _report_progress(job_id, "submitted")
     launch_job(config, job_id, runner=runner)
     timestamps["client_launched_at"] = now()
     # Issue #2978: name the job on stderr the moment it exists, so a caller
@@ -3121,7 +3150,14 @@ def _poll_and_collect(
     (all ``None`` on ``--attach``, where this client never submitted or
     launched); the terminal/collected phases are filled in here."""
     try:
-        status = poll_status(config, job_id, runner=runner, sleep=sleep, heartbeat=True)
+        status = poll_status(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=True,
+            on_state=lambda state: _report_progress(job_id, state),
+        )
     except BatchPollTimeout as exc:
         return (
             _poll_timeout_corners(corner_points, measurements_spec, exc),
