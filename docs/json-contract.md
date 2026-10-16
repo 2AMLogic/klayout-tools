@@ -1777,6 +1777,12 @@ refusal exit codes `5`-`10` (a set that is not exactly the planned one; stdout c
 `3`/`4` verdicts. See [`docs/cli/sim.md`](cli/sim.md) "Merging per-request
 reports" and `docs/schemas/sim-merge-report.schema.json`.
 
+`klt sim-plan` (issue #3423) writes the shard requests and `sim-merge` manifest
+beside a request and prints `{schema_version, axis, manifest, shard_count,
+shards[]}` (`id`, `request`, `request_sha256`, `corner_count`). It exits `0` or
+`1` (error envelope on stderr) only. See [`docs/cli/sim.md`](cli/sim.md)
+"Planning shards".
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                     |
