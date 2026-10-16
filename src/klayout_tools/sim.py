@@ -7489,7 +7489,10 @@ def _scale_supply_waveforms(
     source rescaled to its ``supply_v`` value (issue #2902); returns
     ``(copy_path, disclosure)``. Relative ``.include`` targets that resolve
     beside the original netlist are made absolute, as in
-    :func:`_expand_netlist_includes`."""
+    :func:`_expand_netlist_includes`. A corner with no waveform sources
+    passes the netlist through untouched with an empty disclosure."""
+    if not point.supply_waveforms:
+        return run_netlist_path, {}
     with open(run_netlist_path, encoding="utf-8", errors="surrogateescape") as fh:
         text = fh.read()
     scaled, disclosure = sim_supply_waveform.scale_netlist(
@@ -7964,11 +7967,9 @@ def _run_corner(
     run_netlist_path, include_diagnostics = _expand_netlist_includes(
         netlist_path, corner_dir
     )
-    supply_waveform_report: dict[str, Any] = {}
-    if point.supply_waveforms:
-        run_netlist_path, supply_waveform_report = _scale_supply_waveforms(
-            run_netlist_path, netlist_path, corner_dir, point
-        )
+    run_netlist_path, supply_waveform_report = _scale_supply_waveforms(
+        run_netlist_path, netlist_path, corner_dir, point
+    )
     command, log_path, raw_path, deck_path = _prepare_corner_run(
         corner_dir=corner_dir,
         netlist_path=run_netlist_path,
