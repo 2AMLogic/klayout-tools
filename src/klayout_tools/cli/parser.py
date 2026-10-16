@@ -2289,7 +2289,7 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "(written as a 1 mohm resistor -- SPICE has no zero-ohm "
             "resistor). Must be >= 0. Reported as "
             "`parasitics.substrate_dc_tie.resistance_ohm`/`mode`. Requires "
-            "--parasitics. See docs/cli/extract.md's 'Substrate DC tie' "
+            "--parasitics. See docs/cli/extract.md's 'Substrate tie value' "
             "section."
         ),
     )
@@ -3387,7 +3387,7 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "resistance of the substrate DC-reference tie (default 1e12, "
             "substrate floating in transient; 0 = hard tie), passed "
             "through to `klt extract --substrate-tie-ohms` (issue #3089). "
-            "Must be >= 0. See docs/cli/extract.md's 'Substrate DC tie' "
+            "Must be >= 0. See docs/cli/extract.md's 'Substrate tie value' "
             "section."
         ),
     )
