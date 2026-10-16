@@ -719,6 +719,19 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--report-out",
+        dest="report_out",
+        default=None,
+        metavar="PATH",
+        help=(
+            "also write the report envelope to PATH, byte-identical to "
+            "`--format json` stdout; gzip-compressed (deterministic) when "
+            "PATH ends `.gz`, plain indented JSON otherwise. Stdout is "
+            "unchanged (issue #2975). `klt yield` reads `.json.gz` "
+            "directly. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--plot",
         dest="plot",
         default=None,
@@ -1814,6 +1827,17 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "to the input) and report netlist_path/netlist_sha256 as null. "
             "Counts and status are identical to a normal run. Cannot be "
             "combined with -o/--output or --subcircuit/--subcircuit-output"
+        ),
+    )
+    extract_parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "write stage start/finish lines and a periodic heartbeat to "
+            "stderr (stdout stays the pure response). Default: heartbeat "
+            "lines only (every 30s of a long stage) when stderr is not a "
+            "TTY, nothing on a TTY; --no-progress forces off"
         ),
     )
     extract_parser.add_argument(
