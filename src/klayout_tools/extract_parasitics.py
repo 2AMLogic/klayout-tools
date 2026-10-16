@@ -745,6 +745,43 @@ def _net_pair_key(name_a: str, name_b: str) -> tuple[str, str]:
     return (name_a, name_b) if name_a <= name_b else (name_b, name_a)
 
 
+def _capacitor_plate_masks(
+    circuit: kdb.Circuit,
+    capacitor_top_regions: dict[str, kdb.Region] | None,
+) -> dict[frozenset[int], kdb.Region]:
+    """``masks[frozenset({id_a, id_b})]`` (net cluster ids) is the union of the
+    top-plate marker regions of every recognised capacitor device in
+    ``circuit`` whose two plate terminals are exactly those two nets (issue
+    #3021). ``None``/empty ``capacitor_top_regions`` yields ``{}``.
+    """
+    import klayout.db as kdb
+
+    masks: dict[frozenset[int], kdb.Region] = {}
+    if not capacitor_top_regions:
+        return masks
+    for cap_device in circuit.each_device():
+        marker = capacitor_top_regions.get(cap_device.device_class().name)
+        if marker is None or marker.is_empty():
+            continue
+        # Keyed by `cluster_id`, not by `Net` wrapper: `net_for_terminal` is
+        # not guaranteed to hand back the same Python object
+        # `circuit.each_net()` did.
+        plate_ids = {
+            net.cluster_id
+            for net in (cap_device.net_for_terminal(t) for t in (0, 1))
+            if net is not None
+        }
+        if len(plate_ids) == 2:
+            masks.setdefault(frozenset(plate_ids), kdb.Region()).insert(marker)
+    return masks
+
+
+def _minus_capacitor_mask(overlap: kdb.Region, mask: kdb.Region | None) -> kdb.Region:
+    """``overlap`` with a capacitor's top-plate ``mask`` cut out (issue #3021);
+    ``overlap`` unchanged when the pair has no mask."""
+    return overlap if mask is None else overlap - mask
+
+
 def _compute_parasitics(
     l2n: kdb.LayoutToNetlist,
     circuit: kdb.Circuit | None,
@@ -759,6 +796,7 @@ def _compute_parasitics(
     parasitics_nets: frozenset[str] | None = None,
     parasitics_top_cell_only: bool = False,
     via_index: list[int] | None = None,
+    capacitor_top_regions: dict[str, kdb.Region] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -828,6 +866,20 @@ def _compute_parasitics(
     ever computed between two *distinct* nets, so a net's own via stack
     contributes nothing
     here (it is ordinary connectivity, already merged into one net upstream).
+
+    **Recognised capacitors are not double-counted (issue #3021):**
+    ``capacitor_top_regions`` maps each recognised ``CapacitorDevice``'s name
+    to its top-plate marker region. For a pair of nets that are the two plate
+    nets of a device of that class (read off ``circuit``'s devices), the part
+    of the plate overlap lying under that marker is cut from ``overlap``
+    *before* it becomes coupling or a ground deduction: the device's own
+    ``area_cap_f_um2`` already is the capacitance there. The masked area is
+    simply never claimed by a partner, so it stays on both nets' ground term
+    exactly as if no coupling existed there (charge is not destroyed); only
+    the overlap outside the marker (unit gaps, plate margins) remains as
+    parallel parasitic coupling. A pair that is not a capacitor's plate pair
+    is never masked, even under the marker. ``None`` (the default) masks
+    nothing, byte-identical to the pre-#3021 behaviour.
     **Lateral (same-layer, sidewall) coupling, for critical nets only (issue
     #976, Epic #709 Phase 2a):** unlike vertical-overlap coupling above,
     which is unconditional across the whole layout, this pass only ever
@@ -1300,6 +1352,8 @@ def _compute_parasitics(
     # it. The coupling capacitors themselves are unaffected: each *pair* still
     # gets the full mutual-overlap area, which is what the plate model wants.
     deduction_regions: dict[tuple[kdb.Net, int], kdb.Region] = {}
+    # Issue #3021: recognised capacitors' top-plate markers, per plate-net pair.
+    capacitor_masks = _capacitor_plate_masks(circuit, capacitor_top_regions)
     # `coupling_ff[pair_key]` / `coupling_levels[pair_key]`: the accumulated
     # coupling capacitance and contributing `[lower, upper]` level-index
     # pairs for one unordered net pair.
@@ -1356,6 +1410,14 @@ def _compute_parasitics(
                 overlap = region_a & region_b
                 if overlap.is_empty():
                     continue
+                # A fully masked overlap is empty, so the area check below
+                # skips it.
+                overlap = _minus_capacitor_mask(
+                    overlap,
+                    capacitor_masks.get(
+                        frozenset((net_a.cluster_id, net_b.cluster_id))
+                    ),
+                )
                 overlap_area_um2 = overlap.area() * dbu * dbu
                 if overlap_area_um2 <= 0.0:
                     continue

@@ -5718,21 +5718,14 @@ def _grade_evidence(
         require_post_layout=require_post_layout,
     )
     if kind_gated is not None:
-        # Issue #2467: the two `yield` refusals name a state the reader
-        # cannot see from the reason alone -- *which* measurements are
-        # undersized, or whose negative control did not detect -- so the
-        # same disclosure the `"met"` path carries on the citation is
-        # carried here as the item's `detail` instead. `{}` (no `detail`
-        # key at all) for every other refusal, exactly as before.
-        campaign = _yield_campaign_disclosure(check_kind, envelope)
-        failure_detail = (
-            {"yield_campaign": campaign}
-            if campaign is not None
-            and kind_gated
-            in (_REASON_UNDERSIZED_SAMPLE, _REASON_NEGATIVE_CONTROL_NOT_DETECTED)
-            else {}
+        return (
+            "unmet",
+            kind_gated,
+            None,
+            _kind_gated_failure_detail(
+                kind_gated, check_kind, envelope, spec, resolution
+            ),
         )
-        return "unmet", kind_gated, None, failure_detail
 
     # Issue #2718: a generic citation's declared item identity and, for the
     # artifact-anchored items, its artifact binding -- checked only for an
@@ -5742,10 +5735,12 @@ def _grade_evidence(
     if binding_refusal is not None:
         return "unmet", binding_refusal, None, {}
 
-    expected_hash = spec.get("content_hash")
-    if expected_hash is not None and resolution["content_hash"] != expected_hash:
-        if resolution["content_hash"] is None:
-            return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
+    pin_state = _content_hash_pin_state(
+        spec.get("content_hash"), resolution["content_hash"]
+    )
+    if pin_state == _PIN_UNVERIFIABLE:
+        return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
+    if pin_state == _PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
     citation = _citation(resolution)
@@ -5755,6 +5750,62 @@ def _grade_evidence(
     if anchored_refusal is not None:
         return "unmet", anchored_refusal, None, {}
     return "met", None, citation, {}
+
+
+def _kind_gated_failure_detail(
+    kind_gated: str,
+    check_kind: str,
+    envelope: dict[str, Any],
+    spec: Mapping[str, Any],
+    resolution: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The ``detail`` for a :func:`_kind_gated_refusal` verdict.
+
+    Issue #2467: the two ``yield`` refusals name a state the reader cannot
+    see from the reason alone -- *which* measurements are undersized, or
+    whose negative control did not detect -- so the same disclosure the
+    ``"met"`` path carries on the citation is carried here instead. ``{}``
+    (no ``detail`` key at all) for every other refusal.
+
+    Issue #3063: the early return would otherwise hide a stale
+    ``content_hash`` pin behind the campaign refusal until the sample is
+    raised. Disclosed beside the verdict, never changing it.
+    """
+    campaign = _yield_campaign_disclosure(check_kind, envelope)
+    if campaign is None or kind_gated not in (
+        _REASON_UNDERSIZED_SAMPLE,
+        _REASON_NEGATIVE_CONTROL_NOT_DETECTED,
+    ):
+        return {}
+    detail: dict[str, Any] = {"yield_campaign": campaign}
+    pin_state = _content_hash_pin_state(
+        spec.get("content_hash"), resolution["content_hash"]
+    )
+    if pin_state is not None:
+        detail["content_hash_pin"] = pin_state
+    return detail
+
+
+_PIN_VERIFIED = "verified"
+_PIN_STALE = "stale"
+_PIN_UNVERIFIABLE = "unverifiable"
+
+
+def _content_hash_pin_state(
+    expected_hash: str | None, live_hash: str | None
+) -> str | None:
+    """Compare a manifest-pinned ``content_hash`` to the resolved live one.
+
+    ``None`` when the entry pins nothing; otherwise ``"verified"`` (equal),
+    ``"unverifiable"`` (no live hash to compare) or ``"stale"`` (differs).
+    Shared by the staleness gate and the issue #3063 disclosure on the
+    ``yield`` refusals so the two cannot drift.
+    """
+    if expected_hash is None:
+        return None
+    if live_hash is None:
+        return _PIN_UNVERIFIABLE
+    return _PIN_VERIFIED if live_hash == expected_hash else _PIN_STALE
 
 
 def _bind_anchored_citation(
