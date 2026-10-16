@@ -17160,7 +17160,7 @@ def test_compose_plane_bearing_waypoint_changes_plane_mid_leg(tmp_path, pdk_root
         pdk_root,
         output,
         "plane_change",
-        [[5.6, 2.5], [7.0, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, "metal3"], [10.3, 2.5], [10.3, 0.21]],
     )
     report = compose(request)
 
@@ -17196,15 +17196,15 @@ def test_compose_plane_bearing_waypoint_changes_plane_mid_leg(tmp_path, pdk_root
 
 
 def _gate_net_crossing_plane_change(layer_role):
-    """A u1.G -> u2.G net whose descent at x=8.8 crosses the met2 segment of
-    the plane-changing DBUS leg (y=2.5, x=7.0..9.8) in the fixture above."""
+    """A u1.G -> u2.G net whose descent at x=9.3 crosses the met2 segment of
+    the plane-changing DBUS leg (y=2.5, x=7.0..10.3) in the fixture above."""
     entry = {
         "net": "GLINK",
         "pins": [
             {"block": "u1", "port": "U0_G"},
             {"block": "u2", "port": "U0_G"},
         ],
-        "waypoints_um": [[4.68, 3.5], [8.8, 3.5]],
+        "waypoints_um": [[4.93, 3.5], [9.3, 3.5]],
     }
     if layer_role is not None:
         entry["layer_role"] = layer_role
@@ -17230,7 +17230,7 @@ def test_compose_plane_bearing_waypoint_checks_each_segment_on_its_own_plane(
         pdk_root,
         output,
         "plane_change_cross",
-        [[5.6, 2.5], [7.0, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, "metal3"], [10.3, 2.5], [10.3, 0.21]],
     )
     request["connectivity"].append(_gate_net_crossing_plane_change(layer_role))
     report = compose(request)
@@ -17255,7 +17255,7 @@ def test_compose_plane_bearing_waypoint_on_a_two_pin_net(tmp_path, pdk_root):
                 {"block": "u1", "port": "U0_D"},
                 {"block": "u2", "port": "U0_D"},
             ],
-            "waypoints_um": [[5.6, 2.5, "metal3"], [9.8, 2.5], [9.8, 0.21]],
+            "waypoints_um": [[6.0, 2.5, "metal3"], [10.3, 2.5], [10.3, 0.21]],
         }
     ]
     report = compose(request)
@@ -17276,7 +17276,7 @@ def test_compose_plane_bearing_waypoint_unknown_role_is_an_application_error(
         pdk_root,
         tmp_path / "bad_role.gds",
         "bad_role",
-        [[5.6, 2.5], [7.0, 2.5, "metal99"], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, "metal99"], [10.3, 2.5], [10.3, 0.21]],
     )
     with pytest.raises(GenComposeError, match=r"legs\[1\]\.waypoints_um\[1\]"):
         compose(request)
@@ -17291,7 +17291,7 @@ def test_compose_plane_bearing_waypoint_rejects_a_malformed_role(
         pdk_root,
         tmp_path / "bad_triple.gds",
         "bad_triple",
-        [[5.6, 2.5], [7.0, 2.5, bad_role], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, bad_role], [10.3, 2.5], [10.3, 0.21]],
     )
     with pytest.raises(GenComposeError, match=r"waypoints_um\[1\]\[2\]"):
         compose(request)
@@ -17305,7 +17305,7 @@ def test_compose_plane_bearing_waypoint_rejects_a_four_element_waypoint(
         pdk_root,
         tmp_path / "bad_len.gds",
         "bad_len",
-        [[5.6, 2.5], [7.0, 2.5, "metal3", 1], [9.8, 2.5], [9.8, 0.21]],
+        [[6.0, 2.5], [7.0, 2.5, "metal3", 1], [10.3, 2.5], [10.3, 0.21]],
     )
     with pytest.raises(GenComposeError, match=r"waypoints_um\[1\] must be"):
         compose(request)
