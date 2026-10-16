@@ -5,7 +5,9 @@ no dependency on an external corpus.
 """
 
 import json
+from pathlib import Path
 
+import jsonschema
 import klayout.db as kdb
 import pytest
 
@@ -431,6 +433,66 @@ def test_json_contract(tmp_path, capsys):
     # Sorted ascending by (layer, datatype).
     pairs = [(e["layer"], e["datatype"]) for e in data["layers"]]
     assert pairs == sorted(pairs)
+
+
+_SCHEMA = json.loads(
+    (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "schemas"
+        / "stats-response.schema.json"
+    ).read_text()
+)
+
+
+def _assert_conforms_and_requires(payload: dict, drop: list) -> None:
+    """The real payload validates, and deleting each required field breaks it."""
+    jsonschema.Draft202012Validator.check_schema(_SCHEMA)
+    jsonschema.validate(payload, _SCHEMA, cls=jsonschema.Draft202012Validator)
+    for path in drop:
+        broken = json.loads(json.dumps(payload))
+        target = broken
+        for key in path[:-1]:
+            target = target[key]
+        del target[path[-1]]
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, _SCHEMA, cls=jsonschema.Draft202012Validator)
+
+
+def test_json_response_schema(tmp_path, capsys):
+    """Real `--format json` output with and without --per-layer validates
+    against the shipped response schema."""
+    path = tmp_path / "design.oas"
+    _make_layout().write(str(path))
+
+    assert main(["stats", str(path), "--per-layer", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    _assert_conforms_and_requires(
+        data,
+        [
+            ["schema_version"],
+            ["file"],
+            ["dbu_um"],
+            ["top_cell"],
+            ["bbox_um"],
+            ["total"],
+            ["layers"],
+        ]
+        + [
+            ["bbox_um", "height"],
+            ["total", "area_um2"],
+            ["total", "flattened_vertex_count"],
+        ]
+        + [
+            ["layers", 0, k]
+            for k in ("layer", "datatype", "name", "area_um2", "annotation")
+        ],
+    )
+
+    assert main(["stats", str(path), "--format", "json"]) == 0
+    plain = json.loads(capsys.readouterr().out)
+    assert plain["layers"] is None
+    _assert_conforms_and_requires(plain, [["layers"], ["total", "density"]])
 
 
 def test_json_without_per_layer_has_null_layers(tmp_path, capsys):

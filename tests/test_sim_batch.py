@@ -690,13 +690,89 @@ def test_classify_launch_failure_only_matches_the_capacity_refusal():
     assert sb.BATCH_NO_CAPACITY_CODE == "batch_no_capacity"
     for other in (
         "error: only 2 instance type(s) configured, floor is 3",
-        "error: 4 instance(s) already running + 1 requested exceeds "
-        "BATCH_MAX_CONCURRENT_INSTANCES=4",
         "error: nothing launched and pools refused with UnauthorizedOperation",
         "error: no job spec at s3://bucket/jobs/x/job.json",
         "",
     ):
         assert sb._classify_launch_failure(other) is None
+
+
+#: Verbatim shape of 2am's concurrency-cap refusal (issue #2917).
+_CAP_REFUSAL = (
+    "error: 8 instance(s) already running + 1 requested exceeds "
+    "BATCH_MAX_CONCURRENT_INSTANCES=8"
+)
+
+
+def test_classify_launch_failure_matches_the_concurrency_cap_refusal():
+    assert sb._classify_launch_failure(_CAP_REFUSAL) == "batch_concurrency_cap"
+    assert sb.BATCH_CONCURRENCY_CAP_CODE == "batch_concurrency_cap"
+    # Both markers present: the Spot refusal wins (checked first).
+    both = f"{_CAPACITY_REFUSAL}; {_CAP_REFUSAL}"
+    assert sb._classify_launch_failure(both) == "batch_no_capacity"
+
+
+def test_concurrency_cap_without_wait_is_one_attempt_with_a_code(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    runner.queue("launch", fake_completed(returncode=1, stderr=_CAP_REFUSAL))
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb.launch_job(
+            _config(tmp_path),
+            "job-1",
+            runner=runner,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+    assert excinfo.value.code == "batch_concurrency_cap"
+    assert len(runner.argvs_matching("launch")) == 1
+    assert clock.sleeps == []
+
+
+def test_concurrency_cap_wait_relaunches_the_same_job(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    for _ in range(2):
+        runner.queue("launch", fake_completed(returncode=1, stderr=_CAP_REFUSAL))
+
+    sb.launch_job(
+        _config(tmp_path, capacity_wait_s=3600.0),
+        "job-1",
+        runner=runner,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+        jitter=lambda: 0.0,
+    )
+
+    launches = runner.argvs_matching("launch")
+    assert len(launches) == 3
+    assert all(argv == launches[0] for argv in launches)
+    assert clock.sleeps == [15.0, 30.0]
+
+
+def test_concurrency_cap_budget_exhausted_keeps_its_code(tmp_path):
+    runner = _FakeRunner()
+    clock = _FakeClock()
+    for _ in range(10):
+        runner.queue("launch", fake_completed(returncode=1, stderr=_CAP_REFUSAL))
+
+    with pytest.raises(sb.BatchError) as excinfo:
+        sb.launch_job(
+            _config(tmp_path, capacity_wait_s=100.0),
+            "job-1",
+            runner=runner,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+            jitter=lambda: 1.0,
+        )
+
+    assert excinfo.value.code == "batch_concurrency_cap"
+    assert "capacity wait budget of 100s exhausted after 4 launch attempt(s)" in str(
+        excinfo.value
+    )
+    assert _CAP_REFUSAL in str(excinfo.value)
 
 
 def test_capacity_refusal_without_wait_is_one_attempt_with_a_code(tmp_path):
@@ -780,12 +856,11 @@ def test_capacity_wait_never_retries_an_unrelated_launch_failure(tmp_path):
         "launch",
         fake_completed(
             returncode=1,
-            stderr="error: 4 instance(s) already running + 1 requested exceeds "
-            "BATCH_MAX_CONCURRENT_INSTANCES=4",
+            stderr="error: only 2 instance type(s) configured, floor is 3",
         ),
     )
 
-    with pytest.raises(sb.BatchError, match="BATCH_MAX_CONCURRENT_INSTANCES") as exc:
+    with pytest.raises(sb.BatchError, match="capacity floor|floor is 3") as exc:
         sb.launch_job(
             _config(tmp_path, capacity_wait_s=3600.0),
             "job-1",
@@ -4627,3 +4702,149 @@ def test_engine_log_tail_is_bounded(tmp_path):
     note, found = sb._engine_log_note(str(tmp_path))
     assert found is None
     assert len(note) < sb._BATCH_ENGINE_LOG_TAIL_CHARS + 100
+
+
+# --- request-feature capability check (issue #3249) --------------------------
+
+_STEPS_REQUEST = {"models": {}, "options": {}, "analysis_steps": [{"tran": {}}]}
+
+
+def _feature_spec(tmp_path, request, client="0.7.1.dev384+gf386aca", **kwargs):
+    return sb._build_batch_job_spec(
+        request,
+        str(_write_body(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=True,
+        client_version=client,
+        **kwargs,
+    )
+
+
+def test_analysis_steps_on_a_pre_feature_runner_is_rejected_by_name(tmp_path):
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _feature_spec(tmp_path, _STEPS_REQUEST), _fake_klt("klt 0.7.0")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "analysis_steps" in error["message"]
+    assert "0.7.0" in error["message"] and "0.7.1.dev384" in error["message"]
+
+
+@pytest.mark.parametrize("runner", ["0.7.1", "0.7.1.dev5+gabc", "0.7.3"])
+def test_analysis_steps_on_a_supporting_runner_passes(tmp_path, runner):
+    proc, _, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, _feature_spec(tmp_path, _STEPS_REQUEST), _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_request_without_the_feature_is_unaffected_on_an_old_runner(tmp_path):
+    proc, _, marker = _run_job_cmd_with_fake_klt(
+        tmp_path,
+        _feature_spec(tmp_path, {"models": {}, "options": {}}),
+        _fake_klt("klt 0.7.0"),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_feature_gate_warn_mode_still_runs_the_job(tmp_path):
+    spec = _feature_spec(tmp_path, _STEPS_REQUEST, version_check="warn")
+    proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.7.0"))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_feature_gate_never_overrides_a_version_rejection(tmp_path):
+    proc, out_dir, _ = _run_job_cmd_with_fake_klt(
+        tmp_path, _feature_spec(tmp_path, _STEPS_REQUEST), _fake_klt("klt 0.6.0")
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_MISMATCH_CODE
+
+
+def test_missing_runner_features_unknown_version_is_not_missing():
+    assert sb._missing_runner_features(["analysis_steps"], None) is None
+    assert sb._missing_runner_features(["analysis_steps"], "dirty") is None
+    assert sb._missing_runner_features(["analysis_steps"], "0.7.0") == [
+        "analysis_steps"
+    ]
+    assert sb._missing_runner_features(["analysis_steps"], "0.7.1") == []
+
+
+def test_environment_carries_the_capability_result(monkeypatch):
+    _pin_client_version(monkeypatch, "0.7.1.dev384+gf386aca")
+    fields = sb._read_runner_identity(None, _STEPS_REQUEST)
+    assert fields["runner_request_features"] == {
+        "required": ["analysis_steps"],
+        "missing": None,
+        "status": "unknown",
+    }
+    assert "runner_request_features" not in sb._read_runner_identity(None, {})
+
+
+def test_environment_reports_unsupported_feature_on_a_matching_minor(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, "0.7.1.dev384+gf386aca")
+    (tmp_path / "runner_identity.json").write_text(_identity("0.7.0"))
+    fields = sb._read_runner_identity(str(tmp_path), _STEPS_REQUEST)
+    assert fields["runner_compatibility"] == "match"
+    assert fields["runner_request_features"]["status"] == "unsupported"
+    assert fields["runner_request_features"]["missing"] == ["analysis_steps"]
+    assert "analysis_steps" in fields["runner_compatibility_warning"]
+
+
+def test_preflight_feature_rejection_is_annotated_on_the_corner(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="87", detail="x"))
+    runner.outputs = {
+        "report.json": _envelope(
+            "predates analysis_steps", code=sb.BATCH_RUNNER_FEATURE_CODE
+        ),
+        "runner_identity.json": _identity("0.7.0"),
+    }
+    corners, _, _ = _run_one_job(tmp_path, monkeypatch, runner)
+    diagnostic = corners[0]["diagnostics"][0]
+    assert diagnostic["runner_code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert diagnostic["runner_klt_version"] == "0.7.0"
+
+
+def test_prelaunch_refuses_a_feature_every_published_image_predates(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    request = {"models": {"pdk": "sky130A"}, "analysis_steps": [{}]}
+    assessment = sb._assess_published_runner(request, _config(tmp_path))
+    assert assessment["status"] == "match"
+    with pytest.raises(sim.SimError) as raised:
+        sb._enforce_published_runner_features(request, assessment)
+    assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "analysis_steps" in str(raised.value)
+
+
+def test_prelaunch_feature_check_passes_when_unknown_or_supported(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    request = {"models": {"pdk": "sky130A"}, "analysis_steps": [{}]}
+    for images in ([_image()], [_image(klt_version="0.7.1")], []):
+        _publish_manifest(tmp_path, monkeypatch, images)
+        assessment = sb._assess_published_runner(request, _config(tmp_path))
+        sb._enforce_published_runner_features(request, assessment)  # no raise
+
+
+def test_prelaunch_feature_check_warn_mode_does_not_raise(tmp_path, monkeypatch):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    request = {"models": {"pdk": "sky130A"}, "analysis_steps": [{}]}
+    assessment = sb._assess_published_runner(
+        request, _config(tmp_path, runner_version_check="warn")
+    )
+    sb._enforce_published_runner_features(request, assessment)

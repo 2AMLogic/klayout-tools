@@ -1696,6 +1696,14 @@ def _run_decks_batch(
 # --------------------------------------------------------------------------- #
 
 
+def resolve_deck_outdir(artifacts_dir: str | None, request_dir: str) -> str:
+    """The directory a deck run writes its unit trees under: the explicit
+    ``artifacts_dir``, else ``<request_dir>/.klt/sim``. Shared by
+    :func:`run_deck_request` and ``sim.run_sim``'s output-directory
+    ownership (#3168) so the locked root can never drift from the written one."""
+    return artifacts_dir or os.path.join(request_dir, ".klt", "sim")
+
+
 def run_deck_request(
     request: dict[str, Any],
     *,
@@ -1732,7 +1740,7 @@ def run_deck_request(
     )
     options = request.get("options") or {}
     ngspice_binary = _resolve_ngspice_binary(options, request_dir)
-    outdir = artifacts_dir or os.path.join(request_dir, ".klt", "sim")
+    outdir = resolve_deck_outdir(artifacts_dir, request_dir)
 
     if backend == "remote" or backend == "batch":
         # Validate the whole staged closure before anything billable: an

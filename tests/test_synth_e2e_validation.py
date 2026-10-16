@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import pdk as pdk_module
+from klayout_tools import pdk_cells
 from klayout_tools.synthesize import run_synthesize
 
 _CORPUS_DIR = Path(__file__).parent / "corpus" / "synth_e2e_validation"
@@ -44,17 +45,14 @@ def _find_any_cell_library() -> tuple[str, str, str, str] | None:
     """Duplicated from `tests/test_synthesize_equiv_gate.py`'s own helper of
     the same name/behaviour -- test modules in this repo do not import
     fixtures across each other."""
-    try:
-        result = pdk_module.list_pdks()
-    except Exception:
-        return None
+    result = pdk_module.list_pdks()
     for install in result["installs"]:
         for variant in install["variants"]:
             try:
-                libraries = pdk_module.list_cell_libraries(
+                libraries = pdk_cells.list_cell_libraries(
                     variant=variant["name"], root=install["root"]
                 )
-            except Exception:
+            except pdk_module.PdkNotFoundError:
                 continue
             for library in libraries["libraries"]:
                 name = library["name"]

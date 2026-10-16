@@ -81,7 +81,7 @@
     {
       "file": "src/klayout_tools/cli/extract_cmd.py",
       "function": "_print_text",
-      "complexity": 24
+      "complexity": 25
     },
     {
       "file": "src/klayout_tools/cli/functional_verification_cmd.py",
@@ -216,7 +216,7 @@
     {
       "file": "src/klayout_tools/extract.py",
       "function": "run_extract",
-      "complexity": 63
+      "complexity": 67
     },
     {
       "file": "src/klayout_tools/extract.py",
@@ -246,7 +246,7 @@
     {
       "file": "src/klayout_tools/extract_parasitics.py",
       "function": "_inject_parasitics",
-      "complexity": 17
+      "complexity": 20
     },
     {
       "file": "src/klayout_tools/extract_passive_regions.py",
