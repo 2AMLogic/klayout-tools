@@ -4506,6 +4506,7 @@ a corner grid. A stock ngspice without the module still produces the
   no waveform, or one declared only in an `.include`d file or `.subckt` is
   rejected before any run with an error naming the source. Works on every
   backend, including `--backend batch` (the worker reads the same field).
+  `--op-lint` honours it too: its deck skips the `alter` and includes the same scaled copy.
   Each affected corner report gains an additive `supply_waveforms` object,
   keyed by source, that discloses what was simulated:
 

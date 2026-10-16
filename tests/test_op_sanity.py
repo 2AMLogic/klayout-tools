@@ -1105,6 +1105,79 @@ def test_osdi_preload_reaches_the_op_lint_deck(tmp_path, monkeypatch):
     assert deck.index(".control") < pre < deck.index("op")
 
 
+_PWL_NETLIST = _GOOD_NETLIST.replace("Vdd vdd 0 DC {vdd}", "Vdd vdd 0 PWL(0 0 1u 1.8)")
+
+
+def _record_decks(monkeypatch) -> list[list[str]]:
+    _install_fake_ngspice(
+        monkeypatch,
+        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        node_voltages={"vdd": 1.8, "in": 0.9, "bias": 0.6, "out": 1.2},
+    )
+    decks: list[list[str]] = []
+    fake_run = op_sanity.subprocess.run
+
+    def recording_run(cmd, **kwargs):
+        deck = Path(cmd[cmd.index("-b") + 1])
+        decks.append(deck.read_text().splitlines())
+        # The work dir is removed on exit; capture the included copy now.
+        for line in decks[-1]:
+            if line.startswith(".include "):
+                decks[-1].append("INCLUDED " + Path(line.split(" ", 1)[1]).read_text())
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(op_sanity.subprocess, "run", recording_run)
+    return decks
+
+
+def test_supply_waveform_rail_is_scaled_not_altered_in_the_op_lint_deck(
+    tmp_path, monkeypatch
+):
+    """Issue #3624: `alter` on a PWL source is a no-op in ngspice, so the lint
+    deck must skip it and include the per-corner scaled netlist copy, as the
+    sweep deck does (issue #2902); a DC rail is still `alter`ed."""
+    request = _write_request(tmp_path, _PWL_NETLIST)
+    doc = json.loads(request.read_text())
+    doc["corners"] = {
+        "supply_v": {"vdd": [1.2], "Vbias": [0.5]},
+        "temperature_c": [27],
+        "supply_waveforms": ["vdd"],
+    }
+    request.write_text(json.dumps(doc))
+    decks = _record_decks(monkeypatch)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    assert not any(line.startswith("alter vdd=") for line in deck)
+    assert "alter Vbias=0.5" in deck
+    include = next(line for line in deck if line.startswith(".include "))
+    assert include.endswith("netlist.supply_waveforms.cir")
+    assert "PWL(0 0 1u 1.2)" in next(x for x in deck if x.startswith("INCLUDED "))
+
+
+def test_op_lint_deck_without_supply_waveforms_is_unchanged(tmp_path, monkeypatch):
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    decks = _record_decks(monkeypatch)
+
+    op_sanity.run_op_sanity(str(request))
+
+    (deck,) = decks
+    assert "alter vdd=1.8" in deck
+    include = next(line for line in deck if line.startswith(".include "))
+    assert include.endswith("body.spice")
+
+
+def test_unsupported_supply_waveform_source_is_an_op_sanity_error(tmp_path):
+    request = _write_request(tmp_path, _GOOD_NETLIST)  # DC source, not PWL
+    doc = json.loads(request.read_text())
+    doc["corners"]["supply_waveforms"] = ["vdd"]
+    request.write_text(json.dumps(doc))
+
+    with pytest.raises(op_sanity.OpSanityError, match="PWL/PULSE"):
+        op_sanity.run_op_sanity(str(request))
+
+
 def test_per_section_corner_libs_reach_the_op_lint_deck(tmp_path, monkeypatch):
     """Issue #2522: a `corners.process` bundle whose sections name their own
     `.lib` files must produce the same `.lib` cards here as the sweep deck --

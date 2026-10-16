@@ -135,6 +135,8 @@ from .sim import (
     _resolve_models_lib,
     _resolve_netlist_include,
     _resolve_osdi_preload,
+    _scale_supply_waveforms,
+    _supply_alter_lines,
 )
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -880,8 +882,7 @@ def _write_op_deck(
     lines.append(".control")
     for path in osdi_preload:
         lines.append(f"pre_osdi {path}")
-    for key, value in sorted(point.supply_v.items()):
-        lines.append(f"alter {key}={value}")
+    lines.extend(_supply_alter_lines(point))
     lines.append("op")
     for index, device in enumerate(devices):
         lines.append(f"echo {_DEVICE_MARKER} {index} {device.name}")
@@ -1634,9 +1635,17 @@ def _run_op(
     log_text = ""
 
     try:
+        # Issue #3624: a `corners.supply_waveforms` source is rescaled in a
+        # per-corner netlist copy (as the sweep does), not `alter`ed.
+        try:
+            deck_netlist_path, _ = _scale_supply_waveforms(
+                netlist_path, netlist_path, work_dir, point
+            )
+        except SimError as exc:
+            raise OpSanityError(str(exc)) from exc
         _write_op_deck(
             deck_path=deck_path,
-            netlist_path=netlist_path,
+            netlist_path=deck_netlist_path,
             models_lib=models_lib,
             point=point,
             devices=devices,
