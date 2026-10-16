@@ -20611,6 +20611,49 @@ def test_spef_floating_duplicate_named_outputs_are_skipped(tmp_path):
     assert "X:" not in text
 
 
+def test_spef_unlabelled_dollar_nets_absent_from_def_are_skipped(tmp_path):
+    """Issue #3580: a unique-named unlabelled `$N` net with no DEF net (and not
+    a port) gets no `*D_NET` (STA-1650) and its coupling is dropped; a `$N`
+    that the DEF names, a port, and a labelled non-DEF net are untouched."""
+    from klayout_tools.extract_spef import _write_spef
+
+    def run(name, **kwargs):
+        report = {
+            "nets": [
+                _plain_net("sig", coupled=[{"net": "$7", "capacitance_ff": 0.3}]),
+                _plain_net("$7", coupled=[{"net": "sig", "capacitance_ff": 0.3}]),
+                _plain_net("$12"),
+                _plain_net("lab"),
+                _plain_net("p"),
+            ]
+        }
+        out = tmp_path / f"{name}.spef"
+        skipped = _write_spef(
+            str(out),
+            design_name="top",
+            klt_version="0.0.0",
+            parasitics_report=report,
+            port_names=["p"],
+            **kwargs,
+        )
+        return skipped, out.read_text()
+
+    skipped, text = run(
+        "on", net_instance_pins={"sig": (("u1", "A"),), "$12": (("u2", "A"),)}
+    )
+    assert skipped == ["$7"]
+    assert "*D_NET \\$7 " not in text
+    assert "*D_NET \\$12 " in text
+    assert "*D_NET lab " in text
+    assert "*D_NET sig 1.000000" in text  # coupling cap not folded in
+
+    skipped, _ = run("empty", net_instance_pins={})
+    assert skipped == []
+    skipped, text = run("none")
+    assert skipped == []
+    assert "*D_NET \\$7 " in text
+
+
 def test_spef_def_net_connections_without_def_pins_warns(tmp_path):
     """Issue #3257 gap A: structured warning, SPEF bytes unchanged by it."""
     layout_path = str(CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds")
