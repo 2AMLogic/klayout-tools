@@ -2912,6 +2912,24 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     pex_parser.add_argument(
+        "--device-only-leg",
+        dest="device_only_leg",
+        action="store_true",
+        default=False,
+        help=(
+            "also measure a parasitic-free third leg (issue #3298): the same "
+            "layout extracted again without parasitics (same devices and "
+            "AS/AD/PS/PD, no R/C cards or star nodes), written beside the "
+            "extracted netlist as <name>.device-only<ext>, and every "
+            "testbench re-run against it. Each delta[] row then also carries "
+            "device_only_value, representation_delta_pct (device-only vs "
+            "schematic) and parasitic_delta_pct (extracted vs device-only), "
+            "splitting device-representation effects from parasitics. Not "
+            "supported with --measure-command. Off by default -- "
+            "byte-identical to today's behavior."
+        ),
+    )
+    pex_parser.add_argument(
         "--deck",
         required=True,
         help=(
