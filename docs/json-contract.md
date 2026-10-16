@@ -1647,10 +1647,13 @@ violation (issue #2029).
 
 A verb's success payload may ship a machine-readable JSON Schema (Draft
 2020-12) alongside its prose in `docs/cli/<verb>.md`. Today `klt layers`,
-`klt cells` and `klt stats` have one:
+`klt cells`, `klt stats` and `klt drc` have one:
 [`layers-response`](schemas/layers-response.schema.json),
-[`cells-response`](schemas/cells-response.schema.json) and
-[`stats-response`](schemas/stats-response.schema.json).
+[`cells-response`](schemas/cells-response.schema.json),
+[`stats-response`](schemas/stats-response.schema.json) and
+[`drc-response`](schemas/drc-response.schema.json) (verdict reports from both
+engines plus the non-verdict `--list-rules` listing; its `coverage` block
+`$ref`s [`coverage.schema.json`](schemas/coverage.schema.json)).
 
 - **Naming.** `docs/schemas/<verb>-response.schema.json`, one file per verb.
 - **Required means always present.** Every field the verb always emits is in
