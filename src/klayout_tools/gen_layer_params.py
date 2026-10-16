@@ -299,7 +299,31 @@ def _sd_implant_margin_um(family: str) -> float:
 #: byte-for-byte unchanged.
 _PDK_RING_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.16,  # NP.5b/PP.5b (extension beyond COMP) are 0.16um
+    # sky130 (issue #2934): n/psdm.5b, "min. n/psdm enclosure tap except
+    # butting edge", 0.125um (sky130A.lydrc, PDK c6d73a35).
+    "sky130": 0.125,
 }
+
+
+#: Families whose tap ring needs an implant even though their ``"tap"`` role
+#: is a *distinct* mask from ``"active"`` (so the collision test in
+#: :func:`_ring_tap_implant_layer` does not apply): sky130 draws ``tap``
+#: (65/44) separately from ``diff`` (65/20), but ``n/psdm.5b`` still requires
+#: ``nsdm``/``psdm`` around it and ``difftap.10``/``n/psdm.8`` tie the
+#: implant type to the well underneath (issue #2934).
+_DISTINCT_TAP_IMPLANT_FAMILIES = frozenset({"sky130"})
+
+
+#: Margin (um) the ``npc`` box grows beyond each poly-contact licon (issue
+#: #2934): 0.095um, the amount ``sky130A.tech``'s own ``cifoutput`` grows NPC
+#: around ``xpc`` (the same figure :data:`_PDK_RES_FLAVOR_MASK_ENCLOSURE_UM`
+#: uses for resistor heads). The official ``sky130A_mr.drc`` carries no
+#: npc-enclosure-of-licon rule. A family absent here draws no ``npc``.
+_PDK_NPC_MARGIN_UM: dict[str, float] = {"sky130": 0.095}
+
+#: ``npc.2`` same-layer spacing (um); closer ``npc`` shapes are merged
+#: (``sky130A_mr.drc`` marks it "should be manually merged").
+_PDK_NPC_MIN_SPACE_UM: dict[str, float] = {"sky130": 0.27}
 
 
 def _bjt_unit_implant_margin_um(family: str) -> float:
@@ -577,6 +601,8 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "nplus": (93, 44),  # nsdm.drawing -- n+ S/D implant (nfet flavor),
         # issue #2934; margin in :data:`_PDK_SD_IMPLANT_MARGIN_UM`.
         "pplus": (94, 20),  # psdm.drawing -- p+ S/D implant (pfet flavor)
+        "npc": (95, 20),  # npc.drawing -- over poly-contact licons (issue #2934);
+        # margin/spacing in :data:`_PDK_NPC_MARGIN_UM`/:data:`_PDK_NPC_MIN_SPACE_UM`.
         "well": (64, 20),  # nwell.drawing -- matches
         # `klayout_tools.decks.sky130.EXTRACTION_DECK.nwell`; no curated DRC
         # rule checks this layer, but it is real and extraction already
@@ -2860,6 +2886,8 @@ def _device_layer_params(
     flavor = params.get("flavor", "nfet")
     sd_implant_role = "nplus" if flavor == "nfet" else "pplus"
     sd_implant = _role_layer_info(family, sd_implant_role)
+    npc = _role_layer_info(family, "npc")
+    npc_margin = _PDK_NPC_MARGIN_UM.get(family, 0.0)
     sd_implant_margin = _sd_implant_margin_um(family)
     # MOS capacitor (issue #3283): the marker layer must resolve and `w_um`
     # must clear the deck's own COMP min-width rule for the selected oxide,
@@ -2932,6 +2960,10 @@ def _device_layer_params(
         ),
         "sd_implant_present": sd_implant is not None and sd_implant_margin > 0,
         "sd_implant_margin_um": sd_implant_margin if sd_implant is not None else 0.0,
+        "npc_layer": npc if npc is not None else kdb.LayerInfo(0, 0),
+        "npc_present": npc is not None and npc_margin > 0,
+        "npc_margin_um": npc_margin if npc is not None else 0.0,
+        "npc_min_space_um": _PDK_NPC_MIN_SPACE_UM.get(family, 0.0),
         "sd_implant_min_space_um": _sd_implant_min_space_um(family),
     }
     if mos_cap_mark is not None:
@@ -3240,6 +3272,9 @@ def _ring_tap_implant_layer(family: str, well_tie: bool) -> Any:
     roles = _PDK_ROLE_LAYERS[family]
     tap_pair = roles.get("tap")
     active_pair = roles.get("active")
+    if family in _DISTINCT_TAP_IMPLANT_FAMILIES:
+        # n-tap inside the well -> nsdm; p-tap tying the substrate -> psdm.
+        return _role_layer_info(family, "nplus" if well_tie else "pplus")
     if tap_pair is None or active_pair is None or tap_pair != active_pair:
         return None
     role = "well_tap_implant" if well_tie else "pplus"

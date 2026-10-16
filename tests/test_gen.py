@@ -1293,11 +1293,7 @@ def test_mos_array_guard_ring_flavor_pfet_draws_well_and_is_drc_clean(
         for i in layout.layer_indexes()
     }
     assert well_pair in present
-    # Same sky130-vs-gf180mcu split as the no-ring pfet test above (issue
-    # #2580's reporting-only absence note).
-    family = gen._pdk_family(variant)
-    expected_notes = [_SKY130_RING_TAP_IMPLANT_NOTE] if family == "sky130" else []
-    assert report["drc_hints"]["notes"] == expected_notes
+    assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), deck)
     assert drc_report["status"] == "clean"
@@ -6120,9 +6116,7 @@ def test_diff_pair_flavor_pfet_draws_well_and_is_drc_clean(
         for i in layout.layer_indexes()
     }
     assert well_pair in present
-    assert report["drc_hints"]["notes"] == (
-        [_SKY130_RING_TAP_IMPLANT_NOTE] if variant == "sky130A" else []
-    )
+    assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), deck)
     assert drc_report["status"] == "clean"
@@ -6179,7 +6173,7 @@ def test_diff_pair_default_voltage_flavor_output_unchanged(tmp_path, pdk_root):
     _assert_gds_geometry_equal(implicit, explicit)
     assert report["drc_hints"]["voltage_flavor"] is None
     assert report["drc_hints"]["voltage_flavor_mark_present"] is False
-    assert report["drc_hints"]["notes"] == [_SKY130_RING_TAP_IMPLANT_NOTE]
+    assert report["drc_hints"]["notes"] == []
 
 
 def test_diff_pair_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
@@ -6240,7 +6234,7 @@ def test_diff_pair_voltage_flavor_hvi_draws_marker_and_is_drc_clean(
     assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in present
     assert report["drc_hints"]["voltage_flavor"] == "hvi"
     assert report["drc_hints"]["voltage_flavor_mark_present"] is True
-    assert report["drc_hints"]["notes"] == [_SKY130_RING_TAP_IMPLANT_NOTE]
+    assert report["drc_hints"]["notes"] == []
 
     drc_report = run_drc(str(output), "sky130")
     assert drc_report["status"] == "clean"
@@ -9963,12 +9957,6 @@ def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
     assert_clean_except_tap_distance(drc_report)
 
 
-_SKY130_RING_TAP_IMPLANT_NOTE = (
-    "sky130 guard/tap ring draws no nsdm/psdm tap implant -- "
-    "the ring's tap implant mask was not drawn"
-)
-
-
 def _sd_implant_absence_note(family: str, flavor: str) -> str:
     """The exact ``drc_hints.notes`` entry ``mos_array`` emits on a family
     whose role-layer table declares no S/D implant role for ``flavor``
@@ -10109,8 +10097,8 @@ def test_sky130_sd_implant_drawn_and_no_absence_note(
 ):
     """sky130 (issue #2934) now draws nsdm (93/44) over n-diff and psdm
     (94/20) over p-diff, for both ``mos_array`` and ``diff_pair`` alike, so
-    neither reports the S/D-implant absence note; the masks still omitted are
-    reported instead (ring tap implant, npc under ``gate_contact``)."""
+    neither reports the S/D-implant absence note. The guard ring's tap implant
+    and ``npc`` (phase B) are drawn too, so no omission note remains."""
     import klayout.db as kdb
 
     output = tmp_path / f"{generator}_sky130_sd_implant_{flavor}.gds"
@@ -10129,8 +10117,7 @@ def test_sky130_sd_implant_drawn_and_no_absence_note(
     assert report["drc_hints"]["sd_implant_present"] is True
     notes = report["drc_hints"]["notes"]
     assert _sd_implant_absence_note("sky130", flavor) not in notes
-    assert _SKY130_RING_TAP_IMPLANT_NOTE in notes
-    assert any("no npc" in n for n in notes)
+    assert not [n for n in notes if "nsdm/psdm" in n or "npc" in n]
 
     layout = kdb.Layout()
     layout.read(str(output))
@@ -10138,8 +10125,10 @@ def test_sky130_sd_implant_drawn_and_no_absence_note(
         (layout.get_info(i).layer, layout.get_info(i).datatype)
         for i in layout.layer_indexes()
     }
-    assert ((93, 44) if flavor == "nfet" else (94, 20)) in present
-    assert ((94, 20) if flavor == "nfet" else (93, 44)) not in present
+    # S/D implant of the flavor's own type plus the ring's tap implant: the
+    # p-tap substrate ring of an nfet is psdm, the n-tap well ring of a pfet
+    # nsdm, so both implants (and npc over the gate contact) are present.
+    assert {(93, 44), (94, 20), (95, 20)} <= present
     assert run_drc(str(output), "sky130")["status"] == "clean"
 
 
@@ -11367,3 +11356,79 @@ def test_plain_mos_array_is_unchanged_by_mos_cap_option(tmp_path, both_pdk_root)
                 "options": {"output": str(tmp_path / "narrow.gds")},
             }
         )
+
+
+@pytest.mark.parametrize("generator", ["mos_array", "diff_pair"])
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+def test_sky130_ring_tap_implant_and_npc_geometry(
+    tmp_path, pdk_root, generator, flavor
+):
+    """Phase B of issue #2934: the guard ring's tap is covered by the implant
+    matching the well underneath it (nsdm for the pfet's n-tap well tie, psdm
+    for the nfet's p-tap substrate tie) with ``n/psdm.5b``'s 0.125um margin,
+    and ``npc`` caps every poly-contact licon with ``npc.2`` spacing met."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"{generator}_sky130_phase_b_{flavor}.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "flavor": flavor,
+                "gate_contact": True,
+                "add_guard_ring": True,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+
+    def region(layer: int, datatype: int) -> kdb.Region:
+        return kdb.Region(top.begin_shapes_rec(layout.layer(layer, datatype))).merged()
+
+    tap, poly, licon, npc = (
+        region(65, 44),
+        region(66, 20),
+        region(66, 44),
+        region(95, 20),
+    )
+    ring_implant = region(93, 44) if flavor == "pfet" else region(94, 20)
+    assert not tap.is_empty()
+    # Every tap shape sits wholly inside the implant, 0.125um from its edge.
+    assert (tap - ring_implant).is_empty()
+    assert (tap.sized(125) - ring_implant).is_empty()
+
+    gate_licons = licon.inside(poly)
+    assert not gate_licons.is_empty()
+    assert (gate_licons.sized(95) - npc).is_empty()
+    assert npc.space_check(270).count() == 0
+    assert npc.width_check(270).count() == 0
+    # No npc over source/drain or tap licons.
+    assert (licon - gate_licons).and_(npc).is_empty()
+
+
+def test_sky130_no_ring_draws_no_opposite_implant(tmp_path, pdk_root):
+    """Without ``add_guard_ring`` an nfet array carries nsdm only."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_sky130_no_ring.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "nfet"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert (93, 44) in present
+    assert (94, 20) not in present
+    assert (95, 20) not in present
