@@ -1096,6 +1096,125 @@ class SimError(Exception):
         self.code = code
 
 
+#: ``SimError.code`` for a request whose ``engine_version`` pin the resolved
+#: engine does not satisfy (issue #3041): the *tool* is unavailable at the
+#: pinned build. Distinct from :data:`UNSUPPORTED_ANALYSIS_CODE`.
+ENGINE_VERSION_UNMET_CODE = "engine_version_unmet"
+
+#: ``SimError.code`` for an analysis kind `klt sim` has no implementation for
+#: (issue #3041): the *capability* is absent, whatever engine build is pinned.
+UNSUPPORTED_ANALYSIS_CODE = "unsupported_analysis"
+
+#: Periodic small-signal / noise analysis kinds a request may name but `klt
+#: sim` does not implement (no PSS/pnoise/pac; see also issue #2985).
+UNSUPPORTED_ANALYSIS_KINDS: tuple[str, ...] = ("pss", "pnoise", "pac")
+
+
+def reject_unsupported_analysis(kind: Any) -> None:
+    """Raise :class:`SimError` (``code="unsupported_analysis"``) when ``kind``
+    names a periodic analysis (issue #3041) -- before any corner runs, so
+    callers can record "capability absent" apart from "tool unavailable"."""
+    if isinstance(kind, str) and kind.lower() in UNSUPPORTED_ANALYSIS_KINDS:
+        raise SimError(
+            f"analysis.kind {kind!r} is not supported: `klt sim` implements no "
+            "periodic small-signal/noise analysis "
+            f"({', '.join(UNSUPPORTED_ANALYSIS_KINDS)}); "
+            'see docs/cli/sim.md "Supported analyses"',
+            code=UNSUPPORTED_ANALYSIS_CODE,
+        )
+
+
+def _version_components(text: str) -> tuple[int, ...] | None:
+    """Leading dotted integer components of a version string (``"44.2"`` ->
+    ``(44, 2)``, ``"7.10.0-opensource"`` -> ``(7, 10, 0)``), or ``None``."""
+    match = re.match(r"\s*(\d+(?:\.\d+)*)", text)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _validate_engine_version_pin(request: dict[str, Any]) -> tuple[int, ...] | None:
+    """The request's ``engine_version`` pin as ``(major,)`` or ``(major,
+    minor)`` (issue #3041), ``None`` when unset."""
+    pin = request.get("engine_version")
+    if pin is None:
+        return None
+    if not isinstance(pin, str) or not re.fullmatch(r"\d+(?:\.\d+)?", pin.strip()):
+        raise SimError(
+            "request.engine_version must be a string of the form 'MAJOR' or "
+            f"'MAJOR.MINOR' (got {pin!r})"
+        )
+    return _version_components(pin) or None
+
+
+def _check_engine_version_pin(
+    pin: tuple[int, ...], found: str | None, engine: str, *, where: str
+) -> None:
+    """Fail closed with ``engine_version_unmet`` unless ``found`` matches the
+    pin on every component the pin states (``"44"`` pins the major only)."""
+    required = ".".join(str(part) for part in pin)
+    parsed = _version_components(found) if found else None
+    if parsed is not None and parsed[: len(pin)] == pin:
+        return
+    if found is None:
+        detail = f"{where} reported no {engine} version"
+    elif parsed is None:
+        detail = f"{where} reported an unparseable {engine} version {found!r}"
+    else:
+        detail = f"{where} found {engine} {found}"
+    raise SimError(
+        f"pinned simulator unavailable: request requires {engine} {required}; {detail}",
+        code=ENGINE_VERSION_UNMET_CODE,
+    )
+
+
+def _check_local_engine_version_pin(
+    pin: tuple[int, ...] | None, backend: str, engine: str, binary: str
+) -> None:
+    """Enforce the pin before any corner runs, where this process can see the
+    engine (local backends); a no-op when unset or for off-host backends."""
+    if pin is None or backend in _OFFHOST_BACKENDS:
+        return
+    _check_engine_version_pin(
+        pin,
+        _probe_engine_version(engine, binary),
+        engine,
+        where="the local engine probe",
+    )
+
+
+def _check_offhost_engine_version_pin(
+    pin: tuple[int, ...] | None,
+    backend: str,
+    engine: str,
+    engine_version: str | None,
+) -> None:
+    """Enforce the pin for off-host backends. No pre-submit probe exists for a
+    remote/batch runner, so it is checked against the version its reports
+    carried (after the run)."""
+    if pin is None or backend not in _OFFHOST_BACKENDS:
+        return
+    _check_engine_version_pin(
+        pin, engine_version, engine, where=f"the {backend} runner's report"
+    )
+
+
+def _probe_engine_version(engine: str, binary: str) -> str | None:
+    """Ask the local engine binary for its version without simulating."""
+    argv = [binary, "--version"] if engine == "ngspice" else [binary, "-v"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (proc.stdout or "") + (proc.stderr or "")
+    if engine == "ngspice":
+        return _extract_engine_version(text)
+    match = re.search(r"Release\s+([\w.]+)", text)
+    return match.group(1) if match else None
+
+
 def _worker_ngspice_binary(remote: Any) -> str | None:
     """The worker-observed ngspice path out of ``environment.remote`` (issue
     #3110): ``worker_environment.simulator.selected_path`` when its capture is
@@ -1219,6 +1338,7 @@ def _resolve_analysis_and_measurements(
     analysis = request.get("analysis") or {}
     if "kind" not in analysis or "args" not in analysis:
         raise SimError("request.analysis requires 'kind' and 'args'")
+    reject_unsupported_analysis(analysis["kind"])
     measurements_spec = request.get("measurements", [])
     # Issue #2533: `spice` (a verbatim top-level `.meas` card) and `expr` (an
     # expression evaluated after the analysis, inside the generated
@@ -3057,6 +3177,13 @@ def _run_sim_corners(
             "options.stage_model_inputs: true to upload binaries built for "
             "the runner's platform and ngspice OSDI ABI"
         )
+    # Issue #3041: an `engine_version` pin is checked before any corner runs
+    # where this process can see the engine (local backends); off-host
+    # backends are checked against the report's `engine_version` afterwards.
+    engine_version_pin = _validate_engine_version_pin(request)
+    _check_local_engine_version_pin(
+        engine_version_pin, backend, engine, ngspice_binary or XYCE_BINARY
+    )
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     keep_artifacts = bool(options.get("keep_artifacts", False))
     portable_artifacts = _portable_artifacts_option(options)
@@ -3667,6 +3794,9 @@ def _run_sim_corners(
         backend_engine_version
         if backend_engine_version is not None
         else loaded_engine_version
+    )
+    _check_offhost_engine_version_pin(
+        engine_version_pin, backend, engine, engine_version
     )
 
     budget_exceeded = any(
