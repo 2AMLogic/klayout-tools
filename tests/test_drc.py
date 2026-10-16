@@ -9969,3 +9969,177 @@ def test_rerun_rejects_a_malformed_recorded_selection(selection, tmp_path, monke
 
     with pytest.raises(DrcError, match="rule_selection.selectors"):
         rerun_drc_report(str(report_path))
+
+
+# ---------------------------------------------------------------------------
+# rule-scoped cell waivers: --waivers / waivers_file (#3483)
+# ---------------------------------------------------------------------------
+
+_WAIVED_CELL = "sky130_fd_sc_hd__inv_2"
+
+
+def _waivers_file(tmp_path, entries, name="waivers.json") -> str:
+    path = tmp_path / name
+    path.write_text(json.dumps({"waivers": entries}))
+    return str(path)
+
+
+def _hier_gds(tmp_path) -> str:
+    path = tmp_path / "hier.gds"
+    _make_hierarchical_violation_layout().write(str(path))
+    return str(path)
+
+
+def _waiver(cell=_WAIVED_CELL, rule="poly.width.1", justification="library cell"):
+    return {"cell": cell, "rule": rule, "justification": justification}
+
+
+def test_waivers_move_matching_markers_to_waived(tmp_path):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(tmp_path, [_waiver()])
+
+    report = run_drc(gds, "sky130", waivers_file=waivers)
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+    assert report["violations"] == []
+    assert report["rule_counts"] == {}
+    assert report["metrics"]["drc__error__count"] == 0
+    assert report["waived_count"] == 3
+    assert report["waived_rule_counts"] == {"poly.width.1": 3}
+    assert report["unused_waivers"] == []
+    for entry in report["waived"]:
+        assert entry["rule"] == "poly.width.1"
+        assert entry["source_cell"] == _WAIVED_CELL
+        assert entry["waiver_justification"] == "library cell"
+        assert "bbox" in entry
+    assert report["provenance"]["waivers"]["file"] == waivers
+    assert report["provenance"]["waivers"]["content_hash"].startswith("sha256:")
+
+
+def test_waivers_do_not_apply_to_other_rule_or_cell(tmp_path):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(
+        tmp_path,
+        [_waiver(rule="poly.space.1"), _waiver(cell="block_a")],
+    )
+
+    report = run_drc(gds, "sky130", waivers_file=waivers)
+
+    assert report["status"] == "violations"
+    assert report["violation_count"] == 3
+    assert report["waived_count"] == 0
+    assert report["waived"] == []
+    assert len(report["unused_waivers"]) == 2
+
+
+def test_waivers_glob_rule_and_unused_listing(tmp_path):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(
+        tmp_path, [_waiver(rule="poly.*"), _waiver(cell="never_placed")]
+    )
+
+    report = run_drc(gds, "sky130", waivers_file=waivers)
+
+    assert report["status"] == "clean"
+    assert report["waived_count"] == 3
+    assert [w["cell"] for w in report["unused_waivers"]] == ["never_placed"]
+
+
+def test_waivers_never_waive_unattributed_marker(tmp_path):
+    path = tmp_path / "flat.gds"
+    _make_violation_layout().write(str(path))
+    waivers = _waivers_file(tmp_path, [_waiver(cell="TOP", rule="*")])
+
+    report = run_drc(str(path), "sky130", waivers_file=waivers)
+
+    assert report["status"] == "violations"
+    assert report["waived_count"] == 0
+
+
+def test_without_waivers_report_has_no_waiver_fields(tmp_path):
+    report = run_drc(_hier_gds(tmp_path), "sky130")
+
+    for key in ("waived", "waived_count", "waived_rule_counts", "unused_waivers"):
+        assert key not in report
+    assert "waivers" not in report["provenance"]
+
+
+@pytest.mark.parametrize(
+    "doc, message",
+    [
+        ({"waivers": []}, "non-empty 'waivers' list"),
+        ({"nope": 1}, "non-empty 'waivers' list"),
+        ({"waivers": [{"rule": "r", "justification": "j"}]}, "'cell'"),
+        ({"waivers": [{"cell": "c", "justification": "j"}]}, "'rule'"),
+        ({"waivers": [{"cell": "c", "rule": "r"}]}, "'justification'"),
+        ({"waivers": [{"cell": "c", "rule": "r", "justification": " "}]}, "justif"),
+        (
+            {"waivers": [{"cell": "c", "rule": "r", "justification": "j", "x": 1}]},
+            "unknown",
+        ),
+    ],
+)
+def test_malformed_waivers_file_is_rejected(tmp_path, doc, message):
+    gds = _hier_gds(tmp_path)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(doc))
+
+    with pytest.raises(DrcError, match=message):
+        run_drc(gds, "sky130", waivers_file=str(path))
+
+
+def test_unreadable_and_non_json_waivers_file_rejected(tmp_path):
+    gds = _hier_gds(tmp_path)
+    with pytest.raises(DrcError, match="could not read"):
+        run_drc(gds, "sky130", waivers_file=str(tmp_path / "missing.json"))
+    broken = tmp_path / "broken.json"
+    broken.write_text("{")
+    with pytest.raises(DrcError, match="not valid JSON"):
+        run_drc(gds, "sky130", waivers_file=str(broken))
+
+
+def test_cli_waivers_flag_and_request_field_agree(tmp_path, capsys):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(tmp_path, [_waiver()])
+    request_path = tmp_path / "drc.request.json"
+    request_path.write_text(
+        json.dumps(_drc_request_document(Path(gds), waivers_file="waivers.json"))
+    )
+
+    code, flag_report = _run_drc_json(
+        capsys, [gds, "--deck", "sky130", "--waivers", waivers]
+    )
+    request_code, request_report = _run_drc_json(capsys, [str(request_path)])
+
+    assert code == request_code == 0
+    assert flag_report["waived_count"] == request_report["waived_count"] == 3
+    assert request_report["provenance"]["waivers"]["file"] == str(
+        tmp_path / "waivers.json"
+    )
+
+
+def test_cli_waivers_rejected_with_klayout_engine(tmp_path, capsys):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(tmp_path, [_waiver()])
+    message = _drc_error_message(
+        capsys,
+        [gds, "--engine", "klayout", "--deck-file", waivers, "--waivers", waivers],
+    )
+    assert "--waivers is not supported with --engine klayout" in message
+
+
+def test_waived_report_check_and_rerun_replay_waivers(tmp_path):
+    gds = _hier_gds(tmp_path)
+    waivers = _waivers_file(tmp_path, [_waiver()])
+    report = run_drc(gds, "sky130", waivers_file=waivers)
+    report_path = tmp_path / "waived.drc.json"
+    _write_report(report_path, report)
+
+    assert rerun_drc_report(str(report_path))["status"] == "match"
+    assert check_drc_report(str(report_path))["status"] == "match"
+
+    Path(waivers).write_text(json.dumps({"waivers": [_waiver(justification="edited")]}))
+    checked = check_drc_report(str(report_path))
+    assert checked["status"] == "drifted"
+    assert rerun_drc_report(str(report_path))["status"] == "drifted"
