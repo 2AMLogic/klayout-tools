@@ -99,6 +99,10 @@ def run(args: argparse.Namespace) -> int:
             # flag was never given, unchanged from every call site that
             # predates it.
             critical_nets=args.critical_nets,
+            # Issue #2974: glob / all-nets forms of --critical-net.
+            critical_net_patterns=args.critical_net_patterns,
+            critical_net_all=args.critical_net_all,
+            critical_net_excludes=args.critical_net_excludes,
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was

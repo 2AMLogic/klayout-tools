@@ -126,6 +126,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
             plot_dir=args.plot,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
+            max_units_per_job=args.max_units_per_job,
             dry_run=getattr(args, "dry_run", False),
             submit_only=getattr(args, "submit_only", False),
             require_pdk_match=getattr(args, "require_pdk_match", None),

@@ -707,6 +707,20 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--max-units-per-job",
+        dest="max_units_per_job",
+        type=int,
+        default=None,
+        help=(
+            "backend `batch`, `hosts` 1: split the expanded corner/Monte-Carlo "
+            "unit list into batch jobs of at most this many units, so no job "
+            "outruns the fleet's whole-job ceiling (default: the request's "
+            "`batch.max_units_per_job`, else no split); overrides the request "
+            "field when given. Rejected before any submit when a job of that "
+            "size would still exceed the ceiling. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--budget-s",
         dest="budget_s",
         type=float,
@@ -2055,6 +2069,68 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--critical-net-pattern",
+        dest="critical_net_patterns",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "like --critical-net, but a shell-style glob (e.g. 'bl_*') "
+            "resolved against the extracted nets' escaped spelling; "
+            "repeatable, merged with any exact --critical-net names (issue "
+            "#2974). Anonymous `\\$N` nets match only a glob that itself "
+            "starts with `\\$`. A pattern matching no net is reported in "
+            "`warnings` (an error under --strict-net-patterns). Requires "
+            "--parasitics. See docs/cli/extract.md's '--critical-net' "
+            "section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--critical-net-all",
+        dest="critical_net_all",
+        action="store_true",
+        help=(
+            "treat every labelled (non-anonymous) net as --critical-net, "
+            "minus any --critical-net-exclude glob (issue #2974). Requires "
+            "--parasitics."
+        ),
+    )
+    extract_parser.add_argument(
+        "--critical-net-exclude",
+        dest="critical_net_excludes",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "glob of nets to leave out of --critical-net-all / "
+            "--critical-net-pattern (e.g. 'VSS', 'sub*'); repeatable. "
+            "Requires --critical-net-all (issue #2974)."
+        ),
+    )
+    extract_parser.add_argument(
+        "--parasitics-net-pattern",
+        dest="parasitics_net_patterns",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "like --parasitics-net, but a shell-style glob resolved against "
+            "the extracted nets; repeatable, merged with any exact "
+            "--parasitics-net names (issue #2974). Requires --parasitics. "
+            "See docs/cli/extract.md's '--parasitics-net' section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--strict-net-patterns",
+        dest="strict_net_patterns",
+        action="store_true",
+        help=(
+            "exit 1 when a --critical-net-pattern / --parasitics-net-pattern "
+            "matches no net, or --critical-net-all selects none, instead of "
+            "reporting it in `warnings` (issue #2974)."
+        ),
+    )
+    extract_parser.add_argument(
         "--parasitics-top-cell-only",
         dest="parasitics_top_cell_only",
         action="store_true",
@@ -3105,6 +3181,38 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "through to `klt extract --critical-net`; repeatable. Off by "
             "default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's '--critical-net' section."
+        ),
+    )
+    pex_parser.add_argument(
+        "--critical-net-pattern",
+        dest="critical_net_patterns",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "glob form of --critical-net (issue #2974), passed through to "
+            "`klt extract --critical-net-pattern`; repeatable."
+        ),
+    )
+    pex_parser.add_argument(
+        "--critical-net-all",
+        dest="critical_net_all",
+        action="store_true",
+        help=(
+            "every labelled net is --critical-net (issue #2974), passed "
+            "through to `klt extract --critical-net-all`."
+        ),
+    )
+    pex_parser.add_argument(
+        "--critical-net-exclude",
+        dest="critical_net_excludes",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "glob of nets left out of --critical-net-all (issue #2974), "
+            "passed through to `klt extract --critical-net-exclude`; "
+            "repeatable."
         ),
     )
     pex_parser.add_argument(
@@ -5241,6 +5349,29 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "--allow-deck-errors/--allow-missing-host-tools, and passing "
             "does not prove the deck is compatible. "
             "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_parser.add_argument(
+        "--negative-control",
+        dest="negative_control",
+        metavar="LAYOUT",
+        default=None,
+        help=(
+            "known-bad fixture layout the same native deck must flag "
+            "(--engine klayout only): run first with identical options; "
+            "zero violations fails the run (error.code "
+            "negative_control_failed), proving the deck executed. "
+            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
+    drc_parser.add_argument(
+        "--negative-control-categories",
+        dest="negative_control_categories",
+        metavar="NAMES",
+        default=None,
+        help=(
+            "comma-separated rule categories the --negative-control "
+            "fixture must additionally produce (requires --negative-control)."
         ),
     )
     drc_parser.add_argument(

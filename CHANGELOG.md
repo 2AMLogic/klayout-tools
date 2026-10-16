@@ -14,6 +14,15 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
+  whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
+  `batch.max_units_per_job` and `--max-units-per-job N` reroute a
+  `remote.hosts: 1` request through the one-job-per-shard path as
+  `ceil(units / cap)` balanced jobs; `environment.remote.job_ceiling` gains
+  `split` and `effective_hosts` (only when a split mode is active). A cap the
+  ceiling cannot honor fails before any S3 write with
+  `error.code: "batch_max_units_per_job_invalid"`. Default (`"warn"`) behavior
+  is unchanged. Additive; no `schema_version` bump.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
@@ -23,6 +32,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   grows from 234 to 238 rule categories (`--expect-rule-categories 238`); the
   four ids leave the "Not implemented" list. The pinned shipped-cell
   regression needed no new deviation. Additive; no `schema_version` bump.
+- **`klt extract` / `klt pex`: glob and all-nets selectors for
+  `--critical-net` / `--parasitics-net`** (issue #2974): new repeatable
+  `--critical-net-pattern GLOB` and `--parasitics-net-pattern GLOB`
+  (request fields `critical_net_patterns` / `parasitics_net_patterns`),
+  `--critical-net-all` with `--critical-net-exclude GLOB`, and
+  `--strict-net-patterns`. Globs resolve against the extracted nets and
+  merge with exact names; a zero-match pattern is a distinct `warnings`
+  entry (an error under `--strict-net-patterns`). Additive fields
+  `parasitics.critical_net_patterns` / `critical_net_all` /
+  `critical_net_excludes` / `parasitics_net_patterns` appear only when
+  requested; `parasitics.critical_nets` / `parasitics_nets` then echo the
+  resolved names. No `schema_version` bump; output without the new flags is
+  unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
+  that the request document already accepts a list for exact names. See
+  `docs/cli/extract.md`.
 - **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
   cycles** (issue #2947): a fourth measurement form
   `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
@@ -80,6 +104,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   block is still non-`null` in both cases; `model_set` output is unchanged.
   Additive; no `schema_version` bump.
 
+- **`klt sim` gains a numeric design-parameter axis, `corners.params`**
+  (issue #3035): SPICE parameter names mapped to equal-length arrays of
+  numbers, zipped by index and expanded innermost (after temperature),
+  applied with `alterparam` + one `reset`. Additive: each parameter point's
+  corner report carries `params`, its `corner_id` gains `/params:<pairs>`
+  before any `/mc<N>` suffix, and `exclude[].params` selects rows; requests
+  without the axis keep byte-identical IDs, slugs and wire payloads.
+  `remote`/`batch` workers must be updated: a worker that does not echo the
+  dispatched `params` fails the request with `params_unsupported_worker`
+  instead of passing at the netlist defaults. `engine: "xyce"` and
+  `--op-lint` refuse the axis. See `docs/cli/sim.md` "Corner axes".
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`

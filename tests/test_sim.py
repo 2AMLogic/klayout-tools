@@ -5138,6 +5138,98 @@ def test_rollup_measurements_implausible_outranks_fail():
     assert entry["status"] == "inconclusive"
 
 
+def _scope_corners(per_corner: dict[str, list[float | None]]) -> list[dict]:
+    return [
+        _sampled_corner(base, i, v)
+        for base, values in per_corner.items()
+        for i, v in enumerate(values)
+    ]
+
+
+def _scope_rollup(per_corner, window_scope, *, k_sigma=3.0, limits=None):
+    (entry,) = sim._rollup_measurements(
+        [{"name": "vref", "limits": limits or {"min": 0.0, "max": 10.0}}],
+        _scope_corners(per_corner),
+        {
+            "quantiles": sim.DEFAULT_MC_QUANTILES,
+            "k_sigma": k_sigma,
+            "window_scope": window_scope,
+        },
+    )
+    return entry
+
+
+# Corner "b" is wide on its own, but 20 tight samples in "a" shrink the
+# pooled sigma enough for the pooled window to sit inside the limits.
+_B_ALONE_FAILS = {"a": [5.0] * 20, "b": [0.5, 9.5]}
+# Each corner is tight, but the between-corner spread inflates the pooled
+# sigma past the limits.
+_POOLED_ONLY_FAILS = {"a": [1.0, 1.2], "b": [8.8, 9.0]}
+
+
+def test_window_scope_per_corner_fails_when_one_corner_window_fails():
+    pooled = _scope_rollup(_B_ALONE_FAILS, "pooled")
+    assert pooled["monte_carlo"]["sigma_window"]["status"] == "pass"
+    assert pooled["status"] == "pass"
+    assert "failing_corners" not in pooled["monte_carlo"]
+
+    entry = _scope_rollup(_B_ALONE_FAILS, "per_corner")
+    assert entry["status"] == "fail"
+    assert entry["monte_carlo"]["failing_corners"] == ["b"]
+
+
+def test_window_scope_per_corner_passes_when_only_pooled_window_fails():
+    pooled = _scope_rollup(_POOLED_ONLY_FAILS, "pooled")
+    assert pooled["status"] == "fail"
+
+    entry = _scope_rollup(_POOLED_ONLY_FAILS, "per_corner")
+    assert entry["monte_carlo"]["sigma_window"]["status"] == "fail"
+    assert entry["status"] == "pass"
+    assert entry["monte_carlo"]["failing_corners"] == []
+
+
+@pytest.mark.parametrize("scope", [None, "pooled"])
+def test_window_scope_default_response_is_unchanged(scope):
+    explicit = _scope_rollup(_B_ALONE_FAILS, scope)
+    (legacy,) = sim._rollup_measurements(
+        [{"name": "vref", "limits": {"min": 0.0, "max": 10.0}}],
+        _scope_corners(_B_ALONE_FAILS),
+        {"quantiles": sim.DEFAULT_MC_QUANTILES, "k_sigma": 3.0},
+    )
+    assert explicit == legacy
+    assert "failing_corners" not in explicit["monte_carlo"]
+
+
+def test_window_scope_per_corner_error_outranks_window_fail():
+    per_corner = {"a": [5.0] * 20, "b": [0.5, 9.5, None]}
+    entry = _scope_rollup(per_corner, "per_corner")
+    assert entry["monte_carlo"]["failing_corners"] == ["b"]
+    assert entry["status"] == "error"
+
+
+def test_window_scope_per_corner_without_k_sigma_is_a_noop():
+    entry = _scope_rollup(_B_ALONE_FAILS, "per_corner", k_sigma=None)
+    assert entry["status"] == "pass"
+    assert entry["monte_carlo"]["failing_corners"] == []
+
+
+def test_window_scope_single_corner_scopes_agree():
+    single = {"b": [0.5, 9.5]}
+    pooled = _scope_rollup(single, "pooled")
+    per_corner = _scope_rollup(single, "per_corner")
+    assert pooled["status"] == per_corner["status"] == "fail"
+    assert per_corner["monte_carlo"]["failing_corners"] == ["b"]
+
+
+def test_window_scope_validation():
+    assert sim._validate_mc_window_scope({}) == "pooled"
+    assert sim._validate_mc_window_scope({"window_scope": None}) == "pooled"
+    assert sim._validate_mc_window_scope({"window_scope": "per_corner"}) == "per_corner"
+    for bad in ("per-corner", "", 3, True, ["pooled"]):
+        with pytest.raises(sim.SimError, match="window_scope.*'pooled', 'per_corner'"):
+            sim._validate_mc_window_scope({"window_scope": bad})
+
+
 def test_rollup_measurements_by_corner_splits_per_originating_corner():
     corners = [
         _sampled_corner("tt/1.800V/27C", 0, 1.0),
@@ -11742,6 +11834,7 @@ def test_run_sim_per_section_libs_alongside_a_models_lib_section(tmp_path, monke
     assert report["environment"]["models_lib_sha256"] == sim.sha256_file(
         str(models_lib)
     )
+    assert report["environment"]["models_lib_sha256_scope"] == "local"
 
 
 def test_run_sim_without_per_section_libs_omits_the_environment_field(
@@ -12913,7 +13006,7 @@ def test_expand_netlist_includes_keeps_relative_meaning_beside_env_include(
 def _control_for(kind, args):
     from types import SimpleNamespace
 
-    point = SimpleNamespace(supply_v={})
+    point = SimpleNamespace(supply_v={}, params={})
     return sim._corner_deck_control_lines(
         point=point,
         analysis={"kind": kind, "args": args},

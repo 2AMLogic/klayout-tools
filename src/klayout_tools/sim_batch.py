@@ -95,7 +95,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -264,11 +264,16 @@ FLEET_MAX_JOB_SECONDS_KEY = "BATCH_MAX_JOB_SECONDS"
 
 #: ``request.batch.job_ceiling_check`` values (issue #2833): ``"warn"``
 #: (default) submits and reports a structured warning; ``"enforce"`` refuses
-#: before any S3 write.
-JOB_CEILING_CHECK_MODES = ("warn", "enforce")
+#: before any S3 write; ``"split"`` (issue #3446) reroutes an over-ceiling
+#: ``hosts == 1`` request through the one-job-per-shard path instead.
+JOB_CEILING_CHECK_MODES = ("warn", "enforce", "split")
 
 #: Machine-readable ``error.code`` of an ``"enforce"`` refusal.
 BATCH_JOB_CEILING_CODE = "batch_job_ceiling_exceeded"
+
+#: Machine-readable ``error.code`` of a ``max_units_per_job`` the fleet's
+#: ceiling cannot honor (issue #3446).
+BATCH_MAX_UNITS_CODE = "batch_max_units_per_job_invalid"
 
 #: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
 #: request-derived fully-serial upper bound, never a measured runtime.
@@ -572,6 +577,8 @@ WORKER_CAPTURE_BANNER_MAX = 2000
 WORKER_CAPTURE_STR_MAX = 300
 WORKER_CAPTURE_FILE_MAX = 65536
 WORKER_CAPTURE_PROBE_TIMEOUT_S = 10
+#: Most staged model files the worker capture digests / the client re-reads.
+WORKER_CAPTURE_MODEL_INPUTS_MAX = 64
 
 #: The worker-side capture program. It is passed to ``python3 -I -c`` as one
 #: shell-quoted argument (never interpolated with untrusted text); request
@@ -584,6 +591,7 @@ import hashlib, json, os, shutil, sys
 import subprocess as sp
 BAN, STR, T = @BAN@, @STR@, @TIMEOUT@
 out, req_bin, variant, staged = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+model_names = sys.argv[5:5 + @MODELS@]
 diag = []
 def clip(v, n=STR):
     if not isinstance(v, str):
@@ -665,6 +673,19 @@ def manifest():
         return m
     return None
 doc["image_manifest"] = guard("image manifest", manifest)
+def model_inputs():
+    if staged != "1":
+        return None
+    base = os.environ.get("EDA_INPUT_DIR") or "."
+    found = []
+    for name in model_names:
+        h = hashlib.sha256()
+        with open(os.path.join(base, name), "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        found.append({"name": clip(name), "sha256": h.hexdigest()})
+    return found
+doc["model_inputs"] = guard("model inputs", model_inputs)
 doc["diagnostics"] = diag[:20]
 body = json.dumps(doc, ensure_ascii=True)
 tmp = out + ".tmp"
@@ -676,10 +697,13 @@ _WORKER_CAPTURE_PROGRAM = (
     _WORKER_CAPTURE_PROGRAM.replace("@BAN@", str(WORKER_CAPTURE_BANNER_MAX))
     .replace("@STR@", str(WORKER_CAPTURE_STR_MAX))
     .replace("@TIMEOUT@", str(WORKER_CAPTURE_PROBE_TIMEOUT_S))
+    .replace("@MODELS@", str(WORKER_CAPTURE_MODEL_INPUTS_MAX))
 )
 
 
-def _worker_capture_command(remote_request: dict[str, Any]) -> str:
+def _worker_capture_command(
+    remote_request: dict[str, Any], model_names: Sequence[str] = ()
+) -> str:
     """The best-effort worker capture invocation (issue #2834), run from the
     runner preflight. Bounded by ``timeout`` when present, stderr discarded,
     ``|| true`` so it can never fail or alter the job."""
@@ -692,6 +716,7 @@ def _worker_capture_command(remote_request: dict[str, Any]) -> str:
         shlex.quote(str(binary) if isinstance(binary, str) else ""),
         shlex.quote(str(variant) if isinstance(variant, str) else ""),
         staged,
+        *(shlex.quote(name) for name in model_names[:WORKER_CAPTURE_MODEL_INPUTS_MAX]),
     ]
     target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
     return (
@@ -1000,7 +1025,9 @@ def _build_batch_job_spec(
     command = _runner_preflight_script(
         client_version if client_version is not None else _provenance._klt_version(),
         enforce=version_check == "enforce",
-        capture=_worker_capture_command(remote_request),
+        capture=_worker_capture_command(
+            remote_request, [asset.name for asset in staged.model_assets]
+        ),
         required_features=tuple(_request_features(remote_request)),
     ) + (
         f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
@@ -1122,6 +1149,10 @@ class BatchConfig:
     max_job_seconds_source: str = "default"
     #: ``request.batch.job_ceiling_check`` (issue #2833).
     job_ceiling_check: str = "warn"
+    #: ``request.batch.max_units_per_job`` (issue #3446): opt-in cap on the
+    #: units of one job; ``None`` -- the default -- leaves the split to
+    #: ``job_ceiling_check: "split"`` (or to no split at all).
+    max_units_per_job: int | None = None
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -1276,6 +1307,7 @@ def _resolve_batch_config(
         batch_spec, fleet
     )
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
+    max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
     config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -1310,6 +1342,7 @@ def _resolve_batch_config(
         max_job_seconds=max_job_seconds,
         max_job_seconds_source=max_job_seconds_source,
         job_ceiling_check=job_ceiling_check,
+        max_units_per_job=max_units_per_job,
     )
     # Issue #2851: compare the runner klt the AMI manifest publishes with
     # this client, once per request (so once for every shard of a
@@ -1499,9 +1532,9 @@ def _resolve_max_job_seconds(
 
 
 def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
-    """``request.batch.job_ceiling_check``: ``"warn"`` (default) or
-    ``"enforce"``, else :class:`~klayout_tools.sim.SimError` before any S3
-    write (issue #2833)."""
+    """``request.batch.job_ceiling_check``: ``"warn"`` (default),
+    ``"enforce"`` or ``"split"`` (issue #3446), else
+    :class:`~klayout_tools.sim.SimError` before any S3 write (issue #2833)."""
     from .sim import SimError
 
     value = batch_spec.get("job_ceiling_check", "warn")
@@ -1512,6 +1545,75 @@ def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
             f"(got {value!r})"
         )
     return value
+
+
+def _resolve_max_units_per_job(
+    batch_spec: dict[str, Any], job_ceiling_check: str
+) -> int | None:
+    """``request.batch.max_units_per_job`` (issue #3446): a positive integer
+    cap on the units of one job, which opts the request into splitting; else
+    :class:`~klayout_tools.sim.SimError` before any S3 write. Combining it
+    with ``job_ceiling_check: "enforce"`` is contradictory (one refuses an
+    over-ceiling request, the other splits it) and is refused."""
+    from .sim import SimError
+
+    value = batch_spec.get("max_units_per_job")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise SimError(
+            "request.batch.max_units_per_job must be a positive integer "
+            f"(got {value!r})",
+            code=BATCH_MAX_UNITS_CODE,
+        )
+    if job_ceiling_check == "enforce":
+        raise SimError(
+            "request.batch.max_units_per_job splits an over-ceiling request "
+            'and cannot be combined with job_ceiling_check "enforce", which '
+            'refuses it; use "warn" or "split"',
+            code=BATCH_MAX_UNITS_CODE,
+        )
+    return value
+
+
+def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
+    """The effective ``remote.hosts`` for an opted-in split (issue #3446).
+
+    The shard cap is ``config.max_units_per_job`` when given, else the
+    largest shard the ceiling allows (``assessment["max_units_per_job"]``),
+    and the answer is the fewest balanced shards that respect it. Returns
+    ``1`` when nothing needs splitting. Raises
+    :class:`~klayout_tools.sim.SimError` before any S3 write when no split
+    can keep every job inside the ceiling: code
+    :data:`BATCH_JOB_CEILING_CODE` when even one unit exceeds it (lower
+    ``options.timeout_s``), :data:`BATCH_MAX_UNITS_CODE` when the requested
+    cap leaves a shard over it.
+    """
+    from .sim import SimError
+
+    units = assessment["unit_count"]
+    per_job = assessment["max_units_per_job"]
+    requested = config.max_units_per_job
+    if requested is None and not assessment["exceeds_ceiling"]:
+        return 1
+    if per_job == 0:
+        raise SimError(
+            f"backend 'batch' refused before submission: {assessment['warning']}",
+            code=BATCH_JOB_CEILING_CODE,
+        )
+    cap = requested if requested is not None else per_job
+    hosts = math.ceil(units / cap)
+    largest = math.ceil(units / hosts)
+    if largest > per_job:
+        raise SimError(
+            f"request.batch.max_units_per_job {requested} leaves a job of "
+            f"{largest} units, over the {per_job}-unit limit the fleet's "
+            f"{assessment['max_job_seconds']:g}s whole-job ceiling allows at "
+            f"options.timeout_s {assessment['per_unit_timeout_s']:g}s; use at "
+            f"most {per_job}",
+            code=BATCH_MAX_UNITS_CODE,
+        )
+    return hosts
 
 
 def _assess_job_ceiling(
@@ -2332,6 +2434,22 @@ def _pdk_match_failure(
     )
 
 
+def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
+    """The worker-reported ``model_inputs`` list, re-validated and bounded.
+    ``None`` (not ``[]``) when the capture carries no list at all."""
+    models_in = doc.get("model_inputs")
+    if not isinstance(models_in, list):
+        return None
+    return [
+        {
+            "name": _bounded_str(entry.get("name")),
+            "sha256": _bounded_str(entry.get("sha256"), 64),
+        }
+        for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
+        if isinstance(entry, dict)
+    ]
+
+
 def _read_worker_environment(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -2350,6 +2468,7 @@ def _read_worker_environment(
         "cpu_model": None,
         "omp_num_threads": None,
         "image_manifest": None,
+        "model_inputs": None,
         "diagnostics": [],
         "pdk_stamp_comparison": {"status": "not_comparable"},
     }
@@ -2409,6 +2528,7 @@ def _read_worker_environment(
             "cpu_model": _bounded_str(doc.get("cpu_model")),
             "omp_num_threads": _bounded_str(doc.get("omp_num_threads"), 40),
             "image_manifest": manifest,
+            "model_inputs": _bounded_model_inputs(doc),
             "diagnostics": diagnostics,
             "pdk_stamp_comparison": _compare_pdk_stamps(
                 pdk,
@@ -2518,6 +2638,9 @@ def _read_job_identity(
     return {
         **_read_runner_identity(local_dir, request),
         "worker_environment": worker_environment,
+        # ``None`` (not ``[]``) when the runner did not report it, so "none
+        # staged" and "unknown / older runner" stay distinguishable.
+        "runner_model_inputs": worker_environment.get("model_inputs"),
     }
 
 
@@ -3172,7 +3295,44 @@ def _run_batch(
     job_ceiling = _assess_job_ceiling(
         unit_count=len(corner_points), per_unit_timeout_s=timeout_s, config=config
     )
-    _enforce_job_ceiling(job_ceiling)
+    effective_hosts = 1
+    if config.job_ceiling_check == "split" or config.max_units_per_job is not None:
+        effective_hosts = _plan_job_split(job_ceiling, config)
+        job_ceiling = {
+            **job_ceiling,
+            "split": effective_hosts > 1,
+            "effective_hosts": effective_hosts,
+        }
+        if effective_hosts > 1:
+            print(
+                f"klt sim: notice: splitting {job_ceiling['unit_count']} units "
+                f"into {effective_hosts} batch jobs of at most "
+                f"{math.ceil(job_ceiling['unit_count'] / effective_hosts)} units "
+                "each (request.batch.job_ceiling_check / max_units_per_job)",
+                file=sys.stderr,
+            )
+    else:
+        _enforce_job_ceiling(job_ceiling)
+    if effective_hosts > 1:
+        try:
+            corners, engine_version, environment = _run_batch_fleet(
+                corner_points=corner_points,
+                netlist_path=netlist_path,
+                timeout_s=timeout_s,
+                keep_artifacts=keep_artifacts,
+                want_waveforms=want_waveforms,
+                artifacts_dir=artifacts_dir,
+                request=request,
+                hosts=effective_hosts,
+                measurements_spec=measurements_spec,
+                request_dir=request_dir,
+                config=config,
+            )
+        except BatchError as exc:
+            raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+        if environment is not None:
+            environment = {**environment, "job_ceiling": job_ceiling}
+        return corners, engine_version, environment
     try:
         corners, engine_version, environment = _run_batch_job(
             config=config,
@@ -3208,6 +3368,7 @@ def _run_batch_fleet(
     hosts: int,
     measurements_spec: list[dict[str, Any]],
     request_dir: str | None = None,
+    config: BatchConfig | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend's ``hosts > 1`` dispatch: one **job** per shard.
 
@@ -3226,6 +3387,10 @@ def _run_batch_fleet(
     ``hosts`` exceeding the unit count is rejected up front, mirroring
     ``_run_remote_fleet``: every shard is a real billed instance, so there
     is no benign reading of "more hosts than units".
+
+    ``config`` is for :func:`_run_batch`'s split reroute (issue #3446), which
+    has already resolved it (and run the once-per-request runner check); a
+    direct caller leaves it ``None``.
     """
     from .sim import SimError
 
@@ -3236,9 +3401,10 @@ def _run_batch_fleet(
             "still be billed; use hosts <= corner/sample count"
         )
 
-    config = _resolve_batch_config(
-        request, corner_count=len(corner_points), timeout_s=timeout_s
-    )
+    if config is None:
+        config = _resolve_batch_config(
+            request, corner_count=len(corner_points), timeout_s=timeout_s
+        )
     # Stage (and discard) the whole job closure once, before any shard's
     # first S3 write: an unstageable include or model input (issue #2668)
     # must refuse the submit, not surface as K lost shards after some of
@@ -3291,6 +3457,7 @@ def _run_batch_fleet(
 __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
     "BATCH_JOB_CEILING_CODE",
+    "BATCH_MAX_UNITS_CODE",
     "BATCH_JOB_TOOL",
     "BATCH_CONCURRENCY_CAP_CODE",
     "BATCH_NO_CAPACITY_CODE",
