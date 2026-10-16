@@ -87,6 +87,7 @@ def run(args: argparse.Namespace) -> int:
             plot_dir=args.plot,
             fail_fast_probe=args.fail_fast_probe,
             fail_on_diagnostic=args.fail_on_diagnostic,
+            max_units_per_job=args.max_units_per_job,
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format, code=exc.code)

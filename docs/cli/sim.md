@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--max-units-per-job <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -26,6 +26,10 @@ this document (and the code) win.
   overriding the request's own `options.max_workers` when given. Ignored by
   `local`. Capped by the host's `KLT_SIM_MAX_WORKERS`, when set (a larger
   value is clamped, not refused). See "Execution backends" below.
+- `--max-units-per-job` — backend `batch`, `remote.hosts: 1` only: split the
+  expanded unit list into batch jobs of at most this many units so no job
+  outruns the fleet's whole-job ceiling; overrides `batch.max_units_per_job`
+  (see "Three budgets, and the fleet's whole-job ceiling").
 - `--hosts` — shard the expanded corner/Monte-Carlo unit list across this
   many hosts and merge the per-shard reports, overriding the request's own
   `remote.hosts` field when given. Defaults to `1` (today's single-host
@@ -636,7 +640,8 @@ in its `batch_job_failed` message, or carries the tail of the retrieved
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
-| `batch.job_ceiling_check` | `"warn"` \| `"enforce"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`. Any other value is rejected before any S3 write. |
+| `batch.job_ceiling_check` | `"warn"` \| `"enforce"` \| `"split"` | What the one-job pre-submit check does when the job's conservative bound exceeds `max_job_seconds`: `"warn"` (default) submits and warns, `"enforce"` refuses before any S3 write with `error.code: "batch_job_ceiling_exceeded"`, `"split"` ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)) submits the request as the fewest balanced jobs that each fit. Any other value is rejected before any S3 write. |
+| `batch.max_units_per_job` | integer ≥ 1 | Opt-in cap on the units of one job ([#3446](https://github.com/2AMLogic/klayout-tools/issues/3446)); `--max-units-per-job` overrides it. With `remote.hosts: 1` the request is split into `ceil(units / N)` balanced jobs, even when it would have fit one. Rejected before any S3 write with `error.code: "batch_max_units_per_job_invalid"` when not a positive integer, when combined with `job_ceiling_check: "enforce"`, or when the resulting jobs would still exceed the ceiling. |
 
 ### Capacity refusal and `batch_no_capacity`
 
@@ -794,7 +799,10 @@ ceiling passes. When the bound exceeds the ceiling:
   submits as before;
 - under `"enforce"`, the request fails with exit `1` and
   `error.code: "batch_job_ceiling_exceeded"` before anything is uploaded or
-  launched.
+  launched;
+- under `"split"` (or with `batch.max_units_per_job` / `--max-units-per-job`
+  set), the request is rerouted through the shard path below instead: see
+  "Opt-in auto-split".
 
 Either way, the message names the bound, the ceiling and its source, and the
 smallest `remote.hosts` value whose largest shard fits within the ceiling.
@@ -849,12 +857,32 @@ bound is `120 × 21 + 120 = 2640 s`, within the ceiling:
 ```
 
 `remote.hosts > 1` submits one independent job per shard and merges them in
-global unit order (see "Fleet sharding" below). That path is not changed by
-this check, and its shards are not assessed. Each extra shard is one more
+global unit order (see "Fleet sharding" below). An explicit `remote.hosts > 1`
+is honored as given: the check, and the split below, never apply to it, and its
+shards are not assessed. Each extra shard is one more
 launch against the fleet's shared concurrency cap. Because the bound is
 conservative, a tighter `options.timeout_s` that still covers each unit (see
 "Timeout-budget preflight" below) often needs far fewer shards than a
 generous one.
+
+**Opt-in auto-split.** Rather than hand-picking `remote.hosts`, set
+`batch.job_ceiling_check: "split"` or a cap (`batch.max_units_per_job`,
+`--max-units-per-job N`). With `remote.hosts: 1` the client then submits
+`ceil(units / cap)` balanced jobs through the shard path (the cap defaults to
+the largest unit count that fits the ceiling), merged in global unit order
+with the same report shape as `remote.hosts: <that many>`, and prints
+`klt sim: notice: splitting ...` to stderr. In the 63-unit example above that is
+3 jobs of 21 units. A request that already fits stays one job unless a smaller
+cap is given. Splitting is never silent: each extra job is one more launch
+against the fleet's shared concurrency cap, which is why it is opt-in and
+the default stays `"warn"`. A cap that would leave a job over the ceiling is
+rejected up front (`batch_max_units_per_job_invalid`), and when even one unit
+exceeds the ceiling the "lower `options.timeout_s`" refusal applies
+(`batch_job_ceiling_exceeded`), because splitting cannot help. When a split
+mode is active, `environment.remote.job_ceiling` gains `split` (boolean) and
+`effective_hosts`; the report otherwise carries the `fleet[]` array of a
+`remote.hosts > 1` run. Units that finished before a killed job are still not
+recovered (the harness never writes an incremental report).
 
 ### Both off-host backends validate `models.pdk` up front
 
