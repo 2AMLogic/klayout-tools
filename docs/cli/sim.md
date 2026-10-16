@@ -3543,8 +3543,8 @@ Grading, in order:
   indeterminate, so with `limits` it grades `inconclusive`.
 
 Off-host: the new tokens are `transfer` entries, so `backend: "remote"` /
-`"batch"` requests are refused exactly as above (a single corner may use
-`--backend local`).
+`"batch"` requests are handled exactly as above (not refused locally; the
+worker's mandatory `transfer` feature gate decides -- see "Backends" below).
 
 One rawfile and one ratio computation are used per unique `num`/`den` pair, and
 the capture does not depend on `options.waveforms`.
