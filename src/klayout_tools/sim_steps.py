@@ -965,6 +965,37 @@ def _format_value(value: float) -> str:
     return repr(float(value))
 
 
+def _spectrum_plot_lines(index: int) -> list[str]:
+    """Pick the spectra plot of step ``index``. `noise` leaves the integrated
+    plot current; the spectra are in the plot made just before it -- the
+    second-to-last of $plots right after the analysis. A failed solve is
+    blocked in Python (step_failed), so a stale pick there is never graded."""
+    return [
+        f"set klt_pa{index} = none",
+        f"set klt_pb{index} = none",
+        "foreach klt_p $plots",
+        f"set klt_pa{index} = $klt_pb{index}",
+        f"set klt_pb{index} = $klt_p",
+        "end",
+        f"set klt_plot_{index}_spectrum = $klt_pa{index}",
+    ]
+
+
+def _derived_lines(
+    analysis: dict[str, Any], measurements_spec: list[dict[str, Any]]
+) -> list[str]:
+    """Trailing ``setplot new`` block for measurements that span steps."""
+    if "derived_lines" in analysis:
+        return ["setplot new", *analysis["derived_lines"]]
+    derived = [spec for spec in measurements_spec if "step" not in spec]
+    if not derived:
+        return []
+    lines = ["setplot new"]
+    for spec in derived:
+        lines.extend(spec["deck_lines"])
+    return lines
+
+
 def control_lines(
     analysis: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
@@ -998,36 +1029,14 @@ def control_lines(
         lines.append(f"echo klt_step_end {index} $curplot")
         lines.append(f"set klt_plot_{index} = $curplot")
         if step["name"] in spectrum_needed:
-            # `noise` leaves the integrated plot current; the spectra are in
-            # the plot made just before it -- the second-to-last of $plots
-            # right after the analysis. A failed solve is blocked in Python
-            # (step_failed), so a stale pick there is never graded.
-            lines.extend(
-                [
-                    f"set klt_pa{index} = none",
-                    f"set klt_pb{index} = none",
-                    "foreach klt_p $plots",
-                    f"set klt_pa{index} = $klt_pb{index}",
-                    f"set klt_pb{index} = $klt_p",
-                    "end",
-                    f"set klt_plot_{index}_spectrum = $klt_pa{index}",
-                ]
-            )
+            lines.extend(_spectrum_plot_lines(index))
         if "lines" in step:
             lines.extend(step["lines"])
             continue
         for spec in measurements_spec:
             if spec.get("step") == step["name"]:
                 lines.extend(spec["deck_lines"])
-    if "derived_lines" in analysis:
-        lines.append("setplot new")
-        lines.extend(analysis["derived_lines"])
-        return lines
-    derived = [spec for spec in measurements_spec if "step" not in spec]
-    if derived:
-        lines.append("setplot new")
-        for spec in derived:
-            lines.extend(spec["deck_lines"])
+    lines.extend(_derived_lines(analysis, measurements_spec))
     return lines
 
 
