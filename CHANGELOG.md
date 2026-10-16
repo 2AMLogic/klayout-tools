@@ -137,6 +137,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   instead of claiming the sides "instantiate different device models". The
   block is still non-`null` in both cases; `model_set` output is unchanged.
   Additive; no `schema_version` bump.
+- **`klt sim` `options.portable_artifacts`** (issue #3052): opt-in, additive
+  (default off; deck and log bytes unchanged when off). With
+  `keep_artifacts`, the persisted `corner.cir`, engine log,
+  `netlist.expanded.cir` and `.spiceinit` have host paths (PDK, models
+  directory, request/artifacts directories, `$HOME`) replaced by stable
+  `$TOKEN`s, and `environment.portable_artifacts.substitutions` records
+  the map. See `docs/cli/sim.md` "Portable deck and log".
 
 - **`klt sim` gains a numeric design-parameter axis, `corners.params`**
   (issue #3035): SPICE parameter names mapped to equal-length arrays of

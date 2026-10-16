@@ -1559,6 +1559,48 @@ the *submitting* client generates, so it works whatever klt version the fleet
 image runs. When neither file yields an envelope, the reason is in
 `harness.log` (and `stderr.log`) under the job's S3 prefix.
 
+### Portable deck and log (`options.portable_artifacts`, [#3052](https://github.com/2AMLogic/klayout-tools/issues/3052))
+
+With `options.keep_artifacts`, `corner.cir` and the engine log
+(`ngspice.log` / `xyce.log`) name the absolute paths of the machine that ran
+them. Set `options.portable_artifacts: true` (boolean, default `false`; a
+no-op without `keep_artifacts`) to have klt rewrite them, after the corner
+finishes, so they can be committed as the raw record of a run:
+
+| Token | Stands for |
+|---|---|
+| `$CORNER_DIR` | the corner's own artifact directory |
+| `$PDK_ROOT` | `$PDK_ROOT` from the environment, when set |
+| `$MODELS_DIR` | the directory of `models.lib` |
+| `$SECTION_LIB_DIR_<n>` / `$OSDI_DIR_<n>` | further `corner_section_libs` / `osdi_preload` directories |
+| `$REQUEST_DIR` | the directory holding the request file |
+| `$ARTIFACTS_DIR` | the artifacts root (`--outdir`) |
+| `$HOME` | the user's home directory |
+
+Where roots nest, the earlier row wins (so a model file under `$PDK_ROOT` is
+`$PDK_ROOT/<rel>`); a root is replaced only as a whole path prefix, and its
+symlink-resolved form is replaced too. The same substitution is applied to
+`netlist.expanded.cir` (the include-expanded netlist copy) and `.spiceinit`
+in the corner directory. Paths outside every root are left as written.
+
+The persisted `corner.cir` is **a record, not a re-runnable input**: ngspice
+does not expand `$VAR` in include paths, so klt executes the real-path deck
+and rewrites it only after the engine has exited. With the option off, deck
+and log bytes are unchanged.
+
+`environment.portable_artifacts.substitutions` lists each token and what it
+stood for (normalised like every other path in the report, never a host
+path). The inputs stay identified by `environment.models_lib_sha256` and
+`environment.netlist_closure`; the `$MODELS_DIR` entry repeats
+`models_lib_sha256`. Output is deterministic for a given environment: the
+same request from two checkout locations yields byte-identical deck and log.
+
+Backends: `local` and `local-parallel` apply it directly. On `batch` and
+`remote` the worker runs the forwarded request, so the option applies on the
+worker and the returned `artifacts/` are already portable. `klt
+env-provenance scan` over a portable deck or log reports no `home-path`
+findings.
+
 ### Getting the per-corner deck and ngspice log through klt
 
 Set `options.keep_artifacts: true` (and pass `--outdir DIR` to choose where
