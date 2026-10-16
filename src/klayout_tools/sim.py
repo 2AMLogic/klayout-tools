@@ -9080,6 +9080,16 @@ def _param_reset_lines(point: CornerPoint) -> list[str]:
     ]
 
 
+def _supply_alter_lines(point: CornerPoint) -> list[str]:
+    """One ``alter`` per swept supply rail, skipping the sources rescaled in
+    the corner's netlist copy instead (issue #2902)."""
+    return [
+        f"alter {key}={value}"
+        for key, value in sorted(point.supply_v.items())
+        if key not in point.supply_waveforms
+    ]
+
+
 def _corner_deck_control_lines(
     *,
     point: CornerPoint,
@@ -9199,10 +9209,7 @@ def _corner_deck_control_lines(
             )
         else:
             prefix.append("save all")
-    for key, value in sorted(point.supply_v.items()):
-        if key in point.supply_waveforms:
-            continue  # rescaled in the netlist copy (issue #2902), no `alter`
-        prefix.append(f"alter {key}={value}")
+    prefix.extend(_supply_alter_lines(point))
     lines.extend(prefix)
     if sim_steps.is_steps_analysis(analysis):
         # Issue #3103: a `reset: true` step re-emits this same prefix after
