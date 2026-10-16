@@ -420,6 +420,7 @@
       "modules": [
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.signoff",
+        "klayout_tools.signoff_attest",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_power_delivery"
       ]
@@ -445,6 +446,7 @@
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
+        "klayout_tools.sim_noise",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
         "klayout_tools.sim_raw",
@@ -452,6 +454,7 @@
         "klayout_tools.sim_set",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
+        "klayout_tools.sim_supply_waveform",
         "klayout_tools.sim_transfer",
         "klayout_tools.sim_transfer_meas"
       ]
@@ -861,6 +864,11 @@
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
     {
+      "consumer": "lvs",
+      "exporter": "socket_check",
+      "reason": "Issue #2971: klt lvs power findings reuse the verb's public classify_pin_by_name ground/power name heuristic to decide which pins get the substrate-continuity caveat, so lvs and socket-check never disagree about what a ground pin is."
+    },
+    {
       "consumer": "mcp",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
@@ -1227,18 +1235,6 @@
       "consumer": "klayout_tools.lvs",
       "exporter": "klayout_tools._provenance",
       "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.lvs",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klayout_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.lvs",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
@@ -1795,6 +1791,12 @@
         "exporter": "klayout_tools.sim",
         "symbol": "_resolve_models_lib",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_netlist_include",
+        "reason": "op-lint follows `.include`s with the same resolver the sweep uses (issue #3101); remove by making the symbol public or moving it to a shared module."
       },
       {
         "consumer": "klayout_tools.op_sanity",

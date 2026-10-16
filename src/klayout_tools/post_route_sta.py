@@ -242,6 +242,7 @@ from ._openroad_engine import (
     _run_openroad,
     _timing_status,
     _timing_violation_report_lines,
+    write_sdf_line,
 )
 from ._paths import (
     _count_spef_nets_annotated,
@@ -672,6 +673,12 @@ def run_sta(
         else:
             spef_path = _resolve_spef(spef_field, request_dir)
         geometry_source = _validate_geometry_source(request.get("geometry_source"))
+    write_sdf = _validate_sdf(
+        request.get("sdf"),
+        has_verilog=has_verilog,
+        has_spef=spef_path is not None,
+        has_spef_map=spef_map is not None,
+    )
 
     output_dir = os.path.join(request_dir, ".klt", "sta")
     try:
@@ -724,6 +731,7 @@ def run_sta(
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
+            write_sdf=write_sdf,
             output_dir=output_dir,
             input_path=input_path,
             basename=basename,
@@ -761,6 +769,7 @@ class _ReportPaths:
         spef_path: dict[str, Any] | None,
         spef_paths: dict[str, dict[str, Any]] | None,
         replacements: list[tuple[str, str]],
+        repo_root: str | None = None,
     ) -> None:
         self.def_path = def_path
         self.verilog_path = verilog_path
@@ -769,6 +778,13 @@ class _ReportPaths:
         # `request.spef` (`None` otherwise); `spef_path` is `None` then.
         self.spef_paths = spef_paths
         self._replacements = replacements
+        self._repo_root = repo_root
+
+    def output_envelope(self, engine_path: str) -> dict[str, Any]:
+        """The ``{path, scope}`` identity of a file this command *wrote*
+        (issue #2886's per-corner SDF), resolved against the same repo root
+        as the three inputs above -- never an absolute host path."""
+        return env_provenance.repo_relative_path(engine_path, repo_root=self._repo_root)
 
     @classmethod
     def build(
@@ -820,6 +836,7 @@ class _ReportPaths:
             spef_path=envelopes["spef_path"],
             spef_paths=spef_envelopes or None,
             replacements=replacements,
+            repo_root=repo_root,
         )
 
     def scrub(self, text: str) -> str:
@@ -878,6 +895,7 @@ def _dispatch_sta(
     output_dir: str,
     input_path: str,
     basename: str,
+    write_sdf: bool = False,
 ) -> dict[str, Any]:
     """Run the single- or multi-corner analysis :func:`run_sta` resolved,
     and assemble its response. Every ``*_path`` argument is an absolute
@@ -915,6 +933,7 @@ def _dispatch_sta(
             wire_load_model=wire_load_model,
             wire_load_mode=wire_load_mode,
             propagated_clock=propagated_clock,
+            write_sdf=write_sdf,
             output_dir=output_dir,
             input_path=input_path,
             basename=basename,
@@ -947,6 +966,8 @@ def _dispatch_sta(
         output_dir=output_dir,
         script_tag=basename,
         scrub=report_paths.scrub,
+        sdf_stem=basename if write_sdf else None,
+        report_paths=report_paths,
     )
 
     engine_version = _openroad_version()
@@ -1040,6 +1061,9 @@ def _dispatch_sta(
     # what propagation actually reached -- `null` unless the request asked
     # for propagated-clock timing (see `_parse_clock_latency`).
     response["clock_propagation"] = corner_fields["clock_propagation"]
+    # Additive field (issue #2886): the post-route SDF this corner's session
+    # wrote -- `{path, scope, content_hash}`, `null` unless `request.sdf`.
+    response["sdf"] = corner_fields["sdf"]
     # Additive field (issue #3005): see `_electrical_checks_block`.
     response["electrical_checks"] = corner_fields["electrical_checks"]
     response["engine_log"] = corner_fields["engine_log"]
@@ -1074,6 +1098,8 @@ def _run_corner_session(
     output_dir: str,
     script_tag: str,
     scrub: Callable[[str], str] = _identity,
+    sdf_stem: str | None = None,
+    report_paths: _ReportPaths | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one complete, fresh OpenSTA session (``read_lef`` x2, ``read_def``
     or ``read_verilog``/``link_design``, ``read_liberty``, ``create_clock``,
@@ -1108,6 +1134,16 @@ def _run_corner_session(
       response once (shared across every corner) while nesting only
       ``deck`` per corner (see :func:`_run_multi_corner`).
 
+    ``sdf_stem`` (issue #2886) -- when given (only ever for a ``def``-mode
+    request with a ``spef``; :func:`_validate_sdf` enforces both) -- makes
+    this session write ``<output_dir>/<sdf_stem>.<corner>.sdf`` right after
+    ``read_spef`` and adds its ``{path, scope, content_hash}`` identity to
+    ``corner_fields["sdf"]`` (``report_paths`` supplies the ``{path,
+    scope}`` resolution). Any previous file at that path is removed first,
+    so a missing or empty file after the run is this session's own failure
+    and is raised, never reported. ``None`` leaves the emitted Tcl
+    byte-identical to the pre-#2886 session, with ``sdf: None``.
+
     Raises :class:`PostRouteStaError` for an unresolvable
     ``cell_library``/``corner_name``/LEF, or an OpenROAD engine failure --
     identical to this command's pre-#1871 single-corner behaviour.
@@ -1119,6 +1155,17 @@ def _run_corner_session(
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
     metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
+    sdf_path: str | None = None
+    if sdf_stem is not None:
+        sdf_path = os.path.join(output_dir, f"{sdf_stem}.{corner}.sdf")
+        try:
+            os.remove(sdf_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise PostRouteStaError(
+                f"could not remove stale sdf '{sdf_path}': {exc}"
+            ) from exc
 
     if has_def:
         assert def_path is not None
@@ -1141,6 +1188,7 @@ def _run_corner_session(
             report_ports=report_ports,
             false_path_from=false_path_from,
             propagated_clock=propagated_clock,
+            sdf_path=sdf_path,
         )
     else:
         spef_net_names = None
@@ -1259,6 +1307,11 @@ def _run_corner_session(
         )
     else:
         corner_fields["clock_propagation"] = None
+    corner_fields["sdf"] = (
+        _sdf_record(sdf_path, report_paths, completed=completed, scrub=scrub)
+        if sdf_path is not None
+        else None
+    )
 
     resolution = {"corner": corner, "liberty_path": liberty_path, "pdk_info": pdk_info}
     return corner_fields, resolution
@@ -1294,6 +1347,7 @@ def _run_multi_corner(
     input_path: str,
     basename: str,
     report_paths: _ReportPaths,
+    write_sdf: bool = False,
 ) -> dict[str, Any]:
     """Issue #1871: ``request.pdk.corners`` -- characterize the *same*
     loaded ``def``/``verilog`` geometry at every corner in ``corners``, one
@@ -1372,6 +1426,8 @@ def _run_multi_corner(
             output_dir=output_dir,
             script_tag=script_tag,
             scrub=report_paths.scrub,
+            sdf_stem=basename if write_sdf else None,
+            report_paths=report_paths,
         )
         if shared_pdk_info is None:
             shared_pdk_info = resolution["pdk_info"]
@@ -2060,6 +2116,87 @@ def _validate_propagated_clock(constraints: dict[str, Any], has_def: bool) -> bo
             "to propagate through"
         )
     return value
+
+
+def _validate_sdf(
+    value: Any, *, has_verilog: bool, has_spef: bool, has_spef_map: bool = False
+) -> bool:
+    """Validate the optional top-level ``request.sdf`` boolean (issue
+    #2886), returning ``False`` when omitted or ``null``.
+
+    ``true`` writes one post-route SDF per analyzed corner. Rejected (exit
+    1) rather than silently ignored when:
+
+    - the value is not a JSON boolean;
+    - the request is ``verilog`` mode -- a linked netlist has no routed
+      geometry for the SDF's interconnect delays to reflect;
+    - the request has no ``spef`` -- mirroring ``klt place-and-route``'s
+      ``post_route_sdf`` requiring ``post_route_spef``: an SDF written
+      without real parasitics would carry no routed interconnect delay
+      while looking exactly like a post-route measurement to every
+      simulation that annotates it;
+    - the ``spef`` is the map form (issue #3228) -- one SDF per liberty
+      corner would be ambiguous across the interconnect axis.
+    """
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise PostRouteStaError(
+            "request.sdf must be a boolean (true writes one post-route SDF "
+            "per corner; omit or false writes none)"
+        )
+    if not value:
+        return False
+    if has_verilog:
+        raise PostRouteStaError(
+            "request.sdf is only valid in def mode -- a verilog-mode request "
+            "links a netlist with no routed geometry for an SDF to reflect"
+        )
+    if has_spef_map:
+        raise PostRouteStaError(
+            "request.sdf is not supported together with the map form of "
+            "request.spef -- an SDF is written per liberty corner, which "
+            "is ambiguous across the min/nom/max interconnect axis; give "
+            "a single spef path"
+        )
+    if not has_spef:
+        raise PostRouteStaError(
+            "request.sdf requires request.spef -- an SDF written without the "
+            "routed parasitics would not be a post-route delay file"
+        )
+    return True
+
+
+def _sdf_record(
+    sdf_path: str,
+    report_paths: _ReportPaths | None,
+    *,
+    completed: _OpenRoadResult,
+    scrub: Callable[[str], str],
+) -> dict[str, Any]:
+    """The ``sdf`` response record (issue #2886) for one corner session's
+    ``write_sdf`` output: ``{path, scope, content_hash}``, the ``content_hash``
+    being the ``sha256:``-prefixed digest of the exact bytes on disk.
+
+    A missing or empty file is a :class:`PostRouteStaError` -- a reported
+    path a downstream simulator cannot open degrades there to a *silent*
+    zero-delay run (see docs/cli/place-and-route.md "SDF export")."""
+    try:
+        size = os.path.getsize(sdf_path)
+    except OSError:
+        size = None
+    if not size:
+        detail = scrub(_engine_error_message(completed))
+        raise PostRouteStaError(
+            f"write_sdf produced {'no' if size is None else 'an empty'} file "
+            f"'{os.path.basename(sdf_path)}': {detail}"
+        )
+    envelope = (
+        report_paths.output_envelope(sdf_path)
+        if report_paths is not None
+        else env_provenance.repo_relative_path(sdf_path)
+    )
+    return {**envelope, "content_hash": f"sha256:{sha256_file(sdf_path)}"}
 
 
 def _validate_wire_load_estimate(
@@ -2810,6 +2947,7 @@ def _sta_script_lines(
     report_ports: list[str] | None = None,
     false_path_from: list[str] | None = None,
     propagated_clock: bool = False,
+    sdf_path: str | None = None,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
     this verb runs: load the LEF/DEF pair directly (no netlist, no
@@ -2837,7 +2975,16 @@ def _sta_script_lines(
     evidence dump (:func:`_clock_latency_lines`) runs *after* ``read_spef``
     so its network latencies reflect the same parasitics the timing
     numbers do.
+
+    ``sdf_path`` (issue #2886; requires ``spef_path``) appends the shared
+    ``write_sdf`` command (:func:`~klayout_tools._openroad_engine.write_sdf_line`)
+    immediately after ``read_spef`` -- outside the reader-warning markers,
+    so SDF-writer diagnostics are never counted as SPEF reader warnings,
+    and before every report command, the same ordering ``klt
+    place-and-route``'s ``post_route_sdf`` uses.
     """
+    if sdf_path is not None and spef_path is None:
+        raise ValueError("sdf_path requires spef_path")
     lines = [
         f"read_lef {tech_lef}",
         f"read_lef {cell_lef}",
@@ -2864,6 +3011,8 @@ def _sta_script_lines(
         lines.append(f'puts "{_SPEF_READ_BEGIN}"')
         lines.append(f"read_spef {spef_path}")
         lines.append(f'puts "{_SPEF_READ_END}"')
+        if sdf_path is not None:
+            lines.append(write_sdf_line(sdf_path))
         lines += _delay_fingerprint_lines(_DELAY_POST_BEGIN, _DELAY_POST_END)
         lines += _parasitic_annotation_lines()
     if propagated_clock:

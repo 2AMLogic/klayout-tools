@@ -121,7 +121,7 @@ import fnmatch
 import json
 import os
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -132,11 +132,10 @@ from ._provenance import (
     INPUT_ROLE_LAYOUT,
     INPUT_ROLE_NETLIST,
     _content_hash,
-    _klayout_version,
-    _klt_version,
     build_provenance,
     explicit_deck_options,
     sha256_file,
+    version_drift_advisories,
 )
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
@@ -198,6 +197,7 @@ from .netlist_capacitor_recovery import (
     resistor_classes_for_deck,
 )
 from .pdk import PdkNotFoundError, find_pdk
+from .socket_check import classify_pin_by_name
 from .verilog_netlist import (
     VerilogNetlistError,
     collect_gate_level_port_aliases,
@@ -318,6 +318,13 @@ CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 #:
 #: See `_correct_combine_parameters`.
 CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED = "device.combine_parameter_corrected"
+#: Issue #3017: `options.combine_devices` folded a pure series chain of N>1
+#: resistor primitives of a class whose deck row has a nonzero
+#: `fixed_offset_ohm`, and the deferred correction (#559) charged that offset
+#: once for the folded device -- so `(N-1) * fixed_offset_ohm` the drawn
+#: chain physically carries was absorbed by the fold. Always `severity:
+#: "warning"`. See `_series_fold_offset_absorbed_warnings`.
+CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED = "device.series_fold_offset_absorbed"
 CATEGORY_PIN_UNMATCHED = "pin.unmatched"
 #: Issue #2845: `options.strict_top_level_pin_count` found the two compared
 #: top circuits declaring a different number of pins. Always `severity:
@@ -1342,6 +1349,12 @@ def run_lvs(request: str) -> dict[str, Any]:
         pdk_root=reference_spec.get("pdk_root"),
         pin_orders=reference_pin_orders,
         placeholder_value_classes=reference_placeholder_classes,
+        resistor_value_classes=_resistor_value_classes(compare_parameters),
+        deck_options=(
+            deck_options
+            if layout_spec.get("deck") == reference_spec.get("deck")
+            else None
+        ),
         gate_level_port_aliases=reference_gate_level_port_aliases,
         finfet=finfet_layout,
         finfet_top=reference_spec.get("top"),
@@ -1752,6 +1765,16 @@ def run_lvs(request: str) -> dict[str, Any]:
             # would have produced. Skipping it here would leave the degraded
             # run reporting under-valued resistances.
             apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
+            # Issue #3017: disclose the (N-1) head/end terms the fold above
+            # absorbed (a no-op after a symmetric degrade).
+            combine_warnings.extend(
+                _series_fold_offset_absorbed_warnings(
+                    layout_snapshot,
+                    layout_netlist,
+                    layout_deck,
+                    combine_incomplete=combine_incomplete,
+                )
+            )
 
     bulk_warnings: list[dict[str, Any]] = []
     short_nets_warnings: list[dict[str, Any]] = []
@@ -2676,51 +2699,6 @@ def run_lvs(request: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-#: `provenance` fields `check_lvs_report()` treats as a non-fatal *advisory*
-#: rather than a hash-integrity failure (issue #1373). `klt_version` and
-#: `klayout_version` are included because they answer the question `--check`
-#: was previously silent on: "did the engine itself change between the
-#: committed run and now". `provenance.pdk.version` is deliberately left out
-#: -- unlike the tool build, a PDK release routinely differs by design
-#: between machines/CI runners without implying anything about *this*
-#: report's reproducibility, so folding it in here would make the advisory
-#: noisy rather than informative. This mirrors -- but is a distinct read
-#: path from -- `_report_verify.VOLATILE_PROVENANCE_PATHS`, which excludes
-#: all three fields from `--rerun`'s drift diff (#1106); that exclusion is
-#: unchanged by this constant.
-_VERSION_ADVISORY_FIELDS: tuple[tuple[str, Callable[[], str | None]], ...] = (
-    ("klt_version", _klt_version),
-    ("klayout_version", _klayout_version),
-)
-
-
-def _version_drift_advisories(committed: dict[str, Any]) -> list[dict[str, Any]]:
-    """Non-fatal advisories (issue #1373) naming any `provenance.<field>` in
-    `_VERSION_ADVISORY_FIELDS` that differs between `committed` and the
-    engine currently running `--check`. A missing value on either side (an
-    older report predating these fields, or an unresolvable current
-    version) is "unknown", not "drift" -- it is silently skipped rather than
-    reported, so `--check` never crashes or false-positives on a report
-    format gap.
-    """
-    advisories = []
-    for field, current_getter in _VERSION_ADVISORY_FIELDS:
-        report_value = get_path(committed, ("provenance", field))
-        current_value = current_getter()
-        if report_value is None or current_value is None:
-            continue
-        if report_value == current_value:
-            continue
-        advisories.append(
-            {
-                "field": f"provenance.{field}",
-                "report": report_value,
-                "current": current_value,
-            }
-        )
-    return advisories
-
-
 def _input_hash_check(
     field: str, expected: str | None, echoed: Any, report_path: str
 ) -> dict[str, Any]:
@@ -2816,7 +2794,7 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
     The result additionally carries an ``advisories`` list (issue #1373):
     entries naming a ``provenance.klt_version``/``provenance.klayout_version``
     that differs between the committed report and the engine currently
-    running ``--check`` -- see :func:`_version_drift_advisories`. This is
+    running ``--check`` -- see :func:`version_drift_advisories`. This is
     purely informational: it never affects ``status`` (still driven only by
     the hash ``checks`` above) or the caller's exit code, and is never folded
     into ``checks``' ``[OK]``/``[DRIFTED]`` list, so a scripted gate grepping
@@ -2847,7 +2825,7 @@ def check_lvs_report(report_path: str) -> dict[str, Any]:
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)
-    result["advisories"] = _version_drift_advisories(committed)
+    result["advisories"] = version_drift_advisories(committed)
     return result
 
 
@@ -3413,6 +3391,27 @@ def _label_layers_replay(committed: dict[str, Any]) -> dict[str, Any]:
     return {"label_layers": dict(echoed)}
 
 
+def _reject_subckt_call_layout_netlist(path: str, text: str) -> None:
+    """Issue #2972: the layout-side twin of `_read_reference_netlist`'s
+    simulation-form guard. `klt extract --pdk` writes PDK-bound MOS `X` cards;
+    read back unguarded they are undefined-subcircuit instances (zero layout
+    devices, a topology cascade) rather than a form-mismatch error."""
+    from .netlist_normalize import detect_subckt_call_devices
+
+    offending = detect_subckt_call_devices(text)
+    if offending:
+        raise LvsError(
+            f"layout netlist '{path}' is in the simulation "
+            f"(subcircuit-call) form: it instantiates curated PDK device "
+            f"subcircuit(s) {', '.join(offending)} via undefined 'X' cards, "
+            "which 'klt lvs' cannot compare as extracted plain-element "
+            "devices (it would silently read as zero layout devices and "
+            "report a topology mismatch). Re-extract the layout without "
+            "'--pdk' (plain-element M-cards) -- see docs/cli/lvs.md, "
+            '"Netlist form".'
+        )
+
+
 def _logical_spice_cards(netlist_text: str) -> list[str]:
     """Split ``netlist_text`` into lines, joining ``+`` continuations so a
     wrapped card is one logical card."""
@@ -3784,6 +3783,7 @@ def _resolve_layout(
         raise LvsError(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
+    _reject_subckt_call_layout_netlist(layout_netlist_path, layout_netlist_text)
     recovered_capacitor_classes = parse_capacitor_class_comments(layout_netlist_text)
     _reject_bare_resistor_x_cards(
         layout_netlist_text,
@@ -3853,6 +3853,8 @@ def _read_reference_netlist(
     gate_level_port_aliases: dict[str, dict[str, str]] | None = None,
     finfet: bool = False,
     finfet_top: str | None = None,
+    resistor_value_classes: Sequence[str] | None = None,
+    deck_options: Mapping[str, str] | None = None,
 ) -> kdb.Netlist:
     """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
     declared ``form`` (issue #280, extended by issue #1336).
@@ -3881,6 +3883,13 @@ def _read_reference_netlist(
     :func:`_apply_reference_placeholder_values`; every other caller can
     ignore it (``None``, the default, records nothing and leaves behaviour
     byte-identical).
+
+    ``resistor_value_classes`` (issue #2905), ``form="subckt-call"`` only,
+    names resistor classes whose ``R`` the converter fills from the deck's
+    sheet resistance (the ``klt extract`` ``r_ohm`` code path) and the call's
+    ``L``/``W`` rather than the ``0`` placeholder; ``deck_options`` selects
+    the deck's flavours as for extraction. See
+    :func:`_resistor_value_classes`.
 
     ``gate_level_port_aliases`` (issue #2021) is the same kind of optional
     *output* collector, populated only for ``form="gate-level-verilog"``:
@@ -3957,7 +3966,11 @@ def _read_reference_netlist(
     if form == "subckt-call":
         try:
             conversion = convert_reference_netlist(
-                text, deck=deck, device_map=device_map
+                text,
+                deck=deck,
+                device_map=device_map,
+                resistor_value_classes=resistor_value_classes,
+                deck_options=deck_options,
             )
         except NormalizeError as exc:
             raise LvsError(
@@ -5602,6 +5615,145 @@ def _correct_combine_parameters(
     )
 
 
+def _series_chain_lengths(pre_circuit: Any, class_name: str, interior: set[str]):
+    """Map ``(net_a, net_b)`` (sorted expanded net names) to the lengths of
+    every pure series chain of ``class_name`` devices in `pre_circuit`
+    running between those two non-interior nets through `interior` nets
+    only (a lone device between two non-interior nets is a chain of 1)."""
+    edges: dict[str, list[tuple[Any, str]]] = {}
+    for device in pre_circuit.each_device():
+        if device.device_class().name != class_name:
+            continue
+        net_a, net_b = device.net_for_terminal(0), device.net_for_terminal(1)
+        if net_a is None or net_b is None:
+            continue
+        name_a, name_b = net_a.expanded_name(), net_b.expanded_name()
+        edges.setdefault(name_a, []).append((device, name_b))
+        edges.setdefault(name_b, []).append((device, name_a))
+
+    chains: dict[tuple[str, str], list[int]] = {}
+    for start, incident in edges.items():
+        if start in interior:
+            continue
+        for first_device, first_next in incident:
+            length, previous, here = 1, first_device, first_next
+            while here in interior:
+                onward = [e for e in edges.get(here, []) if e[0] is not previous]
+                if len(onward) != 1:
+                    break  # a branch or dead end, not a pure series chain
+                previous, here = onward[0]
+                length += 1
+            else:
+                key = (min(start, here), max(start, here))
+                # Each chain is walked from both ends; keep one direction.
+                if start <= here:
+                    chains.setdefault(key, []).append(length)
+    return chains
+
+
+def _resistor_head_term_ohm(device: Any, fixed_offset: float, end_term: float) -> float:
+    """``fixed_offset_ohm + end_term_ohm_um / W`` for one resistor `device`
+    (the head term the #559 correction charges once; ``end_term_ohm_um`` is
+    skipped when the class has no usable ``W``, as the correction does)."""
+    width = device.parameter("W") if end_term else None
+    return fixed_offset + (end_term / width if width else 0.0)
+
+
+def _series_fold_offset_absorbed_warnings(
+    pre_combine_netlist: Any,
+    netlist: Any,
+    deck: Any,
+    *,
+    combine_incomplete: bool = False,
+) -> list[dict[str, Any]]:
+    """One ``severity: "warning"``
+    :data:`CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED` entry per post-combine
+    resistor that is a fold of N>1 series primitives of a class with a
+    nonzero ``fixed_offset_ohm`` (issue #3017).
+
+    The deferred correction (#559, ``apply_resistor_fixed_offset_corrections``)
+    charges the offset once per surviving device, so the fold absorbs
+    ``(N-1) * fixed_offset_ohm`` the drawn chain physically carries. N is
+    derived from `pre_combine_netlist` topology: the survivor's two end nets
+    are walked back through the nets the fold emptied. Only a **pure series
+    chain** is reported -- when more than one chain (or a parallel primitive)
+    joins the same two end nets, N cannot be attributed to the survivor, so no
+    entry is emitted rather than a guessed one.
+
+    Call after the correction ran, so ``fraction_of_r`` uses the final ``R``.
+    Returns ``[]`` when `combine_incomplete` (a symmetric degrade folded
+    nothing).
+    """
+    offsets = {
+        resistor.name.lower(): (resistor.fixed_offset_ohm, resistor.end_term_ohm_um)
+        for resistor in deck.resistors
+        if resistor.fixed_offset_ohm or resistor.end_term_ohm_um
+    }
+    if combine_incomplete or not offsets:
+        return []
+
+    warnings: list[dict[str, Any]] = []
+    for circuit in netlist.each_circuit():
+        pre_circuit = pre_combine_netlist.circuit_by_name(circuit.name)
+        if pre_circuit is None:
+            continue
+        post_nets = {net.expanded_name() for net in circuit.each_net()}
+        interior = {net.expanded_name() for net in pre_circuit.each_net()} - post_nets
+        if not interior:
+            continue
+        chain_cache: dict[str, Any] = {}
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            terms = offsets.get(device_class.name.lower())
+            if terms is None:
+                continue
+            fixed_offset, end_term = terms
+            offset = _resistor_head_term_ohm(device, fixed_offset, end_term)
+            net_a, net_b = device.net_for_terminal(0), device.net_for_terminal(1)
+            if net_a is None or net_b is None:
+                continue
+            if device_class.name not in chain_cache:
+                chain_cache[device_class.name] = _series_chain_lengths(
+                    pre_circuit, device_class.name, interior
+                )
+            name_a, name_b = net_a.expanded_name(), net_b.expanded_name()
+            key = (min(name_a, name_b), max(name_a, name_b))
+            lengths = chain_cache[device_class.name].get(key, [])
+            if len(lengths) != 1 or lengths[0] < 2:
+                continue
+            folded = lengths[0]
+            absorbed = (folded - 1) * offset
+            r_final = device.parameter("R")
+            fraction = absorbed / r_final if r_final else None
+            warnings.append(
+                _mismatch(
+                    CATEGORY_DEVICE_SERIES_FOLD_OFFSET_ABSORBED,
+                    "warning",
+                    f"options.combine_devices folded {folded} series "
+                    f"{device_class.name} primitives in circuit "
+                    f"{circuit.name!r} into one device ({device.name or '<unnamed>'}) "
+                    f"and charged the head term ({offset!r} ohm: fixed_offset_ohm "
+                    f"+ end_term_ohm_um / W) once, so {absorbed!r} ohm "
+                    "((N-1) * head term) the drawn chain "
+                    "physically carries was not charged to the compare "
+                    "(see docs/cli/lvs.md, "
+                    "'device.series_fold_offset_absorbed')",
+                    "layout",
+                    details={
+                        "circuit": circuit.name,
+                        "device": device.name or None,
+                        "class": device_class.name,
+                        "folded_primitives": folded,
+                        "fixed_offset_ohm": fixed_offset,
+                        "end_term_ohm": offset - fixed_offset,
+                        "absorbed_offset_ohm": absorbed,
+                        "fraction_of_r": fraction,
+                    },
+                )
+            )
+    return warnings
+
+
 def _flatten_netlist_safely(netlist: kdb.Netlist, side: str) -> dict[str, Any] | None:
     """Call ``netlist.flatten()``, in-process, on ``side``'s netlist (issue
     #1085's ``options.flatten_reference``/``options.flatten_layout``).
@@ -6974,6 +7126,26 @@ def _short_nets_disclosure(
 #: Keyed by the family name `netlist_normalize.ReferenceConversion`
 #: reports.
 _PLACEHOLDER_VALUE_PARAMETER = {"resistor": "R", "capacitor": "C"}
+
+
+def _resistor_value_classes(
+    compare_parameters: Mapping[str, Sequence[str]] | None,
+) -> list[str]:
+    """Device-class names ``options.compare_parameters`` asks to compare ``R``
+    on (issue #2905) -- the opt-in for a ``form: "subckt-call"`` reference to
+    carry a deck-derived ``R`` instead of the ``0`` placeholder.
+
+    Opt-in on purpose: filling ``R`` for every deck-modelled resistor would
+    silently turn existing ``match`` results into value comparisons against
+    the deck's sheet resistance. Naming ``R`` is the caller asking for it.
+    """
+    if not compare_parameters:
+        return []
+    return [
+        name
+        for name, params in compare_parameters.items()
+        if any(param.lower() == "r" for param in params)
+    ]
 
 
 def _apply_reference_placeholder_values(
@@ -8844,6 +9016,27 @@ def _describe_power_net_groups(groups: list[dict[str, Any]]) -> str:
     return "; ".join(parts)
 
 
+#: Appended to a ground-class pin's ``power.inconsistent_pin_net`` /
+#: ``power.unexpected_pin_net`` ``description`` (issue #2971). Abstract-cell
+#: extraction black-boxes each cell, erasing the substrate taps that join
+#: separate ground rails in a transistor-level extraction of the same GDS, so
+#: a ground finding here can be a modelling artifact rather than a defect.
+_GROUND_SUBSTRATE_CAVEAT = (
+    ". Caveat for this ground pin: substrate continuity through the cells' "
+    "own taps is not modelled in abstract-cell extraction, so separate "
+    "Metal1 ground rails that a transistor-level extraction joins through "
+    "the substrate are reported here as distinct nets -- this finding may "
+    "be an artifact. To classify it, re-run klt extract without "
+    "--abstract-cells and compare the pin's net count"
+)
+
+
+def _ground_pin_caveat(pin: str) -> str:
+    """:data:`_GROUND_SUBSTRATE_CAVEAT` for a ground-class ``pin`` (by the
+    repo's shared name heuristic), ``""`` for a power or signal pin."""
+    return _GROUND_SUBSTRATE_CAVEAT if classify_pin_by_name(pin)[1] == "GROUND" else ""
+
+
 def _power_connectivity_findings(
     rows: list[dict[str, Any]], expected_nets: dict[str, str] | None
 ) -> list[dict[str, Any]]:
@@ -8925,6 +9118,7 @@ def _power_connectivity_findings(
                             "routed at all, the more likely fix is "
                             "request.power in klt place-and-route rather "
                             "than this option"
+                            f"{_ground_pin_caveat(pin)}"
                         ),
                         "instance_count": len(entries),
                         "nets": groups,
@@ -8957,6 +9151,7 @@ def _power_connectivity_findings(
                         "the same signature as no PDN having been added -- "
                         "the more likely fix is request.power in klt "
                         "place-and-route rather than either option above"
+                        f"{_ground_pin_caveat(pin)}"
                     ),
                     "instance_count": len(entries),
                     "nets": groups,
