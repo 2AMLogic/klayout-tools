@@ -3887,6 +3887,20 @@ def _rerun_assertion_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _resolve_provenance_pdk(
+    pdk_variant: str | None, pdk_root: str | None
+) -> dict[str, Any] | None:
+    """The :func:`klayout_tools.pdk.find_pdk` record for ``provenance.pdk``
+    when ``--pdk``/``--pdk-root`` was given, else ``None``. A missing PDK
+    raises :class:`DrcError`."""
+    if pdk_variant is None and pdk_root is None:
+        return None
+    try:
+        return find_pdk(variant=pdk_variant, root=pdk_root)
+    except PdkNotFoundError as exc:
+        raise DrcError(str(exc)) from exc
+
+
 def run_drc_klayout_engine(
     path: str,
     deck_file: str,
@@ -4134,12 +4148,7 @@ def run_drc_klayout_engine(
     # layer up in `cli/drc_cmd.py`'s `drc_deck_file` call). Mirrors
     # `run_drc`'s identical guard so an omitted `--pdk` still yields
     # `provenance.pdk: null`.
-    pdk_info: dict[str, Any] | None = None
-    if pdk_variant is not None or pdk_root is not None:
-        try:
-            pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-        except PdkNotFoundError as exc:
-            raise DrcError(str(exc)) from exc
+    pdk_info = _resolve_provenance_pdk(pdk_variant, pdk_root)
 
     if not os.path.isfile(deck_file):
         raise DrcError(f"deck file not found: {deck_file}")
