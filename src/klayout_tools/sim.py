@@ -2010,6 +2010,7 @@ def run_sim(
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
+    capacity_wait_s: float | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Run the request at ``request_path`` and return its report.
@@ -2261,6 +2262,8 @@ def run_sim(
         artifacts_dir = os.path.abspath(artifacts_dir)
     if attach_job_id is not None and sim_decks.DECKS_FIELD in request:
         raise SimError("--attach does not apply to deck-list requests")
+    if capacity_wait_s is not None and sim_decks.DECKS_FIELD in request:
+        raise SimError("--wait-for-capacity does not apply to deck-list requests")
     if sim_decks.DECKS_FIELD in request:
         if dry_run:
             raise SimError(
@@ -2301,6 +2304,7 @@ def run_sim(
         dry_run=dry_run,
         submit_only=submit_only,
         attach_job_id=attach_job_id,
+        capacity_wait_s=capacity_wait_s,
         _ownership=_ownership,
     )
 
@@ -2481,6 +2485,25 @@ def _with_max_units_override(
     }
 
 
+def _with_capacity_wait_override(
+    request: dict[str, Any], capacity_wait_s: float | None
+) -> dict[str, Any]:
+    """Fold the ``--wait-for-capacity`` CLI override into
+    ``request.batch.capacity_wait_s`` (issue #3564), leaving the loaded request
+    untouched. The flag wins over the request field, and the value is validated
+    by the one resolver the field uses, so a bad value is refused before any
+    S3 write."""
+    if capacity_wait_s is None:
+        return request
+    from .sim_batch import _resolve_capacity_wait_s
+
+    value = _resolve_capacity_wait_s({"capacity_wait_s": capacity_wait_s})
+    return {
+        **request,
+        "batch": {**(request.get("batch") or {}), "capacity_wait_s": value},
+    }
+
+
 def _check_expected_netlist_identity(
     expect_identity: Any,
     netlist_identity: str | None,
@@ -2515,6 +2538,23 @@ def _stamp_netlist_identity(
     environment["netlist_identity"] = netlist_identity
     if netlist_identity_error is not None:
         environment["netlist_identity_error"] = netlist_identity_error
+
+
+def _check_capacity_wait_applies(
+    capacity_wait_s: Any, backend: str, attach_job_id: Any
+) -> None:
+    """Refuse ``--wait-for-capacity`` where it has nothing to wait for."""
+    if capacity_wait_s is None:
+        return
+    if backend != "batch":
+        raise SimError(
+            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
+        )
+    if attach_job_id is not None:
+        raise SimError(
+            "--wait-for-capacity cannot be combined with --attach: attach "
+            "launches nothing, so there is no capacity to wait for"
+        )
 
 
 def _apply_attach(
@@ -2557,6 +2597,7 @@ def _run_sim_corners(
     dry_run: bool = False,
     submit_only: bool = False,
     attach_job_id: str | None = None,
+    capacity_wait_s: float | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
@@ -2564,6 +2605,7 @@ def _run_sim_corners(
     are documented there. Kept as its own function so the deck dispatch
     in ``run_sim`` adds nothing to this sweep's own complexity budget."""
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
+    request = _with_capacity_wait_override(request, capacity_wait_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1261 (and #1274 for `environment.models_lib`): every input-path
     # field this run's own JSON response echoes (`netlist`,
@@ -3121,6 +3163,7 @@ def _run_sim_corners(
         else {"request_dir": request_dir}
     )
     _apply_attach(local_engine_kwargs, attach_job_id, backend, hosts, submit_only)
+    _check_capacity_wait_applies(capacity_wait_s, backend, attach_job_id)
 
     # Issue #2668: stage the complete job closure once, here, before any
     # backend runs -- so a missing model input, unresolvable dependency or

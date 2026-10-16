@@ -636,6 +636,21 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--wait-for-capacity",
+        dest="wait_for_capacity",
+        metavar="SECONDS",
+        type=float,
+        default=None,
+        help=(
+            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
+            "capacity when the launch is refused (batch_no_capacity / "
+            "batch_concurrency_cap), re-launching the same job with jittered "
+            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
+            "means one attempt. Also applies with --submit-only (issue "
+            "#3564). See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--job-status",
         dest="job_status",
         metavar="JOB_ID",

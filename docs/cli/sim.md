@@ -849,8 +849,17 @@ made. Things worth knowing:
   request-level `error.code` — its sibling shards' results are kept.
 - **Fan-out:** several requests can be submitted at once with `--batch-set`
   (below).
-- **There is no `--wait-for-capacity` CLI flag yet.** The request field is
-  the one control for now; a flag mirroring it is a possible follow-up.
+- **`--wait-for-capacity SECONDS`** ([#3564](https://github.com/2AMLogic/klayout-tools/issues/3564))
+  sets the effective `batch.capacity_wait_s` from the command line, for callers
+  who do not own the request file. It takes a finite number `>= 0` and **wins
+  over** the request field (`--wait-for-capacity 0` forces a single attempt even
+  if the request asks for a wait). It applies to the blocking path and to
+  `--submit-only`; an invalid value is refused before any S3 write, like the
+  request field. It requires the `batch` backend and is refused with `--attach`,
+  `--job-status`, `--batch-set` (use `--capacity-retries`) and deck-list
+  requests. On expiry the run fails with the existing `batch_no_capacity` /
+  `batch_concurrency_cap` code. `--submit-only`'s reported `request_sha256`
+  covers the request with this override folded in.
 
 ### Submit receipt and client termination ([#3065](https://github.com/2AMLogic/klayout-tools/issues/3065))
 
