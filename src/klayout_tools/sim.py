@@ -1335,6 +1335,8 @@ def _validate_crossings_form(
             "0; a missing series is a read failure, not absent data)"
         )
     sim_crossings.validate_crossings_spec(name, spec["crossings"])
+
+
 def _validate_rawfile_form(
     name: Any, spec: dict[str, Any], present: dict[str, bool]
 ) -> bool:
