@@ -1532,8 +1532,10 @@ def _validate_measurement_form(spec: dict[str, Any]) -> None:
     has_cycle_mean = sim_cycle_mean.is_cycle_mean(spec)
     has_energy = sim_energy.is_energy(spec)
     if sim_noise.is_noise(spec):
-        others = has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
-        _validate_noise_measurement(name, spec, others)
+        has_other = (
+            has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
+        )
+        _validate_noise_measurement(name, spec, has_other)
         return
     if name is None or not (
         has_spice or has_expr or has_crossings or has_cycle_mean or has_energy
