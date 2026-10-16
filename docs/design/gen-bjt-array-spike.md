@@ -119,10 +119,10 @@ common-centroid/dummy arrangement a matched bipolar group needs — but it is
 **not** a drop-in, SPICE-model-exact replacement for the PDK's characterized
 vertical PNP:
 
-- The curated decks check **no implant layer** (no `Pplus`/`Nplus` rules), so
-  emitter, base-tie, and collector all draw on the one `active` (COMP/diff)
-  role. A process-exact device would distinguish P+ emitter, N+ base tie, and
-  P+ collector by implant.
+- Emitter, base-tie, and collector all draw on the one `active` (COMP/diff)
+  role. Only gf180mcu draws implants (its `DF.12` forbids uncovered Comp, #3587):
+  Pplus over the emitter and the ring, Nplus over the base tie. sky130's curated
+  deck checks no implant layer.
 - The device is a schematic/matching floorplan, not a process-exact vertical
   cross-section; its terminals (emitter/base/collector ports) and its
   common-centroid placement are the load-bearing, downstream-consumable part,

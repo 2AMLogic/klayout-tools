@@ -2157,6 +2157,7 @@ def _bjt_array_describe(
         ENCLOSURE_MARGIN_UM,
         MIN_SAME_LAYER_SPACING_UM,
         _bjt_array_layout,
+        _bjt_unit_implant_margin_um,
         _grid_snapped,
     )
 
@@ -2171,6 +2172,7 @@ def _bjt_array_describe(
         params["ring_gap_side"],
         params["ring_gap_um"],
         params["ring_gap_offset_um"],
+        _bjt_unit_implant_margin_um(family),
     )
     unit = info["unit"]
     tap_pair = _PDK_ROLE_LAYERS[family]["tap"]
