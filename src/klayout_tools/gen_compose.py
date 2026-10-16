@@ -2129,6 +2129,84 @@ _CONNECTIVITY_ENTRY_KEYS = {
 }
 
 
+def _resolve_waypoint_layers(
+    resolved_leg: dict[str, Any],
+    leg: dict[str, Any],
+    leg_where: str,
+    net_width_um: float,
+    leg_layer_widths: dict[tuple[int, int], float],
+    *,
+    resolve_layer: Any,
+    effective_width: Any,
+    label_layer: Any,
+) -> None:
+    """Attach ``waypoint_layers`` to a resolved leg that changes plane (#2930).
+
+    Each waypoint role resolves through the same path a leg's own
+    ``layer_role`` does, and carries the width the route draws at on that
+    plane (the leg's own ``width_um``, else the net's, floored against *that
+    plane's* deck minimum). ``route_bundle()`` splits the leg at these points
+    into one segment per plane, joined by a via ladder. A no-op for a leg with
+    no plane-bearing waypoint. ``leg_layer_widths`` is updated in place.
+    """
+    if not leg.get("waypoint_roles"):
+        return
+    waypoint_layers: list[dict[str, Any] | None] = []
+    for wp_index, wp_role in enumerate(leg["waypoint_roles"]):
+        if wp_role is None:
+            waypoint_layers.append(None)
+            continue
+        wp_layer = resolve_layer(wp_role, f"{leg_where}.waypoints_um[{wp_index}]")
+        wp_width_um = effective_width(
+            wp_layer, leg.get("width_um"), net_width_um, f"{leg_where}.width_um"
+        )
+        label_layer(wp_layer, wp_role)
+        leg_layer_widths[wp_layer] = max(
+            leg_layer_widths.get(wp_layer, 0.0), wp_width_um
+        )
+        waypoint_layers.append({"layer": wp_layer, "width_um": wp_width_um})
+    resolved_leg["waypoint_layers"] = waypoint_layers
+
+
+def _drawn_leg_parts(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drawing payloads of a net's routed legs, one per plane drawn (#2930).
+
+    A leg that changes plane at a plane-bearing waypoint carries one payload
+    per plane in ``segments``; each is drawn, recorded for the route-vs-route
+    comparison and labelled exactly as an ordinary leg is.
+    """
+    return [
+        part for leg in legs if leg["routed"] for part in (leg.get("segments") or [leg])
+    ]
+
+
+def _fold_plane_waypoints_into_leg(
+    legs: list[dict[str, Any]] | None,
+    parsed_pins: list[dict[str, str]],
+    waypoints_um: list[tuple[float, float]] | None,
+    waypoint_roles: list[str | None],
+) -> tuple[list[dict[str, Any]] | None, list[tuple[float, float]] | None]:
+    """Express a plane-changing net-level ``waypoints_um`` as one named leg (#2930).
+
+    A 2-pin net whose waypoint path changes plane is its own single named leg:
+    the plane split is a per-leg construct (the leg is pinned to its planes,
+    never retried elsewhere), so the net-level path becomes exactly that one
+    leg. Returns ``(legs, waypoints_um)`` unchanged when no waypoint carries a
+    role.
+    """
+    if not waypoint_roles:
+        return legs, waypoints_um
+    leg = {
+        "from_pin": dict(parsed_pins[0]),
+        "to_pin": dict(parsed_pins[1]),
+        "waypoints_um": waypoints_um,
+        "waypoint_roles": waypoint_roles,
+        "layer_role": None,
+        "width_um": None,
+    }
+    return [leg], None
+
+
 def _parse_connectivity(
     raw_connectivity: Any, blocks: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -2220,22 +2298,9 @@ def _parse_connectivity(
                 "from_pin/to_pin leg"
             )
 
-        if net_waypoint_roles:
-            # A 2-pin net whose waypoint path changes plane (#2930) is its own
-            # single named leg: the plane split is a per-leg construct (the
-            # leg is pinned to its planes, never retried elsewhere), so the
-            # net-level path is expressed as exactly that one leg.
-            legs = [
-                {
-                    "from_pin": dict(parsed_pins[0]),
-                    "to_pin": dict(parsed_pins[1]),
-                    "waypoints_um": waypoints_um,
-                    "waypoint_roles": net_waypoint_roles,
-                    "layer_role": None,
-                    "width_um": None,
-                }
-            ]
-            waypoints_um = None
+        legs, waypoints_um = _fold_plane_waypoints_into_leg(
+            legs, parsed_pins, waypoints_um, net_waypoint_roles
+        )
 
         connectivity.append(
             {
@@ -3571,36 +3636,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 else:
                     resolved_leg["route_layer"] = None
                     resolved_leg["width_um"] = None
-                if leg.get("waypoint_roles"):
-                    # Plane-bearing waypoints (#2930): each role resolves
-                    # through the same path a leg's own `layer_role` does,
-                    # and carries the width the route draws at on that plane
-                    # (the leg's own `width_um`, else the net's, floored
-                    # against *that plane's* deck minimum). `route_bundle()`
-                    # splits the leg at these points into one segment per
-                    # plane, joined by a via ladder.
-                    waypoint_layers: list[dict[str, Any] | None] = []
-                    for wp_index, wp_role in enumerate(leg["waypoint_roles"]):
-                        if wp_role is None:
-                            waypoint_layers.append(None)
-                            continue
-                        wp_layer = _resolve_override_layer(
-                            wp_role, f"{leg_where}.waypoints_um[{wp_index}]"
-                        )
-                        wp_width_um = _effective_width_um(
-                            wp_layer,
-                            leg.get("width_um"),
-                            net_width_um,
-                            f"{leg_where}.width_um",
-                        )
-                        _override_label_layer(wp_layer, wp_role)
-                        leg_layer_widths[wp_layer] = max(
-                            leg_layer_widths.get(wp_layer, 0.0), wp_width_um
-                        )
-                        waypoint_layers.append(
-                            {"layer": wp_layer, "width_um": wp_width_um}
-                        )
-                    resolved_leg["waypoint_layers"] = waypoint_layers
+                # Plane-bearing waypoints (#2930), resolved per waypoint.
+                _resolve_waypoint_layers(
+                    resolved_leg,
+                    leg,
+                    leg_where,
+                    net_width_um,
+                    leg_layer_widths,
+                    resolve_layer=_resolve_override_layer,
+                    effective_width=_effective_width_um,
+                    label_layer=_override_label_layer,
+                )
                 resolved_legs.append(resolved_leg)
 
         # Effective drawn width per layer, for the route-vs-route footprint
@@ -4055,12 +4101,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # one drawing payload per plane in `segments`; each is drawn,
         # recorded for the route-vs-route comparison and labelled exactly as
         # an ordinary leg is (the net's single label lands on the very first).
-        drawn_legs = [
-            part
-            for leg in result["legs"]
-            if leg["routed"]
-            for part in (leg.get("segments") or [leg])
-        ]
+        drawn_legs = _drawn_leg_parts(result["legs"])
         for leg_index, leg in enumerate(drawn_legs):
             # route_layer (#1168): the effective layer this leg actually
             # drew on -- route_layer (the primary) unless the leg fell
