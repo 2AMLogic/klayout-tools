@@ -274,6 +274,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   `v(<node>)` they read) now count as element terminals, ending false
   `floating_node` warnings on behaviourally driven nodes. Additive; no
   `schema_version` bump.
+- **New `klt diff A B [--top CELL]`** (issue #3093): compares two GDSII/OASIS
+  streams for equal geometry, labels and hierarchy. Ignores stream timestamps,
+  element order and library name; never ignores coordinates, path widths, text,
+  instance transforms, dbu or cell names. Reports `stream_sha256` and
+  `canonical_hash` separately. Exit `0` equivalent, `3` layouts differ, `1`
+  unreadable file or unknown `--top`. Additive; new verb.
 - **sky130 `mos_array`/`diff_pair` draw the S/D implant** (issue #2934, phase
   A): `nsdm` (93/44) over n-type and `psdm` (94/20) over p-type unit devices,
   0.125 µm beyond the diffusion (`n/psdm.5a`, `sky130A.lydrc`), merged where
