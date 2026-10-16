@@ -102,7 +102,7 @@ def test_suffixed_sweep_args_are_parsed():
 def _control(spec, analysis=ANALYSIS):
     lowered = sim_noise.lower_measurements([spec], analysis)
     return sim._corner_deck_control_lines(
-        point=SimpleNamespace(supply_v={}),
+        point=SimpleNamespace(supply_v={}, params={}),
         analysis=analysis,
         measurements_spec=lowered,
         raw_path=None,
