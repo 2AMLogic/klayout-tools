@@ -2139,6 +2139,13 @@ def _run_sim_corners(
         backend, backend_from_host_default, reason_ok=engine == "ngspice"
     )
     request = _apply_pdk_match_gate(request, backend, require_pdk_match)
+    if sim_batch.require_pdk_match_requested(request):
+        # The gate is only checked above, against the backend as it stands
+        # now. Treat it as an explicit choice from here on so a later
+        # `_yield_host_default_backend` (single-unit run, resume, OSDI) can
+        # no longer step a gated run back to `local`, where it would pass
+        # ungated: those cases refuse by name or run on batch, gated.
+        backend_from_host_default = False
 
     hosts = (
         hosts if hosts is not None else (request.get("remote") or {}).get("hosts", 1)

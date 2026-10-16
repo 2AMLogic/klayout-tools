@@ -4019,6 +4019,48 @@ def test_require_pdk_match_end_to_end_flag_overrides_option(tmp_path, monkeypatc
     assert report["corners"][0]["status"] != "error"
 
 
+def _host_default_gate_request(tmp_path, **options):
+    """A gated single-corner request whose backend comes from the host default
+    (``KLT_SIM_BACKEND``), not from the request or a flag."""
+    request = _batch_request(tmp_path, options={"require_pdk_match": True, **options})
+    del request["backend"]
+    request["models"]["pdk_expect"] = {"stamp_sha256": _WORKER_SHA}
+    return str(_write_request(tmp_path, request))
+
+
+def test_require_pdk_match_single_corner_stays_on_host_default_batch(
+    tmp_path, monkeypatch
+):
+    # A single-unit run under a host default would normally step aside to
+    # `local`; under the gate that would pass ungated (no worker stamp).
+    monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {
+        "report.json": _sim_report(),
+        "worker_environment.json": _capture(
+            pdk={**json.loads(_capture())["pdk"], "stamp_sha256": _OTHER_SHA}
+        ),
+    }
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    _write_body(tmp_path)
+
+    report = sim.run_sim(_host_default_gate_request(tmp_path))
+
+    assert "worker_environment" in report["environment"]["remote"]
+    assert report["corners"][0]["diagnostics"][0]["code"] == "pdk_stamp_mismatch"
+    assert report["status"] != "pass"
+
+
+def test_require_pdk_match_resume_refused_under_host_default_batch(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("KLT_SIM_BACKEND", "batch")
+    _write_body(tmp_path)
+    with pytest.raises(sim.SimError, match="resume"):
+        sim.run_sim(_host_default_gate_request(tmp_path, resume=True))
+
+
 def test_require_pdk_match_checks_every_sharded_member(tmp_path, monkeypatch):
     _pin_client_version(monkeypatch)
     runner = _FakeRunner()
