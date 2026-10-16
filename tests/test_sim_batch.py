@@ -5704,8 +5704,8 @@ def test_poll_heartbeat_fires_on_state_change_and_coarse_interval(tmp_path, caps
     runner.queue("status.json", fake_completed(_status("running")))
     runner.queue("status.json", fake_completed(_status("interrupted")))
     runner.queue("status.json", fake_completed(_status("done")))
-    # started, then elapsed at each non-terminal poll.
-    clock = iter([0.0, 0.0, 30.0, 400.0, 430.0])
+    # started, then elapsed at each poll (the terminal one included).
+    clock = iter([0.0, 0.0, 30.0, 400.0, 430.0, 430.0])
 
     sb.poll_status(
         _config(tmp_path, poll_timeout_s=10000.0),
