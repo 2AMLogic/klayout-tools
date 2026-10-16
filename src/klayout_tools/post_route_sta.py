@@ -229,7 +229,7 @@ import json
 import os
 import re
 import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -783,15 +783,17 @@ class _ReportPaths:
         replacements = sorted(
             labels.items(), key=lambda item: len(item[0]), reverse=True
         )
+        spef_envelopes: dict[str, dict[str, Any]] = {}
+        for key in spef_map or {}:
+            # Map-form entries always carry a path, so never None.
+            spef_envelope = envelopes[f"spef_path.{key}"]
+            assert spef_envelope is not None
+            spef_envelopes[key] = spef_envelope
         return cls(
             def_path=envelopes["def_path"],
             verilog_path=envelopes["verilog_path"],
             spef_path=envelopes["spef_path"],
-            spef_paths=(
-                {key: envelopes[f"spef_path.{key}"] for key in spef_map}
-                if spef_map
-                else None
-            ),
+            spef_paths=spef_envelopes or None,
             replacements=replacements,
         )
 
@@ -1206,7 +1208,7 @@ def _run_corner_session(
 
 
 def _run_multi_corner(
-    corners: list[str | None],
+    corners: Sequence[str | None],
     *,
     cell_library: str,
     pdk_variant: str | None,
