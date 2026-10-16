@@ -276,7 +276,7 @@ def _lerp(a: float, b: float, w: float) -> float:
     return a if w == 0.0 else a + w * (b - a)
 
 
-def _event_freq(freqs: list[float], ev: _Event) -> float:
+def _event_freq(freqs: Sequence[float], ev: _Event) -> float:
     if ev.weight == 0.0:
         return freqs[ev.index]
     lo, hi = math.log10(freqs[ev.index]), math.log10(freqs[ev.index + 1])
@@ -499,6 +499,218 @@ def _add(items: list[str], reason: str) -> None:
         items.append(reason)
 
 
+def _seg_step(principal: Sequence[float | None], k: int) -> float | None:
+    """Wrapped phase step (degrees) across segment ``k``; ``None`` at a gap."""
+    a, b = principal[k], principal[k + 1]
+    if a is None or b is None:
+        return None
+    return _wrap_deg(b - a)
+
+
+class _Bracketing:
+    """Tracks whether every crossing sits on a resolved sample segment."""
+
+    def __init__(
+        self,
+        freqs: Sequence[float],
+        principal: Sequence[float | None],
+        min_samples_per_decade: float,
+        max_phase_step_deg: float,
+    ) -> None:
+        self.freqs = freqs
+        self.principal = principal
+        self.min_samples_per_decade = min_samples_per_decade
+        self.max_phase_step_deg = max_phase_step_deg
+        self.bracketed = True
+        self.densities: list[float] = []
+
+    def check(self, ev: _Event) -> None:
+        k = ev.index
+        segments = [k] if ev.weight != 0.0 else [s for s in (k - 1, k) if s >= 0]
+        for s in segments:
+            if s + 1 >= len(self.freqs):
+                continue
+            d = 1.0 / math.log10(self.freqs[s + 1] / self.freqs[s])
+            self.densities.append(d)
+            step = _seg_step(self.principal, s)
+            if d < self.min_samples_per_decade or (
+                step is not None and abs(step) > self.max_phase_step_deg
+            ):
+                self.bracketed = False
+
+
+def _phase_margin_entries(
+    freqs: Sequence[float],
+    principal: Sequence[float | None],
+    events: Sequence[_Event],
+    bracket: _Bracketing,
+) -> list[dict[str, Any]]:
+    """Phase margin at every 0 dB crossing."""
+    out: list[dict[str, Any]] = []
+    for ev in events:
+        bracket.check(ev)
+        base = principal[ev.index]
+        if ev.weight == 0.0:
+            phi = base
+        else:
+            step = _seg_step(principal, ev.index)
+            phi = None if step is None or base is None else base + ev.weight * step
+        assert phi is not None
+        out.append(
+            {
+                "freq_hz": _event_freq(freqs, ev),
+                "direction": ev.direction,
+                "phase_margin_deg": wrap_phase_margin_deg(phi),
+            }
+        )
+    return out
+
+
+_GainEvent = tuple[float, str, float, int]  # freq, direction, dB, sample index
+
+
+def _on_line_crossing(
+    k: int,
+    freqs: Sequence[float],
+    mag_db: Sequence[float | None],
+    principal: Sequence[float | None],
+    bracket: _Bracketing,
+) -> _GainEvent | None:
+    """-180 crossing landing exactly on sample ``k``, if it is a true crossing."""
+    if k == 0 or k + 1 >= len(freqs):
+        return None
+    left, right = _seg_step(principal, k - 1), _seg_step(principal, k)
+    if left is None or right is None or left * right <= 0.0:
+        # Tangent touch (or a gap): not a crossing.
+        return None
+    db = mag_db[k]
+    assert db is not None
+    bracket.check(_Event(k, 0.0, "rise"))
+    return (freqs[k], "up" if right > 0.0 else "down", db, k)
+
+
+def _segment_crossing(
+    k: int,
+    gk: float,
+    freqs: Sequence[float],
+    mag_db: Sequence[float | None],
+    g: Sequence[float | None],
+    principal: Sequence[float | None],
+    bracket: _Bracketing,
+) -> _GainEvent | None:
+    """-180 crossing strictly inside segment ``k``, if there is one."""
+    if k + 1 >= len(freqs):
+        return None
+    step = _seg_step(principal, k)
+    if step is None:
+        return None
+    end = gk + step if g[k + 1] != 0.0 else 0.0
+    if gk * end >= 0.0:
+        return None
+    w = -gk / step
+    bracket.check(_Event(k, w, "rise"))
+    da, db_ = mag_db[k], mag_db[k + 1]
+    assert da is not None and db_ is not None
+    lo, hi = math.log10(freqs[k]), math.log10(freqs[k + 1])
+    return (
+        10.0 ** _lerp(lo, hi, w),
+        "up" if step > 0.0 else "down",
+        _lerp(da, db_, w),
+        k,
+    )
+
+
+def _gain_crossings(
+    freqs: Sequence[float],
+    mag_db: Sequence[float | None],
+    g: Sequence[float | None],
+    principal: Sequence[float | None],
+    bracket: _Bracketing,
+) -> list[_GainEvent]:
+    """Every -180 degree crossing (mod 360, either direction)."""
+    events: list[_GainEvent] = []
+    for k, gk in enumerate(g):
+        if gk is None:
+            continue
+        if gk == 0.0:
+            ev = _on_line_crossing(k, freqs, mag_db, principal, bracket)
+        else:
+            ev = _segment_crossing(k, gk, freqs, mag_db, g, principal, bracket)
+        if ev is not None:
+            events.append(ev)
+    return events
+
+
+def _encirclement_net(gain_events: Sequence[_GainEvent]) -> int:
+    """Net clockwise crossings of the ray left of -1.
+
+    Phase falling through -180 sends Im(T) from - to + left of -1, which is
+    clockwise around -1; rising is counter-clockwise.
+    """
+    net = 0
+    for _f, direction, db, _k in gain_events:
+        if db > 0.0:
+            net += 1 if direction == "down" else -1
+    return net
+
+
+def _fill_extrema(rep: MarginReport, mag_plateaus: bool, phase_plateaus: bool) -> None:
+    """Set the minimum margins, or the reason each one is unavailable."""
+    if rep.phase_margins:
+        rep.phase_margin_min_deg = min(p["phase_margin_deg"] for p in rep.phase_margins)
+    elif not mag_plateaus:
+        rep.reasons["phase_margin_min_deg"] = REASON_NO_ZERO_DB_CROSSING
+    else:
+        rep.reasons["phase_margin_min_deg"] = REASON_ZERO_DB_PLATEAU
+    if rep.gain_margins:
+        rep.gain_margin_min_db = min(m["gain_margin_db"] for m in rep.gain_margins)
+    else:
+        rep.reasons["gain_margin_min_db"] = (
+            REASON_PHASE_PLATEAU if phase_plateaus else REASON_NO_PHASE_CROSSING_ANY
+        )
+
+
+def _fill_band(
+    rep: MarginReport,
+    freqs: Sequence[float],
+    ratios: Sequence[complex | None],
+    mag_db: Sequence[float | None],
+    g: Sequence[float | None],
+    bracket: _Bracketing,
+) -> None:
+    """Band validity record plus the ambiguity reasons it implies."""
+    amb = rep.ambiguity
+    first = next((i for i, t in enumerate(ratios) if t is not None), None)
+    last = ratios[-1]
+    top_ok = last is not None and abs(last) < 1.0
+    densities = bracket.densities
+    rep.band = {
+        "f_min_hz": freqs[0],
+        "f_max_hz": freqs[-1],
+        "mag_below_unity_at_top": top_ok,
+        "low_freq_mag_db": None if first is None else mag_db[first],
+        "min_samples_per_decade_near_crossing": min(densities) if densities else None,
+        "crossings_bracketed": bracket.bracketed,
+    }
+    if first is None:
+        _add(amb, REASON_NO_VALID_SAMPLES)
+    if any(t is None for t in ratios):
+        _add(amb, REASON_INVALID_SAMPLES)
+    if not top_ok:
+        _add(amb, REASON_TOP_NOT_BELOW_UNITY)
+    if not bracket.bracketed:
+        _add(amb, REASON_CROSSING_NOT_BRACKETED)
+    # The low-frequency start must not sit on the negative real axis beyond -1
+    # (a type-2+ integrator loop, whose indentation arc crosses that ray; not
+    # counted here).
+    if (
+        first is not None
+        and (mag_db[first] or 0.0) > 0.0
+        and abs(g[first] or 180.0) < 45.0
+    ):
+        _add(amb, REASON_LOW_FREQUENCY_ON_AXIS)
+
+
 def analyze_margins(
     freq_hz: Sequence[float],
     numerator: Sequence[complex],
@@ -519,25 +731,14 @@ def analyze_margins(
     """
     freqs, nums, dens = _check_arrays(freq_hz, numerator, denominator)
     ratios = [_ratio(n_, d_) for n_, d_ in zip(nums, dens, strict=False)]
-    invalid = [i for i, t in enumerate(ratios) if t is None]
     mag_db: list[float | None] = [
         None if t is None else 20.0 * math.log10(abs(t)) for t in ratios
     ]
     principal: list[float | None] = [
         None if t is None else math.degrees(cmath.phase(t)) for t in ratios
     ]
-    n = len(freqs)
     rep = MarginReport()
-    amb = rep.ambiguity
-
-    def seg_step(k: int) -> float | None:
-        a, b = principal[k], principal[k + 1]
-        if a is None or b is None:
-            return None
-        return _wrap_deg(b - a)
-
-    def seg_density(k: int) -> float:
-        return 1.0 / math.log10(freqs[k + 1] / freqs[k])
+    bracket = _Bracketing(freqs, principal, min_samples_per_decade, max_phase_step_deg)
 
     # Phase relative to the -180 line, locally continuous across each segment.
     # Offsets within 1e-9 degree of the line are snapped onto it: ``atan2``
@@ -550,152 +751,37 @@ def analyze_margins(
     ]
 
     # --- 0 dB crossings -> phase margins ---------------------------------
-    mag_plateaus = _plateaus(mag_db, 0.0)
+    mag_plateaus = bool(_plateaus(mag_db, 0.0))
     if mag_plateaus:
-        _add(amb, REASON_ZERO_DB_PLATEAU)
-    unity_events = [] if mag_plateaus else _level_events(mag_db, 0.0)
-    bracketed = True
-    densities: list[float] = []
-
-    def check_bracket(ev: _Event) -> None:
-        nonlocal bracketed
-        k = ev.index
-        segments = [k] if ev.weight != 0.0 else [s for s in (k - 1, k) if s >= 0]
-        for s in segments:
-            if s + 1 >= n:
-                continue
-            d = seg_density(s)
-            densities.append(d)
-            step = seg_step(s)
-            if d < min_samples_per_decade or (
-                step is not None and abs(step) > max_phase_step_deg
-            ):
-                bracketed = False
-
-    for ev in unity_events:
-        check_bracket(ev)
-        f = _event_freq(freqs, ev)
-        if ev.weight == 0.0:
-            phi = principal[ev.index]
-        else:
-            step = seg_step(ev.index)
-            base = principal[ev.index]
-            phi = None if step is None or base is None else base + ev.weight * step
-        assert phi is not None
-        rep.phase_margins.append(
-            {
-                "freq_hz": f,
-                "direction": ev.direction,
-                "phase_margin_deg": wrap_phase_margin_deg(phi),
-            }
+        _add(rep.ambiguity, REASON_ZERO_DB_PLATEAU)
+    else:
+        unity_events = _level_events(mag_db, 0.0)
+        rep.phase_margins = _phase_margin_entries(
+            freqs, principal, unity_events, bracket
         )
 
     # --- -180 degree crossings -> gain margins + encirclement -------------
-    gain_events: list[tuple[float, str, float, float]] = []  # f, dir, db, net
-    phase_plateaus = _plateaus(g, 0.0)
+    phase_plateaus = bool(_plateaus(g, 0.0))
+    gain_events: list[_GainEvent] = []
     if phase_plateaus:
-        _add(amb, REASON_PHASE_PLATEAU)
-    if not phase_plateaus:
-        for k in range(n):
-            gk = g[k]
-            if gk is None:
-                continue
-            if gk == 0.0:
-                if k == 0 or k + 1 >= n:
-                    continue
-                left, right = seg_step(k - 1), seg_step(k)
-                if left is None or right is None or left * right <= 0.0:
-                    # Tangent touch (or a gap): not a crossing.
-                    continue
-                d_up = right > 0.0
-                db = mag_db[k]
-                assert db is not None
-                gain_events.append((freqs[k], "up" if d_up else "down", db, k))
-                bracket_ev = _Event(k, 0.0, "rise")
-                check_bracket(bracket_ev)
-                continue
-            if k + 1 >= n:
-                continue
-            step = seg_step(k)
-            if step is None:
-                continue
-            gn = g[k + 1]
-            end = gk + step if gn != 0.0 else 0.0
-            if gk * end < 0.0:
-                w = -gk / step
-                bracket_ev = _Event(k, w, "rise")
-                check_bracket(bracket_ev)
-                da, db_ = mag_db[k], mag_db[k + 1]
-                assert da is not None and db_ is not None
-                lo, hi = math.log10(freqs[k]), math.log10(freqs[k + 1])
-                gain_events.append(
-                    (
-                        10.0 ** _lerp(lo, hi, w),
-                        "up" if step > 0.0 else "down",
-                        _lerp(da, db_, w),
-                        k,
-                    )
-                )
-
-    # Encirclement bookkeeping: crossings of the ray left of -1.
-    net = 0
-    for _f, direction, db, _k in gain_events:
-        gm = {"freq_hz": _f, "direction": direction, "gain_margin_db": -db}
-        rep.gain_margins.append(gm)
-        if db > 0.0:
-            # Phase falling through -180 sends Im(T) from - to + left of -1,
-            # which is clockwise around -1; rising is counter-clockwise.
-            net += 1 if direction == "down" else -1
-
-    if rep.phase_margins:
-        rep.phase_margin_min_deg = min(p["phase_margin_deg"] for p in rep.phase_margins)
-    elif not mag_plateaus:
-        rep.reasons["phase_margin_min_deg"] = REASON_NO_ZERO_DB_CROSSING
+        _add(rep.ambiguity, REASON_PHASE_PLATEAU)
     else:
-        rep.reasons["phase_margin_min_deg"] = REASON_ZERO_DB_PLATEAU
-    if rep.gain_margins:
-        rep.gain_margin_min_db = min(m["gain_margin_db"] for m in rep.gain_margins)
-    else:
-        rep.reasons["gain_margin_min_db"] = (
-            REASON_PHASE_PLATEAU if phase_plateaus else REASON_NO_PHASE_CROSSING_ANY
-        )
+        gain_events = _gain_crossings(freqs, mag_db, g, principal, bracket)
+    rep.gain_margins = [
+        {"freq_hz": f, "direction": d, "gain_margin_db": -db}
+        for f, d, db, _k in gain_events
+    ]
 
-    # --- band validity -----------------------------------------------------
-    first = next((i for i, t in enumerate(ratios) if t is not None), None)
-    last = ratios[-1]
-    top_ok = last is not None and abs(last) < 1.0
-    rep.band = {
-        "f_min_hz": freqs[0],
-        "f_max_hz": freqs[-1],
-        "mag_below_unity_at_top": top_ok,
-        "low_freq_mag_db": None if first is None else mag_db[first],
-        "min_samples_per_decade_near_crossing": min(densities) if densities else None,
-        "crossings_bracketed": bracketed,
-    }
-    if first is None:
-        _add(amb, REASON_NO_VALID_SAMPLES)
-    if invalid:
-        _add(amb, REASON_INVALID_SAMPLES)
-    if not top_ok:
-        _add(amb, REASON_TOP_NOT_BELOW_UNITY)
-    if not bracketed:
-        _add(amb, REASON_CROSSING_NOT_BRACKETED)
+    _fill_extrema(rep, mag_plateaus, phase_plateaus)
+    _fill_band(rep, freqs, ratios, mag_db, g, bracket)
 
     # Encirclement is decidable only when the contour closes cleanly: |T| < 1
     # at the top, no gaps, no plateaus, and the low-frequency start is not on
-    # the negative real axis beyond -1 (a type-2+ integrator loop, whose
-    # indentation arc crosses that ray; not counted here).
-    low_on_axis = (
-        first is not None
-        and (mag_db[first] or 0.0) > 0.0
-        and abs(g[first] or 180.0) < 45.0
-    )
-    if low_on_axis:
-        _add(amb, REASON_LOW_FREQUENCY_ON_AXIS)
-    if amb:
-        rep.reasons["encirclement"] = amb[0]
+    # the negative real axis beyond -1.
+    if rep.ambiguity:
+        rep.reasons["encirclement"] = rep.ambiguity[0]
     else:
-        rep.encirclements = 2 * net
+        rep.encirclements = 2 * _encirclement_net(gain_events)
     return rep
 
 
