@@ -571,7 +571,7 @@ def test_cap_mim_c_disagrees_with_native_deck_by_a_documented_refinement(
     (`topmin1_metal` = `Metal5`), which would not recognise a `Metal4`
     bottom plate as the MiM stack's `topmin1_metal` at all."""
     (capacitor,) = EXTRACTION_DECK.capacitors
-    assert capacitor.provenance.rule_id == "cap_mim_2f0_m4m5_noshield"
+    assert capacitor.provenance.rule_id == "cap_mim_2f0fF"
 
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
@@ -717,7 +717,7 @@ _CROSS_CHECK_VERDICT_RULE_IDS = frozenset(
         "gf180mcu_fd_pr__rm2",  # agrees
         "gf180mcu_fd_pr__rm3",  # agrees
         "gf180mcu_fd_pr__tm9k",  # agrees (needs extra_rd={"metal_level": "5LM"})
-        "cap_mim_2f0_m4m5_noshield",  # documented disagreement (#512)
+        "cap_mim_2f0fF",  # documented disagreement (#512)
         "BJT.3",  # deferred (investigated)
         "gf180mcu_fd_pr__diode_nd2ps_06v0",  # deferred (investigated)
         "gf180mcu_fd_pr__diode_pd2nw_06v0",  # deferred (investigated)

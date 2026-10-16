@@ -617,6 +617,9 @@ def run_sta(
     input_delays, output_delays = _validate_port_delay_maps(
         request["constraints"], clock_port
     )
+    input_transition_ns, input_transitions = _validate_input_transitions(
+        request["constraints"], clock_port
+    )
     report_ports = _validate_report_ports(request["constraints"], clock_port)
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
         request["constraints"], has_verilog
@@ -683,6 +686,8 @@ def run_sta(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            input_transition_ns=input_transition_ns,
+            input_transitions=input_transitions,
             report_ports=report_ports,
             spef_path=spef_path,
             wire_load_model=wire_load_model,
@@ -814,6 +819,8 @@ def _dispatch_sta(
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
     output_delays: dict[str, dict[str, float]] | None,
+    input_transition_ns: float | None,
+    input_transitions: dict[str, float] | None,
     report_ports: list[str] | None,
     spef_path: str | None,
     wire_load_model: str | None,
@@ -848,6 +855,8 @@ def _dispatch_sta(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            input_transition_ns=input_transition_ns,
+            input_transitions=input_transitions,
             report_ports=report_ports,
             spef_path=spef_path,
             wire_load_model=wire_load_model,
@@ -874,6 +883,8 @@ def _dispatch_sta(
         output_delay_ns=output_delay_ns,
         input_delays=input_delays,
         output_delays=output_delays,
+        input_transition_ns=input_transition_ns,
+        input_transitions=input_transitions,
         report_ports=report_ports,
         spef_path=spef_path,
         wire_load_model=wire_load_model,
@@ -992,6 +1003,8 @@ def _run_corner_session(
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
     output_delays: dict[str, dict[str, float]] | None,
+    input_transition_ns: float | None,
+    input_transitions: dict[str, float] | None,
     report_ports: list[str] | None,
     spef_path: str | None,
     wire_load_model: str | None,
@@ -1062,6 +1075,8 @@ def _run_corner_session(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            input_transition_ns=input_transition_ns,
+            input_transitions=input_transitions,
             report_ports=report_ports,
             propagated_clock=propagated_clock,
         )
@@ -1082,6 +1097,8 @@ def _run_corner_session(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            input_transition_ns=input_transition_ns,
+            input_transitions=input_transitions,
             report_ports=report_ports,
         )
     _write_script(script_path, lines)
@@ -1193,6 +1210,8 @@ def _run_multi_corner(
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
     output_delays: dict[str, dict[str, float]] | None,
+    input_transition_ns: float | None,
+    input_transitions: dict[str, float] | None,
     report_ports: list[str] | None,
     spef_path: str | None,
     wire_load_model: str | None,
@@ -1255,6 +1274,8 @@ def _run_multi_corner(
             output_delay_ns=output_delay_ns,
             input_delays=input_delays,
             output_delays=output_delays,
+            input_transition_ns=input_transition_ns,
+            input_transitions=input_transitions,
             report_ports=report_ports,
             spef_path=spef_path,
             wire_load_model=wire_load_model,
@@ -1546,6 +1567,53 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
         raise PostRouteStaError(
             f"request.constraints.{which}_delay_ns must be a non-negative number"
         )
+    return float(value)
+
+
+def _validate_input_transitions(
+    constraints: dict[str, Any], clock_port: str
+) -> tuple[float | None, dict[str, float] | None]:
+    """``constraints.input_transition_ns`` / ``.input_transitions`` (issue
+    #3227): the default input slew (ns) for non-clock inputs, and a literal
+    port/bus-bit -> slew map overriding it. Returns ``(input_transition_ns,
+    input_transitions)``, each ``None`` when omitted (the map also when
+    empty), which leaves the generated Tcl byte-identical. Values must be
+    finite, non-boolean numbers ``>= 0``; keys follow the same literal-port
+    rules as the I/O delay maps (clock port rejected here; existence and
+    direction are checked in the engine session by :func:`_port_check_lines`).
+    """
+    scalar = _validate_transition_value(
+        constraints.get("input_transition_ns"),
+        "request.constraints.input_transition_ns",
+    )
+    field = "request.constraints.input_transitions"
+    value = constraints.get("input_transitions")
+    if value is None:
+        return scalar, None
+    if not isinstance(value, dict):
+        raise PostRouteStaError(
+            f"{field} must be a JSON object mapping port names to numbers"
+        )
+    parsed: dict[str, float] = {}
+    for port, entry in value.items():
+        _check_port_delay_key(field, "input", port, clock_port)
+        if entry is None:
+            raise PostRouteStaError(
+                f"{field}[{port!r}] must be a finite non-negative number"
+            )
+        validated = _validate_transition_value(entry, f"{field}[{port!r}]")
+        assert validated is not None  # entry is not None, checked above
+        parsed[port] = validated
+    return scalar, parsed or None
+
+
+def _validate_transition_value(value: Any, field: str) -> float | None:
+    """One input-transition value: ``None`` when omitted, else a finite,
+    non-boolean number ``>= 0`` (``0`` is an ideal edge)."""
+    if value is None:
+        return None
+    if not _is_finite_number(value) or value < 0:
+        raise PostRouteStaError(f"{field} must be a finite non-negative number")
     return float(value)
 
 
@@ -2022,29 +2090,40 @@ def _request_io_delay_lines(
     output_delay_ns: float | None,
     input_delays: dict[str, dict[str, float]] | None,
     output_delays: dict[str, dict[str, float]] | None,
+    input_transition_ns: float | None = None,
+    input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
 ) -> list[str]:
-    """All I/O-delay Tcl for one session. With no per-port map and no
-    ``report_ports`` this is exactly :func:`_io_delay_lines` (the
-    scalar-only contract, byte-for-byte the same Tcl as before issue #2740);
-    otherwise :func:`_port_check_lines` (which also verifies every
-    ``report_ports`` name, issue #3042) followed by the delay Tcl."""
-    if not input_delays and not output_delays:
-        if not report_ports:
-            return _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
-        return _port_check_lines(None, None, report_ports) + _io_delay_lines(
-            clock_port, input_delay_ns, output_delay_ns
+    """All I/O-timing Tcl for one session. With no per-port map, no
+    ``input_transitions`` and no ``report_ports`` this is exactly
+    :func:`_io_delay_lines` (the scalar-only contract, byte-for-byte the same
+    Tcl as before issue #2740); otherwise :func:`_port_check_lines` (once,
+    covering the delay maps, the issue #3227 ``input_transitions`` map and
+    the issue #3042 ``report_ports`` names) followed by the delay Tcl --
+    :func:`_port_io_delay_lines` when a delay map is present, else
+    :func:`_io_delay_lines`. :func:`_input_transition_lines` is then
+    appended, and adds nothing when no transition field was given."""
+    if input_delays or output_delays:
+        lines = _port_check_lines(
+            input_delays, output_delays, input_transitions, report_ports
+        ) + _port_io_delay_lines(
+            clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
         )
-    return _port_check_lines(
-        input_delays, output_delays, report_ports
-    ) + _port_io_delay_lines(
-        clock_port, input_delay_ns, output_delay_ns, input_delays, output_delays
+    else:
+        lines = _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
+        if input_transitions or report_ports:
+            lines = (
+                _port_check_lines(None, None, input_transitions, report_ports) + lines
+            )
+    return lines + _input_transition_lines(
+        clock_port, input_transition_ns, input_transitions
     )
 
 
 def _port_check_lines(
     input_delays: dict[str, dict[str, float]] | None,
     output_delays: dict[str, dict[str, float]] | None,
+    input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
 ) -> list[str]:
     """Verify every per-port map key against the loaded design before any
@@ -2054,14 +2133,16 @@ def _port_check_lines(
     the map allows. Failures are printed between
     :data:`_PORT_CHECK_BEGIN`/:data:`_PORT_CHECK_END` and the session exits
     with :data:`_PORT_CHECK_EXIT_CODE`, so a bad key is an actionable error
-    -- never a request that silently constrains nothing.
-
-    ``report_ports`` (issue #3042) are checked the same way on a third
-    ``report`` side that accepts a port of any direction."""
+    -- never a request that silently constrains nothing. The
+    ``input_transitions`` map (issue #3227) is checked in the same block
+    under its own ``input_transition`` side tag, and ``report_ports``
+    (issue #3042) on a ``report`` side that accepts a port of any
+    direction."""
     entries: list[str] = []
     for side, mapping, allowed in (
         ("input", input_delays, _INPUT_PORT_DIRECTIONS),
         ("output", output_delays, _OUTPUT_PORT_DIRECTIONS),
+        ("input_transition", input_transitions, _INPUT_PORT_DIRECTIONS),
         ("report", dict.fromkeys(report_ports or ()), _ANY_PORT_DIRECTIONS),
     ):
         for port in mapping or {}:
@@ -2164,6 +2245,44 @@ def _port_io_delay_lines(
                         f"{command} {flag} {bounds[bound]!r} -clock {clock_port} "
                         f"[dict get $klt_ports_by_name {_tcl_literal(port)}]"
                     )
+    return lines
+
+
+def _input_transition_lines(
+    clock_port: str,
+    input_transition_ns: float | None,
+    input_transitions: dict[str, float] | None,
+) -> list[str]:
+    """``set_input_transition`` for ``constraints.input_transition_ns`` /
+    ``.input_transitions`` (issue #3227). The scalar is the default for every
+    non-clock input **absent** from the map (bus bits are excluded
+    individually, as in :func:`_port_io_delay_lines`); each mapped port then
+    gets exactly its own value. Omitted fields emit nothing. The scalar
+    compares with ``is not None``: ``0`` is a valid transition."""
+    mapping = input_transitions or {}
+    lines: list[str] = []
+    if input_transition_ns is not None:
+        mapped = " ".join(_tcl_literal(port) for port in mapping)
+        lines += [
+            f"set klt_transition_clock_port [get_ports {clock_port}]",
+            "set klt_transition_candidates "
+            "[lsearch -inline -all -not -exact [all_inputs] "
+            "$klt_transition_clock_port]",
+            f"set klt_transition_mapped [list {mapped}]",
+            "set klt_transition_default_ports {}",
+            "foreach klt_port $klt_transition_candidates {",
+            "    if {[lsearch -exact $klt_transition_mapped "
+            "[get_full_name $klt_port]] < 0} {",
+            "        lappend klt_transition_default_ports $klt_port",
+            "    }",
+            "}",
+            "if {[llength $klt_transition_default_ports] > 0} {",
+            f"    set_input_transition {input_transition_ns!r} "
+            "$klt_transition_default_ports",
+            "}",
+        ]
+    for port, value in mapping.items():
+        lines.append(f"set_input_transition {value!r} [get_ports {_tcl_literal(port)}]")
     return lines
 
 
@@ -2429,6 +2548,8 @@ def _sta_script_lines(
     output_delay_ns: float | None = None,
     input_delays: dict[str, dict[str, float]] | None = None,
     output_delays: dict[str, dict[str, float]] | None = None,
+    input_transition_ns: float | None = None,
+    input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
     propagated_clock: bool = False,
 ) -> list[str]:
@@ -2474,6 +2595,8 @@ def _sta_script_lines(
         output_delay_ns,
         input_delays,
         output_delays,
+        input_transition_ns,
+        input_transitions,
         report_ports,
     )
     if spef_path is not None:
@@ -2517,6 +2640,8 @@ def _sta_netlist_script_lines(
     output_delay_ns: float | None = None,
     input_delays: dict[str, dict[str, float]] | None = None,
     output_delays: dict[str, dict[str, float]] | None = None,
+    input_transition_ns: float | None = None,
+    input_transitions: dict[str, float] | None = None,
     report_ports: list[str] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
@@ -2567,6 +2692,8 @@ def _sta_netlist_script_lines(
         output_delay_ns,
         input_delays,
         output_delays,
+        input_transition_ns,
+        input_transitions,
         report_ports,
     )
     if wire_load_mode is not None:
@@ -2934,11 +3061,13 @@ def _parse_port_check_errors(stdout: str) -> list[tuple[str, str, str]]:
 def _port_check_error_message(rows: list[tuple[str, str, str]]) -> str:
     details = []
     for side, port, problem in rows:
-        field = (
-            f"constraints.report_ports[{port!r}]"
-            if side == "report"
-            else f"constraints.{side}_delays[{port!r}]"
-        )
+        if side == "input_transition":
+            field = f"constraints.input_transitions[{port!r}]"
+            side = "input"
+        elif side == "report":
+            field = f"constraints.report_ports[{port!r}]"
+        else:
+            field = f"constraints.{side}_delays[{port!r}]"
         if problem == "not_found":
             details.append(f"{field}: no port with exactly this name in the design")
         elif problem.startswith("matches_"):
