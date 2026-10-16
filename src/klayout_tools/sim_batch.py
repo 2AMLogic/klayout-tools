@@ -1288,7 +1288,7 @@ def _build_batch_job_spec(
 
     ``inputs`` carries the netlist's resolved ``.include``/``.inc`` closure
     alongside the netlist itself (issue #2485), via the *same*
-    :func:`sim_staging.stage_sim_netlist` call
+    :func:`sim_staging.stage_sim_job` call
     :func:`sim_remote._build_remote_job_description` makes -- every staged
     file lands flat under ``inputs/`` (hence side by side in
     ``$EDA_INPUT_DIR``, the same property :data:`BATCH_NETLIST_FILENAME`

@@ -14,7 +14,7 @@ failed *silently* -- ngspice's ``Could not find include file`` only surfaced
 as ``unavailable_measurement`` rows that read like a real regression.
 
 This module is the single place that gap is closed, shared by both
-backends (:func:`stage_sim_netlist`) so their independently-implemented job
+backends (:func:`stage_sim_job`) so their independently-implemented job
 builders cannot drift apart on include handling:
 
 - **Stage what can be staged.** Every ``.include``/``.inc`` target that
@@ -161,7 +161,7 @@ class IncludeStagingError(Exception):
     :data:`MAX_STAGED_INCLUDES`/:data:`MAX_STAGED_BYTES`.
 
     Both backends re-raise this as ``sim.SimError`` (see
-    :func:`stage_sim_netlist`), so it surfaces as `klt sim`'s documented
+    :func:`stage_sim_job`), so it surfaces as `klt sim`'s documented
     "could not run" exit 1 with a named message -- never as a job that is
     submitted, billed, and comes back as undiagnosable
     ``unavailable_measurement`` rows.
@@ -447,35 +447,6 @@ def netlist_identity(
     return f"sha256:{digest.hexdigest()}", None
 
 
-def stage_sim_netlist(
-    request: dict[str, Any],
-    netlist_path: str,
-    *,
-    netlist_staged_name: str,
-    reserved_names: Sequence[str] = (),
-    backend: str,
-) -> StagedNetlist:
-    """:func:`stage_netlist` with `klt sim`'s own conventions applied: PDK
-    roots derived from the forwarded request (:func:`host_resolved_roots`)
-    and :class:`IncludeStagingError` re-raised as ``sim.SimError`` naming
-    the backend.
-
-    Netlist-only: model inputs are staged by :func:`stage_sim_job`, which
-    is what both off-host job builders call.
-    """
-    from .sim import SimError
-
-    try:
-        return stage_netlist(
-            netlist_path,
-            netlist_staged_name=netlist_staged_name,
-            reserved_names=reserved_names,
-            roots=host_resolved_roots(request),
-        )
-    except IncludeStagingError as exc:
-        raise SimError(f"backend {backend!r}: {exc}") from exc
-
-
 def stage_model_inputs_requested(request: dict[str, Any]) -> bool:
     """Validate and return ``request.options.stage_model_inputs`` (issue
     #2668): absent means ``False``; anything but a JSON boolean is a
@@ -504,7 +475,7 @@ def stage_sim_job(
     backend: str,
 ) -> StagedSimJob:
     """Stage one off-host `klt sim` job: the netlist's include closure
-    (always, exactly as :func:`stage_sim_netlist`) and -- only when
+    (always) and -- only when
     ``request.options.stage_model_inputs`` is ``true`` -- the request's own
     model inputs, returning the files to upload and the worker request to
     serialize beside them (issue #2668).
