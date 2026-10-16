@@ -6300,3 +6300,200 @@ def test_batch_and_remote_requests_carry_supply_waveforms(tmp_path):
     assert [p["supply_waveforms"] for p in shard["_explicit_points"]] == [["vdd"]] * 2
     back = sim._corner_points_from_wire(shard["_explicit_points"])
     assert all(p.supply_waveforms == ("vdd",) for p in back)
+
+
+# --------------------------------------------------------------------------- #
+# Sharded resume: batch-shards.json + re-attach (issue #3300)
+# --------------------------------------------------------------------------- #
+
+
+def _shard_resume_fixture(tmp_path, monkeypatch):
+    """A fake fleet whose every job reports the units of *its own* shard, and
+    a `fleet(**overrides)` callable around `_run_batch_fleet` (4 units over 2
+    hosts) sharing one artifacts dir."""
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+
+    def _register_shard_report(argv, timeout_s):
+        if "inputs/request.json" in " ".join(argv):
+            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
+            document = json.loads(Path(source).read_text())
+            runner.outputs_by_job[job_id_of(destination)] = {
+                "report.json": _sim_report(
+                    corner_ids=tuple(
+                        f"tt_1.800_{int(point['temperature_c'])}"
+                        for point in document["_explicit_points"]
+                    )
+                )
+            }
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _register_shard_report)
+    artifacts = tmp_path / "artifacts"
+
+    def fleet(**overrides):
+        kwargs = {
+            "corner_points": _corner_points(4),
+            "netlist_path": str(_write_body(tmp_path)),
+            "timeout_s": 30.0,
+            "keep_artifacts": False,
+            "want_waveforms": False,
+            "artifacts_dir": str(artifacts),
+            "request": {
+                "netlist": "body.spice",
+                "batch": {
+                    "bucket": FAKE_BUCKET,
+                    "provision_script_path": str(_provision_script(tmp_path)),
+                    "poll_interval_s": 0.0,
+                },
+            },
+            "hosts": 2,
+            "measurements_spec": _measurements_spec(),
+            "shard_fingerprint": "fp-1",
+        }
+        kwargs.update(overrides)
+        return sb._run_batch_fleet(**kwargs)
+
+    return runner, fleet, artifacts / sb.BATCH_SHARDS_FILENAME
+
+
+def _launches(runner):
+    return runner.argvs_matching("launch", "--apply")
+
+
+def test_sharded_run_writes_the_shard_map_and_flags_fresh_shards(tmp_path, monkeypatch):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    _, _, environment = fleet()
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["fingerprint"] == "fp-1"
+    assert manifest["hosts"] == 2
+    assert [entry["index"] for entry in manifest["shards"]] == [0, 1]
+    submitted = {argv[3] for argv in _launches(runner)}
+    assert {entry["job_id"] for entry in manifest["shards"]} == submitted
+    assert [entry["resumed"] for entry in environment["fleet"]] == [False, False]
+
+
+def test_manifest_entry_is_written_before_the_shard_is_submitted(tmp_path, monkeypatch):
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    seen: list[str] = []
+
+    def _killed_submit(config, job_id, spec, *, runner=None):
+        seen.append(job_id)
+        assert job_id in manifest_path.read_text()
+        raise sb.BatchError("client died")
+
+    monkeypatch.setattr(sb, "submit_job", _killed_submit)
+    fleet()  # lost shards are reported, not raised
+    assert len(seen) == 2
+
+
+def test_resume_reattaches_to_every_recorded_shard_without_resubmitting(
+    tmp_path, monkeypatch
+):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    first, _, _ = fleet()
+    jobs = {
+        e["index"]: e["job_id"] for e in json.loads(manifest_path.read_text())["shards"]
+    }
+    launches_before = len(_launches(runner))
+    uploads_before = len(runner.argvs_matching("inputs/request.json"))
+
+    corners, _, environment = fleet(resume=True)
+
+    assert len(_launches(runner)) == launches_before
+    assert len(runner.argvs_matching("inputs/request.json")) == uploads_before
+    assert [e["resumed"] for e in environment["fleet"]] == [True, True]
+    assert [e["job_id"] for e in environment["fleet"]] == [jobs[0], jobs[1]]
+    assert [c["corner_id"] for c in corners] == [c["corner_id"] for c in first]
+
+
+def test_resume_submits_only_the_shard_whose_job_is_gone(tmp_path, monkeypatch):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    manifest = json.loads(manifest_path.read_text())
+    gone = manifest["shards"][1]["job_id"]
+    launches_before = len(_launches(runner))
+    runner.queue(f"{gone}/job.json", fake_completed(returncode=1))
+
+    _, _, environment = fleet(resume=True)
+
+    assert len(_launches(runner)) == launches_before + 1
+    assert [e["resumed"] for e in environment["fleet"]] == [True, False]
+    rewritten = json.loads(manifest_path.read_text())
+    assert rewritten["shards"][0] == manifest["shards"][0]
+    assert rewritten["shards"][1]["job_id"] != gone
+
+
+def test_resume_resubmits_a_shard_whose_job_terminally_failed(tmp_path, monkeypatch):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    failed = json.loads(manifest_path.read_text())["shards"][0]["job_id"]
+    launches_before = len(_launches(runner))
+    runner.queue(
+        f"{failed}/status.json", fake_completed(_status("failed", exit_code="1"))
+    )
+
+    _, _, environment = fleet(resume=True)
+
+    assert len(_launches(runner)) == launches_before + 1
+    assert [e["resumed"] for e in environment["fleet"]] == [False, True]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"shard_fingerprint": "fp-2"}, {"hosts": 4}],
+    ids=["request-changed", "hosts-changed"],
+)
+def test_resume_against_another_requests_shard_map_is_refused(
+    tmp_path, monkeypatch, overrides
+):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    calls_before = len(runner.calls)
+    before = manifest_path.read_text()
+    with pytest.raises(sim.SimError) as excinfo:
+        fleet(resume=True, **overrides)
+    assert excinfo.value.code == sb.BATCH_SHARD_MANIFEST_CODE
+    assert str(manifest_path) in str(excinfo.value)
+    assert len(runner.calls) == calls_before  # no S3 traffic
+    assert manifest_path.read_text() == before
+
+
+def test_resume_with_a_corrupt_shard_map_is_refused(tmp_path, monkeypatch):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text('{"schema_version": 1, "fingerp')
+    with pytest.raises(sim.SimError) as excinfo:
+        fleet(resume=True)
+    assert excinfo.value.code == sb.BATCH_SHARD_MANIFEST_CODE
+    assert runner.calls == []
+
+
+def test_without_resume_an_existing_shard_map_is_overwritten(tmp_path, monkeypatch):
+    runner, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+    old_jobs = {e["job_id"] for e in json.loads(manifest_path.read_text())["shards"]}
+    _, _, environment = fleet(shard_fingerprint="fp-2")
+    new_jobs = {e["job_id"] for e in json.loads(manifest_path.read_text())["shards"]}
+    assert old_jobs.isdisjoint(new_jobs)
+    assert [e["resumed"] for e in environment["fleet"]] == [False, False]
+
+
+@pytest.mark.parametrize("lose_a_corner", [False, True])
+def test_shard_map_is_removed_only_when_the_sweep_finishes(
+    tmp_path, monkeypatch, lose_a_corner
+):
+    path = _resume_request(tmp_path)
+    manifest_path = tmp_path / "artifacts" / sb.BATCH_SHARDS_FILENAME
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("{}")
+    probe = _install_fake_batch(monkeypatch, fleet=True)
+    first = _run(path, tmp_path, hosts=2)
+    assert probe
+    if lose_a_corner:
+        manifest_path.write_text("{}")
+        lost = first["corners"][1]["corner_id"]
+        _install_fake_batch(monkeypatch, lost_ids={lost}, fleet=True)
+        _run(path, tmp_path, hosts=2)
+    assert manifest_path.exists() is lose_a_corner
