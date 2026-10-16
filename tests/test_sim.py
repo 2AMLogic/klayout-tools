@@ -13192,7 +13192,7 @@ def test_monte_carlo_block_has_no_absent_key_unless_optional(tmp_path, monkeypat
     _stub_subprocess_run(monkeypatch, log_text="m = 1.0e+00\n")
     report = sim.run_sim(str(request))
     assert "absent" not in report["measurements"][0]["monte_carlo"]
-
+# --------------------------------------------------------------------------- #
 
 
 # corners.units -- explicit, non-crossed unit list (issue #2993)
