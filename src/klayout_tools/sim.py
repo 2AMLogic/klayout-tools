@@ -4160,16 +4160,9 @@ def _resolve_variant_sources(variant: str, sources: dict[str, Any]) -> dict[str,
     return {key: resolved[key] for key in sources}
 
 
-def _eval_source_expr(
-    variant: str,
-    key: str,
-    text: str,
-    lowered: dict[str, str],
-    resolve: Any,
-) -> float:
-    """Evaluate ``text`` (``+ - * /``, parentheses, numbers, and other source
-    names of the same variant) without ``eval``."""
-    where = f"corners.variants[{variant!r}].sources[{key!r}]"
+def _tokenize_source_expr(where: str, text: str) -> list[tuple[str, str]]:
+    """Split ``text`` into ``(kind, lexeme)`` tokens for the source-expression
+    grammar, raising :class:`SimError` on any unparseable character."""
     tokens: list[tuple[str, str]] = []
     pos = 0
     while pos < len(text):
@@ -4181,68 +4174,119 @@ def _eval_source_expr(
         kind = match.lastgroup or ""
         tokens.append((kind, match.group(kind)))
         pos = match.end()
-    cursor = 0
+    return tokens
 
-    def peek() -> tuple[str, str] | None:
-        return tokens[cursor] if cursor < len(tokens) else None
 
-    def take() -> tuple[str, str]:
-        nonlocal cursor
-        token = peek()
+class _SourceExprParser:
+    """Recursive-descent evaluator for ``+ - * /``, parentheses, numbers, and
+    other source names of the same variant (no ``eval``)."""
+
+    def __init__(
+        self,
+        where: str,
+        text: str,
+        tokens: list[tuple[str, str]],
+        lowered: dict[str, str],
+        resolve: Any,
+    ) -> None:
+        self.where = where
+        self.text = text
+        self.tokens = tokens
+        self.lowered = lowered
+        self.resolve = resolve
+        self.cursor = 0
+
+    def peek(self) -> tuple[str, str] | None:
+        return self.tokens[self.cursor] if self.cursor < len(self.tokens) else None
+
+    def take(self) -> tuple[str, str]:
+        token = self.peek()
         if token is None:
-            raise SimError(f"{where}: unexpected end of expression {text!r}")
-        cursor += 1
+            raise SimError(f"{self.where}: unexpected end of expression {self.text!r}")
+        self.cursor += 1
         return token
 
-    def expr() -> float:
-        value = term()
-        while (t := peek()) is not None and t[1] in "+-" and t[0] == "op":
-            take()
-            rhs = term()
-            value = value + rhs if t[1] == "+" else value - rhs
+    def _peek_op(self, ops: str) -> str | None:
+        token = self.peek()
+        if token is not None and token[0] == "op" and token[1] in ops:
+            return token[1]
+        return None
+
+    def parse(self) -> float:
+        result = self.expr()
+        leftover = self.peek()
+        if leftover is not None:
+            raise SimError(
+                f"{self.where}: unexpected {leftover[1]!r} in expression {self.text!r}"
+            )
+        return result
+
+    def expr(self) -> float:
+        value = self.term()
+        while (op := self._peek_op("+-")) is not None:
+            self.take()
+            rhs = self.term()
+            value = value + rhs if op == "+" else value - rhs
         return value
 
-    def term() -> float:
-        value = factor()
-        while (t := peek()) is not None and t[1] in "*/" and t[0] == "op":
-            take()
-            rhs = factor()
-            if t[1] == "*":
-                value *= rhs
-            else:
-                if rhs == 0:
-                    raise SimError(f"{where}: division by zero in {text!r}")
-                value /= rhs
+    def term(self) -> float:
+        value = self.factor()
+        while (op := self._peek_op("*/")) is not None:
+            self.take()
+            rhs = self.factor()
+            value = self._apply_muldiv(op, value, rhs)
         return value
 
-    def factor() -> float:
-        kind, tok = take()
+    def _apply_muldiv(self, op: str, lhs: float, rhs: float) -> float:
+        if op == "*":
+            return lhs * rhs
+        if rhs == 0:
+            raise SimError(f"{self.where}: division by zero in {self.text!r}")
+        return lhs / rhs
+
+    def _name(self, tok: str) -> float:
+        target = self.lowered.get(tok.lower())
+        if target is None:
+            raise SimError(
+                f"{self.where}: unknown source name {tok!r} in expression "
+                f"{self.text!r} (expressions may only reference other sources "
+                "of the same variant)"
+            )
+        return float(self.resolve(target))
+
+    def _group(self) -> float:
+        value = self.expr()
+        if self.take()[1] != ")":
+            raise SimError(f"{self.where}: unbalanced parentheses in {self.text!r}")
+        return value
+
+    def factor(self) -> float:
+        kind, tok = self.take()
         if kind == "num":
             return float(tok)
         if kind == "name":
-            target = lowered.get(tok.lower())
-            if target is None:
-                raise SimError(
-                    f"{where}: unknown source name {tok!r} in expression "
-                    f"{text!r} (expressions may only reference other sources "
-                    "of the same variant)"
-                )
-            return float(resolve(target))
+            return self._name(tok)
         if tok == "-":
-            return -factor()
+            return -self.factor()
         if tok == "+":
-            return factor()
+            return self.factor()
         if tok == "(":
-            value = expr()
-            if take()[1] != ")":
-                raise SimError(f"{where}: unbalanced parentheses in {text!r}")
-            return value
-        raise SimError(f"{where}: unexpected {tok!r} in expression {text!r}")
+            return self._group()
+        raise SimError(f"{self.where}: unexpected {tok!r} in expression {self.text!r}")
 
-    result = expr()
-    if peek() is not None:
-        raise SimError(f"{where}: unexpected {peek()[1]!r} in expression {text!r}")  # type: ignore[index]
-    return result
+
+def _eval_source_expr(
+    variant: str,
+    key: str,
+    text: str,
+    lowered: dict[str, str],
+    resolve: Any,
+) -> float:
+    """Evaluate ``text`` (``+ - * /``, parentheses, numbers, and other source
+    names of the same variant) without ``eval``."""
+    where = f"corners.variants[{variant!r}].sources[{key!r}]"
+    tokens = _tokenize_source_expr(where, text)
+    return _SourceExprParser(where, text, tokens, lowered, resolve).parse()
 
 
 def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool:
@@ -4253,24 +4297,23 @@ def _is_excluded(point: CornerPoint, exclude_spec: list[dict[str, Any]]) -> bool
     return False
 
 
+def _matches_supply_exclude(point: CornerPoint, value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return all(point.supply_v.get(k) == v for k, v in value.items())
+
+
 def _matches_exclude(point: CornerPoint, entry: dict[str, Any]) -> bool:
+    scalars = {
+        "process": point.process,
+        "temperature_c": point.temperature_c,
+        "variant": point.variant,
+    }
     for key, value in entry.items():
-        if key == "process":
-            if point.process != value:
+        if key == "supply_v":
+            if not _matches_supply_exclude(point, value):
                 return False
-        elif key == "temperature_c":
-            if point.temperature_c != value:
-                return False
-        elif key == "variant":
-            if point.variant != value:
-                return False
-        elif key == "supply_v":
-            if not isinstance(value, dict):
-                return False
-            for supply_key, supply_value in value.items():
-                if point.supply_v.get(supply_key) != supply_value:
-                    return False
-        else:
+        elif key not in scalars or scalars[key] != value:
             return False
     return True
 
