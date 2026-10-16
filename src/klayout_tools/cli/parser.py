@@ -719,6 +719,19 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--report-out",
+        dest="report_out",
+        default=None,
+        metavar="PATH",
+        help=(
+            "also write the report envelope to PATH, byte-identical to "
+            "`--format json` stdout; gzip-compressed (deterministic) when "
+            "PATH ends `.gz`, plain indented JSON otherwise. Stdout is "
+            "unchanged (issue #2975). `klt yield` reads `.json.gz` "
+            "directly. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--plot",
         dest="plot",
         default=None,
@@ -1817,6 +1830,17 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "write stage start/finish lines and a periodic heartbeat to "
+            "stderr (stdout stays the pure response). Default: heartbeat "
+            "lines only (every 30s of a long stage) when stderr is not a "
+            "TTY, nothing on a TTY; --no-progress forces off"
+        ),
+    )
+    extract_parser.add_argument(
         "--top",
         default=None,
         help=(
@@ -1829,7 +1853,10 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         pdk_help=(
             "PDK variant to resolve (e.g. sky130A); overrides $PDK. "
             "Optional -- extraction runs from --deck alone when omitted; "
-            "when given, an unresolvable PDK is an application error."
+            "when given, an unresolvable PDK is an application error. "
+            "Omitted, MOS devices are written as bare M cards that are not "
+            "mismatch-capable under Monte Carlo; pass --pdk for the "
+            "subckt-wrapper X call."
         ),
     )
     extract_parser.add_argument(
@@ -2419,11 +2446,12 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "circuit (issue #2722): one definition per named cell, one X "
             "instance per placement, so per-circuit klt lvs options such as "
             "options.combine_devices_per_circuit can scope the layout side. "
-            "Increment 1: the cells must be non-nested, reachable, "
-            "non-top cells, and every placement of one cell must be "
-            "electrically identical; nesting, absent/top/unreachable names "
-            "and combination with --parasitics, --subcircuit or "
-            "--abstract-cells are errors (deferred to #2916). devices[]/"
+            "The cells must be reachable non-top cells, and every placement "
+            "of one cell must be electrically identical; a named cell "
+            "containing another named cell yields a nested '.SUBCKT' tree "
+            "(#2916). Absent/top/unreachable names and combination with "
+            "--parasitics, --subcircuit or --abstract-cells are errors "
+            "(rejected by design, #2916). devices[]/"
             "nets[] keep describing the flat extraction and a 'hierarchy' "
             "block is added to the JSON response. Off by default -- the "
             "flat bytes and JSON are unchanged. See docs/cli/extract.md's "
@@ -3657,6 +3685,19 @@ def _add_functional_verification_parser(
             "isolated build+test of the same <request>. Aborts with exit 1 "
             "if the request's own baseline run fails first -- see "
             "docs/cli/functional-verification.md, '--mutations'"
+        ),
+    )
+    functional_verification_parser.add_argument(
+        "-o",
+        "--outdir",
+        default=None,
+        help=(
+            "write run artifacts (results XML, logs, simulator build "
+            "directory, coverage, trace, mutants/) here instead of "
+            "`.klt/functional-verification/` next to the request file; "
+            "created if missing, relative paths resolve against the cwd. "
+            "Request-relative source paths still resolve against the "
+            "request's own directory"
         ),
     )
     _add_format_arg(functional_verification_parser)
@@ -5581,6 +5622,33 @@ def _add_netlist_parser(subparsers: argparse._SubParsersAction) -> None:
             "checkout). The schematic and a project --rcfile must be tracked "
             "files under it; the uncompressed total is capped at "
             f"{netlist_batch.MAX_BATCH_TREE_BYTES // (1024 * 1024)} MiB"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-include",
+        dest="batch_include",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: upload only the git-tracked "
+            "files under the batch root matching this root-relative glob "
+            "(a bare directory name selects everything under it; '*' also "
+            "crosses '/'). The schematic and a project --rcfile must match, "
+            "or the run is refused"
+        ),
+    )
+    netlist_parser.add_argument(
+        "--batch-exclude",
+        dest="batch_exclude",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "--backend batch only, repeatable: leave the files matching this "
+            "root-relative glob out of the upload (applied after "
+            "--batch-include). The schematic and a project --rcfile cannot "
+            "be excluded"
         ),
     )
     netlist_parser.add_argument(
