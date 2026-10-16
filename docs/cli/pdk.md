@@ -236,10 +236,9 @@ gap alone is closed: `BipolarDevice.marker` accepts a derived `LayerExpr`
 (AND/NOT of drawn layers, nestable) since issue #2860.
 Operator ruling 2026-10-08 (#2864): the PDK's own KLayout LVS runset (#2849)
 is the accepted route for SG13G2 bipolars — runset-backed LVS recognises
-them, the curated deck still does not. The remaining native gaps are tracked
-as #2861–#2863 (#2861 open as a general improvement; #2862 has landed;
-#2863 deferred until something the runset path cannot serve needs it);
-evidence acceptance conditions live in #2870.
+them, the curated deck does not declare bipolars yet. Of the native gaps,
+#2860, #2862 and #2863 have landed and only #2861 remains open, as a general
+improvement; evidence acceptance conditions live in #2870.
 
 ² The remaining metal resistors (`res_metal3` and up) are a different kind
 of gap from the rest of this row: their own recognition (populating
