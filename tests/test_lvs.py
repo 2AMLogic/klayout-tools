@@ -1718,6 +1718,73 @@ def test_parameter_tolerance_minimal_cell_out_of_tolerance_still_mismatches(tmp_
     assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
 
 
+_PASSIVE_ONLY_CAPS_SPICE = """
+.subckt caps A B
+C1 A B 1.0000p
+C2 A B 2.0000p
+C3 A B 3.0000p
+.ends
+"""
+
+# Every value 0.04% off -- inside a 0.1% tolerance.
+_PASSIVE_ONLY_CAPS_REFERENCE_SPICE = (
+    _PASSIVE_ONLY_CAPS_SPICE.replace("1.0000p", "1.0004p")
+    .replace("2.0000p", "2.0008p")
+    .replace("3.0000p", "3.0012p")
+)
+
+
+def test_parameter_tolerance_does_not_rescue_a_structureless_passive_cell(tmp_path):
+    """Documents the known limit (issue #3023): with 2+ off-value parallel
+    passives and nothing anchoring the pairing, the comparer pairs no device,
+    so no tolerance snap is reachable and the cascade is reported."""
+    report = _tolerance_report(
+        tmp_path,
+        _PASSIVE_ONLY_CAPS_SPICE,
+        _PASSIVE_ONLY_CAPS_REFERENCE_SPICE,
+        tolerance=0.001,
+        top="caps",
+    )
+
+    assert report["status"] == "mismatch"
+    assert lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED not in report["category_counts"]
+    assert "device.unmatched" in report["category_counts"]
+
+
+def test_parameter_tolerance_passive_cell_matches_with_anchor_top_level_pins(
+    tmp_path,
+):
+    """The documented workaround (issue #3023): anchoring the shared top-level
+    pins gives the comparer enough structure to pair the devices, so every
+    in-tolerance device is snapped and disclosed."""
+    report = _tolerance_report(
+        tmp_path,
+        _PASSIVE_ONLY_CAPS_SPICE,
+        _PASSIVE_ONLY_CAPS_REFERENCE_SPICE,
+        top="caps",
+        options={"parameter_tolerance": 0.001, "anchor_top_level_pins": True},
+    )
+
+    assert report["status"] == "match"
+    assert report["category_counts"][lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED] == 3
+
+
+def test_parameter_tolerance_passive_cell_anchored_out_of_tolerance_still_mismatches(
+    tmp_path,
+):
+    """Negative control for the workaround: anchoring must not mask a real
+    value error -- one device 10% off stays a hard finding."""
+    report = _tolerance_report(
+        tmp_path,
+        _PASSIVE_ONLY_CAPS_SPICE,
+        _PASSIVE_ONLY_CAPS_REFERENCE_SPICE.replace("3.0012p", "3.3000p"),
+        top="caps",
+        options={"parameter_tolerance": 0.001, "anchor_top_level_pins": True},
+    )
+
+    assert report["status"] == "mismatch"
+
+
 def test_parameter_tolerance_never_masks_a_connectivity_defect(tmp_path):
     """The one genuinely harmful outcome: a rewired device (no parameter
     change at all) must stay a hard connectivity finding with the tolerance

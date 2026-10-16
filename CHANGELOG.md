@@ -248,6 +248,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   An untapped NMOS or an anonymous-body PMOS in a `klt extract -o` netlist
   now reports `unverified` (and emits `device.body_unverified`), matching the
   inline-extraction verdict. Inline-extraction results are unchanged.
+- **`klt lvs` docs: `parameter_tolerance` on passive-only cells** (issue
+  #3023): documented that a structure-less cell with two or more off-value
+  devices (e.g. parallel capacitors) still reports `mismatch` under
+  `options.parameter_tolerance` alone, and that adding
+  `options.anchor_top_level_pins: true` is the working fix. Tests pin the
+  limit, the workaround and the out-of-tolerance negative control. No code or
+  JSON change.
 
 - **sky130 two-adjacent-edges enclosure rules** (issue #3316): new
   `DrcRule.check` kind `"enclosing_adjacent"` (a cut is flagged once when two
