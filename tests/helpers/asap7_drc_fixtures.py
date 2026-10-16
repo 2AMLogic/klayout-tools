@@ -840,7 +840,14 @@ def _sram_sdt_cases() -> list[Case]:
 
     # A SDT that is short is also a short overlap with the ACTIVE and LISD it
     # sits on (SDT.LISD.AUX.4 forces the LISD to cover it).
-    unmarked = ["SDT.W.2", "SDT.ACTIVE.OV.1", "SDT.LISD.OV.2", "SDT.ACTIVE.AUX.2"]
+    # Unmarked, the 17 - D nm SDT is also no whole multiple of 27 nm (SDT.W.3).
+    unmarked = [
+        "SDT.W.2",
+        "SDT.W.3",
+        "SDT.ACTIVE.OV.1",
+        "SDT.LISD.OV.2",
+        "SDT.ACTIVE.AUX.2",
+    ]
     all3 = ["SRAM.SDT.W.4", "SRAM.SDT.ACTIVE.OV.3", "SRAM.SDT.LISD.OV.4"]
     short = (0, 17 - D)
     c.append(_pass("SRAM.SDT.W.4", sd((0, 17))))
@@ -862,14 +869,27 @@ def _sram_sdt_cases() -> list[Case]:
         )
     )
     c.append(_pass("SRAM.SDT.W.4", sd(short, mark=None), also=unmarked))
-    # ACTIVE overlaps only the upper 17 - D nm of a 40 nm SDT.
-    c.append(_pass("SRAM.SDT.ACTIVE.OV.3", sd((0, 40), active=(23, 81))))
-    c.append(_fail("SRAM.SDT.ACTIVE.OV.3", sd((0, 40), active=(23 + D, 81))))
+    # ACTIVE overlaps only the upper 17 - D nm of a 40 nm SDT. The trimmed
+    # ACTIVE is no whole multiple of 27 nm, and ACTIVE.W.2 ignores SRAMDRC.
+    c.append(
+        _pass(
+            "SRAM.SDT.ACTIVE.OV.3",
+            sd((0, 40), active=(23, 81)),
+            also=["ACTIVE.W.2"],
+        )
+    )
+    c.append(
+        _fail(
+            "SRAM.SDT.ACTIVE.OV.3",
+            sd((0, 40), active=(23 + D, 81)),
+            also=["ACTIVE.W.2"],
+        )
+    )
     c.append(
         _pass(
             "SRAM.SDT.ACTIVE.OV.3",
             sd((0, 40), active=(23 + D, 81), mark=None),
-            also=["SDT.ACTIVE.OV.1", "SDT.ACTIVE.AUX.2"],
+            also=["SDT.ACTIVE.OV.1", "SDT.ACTIVE.AUX.2", "SDT.W.3", "ACTIVE.W.2"],
         )
     )
     # LISD overlaps only the upper part of the SDT, so SDT.LISD.AUX.4 (SDT
@@ -886,7 +906,12 @@ def _sram_sdt_cases() -> list[Case]:
         _pass(
             "SRAM.SDT.LISD.OV.4",
             sd((0, 40), lisd=(23 + D, 60), mark=None),
-            also=["SDT.LISD.OV.2", "SDT.LISD.AUX.4", "SDT.ACTIVE.AUX.2"],
+            also=[
+                "SDT.LISD.OV.2",
+                "SDT.LISD.AUX.4",
+                "SDT.ACTIVE.AUX.2",
+                "SDT.W.3",
+            ],
         )
     )
     return c
