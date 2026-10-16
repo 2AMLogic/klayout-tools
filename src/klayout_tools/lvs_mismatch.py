@@ -509,7 +509,14 @@ def _device_body_net_name(device: Any) -> str | None:
 #: straight off the in-memory netlist, so the prefix to match here is the
 #: bare ``"$"``. Reusing ``extract_report.py``'s escaped constant here would
 #: silently never match any real body net.
+#:
+#: **A netlist read back from disk spells it escaped (issue #3177).** For the
+#: ``layout.netlist`` + ``layout.deck`` shape the circuit comes from
+#: ``NetlistSpiceReader`` over a ``klt extract -o`` file, whose anonymous nodes
+#: are written ``\\$<n>`` -- so :func:`_is_unresolved_body_net` accepts that
+#: spelling too (:data:`_ESCAPED_ANONYMOUS_NET_PREFIX`).
 _RAW_ANONYMOUS_NET_PREFIX = "$"
+_ESCAPED_ANONYMOUS_NET_PREFIX = "\\$"
 
 
 def _is_unresolved_body_net(name: str | None) -> bool:
@@ -526,7 +533,9 @@ def _is_unresolved_body_net(name: str | None) -> bool:
     see :data:`_RAW_ANONYMOUS_NET_PREFIX` for why the prefix differs between
     the two paths even though the condition is identical.
     """
-    return name is None or name.startswith(_RAW_ANONYMOUS_NET_PREFIX)
+    return name is None or name.startswith(
+        (_RAW_ANONYMOUS_NET_PREFIX, _ESCAPED_ANONYMOUS_NET_PREFIX)
+    )
 
 
 def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
@@ -548,12 +557,17 @@ def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
     """
     counts: dict[str, int] = {}
 
-    nfet_count = sum(
-        1
-        for device in layout_circuit.each_device()
-        if device.device_class().name == deck.nfet_class
-        and _device_body_net_name(device) in (deck.substrate_net, None)
-    )
+    # Issue #3177: a netlist read back from disk (``layout.netlist`` +
+    # ``layout.deck``) presents class and net names upper-cased
+    # (``NFET``/``VSUBS``), so every name compare is case-insensitive.
+    substrate_net = deck.substrate_net.casefold()
+    nfet_count = 0
+    for device in layout_circuit.each_device():
+        if device.device_class().name.casefold() != deck.nfet_class.casefold():
+            continue
+        body = _device_body_net_name(device)
+        if body is None or body.casefold() == substrate_net:
+            nfet_count += 1
     if nfet_count:
         counts[deck.nfet_class] = nfet_count
 
@@ -564,7 +578,7 @@ def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
     pfet_count = sum(
         1
         for device in layout_circuit.each_device()
-        if device.device_class().name == deck.pfet_class
+        if device.device_class().name.casefold() == deck.pfet_class.casefold()
         and _is_unresolved_body_net(_device_body_net_name(device))
     )
     if pfet_count:
@@ -615,11 +629,14 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     PMOS body demonstrably landed on a named net (e.g. ``VPB``), not because
     the deck declared a mechanism.
 
-    Neither warning fires at all for the pre-extracted ``layout.netlist``
-    request form -- callers only reach this helper when ``layout.file`` +
-    ``layout.deck`` (inline extraction) was given, mirroring how
-    ``device_classes``/``provenance.deck`` are conditioned on that same
-    distinction in ``run_lvs``.
+    Neither warning fires for the pre-extracted ``layout.netlist`` request
+    form *without* a ``layout.deck`` -- callers only reach this helper when a
+    deck was resolved, mirroring how ``device_classes``/``provenance.deck``
+    are conditioned on that same distinction in ``run_lvs``. With
+    ``layout.netlist`` + ``layout.deck`` it does run, against the SPICE read
+    back from disk: names there are upper-cased and anonymous nets are
+    spelled ``\\$<n>``, so the compares are case-insensitive and accept both
+    anonymous spellings (issue #3177).
 
     Counts only the layout's top circuit's own devices (``each_device()``,
     not recursive), matching ``run_lvs``'s own ``counts.devices.layout``
