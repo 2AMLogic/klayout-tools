@@ -661,6 +661,22 @@ in its `batch_job_failed` message, or carries the tail of the retrieved
 [2AMLogic/2am](https://github.com/2AMLogic/2am) (see also
 [#2851](https://github.com/2AMLogic/klayout-tools/issues/2851)).
 
+**A runner older than a request feature fails the job, not the submit.**
+The client has no per-feature runner capability signal: the AMI manifest
+publishes only the runner's `klt_version`/`klt_ref`, which
+`runner_version_check` compares by major.minor release. A request that uses
+a newer feature — e.g. a `corners.process[].sections[]` `{"lib","section"}`
+object (#2522) — is therefore not refused up front when the version check is
+`warn`, or the manifest has no entry to compare (`batch_runner_version_unknown`).
+The job then fails in seconds with `batch job <id> finished 'failed' without a
+usable report: job command exited 1`, followed by the engine-log tail or
+`engine log unavailable` (a submit-only credential cannot read `harness.log`).
+When that is the only evidence, suspect a runner that predates a feature the
+request uses, and keep `runner_version_check` at `enforce` (the default). A
+real pre-submit feature check needs a machine-readable runner capability
+field and is tracked with the `analysis_steps[]` equivalent in
+[#3249](https://github.com/2AMLogic/klayout-tools/issues/3249).
+
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `batch.provision_script_path` | string, required (or `$KLT_BATCH_PROVISION_SCRIPT`) | Path to 2am's `infra/aws/batch-fleet-provision.sh` on *this* host. Resolution order: this field, then `$KLT_BATCH_PROVISION_SCRIPT`, then an error naming both — never a guessed path into a sibling checkout. An unresolvable script is an error raised **before any S3 write**, mirroring `remote.ssh_key_path`'s own early check. |
@@ -2351,6 +2367,31 @@ card. Either pick a step that lands exactly on the end point (a power-of-two
 fraction), or read the last sample from `options.waveforms` instead of using
 `AT=`.
 
+### Operating-point values via `spice` cards
+
+For a runner without `expr`, read an operating-point quantity with a `spice`
+`.meas dc` card. A **one-point** `dc` sweep (`dc args "V1 0 0 1"`) fails:
+`measure <name> find(AT) : out of interval`, because `AT=` needs two samples
+to interpolate between. Sweep a dummy source over **two points** and read at
+the first one:
+
+```
+V1 in 0 1
+Vdummy dmy 0 0
+Rdmy dmy 0 1k
+R1 in out 1k
+R2 out 0 1k
+dc args "Vdummy 0 1 1"
+.meas dc vout_op find v(out) at=0
+```
+
+A source that nothing else uses is a harmless sweep axis, so every point
+carries the same operating-point value. (The one-point failure is as
+reported against ngspice-46 on the fleet; this recipe was not re-run
+through `klt sim` when written.) Declare the card's name in lower
+case (see above), and expect the error text on a one-point sweep to be
+attached to the measurement's `measurement` diagnostic.
+
 ### The expression must reduce to a single real scalar
 
 This is the one contract rule the tool cannot check up front. ngspice's
@@ -2400,6 +2441,13 @@ Worked `op` example — the case that had no expression at all before:
   ([#2546](https://github.com/2AMLogic/klayout-tools/issues/2546)) — ngspice
   lower-cases that one in its report too, so an upper/mixed-case `spice` name
   now harvests exactly as a matching-case one always has.
+  **Runners older than that fix** (the pinned 0.5.0 fleet image) match
+  case-sensitively: a `.meas` named with upper-case letters (`ibus_B`,
+  `d_P_3`) runs and ngspice prints `ibus_b = ...`, but the job reports
+  `measurement ... produced no value` — while the same request graded locally
+  by a current client returns the value. A client/runner skew therefore hides
+  the failure until the job returns. Workaround: lower-case every
+  measurement name when targeting `KLT_SIM_BACKEND=batch` on such a runner.
 - **An `expr` name must be unique** across the whole `measurements[]` list
   (compared case-insensitively, per the previous bullet): a second `let
   <name>` overwrites the first, so both response entries would report the same
@@ -3014,6 +3062,16 @@ netlist's resolved include closure**, not just the netlist file
   channel, which `models`/`models.pdk` resolve on the executing host by
   default (see "Model library resolution" below) — or, with
   `options.stage_model_inputs: true`, ship with the job (next section).
+
+  Because `klt sim` leaves a netlist-body `.lib` card **verbatim** (only
+  `.include`/`.inc` lines are rewritten or `$VAR`-expanded there), the card
+  reaches ngspice exactly as written. ngspice 46 does not expand an
+  unquoted `$PDK_ROOT` inside a `.lib` card: `.lib $PDK_ROOT/<file> <section>`
+  silently never loads the section and the failure surfaces much later as
+  `unknown subckt`, whereas `.lib "$PDK_ROOT/<file>" <section>` (quoted)
+  works. `.include $PDK_ROOT/...` is unaffected because klt expands it
+  itself. Quote the path in `.lib` cards of a netlist that leaves
+  `$PDK_ROOT` for the executing host to resolve.
 
 A closure larger than 64 files or 32 MiB is refused with the same named
 error rather than silently pushed — a closure that big is a host-resident
