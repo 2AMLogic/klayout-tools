@@ -2216,6 +2216,12 @@ Worked `op` example — the case that had no expression at all before:
   exactly as before.
 - **Single line only.** The expression is spliced verbatim into one `let`
   line; an embedded newline would become a separate control command.
+- **No bare `<` / `>`.** In ngspice's control language these are I/O
+  redirection, not comparisons: `vecmax((v(a) < v(b))*v(a))` would redirect
+  stdin/stdout, create stray files in the corner directory and report
+  `produced no value`. `klt sim` rejects such an `expr` up front (application
+  error, exit 1) before any ngspice launch. Spell comparisons `gt` / `lt` /
+  `ge` / `le` / `eq` / `ne`: `vecmax((v(a) lt v(b))*v(a))`.
 - **`corners.*` / `monte_carlo`**: nothing special. The `let`/`print` pair is
   regenerated in every corner's own deck, after that corner's `alter` cards
   and analysis, so the expression is evaluated against that corner's solve.
