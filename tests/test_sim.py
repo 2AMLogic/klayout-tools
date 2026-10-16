@@ -13679,6 +13679,91 @@ def test_pex_side_environment_carries_engine_host():
     assert {"engine_host", "client_ngspice_binary"} <= set(pex._SIDE_ENVIRONMENT_KEYS)
 
 
+# ---------------------------------------------------------------------------
+# `options.capture_only` (issue #3158)
+# ---------------------------------------------------------------------------
+
+
+def _capture_request(tmp_path, **options):
+    _write_body(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"waveforms": True, **options},
+        },
+    )
+
+
+def test_capture_only_waveform_request_passes_and_records_intent(tmp_path, monkeypatch):
+    request = _capture_request(tmp_path, capture_only=True)
+    _stub_subprocess_run_with_waveform(
+        monkeypatch, points=[(0.0, 0.0), (1e-9, 0.5), (2e-9, 1.0)]
+    )
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    assert report["status"] == "pass"
+    assert report["coverage"]["capture_only"] is True
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["coverage"]["skipped"] == []
+
+
+def test_capture_only_absent_is_still_nothing_checked(tmp_path, monkeypatch):
+    request = _capture_request(tmp_path)
+    _stub_subprocess_run_with_waveform(
+        monkeypatch, points=[(0.0, 0.0), (1e-9, 0.5), (2e-9, 1.0)]
+    )
+
+    report = sim.run_sim(str(request), artifacts_dir=str(tmp_path / "artifacts"))
+
+    assert report["status"] == "not_checked"
+    assert report["coverage"]["nothing_checked"] is True
+    assert "capture_only" not in report["coverage"]
+
+
+def test_capture_only_rejects_non_boolean_missing_waveforms_and_measurements(tmp_path):
+    bad = _capture_request(tmp_path, capture_only="yes")
+    with pytest.raises(sim.SimError, match="capture_only must be a boolean"):
+        sim.run_sim(str(bad))
+
+    _write_body(tmp_path)
+    no_waveforms = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"capture_only": True},
+        },
+    )
+    with pytest.raises(sim.SimError, match="requires options.waveforms"):
+        sim.run_sim(str(no_waveforms))
+
+    with_meas = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [{"name": "vmax", "spice": "meas tran vmax MAX v(out)"}],
+            "options": {"waveforms": True, "capture_only": True},
+        },
+    )
+    with pytest.raises(sim.SimError, match="conflicts with a non-empty"):
+        sim.run_sim(str(with_meas))
+
+
+def test_build_coverage_capture_only_never_waives_corner_errors():
+    corners = [
+        {"corner_id": "a", "status": "pass"},
+        {"corner_id": "b", "status": "error"},
+    ]
+    coverage = sim._build_coverage([], corners, capture_only=True)
+    assert len(coverage["checked"]) == 1
+    assert [s["reason"] for s in coverage["skipped"]] == ["no_requested_measurements"]
+    assert sim._build_coverage([], [], capture_only=True)["nothing_checked"] is True
+
+
 # --- issue #3074: normalised netlist identity --------------------------------
 
 

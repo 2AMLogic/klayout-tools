@@ -5276,6 +5276,29 @@ point at a time, so `klt sim`'s peak memory converting it does not scale with
 rawfile size. A binary rawfile reader was considered and rejected because it
 would change the `artifacts.raw` format.
 
+### Capture-only runs (`options.capture_only`, [#3158](https://github.com/2AMLogic/klayout-tools/issues/3158))
+
+A request with `options.waveforms: true` and an empty `measurements` list
+runs every corner and writes the waveform artifacts, but checks nothing, so
+it reports `status: "not_checked"` and exits 4 — the same code as a refusal.
+A caller that post-processes the raw traces itself declares that intent with
+`options.capture_only: true` (boolean, default `false`):
+
+```json
+{ "options": { "waveforms": true, "capture_only": true } }
+```
+
+Each corner that ran clean then counts its capture as checked work, the
+report rolls up as `status: "pass"` (exit 0), and `coverage.capture_only` is
+`true` — the field to read to tell a capture-only pass from a graded one.
+The option is a request error (exit 1) unless `options.waveforms` is true
+(or `--plot` is given), `measurements` is empty, and the value is a boolean.
+It waives only "nothing was checked": a corner `error` (including
+`nonconvergence`) still exits 4, and an empty corner matrix is still
+`not_checked`. A request that does not set the option is unchanged. Coverage
+is computed client-side after the corners are collected, so the option
+behaves the same on the `batch` and `remote` backends.
+
 ### Complex-valued (`ac`/`sp`) rawfiles
 
 An `ac`/`sp` rawfile declares `Flags: complex` in its header, and ngspice
