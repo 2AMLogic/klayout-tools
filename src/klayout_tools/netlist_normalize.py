@@ -250,7 +250,8 @@ class NormalizeError(Exception):
 def _tokenize(text: str) -> list[str]:
     """Whitespace-split ``text`` into SPICE tokens, treating quoted strings
     (``'...'``/``"..."``) and bracketed expressions (``{...}``/``(...)``) as
-    single tokens and stopping at an unquoted ``$`` inline comment.
+    single tokens and stopping at an unquoted ``$`` inline comment (a ``$``
+    that begins a token; mid-token it belongs to the name, e.g. ``X$1``).
 
     A parasitic parameter like ``ad='int((nf+1)/2) * w/nf * 0.18u'`` carries
     spaces *inside* an expression -- a naive split would shatter it and
@@ -280,8 +281,11 @@ def _tokenize(text: str) -> list[str]:
             depth = max(0, depth - 1)
             current.append(char)
             continue
-        if char == "$" and depth == 0:
-            break  # rest of the line is a SPICE inline comment
+        if char == "$" and depth == 0 and not current:
+            # Rest of the line is a SPICE inline comment. Only at a token
+            # start: KLayout names cards `X$1`/`M$1`, so a mid-token `$` is
+            # part of the name (issue #2972).
+            break
         if char.isspace() and depth == 0:
             if current:
                 tokens.append("".join(current))
@@ -1846,6 +1850,13 @@ def detect_subckt_call_devices(text: str) -> list[str]:
     capacitor, bipolar), not just MOS -- a reference netlist whose only
     subckt-call devices are e.g. resistors is now detected the same way a
     MOS-only one always was.
+
+    A card whose instance name contains ``$`` (``X$1``, the name KLayout's
+    own extractor writes) is reported only when it is a MOS call: bare
+    ``klt extract`` round-trips resistors/capacitors/bipolars as such cards
+    under the same curated names (issues #1157/#1942), so those are not
+    evidence of the simulation form. Only ``klt extract --pdk`` emits MOS
+    ``X`` cards (issue #2972).
     """
     known = known_device_subckt_names()
     defined: set[str] = set()
@@ -1870,8 +1881,11 @@ def detect_subckt_call_devices(text: str) -> list[str]:
         if not positional:
             continue
         subckt_name = positional[-1]
-        if subckt_name in known and subckt_name not in seen:
-            used.append(subckt_name)
-            seen.add(subckt_name)
+        if subckt_name not in known or subckt_name in seen:
+            continue
+        if "$" in tokens[0] and known[subckt_name][1].kind != "mos":
+            continue
+        used.append(subckt_name)
+        seen.add(subckt_name)
 
     return [name for name in used if name not in defined]

@@ -3437,6 +3437,27 @@ def _label_layers_replay(committed: dict[str, Any]) -> dict[str, Any]:
     return {"label_layers": dict(echoed)}
 
 
+def _reject_subckt_call_layout_netlist(path: str, text: str) -> None:
+    """Issue #2972: the layout-side twin of `_read_reference_netlist`'s
+    simulation-form guard. `klt extract --pdk` writes PDK-bound MOS `X` cards;
+    read back unguarded they are undefined-subcircuit instances (zero layout
+    devices, a topology cascade) rather than a form-mismatch error."""
+    from .netlist_normalize import detect_subckt_call_devices
+
+    offending = detect_subckt_call_devices(text)
+    if offending:
+        raise LvsError(
+            f"layout netlist '{path}' is in the simulation "
+            f"(subcircuit-call) form: it instantiates curated PDK device "
+            f"subcircuit(s) {', '.join(offending)} via undefined 'X' cards, "
+            "which 'klt lvs' cannot compare as extracted plain-element "
+            "devices (it would silently read as zero layout devices and "
+            "report a topology mismatch). Re-extract the layout without "
+            "'--pdk' (plain-element M-cards) -- see docs/cli/lvs.md, "
+            '"Netlist form".'
+        )
+
+
 def _logical_spice_cards(netlist_text: str) -> list[str]:
     """Split ``netlist_text`` into lines, joining ``+`` continuations so a
     wrapped card is one logical card."""
@@ -3808,6 +3829,7 @@ def _resolve_layout(
         raise LvsError(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
+    _reject_subckt_call_layout_netlist(layout_netlist_path, layout_netlist_text)
     recovered_capacitor_classes = parse_capacitor_class_comments(layout_netlist_text)
     _reject_bare_resistor_x_cards(
         layout_netlist_text,
