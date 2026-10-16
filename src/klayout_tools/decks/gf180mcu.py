@@ -366,6 +366,15 @@ are always the real, unmodified DRM values:
   a layout drawing neither anywhere skips the whole rule rather than
   misapplying it, while a layout drawing either keeps the approximations
   above unchanged. ``nplus.enclosing.comp.1`` needs no equivalent gate.
+- ``comp.coverage.1`` (``DF.12``): evaluated flat (no deep/hierarchical
+  mode) on merged regions, as the upstream ``comp.rb`` expression
+  ``comp.not_interacting(schottky_diode).not(nplus).not(pplus)``. A COMP
+  polygon that touches or overlaps a Schottky-diode marker (241/0) anywhere
+  is exempted whole, exactly as upstream; an absent implant or marker layer
+  is an empty region, so unimplanted COMP is reported rather than skipped.
+  The ``res_mk``-style well/voltage partitions of ``DF.13``/``DF.14`` are not
+  involved. The rule is not voltage-split in the DRM, hence
+  ``voltage_independent``.
 - ``bjt.separation.comp.1``: the official ``BJT.3`` scopes to COMP
   "unrelated" to the BJT device (i.e. excludes COMP that is itself part of
   the same bipolar device, a connectivity/netlist notion); our engine has no
@@ -455,9 +464,11 @@ variant -- confirmed by ``globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``top_via = via4`` when ``top_metal = metal5``) matches Option B's bottom
 plate landing on ``Metal4`` for that stack, the same stack the issue's own
 reproducer layout uses (``Metal4``/``FuseTop``/``Via4``/``Metal5``) -- so
-only Option B (``MIMTM.*``) is transcribed above; Option A's ``MIM.*`` rule
-set targets a different (3-metal-layer) process variant this deck does not
-model and is not duplicated here.
+only Option B (``MIMTM.*``) is transcribed above, and is the default for
+``klt extract``. Option A's ``MIM.*`` DRC rule set is not duplicated here, but
+its *extraction* is selectable (issue #2920): ``--deck-option mim_option=A``
+recognises the ``Metal2``/``FuseTop``/``Via2``/``Metal3`` stack and the
+``cap_mim_*_m2m3_noshield`` device names (see ``_MIM_OPTION_A_CAPACITORS``).
 
 Layer numbers (verified against ``google/globalfoundries-pdk-libs-gf180mcu_fd_pv``'s
 ``klayout/drc/rule_decks/main.drc`` layer derivations, e.g. ``comp =
@@ -498,10 +509,14 @@ alongside the already-transcribed ``via4 = get_polygons(41, 0)``):
 
 from __future__ import annotations
 
+import dataclasses
+
 from . import (
     BipolarDevice,
     CapacitorDevice,
     CapacitorFlavour,
+    CapacitorVariant,
+    CompCoverageSpec,
     DerivedLayer,
     DiodeDevice,
     DrcRule,
@@ -512,6 +527,7 @@ from . import (
     ResistorDevice,
     ResistorFlavour,
     RuleProvenance,
+    UnsupportedDeviceMarker,
 )
 
 # `RuleProvenance.source_repo`/`.commit` shared by every gf180mcu width/space
@@ -1290,6 +1306,30 @@ DECK: list[DrcRule] = [
         provenance=_gf180mcu_provenance("7.5 Comp", "DF.4d"),
     ),
     DrcRule(
+        id="comp.coverage.1",
+        description=(
+            "COMP not covered by Nplus or Pplus is forbidden "
+            "(except COMP under the Schottky-diode marking)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="comp_coverage",
+        threshold_dbu=0,  # no distance: a coverage rule
+        region_spec=CompCoverageSpec(
+            covered_by_any=((32, 0), (31, 0)),  # Nplus, Pplus
+            exempt_markers=((241, 0),),  # Schottky_diode
+        ),
+        # DRM 7.5 Comp, rule "DF.12": "COMP not covered by Nplus or Pplus is
+        # forbidden (except those COMP under marking)". Re-derived from the
+        # PDK's executable `comp.rb`: `comp.not_interacting(schottky_diode)
+        # .not(nplus).not(pplus)`. See the module docstring's "Known
+        # approximations" note on `comp.coverage.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.12"),
+        # DF.12 publishes no 3.3V/5V column split, so it cannot have read the
+        # wrong voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
         id="nplus.width.1",
         description="minimum Nplus implant width",
         layer=(32, 0),  # Nplus
@@ -1747,8 +1787,10 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (127, 5): "DRC_BJT",
     (117, 5): "CAP_MK",
     (117, 10): "MIM_L_MK",
+    (166, 5): "MOS_CAP_MK",
     (80, 5): "efuse_mk",
     (125, 5): "plfuse",
+    (241, 0): "Schottky_diode",
 }
 
 # Voltage-domain marker layers this deck draws but does not *fully* model the
@@ -2722,6 +2764,83 @@ EXTRACTION_DECK = ExtractionDeck(
             flavour="06v0",
             description="gf180mcu 5V/6V thick-oxide domain (Dualgate 55/0)",
         ),
+    ),
+    # Issue #2919: MOS capacitors (`cap_nmos_*`/`cap_pmos_*`) are marked by
+    # `MOS_CAP_MK` (166/5) and have no device class here yet, so they would
+    # otherwise vanish from the netlist with a clean `extracted` status.
+    unsupported_device_markers=(
+        UnsupportedDeviceMarker(
+            marker=(166, 5),  # MOS_CAP_MK
+            kind="mos_capacitor",
+            description="MOS capacitor (MOS_CAP_MK 166/5)",
+        ),
+    ),
+)
+
+
+# MIM option A (issue #2920): bottom plate Metal2, top plate FuseTop under
+# Metal3, joined to Metal3 by Via2 *inside* FuseTop. Selected with
+# `--deck-option mim_option=A`; the deck's own `capacitors` above are option B
+# (the default, byte-for-byte unchanged). Recognition mirrors the PDK's
+# `mimcap_derivations.lvs` (`mim_virtual = fusetop.sized(1.06um) &
+# metal2.interacting(fusetop) - (efuse_mk | plfuse)`, `fuse_cap = fusetop
+# interacting cap_mk, mim_l_mk, - (efuse_mk | plfuse)`) and the device names
+# and densities come from `mimcap_extraction.lvs`'s `MIM_OPTION 'A'` branch
+# (`cap_mim_{1f0,1f5,2f0}_m2m3_noshield`); the area/perimeter coefficients are
+# the same `sm141064.ngspice` cards as option B's. The top-plate Via2 is cut
+# from the generic Via2 layer where it overlaps Metal2 by the existing
+# `top_plate_via` machinery, the equivalent of the runset's `via2_n_cap`.
+_MIM_OPTION_A_CAPACITORS = (
+    CapacitorDevice(
+        name="cap_mim_2f0_m2m3_noshield",
+        top_plate=(75, 0),  # FuseTop
+        top_plate_requires=(
+            (117, 5),  # CAP_MK
+            (117, 10),  # MIM_L_MK
+        ),
+        top_plate_excludes=(
+            (80, 5),  # efuse_mk
+            (125, 5),  # plfuse
+        ),
+        bottom_plate=(36, 0),  # Metal2
+        bottom_plate_oversize_um=1.06,
+        area_cap_f_um2=1.99e-15,
+        perim_cap_f_um=2.383e-16,
+        top_plate_via=(38, 0),  # Via2
+        top_plate_via_metal=(42, 0),  # Metal3
+        flavour_option="mim_cap",
+        flavours=(
+            CapacitorFlavour(
+                value="cap_mim_1f0_m2m3_noshield",
+                name="cap_mim_1f0_m2m3_noshield",
+                area_cap_f_um2=9.87e-16,
+                perim_cap_f_um=3.3e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_1f5_m2m3_noshield",
+                name="cap_mim_1f5_m2m3_noshield",
+                area_cap_f_um2=1.47e-15,
+                perim_cap_f_um=3.79e-16,
+            ),
+            CapacitorFlavour(
+                value="cap_mim_2f0_m2m3_noshield",
+                name="cap_mim_2f0_m2m3_noshield",
+                area_cap_f_um2=1.99e-15,
+                perim_cap_f_um=2.383e-16,
+            ),
+        ),
+        provenance=_gf180mcu_lvs_provenance(
+            "libs.tech/klayout/lvs/rule_decks/mimcap_extraction.lvs",
+            "cap_mim_2f0_m2m3_noshield",
+        ),
+    ),
+)
+
+EXTRACTION_DECK = dataclasses.replace(
+    EXTRACTION_DECK,
+    capacitor_variants=(
+        CapacitorVariant("mim_option", "B", EXTRACTION_DECK.capacitors),
+        CapacitorVariant("mim_option", "A", _MIM_OPTION_A_CAPACITORS),
     ),
 )
 

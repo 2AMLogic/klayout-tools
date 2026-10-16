@@ -169,11 +169,15 @@ def _contact_gate_extra_offset_um(family: str) -> float:
 #:   thresholds.
 #:
 #: A family absent from this table gets ``0.0`` (see
-#: :func:`_gate_bottom_endcap_um`): sky130's/sg13g2's/sg13cmos5l's curated
-#: decks transcribe neither rule, so every existing caller there keeps
+#: :func:`_gate_bottom_endcap_um`): sg13g2's/sg13cmos5l's curated
+#: decks transcribe neither rule (sky130's gained its own endcap rule, so it
+#: has an entry above, issue #2936), so every existing caller there keeps
 #: byte-for-byte identical geometry.
 _PDK_GATE_BOTTOM_ENDCAP_UM: dict[str, float] = {
     "gf180mcu": 0.25,  # PL.4_LV (0.22um) / DF.6_LV (0.24um)
+    # poly.8 (0.13um, issue #2936), with margin; the curated deck's
+    # `poly.endcap.diff.1` checks it.
+    "sky130": 0.15,
 }
 
 
@@ -182,6 +186,24 @@ def _gate_bottom_endcap_um(family: str) -> float:
     :data:`_PDK_GATE_BOTTOM_ENDCAP_UM`), or ``0.0`` for a family that
     declares none -- byte-for-byte unchanged geometry there."""
     return _PDK_GATE_BOTTOM_ENDCAP_UM.get(family, 0.0)
+
+
+#: Gate-stripe *top*-edge endcap (um) the series ``_mos_unit_layout`` draws
+#: as a stripe-width poly neck before the landing pad (issue #2936). Distinct
+#: from :data:`_PDK_GATE_BOTTOM_ENDCAP_UM` because the top edge already has
+#: the #461 landing pad, which clears the diffusion for ``L`` up to the pad
+#: width only; a family whose pad already satisfies its deck (gf180mcu) is
+#: left out so its geometry stays byte-for-byte unchanged.
+_PDK_GATE_TOP_ENDCAP_UM: dict[str, float] = {
+    "sky130": 0.15,  # poly.8 (0.13um) with margin
+}
+
+
+def _gate_top_endcap_um(family: str) -> float:
+    """Return ``family``'s gate-stripe top-edge endcap neck length (see
+    :data:`_PDK_GATE_TOP_ENDCAP_UM`), or ``0.0`` for a family that declares
+    none -- byte-for-byte unchanged geometry there."""
+    return _PDK_GATE_TOP_ENDCAP_UM.get(family, 0.0)
 
 
 #: Margin (um) :func:`_mos_unit_layout`/:func:`_mos_unit_strapped_layout`
@@ -259,6 +281,20 @@ def _sd_implant_margin_um(family: str) -> float:
 _PDK_RING_IMPLANT_MARGIN_UM: dict[str, float] = {
     "gf180mcu": 0.16,  # NP.5b/PP.5b (extension beyond COMP) are 0.16um
 }
+
+
+def _bjt_unit_implant_margin_um(family: str) -> float:
+    """``bjt_array``'s per-unit emitter (Pplus) / base-tie (Nplus) implant
+    margin (issue #3587), or ``0.0`` for a family without both implant roles
+    -- byte-for-byte unchanged geometry there. Uses the ring's minimal
+    NP.5b/PP.5b margin, not the wider S/D one, which would put each implant
+    within NP.3/PP.3 range of the facing opposite-type pad."""
+    if (
+        _role_layer_info(family, "pplus") is None
+        or _role_layer_info(family, "nplus") is None
+    ):
+        return 0.0
+    return _ring_implant_margin_um(family)
 
 
 def _ring_implant_margin_um(family: str) -> float:
@@ -1740,6 +1776,44 @@ _PDK_RES_FLAVOR_MASK_ENCLOSURE_UM: dict[str, dict[tuple[int, int], float]] = {
 }
 
 
+#: gf180mcu salicide-block (SAB) geometry for ``res_array``'s poly body (issue
+#: #3000), keyed by family. The runset's ``sab.drc`` constrains an unsalicided
+#: poly resistor in two directions the body-only marker box violated:
+#:
+#: - ``contact_space_um``: ``SB.4``, SAB-to-contact space >= 0.15um. The SAB is
+#:   drawn on the body segment, so the end head is lengthened until the
+#:   contact edge sits this far from the body (the generic enclosure margin
+#:   left 0.10um). Body length, and so the extracted ``L``, is unchanged.
+#: - ``side_extension_um``: ``SB.9``/``SB.10`` -- the SAB must run >= 0.22um
+#:   past the poly body's long edges (a SAB edge flush with the poly edge is
+#:   what ``SB.10`` flagged). Folded rows are 0.4um apart, so the extended
+#:   SABs of adjacent rows overlap and merge instead of tripping ``SB.2``.
+#:
+#: Values are from the open GF180MCU DRM / ``sab.drc`` (SB.4: 0.15um,
+#: SB.9/SB.10: 0.22um). A family absent here draws the body-only SAB.
+_PDK_RES_SAB_UM: dict[str, dict[str, Any]] = {
+    "gf180mcu": {
+        "layer": (49, 0),
+        "contact_space_um": 0.15,
+        "side_extension_um": 0.22,
+    },
+}
+
+
+def _res_sab_geometry_um(
+    family: str, flavor: str, metal_level: int = 0
+) -> tuple[float, float]:
+    """``(contact_space_um, side_extension_um)`` of the poly-body salicide
+    block for ``family`` (see :data:`_PDK_RES_SAB_UM`), or ``(0.0, 0.0)`` for
+    a family without one or a ``metal_level`` (metal-body) request."""
+    entry = _PDK_RES_SAB_UM.get(family)
+    if entry is None or metal_level:
+        return (0.0, 0.0)
+    if entry["layer"] not in _PDK_RES_FLAVOR_LAYERS[family].get(flavor, ()):
+        return (0.0, 0.0)
+    return (entry["contact_space_um"], entry["side_extension_um"])
+
+
 #: PDK families whose poly resistors follow the ``abutting_heads`` topology
 #: (issue #2679): ``polyres`` is the whole resistive body and the poly layer
 #: is only the two abutting contact heads. Must match the families whose
@@ -2830,6 +2904,7 @@ def _device_layer_params(
         "gate_pad_clearance_um": _gate_pad_clearance_um(family),
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
         "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "top_endcap_um": _gate_top_endcap_um(family),
         "sd_implant_layer": (
             sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
         ),
@@ -2918,6 +2993,7 @@ def _resistor_layer_params(
             resolved[f"res_flavor_{i}_layer"] = kdb.LayerInfo(0, 0)
             resolved[f"res_flavor_{i}_present"] = False
             resolved[f"res_flavor_{i}_head_enclosure_um"] = 0.0
+            resolved[f"res_flavor_{i}_side_extension_um"] = 0.0
         floors = _metal_res_geometry_min_um(family, metal_level)
         resolved["metal_res_via_min_w_um"] = floors["via_min_w_um"]
         resolved["metal_res_via_enclosure_min_um"] = floors["via_enclosure_min_um"]
@@ -2938,6 +3014,7 @@ def _resistor_layer_params(
     # Issue #2449: a precision-poly flavour draws its own rectangular cut, so
     # the layer-keyed ordinary fixed-size clamp (0.17um) must not shrink it.
     end_w_um, end_h_um = _res_end_contact_um(family, flavor)
+    sab_contact_space_um, sab_side_ext_um = _res_sab_geometry_um(family, flavor)
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -2967,6 +3044,13 @@ def _resistor_layer_params(
             if pair is not None and end_w_um > 0.0
             else 0.0
         )
+        # Issue #3000: the SAB runs past the poly body's long edges.
+        resolved[f"res_flavor_{i}_side_extension_um"] = (
+            sab_side_ext_um
+            if pair is not None and pair == _PDK_RES_SAB_UM.get(family, {}).get("layer")
+            else 0.0
+        )
+    resolved["res_contact_space_um"] = sab_contact_space_um
     return resolved
 
 
@@ -3279,13 +3363,12 @@ def _bjt_layer_params(
     it always ties the p-type substrate directly -- the real, physical
     collector terminal of a vertical PNP (P+ emitter / N+ base tie inside an
     Nwell / P+ collector = substrate, per ``docs/design/gen-bjt-array-spike.md``),
-    never a well tie. This intentionally does **not** extend implant coverage
-    to the emitter/base-tie unit body itself, a separate, pre-existing,
-    documented limitation (that same design doc: "curated decks check no
-    implant layer ... a process-exact device would distinguish P+ emitter, N+
-    base tie, and P+ collector by implant") predating both #1577 and this
-    issue -- out of #1580's own scope, which is the tap/collector *ring*
-    only.
+    never a well tie. The emitter/base-tie unit body is covered separately
+    (issue #3587, once ``comp.coverage.1`` / ``DF.12`` started flagging bare
+    ``Comp``): a P+ implant over each emitter pad and an N+ implant over each
+    base-tie pad, resolved as ``unit_emitter_implant_layer``,
+    ``unit_base_implant_layer`` and ``unit_implant_margin_um`` (``0.0`` = none
+    drawn).
     """
     import klayout.db as kdb
 
@@ -3295,6 +3378,9 @@ def _bjt_layer_params(
     mark = _role_layer_info(family, "bjt_mark")
     dummy = _role_layer_info(family, "dummy")
     ring_implant = _ring_tap_implant_layer(family, well_tie=False)
+    emitter_implant = _role_layer_info(family, "pplus")
+    base_implant = _role_layer_info(family, "nplus")
+    unit_implant_margin = _bjt_unit_implant_margin_um(family)
     return {
         "active_layer": _role_layer_info(family, "active"),
         "contact_layer": _role_layer_info(family, "contact"),
@@ -3306,6 +3392,18 @@ def _bjt_layer_params(
         "tap_layer": _role_layer_info(family, "tap"),
         "well_layer": well if well is not None else kdb.LayerInfo(0, 0),
         "well_present": well is not None,
+        # Per-unit emitter (P+) / base-tie (N+) implants -- the unit-body
+        # counterpart of the ring implant below, closing `DF.12` for the
+        # unit's own `Comp` (issue #3587). Uses the ring's minimal NP.5b/PP.5b
+        # margin, not `sd_implant_margin_um`: the wider S/D margin would push
+        # each implant within NP.3/PP.3 range of the facing opposite-type pad.
+        "unit_emitter_implant_layer": (
+            emitter_implant if emitter_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "unit_base_implant_layer": (
+            base_implant if base_implant is not None else kdb.LayerInfo(0, 0)
+        ),
+        "unit_implant_margin_um": unit_implant_margin,
         "bjt_mark_layer": mark if mark is not None else kdb.LayerInfo(0, 0),
         "bjt_mark_present": mark is not None,
         "ring_implant_layer": (
@@ -3431,6 +3529,7 @@ def _esd_device_layer_params(
         "salicide_block_present": salicide_block is not None,
         "contact_gate_offset_um": _contact_gate_extra_offset_um(family),
         "bottom_endcap_um": _gate_bottom_endcap_um(family),
+        "top_endcap_um": _gate_top_endcap_um(family),
         "sd_implant_layer": (
             sd_implant if sd_implant is not None else kdb.LayerInfo(0, 0)
         ),

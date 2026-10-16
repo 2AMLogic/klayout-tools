@@ -679,6 +679,7 @@ def test_list_generators_includes_all_four_phase2_families():
         "bond_pad",
         "esd_device",
         "cap_array",
+        "cap_vpp_array",
         "well_island",
     }
 
@@ -3925,6 +3926,70 @@ def test_res_array_gf180_higher_sheet_rho_flavor_extracts_as_matching_class(
 
     assert report["device_counts"].get(device_class, 0) > 0
     assert report["device_counts"].get("ppolyf_u", 0) == 0
+
+
+@pytest.mark.parametrize("flavor", ("generic", "1k", "2k", "3k"))
+@pytest.mark.parametrize(
+    "extra", [{}, {"num": 4, "dummy": 1, "rows": 2}], ids=["single", "folded"]
+)
+def test_res_array_gf180_sab_clears_runset_sb_rules(
+    tmp_path, both_pdk_root, flavor, extra
+):
+    """Issue #3000: the PDK runset's `SB.4` (SAB to contact >= 0.15um) and
+    `SB.9`/`SB.10` (SAB runs >= 0.22um past the poly body's long edges while
+    poly runs past its ends) failed because the SAB reused the body-only
+    marker box. Checked on the drawn geometry, no runset needed."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"res_array_gf180_sab_{flavor}.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"flavor": flavor, **extra},
+            "options": {"output": str(output)},
+        }
+    )
+    sab = _layer_region(output, _GF180_RES_BLOCK_LAYER).merged()
+    contact = _layer_region(output, _GF180_CONTACT_LAYER)
+    poly = _layer_region(output, (30, 0)).merged()  # Poly2
+    dbu = _gds_dbu(output)
+    far = round(0.22 / dbu)
+    # SB.4 / SB.8: no contact within 0.15um of (or inside) the SAB.
+    assert sab.separation_check(contact, round(0.15 / dbu)).is_empty()
+    assert (sab & contact).is_empty()
+    # SB.9: the SAB runs >= 0.22um past the poly body's long edges.
+    for sab_poly in sab.each():
+        box = sab_poly.bbox()
+        body = poly & kdb.Region(kdb.Box(box.left, -(10**9), box.right, 10**9))
+        assert (body.sized(0, far) - sab).is_empty()
+    # SB.10: poly runs >= 0.22um past the SAB ends along the current flow.
+    leftover = (sab & poly).sized(far, 0, 2) - poly
+    assert leftover.is_empty(), leftover
+
+
+def test_res_array_gf180_sab_keeps_body_length_for_extraction(tmp_path, both_pdk_root):
+    """The lengthened end heads must not change the recognised body: SAB spans
+    the full `length_um` body, so the extracted resistor keeps its length."""
+    output = tmp_path / "res_array_gf180_sab_len.gds"
+    generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "flavor": "1k",
+                "length_um": 4.0,
+                "width_um": 2.0,
+                "num": 1,
+                "dummy": 0,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    sab = _layer_region(output, _GF180_RES_BLOCK_LAYER)
+    assert sab.bbox().width() * _gds_dbu(output) == pytest.approx(4.0)
+    report = run_extract(str(output), "gf180mcu", deck_options={"poly_res": "1k"})
+    assert report["device_counts"].get("ppolyf_u_1k", 0) == 1
 
 
 @pytest.mark.parametrize(
@@ -8335,11 +8400,15 @@ def test_diff_pair_ring_gap_reports_gap_port_and_stays_drc_clean(tmp_path, pdk_r
                 "ring_gap_side": "E",
                 "ring_gap_um": 1.0,
                 # Offset re-centres the opening from the ring's mid-height
-                # (core_h / 2 == 1.04um) onto the lower device row (y==0.21um);
+                # (core_h / 2 == 1.19um) onto the lower device row (y==0.21um);
                 # core_h grew with the gate landing pad's row-pitch bump
-                # (issue #461) and the sky130 pad stand-off (issue #3115),
-                # so the offset that lands there did too.
-                "ring_gap_offset_um": -0.98,
+                # (issue #461), the sky130 pad stand-off (issue #3115) and the
+                # sky130 top endcap (issue #2936), so the offset that lands
+                # there did too. The ring padding is widened by 0.1um so the
+                # opening still leaves the 0.485um a 0.17um route needs below
+                # the device row.
+                "ring_padding_um": 0.6,
+                "ring_gap_offset_um": -1.13,
             },
             "options": {"output": str(output)},
         }
@@ -8390,7 +8459,7 @@ def test_bjt_array_collector_ring_gap_reports_gap_port_and_stays_drc_clean(
             "params": {
                 "ring_gap_side": "N",
                 "ring_gap_um": 1.0,
-                "ring_gap_offset_um": -0.41,
+                "ring_gap_offset_um": -0.2,
             },
             "options": {"output": str(output)},
         }
@@ -9462,13 +9531,16 @@ def test_dogbone_terminal_example_channel_narrower_than_pads():
 @pytest.mark.parametrize("family", ("sky130", "sg13g2", "sg13cmos5l"))
 def test_families_without_the_1577_gf180mcu_knobs_are_unchanged(family):
     """None of sky130/sg13g2/sg13cmos5l's curated decks check a contact-to-
-    gate spacing, a bottom-edge gate endcap, or a source/drain-implant
-    coverage rule this issue's four new per-family knobs would need to
-    close -- every one of them must resolve to the pre-#1577 no-op value on
-    these three families, so their existing `mos_array`/`diff_pair`/
-    `esd_device` geometry stays byte-for-byte identical."""
+    gate spacing or a source/drain-implant coverage rule this issue's new
+    per-family knobs would need to close -- each must resolve to the
+    pre-#1577 no-op value on these three families, so their existing
+    `mos_array`/`diff_pair`/`esd_device` geometry stays byte-for-byte
+    identical. The bottom-edge gate endcap is the exception for sky130
+    (issue #2936: its deck gained `poly.endcap.diff.1`), pinned in
+    `test_sky130_gate_endcap_knobs_match_the_deck_rule` below."""
     assert gen._contact_gate_extra_offset_um(family) == 0.0
-    assert gen._gate_bottom_endcap_um(family) == 0.0
+    if family != "sky130":
+        assert gen._gate_bottom_endcap_um(family) == 0.0
     assert gen._sd_implant_margin_um(family) == 0.0
     assert gen._voltage_flavor_mark_margin_um(family) == gen.WELL_ENCLOSURE_MARGIN_UM
 
@@ -10321,17 +10393,11 @@ def test_gf180mcu_bjt_array_collector_ring_covered_by_pplus_implant(
     `docs/design/gen-bjt-array-spike.md`) -- and must be covered by Pplus
     (31/0), never Nplus.
 
-    This deliberately does **not** assert full-`Comp` coverage the way the
-    parametrized test above does: `bjt_array`'s own emitter/base-tie unit
-    body has no implant at all, a separate, pre-existing, documented
-    limitation (`docs/design/gen-bjt-array-spike.md`: "curated decks check
-    no implant layer ... a process-exact device would distinguish P+
-    emitter, N+ base tie, and P+ collector by implant") predating both
-    #1577 and this issue -- out of #1580's own scope, which is the
-    collector *ring* only. This test isolates the ring's own contribution
-    to the drawn `Comp` region (by diffing against the same request with
-    `add_collector_ring=False`) so it verifies only that shape, not the
-    unit body's own pre-existing gap."""
+    This test isolates the ring's own contribution to the drawn `Comp`
+    region (by diffing against the same request with
+    `add_collector_ring=False`) so it verifies only that shape; the unit
+    body's own P+ emitter / N+ base-tie implants (issue #3587) are covered by
+    the whole-layout DRC-clean assertion at the end."""
     import klayout.db as kdb
 
     def _active_region(add_ring):
@@ -10370,7 +10436,9 @@ def test_gf180mcu_bjt_array_collector_ring_covered_by_pplus_implant(
         layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
     ).merged()
     assert (ring_region - pplus_region).is_empty()
-    assert nplus_region.is_empty()  # never the well-tie doping for this ring
+    # Never the well-tie doping for this ring. (The unit bodies' base-tie pads
+    # carry their own Nplus -- issue #3587 -- so only the ring is checked.)
+    assert (nplus_region & ring_region).is_empty()
 
     drc_report = run_drc(str(with_ring_output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]
@@ -10597,6 +10665,14 @@ def test_sky130_precision_res_rows_do_not_overlap(tmp_path, pdk_root):
     assert region.merged().count() == len(pads)  # no pad merged into another
 
 
+def _gds_dbu(path):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(path))
+    return layout.dbu
+
+
 def _layer_region(path, layer_pair):
     import klayout.db as kdb
 
@@ -10724,6 +10800,123 @@ def test_sky130_short_gate_pad_and_ring_well_clear_magic_rules(
 
 
 # --------------------------------------------------------------------------- #
+# sky130 gate-poly endcap (issue #2936) -- `poly.8`, 0.13um
+# --------------------------------------------------------------------------- #
+def test_sky130_gate_endcap_knobs_match_the_deck_rule():
+    """The generator's sky130 endcap clears the deck rule it is checked
+    against with margin, on both edges; no other family gains a top neck."""
+    from klayout_tools.decks import get_deck
+
+    (rule,) = [r for r in get_deck("sky130") if r.id == "poly.endcap.diff.1"]
+    required_um = rule.derived_layer.sized_by_um
+    assert gen._gate_bottom_endcap_um("sky130") > required_um
+    assert gen._gate_top_endcap_um("sky130") > required_um
+    for family in ("gf180mcu", "sg13g2", "sg13cmos5l"):
+        assert gen._gate_top_endcap_um(family) == 0.0
+
+
+@pytest.mark.parametrize("gate_contact", [True, False])
+@pytest.mark.parametrize("l_um", [0.15, 0.5, 1.0])
+def test_sky130_mos_array_gate_poly_clears_the_diffusion_at_both_ends(
+    tmp_path, pdk_root, gate_contact, l_um
+):
+    """The issue's reproduction, over L below/above the 0.42um landing-pad
+    width and both `gate_contact` settings: poly extends past the diffusion
+    by the full endcap at the bottom and the top, and `klt drc --deck sky130`
+    (now carrying `poly.endcap.diff.1`) stays clean."""
+    output = tmp_path / "m.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "w_um": 1.0,
+                "l_um": l_um,
+                "rows": 1,
+                "cols": 1,
+                "dummy": 0,
+                "gate_contact": gate_contact,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    endcap_um = gen._gate_bottom_endcap_um("sky130")
+    poly = _layer_bbox(output, 66, 20)
+    diff = _layer_bbox(output, 65, 20)
+    assert poly["bottom"] == pytest.approx(diff["bottom"] - endcap_um)
+    assert poly["top"] >= diff["top"] + gen._gate_top_endcap_um("sky130") - 1e-9
+
+    report = run_drc(str(output), "sky130")
+    assert report["status"] == "clean", report["violations"]
+    assert "poly.endcap.diff.1" not in report["coverage"].get("skipped", [])
+
+
+@pytest.mark.parametrize("l_um", [0.5, 1.0])
+def test_sky130_gate_endcap_is_full_width_not_just_the_neck(tmp_path, pdk_root, l_um):
+    """For L above the 0.42um pad width the pad alone covers only the middle
+    of the gate; the endcap must still span the *whole* gate length at the
+    top. Probe 0.1um above the diffusion: poly there must cover the full
+    gate x-range."""
+    import klayout.db as kdb
+
+    output = tmp_path / "m.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"w_um": 1.0, "l_um": l_um, "rows": 1, "cols": 1, "dummy": 0},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    poly = kdb.Region(top.begin_shapes_rec(layout.layer(66, 20))).merged()
+    diff = kdb.Region(top.begin_shapes_rec(layout.layer(65, 20))).merged()
+    gate = poly & diff
+    gb = gate.bbox()
+    top_strip = kdb.Region(kdb.Box(gb.left, gb.top, gb.right, gb.top + 100))
+    bottom_strip = kdb.Region(kdb.Box(gb.left, gb.bottom - 100, gb.right, gb.bottom))
+    assert (top_strip - poly).is_empty()
+    assert (bottom_strip - poly).is_empty()
+
+
+def test_sky130_diff_pair_and_parallel_mos_array_are_drc_clean(tmp_path, pdk_root):
+    """`diff_pair` (reuses the unit device) and the `finger_topology:
+    "parallel"` path (its own bottom endcap, comb at the top) both clear
+    `poly.endcap.diff.1`."""
+    pair = tmp_path / "pair.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"w_um": 2.0, "l_um": 0.5},
+            "options": {"output": str(pair)},
+        }
+    )
+    assert run_drc(str(pair), "sky130")["status"] == "clean"
+
+    parallel = tmp_path / "parallel.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "rows": 2,
+                "cols": 2,
+                "dummy": 1,
+                "fingers": 3,
+                "gate_contact": True,
+                "finger_topology": "parallel",
+            },
+            "options": {"output": str(parallel)},
+        }
+    )
+    report = run_drc(str(parallel), "sky130")
+    assert report["status"] == "clean", report["violations"]
+
+
 # mos_array `mos_cap` option (issue #3283)
 # --------------------------------------------------------------------------- #
 

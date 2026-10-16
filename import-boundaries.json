@@ -177,12 +177,14 @@
       "modules": [
         "klayout_tools.cli.gen_cmd",
         "klayout_tools.gen",
+        "klayout_tools.gen_cap_vpp",
         "klayout_tools.gen_describe",
         "klayout_tools.gen_layer_params",
         "klayout_tools.gen_pcells",
         "klayout_tools.gen_pcells.bjt_array",
         "klayout_tools.gen_pcells.bond_pad",
         "klayout_tools.gen_pcells.cap_array",
+        "klayout_tools.gen_pcells.cap_vpp_array",
         "klayout_tools.gen_pcells.diff_pair",
         "klayout_tools.gen_pcells.esd_device",
         "klayout_tools.gen_pcells.guard_ring",
@@ -323,6 +325,7 @@
       "modules": [
         "klayout_tools.cli.place_and_route_cmd",
         "klayout_tools.place_and_route",
+        "klayout_tools.place_and_route_batch",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
@@ -370,6 +373,14 @@
       "modules": [
         "klayout_tools.cli.ring_check_cmd",
         "klayout_tools.ring_check"
+      ]
+    },
+    "tap_distance": {
+      "kind": "verb",
+      "description": "`klt tap_distance` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.tap_distance_cmd",
+        "klayout_tools.tap_distance"
       ]
     },
     "shared-core": {
@@ -430,9 +441,11 @@
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
+        "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
         "klayout_tools.sim_plot",
+        "klayout_tools.sim_portable",
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_set",
@@ -566,6 +579,16 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "tap_distance",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --region parser, as every verb does."
+    },
+    {
+      "consumer": "tap_distance",
+      "exporter": "erc",
+      "reason": "Issue #3009: the optional tap net filter reuses ERC's connectivity extraction helpers instead of a second extraction."
+    },
     {
       "consumer": "arith_gen",
       "exporter": "cli-infra",
@@ -1120,9 +1143,31 @@
       "consumer": "yield_sensitivity",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "sim",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "place_and_route",
+      "exporter": "netlist",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.tap_distance",
+      "exporter": "klayout_tools.erc",
+      "symbol": "_match_net_clusters",
+      "reason": "Issue #3009: reuse ERC net-label matching for the tap net filter rather than duplicating it."
+    },
+    {
+      "consumer": "klayout_tools.tap_distance",
+      "exporter": "klayout_tools.erc",
+      "symbol": "_register_label_layer",
+      "reason": "Issue #3009: reuse ERC label-layer registration for the tap net filter rather than duplicating it."
+    },
     {
       "consumer": "klayout_tools.drc",
       "exporter": "klayout_tools._provenance",
@@ -1332,6 +1377,66 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_batch_environment",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_runner_identity",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_resolve_batch_config",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_runner_preflight_script",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_status_exit_code",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_remote_stderr_tail",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.netlist_batch",
+      "symbol": "_runner_error",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools.sim",
+      "symbol": "_yield_host_default_backend",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_content_hash",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
+    },
+    {
+      "consumer": "klayout_tools.place_and_route_batch",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_klt_version",
+      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     }
   ],
   "legacy_exceptions": {

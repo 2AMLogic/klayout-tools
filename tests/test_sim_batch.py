@@ -2401,6 +2401,124 @@ def test_mixed_shards_keep_per_shard_diagnostics_and_artifacts(tmp_path, monkeyp
     assert len(environment["fleet"]) == 2
 
 
+def _receipt_job_kwargs(tmp_path, runner, **overrides):
+    kwargs = dict(
+        config=_config(tmp_path),
+        job_id="job-1",
+        corner_points=_corner_points(1),
+        netlist_path=str(_write_body(tmp_path)),
+        timeout_s=30.0,
+        keep_artifacts=False,
+        want_waveforms=False,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        request={"netlist": "body.spice"},
+        measurements_spec=_measurements_spec(),
+        runner=runner,
+        sleep=runner.sleep,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_receipt_is_written_before_the_first_poll_and_records_terminal_state(
+    tmp_path, monkeypatch
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    runner.outputs = {"report.json": _sim_report()}
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    receipt_path = tmp_path / "artifacts" / sb.BATCH_RECEIPT_FILENAME
+    seen_before_poll: list[dict] = []
+    real_poll = sb.poll_status
+
+    def _spy(*args, **kwargs):
+        seen_before_poll.append(json.loads(receipt_path.read_text()))
+        return real_poll(*args, **kwargs)
+
+    monkeypatch.setattr(sb, "poll_status", _spy)
+    sb._run_batch_job(**_receipt_job_kwargs(tmp_path, runner))
+
+    assert seen_before_poll[0]["state"] is None
+    assert seen_before_poll[0]["job_id"] == "job-1"
+    final = json.loads(receipt_path.read_text())
+    assert final["state"] == "done"
+    assert {"bucket", "region", "launched_at", "request_sha256"} <= set(final)
+    assert not list(receipt_path.parent.glob("*.tmp.*"))
+
+
+def test_receipt_is_not_written_when_launch_fails(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    runner.queue("launch", fake_completed("", returncode=1, stderr="boom"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    with pytest.raises(sb.BatchError):
+        sb._run_batch_job(**_receipt_job_kwargs(tmp_path, runner))
+    assert not (tmp_path / "artifacts" / sb.BATCH_RECEIPT_FILENAME).exists()
+
+
+def test_unwritable_receipt_warns_and_does_not_fail_the_sweep(
+    tmp_path, monkeypatch, capsys
+):
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("failed", exit_code="1"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    blocker = tmp_path / "artifacts"
+    blocker.write_text("not a directory")
+    corners, _, _ = sb._run_batch_job(**_receipt_job_kwargs(tmp_path, runner))
+    assert corners[0]["status"] == "error"
+    assert "could not write batch receipt" in capsys.readouterr().err
+
+
+def test_sigterm_during_poll_names_the_job_and_restores_handlers(
+    tmp_path, monkeypatch, capsys
+):
+    import signal
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("running"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    def _sleep(_seconds):
+        signal.raise_signal(signal.SIGTERM)
+
+    with pytest.raises(sb.BatchClientInterrupted) as excinfo:
+        sb._run_batch_job(**_receipt_job_kwargs(tmp_path, runner, sleep=_sleep))
+
+    assert excinfo.value.code == sb.BATCH_INTERRUPTED_CODE
+    err = capsys.readouterr().err
+    assert "job-1" in err and "left running" in err
+    receipt = json.loads(
+        (tmp_path / "artifacts" / sb.BATCH_RECEIPT_FILENAME).read_text()
+    )
+    assert receipt["state"] is None
+    assert {sig: signal.getsignal(sig) for sig in before} == before
+
+
+def test_run_batch_reraises_interrupt_as_coded_sim_error(tmp_path, monkeypatch):
+    def _boom(**kwargs):
+        raise sb.BatchClientInterrupted("x", job_id="job-1", signum=15)
+
+    monkeypatch.setattr(sb, "_run_batch_job", _boom)
+    monkeypatch.setattr(sb, "_resolve_batch_config", lambda *a, **k: _config(tmp_path))
+    monkeypatch.setattr(sb, "_assess_job_ceiling", lambda **k: {})
+    monkeypatch.setattr(sb, "_enforce_job_ceiling", lambda *a, **k: None)
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._run_batch(
+            corner_points=_corner_points(1),
+            netlist_path="n",
+            models_lib=None,
+            analysis={},
+            measurements_spec=[],
+            timeout_s=1.0,
+            keep_artifacts=False,
+            want_waveforms=False,
+            artifacts_dir=str(tmp_path),
+            max_workers=None,
+            request={},
+        )
+    assert excinfo.value.code == "batch_client_interrupted"
+
+
 def test_poll_budget_overrun_reports_unrun_corners(tmp_path, monkeypatch):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("running"))
@@ -5337,6 +5455,113 @@ def test_prelaunch_feature_check_warn_mode_does_not_raise(tmp_path, monkeypatch)
         request, _config(tmp_path, runner_version_check="warn")
     )
     sb._enforce_published_runner_features(request, assessment)
+
+
+def test_request_feature_registry_matches_docs_table():
+    """Every registry entry has a matching row in docs/cli/sim.md (#2877)."""
+    from pathlib import Path
+
+    from klayout_tools.sim_batch import REQUEST_FEATURE_MIN_RUNNER_VERSION as reg
+
+    assert reg
+    doc = (Path(__file__).resolve().parents[1] / "docs/cli/sim.md").read_text()
+    for feature, version in reg.items():
+        assert version is None or version.count(".") == 2
+        shown = version if version is not None else "unreleased"
+        row = f"| `{feature.split(' (')[0]}`"
+        assert row in doc, feature
+        line = next(ln for ln in doc.splitlines() if ln.startswith(row))
+        assert line.rstrip().endswith(f"| {shown} |"), (feature, line)
+
+
+# --- mandatory `transfer` worker gate (issue #2924) --------------------------
+
+_TRANSFER_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {},
+    "measurements": [
+        {
+            "name": "pm",
+            "transfer": {
+                "num": "v(out)",
+                "den": "v(in)",
+                "metric": "phase_margin_deg",
+            },
+        }
+    ],
+}
+
+
+def test_transfer_is_a_registered_mandatory_runner_feature():
+    assert sb._request_features(_TRANSFER_REQUEST) == ["transfer"]
+    assert (
+        sb._request_features({"measurements": [{"name": "x", "spice": ".meas"}]}) == []
+    )
+    assert "transfer" in sb._MANDATORY_RUNNER_FEATURES
+    assert "analysis_steps" not in sb._MANDATORY_RUNNER_FEATURES
+
+
+@pytest.mark.parametrize("version_check", ["enforce", "warn"])
+@pytest.mark.parametrize("runner", ["klt 0.7.0", "klt dirty", "klt"])
+def test_transfer_on_an_old_or_unknown_runner_is_rejected_even_under_warn(
+    tmp_path, runner, version_check
+):
+    spec = _feature_spec(tmp_path, _TRANSFER_REQUEST, version_check=version_check)
+    proc, out_dir, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(runner)
+    )
+    assert proc.returncode == sb._BATCH_PREFLIGHT_REJECT_EXIT
+    assert not marker.exists()  # klt sim never ran
+    error = json.loads((out_dir / "report.json").read_text())["error"]
+    assert error["code"] == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "transfer" in error["message"]
+
+
+@pytest.mark.parametrize("version_check", ["enforce", "warn"])
+@pytest.mark.parametrize("runner", ["0.7.1", "0.7.1.dev5+gabc", "0.7.3"])
+def test_transfer_on_a_supporting_runner_runs(tmp_path, runner, version_check):
+    spec = _feature_spec(tmp_path, _TRANSFER_REQUEST, version_check=version_check)
+    proc, _, marker = _run_job_cmd_with_fake_klt(
+        tmp_path, spec, _fake_klt(f"klt {runner}")
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_request_without_transfer_keeps_the_warn_semantics_on_an_old_runner(tmp_path):
+    spec = _feature_spec(tmp_path, _STEPS_REQUEST, version_check="warn")
+    proc, _, marker = _run_job_cmd_with_fake_klt(tmp_path, spec, _fake_klt("klt 0.7.0"))
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+def test_job_command_is_unchanged_for_a_request_without_transfer(tmp_path):
+    plain = {"models": {}, "options": {}}
+    command = _feature_spec(tmp_path, plain).cmd
+    assert "mmiss" not in command
+
+
+def test_prelaunch_refuses_transfer_on_an_old_image_even_under_warn(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.7.0")])
+    assessment = sb._assess_published_runner(
+        _TRANSFER_REQUEST, _config(tmp_path, runner_version_check="warn")
+    )
+    with pytest.raises(sim.SimError) as raised:
+        sb._enforce_published_runner_features(_TRANSFER_REQUEST, assessment)
+    assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+    assert "transfer" in str(raised.value)
+
+
+def test_prelaunch_defers_transfer_to_the_runner_when_the_image_is_unknown(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image()])  # legacy: no klt_version
+    assessment = sb._assess_published_runner(_TRANSFER_REQUEST, _config(tmp_path))
+    sb._enforce_published_runner_features(_TRANSFER_REQUEST, assessment)  # no raise
 
 
 # --------------------------------------------------------------------------- #

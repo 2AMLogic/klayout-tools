@@ -155,6 +155,20 @@ def _refuse_crossings(spec: dict[str, Any]) -> None:
         )
 
 
+def _refuse_optional(spec: dict[str, Any]) -> None:
+    """Issue #2925: ``optional: true`` (a value-less measurement grades
+    ``absent`` instead of ``error``) is implemented for the scalar analysis
+    only; a step measurement's no-value paths also carry ``step_failed`` /
+    ``derived_input_unavailable`` causes that must stay errors, so the flag is
+    refused by name rather than silently ignored."""
+    if spec.get("optional") is True:
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'optional' is not supported "
+            "with analysis_steps -- use the scalar analysis for a measurement "
+            "that may legitimately be absent"
+        )
+
+
 def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
     """Issue #2947: like ``crossings``, a ``cycle_mean`` reads one transient
     plot's rawfile and has no per-step equivalent -- refused by name."""
@@ -292,6 +306,39 @@ def _resolve_step_analysis(analysis: Any, step: str) -> tuple[str, str]:
     return kind.lower(), args
 
 
+def _resolve_pwl_alter(value: dict[str, Any], target: str, step: str) -> dict[str, Any]:
+    """Validate a ``{"pwl": [t0, v0, t1, v1, ...]}`` alter value."""
+    if set(value) != {"pwl"}:
+        raise _error(
+            f"step {step!r}: alter value for {target!r} as an object must have "
+            f'exactly one key, "pwl" (got {sorted(value)!r})'
+        )
+    vector = value["pwl"]
+    if (
+        not isinstance(vector, list)
+        or len(vector) < 4
+        or len(vector) % 2
+        or any(
+            isinstance(v, bool)
+            or not isinstance(v, (int, float))
+            or not math.isfinite(v)
+            for v in vector
+        )
+    ):
+        raise _error(
+            f"step {step!r}: alter pwl for {target!r} must be an even-length "
+            "flat list of finite numbers [t0, v0, t1, v1, ...] with at least "
+            f"2 points (got {vector!r})"
+        )
+    times = vector[0::2]
+    if any(b < a for a, b in zip(times, times[1:], strict=False)):
+        raise _error(
+            f"step {step!r}: alter pwl for {target!r} has decreasing times "
+            f"{times!r}; times must be non-decreasing"
+        )
+    return {"pwl": list(vector)}
+
+
 def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
     """``alter`` as ordered ``[target, value]`` pairs (declaration order)."""
     if alter is None:
@@ -314,14 +361,17 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
         if target.lower() in seen:
             raise _error(f"step {step!r}: alter target {target!r} is repeated")
         seen.add(target.lower())
-        if (
+        if isinstance(value, dict):
+            value = _resolve_pwl_alter(value, target, step)
+        elif (
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(value)
         ):
             raise _error(
                 f"step {step!r}: alter value for {target!r} must be a finite "
-                f"number (got {value!r})"
+                f'number or a {{"pwl": [t0, v0, t1, v1, ...]}} object '
+                f"(got {value!r})"
             )
         pairs.append([target, value])
     return pairs
@@ -346,6 +396,7 @@ def _resolve_step_measurements(
     for spec in specs:
         _validate_measurement_form(spec)
         _refuse_crossings(spec)
+        _refuse_optional(spec)
         _refuse_cycle_mean(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
@@ -536,6 +587,7 @@ def _resolve_derived_measurements(
     for position, spec in enumerate(specs):
         name = spec["name"]
         _refuse_crossings(spec)
+        _refuse_optional(spec)
         _refuse_cycle_mean(spec)
         if spec.get("spice") is not None:
             raise _error(
@@ -666,8 +718,8 @@ def validate_alter_targets(
     except (OSError, UnicodeDecodeError):
         waveforms = {}
     for step in analysis["steps"]:
-        for target, _value in step["alter"]:
-            _check_alter_target(step["name"], target, supply_targets, waveforms)
+        for target, value in step["alter"]:
+            _check_alter_target(step["name"], target, supply_targets, waveforms, value)
     step_targets = sorted(
         {target for step in analysis["steps"] for target, _value in step["alter"]}
     )
@@ -685,7 +737,11 @@ def validate_alter_targets(
 
 
 def _check_alter_target(
-    step: str, target: str, supply_targets: set[str], waveforms: dict[str, str]
+    step: str,
+    target: str,
+    supply_targets: set[str],
+    waveforms: dict[str, str],
+    value: Any = None,
 ) -> None:
     if target.lower() in supply_targets:
         raise _error(
@@ -695,11 +751,27 @@ def _check_alter_target(
             "from corners.supply_v"
         )
     waveform = waveforms.get(target.lower())
+    if isinstance(value, dict):
+        if waveform != "pwl":
+            declared = (
+                f"a {waveform.upper()} waveform" if waveform else "no PWL waveform"
+            )
+            raise _error(
+                f"step {step!r}: alter target {target!r} is declared with "
+                f'{declared}; the {{"pwl": [...]}} form only retargets a '
+                "V/I source the netlist declares with a pwl(...) waveform"
+            )
+        return
     if waveform is not None:
+        hint = (
+            ' -- pass {"pwl": [t0, v0, ...]} to give this step its own vector'
+            if waveform == "pwl"
+            else " -- declare it as a plain DC value"
+        )
         raise _error(
             f"step {step!r}: alter target {target!r} is declared with an "
             f"explicit {waveform.upper()} waveform, and ngspice's alter has no "
-            "effect on it -- declare it as a plain DC value"
+            f"effect on it{hint}"
         )
 
 
@@ -735,7 +807,11 @@ def control_lines(
             lines.append("reset")
             lines.extend(reset_prefix or [])
         for target, value in step["alter"]:
-            lines.append(f"alter {target}={_format_value(value)}")
+            if isinstance(value, dict):
+                vector = " ".join(_format_value(v) for v in value["pwl"])
+                lines.append(f"alter @{target}[pwl] = [ {vector} ]")
+            else:
+                lines.append(f"alter {target}={_format_value(value)}")
         lines.append("setplot new")
         lines.append(f"echo klt_step_begin {index} $curplot")
         lines.append(f"{step['kind']} {step['args']}".rstrip())

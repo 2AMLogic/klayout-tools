@@ -1836,6 +1836,10 @@ def _run_measure_command(
     if backend is not None:
         env["KLT_PEX_BACKEND"] = backend
         env["KLT_SIM_BACKEND"] = backend
+    # The parent holds the pex root locked while blocked here; let a nested
+    # `klt sim` under that root (its default `.klt/sim` beside a request in
+    # $KLT_PEX_ARTIFACTS_DIR) proceed instead of tripping outdir_locked (#3291).
+    env[output_lock.INHERIT_ENV] = output_lock.canonical_dir(artifacts_dir)
 
     try:
         completed = subprocess.run(
@@ -2488,6 +2492,7 @@ def run_pex(
     critical_net_excludes: Sequence[str] | None = None,
     distributed_rc: bool = False,
     parasitic_variants: Sequence[str] | None = None,
+    substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
     mom_rlc_resistance_ohm: float | None = None,
     mom_rlc_capacitance_ff: float | None = None,
@@ -2761,6 +2766,7 @@ def run_pex(
             critical_net_excludes=critical_net_excludes,
             distributed_rc=distributed_rc,
             parasitic_variants=parasitic_variants,
+            substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
             mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,

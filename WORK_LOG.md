@@ -4,6 +4,81 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-10-16
 
+- **PR #3612**: test: loosen netlist-hash scaling bound to absorb runner noise
+- **PR #3608**: test: cover source_defines wrapper wiring on the mutation path
+- **PR #3605**: feat(place-and-route): add --backend batch for pdk.rebuild_corners units
+- **PR #3596**: fix: flag margin band starting exactly on the -180 deg axis as ambiguous
+- **PR #3586**: docs(sim): record ngspice 46 verification of per-instance mismatch gating
+- **PR #3577**: fix(examples): make the Monte Carlo instances request pass validation
+- **PR #3508**: feat(erc): add --compact summary mode for --findings-only reports
+- **PR #3504**: fix: draw gf180mcu res_array SAB clear of contacts and past poly body
+- **PR #3481**: feat: add cap_vpp_array generator for PDK fixed capacitor cells
+- **PR #3473**: feat: add --substrate-tie-ohms to choose the extracted substrate DC tie
+- **PR #3453**: feat(sim): add monte_carlo.seed_scope for paired and split-stable draws
+- **PR #3449**: fix: refuse bare layout.netlist resistor X cards that need layout.deck
+- **PR #3438**: feat(sim): stream batch job state to stderr and bound never-started jobs
+- **PR #3432**: feat(sim): refuse a batch PDK variant the fleet image does not ship
+- **PR #3430**: feat(sim): add options.portable_artifacts for portable kept deck and log
+- **PR #3422**: feat(sim): add klt sim-merge to recombine per-request corner-grid reports
+- **PR #3413**: feat: check and draw the sky130 gate-poly endcap (poly.8)
+- **PR #3374**: feat(sim): add client-side timing fields to batch environment.remote
+- **PR #3372**: feat(yield): add klt yield-threshold probit threshold fit for binary-outcome circuits
+- **PR #3361**: feat(sim): add save_vectors option and waveform size guard
+- **PR #3358**: feat: select gf180mcu MIM option A via --deck-option mim_option
+- **PR #3341**: docs: document parameter_tolerance limit on passive-only cells and anchor workaround
+- **PR #3334**: feat(functional-verification): echo test/build console log paths in environment
+- **PR #3329**: feat(asap7): check SRAMDRC-scoped active/well and select enclosure rules
+- **PR #3304**: feat(sim): accept a per-step PWL vector for alter on PWL sources
+- **PR #3220**: docs: point SG13G2 SiGe HBT finding at the runset-backed LVS ruling (#2864)
+- **Issue #3610** (closed): test flake: test_normalized_netlist_hash_scales_roughly_linearly fails on Tests (Python 3.10)
+- **Issue #3574** (closed): fix(examples): examples/sim/request-monte-carlo-instances.json fails request validation
+- **Issue #3562** (closed): analyze_margins: low-frequency axis guard misses a start exactly on -180 deg (0.0 falsy)
+- **Issue #3554** (closed): Add automated test for options.source_defines on the --mutations path
+- **Issue #3518** (closed): place-and-route: dispatch per-corner rebuild units to the batch fleet (backend selection)
+- **Issue #3442** (closed): Live-verify klt sim monte_carlo.instances mismatch gating on a PDK host
+- **Issue #3251** (closed): klt sim/pex batch: request naming PDK variant gf180mcuC is accepted and submitted, then fails on the runner (image ships only gf180mcuD); no client-side variant check
+- **Issue #3212** (closed): klt sim: document client-observed submit/collect timestamps in environment.remote (batch)
+- **Issue #3211** (closed): klt sim: honor .save / allow restricting saved vectors; waveform artifacts are multi-GB for a modest transient
+- **Issue #3132** (closed): klt sim --backend batch: sharded request has no per-shard progress and can hang indefinitely when the shared fleet cap is saturated
+- **Issue #3117** (closed): klt sim analysis_steps: no way to retarget a PWL-declared source's waveform per step
+- **Issue #3100** (closed): gen: no generator for a PDK's fixed-layout capacitor cells or varactors; sky130 PDK PCells need an unavailable dependency
+- **Issue #3089** (closed): Friction: klt extract --parasitics has no control over the substrate DC tie (fixed 1e12 shunt), so transient results depend on an uncontrolled floating substrate
+- **Issue #3082** (closed): ASAP7 SRAM FEOL: active/well and select enclosure rules
+- **Issue #3078** (closed): klt lvs: pre-extracted netlist form cannot compare resistor devices against a subckt-call reference
+- **Issue #3052** (closed): klt sim: keep_artifacts deck and log embed absolute host paths, so they cannot be committed as evidence unmodified
+- **Issue #3045** (closed): klt sim: no verb to merge per-request reports when one logical grid must run as several requests
+- **Issue #3023** (closed): lvs: parameter_tolerance cannot match a passive-only cell where every device differs slightly unless pins are anchored
+- **Issue #3013** (closed): Friction: functional-verification does not return or name the testbench console log (only an overwritten file under .klt/)
+- **Issue #3000** (closed): Friction: gf180mcu res_array ppolyf_u cell violates the PDK runset's salicide-block rules SB.4 and SB.10
+- **Issue #2976** (closed): Friction: no Monte Carlo reduction for binary outcomes vs a swept stimulus (comparator/latch offset via probit with CIs)
+- **Issue #2965** (closed): klt erc --findings-only envelope is megabytes of null per-gate scaffolding
+- **Issue #2936** (closed): gen (sky130): mos_array/diff_pair gate poly has no endcap past the diffusion (poly.8), and the curated deck has no rule for it
+- **Issue #2920** (closed): extract: gf180mcu deck models only MIM option B; an option-A (Metal2/Metal3) MIM is unrecognised and its top-plate vias short the two plates
+- **Issue #2899** (closed): klt sim monte_carlo: mismatch seed is keyed on corner_index, so the same sample_index is a different die at each corner
+- **Issue #2864** (closed): Revisit #1232: SG13G2 bipolar recognition is declined, and three blocks cannot reach T1 because of it
+- **Issue #2093** (closed): The tools klt orchestrates have silent-failure modes: a catalogue with evidence, for workaround-or-report decisions
+- **PR #3583**: fix: fill CI wall-clock baseline from usable runs when main is mostly cancelled
+- **PR #3582**: docs: codify external-tool wrapper contract in json-contract
+- **PR #3521**: fix: fail klt netlist on unevaluated expr() and report xschem version
+- **PR #3478**: fix(gen): clear sky130 poly.4 and diff/tap.10 for short-gate pfet pairs with a guard ring
+- **PR #3477**: feat(signoff): disclose content_hash pin state on yield campaign refusals
+- **PR #3461**: fix(sim): recover stepping narration on capture-only tran from an intact waveform
+- **PR #3417**: feat(drc): add enclosing_adjacent check and sky130 two-adjacent-edge via rules
+- **PR #3336**: docs(gen,lvs): flag sky130 native-Vt NMOS as unsupported with a specific note
+- **PR #3325**: feat(signoff): bind T1 evidence to a set of artifacts via provenance.input.paths
+- **PR #3307**: feat(sim): report sg13g2 MOS subckts as mosfet with section-dependent mismatch activity
+- **PR #3302**: feat(pex): pass --backend through to --measure-command harnesses
+- **Issue #3591** (closed): perf(extract): netlist_normalized_hash is quadratic in device count
+- **Issue #3575** (closed): ci: 'CI wall-clock budget' job fails on main — Tests (Python 3.10-3.13) run 710-800s vs 700s ceiling
+- **Issue #3569** (closed): docs: codify the external-tool wrapper contract (requested-vs-achieved, stage, tool identity, retained failure evidence)
+- **Issue #3482** (closed): klt netlist: silently emits unevaluated expr() device parameters when xschem predates expr() support
+- **Issue #3316** (closed): sky130 DRC: add two-adjacent-edges enclosure check primitive and via.5a/m2.5/via2.5/via3.5 rules
+- **Issue #3246** (closed): klt sim: a waveform-only request never gets the recovered-stepping downgrade, so OP gmin-stepping narration errors a completed transient
+- **Issue #3115** (closed): gen (sky130): short-L gate landing pad abuts diffusion (poly.4) and pfet guard-ring well under-encloses the n-tap (diff/tap.10)
+- **Issue #3063** (closed): signoff: report stale content_hash pin even when a yield citation is unmet for sample size
+- **Issue #3044** (closed): signoff: artifact-anchored generic evidence (items 1, 2, 9, 10) binds a single path; no way to bind a set of source files
+- **Issue #2962** (closed): pex --measure-command: no way to route the per-corner measurement grid to the sim batch backend
+- **Issue #2961** (closed): klt sim monte_carlo: family_mismatch reports sg13g2 MOS subcircuit calls (sg13_lv_nmos/...) as 'other' and has no curated sg13g2 entry
 - **PR #3506**: feat(gen): add mos_cap option to mos_array for marked MOS capacitors
 - **PR #3421**: fix(extract): replay --pins/--def-pins and keep --rerun off the committed netlist
 - **PR #3579**: fix: side-aware input_transitions port-check prefix and live-engine tests

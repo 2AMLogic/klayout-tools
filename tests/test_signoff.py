@@ -8040,7 +8040,9 @@ def test_describe_grader_shape():
         "graded_t1_item_ids",
         "opt_in_evidence_kinds",
         "opt_in_kinds_by_item",
+        "not_applicable_items",
     }
+    assert result["not_applicable_items"] == {"6": ["digital"]}
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
@@ -9903,6 +9905,33 @@ def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
         # fabricated zero.
         "supply_unlabelled_islands": {},
     }
+
+
+def test_item_11_grades_a_compact_erc_envelope_like_the_full_one(tmp_path):
+    """Issue #2965: `klt erc --findings-only --compact` empties `gates` (still
+    a list) and adds a `compact` counts block; item 11 grades it identically."""
+    compact = {
+        **ERC_CLEAN_ENVELOPE,
+        "gates": [],
+        "compact": {"gate_count": 1, "skipped_reason": "findings_only"},
+    }
+    results = []
+    for envelope in (ERC_CLEAN_ENVELOPE, compact):
+        item = _item_11(
+            build_tier_report(
+                _manifest(
+                    kind="digital",
+                    evidence={
+                        "11": _power_delivery_evidence(
+                            tmp_path, kind="digital", erc_envelope=envelope
+                        )
+                    },
+                )
+            )
+        )
+        results.append((item["status"], item["reason"]))
+
+    assert results[0] == results[1] == ("met", None)
 
 
 def test_item_11_analog_met_with_supply_net_correspondence(tmp_path):
@@ -14937,6 +14966,230 @@ def test_sta_schema_v1_foreign_absolute_path_is_not_re_rooted(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Item 6 `not_applicable` outcome (issue #2865)
+# --------------------------------------------------------------------------- #
+
+
+def _sha(path) -> str:
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _na_entry(tmp_path, spec: dict | None = None, statement: dict | None = None):
+    spec = spec or {
+        "status": "ratified",
+        "rows": [
+            {"id": "fmax", "metric": "fmax_mhz", "min": 100},
+            {"id": "setup", "metric": "setup_slack_ns", "min": 0},
+        ],
+    }
+    statement = statement or {
+        "rows": [
+            {"id": "fmax", "class": "timing", "reason": "corner-bounded by STA"},
+            {"id": "setup", "class": "timing", "reason": "corner-bounded by STA"},
+        ]
+    }
+    spec_path = _write(tmp_path, "na-spec.json", spec)
+    statement_path = _write(tmp_path, "na-statement.json", statement)
+    return {
+        "not_applicable": {
+            "spec": {"file": spec_path, "content_hash": _sha(spec_path)},
+            "statement": {
+                "file": statement_path,
+                "content_hash": _sha(statement_path),
+            },
+        }
+    }
+
+
+def _na_report(tmp_path, entry, kind="digital", **kw):
+    evidence = _full_t1_evidence(tmp_path, kind=kind)
+    evidence["6"] = entry
+    return build_tier_report(_manifest(kind=kind, evidence=evidence, **kw))
+
+
+def _item6(report, partition=None):
+    return next(
+        i
+        for i in report["items"]
+        if i["id"] == 6 and i["tier"] == "T1" and i["partition"] == partition
+    )
+
+
+def test_item6_not_applicable_reaches_t1_and_is_counted_separately(tmp_path):
+    report = _na_report(tmp_path, _na_entry(tmp_path))
+
+    item = _item6(report)
+    assert item["status"] == "not_applicable"
+    assert item["reason"] is None
+    assert item["not_applicable"]["spec"]["status"] == "ratified"
+    assert [r["id"] for r in item["not_applicable"]["statement"]["rows"]] == [
+        "fmax",
+        "setup",
+    ]
+    assert report["tier"] == "T1"
+    assert report["t1_met_count"] == 10
+    assert report["t1_not_applicable_count"] == 1
+    assert report["t1_item_count"] == 11
+
+
+def test_item6_not_applicable_without_other_items_is_not_t1(tmp_path):
+    evidence = {"6": _na_entry(tmp_path)}
+    report = build_tier_report(_manifest(kind="digital", evidence=evidence))
+    assert report["tier"] is None
+    assert report["t1_met_count"] == 0
+    assert report["t1_not_applicable_count"] == 1
+
+
+def test_t1_not_applicable_count_absent_when_zero(tmp_path):
+    report = build_tier_report(_manifest(kind="digital"))
+    assert "t1_not_applicable_count" not in report
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"id": "gain", "statistical": True},
+        {"id": "vos", "offset_mv_3sigma": 5},
+        {"id": "y", "target_yield": 0.99},
+        {"id": "c", "class": "matching"},
+        {"id": "b", "note": "bound is 3σ"},
+    ],
+)
+def test_item6_statistical_row_is_refused_naming_the_row(tmp_path, row):
+    spec = {"status": "ratified", "rows": [{"id": "fmax", "min": 1}, row]}
+    statement = {
+        "rows": [
+            {"id": r["id"], "class": "timing", "reason": "x"} for r in spec["rows"]
+        ]
+    }
+    report = _na_report(tmp_path, _na_entry(tmp_path, spec, statement))
+
+    item = _item6(report)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "not_applicable_statistical_row"
+    assert item["detail"]["row"] == row["id"]
+    assert report["tier"] is None
+    assert "t1_not_applicable_count" not in report
+
+
+def test_item6_statistical_false_marker_is_allowed(tmp_path):
+    spec = {
+        "status": "ratified",
+        "rows": [{"id": "fmax", "statistical": False, "min": 1}],
+    }
+    statement = {"rows": [{"id": "fmax", "class": "timing", "reason": "STA"}]}
+    item = _item6(_na_report(tmp_path, _na_entry(tmp_path, spec, statement)))
+    assert item["status"] == "not_applicable"
+
+
+def test_item6_unratified_spec_is_refused(tmp_path):
+    spec = {"status": "draft", "rows": [{"id": "fmax", "min": 1}]}
+    statement = {"rows": [{"id": "fmax", "class": "timing", "reason": "STA"}]}
+    item = _item6(_na_report(tmp_path, _na_entry(tmp_path, spec, statement)))
+    assert item["status"] == "unmet"
+    assert item["reason"] == "not_applicable_spec_unratified"
+
+
+@pytest.mark.parametrize("which", ["na-spec.json", "na-statement.json"])
+def test_item6_editing_spec_or_statement_makes_it_stale(tmp_path, which):
+    entry = _na_entry(tmp_path)
+    path = tmp_path / which
+    path.write_text(path.read_text() + " ")
+    item = _item6(_na_report(tmp_path, entry))
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+    assert item["detail"]["document"] == which.split("-")[1].split(".")[0]
+
+
+def test_item6_missing_content_hash_is_invalid(tmp_path):
+    entry = _na_entry(tmp_path)
+    del entry["not_applicable"]["spec"]["content_hash"]
+    item = _item6(_na_report(tmp_path, entry))
+    assert item["reason"] == "invalid_evidence"
+
+
+def test_item6_unreadable_document(tmp_path):
+    entry = _na_entry(tmp_path)
+    entry["not_applicable"]["statement"]["file"] = str(tmp_path / "gone.json")
+    item = _item6(_na_report(tmp_path, entry))
+    assert item["reason"] == "unreadable_evidence"
+
+
+def test_item6_statement_must_cover_exactly_the_spec_rows(tmp_path):
+    spec = {
+        "status": "ratified",
+        "rows": [{"id": "fmax", "min": 1}, {"id": "setup", "min": 0}],
+    }
+    missing = {"rows": [{"id": "fmax", "class": "timing", "reason": "STA"}]}
+    item = _item6(_na_report(tmp_path, _na_entry(tmp_path, spec, missing)))
+    assert item["reason"] == "not_applicable_statement_incomplete"
+    assert item["detail"]["uncovered_row_ids"] == ["setup"]
+
+    extra = {
+        "rows": [
+            {"id": i, "class": "timing", "reason": "STA"}
+            for i in ("fmax", "setup", "ghost")
+        ]
+    }
+    item = _item6(_na_report(tmp_path, _na_entry(tmp_path, spec, extra)))
+    assert item["reason"] == "not_applicable_statement_incomplete"
+    assert item["detail"]["unknown_row_ids"] == ["ghost"]
+
+
+def test_item6_spec_with_zero_rows_is_refused(tmp_path):
+    item = _item6(
+        _na_report(
+            tmp_path,
+            _na_entry(tmp_path, {"status": "ratified", "rows": []}, {"rows": []}),
+        )
+    )
+    assert item["status"] == "unmet"
+    assert item["reason"] == "not_applicable_statement_incomplete"
+
+
+def test_item6_analog_cannot_use_not_applicable(tmp_path):
+    report = _na_report(tmp_path, _na_entry(tmp_path), kind="analog")
+    assert _item6(report)["reason"] == "not_applicable_wrong_partition"
+
+
+def test_item6_mixed_signal_digital_partition_only(tmp_path):
+    evidence = _full_t1_evidence(tmp_path, kind="digital")
+    entry = _na_entry(tmp_path)
+    evidence["6.digital"] = entry
+    evidence["6.analog"] = entry
+    report = build_tier_report(_manifest(kind="mixed-signal", evidence=evidence))
+
+    assert _item6(report, "digital")["status"] == "not_applicable"
+    analog = _item6(report, "analog")
+    assert analog["status"] == "unmet"
+    assert analog["reason"] == "not_applicable_wrong_partition"
+    assert report["t1_not_applicable_count"] == 1
+    assert report["tier"] is None
+
+
+def test_item6_not_applicable_text_and_fleet_output(tmp_path, capsys):
+    evidence = _full_t1_evidence(tmp_path, kind="digital")
+    evidence["6"] = _na_entry(tmp_path)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(_manifest(kind="digital", evidence=evidence)), encoding="utf-8"
+    )
+    assert main(["signoff", "--manifest", str(manifest)]) == 0
+    out = capsys.readouterr().out
+    assert "T1: 10/11 items met, 1 not_applicable" in out
+    assert "N/A  " in out
+    assert "fmax [timing]: corner-bounded by STA" in out
+
+    fleet = tmp_path / "fleet.json"
+    fleet.write_text(json.dumps({"blocks": [str(manifest)]}), encoding="utf-8")
+    report = build_fleet_report(json.loads(fleet.read_text()))
+    block = report["blocks"][0]
+    assert block["tier"] == "T1"
+    assert block["t1_not_applicable_count"] == 1
+    assert block["blocking_item"] is None
+
+
+# --------------------------------------------------------------------------- #
 # Item 5: several citations + declared spec rows (issue #2959)
 # --------------------------------------------------------------------------- #
 
@@ -15079,3 +15332,94 @@ def test_item5_list_in_another_item_is_still_invalid(tmp_path):
     report = build_tier_report(_manifest(evidence={"8": [sim]}))
     item_8 = next(i for i in report["items"] if i["id"] == 8)
     assert item_8["reason"] == "invalid_evidence"
+
+
+# --- Issue #3258: opt-in `require_annotation_complete` on `sta` evidence ----
+
+
+def _sta_with_annotation(corner_blocks: list) -> dict:
+    """The clean multi-corner `klt sta` envelope with each corner's
+    ``spef_annotation`` replaced, in corner order."""
+    corners = [
+        {**corner, "spef_annotation": block}
+        for corner, block in zip(
+            STA_MULTI_CORNER_CLEAN_ENVELOPE["corners"], corner_blocks, strict=True
+        )
+    ]
+    return {**STA_MULTI_CORNER_CLEAN_ENVELOPE, "corners": corners}
+
+
+def _grade_sta_item_5(tmp_path, envelope: dict, **entry_extra):
+    path = _write(tmp_path, "sta.json", envelope)
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={"5.digital": {"file": path, **entry_extra}},
+        )
+    )
+    return next(item for item in result["items"] if item["id"] == 5)
+
+
+_ANNOTATED = {"annotation_complete": True, "annotation_warning": None}
+_UNANNOTATED = {
+    "annotation_complete": False,
+    "annotation_warning": "delay_changed was false: parasitics not applied",
+}
+
+
+def test_require_annotation_complete_passes_when_every_corner_complete(tmp_path):
+    envelope = _sta_with_annotation([_ANNOTATED, _ANNOTATED])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "met"
+
+
+def test_require_annotation_complete_fails_with_warning_in_detail(tmp_path):
+    envelope = _sta_with_annotation([_ANNOTATED, _UNANNOTATED])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    (shortfall,) = item["detail"]["sta_annotation_incomplete"]
+    assert shortfall["corner"] == "tt_025C_1v80"  # non-worst corner still counts
+    assert "parasitics not applied" in shortfall["annotation_warning"]
+
+
+def test_annotation_incomplete_unchanged_when_option_not_set(tmp_path):
+    envelope = _sta_with_annotation([_UNANNOTATED, _UNANNOTATED])
+    assert _grade_sta_item_5(tmp_path, envelope)["status"] == "met"
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=False)
+    assert item["status"] == "met"
+
+
+@pytest.mark.parametrize("block", [None, "absent"])
+def test_require_annotation_complete_no_effect_without_spef_annotation(tmp_path, block):
+    """Absent/null `spef_annotation` (no SPEF supplied): option is a no-op."""
+    envelope = _sta_with_annotation([None, None])
+    if block == "absent":
+        for corner in envelope["corners"]:
+            del corner["spef_annotation"]
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "met"
+
+
+@pytest.mark.parametrize(
+    "block", [{}, {"annotation_complete": None}, {"annotation_complete": "yes"}]
+)
+def test_require_annotation_complete_fails_closed_on_non_true(tmp_path, block):
+    envelope = _sta_with_annotation([_ANNOTATED, block])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_require_annotation_complete_flat_single_corner_shape(tmp_path):
+    envelope = {**STA_SINGLE_CORNER_CLEAN_ENVELOPE, "spef_annotation": _UNANNOTATED}
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete=True)
+    assert item["status"] == "unmet"
+    assert _grade_sta_item_5(tmp_path, envelope)["status"] == "met"
+
+
+def test_require_annotation_complete_non_boolean_entry_is_invalid_evidence(tmp_path):
+    envelope = _sta_with_annotation([_ANNOTATED, _ANNOTATED])
+    item = _grade_sta_item_5(tmp_path, envelope, require_annotation_complete="true")
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"

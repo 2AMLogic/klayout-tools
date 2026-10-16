@@ -1787,6 +1787,10 @@ Two mechanisms close that gap, both driven by the same content hash:
    the running build and have changed across releases; read them at runtime
    rather than hardcoding.
 
+   A further additive field (issue #2865), `"not_applicable_items": {"6":
+   ["digital"]}`, maps each item that accepts a recorded `not_applicable`
+   outcome to the partitions that may use it (see "Item 6 `not_applicable`").
+
    Always reports **this build's own shipped** grading rules — deliberately
    unaffected by `--tiers-doc`/`$KLT_TIERS_DOC` (which override the item
    *list* a tier report parses, not the grading logic compiled into the
@@ -1999,6 +2003,27 @@ instead. Every corner the run reported must satisfy both of:
 An empty `corners` list never passes — a characterization of zero corners
 proves nothing.
 
+**Opt-in: `require_annotation_complete` (issue #3258).** Slack alone does not
+say whether a SPEF was actually applied to the timing. An evidence entry
+citing a `klt sta` envelope may add `"require_annotation_complete": true`
+(e.g. `{"file": "sta.json", "require_annotation_complete": true}`; file- or
+command-backed). Then, for **every** reported corner (or the flat envelope)
+that carries a `spef_annotation` block, `annotation_complete` must be
+literal `true`; otherwise the item is `unmet` with reason `check_failed` and
+`detail.sta_annotation_incomplete` lists each offending corner as
+`{corner, annotation_complete, annotation_warning}`. Semantics:
+
+- Absent or `false` → grading is unchanged (the default).
+- `spef_annotation` absent or `null` (no SPEF supplied) → no effect; the
+  option cannot turn a no-SPEF run into a parasitics claim.
+- `annotation_complete` missing, `null` or non-boolean on a present block →
+  unmet (fail-closed).
+- A non-boolean `require_annotation_complete` value makes the entry
+  malformed (`invalid_evidence`) rather than silently reading as off.
+
+The key is an additive manifest input and an additive `detail` field; no
+existing field changes meaning, so `schema_version` is unchanged.
+
 **Corner scoping is the cited run's own declared corner set.** Which corners
 must close is decided by the request that produced the envelope (`klt sta`'s
 `pdk.corners`), so `klt signoff` never widens a claim to corners the
@@ -2079,6 +2104,50 @@ A citation of any other kind renders `"unmet"` with `reason: "wrong_kind"`,
 exactly as it already did for items 3, 4 and 7 — the cited check did not
 fail on its own terms, it simply does not prove what the item requires.
 
+### Item 6 `not_applicable` (issue #2865)
+
+A block whose ratified spec has no statistical row discharges item 6 by a
+recorded "not applicable", not by a grant-time waiver. Item 6's manifest
+entry (`"6"`, or `"6.digital"` for a mixed-signal block) takes this form
+instead of a `klt yield` citation:
+
+```json
+"6": {"not_applicable": {
+  "spec":      {"file": "spec.json",      "content_hash": "sha256:..."},
+  "statement": {"file": "na-statement.json", "content_hash": "sha256:..."}
+}}
+```
+
+- `spec` is the block's ratified target spec: a JSON object with
+  `"status": "ratified"` and `"rows": [{"id": ...}, ...]` (no shipped spec
+  schema exists yet; only `status` and the row `id`s are required).
+- `statement` is the committed claim, `{"rows": [{"id", "class", "reason"}]}`,
+  with exactly one entry per spec row giving why that row class is not
+  statistical (for example "timing rows are corner-bounded by STA").
+- Both documents must carry a `content_hash`; editing either renders the item
+  `unmet`/`stale_evidence` (`detail.document` names which). An unreadable
+  file is `unreadable_evidence`; a malformed form is `invalid_evidence`.
+- Digital partition only. Analog (and the analog half of a mixed-signal
+  block) is refused with `not_applicable_wrong_partition`.
+- Any statistical-looking spec row is refused with
+  `not_applicable_statistical_row` naming the row; see the `reason` table.
+- Rows are keyed by `id` so a later partial-coverage outcome (issue #2908)
+  can extend this block; that outcome is not implemented here.
+
+A granted item renders `status: "not_applicable"`, `reason: null`,
+`citation: null`, and a `not_applicable` object
+(`{"spec": {"file", "content_hash", "status", "row_count"}, "statement":
+{"file", "content_hash", "rows"}}`). It is never rendered as `met`: the text
+report marks it `N/A`, counts stay separate (`t1_met_count` is `met` only;
+`t1_not_applicable_count` is new), and `tier: "T1"` needs
+`met + not_applicable == t1_item_count`. `--describe-grader` lists it under
+`not_applicable_items` (`{"6": ["digital"]}`).
+
+**`schema_version`: no bump.** The change is additive per
+[`../json-contract.md`](../json-contract.md): new optional fields, a new
+`status` value reachable only through a new manifest form, and new `reason`
+values. A consumer that treats every non-`met` status as unmet stays correct;
+a strict `status` enum consumer must add `not_applicable`.
 #### Item 5 with several citations and declared spec rows (issue #2959)
 
 One `klt sim` request is one netlist and one analysis, so a spec needing
@@ -2772,10 +2841,11 @@ distinguishable from "no samples document was ever named" (see
 | `block`         | string \| null       | Echoed from the manifest's `block` field.                                                |
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the manifest.                  |
 | `partition_boundary` | object          | **Present only when a `"mixed-signal"` manifest declared one** (issue #2278): `{"analog": <string>, "digital": <string>}` — what each partition denotes (which nets/pins/cells belong to which side), echoed verbatim from the manifest, with only the partitions it actually declared. Reported, never graded: it moves no item's `status` and no block's `tier`, exactly like `drc_coverage` and `body_bias`. Absent entirely for a manifest that declares nothing, so such a report is byte-identical to what a pre-#2278 build rendered. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). See "The declared partition boundary" above. |
-| `tier`          | string \| null       | `"T1"` only if every rendered T1 item is `"met"`; otherwise `null` — no partial credit.  |
+| `tier`          | string \| null       | `"T1"` only if every rendered T1 item is `"met"` (or, item 6 only, a guarded `"not_applicable"`); otherwise `null` — no partial credit. |
 | `t1_item_count` | integer              | Number of rendered T1 items (11 for `analog`/`digital`, 22 for `mixed-signal`). Eleven since issue #2025 added item 11 ("Power delivery (structural)"); the value is the parsed checklist's own length, never a literal in code. |
 | `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
-| `t1_met_count`  | integer              | Number of those items with `status: "met"`.                                              |
+| `t1_met_count`  | integer              | Number of those items with `status: "met"`. **Never includes `not_applicable` items** (issue #2865). |
+| `t1_not_applicable_count` | integer    | **Present only when at least one item is `not_applicable`** (issue #2865; absent means `0`, so a report with none is byte-identical to a pre-#2865 one). `tier` is `"T1"` when `t1_met_count + t1_not_applicable_count == t1_item_count`. |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
 | `build`         | object               | Which build produced this report (issue #2176): `{"version", "package_version", "git_commit", "git_tag", "dirty", "is_release", "grading_ruleset_id"}`, exactly as `klt version --format json` reports them — see "Which build graded this" and "Identifying the grading build" above. `grading_ruleset_id` (issue #2216) is a content hash identifying the grading code, distinct from `git_commit`/`git_tag`. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). **Route-dependent** (issue #2249): it describes the install, not only the commit, so two byte-legitimate installs of the same pinned commit can carry different blocks — never byte-compare a report across installs; use `--check`, which excludes exactly this block. |
@@ -2792,8 +2862,8 @@ distinguishable from "no samples document was ever named" (see
 | `partition_boundary` | string     | **Present only on a row whose partition the manifest declared a boundary for** (issue #2278) — the top-level `partition_boundary` entry for this row's `partition`, repeated here so a row selected out of `items[]` carries the definition of the silicon it covers, not just the partition's name. Absent on every row of an undeclared partition, and on every T2-T4 ladder row (a ladder row belongs to no partition). Never graded. |
 | `text`      | string \| null      | The item's body text (the matching column for a per-kind item, or the shared text).      |
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
-| `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
-| `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
+| `status`    | string               | `"met"`, `"unmet"`, or (item 6 only, issue #2865) `"not_applicable"` — see above and "Item 6 `not_applicable`" below. |
+| `reason`    | string \| null       | `null` when `status` is `"met"` or `"not_applicable"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
 | `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
 | `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
 
@@ -2844,6 +2914,10 @@ actually ran and failed):
 | `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"`, `"place-and-route"`, `"socket-check"` or `"lef-abstract"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 | `"unanchored_evidence"`   | yes | **(issue #2718)** **Items 1, 2, 9 and 10 only.** The evidence resolved to a *passing* `generic` envelope, but it is not bound to an audited artifact. Either the envelope declares no `t1_item` (or a non-integer one), or it names no usable `provenance.input.path`, or the manifest entry pins no `content_hash`. The envelope's `status` is then only its author's word. Add the binding; there is nothing to re-run. A non-integer `t1_item` renders this for item 8 too. See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
 | `"wrong_item"`            | yes | **(issue #2718)** The evidence resolved to a *passing* `generic` envelope whose declared `t1_item` names a different item than the one it is cited for: an attestation replayed across items. Rendered for every item that accepts `generic` (1, 2, 8, 9, 10). An item-8 envelope with no `t1_item` is unaffected. Cite the attestation made for this item. |
+| `"not_applicable_wrong_partition"` | yes | **(issue #2865)** **Item 6 only.** The `not_applicable` form was used on an analog partition (or a pure `analog` block); only a digital partition may. |
+| `"not_applicable_spec_unratified"` | yes | **(issue #2865)** The cited spec's `status` is not `"ratified"`. `detail.spec_status` echoes it. |
+| `"not_applicable_statistical_row"` | yes | **(issue #2865)** The cited spec (or the statement's own `class`) carries a row marked `statistical`, or one with a sigma/yield/Cpk/offset/mismatch/Monte Carlo key or a `3σ`/accuracy/matching/offset-style value. `detail.row` names the row, `detail.field` the offending key path. The scan is a conservative backstop: a false positive refuses. |
+| `"not_applicable_statement_incomplete"` | yes | **(issue #2865)** The statement does not account for exactly the spec's rows: `detail.uncovered_row_ids` (spec rows with no statement row), `detail.unknown_row_ids` (statement rows naming no spec row), a row missing `class`/`reason`, or a spec with no rows at all. |
 | `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`, or no `power.tapcell_master` was placed. Re-run P&R with a `request.power` block. |
 | `"supply_spec_incomplete"` | yes | **Item 11 only** (issue #2025). The cited `klt erc` run's own spec document does not ask the question this item grades: it could not be read at *any* path it could mean from here (issue #2608 — the ERC report's own directory is tried as well as the producing run's, so this no longer fires for a spec committed beside its evidence), declares no `"kind": "supply"` net, declares no `ties[]` with no disclosure of why — an uncomputed check is not a clean one — declares a `ties[]` entry the ERC run reported as *degenerate* in `erc_coverage.skipped[]` (issue #2199 — a tie whose tap region is indistinguishable from an ordinary source/drain contact is likewise not a clean one; narrow it with `tap_requires`, `tap_is_dedicated`, or assert it directly with `tap_boxes`), or its stackup does not cover every strap layer the P&R response reports. Widen the spec and re-run `klt erc`. A spec that *did* disclose why it declares no `ties[]` renders one of the two sibling reasons below instead, one per disclosed obstacle (`"supply_spec_disclosed_unexpressible"`, issue #2234, or `"supply_spec_disclosed_tool_limitation"`, issue #2247). A spec that *could* be read but no longer matches (or was never pinned against) the envelope's own `provenance.spec.content_hash` renders `"stale_evidence"`/`"unverifiable_provenance"` above instead, never this reason (issue #2496) — an unverified spec is a provenance gap, not a declaration gap. |
 | `"supply_spec_disclosed_unexpressible"` | yes | **Item 11 only** (issue #2234). The cited `klt erc` run declares zero `ties[]`, exactly as `"supply_spec_incomplete"`'s "no `ties[]`" case above — but its spec explicitly disclosed why no tap can be expressed on this stream (`ties_disclosure`). Still unmet: a disclosure proves nothing about the tap's actual connectivity, so it can never substitute for a computed `erc.missing_tie` result — but distinguishable in the rendered reason (and `detail.ties_disclosure_reason`) from "nobody declared ties at all". Express the tap (`tap_boxes`, `tap_requires`, or `tap_is_dedicated`) and re-run `klt erc`, or accept this item stays unmet for this stream. |
@@ -3081,7 +3155,8 @@ under `3` as it did under `2`; only `blocking_item` moved.
 | `tier`          | string \| null       | `"T1"` only if every one of this block's rendered T1 items is `"met"`; otherwise `null`. |
 | `t1_item_count` | integer              | This block's rendered T1 item count (11, or 22 for `mixed-signal`).                      |
 | `build_t1_item_count` | integer \| null | As in tier-report mode (issue #2202): how many T1 rows **this build's own shipped doc** would have rendered for this block, so a row reading `T1: 9/9 items met` against a doc older than this build is distinguishable from one reading `11/11`. Carried here — unlike per-item `graded_by_build`, which is `--manifest`-only — because `t1_item_count` is carried here, and the shortfall is a property of that count. Identical across rows of the same `kind` within one roll-up (`tiers_doc` and the build are both shared), and doubled for a `mixed-signal` row exactly as `t1_item_count` is. |
-| `t1_met_count`  | integer              | This block's `"met"` T1 item count.                                                       |
+| `t1_met_count`  | integer              | This block's `"met"` T1 item count (never includes `not_applicable`).                     |
+| `t1_not_applicable_count` | integer    | Present only when non-zero (issue #2865): this block's `"not_applicable"` T1 item count. The text roll-up prints `T1: 10/11 items met, 1 not_applicable`. |
 | `source_doc_content_hash` | string \| null | This block's tier report's own `source_doc_content_hash` (issue #2175), echoed verbatim — useful when this row is later extracted from a committed roll-up captured at a different time than another row's. |
 | `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker: an item this build cannot grade at all (`graded_by_build: false`) if there is one (issue #2203), else the first unmet *gradeable* one, else a structurally ungradeable one (issue #2178). See below. |
 | `ungraded_items`| array\<object\>      | Every unmet T1 item with **no runnable check behind it** — the structurally ungradeable 1, 2, 9, 10 (no `klt` verb at all) *and* any `graded_by_build: false` item (no rules in this build) — in render order, each in `blocking_item`'s own `{"id", "title", "partition", "reason"}` shape (issues #2178, #2203). These are the rows the blocker reduction ranks separately: listed so that ranking them never silently hides them, and so that demoting an honestly-uncited item 1 never masks a real gap. The named `blocking_item` is itself one of these rows whenever it came from either ungradeable class. `[]` for a block that cites all four and that this build grades fully, and for a block at `tier: "T1"`. Reduced from this block's own tier report, never re-graded; it changes no block's `tier` — every T1 item, these included, still has to be `"met"` for `tier: "T1"`. |
