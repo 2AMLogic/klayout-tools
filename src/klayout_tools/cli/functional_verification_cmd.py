@@ -79,6 +79,18 @@ def run(args: argparse.Namespace) -> int:
     return EXIT_TESTS_FAILED if report["status"] == "fail" else EXIT_PASS
 
 
+def _print_initial_state(initial_state: dict | None) -> None:
+    """One line, only when `options.initial_state` was requested (issue #2998)."""
+    if initial_state is None:
+        return
+    seeds = ",".join(str(seed) for seed in initial_state["seeds"]) or "-"
+    print(
+        f"initial_state: {initial_state['mode']}  seeds: {seeds}  "
+        f"state_elements: {initial_state['state_elements']}  "
+        f"clock: {initial_state['clock']}"
+    )
+
+
 def _print_text(report: dict) -> None:
     environment = report["environment"]
     engine_version = environment.get("engine_version") or ""
@@ -126,6 +138,7 @@ def _print_text(report: dict) -> None:
     random_seed = environment.get("random_seed")
     if random_seed is not None:
         print(f"random_seed: {random_seed}")
+    _print_initial_state(environment.get("initial_state"))
     # Printed only on an SDF-annotated run (issue #1002): a reader glancing
     # at a gate-level report has no other way to tell a delay-annotated
     # verdict from a zero-delay one, and the two mean very different things.
