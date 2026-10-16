@@ -367,6 +367,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   a layout circuit, and `gate-level-verilog` references are unaffected.
   **Additive contract change**; `schema_version` is unchanged.
 
+- **New verb `klt tap-distance`** (issue #3009): asserts every point of a
+  subject region is within a Euclidean distance of a qualifying tap (latch-up /
+  tie spacing), optionally per island and filtered to taps wired to named
+  nets. Reports a proven `lower_bound_um`/`measured_max_distance_um` bracket;
+  exits `0` pass, `3` fail, `4` `unsupported` (rule not evaluable, never a
+  pass). See `docs/cli/tap-distance.md`.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
