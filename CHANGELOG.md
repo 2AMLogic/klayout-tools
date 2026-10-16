@@ -54,7 +54,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   `SRAM.SDT.ACTIVE.OV.3`, `SRAM.SDT.LISD.OV.4`, `SRAM.LISD.S.4`,
   `SRAM.LISD.AUX.1`, `SRAM.LIG.GATE.A.4`, `SRAM.LIG.AUX.2` and
   `SRAM.LIG.GATE.OV.2`, moving them out of the documented gaps. The deck
-  declares 242 rule categories (was 234); pass `--expect-rule-categories 242`.
+  declares 246 rule categories (was 238); pass `--expect-rule-categories 246`.
   Additive; no `schema_version` bump.
 - **`klt lvs` no longer folds one device class into another under
   `options.combine_devices`** (issue #3019): with two MiM classes stacked in
