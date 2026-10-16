@@ -1165,6 +1165,79 @@ def test_single_pin_net_driver_is_not_treated_as_floating():
     assert block["floating_driver_count"] == 0
 
 
+# Verbatim stdout tail of the module's own `_parasitic_annotation_lines`
+# against OpenROAD 26Q3-1510-g6cb3f2b704 + sky130_fd_sc_hd tt_025C_1v80 on a
+# reduced DEF (2 flops; `dum1` CTS-style clkbuf with its output on no net;
+# `dum2` with its output on a single-pin net `dummy_o`; flop Q net `c0_r`
+# reaching port `c0`), with a SPEF that omits `d`, `ff1/Q` and the dummy nets.
+# Issue #3668: hypothesis 1 (OpenSTA returns a real net for the dummy output)
+# does not hold -- both dummy outputs are listed floating -- and the evidence
+# loop, uncaught, died on dum1's NULL net before reaching dum2.
+_REAL_DUMMY_LOAD_CAPTURE = """\
+===KLT_STA_PARASITIC_ANNOTATION_BEGIN===
+Found 4 unannotated drivers.
+ d
+ dum1/X
+ dum2/X
+ ff1/Q
+Found 2 partially unannotated drivers.
+ clk
+  ff1/CLK
+  dum1/A
+  dum2/A
+ ff0/Q
+  c0
+===KLT_STA_PARASITIC_ANNOTATION_END===
+===KLT_STA_FLOATING_DRIVERS_BEGIN===
+[WARNING STA-0101] object 'NULL' not found.
+[WARNING STA-0361] net 'NULL' not found.
+KLT_FLOATING_DRIVER dum1/X
+KLT_FLOATING_DRIVER dum2/X
+===KLT_STA_FLOATING_DRIVERS_END===
+===KLT_STA_DRIVER_NETS_BEGIN===
+KLT_DRIVER_NET ff1/Q 1 q2
+[WARNING STA-0101] object 'NULL' not found.
+[ERROR STA-2204] get_property NULL is not an object.
+KLT_DRIVER_NET dum2/X 1 dummy_o
+===KLT_STA_DRIVER_NETS_END===
+"""
+
+
+def test_real_capture_dummy_loads_are_floating_and_real_drivers_gate():
+    """Issue #3668, measured on real OpenSTA: dummy-load outputs on no net and
+    on a single-pin net are floating; `d` (port) and `ff1/Q` (net reaching a
+    port) have no parasitics in this SPEF and still gate."""
+    block = _annotation_from(_REAL_DUMMY_LOAD_CAPTURE)
+
+    assert block["floating_driver_sample"] == ["dum1/X", "dum2/X"]
+    assert block["unannotated_driver_sample"] == ["d", "ff1/Q"]
+    assert block["annotation_complete"] is False
+    assert block["partially_unannotated_driver_count"] == 2
+    assert [d["pin"] for d in block["unannotated_driver_detail"]] == ["d", "ff1/Q"]
+
+
+def test_real_capture_dummy_loads_only_is_complete():
+    """Same capture with only the dummy loads unannotated -> complete."""
+    stdout = _REAL_DUMMY_LOAD_CAPTURE.replace(
+        "Found 4 unannotated drivers.\n d\n dum1/X\n dum2/X\n ff1/Q\n",
+        "Found 2 unannotated drivers.\n dum1/X\n dum2/X\n",
+    )
+    block = _annotation_from(stdout)
+
+    assert block["annotation_complete"] is True
+    assert block["floating_driver_count"] == 2
+    assert block["unannotated_driver_sample"] == []
+
+
+def test_driver_net_evidence_loop_survives_a_null_net():
+    """OpenSTA returns a one-element NULL-net list for an output pin on no net;
+    the per-pin `catch` keeps one such pin from dropping later evidence."""
+    tcl = "\n".join(post_route_sta._parasitic_annotation_lines())
+    loop = tcl.split(post_route_sta._DRIVER_NETS_BEGIN, 1)[1]
+
+    assert loop.index("foreach klt_pin") < loop.index("catch {")
+
+
 def test_driver_detail_is_null_without_pin_listing():
     block = _annotation_from(
         _parasitic_block(
