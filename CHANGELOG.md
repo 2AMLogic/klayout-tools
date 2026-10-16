@@ -14,6 +14,15 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
+  whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
+  `batch.max_units_per_job` and `--max-units-per-job N` reroute a
+  `remote.hosts: 1` request through the one-job-per-shard path as
+  `ceil(units / cap)` balanced jobs; `environment.remote.job_ceiling` gains
+  `split` and `effective_hosts` (only when a split mode is active). A cap the
+  ceiling cannot honor fails before any S3 write with
+  `error.code: "batch_max_units_per_job_invalid"`. Default (`"warn"`) behavior
+  is unchanged. Additive; no `schema_version` bump.
 - **ASAP7 DRC deck checks the four net-aware spacings `ACTIVE.S.2A`,
   `LIG.LISD.S.6`, `LIG.LISD.S.7` and `LIG.SDT.S.8`** (issue #3084): DRM Tables
   3.5.1 and 3.10.1 apply these only to shapes on different nets, so the deck
@@ -23,6 +32,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   grows from 234 to 238 rule categories (`--expect-rule-categories 238`); the
   four ids leave the "Not implemented" list. The pinned shipped-cell
   regression needed no new deviation. Additive; no `schema_version` bump.
+- **`klt extract` / `klt pex`: glob and all-nets selectors for
+  `--critical-net` / `--parasitics-net`** (issue #2974): new repeatable
+  `--critical-net-pattern GLOB` and `--parasitics-net-pattern GLOB`
+  (request fields `critical_net_patterns` / `parasitics_net_patterns`),
+  `--critical-net-all` with `--critical-net-exclude GLOB`, and
+  `--strict-net-patterns`. Globs resolve against the extracted nets and
+  merge with exact names; a zero-match pattern is a distinct `warnings`
+  entry (an error under `--strict-net-patterns`). Additive fields
+  `parasitics.critical_net_patterns` / `critical_net_all` /
+  `critical_net_excludes` / `parasitics_net_patterns` appear only when
+  requested; `parasitics.critical_nets` / `parasitics_nets` then echo the
+  resolved names. No `schema_version` bump; output without the new flags is
+  unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
+  that the request document already accepts a list for exact names. See
+  `docs/cli/extract.md`.
 - **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
   cycles** (issue #2947): a fourth measurement form
   `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
@@ -43,6 +67,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   Decks without `reset` are byte-identical; a non-boolean value is refused by
   name. `docs/cli/sim.md` now also states that steps otherwise share circuit
   and solver state. Additive; no `schema_version` bump.
+
+- **`klt pex` no longer discards the schematic side on an extracted-side
+  backend failure** (issue #2990): an extracted-side `klt sim` failure other
+  than the pin-count mismatch (e.g. a batch-fleet capacity refusal) now
+  returns a normal response -- every `delta[]` row of that testbench is an
+  `error` row with the schematic value intact -- and names the failure in the
+  new additive top-level `backend_failure` field (`{testbench, side, message,
+  code}`, `null` otherwise). A schematic-side failure still aborts, but its
+  error envelope now carries `error.code` (e.g. `batch_no_capacity`).
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
@@ -70,6 +103,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   block is still non-`null` in both cases; `model_set` output is unchanged.
   Additive; no `schema_version` bump.
 
+- **`klt sim` gains a numeric design-parameter axis, `corners.params`**
+  (issue #3035): SPICE parameter names mapped to equal-length arrays of
+  numbers, zipped by index and expanded innermost (after temperature),
+  applied with `alterparam` + one `reset`. Additive: each parameter point's
+  corner report carries `params`, its `corner_id` gains `/params:<pairs>`
+  before any `/mc<N>` suffix, and `exclude[].params` selects rows; requests
+  without the axis keep byte-identical IDs, slugs and wire payloads.
+  `remote`/`batch` workers must be updated: a worker that does not echo the
+  dispatched `params` fails the request with `params_unsupported_worker`
+  instead of passing at the netlist defaults. `engine: "xyce"` and
+  `--op-lint` refuse the axis. See `docs/cli/sim.md` "Corner axes".
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
@@ -96,6 +140,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   Verilog netlist as reset-covered or unreset (machine-readable reason code),
   with a waiver file (fail on an unwaived element and on a stale waiver).
   `options.initial_state` for `functional-verification` follows separately.
+- **sg13g2 poly resistors from PDK PCells** (issue #2679): `klt extract
+  --deck sg13g2` now recognises `rsil`/`rppd`/`rhigh` drawn the way IHP's own
+  PCells draw them (`polyres` 128/0 as the body, two abutting `GatPoly` 5/0
+  heads) via a new `ResistorDevice.topology="abutting_heads"` mode (default
+  `"overlap"` is unchanged). A body missing a head, or separated from one by
+  a gap, is not recognised. `klt gen res_array` on sg13g2 now draws the same
+  convention, and `klt erc --deck sg13g2`'s auto-detected device cuts agree
+  with extraction. `klt deck devices` gains an additive `topology` field on
+  `resistor` entries.
 
 - **`openroad` Docker wrapper no longer runs as root** (issue #3151):
   `scripts/install-openroad-docker.sh` now writes a wrapper that passes

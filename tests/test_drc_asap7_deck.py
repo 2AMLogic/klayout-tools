@@ -1,4 +1,5 @@
-"""Tests for the in-repo ASAP7 DRC deck (#2760 FEOL/MOL, #2810 BEOL M1-M9/V0-V9).
+"""Tests for the in-repo ASAP7 DRC deck (#2760 FEOL/MOL, #2810 BEOL M1-M9/V0-V9,
+#2811 density disposition and shipped-cell gate).
 
 The deck is a KLayout DRC-DSL script (``src/klayout_tools/decks/asap7.drc``)
 run through ``klt drc --engine klayout --deck-file``. Its rule ids are
@@ -14,7 +15,10 @@ Three tiers:
   drawing-scale convention holds;
 - PDK checks, gated on ``scripts/fetch-pdks.sh`` having populated
   ``pdks/lambdapdk``: the deck's layer numbers match the pinned ``asap7.lyp``
-  and the shipped standard cells are clean apart from documented deviations.
+  and the shipped standard cells are the acceptance gate for every
+  implemented rule: the full R/L/SL corpus violates exactly the documented
+  ``(cell, rule)`` deviations, and the corpus without the documented
+  deviating cells runs clean through ``klt drc --format json``.
 
 Every layout is generated into ``tmp_path``; nothing is written to the repo.
 """
@@ -34,9 +38,12 @@ from helpers import asap7_drc_fixtures as fx
 from klayout_tools.cli import main
 from klayout_tools.decks.asap7_rules import (
     DECK_PATH,
+    DENSITY_DISPOSITION,
+    DRM_SOURCE,
     NOT_IMPLEMENTED,
     RULE_IDS,
     RULES,
+    SHIPPED_CELL_DEVIATION_RECORDS,
     SHIPPED_CELL_DEVIATIONS,
 )
 from klayout_tools.drc import run_drc_klayout_engine
@@ -90,6 +97,12 @@ _DECK_LAYERS = {
     *(f"v{i}" for i in range(1, 10)),
 }  # fmt: skip
 _CASES = fx.all_cases()
+#: The pinned shipped-cell libraries: (lambdapdk library, GDS / cell suffix).
+_LIBRARIES = (
+    ("asap7sc7p5t_rvt", "R"),
+    ("asap7sc7p5t_lvt", "L"),
+    ("asap7sc7p5t_slvt", "SL"),
+)
 
 
 def _deck_text() -> str:
@@ -210,6 +223,46 @@ def test_docs_list_every_rule_and_gap():
     assert f"--expect-rule-categories {len(RULE_IDS)}" in _deck_text()
 
 
+def test_shipped_cell_deviations_are_exact_and_documented():
+    """Each retained deviation is one ``(cell, rule)`` pair on an implemented
+    rule, with a DRM citation, a rationale and a handling decision, and
+    docs/cli/drc.md lists it in the same terms (no hidden waiver)."""
+    section = _docs_asap7_section()
+    pairs = [(d.cell, d.rule) for d in SHIPPED_CELL_DEVIATION_RECORDS]
+    assert len(pairs) == len(set(pairs))
+    assert {cell: set(rules) for cell, rules in SHIPPED_CELL_DEVIATIONS.items()} == {
+        cell: {r for c, r in pairs if c == cell} for cell, _ in pairs
+    }
+    for d in SHIPPED_CELL_DEVIATION_RECORDS:
+        assert d.rule in RULE_IDS, d
+        assert re.match(r"Table 3\.\d+\.\d", d.citation), d
+        assert d.rationale and d.handling, d
+        assert d.libraries and set(d.libraries) <= {s for _, s in _LIBRARIES}, d
+        row = (
+            f"| `{d.cell}` | `{d.rule}` | {d.citation} | {', '.join(d.libraries)} "
+            f"| {d.rationale} | {d.handling} |"
+        )
+        assert row in section, row
+
+
+def test_density_disposition_is_documented_without_thresholds():
+    """The pinned DRM states no density rule (#2811): no density id is
+    declared or tracked as a gap, and the docs record the reviewed DRM and
+    the absence rather than an invented threshold."""
+    density_like = re.compile(r"\.(DEN|DENSITY)(\.|$)")
+    assert not [r for r in RULE_IDS if density_like.search(r)]
+    assert not [g.id for g in NOT_IMPLEMENTED if density_like.search(g.id)]
+    assert "states no density rule" in DENSITY_DISPOSITION
+    assert DRM_SOURCE in DENSITY_DISPOSITION
+    section = _docs_asap7_section()
+    start = section.index("### Density")
+    density = section[start : section.index("\n### ", start + 1)]
+    assert "asap7_drm_201207a.pdf" in density
+    assert "lambdapdk v0.2.17" in density
+    assert "states no density rule" in density
+    assert "DENSITY_DISPOSITION" in density
+
+
 def test_fixture_layers_match_deck():
     deck = {
         var.upper(): int(layer)
@@ -241,6 +294,47 @@ def fixture_run(tmp_path_factory):
 def test_fixture_trips_exactly_its_expected_rules(fixture_run, index):
     _, tripped = fixture_run
     assert tripped.get(index, set()) == set(_CASES[index].expect)
+
+
+_TOPOLOGY_GAPS = ("GATE.AUX.2", "ACTIVE.AUX.3")
+_PROBES = fx.topology_gap_probes()
+
+
+def test_topology_gaps_stay_declared_with_distinct_reasons():
+    """#3086: both rules are topological conditions, not missing thresholds;
+    the evidence is recorded but neither is enforced, so both stay gaps."""
+    gaps = {g.id: g for g in NOT_IMPLEMENTED}
+    for rule_id in _TOPOLOGY_GAPS:
+        assert rule_id in gaps
+        assert rule_id not in RULE_IDS
+        assert "topological condition" in gaps[rule_id].reason
+        assert "no distance bound to check" not in gaps[rule_id].reason
+        assert gaps[rule_id].tracked_by == "#2812"
+    assert gaps["GATE.AUX.2"].reason != gaps["ACTIVE.AUX.3"].reason
+    for rule_id in _TOPOLOGY_GAPS:
+        assert f'output("{rule_id}"' not in _deck_text()
+
+
+@pytest.fixture(scope="module")
+def probe_run(tmp_path_factory):
+    if not HAVE_KLAYOUT_BINARY:
+        pytest.skip("klayout binary is not installed on this machine")
+    path = tmp_path_factory.mktemp("asap7_probes") / "probes.gds"
+    fx.write_cases(str(path), _PROBES)
+    report = run_drc_klayout_engine(str(path), str(DECK_PATH))
+    tripped: dict[int, set[str]] = defaultdict(set)
+    for v in report["violations"]:
+        tripped[fx.slot_of(v["bbox"])].add(v["rule"])
+    return tripped
+
+
+@_needs_klayout
+@pytest.mark.parametrize("index", range(len(_PROBES)), ids=[c.name for c in _PROBES])
+def test_topology_gap_probes_stay_silent(probe_run, index):
+    """The DRM's illegal drawings pass the deck (apart from the narrow slots
+    ACTIVE.S.1 already reports and the strips ACTIVE.W.2 reports), which is
+    why the gaps remain declared."""
+    assert probe_run.get(index, set()) == set(_PROBES[index].expect)
 
 
 @_needs_klayout
@@ -333,17 +427,30 @@ def test_deck_layers_match_pinned_lyp():
         assert lyp.get(var) == source, var
 
 
-def _place_between_neighbours(gds: Path, neighbour: str, out: Path) -> list[str]:
-    """Place every shipped cell abutted between two copies of ``neighbour``
-    (row cells such as FILLERxp5 or TAPCELL_WITH_FILLER carry 54 nm
-    select/well slivers that are only legal abutted), one sandwich per 8 um
-    slot. Returns the cell names in slot order."""
+def _shipped_gds(lib: str, suffix: str) -> Path:
+    gds = _ASAP7_ROOT / "libs" / lib / "gds" / f"asap7sc7p5t_28_{suffix}.gds.gz"
+    if not gds.is_file():
+        pytest.skip(
+            f"pinned ASAP7 library GDS {gds.name} not found under pdks/lambdapdk "
+            "-- run scripts/fetch-pdks.sh"
+        )
+    return gds
+
+
+def _place_between_neighbours(
+    gds: Path, neighbour: str, out: Path, exclude: frozenset[str] = frozenset()
+) -> list[str]:
+    """Place every shipped cell not named in ``exclude`` abutted between two
+    copies of ``neighbour`` (row cells such as FILLERxp5 or
+    TAPCELL_WITH_FILLER carry 54 nm select/well slivers that are only legal
+    abutted), one sandwich per 8 um slot. Returns the placed cell names in
+    slot order. The source GDS is only read; ``out`` is the new layout."""
     src = kdb.Layout()
     src.read(str(gds))
     out_layout = kdb.Layout()
     out_layout.dbu = src.dbu
     top = out_layout.create_cell("TOP")
-    names = sorted(c.name for c in src.top_cells())
+    names = sorted(c.name for c in src.top_cells() if c.name not in exclude)
     copies: dict[str, kdb.Cell] = {}
     boundary = src.layer(100, 0)
 
@@ -373,14 +480,21 @@ def _place_between_neighbours(gds: Path, neighbour: str, out: Path) -> list[str]
     return names
 
 
+def _expected_deviations(suffix: str) -> dict[str, set[str]]:
+    expected: dict[str, set[str]] = defaultdict(set)
+    for d in SHIPPED_CELL_DEVIATION_RECORDS:
+        if suffix in d.libraries:
+            expected[d.cell].add(d.rule)
+    return dict(expected)
+
+
 @_needs_asap7
 @_needs_klayout
-@pytest.mark.parametrize(
-    ("lib", "suffix"),
-    [("asap7sc7p5t_rvt", "R"), ("asap7sc7p5t_lvt", "L"), ("asap7sc7p5t_slvt", "SL")],
-)
+@pytest.mark.parametrize(("lib", "suffix"), _LIBRARIES)
 def test_shipped_cells_clean_apart_from_documented_deviations(tmp_path, lib, suffix):
-    gds = _ASAP7_ROOT / "libs" / lib / "gds" / f"asap7sc7p5t_28_{suffix}.gds.gz"
+    """Full corpus: the exact ``(cell, rule)`` deviation set, and every
+    implemented rule category reported."""
+    gds = _shipped_gds(lib, suffix)
     out = tmp_path / f"cells_{suffix}.gds"
     names = _place_between_neighbours(gds, f"INVx1_ASAP7_75t_{suffix}", out)
     report = run_drc_klayout_engine(str(out), str(DECK_PATH))
@@ -391,9 +505,42 @@ def test_shipped_cells_clean_apart_from_documented_deviations(tmp_path, lib, suf
             v["bbox"]["left"] // pitch_dbu
         )
         found[names[slot].removesuffix(f"_ASAP7_75t_{suffix}")].add(v["rule"])
-    expected = {cell: set(rules) for cell, rules in SHIPPED_CELL_DEVIATIONS.items()}
-    assert dict(found) == expected
-    assert len(set(report["coverage"]["rule_categories"])) == len(RULE_IDS)
+    assert dict(found) == _expected_deviations(suffix)
+    assert set(report["coverage"]["rule_categories"]) == set(RULE_IDS)
+
+
+@_needs_asap7
+@_needs_klayout
+@pytest.mark.parametrize(("lib", "suffix"), _LIBRARIES)
+def test_shipped_cells_without_documented_deviations_run_clean_via_cli(
+    tmp_path, capsys, lib, suffix
+):
+    """Clean-run gate: the corpus minus exactly the documented deviating
+    cells is clean through ``klt drc --engine klayout --deck-file asap7.drc
+    --expect-rule-categories <len(RULE_IDS)> --format json``."""
+    gds = _shipped_gds(lib, suffix)
+    src = kdb.Layout()
+    src.read(str(gds))
+    all_cells = {c.name for c in src.top_cells()}
+    excluded = frozenset(
+        f"{cell}_ASAP7_75t_{suffix}" for cell in _expected_deviations(suffix)
+    )
+    # Every exclusion names a cell the library ships; nothing else is left out.
+    assert excluded <= all_cells
+    out = tmp_path / f"cells_{suffix}_clean.gds"
+    placed = _place_between_neighbours(
+        gds, f"INVx1_ASAP7_75t_{suffix}", out, exclude=excluded
+    )
+    assert set(placed) == all_cells - excluded
+    code, payload = _run_cli(
+        capsys, out, "--expect-rule-categories", str(len(RULE_IDS))
+    )
+    assert code == 0, payload.get("rule_counts")
+    assert payload["status"] == "clean"
+    assert payload["violation_count"] == 0
+    assert payload["violations"] == []
+    assert payload["coverage_assertion"]["satisfied"] is True
+    assert set(payload["coverage"]["rule_categories"]) == set(RULE_IDS)
 
 
 # --------------------------------------------------------------------------- #

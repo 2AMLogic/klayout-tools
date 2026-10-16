@@ -1454,6 +1454,28 @@ DECK: list[DrcRule] = [
         scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nwell.2a"),
     ),
+    DrcRule(
+        id="rpm.width.1",
+        description="minimum rpm (poly-resistor implant marker) width",
+        layer=(86, 20),  # rpm.drawing
+        check="width",
+        threshold_dbu=1270,  # 1.27 um
+        # sky130A_mr.drc rule "rpm.1a": rpm.width(1.27, euclidian)
+        # -> "rpm.1a : min. rpm width : 1.27um"
+        scope="rpm",  # sky130A_mr.drc "rpm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "rpm.1a"),
+    ),
+    DrcRule(
+        id="urpm.width.1",
+        description="minimum urpm (ultra-high-rho poly-resistor implant marker) width",
+        layer=(79, 20),  # urpm.drawing
+        check="width",
+        threshold_dbu=1270,  # 1.27 um
+        # sky130A_mr.drc rule "urpm.1a": urpm.width(1.27, euclidian)
+        # -> "urpm.1a : min. rpm width : 1.27um"
+        scope="urpm",  # sky130A_mr.drc "urpm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "urpm.1a"),
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -1623,6 +1645,7 @@ OFFGRID_UNCHECKED_LAYERS: dict[tuple[int, int], str] = {
     (89, 44): "capm.drawing -- no ongrid/with_angle call in the OFFGRID block",
     (97, 44): "capm2.drawing (source deck `cap2m`) -- likewise unchecked",
     (82, 44): "pnp.drawing -- device-recognition mark, not a patterned layer",
+    (79, 20): "urpm.drawing -- no ongrid/with_angle call in the OFFGRID block",
 }
 
 
