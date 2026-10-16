@@ -394,3 +394,17 @@ def corner_report(
                 }
             )
     return field, diagnostics
+
+
+def corner_fields(
+    analysis: dict[str, Any], corner_dir: str, *, keep_artifacts: bool
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """``(extra corner fields, diagnostics)`` for one finished corner: the
+    additive ``passes`` field for an ``analysis.passes`` request, ``({}, [])``
+    for every other one."""
+    if not is_passes_analysis(analysis):
+        return {}, []
+    field, diagnostics = corner_report(
+        extract_corner_passes(analysis, corner_dir), keep_artifacts=keep_artifacts
+    )
+    return {"passes": field}, diagnostics

@@ -8053,11 +8053,6 @@ def _run_corner(
     transfers = sim_transfer_meas.extract_corner_transfers(
         measurements_spec, corner_dir
     )
-    pass_results = (
-        sim_passes.extract_corner_passes(analysis, corner_dir)
-        if sim_passes.is_passes_analysis(analysis)
-        else None
-    )
     measurement_results, measurement_diagnostics, step_fields = (
         _corner_measurement_results(
             measurement_values,
@@ -8076,13 +8071,10 @@ def _run_corner(
         measurement_diagnostics, engine_aborted
     )
     diagnostics.extend(measurement_diagnostics)
-    pass_fields: dict[str, Any] = {}
-    if pass_results is not None:
-        pass_field, pass_diagnostics = sim_passes.corner_report(
-            pass_results, keep_artifacts=keep_artifacts
-        )
-        diagnostics.extend(pass_diagnostics)
-        pass_fields["passes"] = pass_field
+    pass_fields, pass_diagnostics = sim_passes.corner_fields(
+        analysis, corner_dir, keep_artifacts=keep_artifacts
+    )
+    diagnostics.extend(pass_diagnostics)
 
     # Issue #3016: the engine ran (any exit status, including 0) yet left no
     # log text and not a single requested measurement has a value -- the
