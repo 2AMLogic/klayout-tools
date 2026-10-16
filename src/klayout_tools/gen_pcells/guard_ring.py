@@ -173,6 +173,13 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ring_implant_present)",
                 default=0.0,
             )
+            self.param(
+                "ring_well_margin_um",
+                self.TypeDouble,
+                "Harness-resolved nwell enclosure of the n-tap guard ring "
+                "(see _PDK_RING_WELL_MARGIN_UM)",
+                default=WELL_ENCLOSURE_MARGIN_UM,
+            )
             # Fixed drawn side of every cut on contact_layer (issue #2585) --
             # harness-computed by `_cut_fixed_size_um` from the resolved PDK
             # family and layer. `0.0` (no upper size bound) leaves the cuts
@@ -238,7 +245,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # Grows the well onto the manufacturing grid (issue #3364): an
                 # off-grid `inner_*_um` otherwise leaves Nwell vertices off it.
                 well_box = _snap_ring_box_um(
-                    _well_box_um(info, WELL_ENCLOSURE_MARGIN_UM),
+                    _well_box_um(info, self.ring_well_margin_um),
                     self.mfg_grid_um,
                     dbu,
                 )
