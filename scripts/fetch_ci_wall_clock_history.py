@@ -421,8 +421,10 @@ def collect(client: GhClient, repo: str, run_id: str, opts: dict) -> dict:
                 baseline_runs.append(run)
     # Newest first, so the `baseline_runs` limit keeps the most recent usable ones.
     baseline_runs.sort(
-        key=lambda r: (_created_at(r) if isinstance(r, dict) else None)
-        or datetime.min.replace(tzinfo=timezone.utc),
+        key=lambda r: (
+            (_created_at(r) if isinstance(r, dict) else None)
+            or datetime.min.replace(tzinfo=timezone.utc)
+        ),
         reverse=True,
     )
 

@@ -1754,7 +1754,11 @@ def test_fetcher_finds_baselines_when_main_is_mostly_cancelled(
     for run in usable:
         responses[f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100"] = job
     _, payload = _run_fetcher(
-        tmp_path, responses, _fetch_budget(tmp_path, max_age_days=14), "--baseline-runs", "15"
+        tmp_path,
+        responses,
+        _fetch_budget(tmp_path, max_age_days=14),
+        "--baseline-runs",
+        "15",
     )
     baselines = [e for e in payload["runs"] if "baseline" in e["roles"]]
     assert {e["run_id"] for e in baselines} == {r["id"] for r in usable}
