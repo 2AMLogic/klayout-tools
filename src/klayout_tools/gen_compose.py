@@ -199,6 +199,7 @@ from .gen import (
     _fixed_cut_side_um,
     _pdk_family,
 )
+from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
 # purely so `klayout_tools.gen_compose.<name>` keeps working (the test suite
@@ -1245,7 +1246,11 @@ def _parse_cell_block(
     ``navigable_regions`` (#1531/#1835) is likewise optional and defaults to
     ``[]`` -- see :func:`_require_navigable_regions`.
 
-    Returns ``{"cell_name", "gds_path", "bbox_um", "ports", "navigable_regions"}``.
+    ``ports_from_labels`` (#2927) is an opt-in option deriving ports from text
+    labels inside the cell (see :mod:`.gen_compose_port_access`).
+
+    Returns ``{"cell_name", "gds_path", "bbox_um", "ports", "navigable_regions",
+    "ports_from_labels"}``.
     """
     if not isinstance(raw_cell, dict):
         raise GenComposeError(f"{where} must be a JSON object")
@@ -1280,11 +1285,44 @@ def _parse_cell_block(
         "bbox_um": bbox_um,
         "ports": ports,
         "navigable_regions": navigable_regions,
+        "ports_from_labels": parse_ports_from_labels(
+            raw_cell.get("ports_from_labels"), where
+        ),
     }
 
 
+def _merge_label_ports(
+    block_id: str,
+    parsed_cell: dict[str, Any],
+    pdk_variant: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """``(ports, derived_port_reports, warnings)`` for a ``cell`` block:
+    its hand-declared ``ports[]`` plus any ``ports_from_labels`` (#2927)
+    derived ports. A name in both is rejected as ambiguous."""
+    spec = parsed_cell["ports_from_labels"]
+    declared = parsed_cell["ports"]
+    if spec is None:
+        return declared, [], []
+    if pdk_variant is None:
+        raise GenComposeError(
+            f"block '{block_id}': ports_from_labels needs a resolved PDK"
+        )
+    ambiguous = {p["name"] for p in declared} & {n["name"] for n in spec["names"]}
+    if ambiguous:
+        raise GenComposeError(
+            f"block '{block_id}': port name(s) {', '.join(sorted(ambiguous))} "
+            "declared in both ports[] and ports_from_labels -- ambiguous"
+        )
+    derived, reports, warnings = derive_label_ports(
+        block_id, parsed_cell["gds_path"], parsed_cell["cell_name"], spec, pdk_variant
+    )
+    return declared + derived, reports, warnings
+
+
 def _parse_blocks(
-    raw_blocks: Any, request_dir: str | None = None
+    raw_blocks: Any,
+    request_dir: str | None = None,
+    pdk_variant: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(raw_blocks, list) or not raw_blocks:
         raise GenComposeError("request.blocks must be a non-empty array")
@@ -1335,7 +1373,9 @@ def _parse_blocks(
             gds_path = parsed_cell["gds_path"]
             spelled_gds_path = parsed_cell["spelled_gds_path"]
             bbox_um = parsed_cell["bbox_um"]
-            ports = parsed_cell["ports"]
+            ports, derived_reports, derived_warnings = _merge_label_ports(
+                block_id, parsed_cell, pdk_variant
+            )
             navigable_regions = parsed_cell["navigable_regions"]
             report: dict[str, Any] = {}
         else:
@@ -1371,6 +1411,7 @@ def _parse_blocks(
                 where=f"blocks[{index}] (id '{block_id}').generator_report",
             )
             ports = report.get("ports") or []
+            derived_reports, derived_warnings = [], []
             navigable_regions = _require_navigable_regions(
                 report.get("navigable_regions"),
                 where=f"blocks[{index}] (id '{block_id}').generator_report",
@@ -1432,6 +1473,8 @@ def _parse_blocks(
             "navigable_regions": navigable_regions,
             # blocks[].abuts (#2638) -- parsed below, once every id is known.
             "abuts": _parse_abuts(raw_block, index, block_id),
+            "derived_ports": derived_reports,
+            "derived_port_warnings": derived_warnings,
         }
 
     _validate_abuts(blocks)
@@ -2993,7 +3036,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     except PdkNotFoundError as exc:
         raise GenComposeError(str(exc)) from exc
 
-    blocks = _parse_blocks(request.get("blocks"), request_dir or os.getcwd())
+    blocks = _parse_blocks(
+        request.get("blocks"), request_dir or os.getcwd(), pdk_info["variant"]
+    )
     strategy, order, spacing_um, origins_um, target_bbox_um, array_params = (
         _parse_placement(request.get("placement"), set(blocks))
     )
@@ -3043,6 +3088,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
     warnings: list[str] = []
     notes: list[str] = []
+    for _block in blocks.values():
+        warnings.extend(_block["derived_port_warnings"])
 
     # #692: "explicit" placement performs no overlap validation of its own
     # (resolve_explicit_offsets's docstring) -- but a caller that places a
@@ -4333,6 +4380,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # advisory must stay visible in the response, not only in the
             # request that declared it.
             "abuts": sorted(blocks[block_id]["abuts"]),
+            # #2927: additive -- only present for blocks that used
+            # `cell.ports_from_labels`.
+            **(
+                {"derived_ports": blocks[block_id]["derived_ports"]}
+                if blocks[block_id]["derived_ports"]
+                else {}
+            ),
         }
         for block_id in order
     ]

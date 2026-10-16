@@ -565,6 +565,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   separately: `res_array` SAB geometry (#3000) and off-grid guard-ring
   bodies at a non-multiple `ring_padding_um` (#3364). See
   [`docs/cli/drc.md`](docs/cli/drc.md).
+- **`klt gen-compose` derives ports from in-cell labels** (issue #2927):
+  `blocks[].cell.ports_from_labels` resolves named text labels to nets via
+  `LayoutToNetlist` and, with an `access` block, searches the port net for a
+  rule-legal via-stack landing (clearance to other nets, via spacing,
+  keep-out layers). Opt-in and additive: the response gains
+  `blocks[].derived_ports[]` only when used; `schema_version` is unchanged.
+  `via_array` other than `[1, 1]` is rejected for now.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
