@@ -95,7 +95,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -577,6 +577,8 @@ WORKER_CAPTURE_BANNER_MAX = 2000
 WORKER_CAPTURE_STR_MAX = 300
 WORKER_CAPTURE_FILE_MAX = 65536
 WORKER_CAPTURE_PROBE_TIMEOUT_S = 10
+#: Most staged model files the worker capture digests / the client re-reads.
+WORKER_CAPTURE_MODEL_INPUTS_MAX = 64
 
 #: The worker-side capture program. It is passed to ``python3 -I -c`` as one
 #: shell-quoted argument (never interpolated with untrusted text); request
@@ -589,6 +591,7 @@ import hashlib, json, os, shutil, sys
 import subprocess as sp
 BAN, STR, T = @BAN@, @STR@, @TIMEOUT@
 out, req_bin, variant, staged = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+model_names = sys.argv[5:5 + @MODELS@]
 diag = []
 def clip(v, n=STR):
     if not isinstance(v, str):
@@ -670,6 +673,19 @@ def manifest():
         return m
     return None
 doc["image_manifest"] = guard("image manifest", manifest)
+def model_inputs():
+    if staged != "1":
+        return None
+    base = os.environ.get("EDA_INPUT_DIR") or "."
+    found = []
+    for name in model_names:
+        h = hashlib.sha256()
+        with open(os.path.join(base, name), "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        found.append({"name": clip(name), "sha256": h.hexdigest()})
+    return found
+doc["model_inputs"] = guard("model inputs", model_inputs)
 doc["diagnostics"] = diag[:20]
 body = json.dumps(doc, ensure_ascii=True)
 tmp = out + ".tmp"
@@ -681,10 +697,13 @@ _WORKER_CAPTURE_PROGRAM = (
     _WORKER_CAPTURE_PROGRAM.replace("@BAN@", str(WORKER_CAPTURE_BANNER_MAX))
     .replace("@STR@", str(WORKER_CAPTURE_STR_MAX))
     .replace("@TIMEOUT@", str(WORKER_CAPTURE_PROBE_TIMEOUT_S))
+    .replace("@MODELS@", str(WORKER_CAPTURE_MODEL_INPUTS_MAX))
 )
 
 
-def _worker_capture_command(remote_request: dict[str, Any]) -> str:
+def _worker_capture_command(
+    remote_request: dict[str, Any], model_names: Sequence[str] = ()
+) -> str:
     """The best-effort worker capture invocation (issue #2834), run from the
     runner preflight. Bounded by ``timeout`` when present, stderr discarded,
     ``|| true`` so it can never fail or alter the job."""
@@ -697,6 +716,7 @@ def _worker_capture_command(remote_request: dict[str, Any]) -> str:
         shlex.quote(str(binary) if isinstance(binary, str) else ""),
         shlex.quote(str(variant) if isinstance(variant, str) else ""),
         staged,
+        *(shlex.quote(name) for name in model_names[:WORKER_CAPTURE_MODEL_INPUTS_MAX]),
     ]
     target = f'"$EDA_OUTPUT_DIR/{BATCH_WORKER_ENVIRONMENT_FILENAME}"'
     return (
@@ -1005,7 +1025,9 @@ def _build_batch_job_spec(
     command = _runner_preflight_script(
         client_version if client_version is not None else _provenance._klt_version(),
         enforce=version_check == "enforce",
-        capture=_worker_capture_command(remote_request),
+        capture=_worker_capture_command(
+            remote_request, [asset.name for asset in staged.model_assets]
+        ),
         required_features=tuple(_request_features(remote_request)),
     ) + (
         f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
@@ -2296,6 +2318,22 @@ def _compare_pdk_stamps(
     }
 
 
+def _bounded_model_inputs(doc: dict[str, Any]) -> list[dict[str, str | None]] | None:
+    """The worker-reported ``model_inputs`` list, re-validated and bounded.
+    ``None`` (not ``[]``) when the capture carries no list at all."""
+    models_in = doc.get("model_inputs")
+    if not isinstance(models_in, list):
+        return None
+    return [
+        {
+            "name": _bounded_str(entry.get("name")),
+            "sha256": _bounded_str(entry.get("sha256"), 64),
+        }
+        for entry in models_in[:WORKER_CAPTURE_MODEL_INPUTS_MAX]
+        if isinstance(entry, dict)
+    ]
+
+
 def _read_worker_environment(
     local_dir: str | None, request: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -2314,6 +2352,7 @@ def _read_worker_environment(
         "cpu_model": None,
         "omp_num_threads": None,
         "image_manifest": None,
+        "model_inputs": None,
         "diagnostics": [],
         "pdk_stamp_comparison": {"status": "not_comparable"},
     }
@@ -2373,6 +2412,7 @@ def _read_worker_environment(
             "cpu_model": _bounded_str(doc.get("cpu_model")),
             "omp_num_threads": _bounded_str(doc.get("omp_num_threads"), 40),
             "image_manifest": manifest,
+            "model_inputs": _bounded_model_inputs(doc),
             "diagnostics": diagnostics,
             "pdk_stamp_comparison": _compare_pdk_stamps(
                 pdk, _client_pdk_stamp(request)
@@ -2471,9 +2511,13 @@ def _read_job_identity(
 ) -> dict[str, Any]:
     """Runner identity plus the worker-observed environment capture, merged
     into ``environment.remote``. Neither reader can raise."""
+    worker_environment = _read_worker_environment(local_dir, request)
     return {
         **_read_runner_identity(local_dir, request),
-        "worker_environment": _read_worker_environment(local_dir, request),
+        "worker_environment": worker_environment,
+        # ``None`` (not ``[]``) when the runner did not report it, so "none
+        # staged" and "unknown / older runner" stay distinguishable.
+        "runner_model_inputs": worker_environment.get("model_inputs"),
     }
 
 
