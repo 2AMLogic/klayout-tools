@@ -1646,6 +1646,134 @@ def test_expand_monte_carlo_produces_n_samples_per_corner():
     ]
 
 
+def _mc_by_corner(sampled):
+    out = {}
+    for p in sampled:
+        out.setdefault(p.corner_id.rsplit("/mc", 1)[0], {})[p.sample_index] = p.mc_seed
+    return out
+
+
+def test_seed_scope_default_is_bit_identical_to_pre_2899_seeds():
+    # Concrete integers computed from the original positional derivation
+    # (seed, axis, corner_index, sample_index-or-"fixed"); must never change.
+    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    for mc in (
+        {"n": 2, "seed": 42, "vary": "mismatch"},
+        {"n": 2, "seed": 42, "vary": "mismatch", "seed_scope": "per_corner"},
+    ):
+        sampled, info = sim._expand_monte_carlo(points, mc)
+        assert info.get("seed_scope", "per_corner") == "per_corner"
+        got = [
+            (
+                p.mc_seed["process_seed"],
+                p.mc_seed["mismatch_seed"],
+                p.mc_seed["rndseed"],
+            )
+            for p in sampled
+        ]
+        assert got == [
+            (1973556995, 1917083296, 1010234817),
+            (1973556995, 801777546, 195950796),
+            (29864885, 1595696400, 212062138),
+            (29864885, 869917166, 734373890),
+        ]
+
+
+def test_seed_scope_rejects_unknown_value():
+    with pytest.raises(sim.SimError, match="monte_carlo.seed_scope"):
+        sim._validate_monte_carlo_spec(
+            {"n": 1, "seed": 1, "vary": "both", "seed_scope": "bogus"}
+        )
+
+
+def test_seed_scope_shared_pairs_samples_across_corners():
+    points = sim._expand_corners(
+        {"process": ["tt", "ss"], "temperature_c": [-40, 125]}, []
+    )
+    sampled, info = sim._expand_monte_carlo(
+        points, {"n": 3, "seed": 7, "vary": "both", "seed_scope": "shared"}
+    )
+    assert info["seed_scope"] == "shared"
+    by_corner = _mc_by_corner(sampled)
+    assert len(by_corner) == 4
+    for k in range(3):
+        assert len({tuple(sorted(c[k].items())) for c in by_corner.values()}) == 1
+    first = next(iter(by_corner.values()))
+    assert len({first[k]["mismatch_seed"] for k in range(3)}) == 3
+    assert all(p.mc_seed["seed_scope"] == "shared" for p in sampled)
+
+
+@pytest.mark.parametrize(
+    ("vary", "pinned"), [("mismatch", "process_seed"), ("process", "mismatch_seed")]
+)
+@pytest.mark.parametrize("scope", ["per_corner", "shared", "point"])
+def test_seed_scope_keeps_negative_control(scope, vary, pinned):
+    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+    sampled, _ = sim._expand_monte_carlo(
+        points, {"n": 4, "seed": 3, "vary": vary, "seed_scope": scope}
+    )
+    for corner in _mc_by_corner(sampled).values():
+        assert len({corner[k][pinned] for k in range(4)}) == 1
+
+
+def test_seed_scope_point_is_split_and_order_stable():
+    # The #3081 repro: 2 process x 2 temp x 2 supply, n=3, seed=45.
+    axes = {
+        "process": ["tt", "ss"],
+        "temperature_c": [-40, 125],
+        "supply_v": {"vdd": [1.62, 1.98]},
+    }
+    mc = {"n": 3, "seed": 45, "vary": "mismatch", "seed_scope": "point"}
+    full_points = sim._expand_corners(axes, [])
+    full, _ = sim._expand_monte_carlo(full_points, mc)
+    full_by = _mc_by_corner(full)
+    assert len(full_by) == 8
+    # Distinct points still draw distinct dice.
+    assert len({tuple(c[0].items()) for c in full_by.values()}) == 8
+
+    reordered, _ = sim._expand_monte_carlo(list(reversed(full_points)), mc)
+    assert _mc_by_corner(reordered) == full_by
+
+    for point in full_points:
+        alone, _ = sim._expand_monte_carlo([point], mc)
+        assert _mc_by_corner(alone) == {point.corner_id: full_by[point.corner_id]}
+
+
+def test_checkpoint_fingerprint_changes_with_seed_scope(tmp_path):
+    netlist = tmp_path / "n.cir"
+    netlist.write_text("* x\n.end\n")
+    points = sim._expand_corners({"process": ["tt", "ss"]}, [])
+
+    def fp(scope):
+        sampled, _ = sim._expand_monte_carlo(
+            points, {"n": 2, "seed": 1, "vary": "both", "seed_scope": scope}
+        )
+        return sim._checkpoint_fingerprint(
+            netlist_path=str(netlist),
+            models_lib=None,
+            analysis={"type": "op"},
+            measurements_spec=[],
+            corner_points=sampled,
+            timeout_s=1.0,
+            engine="ngspice",
+        )
+
+    assert fp("per_corner") != fp("shared") != fp("point")
+    assert fp("shared") != fp("per_corner")
+
+
+def test_points_to_push_resolves_non_default_scope_client_side():
+    from klayout_tools import sim_remote
+
+    points = sim._expand_corners({"process": ["tt"]}, [])
+    base = {"monte_carlo": {"n": 1, "seed": 1, "vary": "both"}}
+    assert sim_remote._points_to_push(base, points, None) is None
+    shared = {"monte_carlo": {**base["monte_carlo"], "seed_scope": "shared"}}
+    assert sim_remote._points_to_push(shared, points, None) is points
+    explicit = list(points)
+    assert sim_remote._points_to_push(base, points, explicit) is explicit
+
+
 def test_expand_monte_carlo_is_reproducible_given_the_same_seed():
     corner_points = sim._expand_corners({"process": ["tt"]}, [])
     mc_spec = {"n": 5, "seed": 20260801, "vary": "both"}
@@ -4738,6 +4866,66 @@ def test_run_sim_monte_carlo_family_mismatch_reports_gf180mcu_resistor_disabled(
     assert by_family["mosfet"] is True
     # capacitor: gf180mcu MIM caps have no per-instance mismatch hook (#2898).
     assert by_family["capacitor"] is False
+
+
+@pytest.mark.parametrize(
+    "section, expected",
+    [
+        ("mos_tt_mismatch", True),
+        ("mos_tt", False),
+        ("mos_tt_stat", False),
+        (None, None),
+    ],
+)
+def test_run_sim_monte_carlo_family_mismatch_sg13g2_mosfet_is_section_dependent(
+    tmp_path, monkeypatch, section, expected
+):
+    """Issue #2961: sg13g2 MOS subcircuit calls classify as `mosfet` (not
+    `other`) and `active` follows whether the selected section is a
+    `*_mismatch` one; unknown section -> `None`."""
+    (tmp_path / "body.spice").write_text(
+        "Vdd vdd 0 DC 1.2\n"
+        "XM1 mid g out b sg13_lv_nmos L=0.13u W=1u\n"
+        "XM2 mid g vdd vdd sg13_hv_pmos L=0.45u W=1u\n"
+    )
+    spec: dict = {
+        "netlist": "body.spice",
+        "models": {"pdk": "ihp-sg13g2"},
+        "monte_carlo": {"n": 2, "seed": 1, "vary": "mismatch"},
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+    }
+    if section is not None:
+        spec["models"]["lib"] = str(tmp_path / "corner.lib")
+        spec["corners"] = {"process": [section]}
+        (tmp_path / "corner.lib").write_text(f".lib {section}\n.endl {section}\n")
+    request = _write_request(tmp_path, spec)
+    _stub_subprocess_run(monkeypatch)
+    # No ihp-sg13g2 install on CI: stub PDK resolution (the section libs
+    # above are absolute paths, so only the resolution call itself matters).
+    monkeypatch.setattr(
+        sim,
+        "find_pdk",
+        lambda **_kw: {"root": str(tmp_path), "variant": "ihp-sg13g2"},
+    )
+
+    report = sim.run_sim(str(request))
+
+    family_mismatch = report["environment"]["monte_carlo"]["family_mismatch"]
+    by_family = {entry["family"]: entry["active"] for entry in family_mismatch}
+    assert by_family == {"mosfet": expected}
+
+
+@pytest.mark.parametrize(
+    "line, family",
+    [
+        ("XM1 d g s b sg13_lv_nmos L=1u W=1u", "mosfet"),
+        ("XM1 d g s b sg13_hv_pmos L=1u W=1u", "mosfet"),
+        ("XC1 a b sg13_lv_nmoscap W=1u", "capacitor"),
+        ("XQ1 c b e npn13G2", "bipolar"),
+    ],
+)
+def test_classify_device_family_sg13g2_subckts(line, family):
+    assert sim._classify_device_family("X", line) == family
 
 
 def test_run_sim_monte_carlo_family_mismatch_scans_include_closure(
