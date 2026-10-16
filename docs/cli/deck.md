@@ -297,7 +297,7 @@ could re-check mechanically.
         "source_repo": "fossi-foundation/open-pdks",
         "source_path": "sky130/klayout/sky130.lydrc",
         "rule_id": "poly.1a",
-        "commit": "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        "commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
       }
     }
   ]
