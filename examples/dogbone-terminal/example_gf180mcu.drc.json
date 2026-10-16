@@ -31,7 +31,8 @@
       "55/0",
       "75/0",
       "81/0",
-      "127/5"
+      "127/5",
+      "241/0"
     ],
     "layers_checked": [
       "22/0",
@@ -42,6 +43,7 @@
     ],
     "layers_in_stream_without_rules": [],
     "rules_checked": [
+      "comp.coverage.1",
       "comp.enclosing.contact.1",
       "comp.space.1",
       "comp.width.1",
@@ -119,9 +121,11 @@
       "7.9 Pplus",
       "9.1 Bond Pad"
     ],
+    "unmodeled_rules": [],
     "schema_version": 1,
     "known": true,
     "checked": [
+      "comp.coverage.1",
       "comp.enclosing.contact.1",
       "comp.space.1",
       "comp.width.1",

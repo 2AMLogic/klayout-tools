@@ -155,6 +155,20 @@ def _refuse_crossings(spec: dict[str, Any]) -> None:
         )
 
 
+def _refuse_optional(spec: dict[str, Any]) -> None:
+    """Issue #2925: ``optional: true`` (a value-less measurement grades
+    ``absent`` instead of ``error``) is implemented for the scalar analysis
+    only; a step measurement's no-value paths also carry ``step_failed`` /
+    ``derived_input_unavailable`` causes that must stay errors, so the flag is
+    refused by name rather than silently ignored."""
+    if spec.get("optional") is True:
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'optional' is not supported "
+            "with analysis_steps -- use the scalar analysis for a measurement "
+            "that may legitimately be absent"
+        )
+
+
 def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
     """Issue #2947: like ``crossings``, a ``cycle_mean`` reads one transient
     plot's rawfile and has no per-step equivalent -- refused by name."""
@@ -163,6 +177,17 @@ def _refuse_cycle_mean(spec: dict[str, Any]) -> None:
             f"measurement {spec.get('name')!r}: 'cycle_mean' is not supported "
             "with analysis_steps -- use the scalar analysis "
             '(kind "tran") for a cycle-aligned mean'
+        )
+
+
+def _refuse_noise(spec: dict[str, Any]) -> None:
+    """Issue #2938: a ``noise`` measurement reads one noise analysis'
+    spectrum plot; no per-step equivalent is implemented."""
+    if spec.get("noise") is not None:
+        raise _error(
+            f"measurement {spec.get('name')!r}: 'noise' is not supported "
+            "with analysis_steps -- use the scalar analysis "
+            '(kind "noise") for a noise-spectrum measurement'
         )
 
 
@@ -382,7 +407,9 @@ def _resolve_step_measurements(
     for spec in specs:
         _validate_measurement_form(spec)
         _refuse_crossings(spec)
+        _refuse_optional(spec)
         _refuse_cycle_mean(spec)
+        _refuse_noise(spec)
         local = spec["name"]
         if not isinstance(local, str) or not _NAME_RE.match(local):
             raise _error(
@@ -572,7 +599,9 @@ def _resolve_derived_measurements(
     for position, spec in enumerate(specs):
         name = spec["name"]
         _refuse_crossings(spec)
+        _refuse_optional(spec)
         _refuse_cycle_mean(spec)
+        _refuse_noise(spec)
         if spec.get("spice") is not None:
             raise _error(
                 f"measurement {name!r}: with analysis_steps, a top-level "

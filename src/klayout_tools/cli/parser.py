@@ -56,6 +56,7 @@ from . import (
     sta_cmd,
     stats_cmd,
     synthesize_cmd,
+    tap_distance_cmd,
     techmap_cmd,
     trajectory_cmd,
     version_cmd,
@@ -240,6 +241,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_lef_abstract_parser(subparsers)
 
     _add_ring_check_parser(subparsers)
+    _add_tap_distance_parser(subparsers)
 
     _add_layout_metrics_parser(subparsers)
 
@@ -633,6 +635,21 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "#3073). Read the job later with --job-status. One job only: "
             "refused with --hosts > 1, --resume, --plot, a deck request, or "
             "a non-batch backend. See docs/cli/sim.md 'Asynchronous submit'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--wait-for-capacity",
+        dest="wait_for_capacity",
+        metavar="SECONDS",
+        type=float,
+        default=None,
+        help=(
+            "with --backend batch, wait up to SECONDS (>= 0) for fleet "
+            "capacity when the launch is refused (batch_no_capacity / "
+            "batch_concurrency_cap), re-launching the same job with jittered "
+            "backoff; overrides the request's `batch.capacity_wait_s`. 0 "
+            "means one attempt. Also applies with --submit-only (issue "
+            "#3564). See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -2242,6 +2259,21 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--resistance-graph",
+        dest="resistance_graph",
+        action="store_true",
+        help=(
+            "additionally attach a terminal-aware resistor-graph result to "
+            "each `parasitics.nets[]` entry as `resistance_graph` (issue "
+            "#2982): the terminal-pair effective-resistance matrix, graph "
+            "node/edge counts, the legacy scalar and diagnostics. Additive "
+            "only -- `resistance_ohm` and every other field keep their "
+            "legacy value. Requires --parasitics. Off by default -- "
+            "byte-identical to today's behavior. See docs/cli/extract.md's "
+            "'--resistance-graph' section."
+        ),
+    )
+    extract_parser.add_argument(
         "--distributed-rc",
         dest="distributed_rc",
         action="store_true",
@@ -2274,7 +2306,7 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
             "(written as a 1 mohm resistor -- SPICE has no zero-ohm "
             "resistor). Must be >= 0. Reported as "
             "`parasitics.substrate_dc_tie.resistance_ohm`/`mode`. Requires "
-            "--parasitics. See docs/cli/extract.md's 'Substrate DC tie' "
+            "--parasitics. See docs/cli/extract.md's 'Substrate tie value' "
             "section."
         ),
     )
@@ -3372,7 +3404,7 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "resistance of the substrate DC-reference tie (default 1e12, "
             "substrate floating in transient; 0 = hard tie), passed "
             "through to `klt extract --substrate-tie-ohms` (issue #3089). "
-            "Must be >= 0. See docs/cli/extract.md's 'Substrate DC tie' "
+            "Must be >= 0. See docs/cli/extract.md's 'Substrate tie value' "
             "section."
         ),
     )
@@ -3547,7 +3579,45 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "of the same pinned commit report different ones (issue #2249). "
             "Use this rather than byte-comparing the committed file against "
             "a fresh render. Only meaningful with --manifest/--fleet; see "
-            "docs/cli/signoff.md's '--check' section."
+            "docs/cli/signoff.md's '--check' section. With --attest, REPORT "
+            "is a committed attestation envelope instead: re-attests and "
+            "exits 0 only if it still reproduces and still passes, 3 "
+            "otherwise -- never rewriting it."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--attest",
+        metavar="ITEM",
+        type=int,
+        choices=[1, 9, 10],
+        help=(
+            "produce the artifact-anchored generic envelope for T1 item 1 "
+            "(Design sources), 9 (Testbenches shipped) or 10 (Repo hygiene) "
+            "from --inventory, by running the item-specific checks the "
+            "inventory declares (issue #2844). Status is derived from those "
+            "checks: exit 0 pass, 3 fail (nothing written), 1 malformed "
+            "inventory. Mutually exclusive with <file>/--manifest/--fleet/"
+            "--describe-grader/--tiers-doc. See docs/cli/signoff.md's "
+            "'Attesting items 1, 9 and 10' section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--inventory",
+        metavar="FILE",
+        help=(
+            "with --attest: path to the versioned attestation inventory "
+            "(schema_version 1, kind 't1-attestation-inventory') inside a "
+            "git repository; the envelope pins this file's raw-byte sha256."
+        ),
+    )
+    signoff_parser.add_argument(
+        "-o",
+        "--output",
+        metavar="FILE",
+        help=(
+            "with --attest: also write the envelope to FILE when it passes, "
+            "only if its bytes changed (an unchanged attestation leaves the "
+            "committed file untouched)."
         ),
     )
     signoff_parser.add_argument(
@@ -3557,7 +3627,8 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "print which T1 checklist item ids this build has grading "
             "rules for, plus the content hash identifying the grading code "
             "itself, without reading source or running any check -- "
-            "mutually exclusive with <file>/--manifest/--fleet/--tiers-doc "
+            "mutually exclusive with <file>/--manifest/--fleet/--tiers-doc/"
+            "--attest "
             "(this always reports the build's own shipped grading rules, "
             "never an overridden doc's item list). See docs/cli/signoff.md's "
             "'Identifying the grading build' section."
@@ -5831,6 +5902,87 @@ def _add_socket_check_parser(subparsers: argparse._SubParsersAction) -> None:
     socket_check_parser.set_defaults(func=socket_check_cmd.run)
 
 
+def _add_tap_distance_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Register the ``tap-distance`` verb: latch-up / tie-spacing distance bound."""
+    tap_parser = subparsers.add_parser(
+        "tap-distance",
+        help="assert every subject point is within a Euclidean distance of a tap",
+        description=(
+            "Assert that every point of a subject region (e.g. diffusion) lies "
+            "within --max-distance-um (Euclidean) of a qualifying tap "
+            "(e.g. a well/substrate tie), optionally per island (e.g. per well) "
+            "and optionally counting only taps wired to named nets. The "
+            "distance is measured with an inscribed-polygon Minkowski sum, so "
+            "it errs on the safe side and reports an explicit error bound. A "
+            "rule that cannot be evaluated reports status 'unsupported' "
+            "(exit 4), never a pass. Runs fully headless via KLayout's native "
+            "batch database API. See docs/cli/tap-distance.md."
+        ),
+    )
+    tap_parser.add_argument("file", help="path to a GDSII or OASIS layout file")
+    tap_parser.add_argument(
+        "--subject",
+        required=True,
+        help=(
+            "subject layer expression: '<layer>/<datatype>' terms joined by "
+            "'+' (union), '&' (intersection), '-' (difference), left to right "
+            "(e.g. '65/20 & 125/44')"
+        ),
+    )
+    tap_parser.add_argument(
+        "--taps", required=True, help="tap layer expression (same syntax as --subject)"
+    )
+    tap_parser.add_argument(
+        "--max-distance-um",
+        required=True,
+        type=float,
+        help="maximum allowed Euclidean subject-to-tap distance in micrometres",
+    )
+    tap_parser.add_argument(
+        "--island",
+        default=None,
+        help=(
+            "optional island-partition layer expression (e.g. a well layer): "
+            "each merged polygon is checked on its own, counting only taps "
+            "that touch it; an island with subject but no tap fails"
+        ),
+    )
+    tap_parser.add_argument(
+        "--tap-net",
+        action="append",
+        default=None,
+        metavar="NET",
+        help=(
+            "repeatable net name; count only taps wired to one of these nets "
+            "(needs --net-spec)"
+        ),
+    )
+    tap_parser.add_argument(
+        "--net-spec",
+        default=None,
+        help=(
+            "path to a JSON connectivity spec for --tap-net: {'stackup': "
+            "[{'name', 'layer', 'label_layer'}], 'vias': [{'name', 'layer', "
+            "'between': [a, b]}], 'tap_connect_to': <stackup name>}"
+        ),
+    )
+    tap_parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "optional subject clip window as an inline JSON array of four "
+            "micrometre coordinates [left, bottom, right, top]"
+        ),
+    )
+    tap_parser.add_argument(
+        "--top",
+        default=None,
+        help="top cell to check when the stream has more than one",
+    )
+    _add_format_arg(tap_parser)
+    tap_parser.set_defaults(func=tap_distance_cmd.run)
+
+
 def _add_ring_check_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``ring-check`` verb: assert a layer set forms a closed annulus."""
     ring_check_parser = subparsers.add_parser(
@@ -6099,15 +6251,31 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "the JSON contract."
         ),
     )
-    erc_parser.add_argument("file", help="path to a routed GDSII or OASIS layout file")
+    # `file`/`spec` (positional) and `--check` (issue #3060) are mutually
+    # exclusive input sources, as in `klt lvs`. `file` and `spec` are optional
+    # positionals, so "neither given" is enforced in `erc_cmd.run` (exit 1)
+    # rather than here.
+    erc_input_group = erc_parser.add_mutually_exclusive_group()
+    erc_input_group.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help=(
+            "path to a routed GDSII or OASIS layout file. Required unless "
+            "--check is given (the input paths are then read from the "
+            "committed report instead)"
+        ),
+    )
     erc_parser.add_argument(
         "spec",
+        nargs="?",
+        default=None,
         help=(
             "path to a JSON spec file: a 'stackup' array (>= 2 entries) "
             "mapping GDS layer/datatype pairs to fabrication-order "
             'conductor roles -- stackup[0] sets "role": "gate" -- and '
             "an optional 'vias' array -- see docs/cli/erc.md's 'Spec file' "
-            "section"
+            "section. Required unless --check is given"
         ),
     )
     erc_parser.add_argument(
@@ -6198,6 +6366,35 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "erc_status and the tie entries of erc_coverage are unchanged. "
             "Requires --findings-only -- passing it alone exits 1. Omitted, "
             "output is byte-identical."
+        ),
+    )
+    erc_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt erc --format json' report "
+            "(REPORT) instead of running a fresh check: mutually exclusive "
+            "with the positional 'file'/'spec' arguments, since inputs are "
+            "read from REPORT itself (issue #3060). Cheap mode (default): "
+            "re-hash REPORT's layout and spec (and --deck source, when one "
+            "was used) and compare against the recorded "
+            "provenance.input/spec/deck content_hash values, no ERC re-run. "
+            "Combine with --rerun for full mode. Exits 0 if still "
+            "consistent, 3 if drifted -- see docs/cli/erc.md, "
+            "'--check / --rerun'"
+        ),
+    )
+    erc_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #3060): re-run ERC from REPORT's "
+            "echoed file/spec/pdk/findings_only (and provenance.deck) and "
+            "diff verdict-bearing fields against the committed report, "
+            "excluding provenance.klt_version/klayout_version/pdk.version. "
+            "--top is not echoed in the report, so it is not replayed. "
+            "Requires --check; a clean error (exit 1) otherwise"
         ),
     )
     _add_format_arg(erc_parser)

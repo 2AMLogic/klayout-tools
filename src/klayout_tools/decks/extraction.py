@@ -307,6 +307,25 @@ class ResistorFlavour:
 
 
 @dataclass(frozen=True)
+class UnsupportedDeviceMarker:
+    """A marker layer whose drawn shapes mean the layout holds a device class
+    this deck does not recognise (issue #2919) -- e.g. gf180mcu's
+    ``MOS_CAP_MK`` (166/5) over a MOS capacitor.
+
+    ``extract.py`` reports every such layer that carries shapes in the
+    extracted cell in the response's ``unsupported_devices[]`` field and in
+    ``warnings[]``, so a netlist that silently lacks those devices cannot read
+    as a clean extraction. ``kind`` is a short machine-readable token (e.g.
+    ``"mos_capacitor"``); ``description`` is the prose used in the warning.
+    The marker takes no part in recognition or connectivity.
+    """
+
+    marker: tuple[int, int]
+    kind: str
+    description: str
+
+
+@dataclass(frozen=True)
 class MOSFlavour:
     """One additional, marker-scoped MOS voltage/gate-oxide flavour an
     :class:`ExtractionDeck` recognises via its optional ``mos_flavours``
@@ -388,6 +407,28 @@ class MOSFlavour:
     same default every other ``provenance`` field in this module carries, so a
     deck that leaves them unset (e.g. gf180mcu's ``Dualgate`` entry, whose
     prose comment remains the record) is unaffected.
+
+    ``and_markers``/``not_markers``/``nfet_only`` (issue #3599) express a
+    marker *combination*, for a flavour upstream derives as
+    ``<base>.and(A).not(B)`` rather than from a single layer -- e.g. sky130's
+    native-Vt NMOS (``hvi`` AND ``lvtn``, NOT ``areaid_ed``/``areaid_le``/
+    ``vpp``). All three default to empty/``False``, in which case
+    classification is exactly the single-``marker`` behaviour above:
+
+    - ``and_markers``: the island must also ``interacting``-overlap *every*
+      one of these layers to be claimed.
+    - ``not_markers``: an island that ``interacting``-overlaps *any* of these
+      layers is not claimed (it stays available to later flavours / the
+      default split). Like ``marker``, this is island-level, not a geometric
+      subtraction -- the same documented straddling policy.
+    - ``nfet_only``: the flavour has no PMOS counterpart; an island
+      ``interacting`` the deck's ``nwell`` is never claimed (no PMOS is
+      extracted or bound for it).
+
+    ``extract.py`` processes ``mos_flavours`` in declaration order and each
+    flavour removes what it claims before the next runs, so a combination
+    flavour must be declared *before* any flavour whose ``marker`` it
+    refines (or that flavour must list the refining layer in ``not_markers``).
     """
 
     marker: tuple[int, int]
@@ -395,6 +436,9 @@ class MOSFlavour:
     description: str = ""
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
+    and_markers: tuple[tuple[int, int], ...] = ()
+    not_markers: tuple[tuple[int, int], ...] = ()
+    nfet_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -669,6 +713,12 @@ class ExtractionDeck:
     this field's introduction) disables the exclusion: a poly shape matching
     the signature is flagged exactly as it was before this field existed, no
     behaviour change for a deck/layout that declares or draws no marker.
+
+    ``unsupported_device_markers`` (issue #2919) is an optional tuple of
+    :class:`UnsupportedDeviceMarker` entries naming marker layers that flag a
+    device class the deck cannot yet extract; shapes on one are reported in
+    ``unsupported_devices[]``/``warnings[]``. Empty (the default) reports
+    nothing.
     """
 
     active: tuple[int, int]
@@ -696,6 +746,7 @@ class ExtractionDeck:
     resistors: tuple[ResistorDevice, ...] = ()
     diodes: tuple[DiodeDevice, ...] = ()
     mos_flavours: tuple[MOSFlavour, ...] = ()
+    unsupported_device_markers: tuple[UnsupportedDeviceMarker, ...] = ()
     nfet_provenance: RuleProvenance | None = None
     pfet_provenance: RuleProvenance | None = None
     capacitor_variants: tuple[CapacitorVariant, ...] = ()
@@ -1334,6 +1385,74 @@ def layer_operand_leaves(
 
 
 @dataclass(frozen=True)
+class SizeFilter:
+    """Pure-data size restriction on a recognition or terminal region (issue
+    #2861): bounding-box minimum / maximum side and polygon area, each an
+    **inclusive** ``(lo, hi)`` range in microns (um) / square microns (um^2).
+    An exact value is the degenerate range ``(v, v)``. A dimension left
+    ``None`` is unconstrained; a polygon must satisfy *every* declared
+    dimension. It is independent of any one device family so resistor and
+    capacitor flavours can adopt it later (today only
+    :attr:`BipolarDevice.emitter_size` consumes it).
+
+    Dimensions, measured per merged polygon:
+
+    - ``bbox_min_um`` -- the shorter side of the polygon's bounding box
+      (KLayout ``Region.with_bbox_min``);
+    - ``bbox_max_um`` -- the longer side (``with_bbox_max``);
+    - ``area_um2`` -- the polygon area (``with_area``).
+
+    Rounding rule (applied by ``extract.py``): bounds are converted to the
+    layout's database unit by rounding to the nearest integer dbu (area to
+    the nearest dbu^2), so a PDK value such as 0.063 um^2 is exact at
+    ``dbu=0.001`` and tolerant of float noise at any other dbu; the range is
+    then inclusive at both ends. One dbu outside either bound does not match.
+
+    Construction rejects a negative bound, ``lo > hi``, and an *empty*
+    filter (all three dimensions ``None``) -- an empty filter would be a
+    silent no-op, so use ``emitter_size=None`` for "no size restriction".
+    """
+
+    bbox_min_um: tuple[float, float] | None = None
+    bbox_max_um: tuple[float, float] | None = None
+    area_um2: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.bbox_min_um is None
+            and self.bbox_max_um is None
+            and self.area_um2 is None
+        ):
+            raise ValueError(
+                "SizeFilter must constrain at least one of bbox_min_um, "
+                "bbox_max_um, area_um2 (use None instead of an empty filter)"
+            )
+        for name in ("bbox_min_um", "bbox_max_um", "area_um2"):
+            rng = getattr(self, name)
+            if rng is None:
+                continue
+            if len(rng) != 2:
+                raise ValueError(f"SizeFilter.{name} must be a (lo, hi) pair")
+            lo, hi = rng
+            if lo < 0 or hi < 0:
+                raise ValueError(f"SizeFilter.{name} bounds must be non-negative")
+            if lo > hi:
+                raise ValueError(f"SizeFilter.{name} has lo > hi: {rng!r}")
+
+    def overlaps(self, other: SizeFilter) -> bool:
+        """True when some polygon could satisfy both filters: every
+        dimension constrained by *both* has intersecting ranges (a dimension
+        either leaves unconstrained cannot separate them)."""
+        for name in ("bbox_min_um", "bbox_max_um", "area_um2"):
+            a, b = getattr(self, name), getattr(other, name)
+            if a is None or b is None:
+                continue
+            if a[1] < b[0] or b[1] < a[0]:
+                return False
+        return True
+
+
+@dataclass(frozen=True)
 class BipolarDevice:
     """One drawn vertical-BJT device-recognition entry for an
     :class:`ExtractionDeck`'s optional ``bipolars`` field (issue #223),
@@ -1401,6 +1520,16 @@ class BipolarDevice:
     documented residual limitation, see that deck's docstring. Both default
     to ``()`` (no narrowing), so a deck that declares neither extracts
     exactly as it did before the fields existed.
+
+    ``emitter_size`` (issue #2861) is an optional :class:`SizeFilter` applied
+    to the *merged* emitter region after ``emitter_requires``/
+    ``emitter_excludes``, so entries sharing ``base``/``marker``/``emitter``
+    can tell flavours apart by drawn emitter-window size (e.g. SG13G2's
+    ``npn13G2``/``npn13G2l``/``npn13G2v``). A marked emitter matching no
+    entry of such a group is reported in ``warnings[]`` (with its bbox) and
+    yields no device; entries of a group whose size ranges overlap are
+    rejected with an ``ExtractError``. ``None`` (default) means no size
+    restriction and leaves extraction and the deck hash unchanged.
 
     ``class_name`` names the extracted ``DeviceClassBJT3Transistor`` device
     class (``devices[].class`` in the JSON response, and one of the values
@@ -1492,6 +1621,7 @@ class BipolarDevice:
     base_relation: TerminalRelation | None = None
     emitter_relation: TerminalRelation | None = None
     collector_relation: TerminalRelation | None = None
+    emitter_size: SizeFilter | None = None
 
     def __post_init__(self) -> None:
         # Validates eagerly so a malformed deck entry fails where it is

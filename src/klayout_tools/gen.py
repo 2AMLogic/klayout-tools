@@ -222,6 +222,9 @@ from .gen_layer_params import (
     UNIT_MIN_W_UM as UNIT_MIN_W_UM,
 )
 from .gen_layer_params import (
+    _bjt_unit_implant_margin_um as _bjt_unit_implant_margin_um,
+)
+from .gen_layer_params import (
     _cap_family_layers as _cap_family_layers,
 )
 from .gen_layer_params import (
@@ -411,6 +414,11 @@ _HIDDEN_PARAMS = {
     # Shared verbatim by `well_island`'s own `well_tap_implant_*` ring
     # (issue #1421), which draws the same implant over the same `Comp` mask.
     "ring_implant_margin_um",
+    # `bjt_array`'s per-unit emitter (Pplus) / base-tie (Nplus) implants
+    # (issue #3587) -- harness-computed like `sd_implant_*` above.
+    "unit_emitter_implant_layer",
+    "unit_base_implant_layer",
+    "unit_implant_margin_um",
     # `res_array`'s own metal-layer-resistor geometry floors (issue #1639),
     # harness-computed from the resolved PDK family/`params.metal_level`
     # exactly like `cap_bottom_plate_margin_min_um`/friends above -- see
@@ -1275,6 +1283,34 @@ def _clamp_pitch_override(override_um: float, minimum_um: float) -> tuple[float,
     return max(override_um, minimum_um), override_um < minimum_um
 
 
+def _shared_sd_col_pitch(
+    unit: dict[str, Any], min_col_pitch: float, share_sd: bool
+) -> float:
+    """Issue #3551: under ``share_sd`` the real columns abut, overlapping by
+    one contacted S/D segment, so the legal minimum pitch drops to
+    ``total_len_um - contact_region_um``."""
+    if not share_sd:
+        return min_col_pitch
+    return unit["total_len_um"] - (CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM)
+
+
+def _dummy_col_x0s(
+    dc: int,
+    cols: int,
+    col_pitch: float,
+    isolated_col_pitch: float,
+    share_sd: bool,
+) -> tuple[float, float]:
+    """x0 of the ``dc``-th left/right dummy column. Under ``share_sd`` dummies
+    stay at the isolated-unit pitch, measured from the abutted real columns."""
+    if share_sd:
+        return (
+            -dc * isolated_col_pitch,
+            (cols - 1) * col_pitch + dc * isolated_col_pitch,
+        )
+    return -dc * col_pitch, (cols - 1 + dc) * col_pitch
+
+
 def _mos_array_layout(
     w_um: float,
     l_um: float,
@@ -1301,6 +1337,7 @@ def _mos_array_layout(
     pitch_x_um: float = 0.0,
     pitch_y_um: float = 0.0,
     top_endcap_um: float = 0.0,
+    share_sd: bool = False,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` grid of :func:`_mos_unit_layout` unit devices,
     with ``dummy`` extra unit-device columns flanking each side.
@@ -1383,7 +1420,20 @@ def _mos_array_layout(
     ``min_col_pitch_um``/``min_row_pitch_um`` give the legal minimum. ``0.0``
     (the default) means "no override" and is a strict no-op. The override
     replaces the base pitch, and ``interior_channel_um`` is then added on top
-    of the effective base pitch."""
+    of the effective base pitch.
+
+    ``share_sd`` (issue #3551, Phase 2 of #3299) abuts horizontally adjacent
+    unit devices so each pair shares one contacted S/D segment: the real
+    columns' pitch drops from ``total_len_um + MIN_SAME_LAYER_SPACING_UM`` to
+    ``total_len_um - contact_region_um``, i.e. unit ``c``'s last (drain)
+    segment *is* unit ``c + 1``'s first (source) segment, drawn at identical
+    coordinates. This changes electrical topology -- each row becomes a
+    series chain whose ``U<i>_D`` and ``U<i+1>_S`` ports name the same node.
+    Only ``topology='array'`` with ``fingers == 1`` is supported, and it is
+    exclusive with ``pitch_x_um``/``interior_channel_um`` (both would pull
+    the units apart again); :func:`gen_describe._validate_share_sd` rejects
+    the rest with ``GenError``. ``dummy`` columns stay isolated at the normal
+    pitch. ``False`` (the default) is a strict no-op."""
     unit = _mos_unit_layout(
         w_um,
         l_um,
@@ -1398,6 +1448,9 @@ def _mos_array_layout(
         top_endcap_um=top_endcap_um,
     )
     min_col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
+    # Issue #3551: dummy columns keep the isolated-unit pitch under `share_sd`.
+    isolated_col_pitch = min_col_pitch
+    min_col_pitch = _shared_sd_col_pitch(unit, min_col_pitch, share_sd)
     min_row_pitch = unit["bbox_height_um"] + MIN_SAME_LAYER_SPACING_UM
     # Issue #3299 (Phase 1): an explicit pitch override, clamped up to the
     # legal minimum. `0.0` (the default) leaves the pitch untouched.
@@ -1425,14 +1478,17 @@ def _mos_array_layout(
     dummy_cells = []
     for r in range(rows):
         for dc in range(1, dummy + 1):
+            left_x0, right_x0 = _dummy_col_x0s(
+                dc, cols, col_pitch, isolated_col_pitch, share_sd
+            )
             dummy_cells.append(
-                {"row": r, "col": -dc, "x0_um": -dc * col_pitch, "y0_um": r * row_pitch}
+                {"row": r, "col": -dc, "x0_um": left_x0, "y0_um": r * row_pitch}
             )
             dummy_cells.append(
                 {
                     "row": r,
                     "col": cols - 1 + dc,
-                    "x0_um": (cols - 1 + dc) * col_pitch,
+                    "x0_um": right_x0,
                     "y0_um": r * row_pitch,
                 }
             )
@@ -1530,6 +1586,7 @@ def _mos_array_layout(
         "min_row_pitch_um": min_row_pitch,
         "pitch_x_clamped": pitch_x_clamped,
         "pitch_y_clamped": pitch_y_clamped,
+        "share_sd": share_sd,
         "cells": cells,
         "dummy_cells": dummy_cells,
         "well_box_um": well_box,
@@ -2636,6 +2693,47 @@ def _bjt_unit_layout(emitter_um: float) -> dict[str, Any]:
     }
 
 
+def _bjt_unit_implant_overhang_um(
+    margin_um: float, row_pitch_um: float, unit_height_um: float
+) -> float:
+    """How far a unit's emitter/base-tie implant extends above and below its
+    pad: at least ``margin_um``, grown to half the row gap so the same-type
+    implants of adjacent rows abut and merge (NP.2/PP.2 spacing is wider than
+    the row gap)."""
+    return max(margin_um, (row_pitch_um - unit_height_um) / 2.0)
+
+
+def _insert_bjt_unit_implants(
+    cell: Any,
+    layout: Any,
+    info: dict[str, Any],
+    emitter_layer: Any,
+    base_layer: Any,
+    margin_um: float,
+) -> None:
+    """Draw each unit's P+ emitter / N+ base-tie implant (issue #3587): the
+    pad grown by ``margin_um`` (NP.5b/PP.5b) sideways and by
+    :func:`_bjt_unit_implant_overhang_um` above and below. A no-op when
+    ``margin_um`` is not positive (families without both implant roles)."""
+    if margin_um <= 0:
+        return
+    unit = info["unit"]
+    overhang = _bjt_unit_implant_overhang_um(
+        margin_um, info["row_pitch_um"], unit["height_um"]
+    )
+    emitter_box, base_box = unit["boxes_um"]["active"][:2]
+    for layer, box in ((emitter_layer, emitter_box), (base_layer, base_box)):
+        grown = (
+            box[0] - margin_um,
+            box[1] - overhang,
+            box[2] + margin_um,
+            box[3] + overhang,
+        )
+        li = layout.layer(layer)
+        for c in info["cells"] + info["dummy_cells"]:
+            _insert_boxes(cell, li, layout.dbu, [grown], c["x0_um"], c["y0_um"])
+
+
 def _bjt_array_layout(
     emitter_um: float,
     rows: int,
@@ -2646,6 +2744,7 @@ def _bjt_array_layout(
     ring_gap_side: str = "",
     ring_gap_um: float = 0.0,
     ring_gap_offset_um: float = 0.0,
+    unit_implant_margin_um: float = 0.0,
 ) -> dict[str, Any]:
     """A ``rows`` x ``cols`` common-centroid (or plain-array) grid of
     :func:`_bjt_unit_layout` unit devices, with ``dummy`` flanking columns
@@ -2660,10 +2759,27 @@ def _bjt_array_layout(
     base-tie pads included, look like a second emitter). The collector ring
     is still held :data:`BJT_COLLECTOR_GAP_UM` outside the well, well beyond
     gf180mcu's ``bjt.separation.comp.1`` 0.1um limit.
+
+    ``unit_implant_margin_um`` (issue #3587) is the extension of each unit's
+    emitter/base-tie implant beyond its pad (``0.0`` = no unit implants, the
+    layout is unchanged). When set, the ring is pushed out further so its own
+    implant keeps the same-type implant spacing (NP.2/PP.2) from the units'.
     """
     unit = _bjt_unit_layout(emitter_um)
     col_pitch = unit["total_len_um"] + MIN_SAME_LAYER_SPACING_UM
     row_pitch = unit["height_um"] + MIN_SAME_LAYER_SPACING_UM
+    collector_gap = BJT_COLLECTOR_GAP_UM
+    if unit_implant_margin_um > 0:
+        overhang = _bjt_unit_implant_overhang_um(
+            unit_implant_margin_um, row_pitch, unit["height_um"]
+        )
+        needed = (
+            MIN_SAME_LAYER_SPACING_UM
+            + unit_implant_margin_um
+            + overhang
+            - WELL_ENCLOSURE_MARGIN_UM
+        )
+        collector_gap = max(collector_gap, math.ceil(needed * 100) / 100)
 
     order = (
         _centroid_order(rows, cols)
@@ -2702,7 +2818,7 @@ def _bjt_array_layout(
     ring = None
     ring_offset = (0.0, 0.0)
     if add_collector_ring:
-        gap = BJT_COLLECTOR_GAP_UM
+        gap = collector_gap
         ring_w = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
         inner_x0 = well_box[0] - gap
         inner_y0 = well_box[1] - gap

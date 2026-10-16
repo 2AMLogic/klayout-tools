@@ -891,6 +891,7 @@ klt pex 06-layout.gds --deck sky130 \
   | `KLT_PEX_NETLIST` | the same path passed as the final argument |
   | `KLT_PEX_ARTIFACTS_DIR` | a per-side directory under this run's `--outdir` (`<outdir>/measure/<side>/`), created before the command runs — for whatever decks/logs/raw files the harness wants to keep |
   | `KLT_PEX_BACKEND` | the `--backend` value (`local`/`batch`/…), set **only** when `klt pex` was given `--backend`; the same value is also exported as `KLT_SIM_BACKEND` so a child `klt sim` obeys it. Absent otherwise — the host's inherited `$KLT_SIM_BACKEND` default applies unchanged |
+  | `KLT_OUTDIR_LOCK_INHERIT` | the canonical path of `$KLT_PEX_ARTIFACTS_DIR`; a nested `klt` (e.g. `klt sim` on a request under that directory, default `-o`) treats that directory and its descendants as already owned by this run instead of failing with `outdir_locked` (additive, #3291) |
 
 - **A non-zero exit, an unrunnable command, a timeout, or stdout that is not
   valid JSON is a hard error** (exit `1`), with a bounded tail of the
@@ -1267,9 +1268,9 @@ full `repo`/`external`/`absent` scope meanings.
 | `schematic_value` | number \| null  | The measurement's value on the schematic-side run, or `null` if that corner/measurement was missing or itself errored. |
 | `extracted_value` | number \| null  | The measurement's value on the extracted-side run, or `null` if it was unextractable (a `klt sim` `"error"`-status measurement). |
 | `delta_pct`       | number \| null  | `100 * (extracted_value - schematic_value) / abs(schematic_value)`, rounded to 3 decimals; `null` when either value is missing or `schematic_value` is exactly `0`. |
-| `status`          | string          | `"pass"`, `"fail"`, or `"error"` — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
-| `schematic_status` | string         | Issue #2989 (additive). The schematic-side measurement's own `klt sim` limit status: `"pass"`, `"fail"`, or `"error"` (also when the schematic measurement is missing). Does not affect `status`. |
-| `extracted_status` | string         | Issue #2989 (additive). The extracted-side measurement's own `klt sim` limit status; `"error"` for rows whose extracted side never produced a response. |
+| `status`          | string          | `"pass"`, `"fail"`, or `"error"` — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Issue #3620: an optional measurement that is `"absent"` on exactly one side (a figure lost — or newly appearing — after parasitics) is also `"error"` (`delta_pct: null`, `error` blames the absent side); `"absent"` on both sides is `"pass"`. Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
+| `schematic_status` | string         | Issue #2989 (additive). The schematic-side measurement's own `klt sim` limit status: `"pass"`, `"fail"`, `"error"` (also when the schematic measurement is missing), or `"absent"` (issue #3620: an optional measurement with no value). Does not affect `status`. |
+| `extracted_status` | string         | Issue #2989 (additive). The extracted-side measurement's own `klt sim` limit status (may be `"absent"`, see `schematic_status`); `"error"` for rows whose extracted side never produced a response. |
 | `error`           | object          | Issue #3062 (additive). Present **only** on `status: "error"` rows (absent on `pass`/`fail`), naming why the row has no trustworthy value: `side` (`"schematic"` or `"extracted"`), `stage` (`"submit"`, `"execute"`, `"collect"`, `"parse"` or `"unknown"` — `"unknown"` when the source code maps to no stage, never guessed), `message`, and `code` when the source has one (e.g. `batch_job_failed`, `batch_no_capacity`). Taken from that side's corner `diagnostics[]` (first error-severity entry) or, when that side never returned a report, from the recorded failure; `remote` carries the side's `environment.remote` (the batch job id) when present. The side's full evidence stays under `testbenches[].sides.<side>.corners[]` for the same `corner_id`. |
 | `device_only_value` | number \| null | Issue #3298 (additive, `--device-only-leg` only). The measurement on the parasitic-free third leg; `null` when that leg produced nothing for this row. |
 | `representation_delta_pct` | number \| null | Issue #3298 (additive, `--device-only-leg` only). `delta_pct`'s rule applied to `schematic_value` → `device_only_value`: the device-representation/geometry part of `delta_pct`. |
@@ -1313,7 +1314,15 @@ per-testbench `klt sim` runs on `<outdir>/<testbench>/schematic|extracted`
 inherit that ownership, and an independent `klt sim`/`klt pex` aimed at one
 of those child directories is refused while the run is active. A killed or
 crashed run releases ownership automatically; a leftover owner record never
-blocks the next run. `outdir_lock_unavailable` (same exit/streams) means
+blocks the next run. A `--measure-command` harness is the one child process
+that inherits ownership: `klt pex` exports `KLT_OUTDIR_LOCK_INHERIT` (the
+canonical `$KLT_PEX_ARTIFACTS_DIR`), so a nested `klt sim` whose output
+directory is that directory or a descendant -- including the default
+`.klt/sim/` beside a request written there -- runs without `outdir_locked`.
+Only descendants are covered: an ancestor or sibling of it is still refused,
+and a harness that fans out parallel `klt sim`s into the same directory loses
+the guard among themselves. Pass `klt sim -o <dir>` to a distinct directory
+per parallel run. `outdir_lock_unavailable` (same exit/streams) means
 locking itself is not possible here. Full policy, library exceptions and
 platform scope: [json-contract.md](../json-contract.md) "Output-directory
 ownership".

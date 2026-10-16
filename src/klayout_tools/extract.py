@@ -172,6 +172,7 @@ from .decks import (
     InvalidDeckOptionError,
     InvalidLabelLayerError,
     ParasiticsDeck,
+    SizeFilter,
     UnknownExtractionDeckError,
     deck_source_path,
     get_extraction_deck,
@@ -240,6 +241,7 @@ from .extract_passive_regions import (
     _build_mom_capacitor_extractor,
     _capacitor_plate_regions,
     _capacitor_top_via_exclusions,
+    _detect_unclaimed_resistor_markers,
     _diode_terminal_region,
     _exclude_capacitor_top_via_overlap,
     _resolve_resistors,
@@ -1296,10 +1298,10 @@ def _spef_warnings(
         more = len(skipped_nets) - 5
         out.append(
             f"--spef: omitted *D_NET blocks for {len(skipped_nets)} "
-            "duplicate-named net(s) with no DEF net (floating cell "
-            f"outputs / unrouted supplies): {shown}"
+            "duplicate-named or unlabelled ($N) net(s) with no DEF net "
+            f"(floating cell outputs / unrouted supplies): {shown}"
             + (f", ... (+{more} more)" if more > 0 else "")
-            + ". Same-named *D_NET blocks are rejected by OpenSTA "
+            + ". Such *D_NET blocks are rejected by OpenSTA "
             "(STA-1650) and attach to no driver."
         )
     return out
@@ -1334,6 +1336,13 @@ def _timed(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]
     return wrapper
 
 
+def _require_parasitics_for_resistance_graph(
+    resistance_graph: bool, parasitics: bool
+) -> None:
+    if resistance_graph and not parasitics:
+        raise ExtractError("--resistance-graph requires --parasitics")
+
+
 @_timed
 def run_extract(
     path: str,
@@ -1362,6 +1371,7 @@ def run_extract(
     parasitics_net_patterns: Sequence[str] | None = None,
     strict_net_patterns: bool = False,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
     resistance_path_max_nodes: int | None = None,
@@ -1820,6 +1830,14 @@ def run_extract(
     and runs no extra ``Region`` work at all -- byte-identical to before this
     feature existed.
 
+    ``resistance_graph`` (``klt extract --resistance-graph``, issue #2982,
+    Stage 3.D5 increment 3) adds the opt-in ``resistance_graph`` object to each
+    ``parasitics.nets[]`` entry: the terminal-pair effective-resistance matrix
+    of the net's geometry-derived resistor graph, with coverage counts and
+    diagnostics. Purely additive -- ``resistance_ohm``, the ladder and every
+    other field are unchanged, and ``False`` (the default) adds no key.
+    Requires ``parasitics=True``. See :func:`_compute_parasitics`.
+
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
     model (see :func:`_inject_parasitics`) with a distributed, multi-segment
@@ -2062,6 +2080,13 @@ def run_extract(
             ],
             "voltage_domain_warnings": [
                 {"marker": "<layer>/<datatype>", "description": str}, ...
+            ],
+            "unsupported_devices": [
+                {
+                    "kind": str, "marker": "<layer>/<datatype>",
+                    "count": int, "bbox_um": {...}, "description": str,
+                },
+                ...
             ],
             "merged_net_labels": [
                 {"net": str, "labels": [str, ...]}, ...
@@ -2734,6 +2759,10 @@ def run_extract(
     if parasitics_top_cell_only and not parasitics:
         raise ExtractError("--parasitics-top-cell-only requires --parasitics")
 
+    # `--resistance-graph` (issue #2982) attaches to the same per-net
+    # `parasitics.nets[]` entries, so it needs `--parasitics`.
+    _require_parasitics_for_resistance_graph(resistance_graph, parasitics)
+
     # `--distributed-rc` (issue #977) requires `--critical-net`: it reuses
     # that flag's own net set as the "which nets get the ladder" scope
     # rather than inventing a second net classification mechanism -- with
@@ -2839,6 +2868,7 @@ def run_extract(
     hierarchy_placements: dict[int, Any] = {}
     subcircuit_info: dict[str, Any] = {}
     missing_flavour_markers: list[dict[str, Any]] = []
+    unsupported_devices: list[dict[str, Any]] = []
     probe_results: list[dict[str, Any]] = []
     dotted_renames: list[tuple[str, str, str]] = []
 
@@ -2879,6 +2909,7 @@ def run_extract(
         parasitics_nets=parasitics_nets_set,
         net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
+        resistance_graph=resistance_graph,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         # Issue #2854: rename each surviving promoted pin net to its
@@ -2895,6 +2926,7 @@ def run_extract(
         # `--pdk-root` resolved one above.
         pdk_info=pdk_info,
         missing_flavour_markers=missing_flavour_markers,
+        unsupported_devices=unsupported_devices,
         probes=probes,
         probe_results=probe_results,
         dotted_renames_out=dotted_renames,
@@ -3720,7 +3752,9 @@ def run_extract(
         "netlist_normalized_sha256": (
             None
             if netlist_sha256 is None
-            else _normalized_netlist_sha256(devices, nets)
+            else _staged(
+                "netlist_normalized_hash", _normalized_netlist_sha256, devices, nets
+            )
         ),
         "status": "extracted",
         "device_count": len(devices),
@@ -3765,6 +3799,11 @@ def run_extract(
         # declares `mos_flavours` whose marker layer has zero shapes in the
         # whole layout -- see `_detect_missing_flavour_markers`.
         "missing_flavour_markers": missing_flavour_markers,
+        # Additive field (issue #2919): always a list, empty unless the
+        # layout draws shapes on a deck `unsupported_device_markers` layer
+        # (a device class the deck cannot extract yet, e.g. gf180mcu MOS
+        # capacitors) -- see `_detect_unsupported_devices`.
+        "unsupported_devices": unsupported_devices,
         # Additive field (issue #555): always a list, empty when no PMOS
         # device's body net is the anonymous, KLayout-synthesized kind -- see
         # run_extract's docstring and `_detect_unbiased_pmos_body_nets` for
@@ -4861,6 +4900,7 @@ def extract_netlist_from_layout(
     parasitics_nets: frozenset[str] | None = None,
     net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -4871,6 +4911,7 @@ def extract_netlist_from_layout(
     substrate_spreading_net: str | None = None,
     pdk_info: dict[str, Any] | None = None,
     missing_flavour_markers: list[dict[str, Any]] | None = None,
+    unsupported_devices: list[dict[str, Any]] | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[
     kdb.Netlist,
@@ -5309,6 +5350,7 @@ def extract_netlist_from_layout(
         parasitics_nets=parasitics_nets,
         net_selectors=net_selectors,
         parasitics_top_cell_only=parasitics_top_cell_only,
+        resistance_graph=resistance_graph,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
@@ -5357,6 +5399,12 @@ def extract_netlist_from_layout(
     warnings = warnings + missing_marker_prose_warnings
     if missing_flavour_markers is not None:
         missing_flavour_markers.extend(missing_marker_entries)
+
+    # Unsupported devices (issue #2919): additive diagnostic through the
+    # optional `unsupported_devices` out-parameter, same idiom as above.
+    warnings = warnings + _detect_unsupported_devices(
+        layout, top_cell, deck, unsupported_devices
+    )
 
     # Issue #2722: per-device placement attribution for
     # `--hierarchical-cells`, keyed by `Device.id()`, filled into the
@@ -7352,6 +7400,158 @@ def _diode_near_miss_warning(
     )
 
 
+def _size_bounds_dbu(rng: tuple[float, float], unit: float) -> tuple[int, int]:
+    """Convert an inclusive ``(lo, hi)`` range in ``unit``-sized steps into
+    KLayout's half-open integer ``[lo, hi + 1)`` bounds (round to nearest)."""
+    return round(rng[0] / unit), round(rng[1] / unit) + 1
+
+
+def _apply_size_filter(region: kdb.Region, size: SizeFilter, dbu: float) -> kdb.Region:
+    """Keep the polygons of ``region`` satisfying every dimension of ``size``
+    (issue #2861). Bounds are rounded to the nearest dbu (area: dbu^2) and
+    are inclusive at both ends -- see :class:`SizeFilter`."""
+    out = region
+    if size.bbox_min_um is not None:
+        lo, hi = _size_bounds_dbu(size.bbox_min_um, dbu)
+        out = out.with_bbox_min(lo, hi, False)
+    if size.bbox_max_um is not None:
+        lo, hi = _size_bounds_dbu(size.bbox_max_um, dbu)
+        out = out.with_bbox_max(lo, hi, False)
+    if size.area_um2 is not None:
+        lo, hi = _size_bounds_dbu(size.area_um2, dbu * dbu)
+        out = out.with_area(lo, hi, False)
+    return out
+
+
+def _size_filters_overlap_dbu(a: SizeFilter, b: SizeFilter, dbu: float) -> bool:
+    """True when some whole-dbupolygon could satisfy both filters once
+    :func:`_apply_size_filter`'s rounding is applied: every dimension
+    constrained by *both* has intersecting **integer** ranges. Physical
+    disjointness is not enough -- at dbu=0.001 the distinct ranges 0.0701 um
+    and 0.0702 um both round to 70 dbu, so a 70-dbu-side window matches
+    either flavour (area compares in dbu^2)."""
+
+    for name, unit in (
+        ("bbox_min_um", dbu),
+        ("bbox_max_um", dbu),
+        ("area_um2", dbu * dbu),
+    ):
+        ra, rb = getattr(a, name), getattr(b, name)
+        if ra is None or rb is None:
+            continue
+        a_lo, a_hi = round(ra[0] / unit), round(ra[1] / unit)
+        b_lo, b_hi = round(rb[0] / unit), round(rb[1] / unit)
+        if a_hi < b_lo or b_hi < a_lo:
+            return False
+    return True
+
+
+def _validate_bipolar_size_filters(
+    bipolars: tuple[BipolarDevice, ...], dbu: float
+) -> None:
+    """Reject two ``BipolarDevice`` entries that share ``base``/``marker``/
+    ``emitter`` and narrowing but whose ``emitter_size`` windows overlap
+    *after dbu rounding*: a window matching both flavours would be ambiguous
+    (issue #2861). An ``emitter_size=None`` entry in the same flavour group
+    as a sized one is rejected too -- ``None`` matches every window, so it
+    claims whatever the sized entry claims and no unclaimed-window warning
+    can ever be right."""
+
+    def same_group(a: BipolarDevice, b: BipolarDevice) -> bool:
+        a_key = (a.base, a.marker, a.emitter, a.emitter_requires, a.emitter_excludes)
+        return a_key == (
+            b.base,
+            b.marker,
+            b.emitter,
+            b.emitter_requires,
+            b.emitter_excludes,
+        )
+
+    sized = [b for b in bipolars if b.emitter_size is not None]
+    for i, a in enumerate(sized):
+        for b in sized[i + 1 :]:
+            if not same_group(a, b):
+                continue
+            assert a.emitter_size is not None and b.emitter_size is not None
+            if _size_filters_overlap_dbu(a.emitter_size, b.emitter_size, dbu):
+                raise ExtractError(
+                    f"bipolar entries '{a.class_name}' and '{b.class_name}' "
+                    "share base/marker/emitter and have overlapping "
+                    "emitter_size ranges once rounded to the layout dbu "
+                    f"({dbu:g} um) -- a window matching both is ambiguous"
+                )
+    unsized = [b for b in bipolars if b.emitter_size is None]
+    for a in unsized:
+        for b in sized:
+            if not same_group(a, b):
+                continue
+            raise ExtractError(
+                f"bipolar entries '{a.class_name}' (no emitter_size) and "
+                f"'{b.class_name}' share base/marker/emitter -- the unsized "
+                "entry matches every window the sized one claims, so a "
+                "window would extract as both devices; give the fallback "
+                "an explicit disjoint emitter_size or a distinct marker"
+            )
+
+
+def _narrow_bipolar_emitter_by_size(
+    bipolar: BipolarDevice,
+    emitter: kdb.Region,
+    groups: dict[tuple, list[kdb.Region]],
+    matched: dict[tuple, list[kdb.Region]],
+    dbu: float,
+) -> kdb.Region:
+    """Apply ``bipolar.emitter_size`` to ``emitter`` (issue #2861), recording
+    the pre-filter emitter in ``groups`` and the size-matched emitter in
+    ``matched`` under the entry's flavour-group key so
+    :func:`_collect_bipolar_size_warnings` can report unclaimed windows.
+    Returns ``emitter`` unchanged when the entry declares no size filter."""
+    if bipolar.emitter_size is None:
+        return emitter
+    # Measure whole windows, not fragments split by the base edge.
+    emitter = emitter.merged()
+    group_key = (
+        bipolar.base,
+        bipolar.marker,
+        bipolar.emitter,
+        bipolar.emitter_requires,
+        bipolar.emitter_excludes,
+    )
+    groups.setdefault(group_key, []).append(emitter)
+    emitter = _apply_size_filter(emitter, bipolar.emitter_size, dbu)
+    matched.setdefault(group_key, []).append(emitter)
+    return emitter
+
+
+def _collect_bipolar_size_warnings(
+    groups: dict[tuple, list[kdb.Region]],
+    matched: dict[tuple, list[kdb.Region]],
+    dbu: float,
+) -> list[str]:
+    """One ``warnings[]`` line per marked emitter window that no
+    ``emitter_size``-bearing entry of its flavour group matched (issue
+    #2861). Such a window produced no device."""
+    import klayout.db as kdb
+
+    warnings: list[str] = []
+    for key, pre_regions in groups.items():
+        candidates = pre_regions[0]
+        claimed = kdb.Region()
+        for region in matched[key]:
+            claimed = claimed + region
+        for poly in candidates.not_interacting(claimed).each():
+            box = poly.bbox()
+            warnings.append(
+                "bipolar emitter window matches no emitter_size flavour "
+                f"(bbox {box.left * dbu:g},{box.bottom * dbu:g} "
+                f"{box.right * dbu:g},{box.top * dbu:g} um; "
+                f"{box.width() * dbu:g} x {box.height() * dbu:g} um, "
+                f"area {poly.area() * dbu * dbu:g} um^2) -- no device "
+                "extracted"
+            )
+    return warnings
+
+
 def _collect_diode_near_miss_warnings(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -7600,6 +7800,11 @@ def _detect_missing_flavour_markers(
     warnings: list[str] = []
     entries: list[dict[str, Any]] = []
     for flavour in deck.mos_flavours:
+        if flavour.and_markers:
+            # A combination flavour (issue #3599) shares its base marker with
+            # a plain flavour that already reports it; a missing refining
+            # layer is a legitimate layout, not a gap.
+            continue
         if not _region(layout, top_cell, flavour.marker).is_empty():
             continue
         marker_label = f"{flavour.marker[0]}/{flavour.marker[1]}"
@@ -7617,6 +7822,53 @@ def _detect_missing_flavour_markers(
             }
         )
     return warnings, entries
+
+
+def _detect_unsupported_devices(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    entries_out: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Flag each ``deck.unsupported_device_markers`` layer that carries shapes
+    in the extracted cell (issue #2919).
+
+    The deck cannot extract that device class, so the devices are missing
+    from the netlist even though the run reports ``status: extracted``.
+
+    Returns the prose warnings and extends ``entries_out`` (when given) with
+    one entry per flagged marker: ``{"kind": str, "marker":
+    "<layer>/<datatype>", "count": int, "bbox_um": {...}, "description":
+    str}`` where ``count`` is the number of connected marker components and
+    ``bbox_um`` bounds all of them. Nothing is returned or appended when the
+    deck declares no such marker or none has shapes.
+    """
+    warnings: list[str] = []
+    entries: list[dict[str, Any]] = []
+    for spec in deck.unsupported_device_markers:
+        region = _region(layout, top_cell, spec.marker).merged()
+        if region.is_empty():
+            continue
+        count = region.count()
+        marker_label = f"{spec.marker[0]}/{spec.marker[1]}"
+        warnings.append(
+            f"unsupported device class '{spec.kind}': marker layer "
+            f"{marker_label} carries {count} shape(s) ({spec.description}), "
+            "but this deck does not extract that device, so it is absent "
+            "from the netlist"
+        )
+        entries.append(
+            {
+                "kind": spec.kind,
+                "marker": marker_label,
+                "count": count,
+                "bbox_um": _bbox_um_rounded(region.bbox(), layout.dbu),
+                "description": spec.description,
+            }
+        )
+    if entries_out is not None:
+        entries_out.extend(entries)
+    return warnings
 
 
 def _detect_voltage_domain_overlap(
@@ -8146,6 +8398,8 @@ def _extract_bipolar_device(
     top_cell: kdb.Cell,
     bipolar: BipolarDevice,
     dummy: kdb.Region,
+    size_groups: dict[tuple, list[kdb.Region]],
+    size_matched: dict[tuple, list[kdb.Region]],
 ) -> tuple[
     tuple[kdb.Region, kdb.Region, kdb.Region, kdb.Region, kdb.Region | None],
     int,
@@ -8153,7 +8407,8 @@ def _extract_bipolar_device(
     """Resolve, register and extract one ``deck.bipolars`` entry; returns its
     ``(base, emitter, collector, substrate, substrate_layer)`` regions (for
     the connectivity wiring in :func:`_extract_netlist`) and its
-    dummy-dropped count.
+    dummy-dropped count. ``size_groups``/``size_matched`` are caller-owned
+    bookkeeping for ``emitter_size`` entries (issue #2861).
 
     An entry with no terminal relation takes :func:`_bipolar_legacy_regions`
     and is handed to ``DeviceExtractorBJT3Transistor`` exactly as before
@@ -8192,6 +8447,9 @@ def _extract_bipolar_device(
         base, emitter, collector, dropped = _bipolar_legacy_regions(
             layout, top_cell, bipolar, dummy
         )
+    emitter = _narrow_bipolar_emitter_by_size(
+        bipolar, emitter, size_groups, size_matched, layout.dbu
+    )
     l2n.register(base, f"{bipolar.class_name}_base")
     l2n.register(emitter, f"{bipolar.class_name}_emitter")
     l2n.register(collector, f"{bipolar.class_name}_collector")
@@ -8252,6 +8510,7 @@ def _extract_netlist(
     parasitics_nets: frozenset[str] | None = None,
     net_selectors: NetSelectors | None = None,
     parasitics_top_cell_only: bool = False,
+    resistance_graph: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -8701,15 +8960,33 @@ def _extract_netlist(
     # geometry is removed from `active` before the default nfet/pfet split
     # further below, so the default split is unaffected outside every
     # flavour marker -- no regression for the common (unflavoured) case.
+    # A flavour may refine its `marker` with `and_markers`/`not_markers`/
+    # `nfet_only` (issue #3599, sky130 native-Vt); all empty/False for every
+    # other flavour, so the claim test below reduces to `interacting(marker)`.
     flavour_active: list[kdb.Region] = []
     for flavour in deck.mos_flavours:
         marker_region = _region(layout, top_cell, flavour.marker)
+        and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
+        not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
         claimed = kdb.Region()
         if not marker_region.is_empty() and not active.is_empty():
             remaining = kdb.Region()
             for component in active.merged().each():
                 component_region = kdb.Region(component)
-                if not component_region.interacting(marker_region).is_empty():
+                if (
+                    not component_region.interacting(marker_region).is_empty()
+                    and all(
+                        not component_region.interacting(r).is_empty()
+                        for r in and_regions
+                    )
+                    and all(
+                        component_region.interacting(r).is_empty() for r in not_regions
+                    )
+                    and not (
+                        flavour.nfet_only
+                        and not component_region.interacting(nwell).is_empty()
+                    )
+                ):
                     claimed += component_region
                 else:
                     remaining += component_region
@@ -9159,12 +9436,26 @@ def _extract_netlist(
             kdb.Region | None,
         ]
     ] = []
+    _validate_bipolar_size_filters(deck.bipolars, layout.dbu)
+    # Size-filter bookkeeping (issue #2861): per flavour group, the narrowed
+    # pre-filter emitter and each entry's size-matched emitter.
+    bipolar_size_groups: dict[tuple, list[kdb.Region]] = {}
+    bipolar_size_matched: dict[tuple, list[kdb.Region]] = {}
     for bipolar in deck.bipolars:
         regions, dropped = _extract_bipolar_device(
-            l2n, layout, top_cell, bipolar, dummy
+            l2n,
+            layout,
+            top_cell,
+            bipolar,
+            dummy,
+            bipolar_size_groups,
+            bipolar_size_matched,
         )
         dummy_devices_dropped += dropped
         bipolar_regions.append((bipolar, *regions))
+    bipolar_size_warnings = _collect_bipolar_size_warnings(
+        bipolar_size_groups, bipolar_size_matched, layout.dbu
+    )
 
     # Junction-diode device recognition (issue #542): each of the deck's
     # optional `diodes` entries (see `DiodeDevice` in `decks/__init__.py`)
@@ -9528,10 +9819,13 @@ def _extract_netlist(
     warnings = (
         [str(entry.message) for entry in l2n.each_log_entry()]
         + unmodelled_device_warnings
+        # Declared resistor marker no spec claims (issue #3138).
+        + _detect_unclaimed_resistor_markers(layout, top_cell, deck)
         # Junction-diode near misses (issue #2365) -- collected in the diode
         # recognition block above, where the per-entry terminal regions and
         # the MOS/tap geometry the filter needs are both still in scope.
         + diode_near_miss_warnings
+        + bipolar_size_warnings
         + capacitor_variant_warnings
     )
 
@@ -10379,6 +10673,7 @@ def _extract_netlist(
             critical_nets=critical_nets,
             parasitics_nets=parasitics_nets,
             parasitics_top_cell_only=parasitics_top_cell_only,
+            resistance_graph=resistance_graph,
             # Per-fragment square counting (issue #2359): `via_index` lets
             # the parasitics pass read each net's own via landings back
             # through `polygons_of_net`, so it can tell where current enters
@@ -10588,6 +10883,23 @@ def _corrected_resistor_r_ohm(
     if fixed_offset_ohm:
         r_ohm += fixed_offset_ohm
     return r_ohm
+
+
+def resistor_r_ohm_for_geometry(resistor: Any, l_um: float, w_um: float) -> float:
+    """The ``r_ohm`` ``klt extract`` reports for a ``resistor``
+    (:class:`~klayout_tools.decks.ResistorDevice`) of drawn ``l_um`` x
+    ``w_um`` micrometres: ``L / W * sheet_rho_ohm_sq`` run through
+    :func:`_corrected_resistor_r_ohm` with the deck's fixed offset, end term
+    and width offset (issue #2905). The one shared code path for the
+    ``klt lvs`` ``subckt-call`` reference side, so it cannot drift from the
+    layout side."""
+    return _corrected_resistor_r_ohm(
+        l_um / w_um * resistor.sheet_rho_ohm_sq,
+        w_um,
+        resistor.fixed_offset_ohm,
+        resistor.end_term_ohm_um,
+        resistor.width_offset_um,
+    )
 
 
 def apply_resistor_fixed_offset_corrections(

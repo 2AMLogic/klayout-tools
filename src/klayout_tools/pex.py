@@ -1305,7 +1305,10 @@ def _row_status(
     actually grades): ``"pass"`` unless the extracted measurement itself
     failed or errored, or the schematic side is missing/errored (in which
     case no trustworthy delta exists to report at all -- ``"error"``, never
-    a silently-fabricated ``"pass"``)."""
+    a silently-fabricated ``"pass"``). An optional measurement that is
+    ``"absent"`` (issue #3620) on exactly one side is a lost -- or newly
+    appearing -- figure, so also ``"error"``; absent on both sides is
+    ``"pass"`` (the figure legitimately does not exist)."""
     extracted_status = extracted_measurement["status"]
     schematic_status = (
         schematic_measurement["status"]
@@ -1318,6 +1321,10 @@ def _row_status(
         or extracted_status == "error"
     ):
         return "error"
+    if (schematic_status == "absent") != (extracted_status == "absent"):
+        return "error"
+    if extracted_status == "absent":
+        return "pass"
     if extracted_status == "fail":
         return "fail"
     return "pass"
@@ -1339,6 +1346,7 @@ _ERROR_STAGE_BY_CODE = {
     "batch_job_failed": "execute",
     "batch_job_timeout": "execute",
     "batch_poll_timeout": "execute",
+    "batch_job_interrupted": "execute",
     "missing_include": "execute",
     "timeout_budget_unreachable": "execute",
     "budget_exceeded": "execute",
@@ -1478,9 +1486,13 @@ def _build_delta_rows(
             if row["status"] == "error":
                 # Issue #3062: blame the schematic side when it is the one
                 # with no trustworthy value, else the extracted side.
-                schematic_bad = (
-                    schematic_measurement is None
-                    or schematic_measurement["status"] == "error"
+                # Issue #3620: an asymmetric ``absent`` blames the absent side.
+                schematic_bad = schematic_measurement is None or (
+                    schematic_measurement["status"] == "error"
+                    or (
+                        schematic_measurement["status"] == "absent"
+                        and extracted_measurement["status"] != "absent"
+                    )
                 )
                 row["error"] = (
                     _side_error("schematic", schematic_report, corner_id)
@@ -1836,6 +1848,10 @@ def _run_measure_command(
     if backend is not None:
         env["KLT_PEX_BACKEND"] = backend
         env["KLT_SIM_BACKEND"] = backend
+    # The parent holds the pex root locked while blocked here; let a nested
+    # `klt sim` under that root (its default `.klt/sim` beside a request in
+    # $KLT_PEX_ARTIFACTS_DIR) proceed instead of tripping outdir_locked (#3291).
+    env[output_lock.INHERIT_ENV] = output_lock.canonical_dir(artifacts_dir)
 
     try:
         completed = subprocess.run(

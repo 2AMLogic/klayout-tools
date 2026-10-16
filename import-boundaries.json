@@ -375,6 +375,14 @@
         "klayout_tools.ring_check"
       ]
     },
+    "tap_distance": {
+      "kind": "verb",
+      "description": "`klt tap_distance` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.tap_distance_cmd",
+        "klayout_tools.tap_distance"
+      ]
+    },
     "shared-core": {
       "kind": "shared",
       "description": "Cross-verb helper modules (underscore-prefixed internals, provenance, build identity, shared layout/report helpers). Public API is importable by every group.",
@@ -411,6 +419,7 @@
       "modules": [
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.signoff",
+        "klayout_tools.signoff_attest",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_power_delivery"
       ]
@@ -433,8 +442,10 @@
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_decks",
         "klayout_tools.sim_energy",
+        "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_gate",
+        "klayout_tools.sim_noise",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
         "klayout_tools.sim_raw",
@@ -442,6 +453,7 @@
         "klayout_tools.sim_set",
         "klayout_tools.sim_staging",
         "klayout_tools.sim_steps",
+        "klayout_tools.sim_supply_waveform",
         "klayout_tools.sim_transfer",
         "klayout_tools.sim_transfer_meas"
       ]
@@ -570,6 +582,16 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "tap_distance",
+      "exporter": "cli-infra",
+      "reason": "CLI adapter uses the shared output envelope and --region parser, as every verb does."
+    },
+    {
+      "consumer": "tap_distance",
+      "exporter": "erc",
+      "reason": "Issue #3009: the optional tap net filter reuses ERC's connectivity extraction helpers instead of a second extraction."
+    },
     {
       "consumer": "arith_gen",
       "exporter": "cli-infra",
@@ -839,6 +861,11 @@
       "consumer": "lvs",
       "exporter": "netlist",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "lvs",
+      "exporter": "socket_check",
+      "reason": "Issue #2971: klt lvs power findings reuse the verb's public classify_pin_by_name ground/power name heuristic to decide which pins get the substrate-continuity caveat, so lvs and socket-check never disagree about what a ground pin is."
     },
     {
       "consumer": "mcp",
@@ -1138,6 +1165,18 @@
   ],
   "shared_private_permissions": [
     {
+      "consumer": "klayout_tools.tap_distance",
+      "exporter": "klayout_tools.erc",
+      "symbol": "_match_net_clusters",
+      "reason": "Issue #3009: reuse ERC net-label matching for the tap net filter rather than duplicating it."
+    },
+    {
+      "consumer": "klayout_tools.tap_distance",
+      "exporter": "klayout_tools.erc",
+      "symbol": "_register_label_layer",
+      "reason": "Issue #3009: reuse ERC label-layer registration for the tap net filter rather than duplicating it."
+    },
+    {
       "consumer": "klayout_tools.drc",
       "exporter": "klayout_tools._provenance",
       "symbol": "_content_hash",
@@ -1195,18 +1234,6 @@
       "consumer": "klayout_tools.lvs",
       "exporter": "klayout_tools._provenance",
       "symbol": "_content_hash",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.lvs",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klayout_version",
-      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
-    },
-    {
-      "consumer": "klayout_tools.lvs",
-      "exporter": "klayout_tools._provenance",
-      "symbol": "_klt_version",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
@@ -1763,6 +1790,12 @@
         "exporter": "klayout_tools.sim",
         "symbol": "_resolve_models_lib",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim",
+        "symbol": "_resolve_netlist_include",
+        "reason": "op-lint follows `.include`s with the same resolver the sweep uses (issue #3101); remove by making the symbol public or moving it to a shared module."
       },
       {
         "consumer": "klayout_tools.op_sanity",

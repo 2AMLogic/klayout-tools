@@ -2515,6 +2515,116 @@ def test_mos_array_pitch_at_clamp_boundary_is_drc_clean(tmp_path, pdk_root):
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+# `share_sd` (issue #3551, Phase 2 of #3299): abut adjacent units so each pair
+# shares one contacted S/D segment.
+
+
+def _mos_array_share_request(tmp_path, pdk_root, name, **params):
+    return _mos_array_pitch_request(
+        tmp_path,
+        pdk_root,
+        name,
+        **{"rows": 1, "cols": 4, "topology": "array", **params},
+    )
+
+
+def test_mos_array_share_sd_false_output_unchanged(tmp_path, pdk_root):
+    implicit = generate(_mos_array_share_request(tmp_path, pdk_root, "implicit"))
+    explicit = generate(
+        _mos_array_share_request(tmp_path, pdk_root, "explicit", share_sd=False)
+    )
+    _assert_gds_geometry_equal(tmp_path / "implicit.gds", tmp_path / "explicit.gds")
+    assert implicit["ports"] == explicit["ports"]
+    assert implicit["bbox_um"] == explicit["bbox_um"]
+    assert "shared_sd_nodes" not in explicit["drc_hints"]
+
+
+def test_mos_array_share_sd_shrinks_row_and_reports_shared_nodes(tmp_path, pdk_root):
+    base = generate(_mos_array_share_request(tmp_path, pdk_root, "base"))
+    shared = generate(
+        _mos_array_share_request(tmp_path, pdk_root, "shared", share_sd=True)
+    )
+    base_w = base["bbox_um"]["x1"] - base["bbox_um"]["x0"]
+    shared_w = shared["bbox_um"]["x1"] - shared["bbox_um"]["x0"]
+    assert shared_w < base_w
+    nodes = shared["drc_hints"]["shared_sd_nodes"]
+    assert [n["ports"] for n in nodes] == [
+        ["U0_D", "U1_S"],
+        ["U1_D", "U2_S"],
+        ["U2_D", "U3_S"],
+    ]
+    ports = {p["name"]: p for p in shared["ports"]}
+    for node in nodes:
+        for name in node["ports"]:
+            assert ports[name]["x_um"] == pytest.approx(node["x_um"])
+            assert ports[name]["y_um"] == pytest.approx(node["y_um"])
+    assert shared["device_count"] == base["device_count"] == 4
+
+
+@pytest.mark.parametrize("gate_contact", [False, True])
+@pytest.mark.parametrize("dummy", [0, 1])
+def test_mos_array_share_sd_is_drc_clean(tmp_path, pdk_root, gate_contact, dummy):
+    output = tmp_path / "shared.gds"
+    generate(
+        _mos_array_share_request(
+            tmp_path,
+            pdk_root,
+            "shared",
+            share_sd=True,
+            gate_contact=gate_contact,
+            dummy=dummy,
+            rows=2,
+        )
+    )
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_mos_array_share_sd_merges_facing_sd_into_one_net(tmp_path, pdk_root):
+    cols = 4
+    output = tmp_path / "shared.gds"
+    generate(_mos_array_share_request(tmp_path, pdk_root, "shared", share_sd=True))
+    devices = run_extract(str(output), "sky130")["devices"]
+    assert len(devices) == cols
+    # A row of N abutted units is a chain: N + 1 distinct S/D nets, not 2N.
+    sd_nets = {n for d in devices for n in (d["nets"]["s"], d["nets"]["d"])}
+    assert len(sd_nets) == cols + 1
+    # Every interior node is shared by exactly two devices.
+    uses = {}
+    for d in devices:
+        for n in (d["nets"]["s"], d["nets"]["d"]):
+            uses[n] = uses.get(n, 0) + 1
+    assert sorted(uses.values()) == [1, 1] + [2] * (cols - 1)
+
+    isolated = tmp_path / "isolated.gds"
+    generate(_mos_array_share_request(tmp_path, pdk_root, "isolated"))
+    iso_devices = run_extract(str(isolated), "sky130")["devices"]
+    assert (
+        len({n for d in iso_devices for n in (d["nets"]["s"], d["nets"]["d"])})
+        == 2 * cols
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"topology": "common_centroid"},
+        {"fingers": 2},
+        {"pitch_x_um": 5.0},
+        {"interior_channel_um": 1.0},
+    ],
+)
+def test_mos_array_share_sd_incompatible_combinations_rejected(
+    tmp_path, pdk_root, overrides
+):
+    with pytest.raises(GenError, match="share_sd"):
+        generate(
+            _mos_array_share_request(
+                tmp_path, pdk_root, "bad", share_sd=True, **overrides
+            )
+        )
+
+
 # --- res_array --------------------------------------------------------------- #
 
 
@@ -8459,7 +8569,7 @@ def test_bjt_array_collector_ring_gap_reports_gap_port_and_stays_drc_clean(
             "params": {
                 "ring_gap_side": "N",
                 "ring_gap_um": 1.0,
-                "ring_gap_offset_um": -0.41,
+                "ring_gap_offset_um": -0.2,
             },
             "options": {"output": str(output)},
         }
@@ -10393,17 +10503,11 @@ def test_gf180mcu_bjt_array_collector_ring_covered_by_pplus_implant(
     `docs/design/gen-bjt-array-spike.md`) -- and must be covered by Pplus
     (31/0), never Nplus.
 
-    This deliberately does **not** assert full-`Comp` coverage the way the
-    parametrized test above does: `bjt_array`'s own emitter/base-tie unit
-    body has no implant at all, a separate, pre-existing, documented
-    limitation (`docs/design/gen-bjt-array-spike.md`: "curated decks check
-    no implant layer ... a process-exact device would distinguish P+
-    emitter, N+ base tie, and P+ collector by implant") predating both
-    #1577 and this issue -- out of #1580's own scope, which is the
-    collector *ring* only. This test isolates the ring's own contribution
-    to the drawn `Comp` region (by diffing against the same request with
-    `add_collector_ring=False`) so it verifies only that shape, not the
-    unit body's own pre-existing gap."""
+    This test isolates the ring's own contribution to the drawn `Comp`
+    region (by diffing against the same request with
+    `add_collector_ring=False`) so it verifies only that shape; the unit
+    body's own P+ emitter / N+ base-tie implants (issue #3587) are covered by
+    the whole-layout DRC-clean assertion at the end."""
     import klayout.db as kdb
 
     def _active_region(add_ring):
@@ -10442,7 +10546,9 @@ def test_gf180mcu_bjt_array_collector_ring_covered_by_pplus_implant(
         layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
     ).merged()
     assert (ring_region - pplus_region).is_empty()
-    assert nplus_region.is_empty()  # never the well-tie doping for this ring
+    # Never the well-tie doping for this ring. (The unit bodies' base-tie pads
+    # carry their own Nplus -- issue #3587 -- so only the ring is checked.)
+    assert (nplus_region & ring_region).is_empty()
 
     drc_report = run_drc(str(with_ring_output), "gf180mcu")
     assert drc_report["status"] == "clean", drc_report["violations"]

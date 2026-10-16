@@ -14,6 +14,33 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt lvs`: new `mismatches[].category` `device.series_fold_offset_absorbed`**
+  (issue #3017): when `options.combine_devices` folds N>1 series primitives of
+  a resistor class with a nonzero head term (`fixed_offset_ohm` +
+  `end_term_ohm_um / W`) into one device, the deferred #559 correction charges
+  that head term once, so `(N-1) * head term` ohms the drawn chain physically
+  carries is not charged to the compare. Each such fold is now disclosed as a
+  `severity: "warning"` entry (never changes `status`; a `match` stays a
+  `match`) with `details` `circuit`, `device`, `class`, `folded_primitives`,
+  `fixed_offset_ohm`, `end_term_ohm`, `absorbed_offset_ohm` and
+  `fraction_of_r`. Only a pure series chain is reported; ambiguous topologies
+  (branches, parallel primitives, chains sharing end nets) emit nothing rather
+  than a guessed N. See `docs/cli/lvs.md`'s
+  `device.series_fold_offset_absorbed` section. Additive; no `schema_version`
+  bump.
+- **`klt pex`: asymmetric `absent` measurement is a delta `error`** (issue
+  #3620): a `delta[]` row whose optional measurement is `"absent"` on exactly
+  one side (schematic or extracted) is now `status: "error"` (`delta_pct:
+  null`, `error` blames the absent side) instead of a silent `pass`; absent on
+  both sides stays `pass`. `schematic_status` / `extracted_status` may now be
+  `"absent"`. Additive: `delta[].status` stays `pass|fail|error`.
+- **`klt extract --resistance-graph`: opt-in terminal-aware resistance graph**
+  (issue #2982, Stage 3.D5 increment 3): adds `parasitics.nets[].resistance_graph`
+  (`status`, `terminals`, `pair_resistance_ohm`, `legacy_resistance_ohm`,
+  `nodes`, `edges`, `diagnostics`) from the Stage 3.D graph builder and DC
+  solve. Request field `resistance_graph`; requires `--parasitics`. Without the
+  flag no key is added and output is byte-identical; `resistance_ohm` and the
+  ladder are unchanged. Additive; no `schema_version` bump.
 - **ASAP7 DRC deck checks `V9.PAD.EN.2` and `V9.AUX.1`** (issue #3156): the
   V8 enclosure-by-M9 and inside-M8-and-M9 rules carry over to V9 with PAD
   (DRM section 3.19 preamble), reading PAD (mask 96, GDS 96/0) by layer
@@ -39,6 +66,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   The aggregated report gains `environment.{backend,remote.fleet[]}` and
   `corner_runs[].job_id`/`error_code` (batch runs only). Additive; no
   `schema_version` bump.
+- **`klt extract --spef --def-net-connections` omits unlabelled `$N` nets absent
+  from the DEF** (issue #3580): generalises the #3257 gap C omission from
+  duplicate-named nets to unique-named `$<digits>` nets (and coupling to them),
+  which OpenSTA rejects with `STA-1650`; they are listed in `warnings[]`.
+  Docs now state `--def-net-names` is required alongside
+  `--def-net-connections --def-pins`. SPEF output without
+  `--def-net-connections` is unchanged. Additive; no `schema_version` bump.
+- **`klt sim` initial-guess hints: `options.nodeset`** (issue #3036): rules
+  `{match, values}` select per-point `{node: volts}` maps (after corner
+  expansion/`exclude`, before Monte Carlo cloning) that are rendered as
+  file-scope `.nodeset` cards, echoed as `nodeset` on each hinted corner
+  report and keyed into the `options.resume` fingerprint. Overlapping or unused
+  rules, unsupported node spellings, an unknown node (an `error` diagnostic) and
+  `engine: "xyce"` fail visibly; an off-host worker that does not echo the maps
+  fails with `nodeset_unsupported_worker`. Omitting the option changes nothing.
+  Additive; no `schema_version` bump.
 - **`klt sim` batch: opt-in auto-split of a request that cannot fit the fleet's
   whole-job ceiling** (issue #3446): `batch.job_ceiling_check: "split"`,
   `batch.max_units_per_job` and `--max-units-per-job N` reroute a
@@ -86,6 +129,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged. `klt pex` forwards the `--critical-net-*` forms. Documented
   that the request document already accepts a list for exact names. See
   `docs/cli/extract.md`.
+- **`klt drc --deck sky130`: `nwell.9` and `coverage.unmodeled_rules`**
+  (issue #3031): new rule `nwell.enclosed.hvi.1` (runset `nwell.9`, HVnwell
+  must be enclosed by `hvi` 75/20; only `hvi` of the runset's
+  `hvi|rdl|uhvi|vhvi` marker is read). New additive, deck-static
+  `coverage.unmodeled_rules` lists official runset ids the curated deck does
+  not transcribe (sky130: `m1.5`, `m2.5`, `via.5a`, `via2.5`, `via3.5`, the
+  two-adjacent-edges enclosure refinements) so a clean verdict is not read as
+  full coverage; empty for decks that declare none. Curated engine only.
+
 - **`klt sim` `measurements[].cycle_mean`: a mean over whole reference
   cycles** (issue #2947): a fourth measurement form
   `{signal, align, level, cycles, edge?, from?}` (`tran` only) returns the
@@ -129,6 +181,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   `erc_status` and tie coverage are unchanged. Requires `--findings-only`
   (exit 1 otherwise). Additive; default output is byte-identical; no
   `schema_version` bump.
+- **`klt sim` discloses transient-noise coverage** (issue #2985): ngspice
+  generates no device or resistor noise in `.tran`, only explicit
+  `trnoise`/`trrandom` source noise. A transient request (scalar `tran` or an
+  `analysis_steps[]` tran step) whose netlist declares such a source now gets
+  an additive `environment.transient_noise` field (`engine`, sorted `sources`,
+  `intrinsic_device_noise: false`, `intrinsic_resistor_noise: false`); absent
+  otherwise and for `engine: "xyce"`, so existing reports are unchanged. No
+  `schema_version` bump. Documented in `docs/cli/sim.md`.
+- **`klt sim --op-lint` follows user subcircuits and counts `B` sources**
+  (issue #3101): `.subckt` blocks in the netlist (and its `.include`s) are
+  expanded at their `X` instances, so a wrapped DUT's MOS devices are linted
+  under hierarchical names (`Xdut.M1`) instead of `device_count: 0`; an
+  unresolvable `X` instance emits an `unsupported_hierarchy` diagnostic and
+  an empty device list no longer reports `clean`. `B` sources (and the
+  `v(<node>)` they read) now count as element terminals, ending false
+  `floating_node` warnings on behaviourally driven nodes. Additive; no
+  `schema_version` bump.
 - **ASAP7 DRC deck checks `ACTIVE.W.2` and `SDT.W.3`** (issue #3085): the
   vertical-width-is-an-integer-multiple-of-27-nm rules (DRM Tables 3.5.1 /
   3.8.1) are now measured per local vertical width of each merged rectilinear
@@ -160,7 +229,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `device.combine_incomplete` (so `status` degrades to `inconclusive` instead
   of a false verdict). Additive; no `schema_version` bump. See
   `docs/cli/lvs.md`'s `device.combine_incomplete` section.
-
+- **`klt sim` `measurements[].optional`** (issue #2925): an opt-in boolean
+  (default `false`, existing reports unchanged). A `spice`/`expr` measurement
+  that legitimately has no value (no ngspice reason, or `out of interval`)
+  reports `status: "absent"`, `value: null`, an info `measurement_absent`
+  diagnostic, and no longer grades its corner `error`. Rollup, `worst_case` and
+  Monte Carlo statistics (new `absent` count, only for optional measurements)
+  treat it as data; `crossings` and `analysis_steps[]` refuse the flag. See
+  `docs/cli/sim.md` "Optional measurements".
 - **`klt pex` `model_mismatch.kind`** (issue #3054): the `model_mismatch`
   block gains an additive `kind` field, `"model_set"` when `reference_only`
   or `extracted_only` is non-empty and `"count_only"` when the model sets are
@@ -189,6 +265,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   dispatched `params` fails the request with `params_unsupported_worker`
   instead of passing at the netlist defaults. `engine: "xyce"` and
   `--op-lint` refuse the axis. See `docs/cli/sim.md` "Corner axes".
+- **`klt pex --measure-command` harnesses can run a nested `klt sim`**
+  (issue #3291): the measure command's environment gains an additive
+  `KLT_OUTDIR_LOCK_INHERIT` (the canonical `$KLT_PEX_ARTIFACTS_DIR`); a `klt`
+  run whose output directory is at or under it is covered by the parent's
+  output-directory ownership, so a default-`-o` `klt sim` no longer fails with
+  `outdir_locked`. Ancestors/siblings are still refused; no `error.code` or
+  `schema_version` change.
+- **`klt signoff` opt-in `require_annotation_complete` for `sta` evidence**
+  (issue #3258): an evidence entry citing a `klt sta` envelope may set
+  `"require_annotation_complete": true`; every corner carrying a
+  `spef_annotation` block must then report `annotation_complete: true`, else
+  the item is `unmet`/`check_failed` with `detail.sta_annotation_incomplete`
+  (per-corner `annotation_warning`). Additive: absent/`false` grades exactly
+  as before, no `schema_version` bump. `design_nets_annotated`/
+  `design_nets_total` are now documented as a name-match count, not evidence
+  of applied parasitics.
 - **`klt sim` surfaces ngspice's `Timestep too small` transient abort**
   (issue #2918): a new `timestep_too_small` diagnostic code (accepted by
   `options.fail_on_diagnostic`) with structured `time_s`/`timestep_s`/`node`
@@ -298,7 +390,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   `sky130A_mr.drc`) and four sky130 rules using it: `met1.enclosing_adjacent.via.1`
   (`via.5a`), `met2.enclosing_adjacent.via.1` (`m2.5`),
   `met2.enclosing_adjacent.via2.1` (`via2.5`), `met3.enclosing_adjacent.via3.1`
-  (`via3.5`). The sky130 deck grows from 136 to 140 rules (additive; the
+  (`via3.5`). The sky130 deck grows from 138 to 142 rules (additive; the
   deck hash changes).
 - **`klt lvs` gate-level-verilog accepts more `assign` shapes** (issue
   #2941): a part-select on either side (`assign imm = word[7:0];`,
@@ -335,7 +427,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   deck custom-device-class `X ... PARAMS:` cards, callees paired by name with
   a layout circuit, and `gate-level-verilog` references are unaffected.
   **Additive contract change**; `schema_version` is unchanged.
+- **`klt extract` warns on an unclaimed resistor marker** (issue #3138): a
+  deck-declared resistor marker drawn on the layout but claimed by no
+  `ResistorDevice` (empty body) now adds one `warnings[]` string per marker
+  layer instead of extracting silently device-less. Additive; no schema,
+  exit-code or `status` change.
 
+- **`klt sim` native noise measurements** (issue #2938): a
+  `measurements[]` entry may declare `noise: {quantity: "inoise"|"onoise",
+  at_hz | band_hz}` to read a spot density or a band-integrated rms value
+  from a `noise` analysis without `expr` or the `noise1.` plot prefix.
+  **Additive contract change:** a new optional measurement form; runners
+  older than this release reject it (see `docs/cli/sim.md`).
+- **New verb `klt tap-distance`** (issue #3009): asserts every point of a
+  subject region is within a Euclidean distance of a qualifying tap (latch-up /
+  tie spacing), optionally per island and filtered to taps wired to named
+  nets. Reports a proven `lower_bound_um`/`measured_max_distance_um` bracket;
+  exits `0` pass, `3` fail, `4` `unsupported` (rule not evaluable, never a
+  pass). See `docs/cli/tap-distance.md`.
+- **`klt sim` can sweep a ramped (PWL/PULSE) supply** (issue #2902): new
+  `corners.supply_waveforms` lists `corners.supply_v` keys whose PWL/PULSE
+  source is rescaled per corner (peak level = the swept supply value) instead
+  of `alter`ed. Additive corner field `supply_waveforms` discloses the
+  nominal and effective levels. The #2706 rejection stays for unlisted
+  sources and now names the option.
 - **Bipolar markers can be derived layer expressions** (issue #2860):
   `BipolarDevice.marker` now accepts a `LayerExpr`, a frozen AND/NOT tree
   of drawn layers that can nest, as well as a bare `(layer, datatype)`
@@ -385,6 +500,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   `netlist_sha256`, inlining summary); flattener failures carry
   `error.code` `schematic_flatten_*`. Default runs are unchanged apart from
   the two new fields (`false` / `null`); no `schema_version` bump.
+
+- **Added** (#2886, `klt sta`; additive JSON only): per-corner post-route
+  SDF export for an already-routed DEF. `sdf: true` (`def` mode, requires
+  `spef`) writes `.klt/sta/<def stem>.<corner>.sdf` per analyzed corner with
+  the same `write_sdf -divider . -include_typ` command `place-and-route`'s
+  `post_route_sdf` uses, immediately after `read_spef`, and reports it as
+  `sdf: {path, scope, content_hash}` (per `corners[]` entry, or top level for
+  a scalar corner; `null` when not requested). Non-boolean values, `true`
+  with `verilog`, and `true` without `spef` are request errors; a missing or
+  empty file is exit 1. Omitted/`false` leaves the generated Tcl unchanged;
+  no `schema_version` bump. Documented in `docs/cli/sta.md` ("Post-route
+  SDF per corner").
+
+- **`klt synthesize` accepts `constraints.clocks` and echoes `clock_targets`**
+  (issue #2883): optional `[{port, period_ns}]` for multi-clock designs
+  (`clock_period_ns` stays the single-clock shorthand and wins if both are
+  given). ABC still takes one global `-D`, so the tightest listed period is
+  used when only `clocks` is given. The new additive `clock_targets` response
+  object reports the clocks, the delay target, its basis, and
+  `per_clock_enforced: false`. No `schema_version` bump.
 
 - **ASAP7 BSIM-CMG real-run evidence recorded** (issue #2814, part of #2761):
   extracted `INVx1` / `NAND2xp5` simulate at TT/FF/SS through `klt sim` in
@@ -495,6 +630,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   `terminals[]` entries gain a `relation` key (`null`, or
   `{source, op, extents}`); no existing field changes.
 
+- **`klt signoff` T1 item 6 `not_applicable` outcome** (issue #2865): a
+  digital partition whose ratified spec has no statistical row can cite
+  `{"not_applicable": {"spec": ..., "statement": ...}}` (both bound by
+  `content_hash`) and grade `status: "not_applicable"`, which counts toward
+  `tier: "T1"` but never toward `t1_met_count`. New optional
+  `t1_not_applicable_count` (tier report and fleet rows, absent when zero),
+  new `reason` values `not_applicable_wrong_partition`,
+  `not_applicable_spec_unratified`, `not_applicable_statistical_row` and
+  `not_applicable_statement_incomplete`, and `not_applicable_items` in
+  `--describe-grader`. Additive: no `schema_version` bump.
+
 - **ASAP7 FinFET extraction assigns source/drain deterministically**
   (issue #3154): a channel's two S/D neighbours used to be taken in a
   merged KLayout region's iteration order, which differs between the macOS
@@ -565,6 +711,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   a read-back `power_pins` verdict and `--require-power-pins`; `klt signoff`
   recognises both envelopes as opt-in kinds scoped to item 11.
 
+- **`klt signoff --attest {1,9,10}`: tool-produced evidence for T1 items 1,
+  9 and 10** (issue #2844): reads a versioned attestation inventory
+  (`"kind": "t1-attestation-inventory"`, `schema_version: 1`), runs
+  item-specific checks (item 1: sources and derived netlists exist and each
+  netlist passes its declared freshness command; item 9: testbenches exist,
+  the cold-start invocation succeeds, PDK revision and tool versions are
+  pinned; item 10: hygiene files exist and declared CI/audit commands
+  succeed) and emits the artifact-anchored `generic` envelope with
+  `status` derived from those checks and an `attestation.checks[]` record.
+  `-o` writes only a passing envelope, only when its bytes change;
+  `--check <committed>` re-attests and exits `3` on any drift or failure.
+  **Behaviour change:** items 1, 9 and 10 now accept only an anchored
+  `generic` envelope, so a passing but unrelated native envelope (e.g. a
+  clean `klt drc` report) renders `unmet`/`wrong_kind` for them. Item 2 is
+  unchanged. A met anchored citation's `artifact_binding` gains an additive
+  `attestation` block when the envelope came from `--attest`. See
+  `docs/cli/signoff.md` "Attesting items 1, 9 and 10".
 - **Output-directory ownership for `klt pex` / `sim` / `place-and-route`**
   (issue #2770): each run takes a non-blocking OS-backed advisory lock on its
   persistent artifact root; a competing cooperating run fails fast with the

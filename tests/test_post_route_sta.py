@@ -3547,7 +3547,11 @@ def test_clock_capture_fixture_matches_module_tcl():
     # -- so the pre-#2780 capture still matches everything before it.
     completeness = post_route_sta._constraint_completeness_lines()
     assert fresh[-len(completeness) :] == completeness
-    assert stored == fresh[: -len(completeness)]
+    # Issue #3005 likewise inserts the electrical-limit block just before it.
+    electrical = post_route_sta._electrical_check_lines()
+    head = fresh[: -len(completeness)]
+    assert head[-len(electrical) :] == electrical
+    assert stored == head[: -len(electrical)]
 
 
 # -- request validation ------------------------------------------------------#
@@ -4447,6 +4451,185 @@ def test_live_engine_report_ports(tmp_path):
     assert report["worst_hold_path"]["startpoint"] == "rst_n"
 
 
+# --------------------------------------------------------------------------- #
+# constraints.false_path_from -- static-input timing exclusions (issue #2968).
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_false_path_from_omitted_and_empty_are_none():
+    assert post_route_sta._validate_false_path_from({}, "clk") is None
+    assert (
+        post_route_sta._validate_false_path_from({"false_path_from": []}, "clk") is None
+    )
+
+
+def test_validate_false_path_from_keeps_request_order():
+    constraints = {"false_path_from": ["b_in", "a_in", "cfg[3]"]}
+    assert post_route_sta._validate_false_path_from(constraints, "clk") == [
+        "b_in",
+        "a_in",
+        "cfg[3]",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("a_in", "must be a list of input port names"),
+        ({"a_in": 1}, "must be a list of input port names"),
+        ([1], "non-empty port-name strings"),
+        ([""], "non-empty port-name strings"),
+        ([" a_in"], "non-empty port-name strings"),
+        (["a\nb"], "control character"),
+        (["clk"], "must not name the clock port"),
+        (["a_in", "b_in", "a_in"], r"must not repeat a port \('a_in'\)"),
+    ],
+)
+def test_validate_false_path_from_rejects(value, message):
+    with pytest.raises(PostRouteStaError, match=message):
+        post_route_sta._validate_false_path_from({"false_path_from": value}, "clk")
+
+
+def test_run_sta_false_path_from_validation_runs_before_engine(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["a_in", "a_in"]),
+    )
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("engine must not run for an invalid request")
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    with pytest.raises(PostRouteStaError, match="must not repeat a port"):
+        run_sta(request_path)
+
+
+def test_omitting_false_path_from_leaves_tcl_unchanged():
+    assert post_route_sta._false_path_lines(None) == []
+    assert post_route_sta._false_path_lines([]) == []
+    for maps in ((None, None), (_BOUNDARY_INPUT_DELAYS, _BOUNDARY_OUTPUT_DELAYS)):
+        assert post_route_sta._port_check_lines(*maps, report_ports=["x"]) == (
+            post_route_sta._port_check_lines(
+                *maps, report_ports=["x"], false_path_from=None
+            )
+        )
+        assert post_route_sta._port_check_lines(*maps) == (
+            post_route_sta._port_check_lines(*maps, false_path_from=[])
+        )
+    assert post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None
+    ) == post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+
+
+def test_false_path_lines_escape_and_follow_delay_lines():
+    lines = post_route_sta._request_io_delay_lines(
+        "clk", 0.0, 0.1, None, None, false_path_from=["a_in", "cfg[3]", "we$ird"]
+    )
+    delay = post_route_sta._io_delay_lines("clk", 0.0, 0.1)
+    assert lines[-3:] == [
+        "set_false_path -from [get_ports a_in]",
+        r"set_false_path -from [get_ports cfg\[3\]]",
+        r"set_false_path -from [get_ports we\$ird]",
+    ]
+    assert lines[-3 - len(delay) : -3] == delay
+    text = "\n".join(lines)
+    assert "false_path a_in {input inout bidirect}" in text
+    assert post_route_sta._PORT_CHECK_BEGIN in text
+
+
+def test_false_path_from_with_port_delay_maps_comes_after_them():
+    lines = post_route_sta._request_io_delay_lines(
+        "clk",
+        0.0,
+        0.1,
+        _BOUNDARY_INPUT_DELAYS,
+        _BOUNDARY_OUTPUT_DELAYS,
+        false_path_from=["a_in"],
+    )
+    assert lines[-1] == "set_false_path -from [get_ports a_in]"
+    assert "klt_input_mapped" in "\n".join(lines)
+
+
+def test_run_sta_false_path_from_single_corner(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["a_in", "b_in"]),
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert scripts[0].count("set_false_path -from") == 2
+    assert "set_false_path -from [get_ports b_in]" in scripts[0]
+    assert report["false_path_from"] == ["a_in", "b_in"]
+
+
+def test_run_sta_without_false_path_from_has_no_echo_or_exceptions(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_verilog_success_env(
+        tmp_path, monkeypatch, constraints=_boundary_constraints()
+    )
+    scripts = _stub_openroad_capture(monkeypatch, {None: "boundary_tt_025C_1v80"})
+
+    report = run_sta(request_path)
+
+    assert "false_path_from" not in report
+    assert "set_false_path" not in scripts[0]
+
+
+def test_run_sta_false_path_from_multi_corner_every_session(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["a_in"]),
+    )
+    scripts = _stub_openroad_capture(
+        monkeypatch,
+        {
+            "tt_025C_1v80": "boundary_tt_025C_1v80",
+            "ss_100C_1v60": "boundary_ss_100C_1v60",
+        },
+    )
+
+    report = run_sta(request_path)
+
+    assert len(scripts) == 2
+    assert all("set_false_path -from [get_ports a_in]" in text for text in scripts)
+    assert report["false_path_from"] == ["a_in"]
+    assert all("false_path_from" not in entry for entry in report["corners"])
+
+
+def test_run_sta_false_path_from_rejected_by_engine_check(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints=_boundary_constraints(false_path_from=["q_a"]),
+    )
+    block = (
+        f"{post_route_sta._PORT_CHECK_BEGIN}\nfalse_path\tq_a\tdirection_output\n"
+        f"{post_route_sta._PORT_CHECK_END}\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout="unknown \n")
+        return fake_completed(returncode=3, stdout=block)
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+    with pytest.raises(PostRouteStaError) as excinfo:
+        run_sta(request_path)
+    message = str(excinfo.value)
+    assert message.startswith("constraints.false_path_from rejected")
+    assert (
+        "constraints.false_path_from['q_a']: port direction is 'output', not an input"
+        in message
+    )
+
+
 _LIVE_ONLY = pytest.mark.skipif(
     _live_sky130_env() is None,
     reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
@@ -4528,6 +4711,25 @@ def test_live_engine_input_transitions_bad_port_rejected(tmp_path):
     assert message.startswith("constraints.input_transitions rejected")
     assert "constraints.input_transitions['nope']" in message
     assert "constraints.input_transitions['q_a']" in message
+
+
+@_LIVE_ONLY
+def test_live_engine_false_path_from(tmp_path):
+    """Engine integration (issue #2968): excluding the setup-binding input
+    must move the worst setup path off that startpoint."""
+    _write(tmp_path / "boundary.v", _WORST_PATH_CAPTURES["netlist"])
+    request = {
+        "verilog": "boundary.v",
+        "hdl_toplevel": "top",
+        "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
+        "constraints": _boundary_constraints(false_path_from=["b_in"]),
+    }
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    report = run_sta(request_path, pdk_variant="sky130A")
+
+    assert report["false_path_from"] == ["b_in"]
+    assert report["worst_setup_path"]["startpoint"] != "b_in"
 
 
 def _write_clock_fixtures(tmp_path) -> dict[str, str]:
@@ -5435,6 +5637,414 @@ def test_run_sta_evidence_input_verified_from_second_checkout(
     citation_b = grade(checkout_b / "flows" / "sta.json")
     assert citation_b is not None
     assert citation_b["input_verified"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Per-corner post-route SDF export (`request.sdf`, issue #2886).
+# --------------------------------------------------------------------------- #
+
+
+def _wrap_openroad_with_sdf_writer(monkeypatch, *, write: bool = True) -> list[str]:
+    """Layer `write_sdf` emulation over whichever `openroad` stub is already
+    installed: for every analysis script carrying a `write_sdf` line, write a
+    small corner-specific SDF to the path that line names (the corner is the
+    one the script's own `read_liberty` loaded, so two corners produce two
+    distinct files). Returns the list of script texts seen."""
+    inner = post_route_sta.subprocess.run
+    scripts: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        result = inner(cmd, **kwargs)
+        if cmd[:2] == ["openroad", "-version"]:
+            return result
+        script_text = Path(cmd[5]).read_text(encoding="utf-8")
+        scripts.append(script_text)
+        liberty = next(
+            ln.split()[1]
+            for ln in script_text.splitlines()
+            if ln.startswith("read_liberty")
+        )
+        for line in script_text.splitlines():
+            if write and line.startswith("write_sdf "):
+                stem = os.path.basename(liberty)
+                Path(line.split()[-1]).write_text(
+                    f'(DELAYFILE (SDFVERSION "3.0") (LIBERTY "{stem}"))\n',
+                    encoding="utf-8",
+                )
+        return result
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    return scripts
+
+
+def _sha256_of(path: Path) -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("value", ["yes", 1, 0, {}, ["true"]])
+def test_run_sdf_must_be_boolean(tmp_path, monkeypatch, value):
+    (tmp_path / "top.spef").write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef", sdf=value)
+
+    with pytest.raises(PostRouteStaError, match="request.sdf must be a boolean"):
+        run_sta(request_path)
+
+
+def test_run_sdf_rejected_in_verilog_mode(tmp_path, monkeypatch):
+    request_path = _setup_verilog_success_env(tmp_path, monkeypatch, sdf=True)
+
+    with pytest.raises(
+        PostRouteStaError, match="request.sdf is only valid in def mode"
+    ):
+        run_sta(request_path)
+
+
+def test_run_sdf_requires_spef(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch, sdf=True)
+
+    with pytest.raises(PostRouteStaError, match="request.sdf requires request.spef"):
+        run_sta(request_path)
+
+
+def test_run_sdf_rejected_with_map_form_spef(tmp_path, monkeypatch):
+    request_path = _setup_matrix_env(
+        tmp_path,
+        monkeypatch,
+        {"min": "min.spef", "max": "max.spef"},
+    )
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sdf"] = True
+    Path(request_path).write_text(json.dumps(request), encoding="utf-8")
+
+    with pytest.raises(PostRouteStaError, match="map form of request.spef"):
+        run_sta(request_path)
+
+
+def test_sta_script_lines_write_sdf_right_after_read_spef():
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        def_path="/design/top.def",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+        spef_path="/design/top.spef",
+        spef_net_names=["net_a"],
+        sdf_path="/out/top.ss_100C_1v60.sdf",
+    )
+
+    from klayout_tools._openroad_engine import write_sdf_line
+
+    write_line = "write_sdf -divider . -include_typ /out/top.ss_100C_1v60.sdf"
+    # The same shared command `klt place-and-route`'s `post_route_sdf` emits.
+    assert write_sdf_line("/out/top.ss_100C_1v60.sdf") == write_line
+    assert lines.count(write_line) == 1
+    sdf_idx = lines.index(write_line)
+    # After `read_spef` *and* outside the reader-warning markers, before the
+    # post-annotation fingerprint and every report command.
+    assert lines.index("read_spef /design/top.spef") < sdf_idx
+    assert lines.index(f'puts "{post_route_sta._SPEF_READ_END}"') < sdf_idx
+    assert sdf_idx < next(
+        i for i, ln in enumerate(lines) if post_route_sta._DELAY_POST_BEGIN in ln
+    )
+    assert sdf_idx < lines.index("report_worst_slack_metric -setup")
+
+
+def test_sta_script_lines_without_sdf_is_unchanged():
+    common = dict(
+        tech_lef="/pdk/tech.lef",
+        cell_lef="/pdk/cells.lef",
+        def_path="/design/top.def",
+        liberty_path="/pdk/lib.lib",
+        clock_port="clk",
+        clock_period_ns=2.5,
+        spef_path="/design/top.spef",
+        spef_net_names=["net_a"],
+    )
+    default = post_route_sta._sta_script_lines(**common)
+    assert post_route_sta._sta_script_lines(**common, sdf_path=None) == default
+    assert not any(ln.startswith("write_sdf") for ln in default)
+
+
+def test_sta_script_lines_sdf_without_spef_is_a_programming_error():
+    with pytest.raises(ValueError, match="sdf_path requires spef_path"):
+        post_route_sta._sta_script_lines(
+            tech_lef="/pdk/tech.lef",
+            cell_lef="/pdk/cells.lef",
+            def_path="/design/top.def",
+            liberty_path="/pdk/lib.lib",
+            clock_port="clk",
+            clock_period_ns=2.5,
+            sdf_path="/out/top.sdf",
+        )
+
+
+@pytest.mark.parametrize("sdf_value", [False, None])
+def test_run_sdf_false_or_omitted_keeps_script_byte_identical(
+    tmp_path, monkeypatch, sdf_value
+):
+    (tmp_path / "top.spef").write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef")
+    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 1, 1))
+    baseline = run_sta(request_path)
+    script = tmp_path / ".klt" / "sta" / "sta_top.tcl"
+    baseline_tcl = script.read_bytes()
+
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sdf"] = sdf_value
+    Path(request_path).write_text(json.dumps(request), encoding="utf-8")
+    report = run_sta(request_path)
+
+    assert script.read_bytes() == baseline_tcl
+    # `engine_log.invocation_id` is unique per run by design; every other
+    # field must match the request without `sdf` exactly.
+    assert (
+        report["engine_log"]["script_sha256"]
+        == (baseline["engine_log"]["script_sha256"])
+    )
+    report.pop("engine_log")
+    baseline.pop("engine_log")
+    assert report == baseline
+    assert report["sdf"] is None
+    assert not list((tmp_path / ".klt" / "sta").glob("*.sdf"))
+
+
+def test_run_sdf_single_corner_reports_path_scope_and_hash(tmp_path, monkeypatch):
+    (tmp_path / "top.spef").write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef", sdf=True)
+    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 1, 1))
+    scripts = _wrap_openroad_with_sdf_writer(monkeypatch)
+
+    report = run_sta(request_path)
+
+    sdf_file = tmp_path / ".klt" / "sta" / "top.tt_025C_1v80.sdf"
+    assert sdf_file.is_file()
+    assert f"write_sdf -divider . -include_typ {sdf_file}" in scripts[0].splitlines()
+    # `tmp_path` is outside any repository, so the path itself is withheld.
+    assert report["sdf"] == {
+        "path": None,
+        "scope": "external",
+        "content_hash": _sha256_of(sdf_file),
+    }
+    # Annotation evidence is unaffected by the extra command.
+    assert report["spef_annotation"]["annotation_complete"] is True
+
+
+def test_run_sdf_multi_corner_writes_one_distinct_file_per_corner(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "top.spef").write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_multi_corner_env(
+        tmp_path, monkeypatch, spef="top.spef", sdf=True
+    )
+    _stub_openroad_multi_corner(monkeypatch)
+    _wrap_openroad_with_sdf_writer(monkeypatch)
+
+    report = run_sta(request_path)
+
+    out_dir = tmp_path / ".klt" / "sta"
+    tt_file = out_dir / "top.tt_025C_1v80.sdf"
+    ss_file = out_dir / "top.ss_100C_1v60.sdf"
+    assert tt_file.read_bytes() != ss_file.read_bytes()
+    tt_entry, ss_entry = report["corners"]
+    assert tt_entry["sdf"]["content_hash"] == _sha256_of(tt_file)
+    assert ss_entry["sdf"]["content_hash"] == _sha256_of(ss_file)
+    assert tt_entry["sdf"]["content_hash"] != ss_entry["sdf"]["content_hash"]
+    # Per-corner only -- never hoisted to the top level of a corners response.
+    assert "sdf" not in report
+
+
+def test_run_sdf_missing_output_is_an_error_not_a_stale_report(tmp_path, monkeypatch):
+    """A file left by an earlier run must never be reported as this run's
+    output: it is removed before the session, so an engine that writes
+    nothing fails loudly."""
+    (tmp_path / "top.spef").write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef", sdf=True)
+    stale = tmp_path / ".klt" / "sta" / "top.tt_025C_1v80.sdf"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("(DELAYFILE stale)\n", encoding="utf-8")
+    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 1, 1))
+    _wrap_openroad_with_sdf_writer(monkeypatch, write=False)
+
+    with pytest.raises(PostRouteStaError, match="write_sdf produced no file"):
+        run_sta(request_path)
+    assert not stale.exists()
+
+
+def test_cli_text_prints_sdf_line(tmp_path, monkeypatch, capsys):
+    (tmp_path / "top.spef").write_text("*D_NET clk 0.01\n*END\n", encoding="utf-8")
+    request_path = _setup_success_env(tmp_path, monkeypatch, spef="top.spef", sdf=True)
+    _stub_openroad_success(monkeypatch, spef_check=(1, 1, 1, 1))
+    _wrap_openroad_with_sdf_writer(monkeypatch)
+
+    assert main(["sta", request_path, "--format", "text"]) == 0
+
+    out = capsys.readouterr().out
+    sdf_file = tmp_path / ".klt" / "sta" / "top.tt_025C_1v80.sdf"
+    assert f"sdf: <outside repo> ({_sha256_of(sdf_file)})" in out
+
+
+@pytest.mark.skipif(
+    _live_sky130_env() is None,
+    reason="needs openroad on PATH, PDK_ROOT with a sky130A install, and "
+    "KLT_SKIP_OPENROAD_TESTS unset",
+)
+def test_live_engine_sdf_per_corner(tmp_path):
+    """Engine integration (issue #2886): the captured post-CTS DEF + SPEF at
+    two corners writes two real SDFs whose delays differ by corner, each
+    hash matching the bytes on disk."""
+    import re
+
+    paths = _write_clock_fixtures(tmp_path)
+    request = {
+        "def": paths["buffered.def"],
+        "spef": paths["buffered.spef"],
+        "sdf": True,
+        "pdk": {
+            "cell_library": "sky130_fd_sc_hd",
+            "corners": ["tt_025C_1v80", "ss_100C_1v60"],
+        },
+        "constraints": _propagated_constraints(),
+    }
+    report = run_sta(
+        _write_request(tmp_path / "request.json", request), pdk_variant="sky130A"
+    )
+
+    out_dir = tmp_path / ".klt" / "sta"
+    texts = []
+    for entry in report["corners"]:
+        sdf_file = out_dir / f"buffered.{entry['corner']}.sdf"
+        assert entry["sdf"]["content_hash"] == _sha256_of(sdf_file)
+        text = sdf_file.read_text(encoding="utf-8")
+        assert "(DELAYFILE" in text
+        assert "IOPATH" in text
+        # `-divider .` and `-include_typ` (a non-empty typ member).
+        assert "(DIVIDER .)" in text
+        assert re.search(r"\(\d[\d.]*:\d[\d.]*:\d[\d.]*\)", text)
+        texts.append(text)
+    tt_text, ss_text = texts
+    iopath = re.compile(r"\(IOPATH .*")
+    assert iopath.findall(tt_text) != iopath.findall(ss_text)
+
+
+# --------------------------------------------------------------------------- #
+# electrical_checks (issue #3005)
+# --------------------------------------------------------------------------- #
+
+_SLEW_REPORT = """max slew
+
+Pin                                       Limit       Slew      Slack
+---------------------------------------------------------------------
+u1/Y                                    0.00100    0.03000   -0.02900 (VIOLATED)
+u2/A                                    0.00100    0.03000   -0.02900 (VIOLATED)
+y                                       0.00100    0.01057   -0.00957 (VIOLATED)
+
+KLT_ELECTRICAL_NET u1/Y n1
+KLT_ELECTRICAL_NET u2/A n1
+KLT_ELECTRICAL_NET y y
+KLT_ELECTRICAL_OK
+"""
+
+
+def _slew_block(body):
+    return "\n".join(
+        [post_route_sta._MAX_SLEW_BEGIN, body, post_route_sta._MAX_SLEW_END]
+    )
+
+
+def test_parse_electrical_check_violating():
+    result = post_route_sta._parse_electrical_check(
+        _slew_block(_SLEW_REPORT),
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result == {
+        "coverage": "checked",
+        "limit_source": "liberty",
+        "unit": "ns",
+        "violation_count": 3,
+        "net_count": 2,
+        "worst_excess": 0.029,
+        "worst_pin": "u1/Y",
+    }
+
+
+def test_parse_electrical_check_clean_is_checked_zero():
+    """A clean design prints nothing from `report_check_types`; only the
+    sentinel says the check ran, and that is a real zero."""
+    result = post_route_sta._parse_electrical_check(
+        _slew_block("\nKLT_ELECTRICAL_OK\n"),
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result["coverage"] == "checked"
+    assert result["violation_count"] == 0
+    assert result["net_count"] == 0
+    assert result["worst_pin"] is None
+
+
+def test_parse_electrical_check_command_unsupported():
+    result = post_route_sta._parse_electrical_check(
+        _slew_block("KLT_ELECTRICAL_UNSUPPORTED"),
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result["coverage"] == "unsupported"
+    assert result["violation_count"] is None
+    assert result["net_count"] is None
+
+
+def test_parse_electrical_check_session_aborted_is_not_run():
+    result = post_route_sta._parse_electrical_check(
+        "no markers here",
+        post_route_sta._MAX_SLEW_BEGIN,
+        post_route_sta._MAX_SLEW_END,
+        "ns",
+    )
+
+    assert result["coverage"] == "not_run"
+    assert result["violation_count"] is None
+    assert result["worst_excess"] is None
+
+
+def test_electrical_checks_block_parasitics_source_follows_spef():
+    stdout = _slew_block(_SLEW_REPORT)
+
+    with_spef = post_route_sta._electrical_checks_block(stdout, True)
+    without = post_route_sta._electrical_checks_block(stdout, False)
+
+    assert with_spef["parasitics_source"] == "spef"
+    assert without["parasitics_source"] == "none"
+    assert with_spef["max_transition"]["coverage"] == "checked"
+    assert with_spef["max_capacitance"]["coverage"] == "not_run"
+    assert with_spef["max_capacitance"]["unit"] == "pF"
+
+
+def test_sta_script_runs_electrical_checks_after_read_spef():
+    lines = post_route_sta._sta_script_lines(
+        tech_lef="t.lef",
+        cell_lef="c.lef",
+        def_path="d.def",
+        liberty_path="l.lib",
+        clock_port="clk",
+        clock_period_ns=10.0,
+        spef_path="x.spef",
+    )
+
+    text = "\n".join(lines)
+    assert lines.index("read_spef x.spef") < lines.index(
+        f'puts "{post_route_sta._MAX_SLEW_BEGIN}"'
+    )
+    assert "report_check_types -max_slew -violators" in text
+    assert "report_check_types -max_capacitance -violators" in text
 
 
 # --------------------------------------------------------------------------- #

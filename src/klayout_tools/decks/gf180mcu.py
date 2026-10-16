@@ -366,6 +366,15 @@ are always the real, unmodified DRM values:
   a layout drawing neither anywhere skips the whole rule rather than
   misapplying it, while a layout drawing either keeps the approximations
   above unchanged. ``nplus.enclosing.comp.1`` needs no equivalent gate.
+- ``comp.coverage.1`` (``DF.12``): evaluated flat (no deep/hierarchical
+  mode) on merged regions, as the upstream ``comp.rb`` expression
+  ``comp.not_interacting(schottky_diode).not(nplus).not(pplus)``. A COMP
+  polygon that touches or overlaps a Schottky-diode marker (241/0) anywhere
+  is exempted whole, exactly as upstream; an absent implant or marker layer
+  is an empty region, so unimplanted COMP is reported rather than skipped.
+  The ``res_mk``-style well/voltage partitions of ``DF.13``/``DF.14`` are not
+  involved. The rule is not voltage-split in the DRM, hence
+  ``voltage_independent``.
 - ``bjt.separation.comp.1``: the official ``BJT.3`` scopes to COMP
   "unrelated" to the BJT device (i.e. excludes COMP that is itself part of
   the same bipolar device, a connectivity/netlist notion); our engine has no
@@ -507,6 +516,7 @@ from . import (
     CapacitorDevice,
     CapacitorFlavour,
     CapacitorVariant,
+    CompCoverageSpec,
     CutRC,
     DerivedLayer,
     DiodeDevice,
@@ -518,6 +528,7 @@ from . import (
     ResistorDevice,
     ResistorFlavour,
     RuleProvenance,
+    UnsupportedDeviceMarker,
 )
 
 # `RuleProvenance.source_repo`/`.commit` shared by every gf180mcu width/space
@@ -1296,6 +1307,30 @@ DECK: list[DrcRule] = [
         provenance=_gf180mcu_provenance("7.5 Comp", "DF.4d"),
     ),
     DrcRule(
+        id="comp.coverage.1",
+        description=(
+            "COMP not covered by Nplus or Pplus is forbidden "
+            "(except COMP under the Schottky-diode marking)"
+        ),
+        layer=(22, 0),  # Comp -- the checked layer
+        check="comp_coverage",
+        threshold_dbu=0,  # no distance: a coverage rule
+        region_spec=CompCoverageSpec(
+            covered_by_any=((32, 0), (31, 0)),  # Nplus, Pplus
+            exempt_markers=((241, 0),),  # Schottky_diode
+        ),
+        # DRM 7.5 Comp, rule "DF.12": "COMP not covered by Nplus or Pplus is
+        # forbidden (except those COMP under marking)". Re-derived from the
+        # PDK's executable `comp.rb`: `comp.not_interacting(schottky_diode)
+        # .not(nplus).not(pplus)`. See the module docstring's "Known
+        # approximations" note on `comp.coverage.1`.
+        scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.12"),
+        # DF.12 publishes no 3.3V/5V column split, so it cannot have read the
+        # wrong voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
         id="nplus.width.1",
         description="minimum Nplus implant width",
         layer=(32, 0),  # Nplus
@@ -1753,8 +1788,10 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (127, 5): "DRC_BJT",
     (117, 5): "CAP_MK",
     (117, 10): "MIM_L_MK",
+    (166, 5): "MOS_CAP_MK",
     (80, 5): "efuse_mk",
     (125, 5): "plfuse",
+    (241, 0): "Schottky_diode",
 }
 
 # Voltage-domain marker layers this deck draws but does not *fully* model the
@@ -2727,6 +2764,16 @@ EXTRACTION_DECK = ExtractionDeck(
             marker=(55, 0),  # Dualgate
             flavour="06v0",
             description="gf180mcu 5V/6V thick-oxide domain (Dualgate 55/0)",
+        ),
+    ),
+    # Issue #2919: MOS capacitors (`cap_nmos_*`/`cap_pmos_*`) are marked by
+    # `MOS_CAP_MK` (166/5) and have no device class here yet, so they would
+    # otherwise vanish from the netlist with a clean `extracted` status.
+    unsupported_device_markers=(
+        UnsupportedDeviceMarker(
+            marker=(166, 5),  # MOS_CAP_MK
+            kind="mos_capacitor",
+            description="MOS capacitor (MOS_CAP_MK 166/5)",
         ),
     ),
 )

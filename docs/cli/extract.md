@@ -279,6 +279,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `critical_net_excludes` | array\<string\> \| string | repeatable `--critical-net-exclude` |
 | `parasitic_variants` | array\<string\> \| string | repeatable `--parasitic-variant` |
 | `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
+| `resistance_graph` | bool | `--resistance-graph` (issue #2982) |
 | `distributed_rc` | bool | `--distributed-rc` |
 | `substrate_tie_ohms` | number | `--substrate-tie-ohms` (issue #3089) |
 | `resistance_paths` | array\<object\> | repeatable `--resistance-path NET_ID FROM TO` (issue #2765). Each entry is exactly `{"net_id": <int>, "from": <string>, "to": <string>}`; any other shape (a missing/extra key, a non-integer `net_id`, a bare array) is rejected. |
@@ -669,23 +670,42 @@ two things let a caller tell a slow run from a hang and budget the step:
   `sum(stages) + unattributed_seconds ≈ total_seconds`). Stages, in order:
   `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal,
   passive-region and `--parasitics` computation), `diagnostics` (voltage-domain
-  and flavour-marker checks), `netlist_write`, `netlist_hash`.
+  and flavour-marker checks), `netlist_write`, `netlist_hash` (the raw-file
+  SHA-256), and `netlist_normalized_hash` (the numbering-independent
+  `netlist_normalized_sha256` canonicalization, issue #3408; present only when a
+  netlist is written, absent under `--no-netlist`).
   `--check --rerun` ignores `timing` (a measurement, not evidence).
 
-**Measured scaling** (sky130, `--no-netlist`, one 8-vCPU shared host, the
-routed digital blocks in `tests/corpus/place_and_route/`):
+**Measured scaling** (sky130, one shared 16-core host, `klt extract --deck
+sky130`, the routed digital blocks in `tests/corpus/place_and_route/`; measured
+2026-10-16 at `2c515415`). The two larger rows are **synthesized**, not a real
+placed-and-routed block: the vendored `gcd.gds.gz` is instantiated side by side
+(20 µm pitch, no shared nets) under a new top cell, 2× and 4×, so the tiles are
+electrically independent and the device/net counts are exact multiples. Open
+PDK only; nothing is vendored. Each row is one run (a second run of the 2× tile
+agreed within ~10 % on `device_extraction`).
 
-| block | devices | nets | `device_extraction` | `netlist_write` | total |
-| ----- | ------- | ---- | ------------------- | --------------- | ----- |
-| `mult8` | 2,274 | 1,109 | 0.81 s | 0.03 s | 1.0 s |
-| `gcd` | 4,857 | 2,054 | 1.82 s | 0.06 s | 2.2 s |
+| block | devices | nets | `device_extraction` | `netlist_write` | `netlist_normalized_hash` | total |
+| ----- | ------- | ---- | ------------------- | --------------- | ------------------------- | ----- |
+| `mult8` | 2,274 | 1,109 | 0.81 s | 0.03 s | — (`--no-netlist`) | 1.0 s |
+| `gcd` | 4,857 | 2,054 | 1.74 s | 0.07 s | 4.9 s | 7.0 s |
+| 2× `gcd` | 9,714 | 4,107 | 3.96 s | 0.14 s | 20.4 s | 24.9 s |
+| 4× `gcd` | 19,428 | 8,213 | 10.4 s | 0.26 s | 79.7 s | 90.9 s |
 
-`device_extraction` is 80–90 % of the run on both and scales roughly linearly
-with device count at this size (~0.35–0.4 ms/device); every other stage is
-under 0.1 s. **Not measured:** the ~8,500-instance, ~4 MB block that
-motivated the issue (it is not in this repo) — whether extraction turns
-super-linear there is for a caller with that block to confirm from the
-`timing` object, and a larger-block run is tracked in #3408.
+**Scaling.** `device_extraction` is mildly super-linear (≈0.36 → 0.41 → 0.54
+ms/device across 4.9k → 9.7k → 19.4k devices, roughly n^1.2) but is not the
+problem. `netlist_normalized_hash` is: it grows ~4× per doubling (quadratic) and
+is 70–88 % of the whole run once a netlist is written, which is the default.
+A ~8.5k-instance block (≈9–10k devices, the 2× row) spends ~20 s of a ~25 s run
+there. Before issue #3408 that time was reported as `unattributed_seconds`
+(5.1 s of 7.0 s on `gcd`), so the `timing` object understated the cost; it now
+has its own stage. Passing `--no-netlist` skips it (the `mult8` row and the
+earlier `device_extraction`-dominated numbers).
+
+`device_extraction` was not split further: it is under 50 % of a default run
+and its growth is close to linear, so the data does not warrant it. Making the
+normalized hash itself sub-quadratic is a separate change and is out of scope
+here; this section only records and attributes the cost.
 
 ### Reserved annotation layer
 
@@ -1177,6 +1197,15 @@ path).
 | Output | the same, single netlist file | a **second**, standalone deck; the flat netlist is untouched |
 | Instantiated by | the flat top-level circuit, via `X` cards | a testbench you write, via an `X` card |
 
+**Ground continuity caveat (issue #2971).** Abstraction erases the cells'
+device and tap layers, so substrate ties that join separate Metal1 ground rails
+(e.g. per-row `VSS` follow-pin rails with no vertical straps) in a
+transistor-level extraction are **not** modelled: the same GDS can report one
+`VSS` net without `--abstract-cells` and several with it. `klt lvs`'s
+`power_connectivity` ground-pin findings say so; re-extract without
+`--abstract-cells` to classify them. (Well conductor/ties are restored; substrate
+continuity is not.)
+
 ### Bipolar (BJT) device recognition
 
 Both curated decks additionally declare one vertical-BJT device-recognition
@@ -1308,6 +1337,25 @@ does not exhibit the merge. A four-terminal entry may combine with
 `collector=None` (collector formed by the substrate, substrate contact
 drawn): the empty `C` input keeps the three-terminal collector semantics,
 staying tied to `substrate_net`.
+
+**Emitter size filter (`BipolarDevice.emitter_size`, issue #2861).** An
+optional `SizeFilter` (`klayout_tools.decks.SizeFilter`) tells bipolar
+flavours apart by drawn emitter-window size, as SG13G2 does for `npn13G2` /
+`npn13G2l` / `npn13G2v`. It holds inclusive `(lo, hi)` ranges in microns for
+`bbox_min_um` (shorter bounding-box side), `bbox_max_um` (longer side) and
+`area_um2` (µm²); an exact value is `(v, v)`, an unset dimension is
+unconstrained, and a window must satisfy every set one. An all-`None`
+filter and `lo > hi` or negative bounds are rejected at construction.
+
+- Applied to the **merged** emitter region, after `emitter_requires` /
+  `emitter_excludes`, so a window split by the base edge is measured whole.
+- Rounding: bounds convert to the layout dbu by rounding to the nearest
+  integer (area: nearest dbu²), then compare inclusively at both ends; a
+  window one dbu outside a bound does not match. Works at any dbu.
+- Entries sharing `base`/`marker`/`emitter` (and narrowing) with overlapping
+  size ranges raise `ExtractError`; a window matching none of a group's
+  entries yields no device and one `warnings[]` line giving its bbox, size
+  and area. Default `None` leaves extraction and deck hashes unchanged.
 
 `devices[].nets` for a bipolar device uses `"c"`/`"b"`/`"e"` terminal keys
 (collector/base/emitter) instead of MOS's `"s"`/`"g"`/`"d"`/`"b"` — plus
@@ -2293,6 +2341,21 @@ after every device class on today's roadmap lands — it is a property of
 "connectivity layer with no matching extractor", not of any specific missing
 class.
 
+**Unclaimed resistor marker (issue #3138).** A second, distinct `warnings[]`
+string covers a resistor-ID marker the deck *declares* but that no
+`ResistorDevice` claims. `_resolve_resistors` drops a spec whose body region
+(`body & marker`, narrowed by `requires`/`excludes`) is empty, and the poly
+heuristic below does not fire because the marker is declared. So a marker
+drawn beside or abutting the conductor (e.g. an abutting-head primitive cell on
+an overlap-topology deck), or one whose `requires`/`excludes` conditions fail,
+previously extracted as a clean, device-less layout. Now, per marker layer, if
+marker shapes interact with none of the pre-`dummy` candidate bodies of the
+specs sharing that marker, one warning names the layer, the unclaimed shape
+count and the deck's declared resistor classes on it. A marker shared by several
+flavours is judged against the union of their bodies, and a body fully consumed
+by the `dummy` cut still counts as claimed. Warning only: exit code and
+`status` are unchanged and there is no new JSON field.
+
 `warnings[]` now carries one narrowly-scoped heuristic diagnostic for the
 most common shape of this problem: a **poly resistor body** drawn without
 (or excluded from) a resistor-ID marker layer, or any other conductor shape
@@ -2546,6 +2609,16 @@ simulator fatal). Extraction reports one `missing_flavour_markers[]` entry
 marker. The check runs only under `--pdk`, where the flavour decides the bound model
 name. A marker that is present but does not overlap MOS active geometry is a
 legitimate layout and is not flagged.
+
+**Unsupported devices (issue #2919)**: a deck may name marker layers that flag
+a device class it cannot extract yet. gf180mcu's `MOS_CAP_MK` (166/5) marks MOS
+capacitors, which have no device class, so a layout holding `cap_nmos_*`/
+`cap_pmos_*` would otherwise extract with `status: "extracted"` and exit 0 while
+the capacitors are missing. Each such layer with shapes yields one
+`unsupported_devices[]` entry (`kind`, `marker`, `count`, `bbox_um`,
+`description`) plus a prose line in `warnings[]`. `status` and the exit code are
+unchanged, so a caller must check the field. It is removed per marker once the
+deck extracts that device.
 
 **What this field does and does not guarantee**: for a marker with no
 `mos_flavours` coverage, it only flags that the bound model name may be
@@ -5772,14 +5845,18 @@ corner), `klt extract --abstract-cells 'sky130_fd_sc_hd__*' --parasitics
 | above, no `--def-net-names` | 52 / 537 | 520 | 486 | `true` |
 | above plus `--def-net-names` | 537 / 537 | 35 | 3 | `true` |
 | plus `--def-net-names`, no `--def-pins` | 537 / 537 | 1036 | 3 | `true` |
+| plus `--def-net-names`, after issue #3580 | 494 / 494 | 0 | 3 | `true` |
 
-So `--def-pins` is necessary but not sufficient: without `--def-net-names`
-the extracted net names are `$N` and almost nothing correlates, and even with
-both, `annotation_complete` stays `false` (35 `STA-1650`). Those 35 are
-`*D_NET \$N` blocks for unlabelled layout nets, not PIN-name or
-floating-duplicate cases; they are tracked in #3580. The pre-PR-#3512
-baseline was not re-measured, so these numbers show the current state, not
-the delta from #3512.
+So `--def-pins` and `--def-net-names` are both required: without
+`--def-net-names` the extracted net names are `$N` and almost nothing
+correlates. Before issue #3580, even with both, `annotation_complete` stayed
+`false` because 35 `*D_NET \$N` blocks for unlabelled layout nets were
+rejected (`STA-1650`); these are now omitted (see below), which is the last
+table row (35 blocks omitted, `reader_warning_count` 0). The remaining 3
+unannotated drivers are `clkload0/Y`, `clkload1/Y` and `clkload2/Y`: the
+unconnected outputs of CTS dummy-load cells. They drive no DEF net, so there is
+no wire for the SPEF to annotate; this is an inherent limit, not an extraction
+defect, and `annotation_complete` stays `false` for it.
 
 **Port PIN name ≠ NET name (issue #3257).** For a DEF `- PortA + NET netA`
 record, the `*PORTS` list and the net's `*P` entry use the PIN name
@@ -5796,6 +5873,13 @@ same-named `*D_NET` blocks are rejected by OpenSTA (`STA-1650`) and attach to
 no driver. `warnings[]` lists the omitted names. This also drops duplicate
 supply nets (`VGND`/`VPWR` islands) that the DEF only declares in
 `SPECIALNETS`.
+
+**Unlabelled `$N` nets (issue #3580).** The same omission applies to a
+unique-named, non-port net spelled `$<digits>` (an unlabelled layout net) that
+is absent from the DEF `NETS` section; OpenSTA rejects its `*D_NET` block
+(`STA-1650`) just the same. Labelled nets that are not in the DEF are kept.
+`warnings[]` lists the omitted names. Nothing changes without
+`--def-net-connections`.
 
 **Parasitic model (default, non-`--distributed-rc`).** The SPEF carries a
 single lumped capacitance per net, hung on the net's hub node, and no wire
@@ -7009,6 +7093,69 @@ klt extract top.gds --deck sky130 --parasitics --parasitics-top-cell-only --form
 |---|---|
 | `parasitics.top_cell_only` | `true` only when `--parasitics-top-cell-only` was given (`false` otherwise) — distinguishes a run whose `nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` are real computed splits from one where they are `null` because the flag was never asked for. |
 
+### Terminal-aware resistance graph (`--resistance-graph`, issue #2982)
+
+`resistance_ohm` is a series sum over a net's fragments (see "Squares are
+counted per connected fragment"); it cannot express parallel structure or
+the resistance *between two named terminals*. `--resistance-graph` (requires
+`--parasitics`) additionally builds the geometry-derived resistor graph of
+`docs/design/extract-fidelity-roadmap.md` Stage 3.D (graph builder
+`extract_resistance_graph.build_resistance_graph`, DC solve
+`terminal_resistance_matrix`) for each net and reports the result next to the
+legacy scalar. It is **diagnostic and opt-in**: it never changes
+`resistance_ohm`, `terminals[]`, `by_layer`, the `--distributed-rc` ladder or
+the written SPICE.
+
+```
+klt extract top.gds --deck sky130 --parasitics --resistance-graph --format json
+```
+
+Each `parasitics.nets[]` entry gains one key, `resistance_graph` (absent
+without the flag — output is byte-identical to a run that never had it):
+
+```json
+{
+  "status": "ok",
+  "terminals": ["via@0.0850,0.0850", "via@4.9150,0.0850"],
+  "pair_resistance_ohm": [[0.0, 376.47], [376.47, 0.0]],
+  "legacy_resistance_ohm": 376.47,
+  "nodes": 3,
+  "edges": 2,
+  "diagnostics": []
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `status` | `ok`; `skipped` (fewer than two terminals, `too_few_terminals`); or `unsupported` (no graph — see `diagnostics`). `skipped`/`unsupported` nets keep the legacy scalar exactly. |
+| `terminals` | Terminal names, sorted. `via@x,y` is a contact/via where current leaves the modelled conductor (µm, centre of the cut); `device@x,y` is a device-body cut edge (a fragment edge strictly inside the role's drawn layer). `[]` when `unsupported`. |
+| `pair_resistance_ohm` | `T x T` symmetric effective resistance between terminals, ohms, `0.0` diagonal, `null` for two terminals in different connected components (with `terminals_disconnected`). `[]` unless `ok`. |
+| `legacy_resistance_ohm` | The unchanged series-sum `resistance_ohm` of the same net, as a cross-check. |
+| `nodes` / `edges` | Counts only; full node/edge lists are not part of this output. |
+| `diagnostics` | `{code, message, detail}` as produced by the builder/solver: `sheet_resistance_unknown`, `via_resistance_unknown`, `unsupported_geometry`, `graph_too_large`, `singular_system`, `terminals_disconnected`, `floating_component`, `too_few_terminals`, `unattached_port`. |
+
+**Boundary conditions and limits.**
+
+- The graph builder attaches a port to every piece it touches, so a port in
+  the *interior* of a conductor would sit in parallel with the in-plane edge
+  it cuts. Contacts and vias are therefore only attached along a side that
+  lies on the conductor's outline (Stage 3.D4's end-edge ports); a contact
+  or via wholly inside a conductor makes the net `unsupported` with
+  `unsupported_geometry` (`detail.interior_landings`).
+- The shipped decks curate **no per-cut resistance**, so a net with a
+  contact/via landing joining two *modelled* roles reports
+  `via_resistance_unknown` rather than an assumed ideal via. Diffusion has no
+  coefficient in the shipped decks, so a contact onto diffusion is a terminal,
+  not a landing.
+- Terminals come from geometry (landings onto an unmodelled role and
+  device-body cut edges), not from `terminals[]` device pins, which carry only
+  a per-device position.
+- Both the builder's size caps (nodes, edges, 64 terminals) and non-Manhattan
+  geometry yield `unsupported`, never an exception.
+
+Replacing `resistance_ohm` with a graph-derived value is a separate change
+(issue #2458), not a side effect of this flag.
+
 ### Curated-coefficient gaps: `metals_without_coefficient` (issue #547)
 
 The per-deck `PARASITICS.metals` table (see "The coefficients are curated
@@ -7515,6 +7662,7 @@ exit codes).
   "unmodelled_poly": [],
   "merged_net_labels": [],
   "voltage_domain_warnings": [],
+  "unsupported_devices": [],
   "unbiased_pmos_body_nets": [],
   "single_terminal_nets": [],
   "dead_metal": [],
@@ -7563,6 +7711,7 @@ exit codes).
 | `merged_net_labels` | array\<object\>          | One entry per net whose name is a merge of 2+ distinct labels (issue #470 — see "Merged net labels" below), each `{ "net": "<full joined name>", "labels": [str, ...] }` (`net` uses the same `\|`-joined spelling as `nets[].name` and the written netlist, issue #696; `labels` is `net` split on `\|`). A matching prose entry is also appended to `warnings[]` for every affected net. Always present, empty when no net carries multiple labels. |
 | `voltage_domain_warnings` | array\<object\>     | One entry per voltage-domain marker layer with **no** matching `mos_flavours` coverage (issue #552, narrowed by issue #1111 — see "Voltage-domain markers and per-flavour MOS binding" below) whose geometry overlaps extracted MOS device geometry, each `{ "marker": "<layer>/<datatype>", "description": str }`. A matching prose entry is also appended to `warnings[]`. Always present, empty for a deck that registers no such marker, a marker fully covered by `mos_flavours` (e.g. gf180mcu's `Dualgate` as of issue #1111 — see the linked section for what "covered" means), or a layout that draws none of the remainder overlapping MOS geometry. |
 | `missing_flavour_markers` | array\<object\> | One entry per `mos_flavours` marker layer the deck declares that has **zero shapes anywhere in the layout** (issue #2417), each `{ "deck": str, "flavour": str, "marker": "<layer>/<datatype>" }`. With no marker geometry flavour selection never fires and every MOS device silently binds the deck's default flavour. A matching prose entry is appended to `warnings[]`. Only evaluated under `--pdk` (flavour selection changes the bound model name only when a PDK resolves the binding). Not raised when the marker is present but overlaps no MOS active area. Always present, empty for a deck with no `mos_flavours` or whose markers all have geometry. |
+| `unsupported_devices` | array\<object\> | One entry per deck `unsupported_device_markers` layer that carries shapes in the extracted cell (issue #2919), each `{ "kind": str, "marker": "<layer>/<datatype>", "count": int, "bbox_um": {"left", "bottom", "right", "top"}, "description": str }`. `count` is the number of merged marker shapes and `bbox_um` bounds all of them. The deck cannot extract that device class, so those devices are **absent from the netlist** although `status` stays `"extracted"`; a matching prose entry is appended to `warnings[]`. Today only `gf180mcu` declares one: `MOS_CAP_MK` (166/5) with `kind: "mos_capacitor"` (`cap_nmos_*`/`cap_pmos_*`). Treat a non-empty field as an incomplete netlist. Always present, empty for a deck that declares no such marker or a layout with no shapes on it. |
 | `unbiased_pmos_body_nets` | array\<object\>  | One entry per extracted PMOS device whose body (`"b"`) terminal ties to an anonymous, KLayout-synthesized net rather than a real, named one (issue #555 — see "Known gap: an anonymous PMOS body net has no DC bias path" above), each `{ "device": "<device name>", "net": "<anonymous net name>" }`. A single aggregate prose entry (count baked in, e.g. `"148 PMOS devices tie their body to..."`) is also appended to `warnings[]` when this field is non-empty — not one line per device (issue #599). Always present, empty when no PMOS device's body net is anonymous — i.e. every device whose `nwell` island a drawn or derived well tie reaches (issue #1084). Present regardless of `--parasitics`/`--pdk`. |
 | `single_terminal_nets` | array\<object\>    | One entry per net with `device_count == 1` and `pin: false` (issue #596 — see "Single-device-terminal nets" above), each `{ "net": "<net name>", "device": "<owning device name>", "terminal": "<lower-cased terminal key>", "terminal_kind": "gate" \| "source" \| "drain" \| "body" \| "<literal terminal key>" }`. Up to two aggregate prose entries (one per `terminal_kind` bucket — `"gate"` vs. everything else — each with its bucket's count baked in) are also appended to `warnings[]`, phrased more strongly for the `"gate"` bucket — not one line per net (issue #599). Always present, empty when every net either has zero or 2+ device terminals, or is a declared pin. |
 | `dead_metal`       | array\<object\>            | One entry per connected cluster of routing-stack (`metals`/`vias`) geometry that joins no extracted net (issue #676 — see "Dead metal" above), each `{ "role": "metal<i>" \| "via<i>", "layer": int, "datatype": int, "bbox_um": {"left", "bottom", "right", "top"}, "shapes": int, "area_um2": number }`, sorted by `(layer, datatype, left, bottom)`. `role`'s `<i>` indexes the deck's own `metals`/`vias` tuple (`0` = bottom-most level); `shapes` counts the drawn shapes on that stream layer the cluster covers (one entry per *cluster*, not per polygon). XY overlap between adjacent metal levels is **not** connection — only a same-layer touch or a via landing joins two shapes, so a wire passing over another with no via between them is still dead. A labelled floating cluster (power strap, seal ring, bond pad) survives as a real named net and never appears here. A non-empty list also appends a single aggregate prose entry to `warnings[]` (count baked in, issue #599). Always present, empty when every metal/via shape joins a net. |

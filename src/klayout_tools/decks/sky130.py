@@ -1562,6 +1562,31 @@ DECK: list[DrcRule] = [
         scope="urpm",  # sky130A_mr.drc "urpm.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "urpm.1a"),
     ),
+    DrcRule(
+        id="nwell.enclosed.hvi.1",
+        description="HVnwell (nwell touching hvi) must be enclosed by hvi",
+        layer=(64, 20),  # nwell.drawing
+        check="enclosed",
+        other_layer=(75, 20),  # hvi.drawing
+        threshold_dbu=0,  # pure containment: no margin is required
+        # sky130A_mr.drc rule "nwell.9":
+        #   nwell.interacting(nwell.and(hvmarker)).not(hvmarker)
+        #   -> "nwell.9 : HVnwell must be enclosed by hv marker"
+        # with `hvmarker = hvi.or(rdl).or(uhvi).or(vhvi)`. The "enclosed"
+        # check's containment half (`nwell.interacting(hvi) - hvi`, the
+        # default `require_containment=False` scoping) is exactly the
+        # runset's expression for the `hvi` term, so a well drawn wholly
+        # outside hvi is a plain low-voltage well and stays clean. The
+        # `rdl` (74/20), `uhvi` (74/22) and `vhvi` (74/21) terms of
+        # `hvmarker` are NOT modelled (a single `other_layer`): a well
+        # inside one of those markers but touching hvi would be flagged.
+        # Those layers are not drawn by this curated deck, and a well
+        # touching hvi while sitting in another marker is not a layout this
+        # deck's PDK-cell inputs produce. The margin half (`threshold_dbu`)
+        # is 0 because the runset checks containment only.
+        scope="nwell",  # sky130A_mr.drc "nwell.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "nwell.9"),
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -1900,13 +1925,30 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # 0.15um column here, which is why registering this marker still produces
 # `klt drc`'s `voltage_domain_warnings` diagnostic (issue #552) even though
 # the *extraction*-side binding gap is now closed.
+#: Official sky130A_mr.drc rule ids this curated deck knowingly does *not*
+#: transcribe (issue #3031): the "2-adjacent-edges-relaxed" enclosure
+#: refinements, which need a per-edge-pair primitive ``DrcRule`` does not have
+#: (see the "primary rule only" notes on ``met1.enclosing.mcon.1``,
+#: ``via.enclosing.met1.1`` and their ``met2``/``met3`` siblings). A layout can
+#: be ``klt drc --deck sky130`` clean yet fail the foundry runset on exactly
+#: these, so ``coverage.unmodeled_rules`` lists them rather than let a clean
+#: verdict read as full coverage. Remove an id here when its rule is added.
+UNMODELED_RULES: tuple[str, ...] = (
+    "m1.5",
+    "m2.5",
+    "via.5a",
+    "via2.5",
+    "via3.5",
+)
+
 UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (75, 20): (
         "hvi (75/20) marks sky130's 5V-gate/10.5V-drain thick-oxide voltage "
         "domain (see sky130.lvs's ngate_high_voltage/pgate_high_voltage). "
         "This curated deck models it for MOS device recognition/model "
         "binding (issue #1369: sky130_fd_pr__nfet_g5v0d10v5/pfet_g5v0d10v5 "
-        "under --pdk) only; no DRC rule here reads hvi, so every rule still "
+        "under --pdk) and for one DRC rule (nwell.enclosed.hvi.1, "
+        "nwell.9, issue #3031); no other DRC rule here reads hvi, so every rule still "
         "applies its general-case threshold to geometry drawn inside hvi "
         "(e.g. diff.width.1 checks difftap.1's 0.15 um where the real DRM's "
         "medium-voltage column, difftap.14, requires 0.29 um -- not "
@@ -2526,10 +2568,34 @@ EXTRACTION_DECK = ExtractionDeck(
     # is the key `pdk_models.py`'s `_MOS_MODEL_FLAVOURS[("sky130", "sky130")]`
     # table binds to those two real subcircuit names under `--pdk` -- see
     # that module's docstring for the verified-provenance citation.
+    #
+    # Native-Vt NMOS (issue #3599): upstream `sky130.lvs` (open_pdks
+    # `c6d73a3`) derives `ngate_nvt = ngate_high_voltage.and(lvtn)
+    # .not(areaid_ed).not(areaid_ce)` (L1214) and `ngate_5p0v_nvt =
+    # ngate_nvt.not(areaid_le).not_interacting(vpp)` (L1226) ->
+    # `mos4("sky130_fd_pr__nfet_05v0_nvt")` (L2081): hvi AND lvtn (125/44,
+    # L924), minus areaid_ed (81/19, L1008), areaid_ce (81/2, L994),
+    # areaid_le (81/60, L1018, the 3v3 native variant -- out of scope) and
+    # anything interacting vpp (82/64, L989). NMOS only (no PMOS native).
+    # Known gap: the other `ngate_high_voltage` subtractions (uhvi, ncm,
+    # ldntm, pwbm) are not modelled, as for the `hvi` flavour. Must precede
+    # `hvi` (flavours claim in order); `hvi` also excludes lvtn, since
+    # upstream L1231 (`ngate_5p0v_hv = ngate_high_voltage.not(lvtn)...`)
+    # keeps lvtn devices out of `g5v0d10v5`.
     mos_flavours=(
         MOSFlavour(
             marker=(75, 20),  # hvi.drawing
+            flavour="nvt",
+            description="sky130 5V native-Vt NMOS (hvi 75/20 AND lvtn 125/44)",
+            nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_05v0_nvt"),
+            and_markers=((125, 44),),  # lvtn.drawing
+            not_markers=((81, 19), (81, 2), (81, 60), (82, 64)),
+            nfet_only=True,
+        ),
+        MOSFlavour(
+            marker=(75, 20),  # hvi.drawing
             flavour="hvi",
+            not_markers=((125, 44),),  # lvtn.drawing; sky130.lvs L1231
             description="sky130 5V-gate/10.5V-drain thick-oxide domain (hvi 75/20)",
             nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_g5v0d10v5"),
             pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_g5v0d10v5"),

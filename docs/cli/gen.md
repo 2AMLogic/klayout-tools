@@ -915,6 +915,7 @@ with their `.drc.json` reports checked in alongside).
 | `ring_padding_um` | double | `0.5`            | Padding between the array's own shared-footprint box (`well_box_um`) and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 | `interior_channel_um` | double | `0.0`         | Extra gap (µm) reserved between adjacent rows/columns, on top of the fixed inter-device spacing, so an interior unit device's pin has a navigable path to the array's edge (issue #1531). Must be `>= 0`. `0.0` (the default) is a strict no-op — byte-for-byte identical geometry to every request that predates this param. A positive value widens `row_pitch`/`col_pitch` by that amount and reports the resulting inter-row/inter-column gap bands in the response's `navigable_regions` field (`{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles). `klt gen-compose` (issue #1835) subtracts a block's own declared `navigable_regions` from its obstacle bbox before its own overlap check runs, so a `waypoints_um` backbone that stays inside the declared channel is no longer rejected as crossing its own block. |
 | `pitch_x_um`/`pitch_y_um` | double | `0.0`      | Override the column/row pitch (µm) between adjacent unit devices (issue #3299). Must be `>= 0`. `0.0` (the default) means no override — byte-for-byte identical geometry to every request that predates these params. The default pitch is already the legal minimum (unit extent + the fixed `0.4` µm same-layer spacing), so an override can only *widen* it: a value below that minimum is **clamped up** to it, never emitted as DRC-violating geometry. When either is set, `drc_hints.pitch` reports `col_pitch_um`/`row_pitch_um` (effective), `min_col_pitch_um`/`min_row_pitch_um` and `pitch_x_clamped`/`pitch_y_clamped`, and a clamp adds a `warnings` entry. Composes with `interior_channel_um`: the channel is added on top of the effective pitch. |
+| `share_sd` | boolean | `false` | Abut horizontally adjacent unit devices so each pair shares one contacted S/D segment (issue #3551, Phase 2 of #3299): column pitch drops from `unit extent + 0.4` µm to `unit extent − one contact region`, and unit *c*'s drain segment **is** unit *c+1*'s source segment (identical drawn coordinates). **This changes electrical topology** — each row extracts as a series chain with `cols + 1` S/D nets instead of `2 × cols`. `U<i>_D`/`U<i+1>_S` stay reported, at the same position; `drc_hints.shared_sd_nodes` lists each shared pair. Dummy columns stay isolated at the normal pitch. Requires `topology: "array"` and `fingers: 1`, and is exclusive with `pitch_x_um`/`interior_channel_um`; any other combination is rejected with `GenError`. `false` (the default) is byte-for-byte identical to every request that predates it. |
 
 #### Tighter than the generator allows: draw your own primitives
 
@@ -1736,9 +1737,11 @@ extracted netlist. On `sky130` this moves the ring from `diff.drawing`
 **This generator draws from base layers, not from a vendor library cell.** The
 result is a DRC-clean, matching-faithful *floorplan* of the device (layer
 stack + common-centroid/dummy arrangement), **not** a SPICE-model-exact
-replacement for the PDK's characterized vertical PNP — the curated decks check
-no implant layer, so emitter/base/collector all draw on the one diffusion
-role. See [`docs/design/gen-bjt-array-spike.md`](../design/gen-bjt-array-spike.md)
+replacement for the PDK's characterized vertical PNP — emitter/base/collector
+all draw on the one diffusion role. On gf180mcu, whose deck forbids Comp not
+covered by an implant (`DF.12`), each emitter pad gets a Pplus implant and each
+base-tie pad an Nplus implant (0.16 µm extension), and the collector ring sits
+further out to keep implant spacing. See [`docs/design/gen-bjt-array-spike.md`](../design/gen-bjt-array-spike.md)
 for why draw-from-scratch was chosen over vendor-cell instantiation, and the
 fidelity limits that choice carries.
 

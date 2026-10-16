@@ -80,7 +80,7 @@ def _capture_decks(monkeypatch) -> list[str]:
     """Stub `subprocess.run`; record the text of every deck it is handed."""
     decks: list[str] = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         decks.append(Path(cmd[cmd.index("-b") + 1]).read_text())
         if "-o" in cmd:
             Path(cmd[cmd.index("-o") + 1]).write_text("")
@@ -192,7 +192,7 @@ def test_run_sim_xyce_without_save_mode_is_unaffected(tmp_path, monkeypatch):
     )
     seen: list[list[str]] = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         seen.append(cmd)
         Path(cmd[cmd.index("-l") + 1]).write_text("")
         return fake_completed("Xyce Release 7.10.0\n")

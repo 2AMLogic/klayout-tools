@@ -44,7 +44,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import lvs, lvs_netgen, pdk
+from klayout_tools import _provenance, lvs, lvs_netgen, pdk
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
 
@@ -4231,6 +4231,154 @@ R1 RA RB vsubs {reference_r_ohm:.5f} res_high_po
     buggy_report = _run(buggy_r_ohm)
     assert buggy_report["counts"]["devices"]["layout"] == 1
     assert buggy_report["status"] == "mismatch"
+
+
+def _run_series_fold_lvs(tmp_path, segments, options, *, deck=True, name="fold"):
+    """`run_lvs` over the `_write_series_res_high_po_gds` chain against a
+    one-element reference carrying the once-charged offset (issue #3017)."""
+    l_um = 10.0
+    gds = _write_series_res_high_po_gds(
+        tmp_path / f"{name}.gds", segments=segments, l_um=l_um
+    )
+    r_ohm = _series_res_high_po_expected_r_ohm(segments, l_um, offset_count=1)
+    reference_path = _write(
+        tmp_path / f"{name}.spice",
+        f".subckt RES RA RB vsubs\nR1 RA RB vsubs {r_ohm:.5f} res_high_po\n.ends\n",
+    )
+    if deck:
+        layout = {"file": gds, "deck": "sky130"}
+    else:
+        # `layout.file` requires a deck, so supply a pre-extracted netlist
+        # (offset deferred) with no `layout.deck`: no correction is applied.
+        from klayout_tools.extract import run_extract
+
+        spice = str(tmp_path / f"{name}_layout.spice")
+        run_extract(gds, "sky130", output=spice, apply_resistor_fixed_offset=False)
+        layout = {"netlist": spice, "top": "RES"}
+    return run_lvs(
+        _write_request(
+            tmp_path / f"{name}.json",
+            {
+                "layout": layout,
+                "reference": {"netlist": reference_path, "top": "RES"},
+                "options": options,
+            },
+        )
+    )
+
+
+def _fold_entries(report):
+    return [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "device.series_fold_offset_absorbed"
+    ]
+
+
+def test_series_fold_offset_absorbed_is_disclosed_as_warning(tmp_path):
+    """Issue #3017: a folded N-segment chain stays a `match` but carries one
+    warning naming N and the `(N-1) * fixed_offset_ohm` the fold absorbed."""
+    segments = 4
+    report = _run_series_fold_lvs(tmp_path, segments, {"combine_devices": True})
+    assert report["status"] == "match"
+    entries = _fold_entries(report)
+    assert len(entries) == 1
+    assert entries[0]["severity"] == "warning"
+    details = entries[0]["details"]
+    assert details["class"] == "res_high_po"
+    assert details["folded_primitives"] == segments
+    # The deck splits the w=1um head term into a constant part and a
+    # width-normalized part (#3049); the disclosure sums both.
+    assert details["fixed_offset_ohm"] + details["end_term_ohm"] == pytest.approx(
+        _RES_HIGH_PO_FIXED_OFFSET_OHM
+    )
+    absorbed = (segments - 1) * _RES_HIGH_PO_FIXED_OFFSET_OHM
+    assert details["absorbed_offset_ohm"] == pytest.approx(absorbed)
+    r_final = _series_res_high_po_expected_r_ohm(segments, 10.0, offset_count=1)
+    assert details["fraction_of_r"] == pytest.approx(absorbed / r_final)
+
+
+def test_series_fold_offset_absorbed_does_not_change_verdict(tmp_path):
+    """The warning never moves status or error counts."""
+    report = _run_series_fold_lvs(tmp_path, 3, {"combine_devices": True})
+    assert report["status"] == "match"
+    assert not [m for m in report["mismatches"] if m["severity"] == "error"]
+    assert not report["category_error_counts"].get("device.series_fold_offset_absorbed")
+
+
+def test_series_fold_offset_absorbed_absent_when_not_folded(tmp_path):
+    """No entry without `combine_devices`, without a deck, with a class list
+    excluding the resistor, or for a single primitive."""
+    for name, segments, options, deck in [
+        ("nocombine", 3, {}, True),
+        ("nodeck", 3, {"combine_devices": True}, False),
+        ("excluded", 3, {"combine_devices": ["nfet"]}, True),
+        ("single", 1, {"combine_devices": True}, True),
+    ]:
+        report = _run_series_fold_lvs(tmp_path, segments, options, deck=deck, name=name)
+        assert _fold_entries(report) == [], name
+
+
+def _run_spice_fold_lvs(tmp_path, layout_body, reference_body, ports, name):
+    layout = _write(
+        tmp_path / f"{name}_layout.spice", f".subckt TOP {ports}\n{layout_body}.ends\n"
+    )
+    reference = _write(
+        tmp_path / f"{name}_ref.spice", f".subckt TOP {ports}\n{reference_body}.ends\n"
+    )
+    return run_lvs(
+        _write_request(
+            tmp_path / f"{name}.json",
+            {
+                "layout": {"netlist": layout, "top": "TOP", "deck": "sky130"},
+                "reference": {"netlist": reference, "top": "TOP"},
+                "options": {"combine_devices": True},
+            },
+        )
+    )
+
+
+def test_series_fold_offset_absorbed_two_chains_and_parallel(tmp_path):
+    """Issue #3017: two separate series chains in one circuit -> two entries;
+    a parallel fold, or a chain in parallel with another path between the same
+    end nets (N not attributable), -> none."""
+    r = 1000.0
+    rr = r + _RES_HIGH_PO_FIXED_OFFSET_OHM
+    two_chains = _run_spice_fold_lvs(
+        tmp_path,
+        "".join(
+            f"R{i} {a} {b} vsubs {r} res_high_po\n"
+            for i, (a, b) in enumerate(
+                [("A", "m1"), ("m1", "B"), ("C", "m2"), ("m2", "m3"), ("m3", "D")]
+            )
+        ),
+        f"RX A B vsubs {2 * r + _RES_HIGH_PO_FIXED_OFFSET_OHM} res_high_po\n"
+        f"RY C D vsubs {3 * r + _RES_HIGH_PO_FIXED_OFFSET_OHM} res_high_po\n",
+        "A B C D vsubs",
+        "twochains",
+    )
+    assert sorted(
+        e["details"]["folded_primitives"] for e in _fold_entries(two_chains)
+    ) == [2, 3]
+
+    parallel = _run_spice_fold_lvs(
+        tmp_path,
+        f"R1 A B vsubs {r} res_high_po\nR2 A B vsubs {r} res_high_po\n",
+        f"RX A B vsubs {r / 2 + _RES_HIGH_PO_FIXED_OFFSET_OHM} res_high_po\n",
+        "A B vsubs",
+        "parallel",
+    )
+    assert _fold_entries(parallel) == []
+
+    mixed = _run_spice_fold_lvs(
+        tmp_path,
+        f"R1 A m vsubs {r} res_high_po\nR2 m B vsubs {r} res_high_po\n"
+        f"R3 A B vsubs {r} res_high_po\n",
+        f"RX A B vsubs {rr} res_high_po\n",
+        "A B vsubs",
+        "mixed",
+    )
+    assert _fold_entries(mixed) == []
 
 
 def test_combine_devices_false_still_applies_fixed_offset_per_primitive(tmp_path):
@@ -11561,6 +11709,67 @@ def test_detect_empty_for_plain_element_netlist():
 # --- integration through run_lvs -------------------------------------------- #
 
 
+@pytest.mark.parametrize(
+    "card, name",
+    [
+        (
+            "X$1 d g s b sky130_fd_pr__nfet_01v8 L=0.15U W=0.65U",
+            "sky130_fd_pr__nfet_01v8",
+        ),
+        ("X$1 d g s b nfet_06v0 L=0.6U W=0.82U", "nfet_06v0"),
+    ],
+)
+def test_run_lvs_rejects_subckt_call_layout_netlist(tmp_path, card, name):
+    """Issue #2972: a PDK-bound (`klt extract --pdk`) layout netlist fails with
+    a form-mismatch error instead of reading as zero devices."""
+    layout_path = _write(
+        tmp_path / "layout.spice", f".subckt inv d g s b\n{card}\n.ends\n"
+    )
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    with pytest.raises(LvsError, match=r"layout netlist .*simulation") as excinfo:
+        run_lvs(json.dumps(request))
+    assert name in str(excinfo.value)
+    assert "--pdk" in str(excinfo.value)
+
+
+def test_run_lvs_layout_netlist_defining_the_subckt_is_not_rejected(tmp_path):
+    text = (
+        ".subckt nfet_06v0 d g s b\n.ends\n"
+        ".subckt inv d g s b\nX$1 d g s b nfet_06v0 L=0.6U W=0.82U\n.ends\n"
+    )
+    layout_path = _write(tmp_path / "layout.spice", text)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    # The in-file `.subckt` makes this a different (out-of-scope) case, not
+    # the form mismatch: whatever the compare does, it must not be that error.
+    try:
+        run_lvs(json.dumps(request))
+    except LvsError as exc:
+        assert "subcircuit-call" not in str(exc)
+
+
+def test_run_lvs_non_mos_generated_x_card_layout_netlist_is_not_rejected(tmp_path):
+    """Bare `klt extract` round-trips resistors as `X$n ... rsil` cards."""
+    text = ".subckt inv d g s b\nX$1 d g rsil W=1U L=2U\n.ends\n"
+    layout_path = _write(tmp_path / "layout.spice", text)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    try:
+        run_lvs(json.dumps(request))
+    except LvsError as exc:
+        assert "subcircuit-call" not in str(exc)
+
+
 def test_run_lvs_subckt_call_reference_converts_and_matches(tmp_path):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
     reference_path = _write(tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_SKY130)
@@ -12150,6 +12359,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__pfet_01v8",
         "sky130_fd_pr__nfet_g5v0d10v5",
         "sky130_fd_pr__pfet_g5v0d10v5",
+        # Native-Vt 5V NMOS via marker combination (issue #3599).
+        "sky130_fd_pr__nfet_05v0_nvt",
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",
@@ -15387,7 +15598,7 @@ def test_check_lvs_report_klt_version_drift_advisory(tmp_path):
     advisories = {entry["field"]: entry for entry in result["advisories"]}
     assert advisories.keys() == {"provenance.klt_version"}
     assert advisories["provenance.klt_version"]["report"] == "0.0.1-forged"
-    assert advisories["provenance.klt_version"]["current"] == lvs._klt_version()
+    assert advisories["provenance.klt_version"]["current"] == _provenance._klt_version()
 
 
 def test_check_lvs_report_klayout_version_drift_advisory(tmp_path):
@@ -15408,7 +15619,10 @@ def test_check_lvs_report_klayout_version_drift_advisory(tmp_path):
     advisories = {entry["field"]: entry for entry in result["advisories"]}
     assert advisories.keys() == {"provenance.klayout_version"}
     assert advisories["provenance.klayout_version"]["report"] == "0.0.1-forged"
-    assert advisories["provenance.klayout_version"]["current"] == lvs._klayout_version()
+    assert (
+        advisories["provenance.klayout_version"]["current"]
+        == _provenance._klayout_version()
+    )
 
 
 def test_check_lvs_report_missing_version_fields_no_crash(tmp_path):
@@ -18331,6 +18545,11 @@ def test_run_lvs_macro_bus_anchoring_does_not_reach_internal_tie_nets(tmp_path):
     ]
     assert entry["details"]["pins"] == ["DIN[0]", "DIN[1]", "DOUT"]
 
+    # Issue #3014: the same swapped layout with the opt-in declaration is
+    # caught; the undeclared verdict above stays pinned as `match`.
+    declared = _constant_nets_report(tmp_path / "declared", swapped=True)
+    assert declared["status"] == "mismatch"
+
 
 # --------------------------------------------------------------------------- #
 # Issue #2704 design spike: can paired-instance pin anchoring be derived
@@ -18776,6 +18995,183 @@ def test_spike_2704_explicit_tie_net_declaration_catches_the_swap(tmp_path):
         ("LO", "__CONST0__"),
     ]
     assert all(m["details"] is None for m in rejected)
+
+
+_CONSTANT_NETS = {"__CONST0__": "LO", "__CONST1__": "HI"}
+
+
+def _constant_nets_report(tmp_path, *, swapped, constant_nets=None, hints=None):
+    """`run_lvs` over the #2692 tie fixture with `hints.constant_nets`."""
+    layout = _MACRO_TIE_LAYOUT_SPICE_SWAPPED if swapped else _MACRO_TIE_LAYOUT_SPICE
+    request = json.loads(
+        _macro_bus_request(tmp_path, layout, _MACRO_TIE_REFERENCE_VERILOG)
+    )
+    request["hints"] = {
+        **(hints or {}),
+        "constant_nets": _CONSTANT_NETS if constant_nets is None else constant_nets,
+    }
+    return run_lvs(json.dumps(request))
+
+
+def test_run_lvs_constant_nets_catches_swapped_tie_and_matches_clean(tmp_path):
+    """Issue #3014: `hints.constant_nets` binds each reference constant to the
+    layout node that carries it, so the swapped tie fixture reports
+    `mismatch` and its clean twin `match`. Refusals are attributed through
+    `details.declared_constant_net` (a hand-written `same_nets` refusal keeps
+    `details: null`), and the run discloses the bindings as a warning that
+    does not change `status`."""
+    clean = _constant_nets_report(tmp_path / "clean", swapped=False)
+    assert clean["status"] == "match"
+    assert clean["error_count"] == 0
+    (disclosure,) = [
+        m
+        for m in clean["mismatches"]
+        if m["category"] == "hints.constant_nets_declared"
+    ]
+    assert disclosure["severity"] == "warning"
+    assert disclosure["details"]["constant_nets"] == _CONSTANT_NETS
+    assert clean["constant_nets_applied"] == _CONSTANT_NETS
+
+    swapped = _constant_nets_report(tmp_path / "swapped", swapped=True)
+    assert swapped["status"] == "mismatch"
+    rejected = [m for m in swapped["mismatches"] if m["category"] == "hints.rejected"]
+    assert sorted(m["details"]["declared_constant_net"] for m in rejected) == [
+        "__CONST0__",
+        "__CONST1__",
+    ]
+    assert sorted((m["net"]["layout"], m["net"]["reference"]) for m in rejected) == [
+        ("HI", "__CONST1__"),
+        ("LO", "__CONST0__"),
+    ]
+
+
+def test_run_lvs_constant_nets_absent_emits_no_disclosure(tmp_path):
+    request = json.loads(
+        _macro_bus_request(
+            tmp_path, _MACRO_TIE_LAYOUT_SPICE, _MACRO_TIE_REFERENCE_VERILOG
+        )
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["constant_nets_applied"] is None
+    assert not [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "hints.constant_nets_declared"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("constant_nets", "hints", "message"),
+    [
+        ({"__CONST2__": "LO"}, None, "not a constant net the reference carries"),
+        ({"DIN[0]": "LO"}, None, "not a constant net the reference carries"),
+        ({"__CONST0__": "NOPE"}, None, "layout net 'NOPE' not found"),
+        (
+            {"__CONST0__": "LO", "__CONST1__": "LO"},
+            None,
+            "both bound to layout net 'LO'",
+        ),
+        (
+            _CONSTANT_NETS,
+            {"same_nets": [["LO", "__CONST0__"]]},
+            "ambiguous authority",
+        ),
+        (["__CONST0__"], None, "must be a JSON object"),
+    ],
+    ids=[
+        "unknown-constant",
+        "non-constant-net",
+        "missing-layout-net",
+        "two-constants-one-net",
+        "also-in-same-nets",
+        "wrong-shape",
+    ],
+)
+def test_run_lvs_constant_nets_validation_errors(
+    tmp_path, constant_nets, hints, message
+):
+    with pytest.raises(LvsError, match=message):
+        _constant_nets_report(
+            tmp_path, swapped=False, constant_nets=constant_nets, hints=hints
+        )
+
+
+def test_run_lvs_constant_nets_rejected_on_netgen_engine(tmp_path, monkeypatch):
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(tmp_path)
+    request = json.loads(Path(path).read_text())
+    request["hints"] = {"constant_nets": _CONSTANT_NETS}
+    Path(path).write_text(json.dumps(request))
+    with pytest.raises(LvsError, match="only supported for engine 'klayout'"):
+        run_lvs(path)
+
+
+def test_run_lvs_constant_nets_replayed_on_parameter_tolerance_retry(
+    tmp_path, monkeypatch
+):
+    """Issue #3014: the bindings are comparer state, re-applied on the fresh
+    comparer the `options.parameter_tolerance` second pass builds. The retry
+    is forced by stubbing the snap collection to offer one (no-op) snap, then
+    the verdict must still come from the bound compare -- a second pass that
+    dropped the bindings would flip the swapped fixture to `match`."""
+    from klayout_tools import lvs as lvs_module
+
+    applied = []
+    real = lvs_module._apply_constant_nets
+
+    def spy(*args, **kwargs):
+        result = real(*args, **kwargs)
+        applied.append(len(result[0]))
+        return result
+
+    offered = []
+
+    def one_snap(*_args, **_kwargs):
+        if offered:
+            return []
+        offered.append(True)
+        return ["snap"]
+
+    monkeypatch.setattr(lvs_module, "_apply_constant_nets", spy)
+    monkeypatch.setattr(lvs_module, "_collect_tolerance_snaps", one_snap)
+    monkeypatch.setattr(lvs_module, "_apply_tolerance_snaps", lambda *a, **k: None)
+    monkeypatch.setattr(
+        lvs_module,
+        "_tolerance_disclosure",
+        lambda *a, **k: lvs_module._mismatch("topology", "warning", "stub", "both"),
+    )
+
+    request = json.loads(
+        _macro_bus_request(
+            tmp_path, _MACRO_TIE_LAYOUT_SPICE_SWAPPED, _MACRO_TIE_REFERENCE_VERILOG
+        )
+    )
+    request["hints"] = {"constant_nets": _CONSTANT_NETS}
+    request.setdefault("options", {})["parameter_tolerance"] = 0.01
+    report = run_lvs(json.dumps(request))
+
+    assert applied == [2, 2]  # first pass + retry pass
+    assert report["status"] == "mismatch"
+
+
+def test_rerun_reconstructs_constant_nets_from_the_echo():
+    """Issue #3014: `--rerun` replays the applied bindings from the report's
+    `constant_nets_applied` echo."""
+    from klayout_tools.lvs import _reconstruct_lvs_request
+
+    request = _reconstruct_lvs_request(
+        {
+            "layout": "l.spice",
+            "reference": "r.spice",
+            "top": "top",
+            "constant_nets_applied": _CONSTANT_NETS,
+        }
+    )
+    assert request["hints"] == {"constant_nets": _CONSTANT_NETS}
+    assert "hints" not in _reconstruct_lvs_request(
+        {"layout": "l.spice", "reference": "r.spice", "constant_nets_applied": None}
+    )
 
 
 def test_run_lvs_anchor_top_level_pins_rejects_a_non_boolean(tmp_path):
@@ -19280,6 +19676,39 @@ def test_run_lvs_gate_level_verilog_power_connectivity_unexpected_net_remedy(
     for finding in findings:
         assert "request.power" in finding["description"]
         assert "klt place-and-route" in finding["description"]
+
+
+def test_run_lvs_gate_level_verilog_power_ground_finding_discloses_substrate_caveat(
+    tmp_path,
+):
+    """Issue #2971: a ground pin's inconsistent/unexpected finding says that
+    substrate continuity is not modelled in abstract-cell extraction (the
+    finding may be an artifact); the power pin's finding does not."""
+    miswired = _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER.replace(
+        "X1 in mid VGND VPWR mylib__inv_1", "X1 in mid VPWR VPWR mylib__inv_1"
+    )
+    report = run_lvs(json.dumps(_gate_level_power_request(tmp_path, miswired)))
+    (ground,) = report["power_connectivity"]["findings"]
+    assert ground["pin"] == "VGND"
+    assert ground["rule"] == "power.inconsistent_pin_net"
+    assert "substrate continuity" in ground["description"]
+    assert "--abstract-cells" in ground["description"]
+
+    swapped = _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER.replace(
+        "X1 in mid VGND VPWR mylib__inv_1", "X1 in mid VPWR VGND mylib__inv_1"
+    ).replace("X2 mid out VGND VPWR mylib__buf_1", "X2 mid out VPWR VGND mylib__buf_1")
+    request = _gate_level_power_request(
+        tmp_path,
+        swapped,
+        power_connectivity={"expected_nets": {"VPWR": "VPWR", "VGND": "VGND"}},
+    )
+    by_pin = {
+        f["pin"]: f
+        for f in run_lvs(json.dumps(request))["power_connectivity"]["findings"]
+    }
+    assert by_pin["VGND"]["rule"] == "power.unexpected_pin_net"
+    assert "substrate continuity" in by_pin["VGND"]["description"]
+    assert "substrate continuity" not in by_pin["VPWR"]["description"]
 
 
 def test_run_lvs_gate_level_verilog_power_connectivity_flags_unchecked_expected_pin(
@@ -23497,3 +23926,172 @@ def test_defined_subckt_names_upper_cases_and_merges_continuations():
 
     text = "* c\n.SUBCKT Foo a\n+ b\n.ends\n.subckt bar_1 x\n.ends\nX1 a b baz\n"
     assert defined_subckt_names(text) == {"FOO", "BAR_1"}
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2905: `subckt-call` resistor `R` filled from the deck (opt-in via
+# `options.compare_parameters`), through the same formula `klt extract` uses
+# for `r_ohm`.
+# --------------------------------------------------------------------------- #
+
+
+def _sky130_resistor(name):
+    from klayout_tools.decks import get_extraction_deck
+
+    return next(r for r in get_extraction_deck("sky130").resistors if r.name == name)
+
+
+def _xhigh_r_ohm(l_um, w_um):
+    # Independent restatement of the xhigh formula (no offset terms).
+    return l_um / w_um * _sky130_resistor("res_xhigh_po").sheet_rho_ohm_sq
+
+
+def _r_value_report(tmp_path, ref_w="1u", layout_scale=1.0, extra_options=None):
+    layout = (
+        ".subckt res_net A B C\n"
+        f"R1 A B {_xhigh_r_ohm(48.2, 1.0) * layout_scale!r} res_xhigh_po L=48.2U W=1U\n"
+        f"R2 B C {_xhigh_r_ohm(6.0, 1.0)!r} res_xhigh_po L=6U W=1U\n"
+        ".ends\n"
+    )
+    reference = (
+        ".subckt res_net A B C\n"
+        f"XR1 A B sky130_fd_pr__res_xhigh_po l=48.2u w={ref_w}\n"
+        "XR2 B C sky130_fd_pr__res_xhigh_po l=6u w=1u\n"
+        ".ends\n"
+    )
+    request = _placeholder_request(tmp_path, layout, reference, "res_net")
+    request["options"] = {
+        "compare_parameters": {"res_xhigh_po": ["R", "L", "W"]},
+        **(extra_options or {}),
+    }
+    return run_lvs(json.dumps(request))
+
+
+def test_subckt_call_resistor_r_filled_from_deck_matches(tmp_path):
+    report = _r_value_report(tmp_path)
+
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+    assert not [
+        e for e in report["mismatches"] if e["category"] == "device.placeholder_value"
+    ]
+    (coverage,) = report["device_parameter_coverage"]
+    assert coverage["compared"] == ["R", "L", "W"]
+    assert {"parameter": "R", "reason": "placeholder_value"} not in coverage[
+        "not_compared"
+    ]
+
+
+def test_subckt_call_resistor_r_negative_control_perturbed_width(tmp_path):
+    # Reference W differs from the layout's, so the deck-derived R differs.
+    report = _r_value_report(tmp_path, ref_w="1.2u")
+
+    assert report["status"] == "mismatch"
+    assert any(e["category"] == "device.property" for e in report["mismatches"])
+
+
+def test_subckt_call_resistor_r_negative_control_layout_r_differs(tmp_path):
+    report = _r_value_report(tmp_path, layout_scale=1.5)
+
+    assert report["status"] == "mismatch"
+    assert any(e["category"] == "device.property" for e in report["mismatches"])
+
+
+def test_subckt_call_resistor_r_parameter_tolerance_absorbs_small_delta(tmp_path):
+    report = _r_value_report(
+        tmp_path, layout_scale=1.001, extra_options={"parameter_tolerance": 0.01}
+    )
+
+    assert report["status"] == "match"
+
+
+def test_subckt_call_resistor_r_not_listed_keeps_placeholder(tmp_path):
+    # Without `R` in compare_parameters the behaviour is unchanged.
+    request = _placeholder_request(
+        tmp_path,
+        _PLACEHOLDER_RESISTOR_LAYOUT,
+        _PLACEHOLDER_RESISTOR_REFERENCE,
+        "res_net",
+    )
+    request["options"] = {"compare_parameters": {"res_xhigh_po": ["L", "W"]}}
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "match"
+    assert [
+        e for e in report["mismatches"] if e["category"] == "device.placeholder_value"
+    ]
+
+
+def test_convert_reference_netlist_fills_r_from_extract_formula():
+    from klayout_tools.extract import resistor_r_ohm_for_geometry
+    from klayout_tools.netlist_normalize import convert_reference_netlist
+
+    conversion = convert_reference_netlist(
+        ".subckt t A B C\n"
+        "XR1 A B sky130_fd_pr__res_high_po l=10u w=1u\n"
+        "XR2 B C sky130_fd_pr__res_xhigh_po l=6u w=1u\n"
+        "XC1 B C sky130_fd_pr__cap_mim_m3_1 l=1u w=1u\n"
+        ".ends\n",
+        deck="sky130",
+        resistor_value_classes=["RES_HIGH_PO", "res_xhigh_po"],
+    )
+
+    high = resistor_r_ohm_for_geometry(_sky130_resistor("res_high_po"), 10.0, 1.0)
+    # The fixed offset is part of the value: 3627.9776 (see
+    # `_RES_HIGH_PO_PDK_MODEL_SPICE`), not the body-only 3248.27244.
+    assert high == pytest.approx(3627.9776, abs=1e-3)
+    assert f"R1 A B {high!r} res_high_po L=10U W=1U" in conversion.text
+    assert conversion.placeholder_value_classes == {
+        "sky130_fd_pr__model__cap_mim": "capacitor"
+    }
+
+
+def test_convert_reference_netlist_no_deck_model_keeps_placeholder():
+    from klayout_tools.netlist_normalize import convert_reference_netlist
+
+    # `res_generic_nd` is requested but no such class has a sheet resistance
+    # in the sky130 resistor list of this request -> placeholder stays.
+    conversion = convert_reference_netlist(
+        ".subckt t A B\nXR1 A B sky130_fd_pr__res_xhigh_po l=6u w=1u\n.ends\n",
+        deck="sky130",
+        resistor_value_classes=["res_not_in_deck"],
+    )
+
+    assert "R1 A B 0 res_xhigh_po" in conversion.text
+    assert conversion.placeholder_value_classes == {"res_xhigh_po": "resistor"}
+
+
+def test_subckt_call_res_high_po_fixed_offset_matches_extracted_layout(tmp_path):
+    # Extracted layout carries the fixed-offset-corrected R (3627.9776); the
+    # subckt-call reference must reproduce it through the shared formula, and
+    # a body-only value must not.
+    gds = _write_res_high_po_gds(tmp_path / "res_high_po.gds")
+    reference = _write(
+        tmp_path / "ref.spice",
+        ".subckt RES RA RB vsubs\n"
+        "XR1 RA RB vsubs sky130_fd_pr__res_high_po l=10u w=1u\n"
+        ".ends\n",
+    )
+    request = {
+        "layout": {"file": gds, "deck": "sky130"},
+        "reference": {
+            "netlist": reference,
+            "top": "RES",
+            "form": "subckt-call",
+            "deck": "sky130",
+        },
+        "options": {"compare_parameters": {"res_high_po": ["R", "L", "W"]}},
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+
+    # Negative control: a longer reference length changes R (and L).
+    reference_long = _write(
+        tmp_path / "ref_long.spice",
+        ".subckt RES RA RB vsubs\n"
+        "XR1 RA RB vsubs sky130_fd_pr__res_high_po l=11u w=1u\n"
+        ".ends\n",
+    )
+    request["reference"]["netlist"] = reference_long
+    assert run_lvs(json.dumps(request))["status"] == "mismatch"

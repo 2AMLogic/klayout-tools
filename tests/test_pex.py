@@ -336,6 +336,21 @@ def test_row_status_error_when_schematic_missing():
     assert _row_status(None, _measurement(1.1)) == "error"
 
 
+def test_row_status_error_when_only_extracted_absent():
+    assert _row_status(_measurement(1.0), _measurement(None, "absent")) == "error"
+
+
+def test_row_status_error_when_only_schematic_absent():
+    assert _row_status(_measurement(None, "absent"), _measurement(1.1)) == "error"
+
+
+def test_row_status_pass_when_both_absent():
+    assert (
+        _row_status(_measurement(None, "absent"), _measurement(None, "absent"))
+        == "pass"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # `_build_delta_rows`
 # --------------------------------------------------------------------------- #
@@ -394,6 +409,49 @@ def test_build_delta_rows_missing_schematic_measurement_is_error_side():
     )
     assert row["schematic_status"] == "error"
     assert row["extracted_status"] == "pass"
+
+
+def _absent_rows(schematic_status, extracted_status):
+    def side(status):
+        return _sim_report(
+            [
+                {
+                    "corner_id": "tt",
+                    "measurements": [
+                        _measurement(None if status == "absent" else 1.0, status)
+                    ],
+                    "diagnostics": [],
+                }
+            ]
+        )
+
+    return _build_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=side(schematic_status),
+        extracted_report=side(extracted_status),
+    )
+
+
+def test_build_delta_rows_extracted_absent_is_error_blaming_extracted():
+    (row,) = _absent_rows("pass", "absent")
+    assert row["status"] == "error"
+    assert row["delta_pct"] is None
+    assert row["extracted_status"] == "absent"
+    assert row["error"]["side"] == "extracted"
+
+
+def test_build_delta_rows_schematic_absent_is_error_blaming_schematic():
+    (row,) = _absent_rows("absent", "pass")
+    assert row["status"] == "error"
+    assert row["schematic_status"] == "absent"
+    assert row["error"]["side"] == "schematic"
+
+
+def test_build_delta_rows_both_absent_is_pass():
+    (row,) = _absent_rows("absent", "absent")
+    assert row["status"] == "pass"
+    assert row["delta_pct"] is None
+    assert "error" not in row
 
 
 def test_unextracted_delta_rows_carry_per_side_status():
@@ -3955,6 +4013,41 @@ def test_run_pex_measure_command_leaves_backend_env_alone_without_flag(
         "KLT_PEX_BACKEND": None,
         "KLT_SIM_BACKEND": "batch",
     }
+
+
+#: A harness that takes ownership of the directory a nested ``klt sim`` would
+#: default to (``.klt/sim`` beside a request under $KLT_PEX_ARTIFACTS_DIR) while
+#: the parent ``klt pex`` holds its outdir locked (#3291).
+_NESTED_LOCK_HARNESS = """\
+import json, os
+from klayout_tools import output_lock
+
+with output_lock.hold_output_dir(
+    os.path.join(os.environ["KLT_PEX_ARTIFACTS_DIR"], ".klt", "sim")
+):
+    pass
+print(json.dumps({"corners": [{"corner_id": "tt", "measurements": [
+    {"name": "t_cross", "value": 1.0, "status": "pass"}]}]}))
+"""
+
+
+def test_run_pex_measure_command_child_can_own_dir_under_artifacts_dir(
+    tmp_path, resistor_layout, measure_reference, monkeypatch
+):
+    """Issue #3291: the parent's flock is per-process, so without the inherited
+    marker a nested `klt sim` under $KLT_PEX_ARTIFACTS_DIR is `outdir_locked`."""
+    monkeypatch.setenv("KLT_LOCK_DIR", str(tmp_path / "locks"))
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, _NESTED_LOCK_HARNESS),
+        reference_netlist=measure_reference,
+    )
+
+    assert report["status"] == "pass"
 
 
 def test_run_pex_measure_command_keeps_extraction_disclosures(

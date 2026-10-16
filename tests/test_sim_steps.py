@@ -117,7 +117,7 @@ def _stub_ngspice(monkeypatch, log_text: str) -> list[str]:
     record the deck text each invocation was handed."""
     decks: list[str] = []
 
-    def fake_run(cmd, capture_output, text, timeout, cwd=None):
+    def fake_run(cmd, capture_output, text, timeout, cwd=None, env=None):
         decks.append(Path(cmd[cmd.index("-b") + 1]).read_text())
         Path(cmd[cmd.index("-o") + 1]).write_text(log_text)
         return fake_completed("** ngspice-46\n")
@@ -1206,6 +1206,22 @@ def test_real_ngspice_failed_derived_expression(tmp_path):
     failing = [d for d in corner["diagnostics"] if "bad_ratio" in d["message"]]
     assert [d["code"] for d in failing] == ["measurement"]
     assert all(step["status"] == "ok" for step in corner["steps"])
+
+
+def test_optional_true_is_refused_in_step_and_derived_measurements():
+    """Issue #2925: `optional` is scalar-analysis only; refused, not ignored."""
+    step_request = _two_point_request()
+    step_request["analysis_steps"][0]["measurements"][0]["optional"] = True
+    with pytest.raises(sim.SimError, match="'optional' is not supported"):
+        _resolve(step_request)
+    derived_request = _two_point_request()
+    derived_request["measurements"][0]["optional"] = True
+    with pytest.raises(sim.SimError, match="'optional' is not supported"):
+        _resolve(derived_request)
+    # `false` is the default and stays accepted.
+    ok = _two_point_request()
+    ok["measurements"][0]["optional"] = False
+    _resolve(ok)
 
 
 # --------------------------------------------------------------------------- #

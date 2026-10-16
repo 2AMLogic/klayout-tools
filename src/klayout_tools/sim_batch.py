@@ -90,9 +90,11 @@ import random
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -100,10 +102,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from . import _provenance, remote_transport, sim_staging
+from . import _provenance, remote_transport, sim_staging, sim_transfer_meas
 from .remote_launcher import (
     ASSUMED_THREADS_PER_CORNER,
     RemoteLaunchError,
+    _signal_handlers_install,
+    _signal_handlers_restore,
     ami_pdk_key,
     published_runner_identities,
 )
@@ -183,6 +187,29 @@ _BATCH_PREFLIGHT_REJECT_EXIT = 87
 #: client's before any simulation runs; ``warn`` runs anyway and reports the
 #: skew in ``environment.remote``.
 RUNNER_VERSION_CHECK_MODES = ("enforce", "warn")
+
+#: Request feature -> minimum ``klt`` release whose runner understands it
+#: (#2877). Pure data, importable without side effects, so a client-side field
+#: preflight (#2901) can consume it. ``None`` means the feature exists only on
+#: unreleased ``main`` (no git tag contains it yet) -- never a guessed version.
+#: Versions were derived with ``git log -S<token>`` plus
+#: ``git tag --contains <commit>``; the commit is cited per entry. The 0.5.0
+#: fleet image predates every entry below that has a version.
+REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
+    # 328b552b feat(sim): add measurements[].expr (#2533); first in v0.7.0.
+    "measurements[].expr": "0.7.0",
+    # 31baf0bc per-section model libraries in a corners.process bundle (#2538);
+    # first in v0.7.0. (The plain-string sections[] form dates from 9bea8456,
+    # #357, v0.2.0 line.)
+    "corners.process[].sections[] (object form)": "0.7.0",
+    # 1b51954f options.ngspice_init (#2530); first in v0.7.0.
+    "options.ngspice_init": "0.7.0",
+    # 8296828c options.osdi_preload (#2534); first in v0.7.0.
+    "options.osdi_preload": "0.7.0",
+    # d4d497ee ordered analysis_steps[] (#2482), 2026-10-09, after v0.7.0:
+    # the only route to .meas cards on a noise analysis. Untagged.
+    "analysis_steps[].measurements[] (noise analysis .meas cards)": None,
+}
 
 #: Upper bound on how much of the collected stderr file recovery reads (its
 #: tail). The envelope is the last thing klt writes; anything earlier is
@@ -302,6 +329,16 @@ BATCH_NO_CAPACITY_CODE = "batch_no_capacity"
 #: can tell slot contention from a Spot shortage.
 BATCH_CONCURRENCY_CAP_CODE = "batch_concurrency_cap"
 
+#: ``error.code`` of a client terminated (SIGINT/SIGTERM) while waiting on a
+#: submitted job (issue #3065). The remote job is deliberately left running.
+BATCH_INTERRUPTED_CODE = "batch_client_interrupted"
+
+#: Submit receipt written into the artifacts directory right after launch
+#: (issue #3065) -- the on-disk record of which fleet job this client
+#: orphaned if it dies mid-wait. A sharded run writes
+#: ``batch-receipt-<job-id>.json`` per shard instead.
+BATCH_RECEIPT_FILENAME = "batch-receipt.json"
+
 #: Capacity-wait backoff (``request.batch.capacity_wait_s``, issue #2721):
 #: the first re-launch waits ~:data:`_CAPACITY_BACKOFF_BASE_S`, each further
 #: one doubles, capped at :data:`_CAPACITY_BACKOFF_CAP_S`. Every delay is
@@ -316,8 +353,28 @@ BATCH_TERMINAL_STATES = ("done", "failed", "timeout")
 #: ``status.json`` states that mean "keep waiting". ``interrupted`` is
 #: included on purpose: Spot reclaimed the instance, and 2am's own
 #: ``reconcile`` (scheduled on the captain, 2am#533) re-launches the job.
-#: The client waits; it never re-submits an ``interrupted`` job itself.
+#: The client waits (at most ``request.batch.interrupted_grace_s`` of
+#: continuous ``interrupted``, issue #2992); it never re-submits an
+#: ``interrupted`` job itself.
 BATCH_WAITING_STATES = ("running", "interrupted")
+
+#: Machine-readable diagnostic/``error.code`` of a poll that gave up on a job
+#: that stayed ``interrupted`` for longer than
+#: ``request.batch.interrupted_grace_s`` (issue #2992).
+BATCH_JOB_INTERRUPTED_CODE = "batch_job_interrupted"
+
+#: Diagnostic/``error.code`` of a poll whose wall-clock budget elapsed.
+BATCH_POLL_TIMEOUT_CODE = "batch_poll_timeout"
+
+#: Default for ``request.batch.interrupted_grace_s``: how long a job may sit
+#: continuously ``interrupted`` (waiting for 2am's scheduled ``reconcile`` to
+#: re-launch it) before :func:`poll_status` stops waiting. ``0`` disables the
+#: fail-fast and restores waiting out the whole ``poll_timeout_s``.
+DEFAULT_INTERRUPTED_GRACE_S = 1800.0
+
+#: :func:`poll_status` prints a progress line on stderr on every state change
+#: and otherwise once every this many polls.
+_POLL_PROGRESS_EVERY = 10
 
 #: `klt sim` exit codes that still mean "the sweep ran and wrote a report":
 #: 0 (pass) / 3 (measurement failure) / 4 (corner error). The harness marks
@@ -367,6 +424,21 @@ class BatchError(Exception):
         self.code = code
 
 
+class BatchClientInterrupted(BatchError):
+    """SIGINT/SIGTERM arrived while waiting on a submitted job (issue #3065).
+
+    Re-raised by :func:`_run_batch` as a ``SimError`` carrying
+    :data:`BATCH_INTERRUPTED_CODE`. The fleet exposes no cancel primitive, so
+    the remote job keeps running; the message names it so the caller can
+    tell whether resubmitting would pay twice.
+    """
+
+    def __init__(self, message: str, *, job_id: str, signum: int) -> None:
+        super().__init__(message, code=BATCH_INTERRUPTED_CODE)
+        self.job_id = job_id
+        self.signum = signum
+
+
 class BatchPollTimeout(BatchError):
     """The wall-clock poll budget elapsed with the job still non-terminal.
 
@@ -378,9 +450,35 @@ class BatchPollTimeout(BatchError):
     failed.
     """
 
-    def __init__(self, message: str, *, last_state: str | None = None) -> None:
-        super().__init__(message)
+    def __init__(
+        self,
+        message: str,
+        *,
+        last_state: str | None = None,
+        code: str | None = BATCH_POLL_TIMEOUT_CODE,
+    ) -> None:
+        super().__init__(message, code=code)
         self.last_state = last_state
+
+
+class BatchJobInterrupted(BatchPollTimeout):
+    """The job stayed ``interrupted`` for longer than
+    ``config.interrupted_grace_s`` (issue #2992), so polling stopped early
+    rather than waiting out ``poll_timeout_s`` for a ``reconcile`` re-launch
+    that is not coming.
+
+    A :class:`BatchPollTimeout` subclass: every handler of the poll budget
+    reports the job's units as unrun and not failed -- the job may still be
+    recoverable on the fleet -- but with ``code ==
+    "batch_job_interrupted"`` and ``interrupted_s`` recording how long it
+    had been interrupted.
+    """
+
+    def __init__(self, message: str, *, interrupted_s: float) -> None:
+        super().__init__(
+            message, last_state="interrupted", code=BATCH_JOB_INTERRUPTED_CODE
+        )
+        self.interrupted_s = interrupted_s
 
 
 # --------------------------------------------------------------------------- #
@@ -520,13 +618,27 @@ def _runner_gate_release(version: str) -> str | None:
 #: release segment that can carry it is ``0.7.1`` (post-tag builds render as
 #: ``0.7.1.devN``). A ``0.7.1.devN`` runner built before the feature landed is
 #: indistinguishable from one built after, so it counts as supporting it.
-#: Next candidate entry: ``decks[]`` (#3303).
+#: ``transfer`` (``measurements[].transfer``, #2923/#2924) was merged after
+#: ``v0.7.0`` too, so ``0.7.1`` is likewise its first release segment.
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": (
         (0, 7, 1),
         lambda request: request.get("analysis_steps") is not None,
     ),
+    "transfer": (
+        (0, 7, 1),
+        lambda request: bool(
+            sim_transfer_meas.transfer_measurements(request.get("measurements") or [])
+        ),
+    ),
 }
+
+#: Registry features a runner must be *known* to support (issue #2924): a
+#: runner that predates one, or whose version cannot be read, is refused
+#: whatever ``runner_version_check`` says, because the alternative is a worker
+#: that accepts the request and omits the metric. Every other registry
+#: feature keeps the warn-and-run behaviour of #3249.
+_MANDATORY_RUNNER_FEATURES = frozenset({"transfer"})
 
 
 def _release_key(release: str) -> int | None:
@@ -922,6 +1034,15 @@ def _runner_preflight_script(
     ]
     if required_features:
         lines.append(_feature_gate_shell(required_features, client_version))
+    mandatory = tuple(
+        name for name in required_features if name in _MANDATORY_RUNNER_FEATURES
+    )
+    if mandatory:
+        lines.append(
+            _mandatory_feature_gate_shell(
+                mandatory, report_path=report_path
+            ).removesuffix("; ")
+        )
     if capture:
         # Issue #2834: the worker capture rides the same preflight, *before*
         # the enforce gate so a rejected job still leaves it collectable.
@@ -938,6 +1059,118 @@ def _runner_preflight_script(
             "exit " + str(_BATCH_PREFLIGHT_REJECT_EXIT) + "; fi"
         )
     return "; ".join(lines) + "; "
+
+
+def _mandatory_feature_gate_shell(
+    features: tuple[str, ...], *, report_path: str | None = None
+) -> str:
+    """Shell that rejects a runner not known to support a
+    :data:`_MANDATORY_RUNNER_FEATURES` entry (issue #2924); needs ``$rv``.
+    Unlike the version gate and :func:`_feature_gate_shell` it is not relaxed
+    by ``runner_version_check: "warn"``, and an unreadable runner version is
+    rejected too. Exits :data:`_BATCH_PREFLIGHT_REJECT_EXIT` with the message
+    on stderr and, when ``report_path`` is given (the batch job), a klt error
+    envelope carrying :data:`BATCH_RUNNER_FEATURE_CODE` there -- before
+    ``klt sim`` runs."""
+    envelope = ""
+    if report_path is not None:
+        envelope = (
+            'printf \'{"schema_version": 1, "error": {"command": "sim", '
+            f'"code": "{BATCH_RUNNER_FEATURE_CODE}", "message": "%s"}}}}\\n\' '
+            f'"$mmsg" >{report_path}; '
+        )
+    return (
+        _mandatory_feature_probe_shell(features)
+        + 'if [ -n "$mmiss" ]; then '
+        + 'mmsg="the worker runs klt ${rv:-<unknown>}, which is not known '
+        + "to support the request feature(s) $mmiss -- the request was not run "
+        + '(rebuild the runner image from a release that has the feature)"; '
+        + envelope
+        + 'echo "$mmsg" >&2; exit '
+        + str(_BATCH_PREFLIGHT_REJECT_EXIT)
+        + "; fi; "
+    )
+
+
+def remote_feature_preflight(request: dict[str, Any]) -> str:
+    """Shell prefix for the ``remote`` backend's ``klt sim`` command (issue
+    #2924): on the provisioned host, read ``klt --version`` and refuse a
+    request that uses a :data:`_MANDATORY_RUNNER_FEATURES` entry the host's
+    ``klt`` is not known to support, before any simulation. Empty (the
+    command is byte-identical to before) when the request uses none."""
+    features = tuple(
+        name
+        for name in _request_features(request)
+        if name in _MANDATORY_RUNNER_FEATURES
+    )
+    if not features:
+        return ""
+    return (
+        "rv=$(klt --version 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._+ -'"
+        " | cut -c1-80); rv=${rv#klt }; rv=${rv# }; "
+        + _mandatory_feature_gate_shell(features)
+    )
+
+
+def assess_remote_runner_features(
+    request: dict[str, Any], pdk: str | None, region: str | None, manifest: Any
+) -> None:
+    """Refuse a ``remote`` request before any billable launch when the AMI
+    manifest says the image it would boot predates a mandatory registry
+    feature the request uses (issue #2924). Anything less certain (no
+    manifest, a legacy entry without ``klt_version``) proceeds to
+    :func:`remote_feature_preflight` on the host. Never relaxed by a warn
+    policy: ``remote`` has none, and a silently dropped metric is worse."""
+    from .sim import SimError
+
+    features = [
+        name
+        for name in _request_features(request)
+        if name in _MANDATORY_RUNNER_FEATURES
+    ]
+    if not features:
+        return
+    try:
+        images = published_runner_identities(pdk, region, manifest)
+    except (RemoteLaunchError, OSError, TypeError, ValueError, AttributeError):
+        return
+    gaps = [
+        _missing_runner_features(features, image["klt_version"]) for image in images
+    ]
+    if not gaps or any(not gap for gap in gaps):
+        return
+    missing = sorted({name for gap in gaps for name in gap or ()})
+    versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
+    raise SimError(
+        f"backend 'remote' refused before launch: the request uses "
+        f"{', '.join(missing)}, which the AMI manifest's runner image "
+        f"(klt {versions}) predates -- no instance was launched (rebuild the "
+        "remote-sim AMI from a release that has the feature; see "
+        "docs/cli/sim.md)",
+        code=BATCH_RUNNER_FEATURE_CODE,
+    )
+
+
+def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
+    """Shell setting ``$mmiss`` to the ``features`` the runner is not known
+    to support, from ``$rv`` (the runner's ``klt --version`` string). It
+    derives the full release segment itself so the remote backend can reuse
+    it without the batch preflight's ``$rfull``."""
+    checks = " ".join(
+        f'if [ "$mk" -lt {_feature_release_key(name)} ]; '
+        f'then mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
+        for name in features
+    )
+    names = ", ".join(features)
+    return (
+        "mmiss=; mr=${rv%%+*}; mr=${mr%%[!0-9.]*}; mr=${mr%.}; "
+        'case "$mr" in ""|.*|*..*) mr= ;; esac; '
+        'if [ -z "$mr" ]; then '
+        f'mmiss="{names}"; else '
+        'IFS=. read -r f1 f2 f3 _ <<<"$mr"; '
+        "mk=$(( (10#${f1:-0} * 1000000 + 10#${f2:-0}) * 1000000 "
+        "+ 10#${f3:-0} )); " + checks + " fi; "
+    )
 
 
 def _feature_gate_shell(features: tuple[str, ...], client_version: str) -> str:
@@ -1155,6 +1388,8 @@ class BatchConfig:
     #: units of one job; ``None`` -- the default -- leaves the split to
     #: ``job_ceiling_check: "split"`` (or to no split at all).
     max_units_per_job: int | None = None
+    #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
+    interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
 
 
 def _read_fleet_config(provision_script: str) -> dict[str, str]:
@@ -1461,6 +1696,7 @@ def _resolve_batch_config(
         max_job_seconds_source=max_job_seconds_source,
         job_ceiling_check=job_ceiling_check,
         max_units_per_job=max_units_per_job,
+        interrupted_grace_s=_resolve_interrupted_grace_s(batch_spec),
     )
     # Issue #2851: compare the runner klt the AMI manifest publishes with
     # this client, once per request (so once for every shard of a
@@ -1585,12 +1821,22 @@ def _enforce_published_runner_features(
     if any(not gap for gap in gaps):  # unknown (None) or complete (empty)
         return
     missing = sorted({name for gap in gaps for name in gap or ()})
+    mandatory = bool(_MANDATORY_RUNNER_FEATURES.intersection(missing))
     versions = ", ".join(sorted({str(image["klt_version"]) for image in images}))
     message = (
         f"the request uses {', '.join(missing)}, which the fleet runner image "
         f"(klt {versions}) predates; the submitting client is klt "
         f"{assessment['client_klt_version']}"
     )
+    if mandatory:
+        raise SimError(
+            f"backend 'batch' refused before submission: {message} -- the "
+            "request was not submitted and no instance was launched; a "
+            "runner that predates this feature would drop it, so "
+            "runner_version_check does not relax this (rebuild the runner "
+            "image from a release that has the feature; see docs/cli/sim.md)",
+            code=BATCH_RUNNER_FEATURE_CODE,
+        )
     if assessment["check"] != "enforce":
         print(f"klt sim: warning: {message}; submitting anyway", file=sys.stderr)
         return
@@ -1875,6 +2121,27 @@ def _resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
     return float(value)
 
 
+def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
+    """``request.batch.interrupted_grace_s``: a finite, non-negative number of
+    seconds (default :data:`DEFAULT_INTERRUPTED_GRACE_S`; ``0`` disables the
+    fail-fast), else :class:`~klayout_tools.sim.SimError` -- raised before any
+    S3 write. A ``bool`` is refused, as for ``capacity_wait_s``."""
+    from .sim import SimError
+
+    value = batch_spec.get("interrupted_grace_s", DEFAULT_INTERRUPTED_GRACE_S)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise SimError(
+            "request.batch.interrupted_grace_s must be a non-negative number "
+            f"of seconds (got {value!r})"
+        )
+    return float(value)
+
+
 # --------------------------------------------------------------------------- #
 # S3 / launch transport (every call through an injectable runner)
 # --------------------------------------------------------------------------- #
@@ -1982,12 +2249,19 @@ def _capacity_backoff_s(retry_index: int, jitter: Callable[[], float]) -> float:
     return nominal * (0.5 + 0.5 * jitter())
 
 
+def _progress(line: str) -> None:
+    """One progress line on stderr (never stdout: that carries the JSON
+    envelope). Resolves ``sys.stderr`` at call time so it can be captured."""
+    print(line, file=sys.stderr, flush=True)
+
+
 def submit_job(
     config: BatchConfig,
     job_id: str,
     spec: BatchJobSpec,
     *,
     runner: remote_transport.CommandRunner | None = None,
+    progress: bool = True,
 ) -> None:
     """Upload ``inputs/**`` and then ``job.json`` to
     ``s3://<bucket>/<jobs>/<job-id>/``.
@@ -1997,9 +2271,15 @@ def submit_job(
     head-object``) and the harness fetches first, so writing it last makes
     the submission atomic from the fleet's point of view -- a launch can
     never observe a job spec whose inputs are still uploading.
+
+    ``progress`` (issue #2992) prints the job id on stderr before uploading;
+    a verb whose stderr carries its error envelope (``klt netlist``) passes
+    ``False``.
     """
     run = runner if runner is not None else _run_subprocess
     prefix = job_uri(config, job_id)
+    if progress:
+        _progress(f"klt: batch job {job_id} submitting to {prefix}")
     with tempfile.TemporaryDirectory(prefix="klt-batch-") as staging:
         for item in spec.inputs:
             local_path = item.local_path
@@ -2186,9 +2466,74 @@ def job_exists(
     return result.returncode == 0
 
 
+def _advance_interrupted_clock(
+    state: str, interrupted_since: float | None, now: float
+) -> float | None:
+    """Start the continuous-``interrupted`` clock on entry, reset it on any
+    other state."""
+    if state != "interrupted":
+        return None
+    return now if interrupted_since is None else interrupted_since
+
+
+def _format_progress(
+    job_id: str, status: dict[str, Any], state: str, elapsed_s: float
+) -> str:
+    """The stderr progress line for one observed ``status.json``."""
+    instance = status.get("instance_id")
+    return f"klt: batch job {job_id} state={state} elapsed={elapsed_s:.0f}s" + (
+        f" instance={instance}" if instance else ""
+    )
+
+
+def _check_interrupted_grace(
+    config: BatchConfig,
+    job_id: str,
+    interrupted_since: float | None,
+    now: float,
+) -> None:
+    """Raise :class:`BatchJobInterrupted` once the job has been continuously
+    ``interrupted`` for ``config.interrupted_grace_s`` (``0`` = unbounded)."""
+    if (
+        interrupted_since is None
+        or config.interrupted_grace_s <= 0
+        or now - interrupted_since < config.interrupted_grace_s
+    ):
+        return
+    interrupted_s = now - interrupted_since
+    raise BatchJobInterrupted(
+        f"job {job_id} stayed 'interrupted' (Spot reclaimed) for "
+        f"{interrupted_s:.0f}s, past batch.interrupted_grace_s="
+        f"{config.interrupted_grace_s:g}s, with no re-launch observed; "
+        "it may still be recoverable on the fleet (check "
+        f"{job_uri(config, job_id)}/status.json) -- the client does "
+        "not re-launch it itself",
+        interrupted_s=interrupted_s,
+    )
+
+
 def _report_progress(job_id: str, state: str) -> None:
     """One per-job progress line on stderr (stdout carries the JSON report)."""
     print(f"klt sim: batch job {job_id}: {state}", file=sys.stderr, flush=True)
+
+
+def _check_never_started(
+    config: BatchConfig, job_id: str, last_state: str | None, elapsed: float
+) -> None:
+    """Raise :class:`BatchPollTimeout` when no ``status.json`` was ever
+    observed within :data:`_BATCH_PROVISION_SLACK_S` (and the overall poll
+    budget has not itself elapsed, which reports the ordinary timeout)."""
+    if (
+        last_state is None
+        and elapsed >= _BATCH_PROVISION_SLACK_S
+        and elapsed < config.poll_timeout_s
+    ):
+        raise BatchPollTimeout(
+            f"job {job_id} never started: no status.json after "
+            f"{_BATCH_PROVISION_SLACK_S:g}s (last observed state: "
+            "no status.json yet)",
+            last_state=None,
+        )
 
 
 def poll_status(
@@ -2199,6 +2544,7 @@ def poll_status(
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
     heartbeat: bool = False,
+    progress: bool = True,
     on_state: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Poll ``status.json`` until the job reaches a terminal state
@@ -2208,7 +2554,15 @@ def poll_status(
     (:data:`BATCH_WAITING_STATES`). ``interrupted`` specifically is **not**
     re-submitted here: Spot reclaimed the instance and 2am's own scheduled
     ``reconcile`` re-launches the job -- a client that also re-launched
-    would double-spend the shared fleet budget.
+    would double-spend the shared fleet budget. The wait is bounded, though:
+    a job continuously ``interrupted`` for longer than
+    ``config.interrupted_grace_s`` (``0`` = unbounded) raises
+    :class:`BatchJobInterrupted`; returning to ``running`` resets that clock,
+    and an unreadable ``status.json`` neither starts nor resets it.
+
+    Unless ``progress=False``, progress goes to stderr (:func:`_progress`): a
+    line on every state change and one per :data:`_POLL_PROGRESS_EVERY` polls
+    otherwise (state, elapsed, the instance id when ``status.json`` has one).
 
     ``on_state`` is called once per *change* of observed state (including a
     flip back, e.g. ``interrupted`` -> ``running``); unchanged and unreadable
@@ -2223,8 +2577,10 @@ def poll_status(
     :class:`BatchError` on a state outside the documented set -- a contract
     violation, surfaced loudly rather than waited on forever.
 
-    With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, ``klt netlist``
-    does not, so its stderr stays a bare JSON envelope), a heartbeat line
+    With ``heartbeat=True`` (opt-in; ``klt sim`` sets it, with
+    ``progress=False`` so the two stderr streams do not duplicate each other;
+    ``klt netlist`` does not, so its stderr stays a bare JSON envelope), a
+    heartbeat line
     (job id, last observed state, elapsed) goes to **stderr** on every state
     change and otherwise every :data:`BATCH_HEARTBEAT_INTERVAL_S`
     (issue #2978).
@@ -2234,8 +2590,13 @@ def poll_status(
     last_state: str | None = None
     beat_state: str | None = None
     beat_at: float | None = None
+    reported_state: str | None = None
+    interrupted_since: float | None = None
+    polls = 0
     while True:
+        polls += 1
         status = _read_status(config, job_id, run)
+        now = monotonic()
         if status is not None:
             new_state = str(status.get("state") or "")
             if on_state is not None and new_state != last_state:
@@ -2249,18 +2610,22 @@ def poll_status(
                     f"{last_state!r} (expected one of "
                     f"{', '.join(BATCH_WAITING_STATES + BATCH_TERMINAL_STATES)})"
                 )
-        elapsed = monotonic() - started
-        if (
-            last_state is None
-            and elapsed >= _BATCH_PROVISION_SLACK_S
-            and elapsed < config.poll_timeout_s
-        ):
-            raise BatchPollTimeout(
-                f"job {job_id} never started: no status.json after "
-                f"{_BATCH_PROVISION_SLACK_S:g}s (last observed state: "
-                "no status.json yet)",
-                last_state=None,
+            interrupted_since = _advance_interrupted_clock(
+                last_state, interrupted_since, now
             )
+            if progress and (
+                last_state != reported_state or polls % _POLL_PROGRESS_EVERY == 0
+            ):
+                reported_state = last_state
+                _progress(_format_progress(job_id, status, last_state, now - started))
+        elif progress and polls % _POLL_PROGRESS_EVERY == 0:
+            _progress(
+                f"klt: batch job {job_id} no readable status.json "
+                f"elapsed={now - started:.0f}s"
+            )
+        _check_interrupted_grace(config, job_id, interrupted_since, now)
+        elapsed = now - started
+        _check_never_started(config, job_id, last_state, elapsed)
         if elapsed >= config.poll_timeout_s:
             raise BatchPollTimeout(
                 f"job {job_id} did not reach a terminal state within "
@@ -2997,13 +3362,19 @@ def _poll_timeout_corners(
     exc: BatchPollTimeout,
 ) -> list[dict[str, Any]]:
     """Every unit of a job whose wall-clock poll budget elapsed, reported
-    through the shared unrun-corner shape (``batch_poll_timeout``). The job
+    through the shared unrun-corner shape (``batch_poll_timeout``, or
+    ``batch_job_interrupted`` for :class:`BatchJobInterrupted`). The job
     may well still be running on the fleet -- which is exactly why this is
     not a ``SimError``: the sweep reports what it knows instead of claiming
     the run failed."""
     return [
         _unrun_corner_report(
-            point, measurements_spec, "batch_poll_timeout", message=str(exc)
+            point,
+            measurements_spec,
+            "batch_job_interrupted"
+            if isinstance(exc, BatchJobInterrupted)
+            else "batch_poll_timeout",
+            message=str(exc),
         )
         for point in corner_points
     ]
@@ -3054,6 +3425,82 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
+    """Atomically (temp + rename) write the submit receipt. A failure to
+    write is a stderr warning, never a failed sweep: the receipt is
+    provenance, not part of the result."""
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(receipt, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        print(
+            f"klt sim: warning: could not write batch receipt {path}: {exc}",
+            file=sys.stderr,
+        )
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _poll_status_interruptibly(
+    config: BatchConfig,
+    job_id: str,
+    *,
+    runner: remote_transport.CommandRunner | None,
+    sleep: Any,
+    heartbeat: bool = False,
+    progress: bool = True,
+    on_state: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """:func:`poll_status`, with SIGINT/SIGTERM converted into
+    :class:`BatchClientInterrupted` for the duration of the wait only
+    (issue #3065). Prior handlers are restored on every exit path. Handlers
+    can only be installed from the main thread, so a sharded run's worker
+    threads poll unwrapped (their receipts are still written)."""
+    if threading.current_thread() is not threading.main_thread():
+        return poll_status(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            progress=progress,
+            on_state=on_state,
+        )
+
+    def _handle(signum: int, _frame: Any) -> None:
+        raise BatchClientInterrupted(
+            f"client terminated by {signal.Signals(signum).name} while waiting "
+            f"on job {job_id} (bucket {config.bucket}, region {config.region}); "
+            "the remote job is left running -- the fleet has no cancel",
+            job_id=job_id,
+            signum=signum,
+        )
+
+    prev_handlers: dict[int, Any] = {}
+    _signal_handlers_install(prev_handlers, _handle)
+    try:
+        return poll_status(
+            config,
+            job_id,
+            runner=runner,
+            sleep=sleep,
+            heartbeat=heartbeat,
+            progress=progress,
+            on_state=on_state,
+        )
+    except BatchClientInterrupted as exc:
+        print(f"klt sim: {exc}", file=sys.stderr)
+        raise
+    finally:
+        _signal_handlers_restore(prev_handlers)
+
+
 def _run_batch_job(
     *,
     config: BatchConfig,
@@ -3072,6 +3519,7 @@ def _run_batch_job(
     request_dir: str | None = None,
     attach: bool = False,
     now: Callable[[], str] = _utc_now,
+    receipt_name: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """Submit, wait for, and collect **one** batch job's worth of corners --
     the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
@@ -3155,6 +3603,24 @@ def _run_batch_job(
         f"re-attach with `klt sim <request> --backend batch --attach {job_id}`\n"
     )
     sys.stderr.flush()
+    receipt_path = os.path.join(
+        artifacts_dir,
+        BATCH_RECEIPT_FILENAME if receipt_name is None else receipt_name,
+    )
+    receipt: dict[str, Any] = {
+        "job_id": job_id,
+        # getattr: the receipt is best-effort and must never break a run.
+        "bucket": getattr(config, "bucket", None),
+        "jobs_prefix": getattr(config, "jobs_prefix", None),
+        "region": getattr(config, "region", None),
+        "profile": getattr(config, "profile", None),
+        "launched_at": datetime.now(timezone.utc).isoformat(),
+        "request_sha256": hashlib.sha256(
+            json.dumps(request, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
+        "state": None,
+    }
+    _write_batch_receipt(receipt_path, receipt)
     return _poll_and_collect(
         config=config,
         job_id=job_id,
@@ -3167,6 +3633,8 @@ def _run_batch_job(
         sleep=sleep,
         timestamps=timestamps,
         now=now,
+        receipt_path=receipt_path,
+        receipt=receipt,
     )
 
 
@@ -3183,22 +3651,33 @@ def _poll_and_collect(
     sleep: Any,
     timestamps: dict[str, str | None],
     now: Callable[[], str],
+    receipt_path: str | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The wait-and-collect tail shared by a fresh submit and ``--attach``.
 
     ``timestamps`` carries the client-observed phase times already recorded
     (all ``None`` on ``--attach``, where this client never submitted or
-    launched); the terminal/collected phases are filled in here."""
+    launched); the terminal/collected phases are filled in here.
+
+    ``receipt_path``/``receipt`` (issue #3065) are the submit receipt a fresh
+    submit wrote; ``--attach`` passes none and writes no receipt."""
     try:
-        status = poll_status(
+        status = _poll_status_interruptibly(
             config,
             job_id,
             runner=runner,
             sleep=sleep,
             heartbeat=True,
+            progress=False,
             on_state=lambda state: _report_progress(job_id, state),
         )
     except BatchPollTimeout as exc:
+        if receipt_path is not None and receipt is not None:
+            _write_batch_receipt(
+                receipt_path,
+                {**receipt, "poll_timed_out": True, "last_state": exc.last_state},
+            )
         return (
             _poll_timeout_corners(corner_points, measurements_spec, exc),
             None,
@@ -3208,12 +3687,26 @@ def _poll_and_collect(
                 "bucket": config.bucket,
                 "region": config.region,
                 "state": exc.last_state,
+                **(
+                    {"interrupted_s": round(exc.interrupted_s, 1)}
+                    if isinstance(exc, BatchJobInterrupted)
+                    else {}
+                ),
                 **_read_job_identity(None),
                 **timestamps,
             },
         )
 
     timestamps["client_status_terminal_at"] = now()
+    if receipt_path is not None and receipt is not None:
+        _write_batch_receipt(
+            receipt_path,
+            {
+                **receipt,
+                "state": status.get("state"),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     environment = {**_batch_environment(config, job_id, status), **timestamps}
     if status.get("state") != "done" and (
         _status_exit_code(status) not in _BATCH_SIM_SUCCESS_EXIT_CODES
@@ -3491,6 +3984,7 @@ def _run_batch_fleet(
             measurements_spec=measurements_spec,
             explicit_points=shard_points,
             request_dir=request_dir,
+            receipt_name=f"batch-receipt-{job_id}.json",
         )
 
     return _run_sharded(
@@ -3506,6 +4000,7 @@ def _run_batch_fleet(
 #: the `remote` backend established -- see that module's import block.
 __all__ = [
     "BATCH_ARTIFACTS_DIRNAME",
+    "BATCH_INTERRUPTED_CODE",
     "BATCH_JOB_CEILING_CODE",
     "BATCH_MAX_UNITS_CODE",
     "BATCH_JOB_TOOL",
@@ -3513,6 +4008,7 @@ __all__ = [
     "BATCH_NO_CAPACITY_CODE",
     "BATCH_UNKNOWN_JOB_CODE",
     "BATCH_NETLIST_FILENAME",
+    "BATCH_RECEIPT_FILENAME",
     "BATCH_REPORT_FILENAME",
     "BATCH_RUNNER_IDENTITY_FILENAME",
     "BATCH_RUNNER_FEATURE_CODE",
@@ -3521,8 +4017,11 @@ __all__ = [
     "BATCH_STDERR_FILENAME",
     "BATCH_REQUEST_FILENAME",
     "BATCH_TERMINAL_STATES",
+    "BATCH_JOB_INTERRUPTED_CODE",
     "BATCH_WAITING_STATES",
+    "BatchJobInterrupted",
     "BatchConfig",
+    "BatchClientInterrupted",
     "BatchError",
     "BatchJobInput",
     "BatchJobSpec",
