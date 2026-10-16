@@ -1267,13 +1267,14 @@ when the deck module is imported.
 - `klt drc rules` reports `value_um: null` for these rules and exposes
   `well_domain`, `voltage`, `max_distance_um` and `step_um` under `limits`.
 
-- **Generator output is not tap-clean on gf180mcu.** DF.13_LV/DF.14_LV are in
-  the default deck and are not suppressed or relaxed (the 20 µm limit is the
-  published rule). `klt gen` does not emit well/substrate taps yet (tracked
-  separately), so tapless generator and `gen-compose` output on gf180mcu
-  reports `comp.tap_distance.*` violations. That is a real missing-tap finding,
-  not a deck bug; tests and `examples/dogbone-terminal` assert exactly that
-  rather than a whole-deck `clean`.
+- **Generator output is tap-clean on gf180mcu.** DF.13_LV/DF.14_LV are in the
+  default deck and are not suppressed or relaxed (the 20 µm limit is the
+  published rule). `klt gen mos_array` / `diff_pair` draw well/substrate tap
+  pads (or the guard ring, when `add_guard_ring` is set) of the right polarity
+  on gf180mcu, so their output and `gen-compose` output of those blocks passes
+  the whole deck. An array deeper than about 17 µm from every side is out of
+  reach of perimeter pads and still reports `comp.tap_distance.*`; that is a
+  real missing-tap finding, as is any hand-drawn layout without taps.
 
 ### `"net_space"` check kind (issue #3572)
 

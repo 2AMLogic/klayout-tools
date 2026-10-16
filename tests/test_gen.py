@@ -16,7 +16,6 @@ from pathlib import Path
 import pytest
 
 from helpers.drc_known_findings import GF180MCU_OFFGRID_RULES
-from helpers.drc_tap import assert_clean_except_tap_distance
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import run_drc
@@ -724,7 +723,7 @@ def test_phase2_generator_default_params_are_drc_clean(
     assert output.is_file()
 
     drc_report = run_drc(str(output), deck)
-    assert_clean_except_tap_distance(drc_report)
+    assert drc_report["status"] == "clean"
 
     # bbox_um and ports[] are populated (acceptance criterion #3).
     bbox = report["bbox_um"]
@@ -1199,7 +1198,7 @@ def test_mos_array_flavor_pfet_draws_well_and_is_drc_clean(
     assert report["drc_hints"]["notes"] == expected_notes
 
     drc_report = run_drc(str(output), deck)
-    assert_clean_except_tap_distance(drc_report)
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1509,10 +1508,8 @@ def test_mos_array_minimum_gate_length_is_drc_clean(
     assert report["drc_hints"]["notes"], "expected an advisory note below the default"
 
     drc_report = run_drc(str(output), deck)
-    assert_clean_except_tap_distance(drc_report)
-    assert set(drc_report["rule_counts"]) <= {
-        r["rule"] for r in drc_report["violations"] if r["check"] == "tap_distance"
-    }
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert drc_report["rule_counts"] == {}
 
 
 @pytest.mark.parametrize(
@@ -1971,6 +1968,18 @@ def _layer_bbox(gds_path, layer, datatype):
     }
 
 
+def _gf180mcu_device_active_region(layout):
+    """Merged gf180mcu Comp (22/0) of the unit devices only: the Comp polygons
+    that interact with a Poly2 (30/0) gate. Excludes the tap pads/ring (issue
+    #3648), whose Comp shares the mask but is not part of a device."""
+    import klayout.db as kdb
+
+    top = layout.top_cell()
+    comp = kdb.Region(top.begin_shapes_rec(layout.layer(22, 0))).merged()
+    poly = kdb.Region(top.begin_shapes_rec(layout.layer(30, 0))).merged()
+    return comp.interacting(poly)
+
+
 @pytest.mark.parametrize(
     ("generator", "params", "gate_prefix"),
     [
@@ -2145,7 +2154,7 @@ def test_mos_gate_contact_reports_metal_port_and_is_drc_clean(
     assert gate_metal != source_metal
 
     drc_report = run_drc(str(output), deck)
-    assert_clean_except_tap_distance(drc_report)
+    assert drc_report["status"] == "clean"
 
 
 def test_mos_gate_contact_defaults_off_and_leaves_geometry_unchanged(
@@ -2290,7 +2299,7 @@ def test_mos_array_parallel_fingers_are_drc_clean(
     )
 
     drc_report = run_drc(str(output), deck)
-    assert_clean_except_tap_distance(drc_report)
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_mos_array_series_finger_topology_reports_notes_not_warnings(
@@ -2651,7 +2660,7 @@ def test_mos_array_interior_channel_is_drc_clean(tmp_path, both_pdk_root):
                 }
             )
             drc_report = run_drc(str(output), deck)
-            assert_clean_except_tap_distance(drc_report)
+            assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 # `pitch_x_um`/`pitch_y_um` (issue #3299, Phase 1): explicit pitch override,
@@ -5837,8 +5846,12 @@ def test_well_island_round_trip_two_named_body_nets(
     over everything, tied to one supply, satisfies that too. The per-device
     body names are what distinguishes two body domains from one.
     """
+    # Sized to hold the unit with room to spare: on gf180mcu the unit draws
+    # its own tap pads (issue #3648) around its array, which a default-size
+    # island's tie ring would collide with.
+    island_size = {"inner_width_um": 12.0, "inner_height_um": 9.0}
     island_a, report_a = _well_island(
-        tmp_path, both_pdk_root, variant, "island_a", net="VBODY_A"
+        tmp_path, both_pdk_root, variant, "island_a", net="VBODY_A", **island_size
     )
     device, device_report = _pfet_unit(tmp_path, both_pdk_root, variant, "pfet_unit")
 
@@ -5854,6 +5867,7 @@ def test_well_island_round_trip_two_named_body_nets(
         variant,
         "island_b",
         net="VBODY_B",
+        **island_size,
         # Island A's well, expressed in island B's own coordinate frame.
         isolate_from=[
             [
@@ -7987,7 +8001,7 @@ def test_gf180mcu_mos_array_pfet_flavor_still_omits_well_tap_port(
     assert "WELL_TAP" not in {p["name"] for p in response["ports"]}
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert_clean_except_tap_distance(drc_report)
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 #: cmos5l's thick-gate-oxide ("-HV") marker (issue #1472) -- the same
@@ -9915,7 +9929,7 @@ def test_phase2_generator_stays_drc_clean_at_pdk_resolved_finer_dbu(
     assert report["dbu_um"] == pytest.approx(0.0005)
 
     drc_report = run_drc(str(fine), "gf180mcu")
-    assert_clean_except_tap_distance(drc_report)
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
     assert _merged_geometry_um(coarse) == _merged_geometry_um(fine), (
         f"{generator_name}: drawn geometry differs between 0.001 and 0.0005 dbu"
@@ -9956,7 +9970,7 @@ def test_dogbone_terminal_example_matches_committed_json(family):
     actual = run_drc(gds_rel_path, family)
     actual.pop("provenance", None)
 
-    assert_clean_except_tap_distance(actual)
+    assert actual["status"] == "clean"
     assert actual == expected
 
 
@@ -10111,12 +10125,16 @@ def test_gf180mcu_mos_array_bottom_edge_gate_endcap_matches_top_edge_pad_clearan
 
     endcap_um = gen._gate_bottom_endcap_um("gf180mcu")
     assert endcap_um > 0
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
     poly_bbox = _layer_bbox(output, 30, 0)  # Poly2.drawing
-    active_bbox = _layer_bbox(output, 22, 0)  # Comp.drawing
-    assert poly_bbox["bottom"] == pytest.approx(active_bbox["bottom"] - endcap_um)
+    device_bottom = _gf180mcu_device_active_region(layout).bbox().bottom * layout.dbu
+    assert poly_bbox["bottom"] == pytest.approx(device_bottom - endcap_um)
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert_clean_except_tap_distance(drc_report)
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 @pytest.mark.parametrize(
@@ -10159,9 +10177,7 @@ def test_gf180mcu_sd_implant_covers_every_drawn_comp_shape(
 
     layout = kdb.Layout()
     layout.read(str(output))
-    active_region = kdb.Region(
-        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
-    ).merged()
+    active_region = _gf180mcu_device_active_region(layout)
     implant_region = kdb.Region(
         layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
     ).merged()
@@ -10169,7 +10185,7 @@ def test_gf180mcu_sd_implant_covers_every_drawn_comp_shape(
     assert (active_region - implant_region).is_empty()
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert_clean_except_tap_distance(drc_report)
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
@@ -10197,18 +10213,20 @@ def test_gf180mcu_mos_array_pfet_flavor_draws_pplus_not_nplus_implant(
         for i in layout.layer_indexes()
     }
     assert (31, 0) in present  # Pplus
-    assert (32, 0) not in present  # no Nplus drawn for a pfet unit
-
-    active_region = kdb.Region(
-        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    # The well-tie tap pads (issue #3648) are Nplus; the unit device is not.
+    active_region = _gf180mcu_device_active_region(layout)
+    nplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
     ).merged()
+    assert (active_region & nplus_region).is_empty()
+
     implant_region = kdb.Region(
         layout.top_cell().begin_shapes_rec(layout.layer(31, 0))
     ).merged()
     assert (active_region - implant_region).is_empty()
 
     drc_report = run_drc(str(output), "gf180mcu")
-    assert_clean_except_tap_distance(drc_report)
+    assert drc_report["status"] == "clean", drc_report["violations"]
 
 
 def _sd_implant_absence_note(family: str, flavor: str) -> str:
@@ -10483,8 +10501,18 @@ def test_gf180mcu_mos_array_voltage_flavor_marker_grows_past_well_margin(
         }
     )
 
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
     mark_bbox = _layer_bbox(output, *_GF180_VOLTAGE_FLAVOR_MARK_LAYER)
-    active_bbox = _layer_bbox(output, 22, 0)
+    device_bbox = _gf180mcu_device_active_region(layout).bbox()
+    active_bbox = {
+        "left": device_bbox.left * layout.dbu,
+        "bottom": device_bbox.bottom * layout.dbu,
+        "right": device_bbox.right * layout.dbu,
+        "top": device_bbox.top * layout.dbu,
+    }
     well_margin = gen.WELL_ENCLOSURE_MARGIN_UM
     for side, mark_edge, active_edge, sign in (
         ("left", mark_bbox["left"], active_bbox["left"], -1),

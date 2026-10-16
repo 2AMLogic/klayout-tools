@@ -31,6 +31,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   `layout.file` and `reference.form: "subckt-call"`; any other combination is
   a request error (exit 1). Additive `options` echo key, replayed by `--check
   --rerun`, no `schema_version` bump.
+
+- **`klt gen mos_array` / `diff_pair` draw tap pads on gf180mcu** (issue
+  #3648): with `add_guard_ring` off, gf180mcu output now carries 0.42 µm
+  well (pfet) or substrate (nfet) tap pads at the footprint's top and bottom
+  corners (plus interior pads on sides over 20 µm), so default output and
+  `gen-compose` of it pass the whole deck including `DF.13_LV`/`DF.14_LV`
+  (`comp.tap_distance.*`). `bbox_um` grows to enclose the pads (the band,
+  `ring_padding_um` + 0.42 µm, at the top and bottom); no ports are added.
+  sky130 and the other families are unchanged, GDS included. **Additive geometry change**; no
+  JSON field changes.
 - **`klt signoff` regeneration claims for T1 items 1 and 2** (issue #2887):
   an artifact-anchored `generic` attestation for item 1 or 2 may carry
   `provenance.regeneration: {generator, regenerated_hash}`, the hash the

@@ -53,9 +53,11 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _close_implant_gaps,
         _diff_pair_layout,
         _draw_pcell_npc,
+        _draw_pcell_tap_pads,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
+        _pcell_tap_reach_um,
         _shift_box,
     )
 
@@ -428,6 +430,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.bottom_endcap_um,
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
                 top_endcap_um=self.top_endcap_um,
+                tap_reach_um=_pcell_tap_reach_um(self),
             )
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
@@ -557,6 +560,9 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.ring_implant_margin_um,
                         self.mfg_grid_um,
                     )
+
+            # Tap pads (issue #3648): see `_MosArrayPCell.produce_impl`.
+            _draw_pcell_tap_pads(self, info["tap_pads"], li_metal, li_contact)
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
